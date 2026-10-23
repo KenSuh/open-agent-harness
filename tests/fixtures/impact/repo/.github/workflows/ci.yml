@@ -1,0 +1,4 @@
+steps:
+  - run: python tools/check.py
+  - run: sha256sum src/lib/util.py
+  - run: echo tools/check.py

@@ -3,10 +3,28 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
+import subprocess
 import unittest
 
-from oah.impact import kinds, lexical
-from tests.helpers import git_commit, make_git_repo
+from oah.impact import gatebind, kinds, lexical, query
+from oah.impact.defaults import effective
+from tests.helpers import git_commit, git_env, make_git_repo
+from tests.test_impact_map import run_impact
+
+FIXTURE_REPO = pathlib.Path(__file__).resolve().parent / "fixtures" / "impact" / "repo"
+
+
+def fixture_repo(test: unittest.TestCase) -> pathlib.Path:
+    """A temporary git repository holding a committed copy of tests/fixtures/impact/repo."""
+    repo = make_git_repo(test)
+    shutil.copytree(FIXTURE_REPO, repo, dirs_exist_ok=True)
+    git_commit(repo, {})
+    return repo
+
+
+def row(binding="link", layer="lexical", source="a.md", line=1, target="t.py", score=1, detail="path"):
+    return query.Row(binding, layer, "doc", source, line, target, detail, score)
 
 
 class KindsTest(unittest.TestCase):
@@ -102,6 +120,251 @@ class LexicalTest(unittest.TestCase):
                          [("a b/doc.md", 1, "see x.py here")])
         self.assertEqual(lexical.grep(repo, first, ["x.py"], paths=["x.py"]), [])
         self.assertEqual(lexical.grep(repo, first, []), [])
+
+
+
+def data_with(files: dict, hits: dict | None = None, history: list | None = None) -> dict:
+    return {"files": files, "hits": hits or {}, "db": None, "db_hits": {}, "history": history or []}
+
+
+class QueryTest(unittest.TestCase):
+    def test_rank_order(self):
+        rows = [row("mention", "cochange", "c.py", score=9), row("link", "wiki", "w.md"),
+                row("exec", "lexical", "ci.yml"), row("link", "lexical", "b.md", score=1),
+                row("link", "lexical", "a.md", score=3), row("pin", "gates", "G#G1", line=None),
+                row("exec", "gates", "G#G2", line=None)]
+        ranked = [(r.binding, r.layer, r.source) for r in query.rank(rows)]
+        self.assertEqual(ranked, [("pin", "gates", "G#G1"), ("exec", "gates", "G#G2"), ("exec", "lexical", "ci.yml"),
+                                  ("link", "lexical", "a.md"), ("link", "lexical", "b.md"), ("link", "wiki", "w.md"),
+                                  ("mention", "cochange", "c.py")])
+
+    def test_weak_rows_capped_strong_kept(self):
+        rows = [row("exec", source=f"s{i}") for i in range(3)] + [row("mention", source=f"m{i:02}") for i in range(10)]
+        shown, total, overflow = query.cap(query.rank(rows), limit=4, strong_only=False)
+        self.assertEqual((len(shown), total, overflow), (7, 13, 6))
+        self.assertEqual([r.binding for r in shown].count("exec"), 3)
+        shown, total, overflow = query.cap(query.rank(rows), limit=0, strong_only=True)
+        self.assertEqual((len(shown), total, overflow), (3, 3, 0))
+        self.assertEqual(query.count_line(total, len(shown), overflow), "total=3 shown=3 overflow=0")
+
+    def test_lexical_bindings_and_wiki_layer(self):
+        files = {"tools/check.py": "code", ".github/workflows/ci.yml": "workflow", "docs/guide.md": "doc",
+                 "docs/wiki/check.md": "doc"}
+        hits = {"tools/check.py": [[".github/workflows/ci.yml", 2, "exec"], [".github/workflows/ci.yml", 4, ""],
+                                   ["docs/guide.md", 1, ""]],
+                "check": [["docs/wiki/check.md", 3, "wikilink"], ["docs/guide.md", 5, ""]],
+                "check.py": [["tools/check.py", 1, ""]]}
+        rows = query.query(data_with(files, hits), ["tools/check.py"], settings=effective(None))
+        found = {(r.binding, r.layer, r.source, r.line) for r in rows}
+        self.assertEqual(found, {("exec", "lexical", ".github/workflows/ci.yml", 2),
+                                 ("link", "lexical", "docs/guide.md", 1),
+                                 ("link", "wiki", "docs/wiki/check.md", 3)})
+
+    def test_ambiguous_names_skipped(self):
+        files = {f"pkg{i}/util.py": "code" for i in range(4)}
+        files["docs/a.md"] = "doc"
+        hits = {"util.py": [["docs/a.md", 1, ""]], "pkg0/util.py": [["docs/a.md", 2, ""]]}
+        rows = query.query(data_with(files, hits), ["pkg0/util.py"], settings=effective(None))
+        self.assertEqual([(r.binding, r.line) for r in rows], [("link", 2)])
+        rows = query.query(data_with(files, hits), ["pkg0/util.py"], settings=effective({"max_ambiguity": 4}))
+        self.assertEqual(sorted((r.binding, r.line) for r in rows), [("link", 2)],
+                         "one row per source, keeping the strongest line")
+
+    def test_cochange_layer(self):
+        files = {"a.py": "code", "b.py": "code", "c.py": "code", "gone.py": "code"}
+        history = [["s1", ["a.py", "b.py"]], ["s2", ["a.py", "b.py", "c.py"]], ["s3", ["c.py"]],
+                   ["s4", ["a.py", "gone2.py"]]]
+        rows = query.query(data_with(files, history=history), ["a.py"], settings=effective(None))
+        self.assertEqual([(r.layer, r.source, r.score, r.detail) for r in rows],
+                         [("cochange", "b.py", 2, "changed together in 2 of 3 commits"),
+                          ("cochange", "c.py", 1, "changed together in 1 of 3 commits")])
+        rows = query.query(data_with(files, history=history), ["a.py"],
+                           settings=effective({"cochange_max_files": 2}))
+        self.assertEqual([r.source for r in rows], ["b.py"], "commits with more files are not evidence")
+
+    def test_graph_neighbours_optional(self):
+        repo = make_git_repo(self)
+        settings = effective(None)
+        self.assertIsNone(query.load_graph(repo, settings))
+        (repo / "graphify-out").mkdir()
+        (repo / "graphify-out" / "graph.json").write_text("{broken", encoding="utf-8")
+        self.assertIsNone(query.load_graph(repo, settings))
+        graph = {"nodes": [{"id": "n1", "source_file": "a.py"}, {"id": "n2", "source_file": "b.py"},
+                           {"id": "n3", "file": "c.py"}, {"id": "n4"}],
+                 "links": [{"source": "n1", "target": "n2", "relation": "calls"}, {"source": "n3", "target": "n1"},
+                           {"source": "n1", "target": "n4"}]}
+        (repo / "graphify-out" / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+        loaded = query.load_graph(repo, settings)
+        files = {"a.py": "code", "b.py": "code", "c.py": "code"}
+        rows = query.query(data_with(files), ["a.py"], graph=loaded, settings=settings)
+        self.assertEqual(sorted((r.layer, r.source, r.binding) for r in rows),
+                         [("graph", "b.py", "mention"), ("graph", "c.py", "mention")])
+
+    def test_gate_binding_pin_exec(self):
+        gates = [gatebind.GateRef(".oah/tasks/T/GATES.md", "G1", "python3 tools/check.py", "OK"),
+                 gatebind.GateRef(".oah/tasks/T/GATES.md", "G2", "sha256sum tools/check.py", "abc"),
+                 gatebind.GateRef(".oah/tasks/T/GATES.md", "G3", "cat build.log", "tools/check.py"),
+                 gatebind.GateRef(".oah/tasks/T/GATES.md", "G4", "see tools/check.py notes", "x"),
+                 gatebind.GateRef(".oah/tasks/T/GATES.md", "G5", "python3 other.py", "check")]
+        rows = gatebind.rows(gates, "tools/check.py", min_needle=3)
+        self.assertEqual([(r.source, r.binding, r.detail) for r in rows],
+                         [(".oah/tasks/T/GATES.md#G1", "exec", "binding=exec"),
+                          (".oah/tasks/T/GATES.md#G2", "pin", "binding=pin"),
+                          (".oah/tasks/T/GATES.md#G3", "pin", "binding=pin"),
+                          (".oah/tasks/T/GATES.md#G4", "link", "binding=link")])
+        found, status = gatebind.discover(pathlib.Path("."))
+        self.assertEqual(found, [])
+        self.assertTrue(status.startswith("unavailable"))
+
+    def test_rerun_plan_strong_only(self):
+        rows = [row("exec", "gates", ".oah/tasks/T/GATES.md#G1", line=None, target="a.py"),
+                row("exec", "gates", ".oah/tasks/T/GATES.md#G1", line=None, target="b.py"),
+                row("pin", "lexical", "ci.yml", line=3, target="a.py"),
+                row("link", "gates", ".oah/tasks/T/GATES.md#G2", line=None, target="a.py"),
+                row("mention", "lexical", "x.md", target="a.py")]
+        self.assertEqual(query.rerun_plan(rows), [
+            {"source": "ci.yml", "line": 3, "binding": "pin", "targets": ["a.py"]},
+            {"source": ".oah/tasks/T/GATES.md#G1", "line": None, "binding": "exec", "targets": ["a.py", "b.py"]}])
+
+    def test_empty_scope_warns(self):
+        files = {"src/a.py": "code", "db/1.sql": "migration", "docs/x.md": "doc"}
+        selected, warnings = query.select_scope([], files)
+        self.assertEqual(selected, sorted(files))
+        self.assertTrue(warnings and warnings[0].startswith("OAH_SCOPE_EMPTY"))
+        selected, warnings = query.select_scope(["src"], files, kinds=["migration"])
+        self.assertEqual(selected, [])
+        self.assertTrue(warnings and warnings[0].startswith("OAH_SCOPE_NO_MATCH"))
+        selected, warnings = query.select_scope(["repo"], files, kinds=["migration"])
+        self.assertEqual((selected, warnings), (["db/1.sql"], []))
+        selected, warnings = query.select_scope(["SRC/"], files)
+        self.assertEqual((selected, warnings), (["src/a.py"], []))
+
+    def test_rerank_status(self):
+        rows = [row("mention", source="b"), row("link", source="a")]
+        self.assertEqual(query.apply_rerank(rows)[1], "unused(not-configured)")
+        self.assertEqual(query.apply_rerank(rows)[0], rows, "an unused re-ranker never changes the rows")
+        self.assertEqual(query.apply_rerank(rows, disabled=True)[1], "unused(disabled-by-brief)")
+
+
+class CliTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = fixture_repo(self)
+
+    def test_cli_query_text(self):
+        result = run_impact(self.repo, "tools/check.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0], "impact: tools/check.py")
+        self.assertRegex(lines[1], r"\Amap: commit=[0-9a-f]{40} tool=[0-9a-f]{12} result=[0-9a-f]{12} \(built\)\Z")
+        self.assertIn("rerank=unused(not-configured)", lines)
+        self.assertTrue(any(line.startswith("gates: unavailable") for line in lines))
+        self.assertTrue(any(line.startswith("db-impact: commit=") for line in lines))
+        self.assertRegex(result.stdout, r"exec\s+lexical\s+workflow\s+\.github/workflows/ci\.yml:2\s+tools/check\.py")
+        self.assertRegex(result.stdout, r"link\s+lexical\s+doc\s+docs/guide\.md:1\s+tools/check\.py")
+        self.assertRegex(lines[-1], r"\Atotal=\d+ shown=\d+ overflow=0\Z")
+        again = run_impact(self.repo, "tools/check.py")
+        self.assertIn("(fresh)", again.stdout.splitlines()[1])
+
+    def test_cli_json(self):
+        result = run_impact(self.repo, "src/app.py", "--json", "--no-rerank")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["targets"], ["src/app.py"])
+        self.assertEqual(report["rerank"], "unused(disabled-by-brief)")
+        self.assertEqual(report["map"]["action"], "built")
+        self.assertEqual((report["total"], report["shown"], report["overflow"]), (len(report["rows"]),) * 2 + (0,))
+        wiki = [r for r in report["rows"] if r["layer"] == "wiki"]
+        self.assertEqual([(r["source"], r["binding"]) for r in wiki], [("docs/wiki/app.md", "link")])
+
+    def test_cli_strong_only_fixture(self):
+        result = run_impact(self.repo, "tools/check.py", "src/lib/util.py", "--strong-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split() for line in result.stdout.splitlines() if line.startswith(("pin ", "exec "))]
+        self.assertEqual(sorted((r[0], r[3], r[4]) for r in rows), [
+            ("exec", ".github/workflows/ci.yml:2", "tools/check.py"),
+            ("exec", "Makefile:2", "tools/check.py"),
+            ("pin", ".github/workflows/ci.yml:3", "src/lib/util.py"),
+            ("pin", "Makefile:2", "src/lib/util.py"),
+        ])
+        self.assertEqual(result.stdout.splitlines()[-1], "total=4 shown=4 overflow=0")
+        self.assertNotIn("docs/guide.md", result.stdout)
+
+    def test_cli_changed_since(self):
+        base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              text=True).stdout.strip()
+        git_commit(self.repo, {"tools/check.py": "print('check v2')\n"})
+        result = run_impact(self.repo, "--changed-since", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("changed since " + base[:12] + ": 1 file", result.stdout)
+        self.assertIn("re-run: .github/workflows/ci.yml:2 (exec tools/check.py)", result.stdout)
+        self.assertIn("re-run: Makefile:2 (exec tools/check.py)", result.stdout)
+        report = json.loads(run_impact(self.repo, "--changed-since", base, "--json").stdout)
+        self.assertEqual(report["changed_since"]["files"], ["tools/check.py"])
+        self.assertEqual([item["source"] for item in report["changed_since"]["rerun"]],
+                         [".github/workflows/ci.yml", "Makefile"])
+
+    def test_cli_ref(self):
+        first = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                               text=True).stdout.strip()
+        git_commit(self.repo, {".github/workflows/ci.yml": "steps: []\n"})
+        result = run_impact(self.repo, "tools/check.py", "--ref", first, "--strong-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"map: commit={first}", result.stdout)
+        self.assertIn("(ephemeral)", result.stdout)
+        self.assertIn(".github/workflows/ci.yml:2", result.stdout)
+        now = run_impact(self.repo, "tools/check.py", "--strong-only")
+        self.assertNotIn(".github/workflows/ci.yml", now.stdout)
+
+    def test_cli_usage_exit_1(self):
+        for args, code in [((), "OAH_IMPACT_USAGE"), (("../outside.py",), "OAH_IMPACT_PATH"),
+                           (("x.py", "--ref", "no-such-ref"), "OAH_IMPACT_BAD_REF"),
+                           (("--changed-since", "no-such-ref"), "OAH_IMPACT_BAD_REF"),
+                           (("db_table:nope",), "OAH_IMPACT_UNKNOWN_ENTITY"),
+                           (("--task", "missing"), "OAH_IMPACT_NO_TASK")]:
+            with self.subTest(args=args):
+                result = run_impact(self.repo, *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(code, result.stderr)
+
+    def test_cli_outside_repo_exit_69(self):
+        outside = make_git_repo(self).parent / "plain"
+        outside.mkdir()
+        result = run_impact(outside, "x.py", env_extra={"GIT_CEILING_DIRECTORIES": str(outside.parent)})
+        self.assertEqual(result.returncode, 69)
+        self.assertIn("OAH_NOT_A_REPO", result.stderr)
+
+    def test_cli_task_scope(self):
+        env = dict(git_env())
+        start = subprocess.run([*_oah_module(), "start", "--task", "t1", "--agent", "claude", "--scope", "tools"],
+                               cwd=self.repo, capture_output=True, text=True, encoding="utf-8",
+                               env=dict(env, PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src")))
+        self.assertEqual(start.returncode, 0, start.stderr)
+        result = run_impact(self.repo, "--task", "t1", "--strong-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("impact: tools/check.py", result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], "total=2 shown=2 overflow=0")
+        none = run_impact(self.repo, "--task", "t1", "--kind", "migration")
+        self.assertEqual(none.returncode, 0, none.stderr)
+        self.assertIn("OAH_SCOPE_NO_MATCH", none.stderr)
+        self.assertEqual(none.stdout.splitlines()[-1], "total=0 shown=0 overflow=0")
+
+    def test_cli_build_refresh_status(self):
+        built = run_impact(self.repo, "build")
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertRegex(built.stdout, r"\AOAH_IMPACT_BUILT commit=[0-9a-f]{40} ")
+        git_commit(self.repo, {"src/new.py": "n = 1\n"})
+        status = run_impact(self.repo, "status")
+        self.assertIn("map: stale (behind HEAD", status.stdout)
+        self.assertIn("oah impact refresh", status.stdout)
+        refreshed = run_impact(self.repo, "refresh", "--json")
+        self.assertEqual(json.loads(refreshed.stdout)["action"], "refreshed")
+        self.assertIn("map: fresh", run_impact(self.repo, "status").stdout)
+
+
+def _oah_module() -> list[str]:
+    import sys
+
+    return [sys.executable, "-m", "oah"]
 
 
 if __name__ == "__main__":
