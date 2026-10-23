@@ -238,7 +238,7 @@ class Store:
             if lease.id != lease_id:
                 raise LeaseError("OAH_LEASE_CHANGED", f"the lease for {task} was replaced during the change scan; "
                                                     "inspect the current lease and retry oah finish")
-            beyond = outside(lease.scope, changed, root=pathlib.Path(lease.worktree))
+            beyond = outside(lease.scope, changed)
             if beyond and not allow_out_of_scope:
                 shown = ", ".join(beyond[:20]) + (f" and {len(beyond) - 20} more" if len(beyond) > 20 else "")
                 raise LeaseError("OAH_SCOPE_EXCEEDED",

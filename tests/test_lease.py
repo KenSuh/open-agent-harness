@@ -13,6 +13,7 @@ from unittest.mock import patch
 from oah.atomic import StateCorrupt
 from oah.lease import Lease, LeaseError, Store
 from oah.paths import RepoInfo
+from oah.scope import normalize_scope
 from tests.helpers import directory_alias, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -84,6 +85,15 @@ class StoreTest(unittest.TestCase):
         self.start(task="t3", agent="codex", scope=("docs",))
         self.assertEqual(len(self.store.snapshot()), 2)
 
+    def test_recorded_alias_conflicts_with_later_scope_on_its_spelling(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "link")
+        started = self.start(scope=normalize_scope(["link/a.py"], self.root))
+        self.assertEqual(started.scope, ["src/a.py", "link/a.py"])
+        error = self.assert_code("OAH_LEASE_CONFLICT", self.start, task="t2", scope=("link/a.py",))
+        self.assertIn("link/a.py", str(error))
+        self.assertEqual(self.store.snapshot()[0][0].scope, started.scope)
+
     def test_same_task_twice_is_refused(self):
         self.start(task="t1", agent="claude", scope=("src",))
         self.assert_code("OAH_LEASE_EXISTS", self.start, task="t1", agent="claude", scope=("docs",))
@@ -153,19 +163,49 @@ class StoreTest(unittest.TestCase):
         self.assertIn("docs/b.md", str(error))
         self.assertEqual(len(self.store.snapshot()), 1)
 
-    def test_finish_resolves_changed_parents_in_recorded_worktree(self):
+    def test_finish_requires_alias_to_be_declared_by_scope_renewal(self):
         (self.root / "src").mkdir()
         directory_alias(self.root / "src", self.root / "link")
         started = self.start(scope=("src/a.py",))
-        error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
-                                 lease_id=started.id, summary="done", changed=["link/a.py"],
-                                 allow_out_of_scope=False)
-        self.assertIn("link/a.py", str(error))
+        for changed in (["link/a.py"], ["link/a.py", "src/a.py"]):
+            with self.subTest(changed=changed):
+                error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                         lease_id=started.id, summary="done", changed=changed,
+                                         allow_out_of_scope=False)
+                self.assertIn("link/a.py", str(error))
+        renewed = self.store.renew(task="t1", agent="claude", ttl_hours=4,
+                                   scope=normalize_scope(["src/a.py", "link/a.py"], self.root))
+        self.assertEqual(renewed.scope, ["src/a.py", "link/a.py"])
         lease, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id, summary="done",
                                           changed=["link/a.py", "src/a.py"], allow_out_of_scope=False)
-        self.assertEqual(lease.scope, ["src/a.py"])
+        self.assertEqual(lease.scope, ["src/a.py", "link/a.py"])
         self.assertEqual(beyond, [])
         self.assertEqual(self.store.snapshot(), [])
+
+    def test_finish_accepts_alias_recorded_at_start(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "link")
+        started = self.start(scope=normalize_scope(["link/a.py"], self.root))
+        lease, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id, summary="done",
+                                          changed=["src/a.py", "link/a.py"], allow_out_of_scope=False)
+        self.assertEqual(lease.scope, ["src/a.py", "link/a.py"])
+        self.assertEqual(beyond, [])
+
+    def test_finish_refuses_both_deletions_after_other_leases_directory_becomes_alias(self):
+        for name in ("src", "docs"):
+            (self.root / name).mkdir()
+            (self.root / name / "readme.md").write_text("original", encoding="utf-8")
+        started = self.start(scope=("src",))
+        other = self.start(task="t2", agent="codex", scope=("docs",))
+        for name in ("src", "docs"):
+            (self.root / name / "readme.md").unlink()
+        (self.root / "docs").rmdir()
+        directory_alias(self.root / "src", self.root / "docs")
+        error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                 lease_id=started.id, summary="deleted", changed=["src/readme.md", "docs/readme.md"],
+                                 allow_out_of_scope=False)
+        self.assertIn("docs/readme.md", str(error))
+        self.assertEqual([lease.id for lease, _ in self.store.snapshot()], [started.id, other.id])
 
     def test_finish_refuses_changes_under_directory_replaced_by_alias(self):
         for variant in ("deleted", "modified"):

@@ -87,15 +87,59 @@ class NormalizeTest(unittest.TestCase):
             normalize_scope([], self.root)
         self.assertEqual(ctx.exception.code, "OAH_SCOPE_EMPTY")
 
-    def test_directory_alias_has_the_target_scope(self):
+    def test_directory_alias_records_canonical_and_lexical_spellings(self):
         (self.root / "src").mkdir()
         directory_alias(self.root / "src", self.root / "link")
-        for path in ("link/a.py", str(self.root / "link" / "a.py")):
+        for path in ("link/a.py", "./link/./a.py", "link\\a.py", str(self.root / "link" / "a.py")):
             with self.subTest(path=path):
                 alias = normalize_scope([path], self.root)
                 target = normalize_scope(["src/a.py"], self.root)
-                self.assertEqual(alias, target)
+                self.assertEqual(alias, ("src/a.py", "link/a.py"))
                 self.assertTrue(overlaps(alias, target))
+        self.assertEqual(normalize_scope(["link"], self.root), ("src", "link"))
+        self.assertEqual(normalize_scope(["link/a.py", "src/a.py", "LINK/A.PY"], self.root),
+                         ("src/a.py", "link/a.py"))
+        self.assertEqual(normalize_scope(["link/a.py", "repo"], self.root), ("repo",))
+
+    def test_absolute_alias_accepts_given_and_resolved_repository_root(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "link")
+        given_root = self.root.parent / "repo-link"
+        directory_alias(self.root, given_root)
+        for root in (self.root, given_root):
+            for path_root in (root, root.resolve()):
+                with self.subTest(root=root, path_root=path_root):
+                    self.assertEqual(normalize_scope([str(path_root / "link" / "a.py")], root),
+                                     ("src/a.py", "link/a.py"))
+
+    def test_case_only_differences_do_not_record_an_alias(self):
+        (self.root / "src").mkdir()
+        for path in ("SRC/a.py", str(self.root / "SRC" / "a.py")):
+            with self.subTest(path=path):
+                scope = normalize_scope([path], self.root)
+                self.assertEqual(len(scope), 1)
+                self.assertEqual(scope[0].casefold(), "src/a.py")
+        with patch("oah.scope._relative_to_root", return_value="src/a.py"):
+            self.assertEqual(normalize_scope(["SRC/a.py"], self.root), ("src/a.py",))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX repository root with a symlink parent")
+    def test_absolute_alias_accepts_resolved_root_below_lexical_root(self):
+        (self.root / "deep" / "dir").mkdir(parents=True)
+        directory_alias(self.root / "deep" / "dir", self.root / "link")
+        given_root = self.root / "link" / ".."
+        resolved_root = given_root.resolve()
+        (resolved_root / "src").mkdir()
+        directory_alias(resolved_root / "src", resolved_root / "alias")
+        for root in (given_root, resolved_root):
+            with self.subTest(root=root):
+                self.assertEqual(normalize_scope([str(root / "alias" / "a.py")], given_root),
+                                 ("src/a.py", "alias/a.py"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX alias spelling containing a colon")
+    def test_invalid_lexical_alias_is_not_recorded(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "ali:as")
+        self.assertEqual(normalize_scope([str(self.root / "ali:as" / "a.py")], self.root), ("src/a.py",))
 
     def test_alias_escape_is_refused_after_resolution(self):
         other = self.root.parent / "other"
@@ -117,9 +161,20 @@ class NormalizeTest(unittest.TestCase):
         (self.root / "deep" / "dir").mkdir(parents=True)
         directory_alias(self.root / "deep" / "dir", self.root / "link")
         expected = ("a.py",) if os.name == "nt" else ("deep/a.py",)
-        actual = normalize_scope(["link/../a.py"], self.root)
-        self.assertEqual(actual, expected)
-        self.assertEqual(overlaps(actual, ("deep",)), os.name != "nt")
+        for path in ("link/../a.py", str(self.root / "link" / ".." / "a.py")):
+            with self.subTest(path=path):
+                actual = normalize_scope([path], self.root)
+                self.assertEqual(actual, expected)
+                self.assertEqual(overlaps(actual, ("deep",)), os.name != "nt")
+        (self.root / "deep" / "dir" / "sub").mkdir()
+        for path in ("link/sub/../a.py", str(self.root / "link" / "sub" / ".." / "a.py")):
+            with self.subTest(path=path):
+                self.assertEqual(normalize_scope([path], self.root), ("deep/dir/a.py", "link/a.py"))
+        if os.name == "posix":
+            self.assertEqual(normalize_scope(["link/../../a.py"], self.root), ("a.py",))
+        else:
+            with self.assertRaises(ScopeError):
+                normalize_scope(["link/../../a.py"], self.root)
 
     @unittest.skipUnless(os.name == "nt", "native Windows junction parent semantics")
     def test_windows_junction_parent_opens_lexical_path(self):
@@ -162,29 +217,37 @@ class OverlapTest(unittest.TestCase):
 
         self.assertEqual(outside(("repo",), changed()), [])
         with patch("pathlib.Path.resolve", side_effect=AssertionError("repo scope must not resolve paths")):
-            self.assertEqual(outside(("repo",), changed(), root=pathlib.Path("missing")), [])
+            self.assertEqual(outside(("repo",), changed()), [])
 
-    def test_outside_resolves_parent_aliases_and_keeps_final_entries_literal(self):
-        root = make_tmp_dir(self)
-        (root / "src").mkdir()
-        (root / "docs").mkdir()
-        directory_alias(root / "src", root / "link")
-        directory_alias(root / "docs", root / "other")
-        directory_alias(root / "src", root / "docs" / "link")
-        changed = ["link/a.py", "docs/link", "other/b.md", "link/missing/a.py"]
-        self.assertEqual(outside(("src/a.py",), changed), changed)
-        for scope in (("src/a.py",), ("src",)):
-            with self.subTest(scope=scope):
-                self.assertEqual(outside(scope, changed, root=root), changed)
-                self.assertEqual(outside(scope, iter(changed + ["src/a.py"]), root=root), changed[1:])
-
-    def test_outside_canonical_twin_comparison_folds_case_and_unicode(self):
+    def test_outside_covers_only_recorded_alias_entries(self):
         root = make_tmp_dir(self)
         (root / "src").mkdir()
         directory_alias(root / "src", root / "link")
+        scope = normalize_scope(["link/a.py"], root)
+        changed = ["link/a.py", "src/a.py", "link/b.py"]
+        self.assertEqual(outside(scope, iter(changed)), ["link/b.py"])
+        self.assertEqual(outside(("src/a.py",), changed), ["link/a.py", "link/b.py"])
+
+    def test_outside_recorded_alias_comparison_folds_case_and_unicode(self):
         decomposed = unicodedata.normalize("NFD", "문서.py")
-        changed = ["link/문서.py", f"SRC/{decomposed}"]
-        self.assertEqual(outside(("src",), changed, root=root), [])
+        changed = [f"LINK/{decomposed}", "SRC/문서.py"]
+        self.assertEqual(outside(("src",), changed), [changed[0]])
+        self.assertEqual(outside(("src/문서.py", "link/문서.py"), changed), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX Git symlink entries")
+    def test_outside_keeps_inward_outward_and_dangling_symlink_entries_literal(self):
+        root = make_tmp_dir(self)
+        (root / "src").mkdir()
+        (root / "src" / "a.py").write_text("inside", encoding="utf-8")
+        (root / "docs").mkdir()
+        target = make_tmp_dir(self) / "a.py"
+        target.write_text("outside", encoding="utf-8")
+        for name, path in (("inward", "../src/a.py"), ("outward", target), ("dangling", "missing.py")):
+            with self.subTest(name=name):
+                (root / "docs" / name).symlink_to(path)
+                changed = [f"docs/{name}"]
+                self.assertEqual(outside(("src",), changed), changed)
+                self.assertEqual(outside(("docs",), changed), [])
 
     def test_outside_refuses_changes_under_directory_replaced_by_alias(self):
         for variant in ("deleted", "modified"):
@@ -200,25 +263,46 @@ class OverlapTest(unittest.TestCase):
                 (root / "docs").rmdir()
                 directory_alias(root / "src", root / "docs")
                 changed = ["docs/readme.md", "docs/a.py"]
-                self.assertEqual(outside(("src",), changed, root=root), changed)
+                self.assertEqual(outside(("src",), changed), changed)
 
-    def test_outside_ignores_parents_resolved_outside_root(self):
+    def test_outside_refuses_replacement_alias_with_changed_canonical_twin(self):
+        root = make_tmp_dir(self)
+        for name in ("src", "docs"):
+            (root / name).mkdir()
+            (root / name / "readme.md").write_text("original", encoding="utf-8")
+        for name in ("src", "docs"):
+            (root / name / "readme.md").unlink()
+        (root / "docs").rmdir()
+        directory_alias(root / "src", root / "docs")
+        self.assertEqual(outside(("src",), ["src/readme.md", "docs/readme.md"]), ["docs/readme.md"])
+
+    def test_outside_keeps_scope_literal_after_directory_is_retargeted(self):
+        root = make_tmp_dir(self)
+        (root / "src").mkdir()
+        (root / "docs").mkdir()
+        scope = normalize_scope(["src"], root)
+        (root / "src").rmdir()
+        directory_alias(root / "docs", root / "src")
+        self.assertEqual(outside(scope, ["src/a.py", "docs/a.py"]), ["docs/a.py"])
+
+    def test_outside_keeps_outward_alias_entries_literal(self):
         root = make_tmp_dir(self)
         target = make_tmp_dir(self)
         (target / "src").mkdir()
         directory_alias(target / "src", root / "link")
-        self.assertEqual(outside(("src",), ["link/a.py"], root=root), ["link/a.py"])
+        self.assertEqual(outside(("src",), ["link/a.py"]), ["link/a.py"])
+        self.assertEqual(outside(("link",), ["link/a.py"]), [])
 
     @unittest.skipUnless(os.name == "posix", "POSIX parent symlink loop")
     def test_outside_parent_symlink_loop_does_not_raise(self):
         root = make_tmp_dir(self)
         (root / "loop").symlink_to("loop", target_is_directory=True)
-        self.assertEqual(outside(("src",), ["loop/a.py"], root=root), ["loop/a.py"])
+        self.assertEqual(outside(("src",), ["loop/a.py"]), ["loop/a.py"])
 
-    def test_outside_parent_os_error_does_not_raise(self):
-        root = make_tmp_dir(self)
-        with patch("pathlib.Path.resolve", side_effect=OSError("unavailable parent")):
-            self.assertEqual(outside(("src",), ["src/a.py", "link/a.py"], root=root), ["link/a.py"])
+    def test_outside_never_resolves_entries_or_acquired_scope(self):
+        with patch("pathlib.Path.resolve", side_effect=AssertionError("resolved a Git path or acquired scope")):
+            self.assertEqual(outside(("src",), ["src/a.py", "link/a.py"]), ["link/a.py"])
+            self.assertEqual(outside(("src/a.py", "link/a.py"), ["link/a.py", "docs/a.py"]), ["docs/a.py"])
 
     def test_overlap_table(self):
         cases = [
@@ -230,6 +314,7 @@ class OverlapTest(unittest.TestCase):
             (("docs",), ("repo",), True),
             (("docs",), ("src",), False),
             (("docs", "tests"), ("src", "tests/unit"), True),
+            (("src/a.py", "link/a.py"), ("link",), True),
         ]
         for a, b, expected in cases:
             with self.subTest(a=a, b=b):

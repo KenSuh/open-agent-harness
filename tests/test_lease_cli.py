@@ -207,6 +207,27 @@ class LeaseCliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("OAH_LEASE_CONFLICT", result.stderr)
 
+    def test_start_records_alias_in_json_and_status(self):
+        directory_alias(self.repo / "src", self.repo / "link")
+        started = self.start("t1", "claude", "link/a.py", extra=("--json",))
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(json.loads(started.stdout)["scope"], ["src/a.py", "link/a.py"])
+        status = oah(self.repo, "status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("scope=src/a.py,link/a.py", status.stdout)
+        status = oah(self.repo, "status", "--json")
+        self.assertEqual(json.loads(status.stdout)["leases"][0]["scope"], ["src/a.py", "link/a.py"])
+
+    def test_renew_records_alias_created_after_start(self):
+        self.assertEqual(self.start("t1", "claude", "src/a.py").returncode, 0)
+        directory_alias(self.repo / "src", self.repo / "link")
+        renewed = oah(self.repo, "renew", "--task", "t1", "--agent", "claude", "--scope", "src/a.py",
+                      "--scope", "link/a.py")
+        self.assertEqual(renewed.returncode, 0, renewed.stderr)
+        self.assertIn("scope=src/a.py,link/a.py", renewed.stdout)
+        status = oah(self.repo, "status", "--json")
+        self.assertEqual(json.loads(status.stdout)["leases"][0]["scope"], ["src/a.py", "link/a.py"])
+
     @unittest.skipUnless(os.name == "nt", "native Windows Git junction replacement")
     def test_finish_refuses_tracked_directory_replaced_by_junction(self):
         started = self.start("t1", "claude", "src")
@@ -221,29 +242,66 @@ class LeaseCliTest(unittest.TestCase):
         self.assertIn("docs/a.py", refused.stderr)
 
     @unittest.skipUnless(os.name == "nt", "native Windows Git junction descendants")
-    def test_finish_matches_tracked_junction_descendants_to_canonical_scope(self):
+    def test_finish_accepts_tracked_junction_alias_declared_at_start(self):
         directory_alias(self.repo / "src", self.repo / "link")
-        directory_alias(self.repo / "docs", self.repo / "other")
         git_commit(self.repo, {"src/a.py": "a = 1\n"})
         tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files", "-z"], check=True,
                                  capture_output=True).stdout.split(b"\0")
         self.assertIn(b"link/a.py", tracked)
-        self.assertIn(b"other/readme.md", tracked)
+        self.assertIn(b"src/a.py", tracked)
         started = self.start("t1", "claude", "link/a.py", extra=("--json",))
         self.assertEqual(started.returncode, 0, started.stderr)
-        self.assertEqual(json.loads(started.stdout)["scope"], ["src/a.py"])
+        self.assertEqual(json.loads(started.stdout)["scope"], ["src/a.py", "link/a.py"])
         (self.repo / "link" / "a.py").write_text("a = 2\n", encoding="utf-8")
         args = ("finish", "--task", "t1", "--agent", "claude", "--summary", "junction")
         finished = oah(self.repo, *args)
         self.assertEqual(finished.returncode, 0, finished.stderr)
 
-        started = self.start("t1", "claude", "link/a.py")
+    @unittest.skipUnless(os.name == "nt", "native Windows Git junction descendants")
+    def test_finish_refuses_undeclared_junction_alias_until_renewal(self):
+        directory_alias(self.repo / "src", self.repo / "link")
+        git_commit(self.repo, {"src/a.py": "a = 1\n"})
+        tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files", "-z"], check=True,
+                                 capture_output=True).stdout.split(b"\0")
+        self.assertIn(b"link/a.py", tracked)
+        started = self.start("t1", "claude", "src/a.py", extra=("--json",))
         self.assertEqual(started.returncode, 0, started.stderr)
-        (self.repo / "other" / "readme.md").write_text("outside scope\n", encoding="utf-8")
+        self.assertEqual(json.loads(started.stdout)["scope"], ["src/a.py"])
+        (self.repo / "link" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        args = ("finish", "--task", "t1", "--agent", "claude", "--summary", "junction")
         refused = oah(self.repo, *args)
         self.assertEqual(refused.returncode, 1, refused.stderr)
         self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
-        self.assertIn("other/readme.md", refused.stderr)
+        self.assertIn("link/a.py", refused.stderr)
+        renewed = oah(self.repo, "renew", "--task", "t1", "--agent", "claude", "--scope", "src/a.py",
+                      "--scope", "link/a.py")
+        self.assertEqual(renewed.returncode, 0, renewed.stderr)
+        status = oah(self.repo, "status", "--json")
+        self.assertEqual(json.loads(status.stdout)["leases"][0]["scope"], ["src/a.py", "link/a.py"])
+        finished = oah(self.repo, *args)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows Git junction double deletion")
+    def test_finish_refuses_both_deletions_after_other_leases_directory_becomes_junction(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {"src/readme.md": "source\n", "docs/readme.md": "docs\n"})
+        for task, agent, scope in (("t1", "claude", "src"), ("t2", "codex", "docs")):
+            started = oah(repo, "start", "--task", task, "--agent", agent, "--scope", scope)
+            self.assertEqual(started.returncode, 0, started.stderr)
+        for name in ("src", "docs"):
+            (repo / name / "readme.md").unlink()
+        (repo / "docs").rmdir()
+        directory_alias(repo / "src", repo / "docs")
+        changed = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", "-z"], check=True,
+                                 capture_output=True).stdout.split(b"\0")
+        self.assertEqual(set(filter(None, changed)), {b"src/readme.md", b"docs/readme.md"})
+        refused = oah(repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "deleted")
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("docs/readme.md", refused.stderr)
+        status = oah(repo, "status", "--json")
+        self.assertEqual([(lease["task"], lease["scope"]) for lease in json.loads(status.stdout)["leases"]],
+                         [("t1", ["src"]), ("t2", ["docs"])])
 
     @unittest.skipUnless(os.name == "nt", "native Windows path aliases")
     def test_windows_alias_scope_is_refused(self):

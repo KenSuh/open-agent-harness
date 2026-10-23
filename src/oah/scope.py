@@ -6,12 +6,15 @@ case and Unicode normalization (macOS can report decomposed Hangul), so it errs 
 conflict rather than missing one. `src` covers `src/a.py`; it does not cover `srcx`.
 
 User scopes resolve as the host OS opens them: Windows collapses `link/..` lexically before following
-an alias; POSIX follows the link first. Acquired canonical scopes stay fixed until explicitly renewed.
-Git's changed entries match literally or through resolved in-root parents when the canonical entry
-also changed, keeping the final component literal. Comparison folds only case and Unicode normalization.
+an alias; POSIX follows the link first. Acquisition records the canonical path followed by its lexical
+repository-relative spelling only if that spelling currently resolves to the same path. Both stay fixed
+until explicitly renewed and participate in overlap checks. Git's changed entries match these recorded
+spellings literally, folding only case and NFC; undeclared aliases fail closed, even if their canonical
+twins also changed. Git paths are never resolved, and their backslashes and colons stay literal.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import unicodedata
 from typing import Iterable, Sequence
@@ -66,8 +69,30 @@ def _normalize_one(raw: str, root: pathlib.Path) -> str:
     return unicodedata.normalize("NFC", text)
 
 
+def _alias_spelling(raw: str, root: pathlib.Path, canonical: str) -> str | None:
+    path = pathlib.Path(os.path.normpath(raw.replace("\\", "/")))
+    bases = ((pathlib.Path(os.path.abspath(root)), root.resolve(strict=False))
+             if path.is_absolute() else (None,))
+    for base in bases:
+        try:
+            lexical = path.relative_to(base) if base is not None else path
+        except ValueError:
+            continue
+        text = lexical.as_posix()
+        if lexical.anchor or ".." in lexical.parts or ":" in text or _key(text) == _key(canonical):
+            continue
+        try:
+            _check_components(text, raw)
+            resolved = _relative_to_root(root / lexical, root, raw)
+        except (ScopeError, OSError):
+            continue
+        if unicodedata.normalize("NFC", resolved) == canonical:
+            return unicodedata.normalize("NFC", text)
+    return None
+
+
 def normalize_scope(raw: Sequence[str], root: pathlib.Path) -> tuple[str, ...]:
-    """Normalize the --scope values; `repo` anywhere means the whole repository."""
+    """Record canonical paths and verified lexical aliases; `repo` means the whole repository."""
     if not raw:
         raise ScopeError("OAH_SCOPE_EMPTY",
                          "a lease needs at least one --scope: a path, or 'repo' for the whole repository")
@@ -77,9 +102,12 @@ def normalize_scope(raw: Sequence[str], root: pathlib.Path) -> tuple[str, ...]:
         normalized = _normalize_one(value, root)
         if normalized == REPO:
             return (REPO,)
-        if _key(normalized) not in seen:
-            seen.add(_key(normalized))
-            items.append(normalized)
+        for entry in (normalized, _alias_spelling(value, root, normalized)):
+            if entry == REPO:
+                return (REPO,)
+            if entry is not None and _key(entry) not in seen:
+                seen.add(_key(entry))
+                items.append(entry)
     return tuple(items)
 
 
@@ -94,25 +122,8 @@ def overlaps(a: Sequence[str], b: Sequence[str]) -> bool:
     return any(_covers(x, y) or _covers(y, x) for x in a for y in b)
 
 
-def outside(scope: Sequence[str], changed: Iterable[str], *, root: pathlib.Path | None = None) -> list[str]:
-    """Match literal entries or covered in-root parent resolutions with a changed canonical twin."""
+def outside(scope: Sequence[str], changed: Iterable[str]) -> list[str]:
+    """Compare Git entries literally against the acquired scope, folding only case and NFC."""
     if REPO in scope:
         return []
-    changed = list(changed)
-    changed_keys = {_key(path) for path in changed}
-    beyond: list[str] = []
-    for path in changed:
-        if any(_covers(entry, path) for entry in scope):
-            continue
-        if root is not None:
-            item = pathlib.Path(path)
-            try:
-                parent = (root / item.parent).resolve(strict=True)
-                resolved = (parent.relative_to(root.resolve(strict=True)) / item.name).as_posix()
-            except (OSError, RuntimeError, ValueError):
-                pass
-            else:
-                if _key(resolved) in changed_keys and any(_covers(entry, resolved) for entry in scope):
-                    continue
-        beyond.append(path)
-    return beyond
+    return [path for path in changed if not any(_covers(entry, path) for entry in scope)]
