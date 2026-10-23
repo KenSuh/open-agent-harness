@@ -17,7 +17,7 @@ DEFAULTS: dict[str, object] = {
     "stale_days": 180,
     "rollover_trigger_bytes": 512_000,
     "rollover_target_bytes": 409_600,
-    "archive_pattern": "log_archive_{nn}.md",
+    "archive_prefix": "log_archive_",
     "new_broken_links": "warn",
 }
 EXIT_REFUSED, EXIT_ENVIRONMENT = 1, 69
@@ -40,7 +40,7 @@ class WikiSettings:
     stale_days: int = 180
     rollover_trigger_bytes: int = 512_000
     rollover_target_bytes: int = 409_600
-    archive_pattern: str = "log_archive_{nn}.md"
+    archive_prefix: str = "log_archive_"
     new_broken_links: str = "warn"
 
     def __post_init__(self) -> None:
@@ -59,7 +59,7 @@ class WikiSettings:
         try:
             from oah.wiki.log import ArchiveNaming
 
-            object.__setattr__(self, "_naming", ArchiveNaming(self.archive_pattern))
+            object.__setattr__(self, "_naming", ArchiveNaming(self.archive_prefix))
         except ValueError as exc:
             problems.append(str(exc))
         if problems:
@@ -68,7 +68,7 @@ class WikiSettings:
 
     @property
     def naming(self):
-        """The ArchiveNaming for archive_pattern."""
+        """The ArchiveNaming for archive_prefix."""
         return self._naming
 
     @classmethod
@@ -80,7 +80,7 @@ class WikiSettings:
         """The settings that change what lint counts; hygiene resets its baseline when they change."""
         data = asdict(self)
         return {name: (list(data[name]) if name == "link_roots" else data[name])
-                for name in ("dir", "link_roots", "index_line_limit", "stale_days", "archive_pattern")}
+                for name in ("dir", "link_roots", "index_line_limit", "stale_days", "archive_prefix")}
 
 
 def read_bytes(path: pathlib.Path) -> bytes | None:

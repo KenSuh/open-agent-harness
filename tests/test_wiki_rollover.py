@@ -1,6 +1,7 @@
 # 위키 로그 롤오버 검사 — 항목 경계, 임계값, 큰 항목 규칙, 아카이브 번호, 보존 스트림 바이트 비교, 저널 복구·장애 주입·동시 편집을 본다.
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import pathlib
@@ -80,18 +81,18 @@ class ParseTest(unittest.TestCase):
 
     def test_invalid_boundaries_refuse(self):
         cases = {
-            "no marker": (b"# Log\n\n## 2026-01-01 a\n", "OAH_WIKI_LOG_NO_MARKER"),
-            "marker only in a fence": (b"```\n<!-- OAH:LOG_INSERT_BELOW -->\n```\n", "OAH_WIKI_LOG_NO_MARKER"),
-            "two markers": (HEADER + b"<!-- OAH:LOG_INSERT_BELOW -->\n## 2026-01-01 a\n", "OAH_WIKI_LOG_INVALID"),
+            "no marker": (b"# Log\n\n## 2026-01-01 a\n", "no marker"),
+            "marker only in a fence": (b"```\n<!-- OAH:LOG_INSERT_BELOW -->\n```\n", "no marker"),
+            "two markers": (HEADER + b"<!-- OAH:LOG_INSERT_BELOW -->\n## 2026-01-01 a\n", "marker lines"),
             "marker inside entry": (HEADER + b"## 2026-01-01 a\n<!-- OAH:LOG_INSERT_BELOW -->\n", "OAH_WIKI_LOG_INVALID"),
-            "first heading undated": (HEADER + b"## Fixed the bug\nx\n## 2026-01-01 a\n", "OAH_WIKI_LOG_UNDATED"),
-            "first heading bad date": (HEADER + b"## 2026-13-01 a\n", "OAH_WIKI_LOG_UNDATED"),
-            "first heading no title": (HEADER + b"## 2026-01-01\n", "OAH_WIKI_LOG_UNDATED"),
-            "first heading short date": (HEADER + b"## 2026-1-1 a\n", "OAH_WIKI_LOG_UNDATED"),
+            "first heading undated": (HEADER + b"## Fixed the bug\nx\n## 2026-01-01 a\n", "undated first entry heading"),
+            "first heading bad date": (HEADER + b"## 2026-13-01 a\n", "undated first entry heading"),
+            "first heading no title": (HEADER + b"## 2026-01-01\n", "undated first entry heading"),
+            "first heading short date": (HEADER + b"## 2026-1-1 a\n", "undated first entry heading"),
             "later bad date": (HEADER + b"## 2026-01-02 a\n## 2026-13-01 b\n", "OAH_WIKI_LOG_INVALID"),
             "indented": (HEADER + b"## 2026-01-02 a\n  ## 2026-01-01 b\n", "OAH_WIKI_LOG_INVALID"),
-            "unclosed fence": (HEADER + b"## 2026-01-01 a\n```\n## 2026-01-01 b\n", "OAH_WIKI_LOG_FENCE_OPEN"),
-            "unclosed fence above marker": (b"```\n" + HEADER, "OAH_WIKI_LOG_FENCE_OPEN"),
+            "unclosed fence": (HEADER + b"## 2026-01-01 a\n```\n## 2026-01-01 b\n", "unclosed code fence"),
+            "unclosed fence above marker": (b"```\n" + HEADER, "unclosed code fence"),
             "nonempty prefix": (HEADER + b"stray text\n## 2026-01-01 a\n", "OAH_WIKI_LOG_INVALID"),
             "fence in prefix": (HEADER + b"```\n```\n## 2026-01-01 a\n", "OAH_WIKI_LOG_INVALID"),
             "index below marker": (b"<!-- OAH:LOG_INSERT_BELOW -->\n<!-- OAH:ARCHIVE_INDEX:BEGIN -->\n",
@@ -101,10 +102,12 @@ class ParseTest(unittest.TestCase):
             "not utf-8": (HEADER + b"## 2026-01-01 a\n\xff\n", "OAH_WIKI_LOG_INVALID"),
             "surrogate": (HEADER + b"## 2026-01-01 a\n\xed\xa0\x80\n", "OAH_WIKI_LOG_INVALID"),
         }
-        for name, (data, code) in cases.items():
+        for name, (data, case) in cases.items():
             with self.subTest(name), self.assertRaises(WikiError) as ctx:
                 log.parse_log(data, "log.md")
-            self.assertEqual(ctx.exception.code, code)
+            self.assertEqual(ctx.exception.code, "OAH_WIKI_LOG_INVALID")
+            if not case.startswith("OAH_"):
+                self.assertIn(case, str(ctx.exception))
 
     def test_blank_prefix_stays_with_file(self):
         prefix_log = make_log(newest_first(30, body=100), header=HEADER + b"\n  \n")
@@ -489,7 +492,7 @@ if __name__ == "__main__":
 
 
 class HardeningTest(unittest.TestCase):
-    """The A16 port: hash checks, writer checks with rollback, and the recovery file."""
+    """Amendment 4 (A16 port): hash checks, revalidation after publication, rollback from the journal."""
 
     def setUp(self):
         self.w, self.folder = make_store(self, make_log(newest_first(20, body=40)))
@@ -497,8 +500,8 @@ class HardeningTest(unittest.TestCase):
         self.original = self.log_path.read_bytes()
         self.stream = wiki_stream(self.folder)
 
-    def leftovers(self) -> list[str]:
-        return sorted(p.name for p in self.folder.iterdir() if p.name.startswith(".oah-rollover"))
+    def wiki_files(self) -> list[str]:
+        return sorted(p.name for p in self.folder.iterdir())
 
     def test_byte_exact_move_with_hash_checks(self):
         plan = log.plan_rollover(self.original, {}, trigger=600, target=300, today=TODAY)
@@ -513,7 +516,7 @@ class HardeningTest(unittest.TestCase):
                    + log.entry_stream(result.archive.read_bytes(), result.archive.name))
         self.assertEqual(log.sha256(on_disk), plan.entries_sha256)
         self.assertEqual(wiki_stream(self.folder), self.stream)
-        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(self.wiki_files(), ["log.md", "log_archive_01.md"])
         self.assertFalse(self.w.journal_path.exists())
 
     def test_oversized_newest_entry_is_kept_on_disk(self):
@@ -528,22 +531,22 @@ class HardeningTest(unittest.TestCase):
 
     def test_refusals_happen_before_any_write(self):
         cases = {
-            "no marker": (b"# Log\n\n" + b"".join(newest_first(20, body=40)), "OAH_WIKI_LOG_NO_MARKER"),
-            "undated": (HEADER + b"## Undated heading\n" + b"".join(newest_first(20, body=40)),
-                        "OAH_WIKI_LOG_UNDATED"),
-            "fence": (make_log(newest_first(20, body=40)) + b"```\nopen\n", "OAH_WIKI_LOG_FENCE_OPEN"),
+            "no marker": b"# Log\n\n" + b"".join(newest_first(20, body=40)),
+            "undated first entry heading": HEADER + b"## Undated heading\n" + b"".join(newest_first(20, body=40)),
+            "unclosed code fence": make_log(newest_first(20, body=40)) + b"```\nopen\n",
         }
-        for name, (data, code) in cases.items():
+        for case, data in cases.items():
             for apply in (False, True):
-                with self.subTest(name, apply=apply):
+                with self.subTest(case, apply=apply):
                     w, folder = make_store(self, data)
                     before = snapshot(folder, w.state)
                     with self.assertRaises(WikiError) as ctx:
                         w.rollover(today=TODAY, apply=apply)
-                    self.assertEqual(ctx.exception.code, code)
+                    self.assertEqual(ctx.exception.code, "OAH_WIKI_LOG_INVALID")
+                    self.assertIn(case, str(ctx.exception))
                     self.assertEqual(snapshot(folder, w.state), before)
 
-    def test_identity_change_refused_before_write(self):
+    def test_identity_change_refused_before_publication(self):
         def swap(step: str) -> None:
             if step == "journal-written":  # same bytes, but another file now has the name
                 temp = self.folder / "other"
@@ -556,90 +559,78 @@ class HardeningTest(unittest.TestCase):
         self.assertFalse((self.folder / "log_archive_01.md").exists())
         self.assertFalse(self.w.journal_path.exists())
 
-    def append_to_old_log(self, step: str) -> None:
-        if step == "stashed":  # a writer that opened log.md earlier appends after our check
+    APPEND = b"## 2025-01-01 late append\n\nlate\n"
+
+    def append_after_publication(self, step: str) -> None:
+        if step == "log-replaced":  # a writer appends right after rollover replaced log.md
             with open(self.log_path, "ab") as handle:
-                handle.write(b"## 2025-01-01 late append\n\nlate\n")
+                handle.write(self.APPEND)
 
     def test_append_during_rollover_is_rolled_back(self):
         with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=self.append_to_old_log)
+            self.w.rollover(today=TODAY, fault=self.append_after_publication)
         self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
         self.assertIn("rolled back", str(ctx.exception))
-        self.assertEqual(self.log_path.read_bytes(), self.original + b"## 2025-01-01 late append\n\nlate\n")
-        self.assertFalse((self.folder / "log_archive_01.md").exists())
+        self.assertEqual(self.log_path.read_bytes(), self.original + self.APPEND)
+        self.assertEqual(self.wiki_files(), ["log.md"])
         self.assertFalse(self.w.journal_path.exists())
-        self.assertEqual(self.leftovers(), [])
         self.assertTrue(self.w.rollover(today=TODAY).line.startswith("OAH_WIKI_ROLLED_OVER"))
 
-    def test_failed_rollback_leaves_recovery_file(self):
+    def test_identity_change_after_publication_is_rolled_back(self):
+        def swap(step: str) -> None:
+            if step == "log-replaced":  # an editor rewrites log.md with the same bytes as a new file
+                data = self.log_path.read_bytes()
+                temp = self.folder / "other"
+                temp.write_bytes(data)
+                temp.replace(self.log_path)
+
+        with self.assertRaises(WikiError) as ctx:
+            self.w.rollover(today=TODAY, fault=swap)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
+        self.assertEqual(self.log_path.read_bytes(), self.original)
+        self.assertEqual(self.wiki_files(), ["log.md"])
+
+    def test_failed_rollback_keeps_bytes_in_the_journal(self):
         def fault(step: str) -> None:
-            self.append_to_old_log(step)
+            self.append_after_publication(step)
             if step == "rollback":
                 raise PermissionError("simulated: log.md is held open")
 
         with self.assertRaises(WikiError) as ctx:
             self.w.rollover(today=TODAY, fault=fault)
         self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
-        recovery = self.folder / ".oah-rollover-recovery.json"
-        self.assertIn(str(recovery), str(ctx.exception))
-        saved = json.loads(recovery.read_text(encoding="utf-8"))
-        self.assertEqual(saved["reason"], "rollback-failed")
+        self.assertEqual(self.wiki_files(), ["log.md", "log_archive_01.md"])  # nothing extra in the worktree
+        journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
+        self.assertEqual((journal["phase"], journal["reason"]), ("rollback-failed", "rollback-failed"))
+        self.assertEqual(base64.b64decode(journal["restore_log"]), self.original + self.APPEND)
         for call in (lambda: self.w.lint(), lambda: self.w.log("x", today=TODAY), lambda: self.w.rollover(today=TODAY)):
             with self.assertRaises(WikiError) as pending:
                 call()
             self.assertEqual(pending.exception.code, "OAH_WIKI_RECOVERY_PENDING")
+            self.assertIn("reason rollback-failed", str(pending.exception))
         line = self.w.recover()
         self.assertTrue(line.startswith("OAH_WIKI_RECOVERED rolled back (rollback-failed)"), line)
-        self.assertEqual(self.log_path.read_bytes(), self.original + b"## 2025-01-01 late append\n\nlate\n")
-        self.assertFalse((self.folder / "log_archive_01.md").exists())
+        self.assertEqual(self.log_path.read_bytes(), self.original + self.APPEND)
+        self.assertEqual(self.wiki_files(), ["log.md"])
         self.assertFalse(self.w.journal_path.exists())
-        self.assertEqual(self.leftovers(), [])
         self.assertEqual(self.w.recover(), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
 
-    def test_change_after_exchange_keeps_bytes_and_refuses_overwrite(self):
+    def test_unmergeable_change_after_publication_is_never_overwritten(self):
         def fault(step: str) -> None:
             if step == "log-replaced":
-                with open(self.log_path, "ab") as handle:
-                    handle.write(b"written to the new log\n")
+                self.log_path.write_bytes(b"someone rewrote the log\n")
 
         with self.assertRaises(WikiError) as ctx:
             self.w.rollover(today=TODAY, fault=fault)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_CHANGED_AFTER_EXCHANGE")
-        saved = json.loads((self.folder / ".oah-rollover-recovery.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["reason"], "changed-after-exchange")
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
+        journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
+        self.assertEqual(journal["reason"], "changed-after-publication")
+        self.assertEqual(base64.b64decode(journal["current_log"]), b"someone rewrote the log\n")
         before = snapshot(self.folder, self.w.state)
         with self.assertRaises(WikiError) as conflict:
             self.w.recover()
         self.assertEqual(conflict.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
         self.assertEqual(snapshot(self.folder, self.w.state), before)
-
-    def test_crash_after_exchange_with_append_rolls_back_on_recover(self):
-        def fault(step: str) -> None:
-            self.append_to_old_log(step)
-            if step == "log-replaced":
-                raise Crash(step)
-
-        with self.assertRaises(Crash):
-            self.w.rollover(today=TODAY, fault=fault)
-        self.assertTrue(self.w.recover().startswith("OAH_WIKI_RECOVERED rolled back"))
-        self.assertEqual(self.log_path.read_bytes(), self.original + b"## 2025-01-01 late append\n\nlate\n")
-        self.assertFalse((self.folder / "log_archive_01.md").exists())
-        self.assertEqual(self.leftovers(), [])
-
-    def test_crash_before_exchange_with_append_rolls_back_on_recover(self):
-        def fault(step: str) -> None:
-            self.append_to_old_log(step)
-            if step == "stashed":
-                raise Crash(step)
-
-        with self.assertRaises(Crash):
-            self.w.rollover(today=TODAY, fault=fault)
-        self.assertTrue(self.w.recover().startswith("OAH_WIKI_RECOVERED rolled back"))
-        self.assertEqual(self.log_path.read_bytes(), self.original + b"## 2025-01-01 late append\n\nlate\n")
-        self.assertFalse((self.folder / "log_archive_01.md").exists())
-        self.assertFalse(self.w.journal_path.exists())
-        self.assertEqual(self.leftovers(), [])
 
     def test_dry_run_writes_nothing(self):
         before = snapshot(self.folder, self.w.state)
@@ -649,22 +640,22 @@ class HardeningTest(unittest.TestCase):
         self.assertIsNone(result.archive)
         self.assertEqual(snapshot(self.folder, self.w.state), before)
 
-    def test_archive_pattern_setting(self):
-        w, folder = make_store(self, make_log(newest_first(20, body=40)), archive_pattern="history-{nnn}.md")
+    def test_archive_prefix_setting(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)), archive_prefix="history-")
         stream = wiki_stream(folder)
-        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-001.md")
+        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-01.md")
         for i in range(12):
             w.log(f"more {i}", body="m" * 40, today=TODAY)
-        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-002.md")
+        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-02.md")
         header = log.parse_log((folder / "log.md").read_bytes(), "log.md").header.decode()
-        self.assertIn("[[history-002]]", header)
-        archives = {int(p.name[8:11]): p.read_bytes() for p in folder.glob("history-*.md")}
+        self.assertIn("[[history-02]]", header)
+        archives = {int(p.name[8:10]): p.read_bytes() for p in folder.glob("history-*.md")}
         self.assertTrue(log.preservation_stream((folder / "log.md").read_bytes(), archives,
-                                                log.ArchiveNaming("history-{nnn}.md")).endswith(stream))
-        (folder / "history-04.md").write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
+                                                log.ArchiveNaming("history-")).endswith(stream))
+        (folder / "history-4.md").write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
         with self.assertRaises(WikiError):
             w.rollover(today=TODAY)
-        for bad in ("x.md", "a/{nn}.md", "log_{nn}.txt", "{n}.md"):
+        for bad in ("", "a/b_", "log", "-x", "x y"):
             with self.subTest(bad=bad), self.assertRaises(WikiError) as ctx:
-                WikiSettings(archive_pattern=bad)
+                WikiSettings(archive_prefix=bad)
             self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")

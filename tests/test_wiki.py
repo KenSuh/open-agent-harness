@@ -578,28 +578,22 @@ class RolloverCliTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("rollover=log_archive_01.md", out)
 
-    def test_archive_pattern_from_config(self):
+    def test_archive_prefix_from_config(self):
         (self.repo / ".oah" / "config.toml").write_text(
-            '[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\narchive_pattern = "history-{nnn}.md"\n',
+            '[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\narchive_prefix = "history-"\n',
             encoding="utf-8")
         code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t9", state=self.state)
         self.assertEqual(code, 0, err)
-        self.assertIn("rollover=history-001.md", out)
+        self.assertIn("rollover=history-01.md", out)
         code, out, _ = run_cli(self.repo, "wiki", "lint", state=self.state)
         self.assertEqual(code, 0, out)
-        (self.repo / ".oah" / "config.toml").write_text('[wiki]\narchive_pattern = "nope.md"\n', encoding="utf-8")
+        (self.repo / ".oah" / "config.toml").write_text('[wiki]\narchive_prefix = "a/b"\n', encoding="utf-8")
         code, _, err = run_cli(self.repo, "wiki", "rollover", state=self.state)
         self.assertEqual(code, 69)
         self.assertTrue(err.startswith("OAH_CONFIG_INVALID"), err)
 
-    def test_gitignore_snippet_names_the_recovery_files(self):
-        from oah.wiki import store
-
-        snippet = notes.gitignore_snippet()
-        self.assertIn(store.RECOVERY, snippet.splitlines())
-        self.assertIn(store.STASH, snippet.splitlines())
-        repo = make_git_repo(self)
-        (repo / ".gitignore").write_text(snippet, encoding="utf-8")
-        for rel in (f"docs/wiki/{store.RECOVERY}", f"docs/wiki/{store.STASH}"):
-            result = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", rel])
-            self.assertEqual(result.returncode, 0, rel)
+    def test_rollover_settings_defaults(self):
+        self.assertEqual({key: wiki.DEFAULTS[key] for key in
+                          ("rollover_trigger_bytes", "rollover_target_bytes", "archive_prefix")},
+                         {"rollover_trigger_bytes": 512_000, "rollover_target_bytes": 409_600,
+                          "archive_prefix": "log_archive_"})

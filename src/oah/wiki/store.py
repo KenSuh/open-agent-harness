@@ -22,12 +22,9 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.wiki import lint as lint_module
 from oah.wiki import log as log_module
 from oah.wiki import notes, tasks
-from oah.wiki.base import (EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettings, fsync_folder, publish_new,
-                           read_bytes)
+from oah.wiki.base import EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettings, publish_new, read_bytes
 
 JOURNAL = "rollover-journal.json"
-RECOVERY = ".oah-rollover-recovery.json"  # in the wiki folder; git-ignored by notes.gitignore_snippet()
-STASH = ".oah-rollover-stash"  # a second name for the old log.md while it is exchanged
 MAINTENANCE = "maintenance.jsonl"
 Fault = Callable[[str], None]
 
@@ -57,33 +54,14 @@ def _identity(path: pathlib.Path) -> tuple[int, int, int, int] | None:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def _stash(log_path: pathlib.Path, stash: pathlib.Path) -> bool:
-    """Give the old log file a second name, so writes that still reach it after the exchange stay visible.
-
-    False when the file system has no hard links; then only the new log's bytes can be checked.
-    """
+def _pending_reason(journal: pathlib.Path) -> str:
     try:
-        stash.unlink()
-    except FileNotFoundError:
-        pass
-    try:
-        os.link(log_path, stash)
-    except OSError:
-        return False
-    fsync_folder(stash.parent)
-    return True
-
-
-def _hash_ok(plan: log_module.RolloverPlan, log_data: bytes | None, archive: bytes | None, naming) -> bool:
-    """Read back after writing: kept plus moved entry bytes must hash like the original entries."""
-    if log_data is None or archive is None:
-        return False
-    try:
-        both = (log_module.entry_stream(log_data, "log.md")
-                + log_module.entry_stream(archive, plan.archive_name))
-    except WikiError:
-        return False
-    return log_module.sha256(both) == plan.entries_sha256
+        data = read_json(journal, None)
+    except Exception:  # the reason is only for the message; recover validates the journal
+        return "unreadable"
+    if isinstance(data, dict):
+        return f"phase {data.get('phase', '?')}" + (f", reason {data['reason']}" if data.get("reason") else "")
+    return "unreadable"
 
 
 def _decode_fields(data: dict, keys: tuple[str, ...]) -> bool:
@@ -135,12 +113,10 @@ class Wiki:
                             f"{self.lock_timeout:g}s; nothing was changed. Wait for it to finish, then retry.",
                             EXIT_REFUSED) from exc
         try:
-            if not recovering:
-                for pending in (self.journal_path, self.dir / RECOVERY):
-                    if read_bytes(pending) is not None:
-                        raise WikiError("OAH_WIKI_RECOVERY_PENDING", f"an interrupted rollover left {pending}. "
-                                        "Nothing was read or changed. Run `oah wiki recover` to finish it, then "
-                                        "retry.", EXIT_ENVIRONMENT)
+            if not recovering and read_bytes(self.journal_path) is not None:
+                raise WikiError("OAH_WIKI_RECOVERY_PENDING", f"an interrupted rollover left {self.journal_path} "
+                                f"({_pending_reason(self.journal_path)}). Nothing was read or changed. Run "
+                                "`oah wiki recover` to finish it, then retry.", EXIT_ENVIRONMENT)
             yield
         finally:
             lock.__exit__(None, None, None)
@@ -205,7 +181,7 @@ class Wiki:
                 continue
             if not naming.well_formed(path.name) or number in found:
                 raise WikiError("OAH_WIKI_LOG_INVALID", f"{path.name} does not fit the archive numbering of "
-                                f"{naming.pattern} (each number once, starting at 1); rename it by hand, then "
+                                f"{naming.prefix}NN.md (each number once, starting at 01); rename it by hand, then "
                                 "retry", EXIT_REFUSED)
             found[number] = (path.name, path.read_bytes())
         return found
@@ -224,6 +200,14 @@ class Wiki:
         with self.session():
             return self._rollover(today, fault, apply=apply, before_write=before_write)
 
+    def _stream(self, log_data: bytes | None) -> bytes | None:
+        """The current preservation stream, or None when it cannot be read."""
+        try:
+            archives = {n: data for n, (_, data) in self._archives(self.dir).items()}
+            return log_module.preservation_stream(log_data or b"", archives, self.settings.naming)
+        except (WikiError, OSError):
+            return None
+
     def _rollover(self, today: datetime.date, fault: Fault, *, apply: bool = True,
                   before_write: Callable[[log_module.RolloverPlan], None] | None = None) -> RolloverResult:
         self._require("log.md")
@@ -231,8 +215,8 @@ class Wiki:
         identity = _identity(log_path)
         original = log_path.read_bytes()
         archives = self._archives(self.dir)
-        plan = log_module.plan_rollover(original, {n: data for n, (_, data) in archives.items()},
-                                        trigger=self.settings.rollover_trigger_bytes,
+        numbered = {n: data for n, (_, data) in archives.items()}
+        plan = log_module.plan_rollover(original, numbered, trigger=self.settings.rollover_trigger_bytes,
                                         target=self.settings.rollover_target_bytes, today=today,
                                         naming=self.settings.naming)
         if isinstance(plan, log_module.RolloverNoOp):
@@ -243,8 +227,8 @@ class Wiki:
                                   "`oah wiki rollover --apply` writes it)", None)
         if before_write is not None:
             before_write(plan)
+        stream = log_module.preservation_stream(original, numbered, self.settings.naming)
         archive_path = self.dir / plan.archive_name
-        stash = self.dir / STASH
         snapshot = {name: _sha(data) for name, data in archives.values()}
         journal = {
             "version": 1, "phase": "staged", "created_at": _now(), "wiki_dir": str(self.dir.resolve()),
@@ -256,7 +240,7 @@ class Wiki:
         }
         write_json_atomic(self.journal_path, journal)
         fault("journal-written")
-        # Writer check before the first write: the same file (identity) with the same bytes.
+        # Revalidate before publication: the same file (identity) with the same bytes, same archives.
         if (_identity(log_path) != identity or read_bytes(log_path) != original
                 or self._digests(self.dir) != snapshot):
             unlink_durable(self.journal_path)
@@ -271,62 +255,63 @@ class Wiki:
         fault("archive-published")
         write_json_atomic(self.journal_path, dict(journal, phase="archive-published"))
         fault("phase-recorded")
-        linked = _stash(log_path, stash)
-        fault("stashed")
-        write_text_atomic(log_path, plan.log.decode("utf-8"))  # the exchange
+        write_text_atomic(log_path, plan.log.decode("utf-8"))
+        published = _identity(log_path)
         fault("log-replaced")
-        # Writer check after the exchange: the old file must be unchanged, the new one ours, and the
-        # entry bytes must still hash the same.
-        old_now = read_bytes(stash) if linked else original
+        # After publication: re-read both files. The log must be the file and bytes we published, the
+        # archive ours, and the preservation stream unchanged.
         log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
-        if old_now == original and log_now == plan.log and archive_now == plan.archive and _hash_ok(plan, log_now, archive_now, self.settings.naming):
-            if linked:
-                unlink_durable(stash)
+        if (_identity(log_path) == published and log_now == plan.log and archive_now == plan.archive
+                and self._stream(log_now) == stream):
             unlink_durable(self.journal_path)
             return RolloverResult(f"OAH_WIKI_ROLLED_OVER {plan.summary()}", archive_path)
-        if log_now == plan.log and archive_now == plan.archive:
-            restore = old_now if old_now is not None else original
+        self._roll_back_after_publication(journal, original, plan, log_path, archive_path, log_now, archive_now,
+                                          fault)
+        raise AssertionError("unreachable")
+
+    def _roll_back_after_publication(self, journal: dict, original: bytes, plan: log_module.RolloverPlan,
+                                     log_path: pathlib.Path, archive_path: pathlib.Path, log_now: bytes | None,
+                                     archive_now: bytes | None, fault: Fault) -> None:
+        """Undo a publication someone else touched, from the journal's original bytes; always raises.
+
+        Bytes appended to the new log are kept after the original bytes. Any other change cannot be
+        merged safely: the journal keeps every version and the wiki waits for `oah wiki recover`.
+        """
+        appended = log_now[len(plan.log):] if log_now is not None and log_now.startswith(plan.log) else None
+        restore = original + appended if appended is not None else None
+        if restore is not None and archive_now in (None, plan.archive):
             try:
-                fault("rollback")
-                self._roll_back(log_path, stash if linked else None, restore, archive_path, plan.archive)
-            except OSError as exc:
-                path = self._save_recovery("rollback-failed", restore, plan, f"{type(exc).__name__}: {exc}")
-                raise WikiError("OAH_WIKI_ROLLBACK_FAILED", f"a writer changed log.md during rollover and undoing "
-                                f"the rollover failed ({exc}). The bytes log.md must get back are kept in {path}. "
-                                "Run `oah wiki recover` to restore them.", EXIT_ENVIRONMENT) from exc
-            unlink_durable(self.journal_path)
-            raise WikiError("OAH_WIKI_CONCURRENT_EDIT", "a writer changed log.md during rollover; the rollover "
-                            "was rolled back and nothing was lost. Retry when no one is editing the log.",
-                            EXIT_REFUSED)
-        path = self._save_recovery("changed-after-exchange", old_now if old_now is not None else original, plan,
-                                   "log.md or the new archive changed right after the exchange")
-        raise WikiError("OAH_WIKI_CHANGED_AFTER_EXCHANGE", f"log.md or {archive_path.name} changed right after "
-                        f"rollover replaced log.md, so it cannot be undone safely. The earlier bytes are kept in {path}. "
-                        "Run `oah wiki recover`; it restores them when log.md is still the rollover's output, and "
-                        "otherwise lists what to reconcile by hand.", EXIT_ENVIRONMENT)
-
-    def _roll_back(self, log_path: pathlib.Path, stash: pathlib.Path | None, restore: bytes,
-                   archive_path: pathlib.Path, archive: bytes) -> None:
-        """Put the old log file back (the very file other writers hold open) and drop the new archive."""
-        if stash is not None and read_bytes(stash) == restore:
-            os.replace(stash, log_path)
-            fsync_folder(log_path.parent)
-        else:
-            write_text_atomic(log_path, restore.decode("utf-8"))
-            if stash is not None:
-                unlink_durable(stash)
-        if read_bytes(archive_path) == archive:
-            unlink_durable(archive_path)
-
-    def _save_recovery(self, reason: str, restore: bytes, plan: log_module.RolloverPlan, detail: str) -> pathlib.Path:
-        path = self.dir / RECOVERY
-        write_json_atomic(path, {
-            "version": 1, "reason": reason, "detail": detail, "created_at": _now(), "log": "log.md",
-            "archive": plan.archive_name, "restore_log": _b64(restore), "restore_log_sha256": _sha(restore),
-            "replacement_log": _b64(plan.log), "replacement_log_sha256": _sha(plan.log),
-            "archive_bytes": _b64(plan.archive), "archive_sha256": _sha(plan.archive),
-        })
-        return path
+                restore_text = restore.decode("utf-8")
+            except UnicodeDecodeError:
+                restore = None
+            else:
+                try:
+                    fault("rollback")
+                    write_text_atomic(log_path, restore_text)
+                    if read_bytes(archive_path) == plan.archive:
+                        unlink_durable(archive_path)
+                except OSError as exc:
+                    write_json_atomic(self.journal_path, dict(
+                        journal, phase="rollback-failed", reason="rollback-failed", detail=f"{type(exc).__name__}: {exc}",
+                        restore_log=_b64(restore), restore_log_sha256=_sha(restore),
+                        current_log=_b64(log_now), current_log_sha256=_sha(log_now)))
+                    raise WikiError("OAH_WIKI_ROLLBACK_FAILED", f"log.md changed after rollover published it, and "
+                                    f"rolling back failed ({exc}). The bytes log.md must get back are kept in "
+                                    f"{self.journal_path} (reason rollback-failed). Run `oah wiki recover`.",
+                                    EXIT_ENVIRONMENT) from exc
+                unlink_durable(self.journal_path)
+                raise WikiError("OAH_WIKI_CONCURRENT_EDIT", "log.md changed right after rollover published it; the "
+                                "rollover was rolled back from the journal and nothing was lost. Retry when no one "
+                                "is editing the log.", EXIT_REFUSED)
+        current = log_now or b""
+        write_json_atomic(self.journal_path, dict(
+            journal, phase="rollback-failed", reason="changed-after-publication",
+            detail="log.md or the new archive was edited in a way rollover cannot merge",
+            current_log=_b64(current), current_log_sha256=_sha(current)))
+        raise WikiError("OAH_WIKI_ROLLBACK_FAILED", f"log.md or {archive_path.name} was edited right after rollover "
+                        "published them, in a way that cannot be rolled back safely. Nothing was overwritten; every "
+                        f"version is kept in {self.journal_path} (reason changed-after-publication). Run "
+                        "`oah wiki recover` for what to reconcile.", EXIT_ENVIRONMENT)
 
     def _load_journal(self) -> dict | None:
         data = read_json(self.journal_path, None)
@@ -339,68 +324,31 @@ class Wiki:
         if not (isinstance(data, dict) and data.get("version") == 1 and all(isinstance(data.get(k), str) for k in keys)
                 and isinstance(data.get("archive_set"), dict)):
             raise corrupt
-        if not _decode_fields(data, ("original_log", "replacement_log", "archive_bytes")):
+        optional = tuple(key for key in ("restore_log", "current_log") if key in data)
+        if not _decode_fields(data, ("original_log", "replacement_log", "archive_bytes", *optional)):
             raise corrupt
-        if (_sha(data["original_log"]) != data.get("original_log_sha256")
-                or _sha(data["replacement_log"]) != data.get("replacement_log_sha256")
+        if (any(_sha(data[key]) != data.get(f"{key}_sha256")
+                for key in ("original_log", "replacement_log", *optional))
                 or _sha(data["archive_bytes"]) != data.get("archive_sha256")
                 or self.settings.naming.number(data["archive"]) is None or data["log"] != "log.md"):
             raise corrupt
         return data
 
-    def _load_recovery(self, folder: pathlib.Path) -> dict | None:
-        path = folder / RECOVERY
-        data = read_json(path, None)
-        if data is None:
-            return None
-        if not (isinstance(data, dict) and data.get("version") == 1 and isinstance(data.get("archive"), str)
-                and _decode_fields(data, ("restore_log", "replacement_log", "archive_bytes"))
-                and _sha(data["restore_log"]) == data.get("restore_log_sha256")
-                and _sha(data["replacement_log"]) == data.get("replacement_log_sha256")
-                and _sha(data["archive_bytes"]) == data.get("archive_sha256")
-                and self.settings.naming.number(data["archive"]) is not None):
-            raise WikiError("OAH_WIKI_JOURNAL_CORRUPT", f"{path} is not a valid rollover recovery file. oah never "
-                            "resets it: repair log.md by hand from your last commit, then move the file away.",
-                            EXIT_ENVIRONMENT)
-        return data
-
     def recover(self, *, fault: Fault = _no_fault) -> str:
         with self.session(recovering=True):
             journal = self._load_journal()
-            folder = pathlib.Path(journal["wiki_dir"]) if journal else self.dir
-            saved = self._load_recovery(folder)
-            if saved is not None:
-                return self._recover_saved(folder, saved, journal)
             if journal is None:
                 return "OAH_WIKI_RECOVER_NOTHING nothing to recover"
+            folder = pathlib.Path(journal["wiki_dir"])
             log_path, archive_path = folder / journal["log"], folder / journal["archive"]
-            stash = folder / STASH
             log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
-            stash_now = read_bytes(stash)
             others = self._digests(folder, skip=journal["archive"]) if folder.is_dir() else None
             original, replacement, archive = (journal["original_log"], journal["replacement_log"],
                                               journal["archive_bytes"])
+            if journal.get("phase") == "rollback-failed":
+                return self._recover_rollback(journal, log_path, archive_path, log_now, archive_now, others)
             if others == journal["archive_set"]:
-                if (log_now == replacement and archive_now == archive and stash_now is not None
-                        and stash_now != original):
-                    # The old log took an append before the crash: undo, as the live run would have.
-                    self._roll_back(log_path, stash, stash_now, archive_path, archive)
-                    unlink_durable(self.journal_path)
-                    return "OAH_WIKI_RECOVERED rolled back: the old log.md changed during rollover; it is restored"
-                if (stash_now not in (None, original) and log_now == stash_now
-                        and archive_now in (None, archive)):
-                    # Crashed before the exchange while the log took an append: log.md is still the
-                    # old file, so dropping the new archive undoes the rollover without loss.
-                    unlink_durable(stash)
-                    if archive_now is not None:
-                        unlink_durable(archive_path)
-                    unlink_durable(self.journal_path)
-                    return "OAH_WIKI_RECOVERED rolled back: log.md changed before the exchange; it was kept"
-                if stash_now not in (None, original) and log_now != replacement:
-                    raise self._conflict(log_path, archive_path)
                 if log_now == replacement and archive_now == archive:
-                    if stash_now is not None:
-                        unlink_durable(stash)
                     unlink_durable(self.journal_path)
                     return f"OAH_WIKI_RECOVERED already complete: {archive_path.name} and log.md match the journal"
                 if log_now == original and archive_now in (None, archive):
@@ -411,33 +359,29 @@ class Wiki:
                     fault("archive-published")
                     write_text_atomic(log_path, replacement.decode("utf-8"))
                     fault("log-replaced")
-                    if stash_now is not None:
-                        unlink_durable(stash)
                     unlink_durable(self.journal_path)
                     return f"OAH_WIKI_RECOVERED completed: published {archive_path.name} and replaced log.md"
             raise self._conflict(log_path, archive_path)
 
-    def _recover_saved(self, folder: pathlib.Path, saved: dict, journal: dict | None) -> str:
-        """Restore log.md from the recovery file a failed rollback left, then drop the new archive."""
-        path = folder / RECOVERY
-        log_path, archive_path, stash = folder / "log.md", folder / saved["archive"], folder / STASH
-        log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
-        restore = saved["restore_log"]
-        if log_now not in (restore, saved["replacement_log"]) or archive_now not in (None, saved["archive_bytes"]):
-            raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"log.md or {archive_path.name} changed after the failed "
-                            f"rollback ({saved.get('reason')}). Nothing was changed. {path} keeps the bytes log.md "
-                            "should have (restore_log, base64); merge them with the current log.md by hand, delete "
-                            f"{archive_path.name} if its entries are still in log.md, then move {path.name} and any "
-                            "rollover journal away.", EXIT_ENVIRONMENT)
-        self._roll_back(log_path, stash if read_bytes(stash) is not None else None, restore, archive_path,
-                        saved["archive_bytes"])
-        if read_bytes(stash) is not None:
-            unlink_durable(stash)
-        if journal is not None:
+    def _recover_rollback(self, journal: dict, log_path: pathlib.Path, archive_path: pathlib.Path,
+                          log_now: bytes | None, archive_now: bytes | None, others: dict | None) -> str:
+        """Finish a rollback that failed: restore log.md from the journal and remove the new archive."""
+        reason = journal.get("reason", "rollback-failed")
+        restore = journal.get("restore_log")
+        if (restore is not None and others == journal["archive_set"]
+                and log_now in (restore, journal["replacement_log"], journal.get("current_log"))
+                and archive_now in (None, journal["archive_bytes"])):
+            if log_now != restore:
+                write_text_atomic(log_path, restore.decode("utf-8"))
+            if archive_now is not None:
+                unlink_durable(archive_path)
             unlink_durable(self.journal_path)
-        unlink_durable(path)
-        return (f"OAH_WIKI_RECOVERED rolled back ({saved.get('reason')}): log.md restored from {path.name} and "
-                f"{archive_path.name} removed")
+            return f"OAH_WIKI_RECOVERED rolled back ({reason}): log.md restored from the journal, {archive_path.name} removed"
+        raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"the rollover journal says {reason}, and log.md or "
+                        f"{archive_path.name} cannot be restored automatically. Nothing was changed. {self.journal_path} "
+                        "keeps original_log, replacement_log and current_log (base64): merge log.md by hand so every "
+                        f"entry appears once, delete {archive_path.name} if its entries are back in log.md, then move "
+                        "the journal away.", EXIT_ENVIRONMENT)
 
     def _conflict(self, log_path: pathlib.Path, archive_path: pathlib.Path) -> WikiError:
         return WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"{log_path} or the archives ({archive_path.name} and its "

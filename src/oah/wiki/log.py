@@ -19,8 +19,8 @@ from oah.wiki.markdown import FenceTracker, eol_of, split_lines, strip_eol
 MARKER = "<!-- OAH:LOG_INSERT_BELOW -->"
 INDEX_BEGIN = "<!-- OAH:ARCHIVE_INDEX:BEGIN -->"
 INDEX_END = "<!-- OAH:ARCHIVE_INDEX:END -->"
-DEFAULT_ARCHIVE_PATTERN = "log_archive_{nn}.md"
-_ARCHIVE_PATTERN = re.compile(r"^([A-Za-z0-9._-]*)\{(n{2,6})\}([A-Za-z0-9._-]*\.md)$")
+DEFAULT_ARCHIVE_PREFIX = "log_archive_"
+_ARCHIVE_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 _ENTRY = re.compile(r"^## ([0-9]{4}-[0-9]{2}-[0-9]{2}) +(\S.*)$")
 _CANDIDATE = re.compile(r"^ {0,3}##[ \t]+[0-9]")
@@ -28,16 +28,16 @@ _HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 
 
 class ArchiveNaming:
-    """[wiki] archive_pattern: a file name with {nn} (or {nnn}…) for the zero-padded archive number."""
+    """[wiki] archive_prefix: archives are named <prefix>NN.md, numbered from 01 with at least two digits."""
 
-    def __init__(self, pattern: str = DEFAULT_ARCHIVE_PATTERN) -> None:
-        match = _ARCHIVE_PATTERN.match(pattern or "")
-        if match is None or match.group(1) + match.group(3) in ("log.md", "index.md"):
-            raise ValueError(f"archive_pattern {pattern!r} must be a file name ending in .md with one {{nn}} "
-                             "placeholder (two to six n's), such as log_archive_{nn}.md")
-        self.pattern = pattern
-        self.prefix, self.digits, self.suffix = match.group(1), len(match.group(2)), match.group(3)
-        self._regex = re.compile("^" + re.escape(self.prefix) + "([0-9]+)" + re.escape(self.suffix) + "$")
+    digits = 2
+
+    def __init__(self, prefix: str = DEFAULT_ARCHIVE_PREFIX) -> None:
+        if not isinstance(prefix, str) or not _ARCHIVE_PREFIX.match(prefix) or prefix in ("log", "index"):
+            raise ValueError(f"archive_prefix {prefix!r} must be a plain file-name start of letters, digits, '.', "
+                             "'_' or '-' (up to 64), such as log_archive_")
+        self.prefix = prefix
+        self._regex = re.compile("^" + re.escape(prefix) + "([0-9]+)\\.md$")
 
     def number(self, name: str) -> int | None:
         """The archive number of a file name, or None when the name is not an archive."""
@@ -49,7 +49,7 @@ class ArchiveNaming:
         return bool(match) and len(match.group(1)) >= self.digits and int(match.group(1)) > 0
 
     def name(self, number: int) -> str:
-        return f"{self.prefix}{number:0{self.digits}d}{self.suffix}"
+        return f"{self.prefix}{number:0{self.digits}d}.md"
 
 
 DEFAULT_NAMING = ArchiveNaming()
@@ -80,8 +80,8 @@ class ParsedLog:
         return sum(len(entry.data) for entry in self.entries)
 
 
-def _invalid(name: str, problem: str, code: str = "OAH_WIKI_LOG_INVALID") -> WikiError:
-    return WikiError(code, f"{name}: {problem}. Nothing was written. Fix the file by hand so every entry starts "
+def _invalid(name: str, problem: str) -> WikiError:
+    return WikiError("OAH_WIKI_LOG_INVALID", f"{name}: {problem}. Nothing was written. Fix the file by hand so every entry starts "
                      f"with an unindented '## YYYY-MM-DD <title>' line below the single {MARKER} line, "
                      "then retry.", EXIT_REFUSED)
 
@@ -113,10 +113,10 @@ def parse_log(data: bytes, name: str) -> ParsedLog:
         elif body == INDEX_END:
             ends.append(number)
     if fences.open:
-        raise _invalid(name, f"the code fence opened at line {opened_at + 1} is never closed, so entry "
-                       "boundaries are ambiguous", "OAH_WIKI_LOG_FENCE_OPEN")
+        raise _invalid(name, f"unclosed code fence: the fence opened at line {opened_at + 1} is never closed, so "
+                       "entry boundaries are ambiguous")
     if not markers:
-        raise _invalid(name, f"has no {MARKER} marker line outside code", "OAH_WIKI_LOG_NO_MARKER")
+        raise _invalid(name, f"no marker: there is no {MARKER} line outside code")
     if len(markers) != 1:
         raise _invalid(name, f"has {len(markers)} {MARKER} marker lines outside code; it needs exactly one")
     marker = markers[0]
@@ -132,8 +132,8 @@ def parse_log(data: bytes, name: str) -> ParsedLog:
         if not starts and not fenced[number] and _HEADING.match(body):
             match = _ENTRY.match(body)
             if match is None or _bad_date(match.group(1)):
-                raise _invalid(name, f"line {number + 1}, the first entry heading, has no 'YYYY-MM-DD' date: "
-                               f"{body.strip()!r}", "OAH_WIKI_LOG_UNDATED")
+                raise _invalid(name, f"undated first entry heading: line {number + 1} has no 'YYYY-MM-DD' date: "
+                               f"{body.strip()!r}")
         if not fenced[number] and _CANDIDATE.match(body):
             match = _ENTRY.match(body)
             if match is None or _bad_date(match.group(1)):
@@ -234,7 +234,7 @@ class RolloverNoOp:
 
 
 def _archive_header(number: int, today: datetime.date, eol: str, naming: ArchiveNaming) -> bytes:
-    return (f"# Log archive {number:0{naming.digits}d}{eol}{eol}Whole entries moved from [[log]] by `oah wiki rollover` on "
+    return (f"# Log archive {number:02d}{eol}{eol}Whole entries moved from [[log]] by `oah wiki rollover` on "
             f"{today.isoformat()}. Never edit this file; the commit check refuses changes to it.{eol}{eol}"
             f"{MARKER}{eol}").encode("utf-8")
 
