@@ -19,18 +19,18 @@ to program with AI.
 |---|---|---|
 | Implements | **Claude Code** | The first implementation of every task. |
 | Reviews and corrects | **Codex CLI** | Review, correction and re-review, until the review converges. |
-| Judges | **TypeSafe Jev** | Ranks the closed list of candidates that fixed rules produce, such as skills or impact results. The engine checks the evidence before it acts. |
+| Judges | **TypeSafe Jev** | Provider: in review (#18). Ranking closed candidates from fixed rules is planned for skills (P4b) and impact results. The engine checks the evidence before it acts. |
 
-Jev is recommended, not required. Guided `oah init` will ask you once before anything is sent to TypeSafe,
-and without Jev the fixed rules decide alone.
+Jev is recommended, not required. The one-time consent question in guided `oah init` is planned (P7b),
+before anything is sent to TypeSafe. Without Jev the fixed rules decide alone.
 
 Two AI coding sessions on one repository will happily edit the same files. "Done" means whatever the
 agent says, and a review has no rule for when it is finished and no proof. `oah` gives the engines and the
 judge one rulebook:
 
 - **Claude implements first. Codex reviews, corrects and re-reviews** until the review converges.
-- **The task's difficulty picks the model, the effort and the skills.** Fixed rules decide first, and Jev
-  ranks the candidates they found. Every result says whether Jev was used.
+- **The task's difficulty picks the model, the effort and the skills.** Fixed rules decide first. The Jev
+  provider is in review (#18); skill wiring (P4b), impact ranking and reporting Jev use in those results are planned.
 - **An impact map** tells you what a change affects and which checks to run again.
 - **A project wiki** remembers why things were done.
 - **"Done" is a ledger of evidence**, and work lands only after the review converges and CI is green.
@@ -953,17 +953,17 @@ are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 |---|---|---|
 | 구현 | **Claude Code** | 모든 작업의 1차 구현을 맡는다. |
 | 리뷰와 수정 | **Codex CLI** | 리뷰가 수렴할 때까지 리뷰하고 고친 뒤 다시 리뷰한다. |
-| 판정 | **TypeSafe Jev** | 정해진 규칙이 만든 닫힌 후보 목록(스킬, 영향 결과)의 순위를 매긴다. 엔진은 근거를 확인한 뒤에 움직인다. |
+| 판정 | **TypeSafe Jev** | 제공자는 in review (#18)다. 정해진 규칙이 만든 닫힌 후보의 순위를 매기는 일은 스킬(P4b)과 영향 결과 모두 planned다. 엔진은 근거를 확인한 뒤에 움직인다. |
 
-Jev는 필수가 아니라 권장 구성 요소다. 안내형 `oah init`이 TypeSafe로 무엇이든 보내기 전에 한 번 묻는다.
-Jev가 없으면 정해진 규칙만으로 판단한다.
+Jev는 필수가 아니라 권장 구성 요소다. TypeSafe로 무엇이든 보내기 전에 안내형 `oah init`에서 한 번
+동의를 묻는 일은 planned (P7b)다. Jev가 없으면 정해진 규칙만으로 판단한다.
 
 AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치기 쉽다. "끝났다"는 에이전트의 말뿐이고
 리뷰는 언제 끝나는지 정한 규칙도 증거도 없다. `oah`는 엔진과 판정기에 같은 규칙을 적용한다.
 
 - **Claude가 먼저 구현하고 Codex가 리뷰하고 고친 뒤 다시 리뷰한다.** 리뷰가 수렴할 때까지 이어 간다.
-- **작업 난이도에 따라 모델과 추론 강도, 스킬을 고른다.** 먼저 정해진 규칙으로 판단하고 Jev가 그
-  후보의 순위를 매긴다. 결과마다 Jev를 썼는지 밝힌다.
+- **작업 난이도에 따라 모델과 추론 강도, 스킬을 고른다.** 먼저 정해진 규칙으로 판단한다. Jev 제공자는
+  in review (#18)이며 스킬 연결(P4b), 영향 순위와 해당 결과에 Jev 사용 여부를 밝히는 일은 planned다.
 - **영향 지도**는 변경이 무엇에 닿는지, 어떤 검사를 다시 돌려야 하는지 알려 준다.
 - **프로젝트 위키**는 왜 그렇게 했는지를 기억한다.
 - **"끝났다"는 증거 원장으로 보인다.** 리뷰가 수렴하고 CI가 통과한 뒤에만 작업을 반영한다.
