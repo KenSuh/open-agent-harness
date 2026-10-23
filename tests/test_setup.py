@@ -43,7 +43,7 @@ class CatalogTest(unittest.TestCase):
     def test_catalog_lists_amendment_tools(self):
         names = [t.name for t in cat.catalog()]
         self.assertEqual(names, ["git", "python", "uv", "node", "claude", "codex", "unlazy", "graphify", "gh",
-                                 "gitleaks", "jq", "rg"])
+                                 "gitleaks", "jq", "rg", "orca", "aside"])
 
     def test_required_tools(self):
         required = {t.name for t in cat.catalog() if t.required}
@@ -460,7 +460,7 @@ class GuidedSetupTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         text = "\n".join(self.lines)
         self.assertIn("curl -fsSL https://claude.ai/install.sh | bash", text)
-        self.assertEqual(self.lines[-1], "SETUP_DRY_RUN planned=11")
+        self.assertEqual(self.lines[-1], "SETUP_DRY_RUN planned=13")
 
     def test_guided_setup_asks_per_tool_and_shows_exact_text(self):
         which = fake_which("git", "brew", "curl", "claude", "codex", "python3")

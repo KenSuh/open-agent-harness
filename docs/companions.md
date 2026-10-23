@@ -13,7 +13,8 @@ Setup offers each one, says what it adds, and installs or changes nothing until 
 ## 1. Install the app
 
 Run `python -m oah.setup` (or `oah init`). Each missing app shows up as `optional` with its official
-install command, and it asks before running it. You can also install by hand.
+install command, and it asks before running it. `--yes` never installs these apps: one is installed only
+when you answer `y` for it, or when you name it. You can also install by hand.
 
 **Orca**
 

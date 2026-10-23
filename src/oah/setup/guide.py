@@ -323,13 +323,19 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
                  runner: Callable[[Argv], int] = run_interactive,
                  status_runner: StatusRunner = default_status_runner, refresh: Callable[[], None] | None = None,
                  env: Mapping[str, str] | None = None, home: pathlib.Path | None = None,
-                 repo_root: pathlib.Path | None = None) -> int:
+                 repo_root: pathlib.Path | None = None, with_optional: Iterable[str] = ()) -> int:
     """Check, plan, ask per tool (or `yes`), install, re-check, then guide the sign-ins.
 
-    Returns 0 when every required tool is present and signed in, else 1. A dry run only checks and
-    prints the plan, and returns 0.
+    Optional apps are never covered by `yes`: one installs only when named in `with_optional` or when
+    the user answers y for it. Returns 0 when every required tool is present and signed in, else 1.
+    A dry run only checks and prints the plan, and returns 0.
     """
     tools = catalog() if tools is None else list(tools)
+    named = set(with_optional)
+    unknown = named - {tool.name for tool in tools if tool.optional}
+    if unknown:
+        raise ValueError(f"OAH_SETUP_USAGE: {', '.join(sorted(unknown))} is not an optional app; name only "
+                         f"{', '.join(tool.name for tool in tools if tool.optional)}")
     refresh = refresh_path if refresh is None else refresh
     refresh()
     out(f"oah setup ({OS_LABELS.get(os_name, os_name)}){' - dry run, nothing will be installed' if dry_run else ''}")
@@ -348,6 +354,8 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
                 how = (f"no installer for it here; get it from the page below (official command: {step.display})"
                        if step.display else step.note or "Install it from the official page below.")
             out(f"  - {step.tool.name} ({step.tool.requirement}): {how}")
+            if step.tool.optional and step.tool.name not in named:
+                out("      Installed only if you name it or answer y for it; --yes skips it.")
             if step.manual and step.display and step.note:
                 out(f"      {step.note}")
             out(f"      {step.url}")
@@ -358,7 +366,13 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
         out(f"SETUP_DRY_RUN planned={len(steps)}")
         return 0
     if steps:
-        confirm = (lambda step: True) if yes else _confirm_with(ask, out)
+        asked = _confirm_with(ask, out)
+
+        def confirm(step: Step) -> bool:
+            if step.tool.optional:
+                return step.tool.name in named or (not yes and asked(step))
+            return yes or asked(step)
+
         out("")
         results = run_installs(steps, confirm=confirm, runner=runner, refresh=refresh, out=out)
         statuses = check_tools(tools, which=which, env=env, home=home, repo_root=repo_root)

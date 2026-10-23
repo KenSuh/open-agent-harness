@@ -198,7 +198,44 @@ class DoctorAndGuideTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("orca (optional): brew install --cask stablyai/orca/orca", text)
         self.assertIn("aside (optional): brew install --cask aside", text)
+        self.assertIn("--yes skips it", text)
         self.assertEqual(runner.calls, [])
+
+    def guided(self, *, yes=False, with_optional=(), answers=(), missing=("orca", "aside", "jq")):
+        out, runner = [], FakeRunner()
+        present = (self.base - set(missing)) | {"brew"}
+        code = guide.guided_setup(os_name="macos", yes=yes, with_optional=with_optional, which=fake_which(*present),
+                                  ask=Answers(*answers), out=out.append, runner=lambda argv: runner(argv, None),
+                                  status_runner=lambda argv: (0, '{"loggedIn": true}'), refresh=lambda: None,
+                                  env={}, home=self.home)
+        return code, [argv for argv, _ in runner.calls], "\n".join(out)
+
+    ORCA = ("brew", "install", "--cask", "stablyai/orca/orca")
+    ASIDE = ("brew", "install", "--cask", "aside")
+    JQ = ("brew", "install", "jq")
+
+    def test_yes_never_installs_optional_apps(self):
+        code, calls, text = self.guided(yes=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [self.JQ])  # the recommended tool in the plan still installs
+        self.assertIn("orca: skipped", text)
+
+    def test_named_optional_apps_install(self):
+        _, calls, _ = self.guided(yes=True, with_optional=("orca",))
+        self.assertEqual(calls, [self.JQ, self.ORCA])
+        # Naming an app is its consent, so it is not asked about; the others still are.
+        _, calls, _ = self.guided(with_optional=("aside",), answers=("n", "n"))
+        self.assertEqual(calls, [self.ASIDE])
+
+    def test_interactive_yes_installs_that_one_app(self):
+        # Plan order: jq, orca, aside.
+        _, calls, _ = self.guided(answers=("n", "y", "n"))
+        self.assertEqual(calls, [self.ORCA])
+
+    def test_unknown_optional_name_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            self.guided(yes=True, with_optional=("jq",))
+        self.assertIn("OAH_SETUP_USAGE", str(caught.exception))
 
 
 class StepsTest(unittest.TestCase):
