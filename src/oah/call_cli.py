@@ -1,4 +1,4 @@
-# call·wait 명령 모듈 — .oah/config.toml 의 [stages]·[engines.*]·[models] 를 읽어 엔진 호출을 준비·실행하고, 백그라운드 실행을 최대 9분씩 기다린다.
+# call·wait 명령 모듈 — .oah/config.toml 의 [stages]·[engines.*]·[models]·[call] 을 읽어 엔진 호출을 준비하고 고른 실행기(process·orca)로 띄우며, 백그라운드 실행을 최대 9분씩 기다린다.
 """engines"""
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import secrets
 import sys
 from typing import Callable, NamedTuple
 
-from oah import briefs, call, models, routing, runs
+from oah import briefs, call, launchers, models, routing, runs
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
@@ -22,10 +22,10 @@ from oah.recommend_cli import add_axis_arguments
 from oah.runs import TERMINAL, RunError
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT, EXIT_AGAIN = 0, 1, 2, 69, 75
-COMMANDS = ("call", "wait")
+COMMANDS = ("call", "wait", "worker-run")
 ENVIRONMENT_CODES = ("OAH_ENGINE_MISSING", "OAH_CONFIG_INVALID", "OAH_CODEX_CONFIG_INVALID",
                      "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE",
-                     "OAH_RUN_DETACH_FAILED")
+                     "OAH_RUN_DETACH_FAILED", "OAH_LAUNCHER_UNAVAILABLE", "OAH_LAUNCHER_FAILED")
 
 
 def register(commands: argparse._SubParsersAction) -> None:
@@ -46,6 +46,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--override-stage", action="store_true",
                         help="run an engine that is not configured for this stage (recorded in the events)")
     parser.add_argument("--background", action="store_true", help="return the run id at once; then use oah wait")
+    parser.add_argument("--launcher", choices=launchers.NAMES, help="run the worker as a plain process or in an Orca "
+                        "worktree terminal (default: [call] launcher, else process)")
     parser.add_argument("--require-detach", action="store_true",
                         help="refuse background dispatch if Windows denies job breakaway; use another terminal")
     parser.add_argument("--request-id", help="retry a saved request from this repository's state folder")
@@ -61,6 +63,10 @@ def register(commands: argparse._SubParsersAction) -> None:
                       help=f"wait at most this long (at most {call.WAIT_LIMIT_S:g} s)")
     wait.add_argument("--json", action="store_true", help="print the run record as JSON")
 
+    runner = commands.add_parser("worker-run", description="Run a queued Orca run inside its terminal. "
+                                 "`oah call --launcher orca` types this command for you.")
+    runner.add_argument("run_id")
+
 
 def load_settings(root: pathlib.Path) -> call.Settings:
     from oah.config import load_config
@@ -69,6 +75,12 @@ def load_settings(root: pathlib.Path) -> call.Settings:
     return call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
                                    config.section("engines", call.ENGINE_DEFAULTS),
                                    config.section("models", models.DEFAULTS))
+
+
+def load_call_section(root: pathlib.Path) -> dict:
+    from oah.config import load_config
+
+    return load_config(root).section("call", launchers.DEFAULTS)
 
 
 class IntentTools(NamedTuple):
@@ -162,6 +174,23 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     if args.worktree:
         root = call.resolve_worktree(args.worktree, root, retry=lambda path: retry_command(args, path))
         state = state_dir(repo_info(root), os.environ)
+    section = load_call_section(root)
+    orca = placement = None
+    if launchers.choose(getattr(args, "launcher", None), section) == "orca":
+        if args.require_detach:
+            print("OAH_USAGE: --require-detach applies to the process launcher only; an Orca terminal never "
+                  "belongs to this terminal. Remove --require-detach", file=sys.stderr)
+            return EXIT_USAGE
+        from oah.launchers import orca as orca_launcher
+
+        orca = orca_launcher.find(section["orca_command"], os.environ)
+        orca_launcher.check_runner(os.environ)
+        if args.worktree:
+            placement = orca_launcher.existing_worktree(orca, root)
+        else:
+            placement = orca_launcher.new_worktree(orca, root, args.task)
+            root = placement.path
+            state = state_dir(repo_info(root), os.environ)
     settings = load_settings(root)
     tools = intent_tools()
     request = call.CallRequest(
@@ -171,10 +200,24 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
         refresh_models=args.refresh_models)
-    prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
-                            has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
+    try:
+        prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
+                                has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
+    except Exception:
+        if placement is not None and placement.created:
+            print(f"OAH_LAUNCHER_NOTE: the Orca worktree {placement.path} made for this call was kept; reuse it with "
+                  f"--worktree {placement.path.name}, or remove it in Orca", file=sys.stderr)
+        raise
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
+    if orca is not None:
+        info = orca_launcher.start(orca, prepared, placement)["launcher"]
+        print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "
+              f"worktree={info['worktree']}", file=sys.stdout if args.background else sys.stderr)
+        if args.background:
+            print(f"Wait for it with: oah wait {prepared.run_id}")
+            return EXIT_OK
+        return _report(orca_launcher.wait_until_done(orca, state, prepared.run_id), args.json)
     if args.background:
         run_id = call.start_background(prepared, require_detach=args.require_detach)
         print(f"OAH_RUN_STARTED run={run_id} folder={prepared.run_dir}")
@@ -184,7 +227,15 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
 
 
 def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
-    data = call.wait(state, args.run_id, timeout=args.timeout_seconds)
+    current = runs.find_run(state, args.run_id).read()
+    launcher = current.get("launcher")
+    if isinstance(launcher, dict) and launcher.get("name") == "orca" and current.get("status") not in TERMINAL:
+        from oah.launchers import orca as orca_launcher
+
+        orca = orca_launcher.find(load_call_section(root)["orca_command"], os.environ)
+        data = orca_launcher.wait(orca, state, args.run_id, timeout=args.timeout_seconds)
+    else:
+        data = call.wait(state, args.run_id, timeout=args.timeout_seconds)
     if data.get("status") in TERMINAL:
         return _report(data, args.json)
     if args.json:
@@ -195,13 +246,28 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     return EXIT_AGAIN
 
 
+def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
+    run = runs.find_run(state, args.run_id)
+    data = run.read()
+    launcher = data.get("launcher")
+    if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
+        print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is {data.get('status')}, not a queued Orca run, so nothing "
+              "was started; start a new run with oah call", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
+          f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
+    call.background_main(str(run.path))
+    return _report(run.read(), False)
+
+
 def run(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
 
     try:
         info = repo_info(pathlib.Path.cwd())
         state = state_dir(info, os.environ)
-        return (_call if args.command == "call" else _wait)(args, info.root, state)
+        handler = {"call": _call, "wait": _wait, "worker-run": _worker_run}[args.command]
+        return handler(args, info.root, state)
     except EngineError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED
