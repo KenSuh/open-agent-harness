@@ -7,9 +7,12 @@ import json
 import os
 import pathlib
 import re
+import subprocess
+import sys
 import threading
 import tomllib
 import unittest
+from unittest import mock
 
 from oah.toolkit import SkillInfo, read_skill
 from oah.toolkit.skillmeta import SkillError, load_problems, parse_frontmatter
@@ -83,6 +86,22 @@ class ReadSkillTest(unittest.TestCase):
 
 
 class LoadProblemsTest(unittest.TestCase):
+    def test_required_metadata_rejects_yaml_types_and_invalid_names(self):
+        root = make_tmp_dir(self)
+        for key, value in (("name", "[]"), ("description", "null"), ("description", "{a: b}"),
+                           ("description", "\n  nested: value"), ("description", "\n  - value"),
+                           ("description", "true"), ("description", "123"), ("name", "Bad_Name"),
+                           ("description", "# comment"),
+                           ("name", "a--b"), ("name", "-demo"), ("name", "x" * 65),
+                           ("description", "&anchor text"), ("description", "*anchor")):
+            fields = {"name": "demo", "description": "Does a thing."}
+            fields[key] = value
+            with self.subTest(key=key, value=value):
+                skill = write_skill(root / "skill", "".join(f"{k}: {v}\n" for k, v in fields.items()))
+                self.assertTrue(load_problems(skill))
+                with self.assertRaises(SkillError):
+                    read_skill(skill)
+
     def test_load_problems_missing_name_and_missing_reference(self):
         root = make_tmp_dir(self)
         good = write_skill(root / "good", "name: good\ndescription: ok\n", "See [ref](refs/a.md).\n")
@@ -137,6 +156,135 @@ class CatalogTest(unittest.TestCase):
 
 
 class FetchStageTest(unittest.TestCase):
+    def test_fetch_ignores_global_xdg_templates_filters_and_rewriting(self):
+        upstream = make_upstream(self, {"skills/demo/lf.md": b"a\nb\n",
+                                       "skills/demo/.gitattributes": "*.md filter=probe\n"})
+        work = make_tmp_dir(self)
+        home = work / "hostile-home"
+        home.mkdir()
+        marker = work / "filter-ran"
+        script = home / "filter.py"
+        script.write_text(f"import pathlib, sys\npathlib.Path({str(marker)!r}).write_text('ran')\n"
+                          "sys.stdout.buffer.write(sys.stdin.buffer.read())\n", encoding="utf-8")
+        command = f'"{pathlib.Path(sys.executable).as_posix()}" "{script.as_posix()}"'
+        templates = home / "templates"
+        (templates / "hooks").mkdir(parents=True)
+        (templates / "hooks" / "post-checkout").write_text("untrusted\n", encoding="utf-8")
+        # URL rewriting lives in XDG, the filter and autocrlf in the global file.
+        (home / ".gitconfig").write_text(
+            f"[core]\n autocrlf = true\n[init]\n templateDir = {templates.as_posix()}\n"
+            f"[filter \"probe\"]\n smudge = {command.replace(chr(34), chr(92) + chr(34))}\n required = true\n"
+            f'[url "{(work / "missing").as_posix()}"]\n insteadOf = {upstream.as_posix()}\n',
+            encoding="utf-8")
+        (home / "git").mkdir()
+        (home / "git" / "config").write_text(
+            f'[url "{(work / "missing").as_posix()}"]\n insteadOf = {upstream.as_posix()}\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home),
+                                          "XDG_CONFIG_HOME": str(home)}):
+            tree = fetch(str(upstream), "main", work / "scratch", paths=("skills/demo", "LICENSE"))
+            record = stage_item(bundled(upstream), tree, work / "item", fetched=TODAY)
+        self.assertFalse(marker.exists())
+        self.assertFalse((work / "scratch" / "skills").exists(), "fetch must never check out upstream content")
+        self.assertFalse((work / "scratch" / ".git" / "hooks" / "post-checkout").exists())
+        self.assertEqual((work / "item" / "lf.md").read_bytes(), b"a\nb\n")
+        for name, blob in record.files.items():
+            self.assertEqual(blob_id((work / "item" / name).read_bytes()), blob)
+
+    def test_git_environment_hides_credential_homes_and_configuration(self):
+        env = git_env()
+        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), os.devnull)
+        self.assertEqual(env.get("GIT_CONFIG_SYSTEM"), os.devnull)
+        for key in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "CURL_HOME"):
+            self.assertNotEqual(env.get(key), os.environ.get(key, "personal-home"))
+
+    def test_scoped_headers_are_absent_from_effective_git_configuration(self):
+        home = make_tmp_dir(self)
+        (home / ".gitconfig").write_text('[http "https://example.com/"]\n extraHeader = Authorization: Basic '
+                                         + "Q" * 20 + "\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            result = run_command((*git_argv(), *GIT_SAFE_CONFIG, "config", "--get-regexp", r"http\..*\.extraheader"),
+                                 timeout=30, env=git_env())
+        self.assertEqual(result.returncode, 1, "scoped credential headers must not be loaded")
+        self.assertEqual(result.stdout, "")
+
+    def test_git_ignores_scoped_extra_headers(self):
+        seen = []
+
+        class Unauthorized(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(401)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+        except PermissionError:
+            self.skipTest("sandbox blocks loopback sockets; effective Git configuration is tested separately")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        home = make_tmp_dir(self)
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        (home / ".gitconfig").write_text(f'[http "{url}/"]\n extraHeader = Authorization: Basic '
+                                         + "Q" * 20 + "\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            run_command((*git_argv(), *GIT_SAFE_CONFIG, "-c", "protocol.http.allow=always", "ls-remote",
+                         url + "/repo.git"), timeout=30, env=git_env())
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {None})
+
+    def test_stage_rejects_portable_path_collisions_and_reserved_names(self):
+        # Build real Git trees without checking out names the host filesystem cannot represent.
+        upstream = make_upstream(self)
+        work = make_tmp_dir(self)
+        tree = fetch(str(upstream), "main", work / "scratch")
+        blob = subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD:skills/demo/ref.md"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        license_blob = tree.entries("LICENSE")[0][1]
+        for index, paths in enumerate((("Foo.md", "foo.md"), ("é.md", "e\u0301.md"),
+                                       ("Foo", "foo/a.md"), ("Foo/a.md", "foo/b.md"),
+                                       ("CON.txt",), ("a.",), ("a ",), ("a:b",), ("a\\b",),
+                                       (".git/config",), ("upstream.JSON",), (".OAH-SKILL.JSON",))):
+            with self.subTest(paths=paths):
+                # mktree accepts arbitrary byte paths; nested names use a subtree.
+                def make_tree(names, root=False):
+                    rows = [f"100644 blob {license_blob}\tLICENSE\0"] if root else []
+                    groups = {}
+                    for name in names:
+                        first, sep, rest = name.partition("/")
+                        if sep:
+                            groups.setdefault(first, []).append(rest)
+                        else:
+                            rows.append(f"100644 blob {blob}\t{first}\0")
+                    for name, children in groups.items():
+                        rows.append(f"040000 tree {make_tree(children)}\t{name}\0")
+                    return subprocess.run(["git", "-C", str(tree.repo), "mktree", "-z", "--missing"],
+                                          input="".join(rows), text=True, capture_output=True, check=True).stdout.strip()
+                # Copy objects from the fetched repository: the blob is already available there.
+                bad = dataclasses.replace(tree, commit=make_tree(paths, root=True))
+                entry = bundled(upstream, subpath="", skills=(".",))
+                with self.assertRaises(StageError):
+                    stage_item(entry, bad, work / f"item-{index}", fetched=TODAY)
+                self.assertFalse((work / f"item-{index}").exists())
+
+    def test_stage_verifies_written_bytes_against_manifest(self):
+        import oah.toolkit.fetch as fetch_module
+
+        upstream = make_upstream(self)
+        work = make_tmp_dir(self)
+        tree = fetch(str(upstream), "main", work / "scratch")
+        original = fetch_module._write
+
+        def corrupt(path, data, executable):
+            original(path, data + b"changed", executable)
+
+        with mock.patch.object(fetch_module, "_write", corrupt), self.assertRaises(StageError):
+            stage_item(bundled(upstream), tree, work / "item", fetched=TODAY)
+        self.assertFalse((work / "item" / "UPSTREAM.json").exists())
+
     def test_fetch_and_stage_records_provenance(self):
         upstream = make_upstream(self)
         make_executable(upstream, "skills/demo/ref.md")
@@ -185,6 +333,10 @@ class FetchStageTest(unittest.TestCase):
         self.assertEqual((work / "item" / "crlf.md").read_bytes(), b"a\r\nb\r\n")
         self.assertEqual((work / "item" / "blob.bin").read_bytes(), b"\0\x01\xff")
 
+    @unittest.skipUnless(os.name == "nt", "Git for Windows must also preserve exact blob bytes")
+    def test_windows_stage_ignores_autocrlf_and_filters(self):
+        self.test_fetch_ignores_global_xdg_templates_filters_and_rewriting()
+
     def test_stage_refuses_wrong_license(self):
         upstream = make_upstream(self, {"LICENSE": APACHE_TEXT})
         work = make_tmp_dir(self)
@@ -213,7 +365,10 @@ class FetchStageTest(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+        except PermissionError:
+            self.skipTest("sandbox blocks loopback sockets; effective Git configuration is tested separately")
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -244,6 +399,24 @@ def sys_executable_helper(folder: pathlib.Path, marker: pathlib.Path) -> str:
 
 
 class ChecksTest(unittest.TestCase):
+    def test_runtime_rules_match_repository_privacy_rules(self):
+        from tools.privacy_scan import CONTENT_RULES as repository_rules, scan_text
+        from oah.toolkit.checks import CONTENT_RULES
+
+        self.assertEqual([(name, pattern.pattern) for name, pattern in CONTENT_RULES],
+                         [(name, pattern.pattern) for name, pattern in repository_rules])
+        folder = make_tmp_dir(self)
+        for index, value in enumerate(("SERVICE_" + "PASSWORD=" + "aB3d" * 4,
+                                        "ACCESS_" + "TOK" + "EN: '" + "xY9z" * 4 + "'",
+                                        "API_" + "KEY=${KEY}", "API_" + "KEY=<your-key>",
+                                        "mail " + "person" + "@" + "private.invalid-domain.com")):
+            with self.subTest(value=index):
+                (folder / "a.md").write_text(value, encoding="utf-8")
+                self.assertEqual(bool(privacy_problems(folder, gitleaks=None)), bool(scan_text(value, ())))
+        value = "SERVICE_" + "PASSWORD=" + "aB3d" * 4
+        (folder / "a.md").write_text(value, encoding="utf-16")
+        self.assertTrue(privacy_problems(folder, gitleaks=None))
+
     def test_identify_license(self):
         self.assertEqual(identify_license(MIT_TEXT), "MIT")
         self.assertEqual(identify_license(MIT_TEXT.replace("\n", "\r\n")), "MIT")

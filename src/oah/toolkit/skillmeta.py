@@ -39,10 +39,12 @@ class SkillInfo:
     path: pathlib.Path
 
 
-def _scalar(raw: str, where: str) -> str:
+def _scalar(raw: str, where: str) -> object:
     text = raw.strip()
     if not text:
         return ""
+    if text.startswith("#"):
+        return None
     if text[0] == '"':
         if len(text) < 2 or not text.endswith('"'):
             raise SkillError(f"{where}: unterminated double-quoted value")
@@ -56,6 +58,14 @@ def _scalar(raw: str, where: str) -> str:
         return text[1:-1].replace("''", "'")
     if " #" in text:
         text = text.split(" #", 1)[0].rstrip()
+    if text[0] in "[{&*!?%@`|>" or re.search(r":(?:\s|$)", text):
+        raise SkillError(f"{where}: unsupported YAML value; use a quoted string or supported block")
+    if text.lower() in ("null", "~"):
+        return None
+    if text.lower() in ("true", "false", "yes", "no", "on", "off"):
+        return text.lower() in ("true", "yes", "on")
+    if re.fullmatch(r"[-+]?[0-9]+(?:\.[0-9]+)?", text):
+        return float(text) if "." in text else int(text)
     return text
 
 
@@ -147,7 +157,7 @@ def _sequence(lines: list[str], start: int, indent: int, where: str) -> tuple[li
 
 
 def parse_frontmatter(text: str, where: str = SKILL_FILE) -> dict:
-    """The YAML frontmatter between the leading `---` lines, as plain dicts, lists and strings."""
+    """The YAML frontmatter between leading `---` lines; required fields retain their scalar types."""
     lines = text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     if not lines or lines[0].strip() != "---":
         raise SkillError(f"{where}: does not start with a '---' frontmatter block")
@@ -195,6 +205,18 @@ def _text(value: object) -> str | None:
     return None
 
 
+def _required_metadata(data: dict, where: str) -> list[str]:
+    problems = []
+    for key in ("name", "description"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            problems.append(f"{where}: frontmatter '{key}' must be a non-empty string; fix SKILL.md before retrying")
+    name = data.get("name")
+    if isinstance(name, str) and (len(name) > 64 or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)):
+        problems.append(f"{where}: name must be 1–64 lowercase letters, digits or single hyphens; fix SKILL.md")
+    return problems
+
+
 def read_skill(path: pathlib.Path) -> SkillInfo:
     """Name, description, version, source and license of the skill at path (a folder or SKILL.md).
 
@@ -208,9 +230,10 @@ def read_skill(path: pathlib.Path) -> SkillInfo:
     except OSError as exc:
         raise SkillError(f"{skill_file}: cannot be read ({exc.strerror or exc})") from exc
     data = parse_frontmatter(text, str(skill_file))
-    name, description = _text(data.get("name")), _text(data.get("description"))
-    if name is None or description is None:
-        raise SkillError(f"{skill_file}: frontmatter needs both 'name' and 'description'")
+    problems = _required_metadata(data, str(skill_file))
+    if problems:
+        raise SkillError("; ".join(problems))
+    name, description = data["name"], data["description"]
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     version = _text(data.get("version")) or _text(metadata.get("version"))
     source, license_id = None, _text(data.get("license"))
@@ -254,9 +277,7 @@ def load_problems(skill_dir: pathlib.Path, *, item_root: pathlib.Path | None = N
         data = parse_frontmatter(text, str(skill_file))
     except SkillError as exc:
         return [str(exc)]
-    for key in ("name", "description"):
-        if _text(data.get(key)) is None:
-            problems.append(f"{skill_file}: frontmatter has no '{key}'")
+    problems.extend(_required_metadata(data, str(skill_file)))
     for target in _links(text[text.find("---", 3) + 3:]):
         if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target) or target.startswith(("#", "/")):
             continue

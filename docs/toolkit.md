@@ -37,22 +37,27 @@ For the same skill name, `oah` uses the first copy it finds:
 
 ## How updates stay safe
 
-- **Automatic updates write only the kit cache.** A due check runs from a mutating `oah` command at most
+- **Automatic updates write only the kit cache.** A due check currently runs from mutating `oah skills` commands at most
   once per `[skills] update_interval_days` (default 1). It waits while any task holds a lease, and it
   holds the state lock from the idle check through publication, so no lease can start mid-update.
   Turn it off with `auto_update = false` in `.oah/config.toml`.
+  Wiring the same check into ordinary mutating commands such as `oah start` is a follow-up after this
+  lane lands; until then, use a mutating skills command or `oah skills schedule install`.
 - **Project copies are pins.** Your tracked `.claude/skills/` and `.agents/skills/` change only through
   `oah skills update --project`, which takes its own lease on those folders.
+  Reinstalling preserves existing pins; if the cache has advanced, run `oah skills update --project`.
 - **Global copies change only with `--global`** and your confirmation, never on a schedule.
 - **Hold an item** with `pins = ["<name>"]` under `[skills]`. unlazy is never updated by this mechanism;
   it is installed at the commit the gates lane tests.
 - **Every update is checked before it is published:** the license must keep the same SPDX id and text,
   each skill must load (frontmatter with `name` and `description`, links that resolve), and the files
-  must pass the key-shape and home-path scan (plus gitleaks when it is installed). A new executable, a
+  must pass the credential-assignment, key-shape and privacy scan (plus gitleaks when it is installed). A new executable, a
   binary file or a large size jump counts as suspicious.
 - **A failed or suspicious update keeps the last good copy** and is reported with the reason. A failed
   swap restores the previous copy. Every result is logged with old and new commits, when and why in
   `toolkit/updates.jsonl` in oah's state folder.
+- **Kit maintainers** run `oah skills update --vendored --yes` from the actual kit checkout with its
+  local installation. This takes a lease on `skills/` and the catalog; conflicting work must finish first.
 
 ## Bundled skills (vendored under `skills/`)
 

@@ -16,21 +16,31 @@ from oah.engines.proc import Resolved, RunResult, run_command
 GITLEAKS_TIMEOUT = 300.0
 SKIP_NAMES = {".git"}
 
-# Built from fragments so this file never matches the repository's own privacy scan.
+# Applicable repository rules, mirrored for wheel installs without tools/.
+# A parity test binds these to tools/privacy_scan.py; private local terms are never packaged.
 _USERS = "Us" + "ers"
-_HOME_PATHS = [
-    re.compile(r"(?<![A-Za-z0-9_])/" + _USERS + r"/(?!<)[\w.-]+"),
-    re.compile(r"(?<![A-Za-z0-9_])/" + "ho" + r"me/(?!<)[\w.-]+"),
-    re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\{1,2}" + _USERS + r"\\{1,2}(?!<)[^\\/\s\"'<>]+"),
+CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
+    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/" + _USERS + r"/(?!<)[\w.-]+")),
+    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/" + "ho" + r"me/(?!<)[\w.-]+")),
+    ("home-path", re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\{1,2}" + _USERS + r"\\{1,2}(?!<)[^\\/\s\"'<>]+")),
+    ("key", re.compile(r"(?<![A-Za-z0-9])" + "s" + "k-" + r"[A-Za-z0-9_-]{20,}")),
+    ("key", re.compile(r"(?<![A-Za-z0-9])gh" + "[pousr]_" + r"[A-Za-z0-9]{36,}")),
+    ("key", re.compile(r"(?<![A-Za-z0-9])github" + "_pat_" + r"[A-Za-z0-9_]{22,}")),
+    ("key", re.compile(r"(?<![A-Za-z0-9])xo" + "x[abprs]-" + r"[A-Za-z0-9-]{10,}")),
+    ("key", re.compile(r"(?<![A-Za-z0-9])AK" + "IA" + r"[0-9A-Z]{16}(?![A-Za-z0-9])")),
+    ("key", re.compile(r"-----BEGIN [A-Z ]*PRIV" + "ATE " + r"KEY-----")),
+    ("env-secret", re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9_]*)?(?:K" + "EY|T" + "OKEN|SEC" + "RET|PASS" + "WORD)"
+                              + r"(?![A-Za-z0-9_])\s*[:=]\s*"
+                              + r"(?!['\"]?(?:\$\{\{|\$\{[A-Za-z_][A-Za-z0-9_]*\}|"
+                              + r"\$[A-Za-z_][A-Za-z0-9_]*(?=['\"\s]|$)|<))"
+                              + r"(?:'[^'\r\n]{12,}'|\"[^\"\r\n]{12,}\"|(?!['\"])\S{12,})")),
+    ("keychain", re.compile(r"secu" + r"rity\s+find-(?:generic|internet)-password")),
 ]
-_KEY_SHAPES = [
-    re.compile(r"(?<![A-Za-z0-9])" + "s" + "k-" + r"[A-Za-z0-9_-]{20,}"),
-    re.compile(r"(?<![A-Za-z0-9])gh" + "[pousr]_" + r"[A-Za-z0-9]{36,}"),
-    re.compile(r"(?<![A-Za-z0-9])github" + "_pat_" + r"[A-Za-z0-9_]{22,}"),
-    re.compile(r"(?<![A-Za-z0-9])xo" + "x[abprs]-" + r"[A-Za-z0-9-]{10,}"),
-    re.compile(r"(?<![A-Za-z0-9])AK" + "IA" + r"[0-9A-Z]{16}(?![A-Za-z0-9])"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIV" + "ATE " + r"KEY-----"),
-]
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+ALLOWED_EMAILS = {"noreply@github.com", "noreply@anthropic.com", "git@github.com"}
+ALLOWED_EMAIL_DOMAINS = ("users.noreply.github.com", "example.com", "example.org", "example.net")
+ALLOWED_EMAIL_TLDS = (".example", ".test", ".invalid", ".localhost")
+UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 # Distinctive phrases of each license text, lower-cased with whitespace collapsed.
 _LICENSES: list[tuple[str, tuple[str, ...]]] = [
@@ -130,13 +140,24 @@ def builtin_privacy_problems(folder: pathlib.Path, *, ignore: Iterable[str] = ()
         if name in skip:
             continue
         data = path.read_bytes()
-        if is_binary(data):
+        if data.startswith(UTF16_BOMS):
+            text = data.decode("utf-16", errors="replace")
+        elif is_binary(data):
             continue
-        for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
-            if any(pattern.search(line) for pattern in _KEY_SHAPES):
-                problems.append(f"{name}:{number}: looks like an API key or private key")
-            if any(pattern.search(line) for pattern in _HOME_PATHS):
-                problems.append(f"{name}:{number}: holds an absolute home folder path")
+        else:
+            text = data.decode("utf-8", errors="replace")
+        for number, line in enumerate(text.splitlines(), start=1):
+            for rule, pattern in CONTENT_RULES:
+                if pattern.search(line):
+                    detail = "looks like an API key or private key" if rule == "key" else rule
+                    problems.append(f"{name}:{number}: {detail}; remove the private content upstream before retrying")
+            for match in EMAIL.finditer(line):
+                address = match.group().lower()
+                domain = address.rsplit("@", 1)[-1]
+                if (address not in ALLOWED_EMAILS
+                        and not any(domain == allowed or domain.endswith("." + allowed) for allowed in ALLOWED_EMAIL_DOMAINS)
+                        and not domain.endswith(ALLOWED_EMAIL_TLDS)):
+                    problems.append(f"{name}:{number}: email; remove the private address upstream before retrying")
     return problems
 
 

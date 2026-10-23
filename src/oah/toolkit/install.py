@@ -60,7 +60,7 @@ class Copy:
     name: str           # the installed folder name
     engine: str
     dest: pathlib.Path
-    action: str         # "install", "replace" or "conflict"
+    action: str         # "install", "keep", "replace" or "conflict"
     outside_project: bool
     reason: str = ""
 
@@ -100,7 +100,7 @@ def marker_of(folder: pathlib.Path) -> dict | None:
     return read_json_file(pathlib.Path(folder) / MARKER_FILE)
 
 
-def _classify(dest: pathlib.Path, item: str) -> tuple[str, str]:
+def _classify(dest: pathlib.Path, item: str, *, project: bool = False, commit: str = "") -> tuple[str, str]:
     if not dest.exists():
         return "install", ""
     marker = marker_of(dest)
@@ -108,6 +108,10 @@ def _classify(dest: pathlib.Path, item: str) -> tuple[str, str]:
         return "conflict", "a folder oah did not install is already there; rename or remove it first"
     if marker.get("item") != item:
         return "conflict", f"oah installed it from {marker.get('item')}; uninstall that first"
+    if project:
+        if marker.get("commit") != commit:
+            return "conflict", "project copies are pins; run oah skills update --project to change this version"
+        return "keep", "existing project pin is preserved; use oah skills update --project to update it"
     return "replace", ""
 
 
@@ -140,11 +144,13 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, source_dirs: Sequenc
             linked.append(entry)
             continue
         sources[entry.name] = item_source(entry.name, source_dirs)
+        source = sources[entry.name]
+        source_commit = read_upstream(source).commit if source is not None else entry.commit
         for engine, folder in target_dirs(target, level, project_root=project_root, home=home):
             for relative in entry.skills:
                 installed = skill_name(entry, relative)
                 dest = folder / installed
-                action, reason = _classify(dest, entry.name)
+                action, reason = _classify(dest, entry.name, project=level == "project", commit=source_commit)
                 if dest in seen:
                     action, reason = "conflict", f"{seen[dest]} also installs a skill named {installed}"
                 seen[dest] = entry.name
@@ -180,8 +186,7 @@ def build_copy(item_dir: pathlib.Path, entry: Bundled, relative: str, record: Up
         target = out / folder.rsplit("/", 1)[-1]
         if not target.exists():
             copy_tree(item_dir.joinpath(*folder.split("/")), target)
-    prefix = "" if relative == "." else relative + "/"
-    executables = sorted(e[len(prefix):] for e in record.executables if e.startswith(prefix))
+    executables = installed_executables(entry, relative, record)
     upstream_path = "/".join(p for p in (record.subpath, "" if relative == "." else relative) if p)
     write_marker(out, {"kit": KIT_MARK, "item": entry.name, "skill": relative, "repository": record.repository,
                        "subpath": upstream_path, "commit": record.commit, "spdx": record.spdx,
@@ -189,6 +194,18 @@ def build_copy(item_dir: pathlib.Path, entry: Bundled, relative: str, record: Up
                        "license_sha256": record.license_sha256, "executables": executables,
                        "installed_at": installed_at})
     return out
+
+
+def installed_executables(entry: Bundled, relative: str, record: Upstream) -> list[str]:
+    """Map every copied skill, support and license executable to its installed path."""
+    prefix = "" if relative == "." else relative + "/"
+    found = {name[len(prefix):] for name in record.executables if name.startswith(prefix)}
+    for folder in entry.support.get(relative, ()):
+        found.update(folder.rsplit("/", 1)[-1] + "/" + name[len(folder) + 1:]
+                     for name in record.executables if name.startswith(folder + "/"))
+    found.update(name.rsplit("/", 1)[-1] for name in (record.license_file, *record.notice_files)
+                 if name in record.executables)
+    return sorted(found)
 
 
 def swap_in(new: pathlib.Path, dest: pathlib.Path, *, verify: Callable[[pathlib.Path], list[str]] | None = None) -> None:
@@ -224,12 +241,19 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime) -> l
         scratch = pathlib.Path(scratch_text)
         items: dict[str, tuple[pathlib.Path, Upstream]] = {}
         for copy in plan.copies:
+            if copy.action == "keep":
+                continue
             entry = catalog.find(copy.item)
             assert isinstance(entry, Bundled)
             if copy.item not in items:
                 item_dir = plan.sources.get(copy.item) or fetch_item(entry, scratch / copy.item, today=now.date())
                 items[copy.item] = (item_dir, read_upstream(item_dir))
             item_dir, record = items[copy.item]
+            action, reason = _classify(copy.dest, copy.item, project=not copy.outside_project, commit=record.commit)
+            if action == "conflict":
+                raise InstallError("OAH_SKILLS_INSTALL_CONFLICT", reason)
+            if action == "keep":
+                continue
             staged = scratch / "copies" / f"{copy.engine}-{copy.item}-{copy.name}"
             staged.parent.mkdir(parents=True, exist_ok=True)
             build_copy(item_dir, entry, copy.skill, record, staged, installed_at=stamp)

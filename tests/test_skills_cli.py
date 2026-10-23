@@ -205,6 +205,93 @@ class ListInstallTest(CliFixture):
 
 
 class UpdateCommandTest(CliFixture):
+    def test_reinstall_cannot_advance_existing_project_pins(self):
+        self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)
+        folder = self.project / ".claude" / "skills" / "demo"
+        (folder / "ref.md").write_text("local pinned edit\n", encoding="utf-8")
+        before = {p.name: p.read_bytes() for p in folder.iterdir()}
+        self.assertEqual(self.oah("install", "--all", "--target", "claude")[0], 0)
+        self.assertEqual({p.name: p.read_bytes() for p in folder.iterdir()}, before)
+        commit(self.upstream, {"skills/demo/ref.md": "new cache\n"})
+        self.assertEqual(self.oah("update")[0], 0)
+        code, out, err = self.oah("install", "--all")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("update --project", out + err)
+        self.assertEqual({p.name: p.read_bytes() for p in folder.iterdir()}, before)
+        self.assertFalse((self.project / ".agents").exists())
+
+    def test_scheduled_check_is_rejected_before_any_writes(self):
+        self.configure("auto_update = true")
+        commit(self.upstream, {"skills/demo/ref.md": "new\n"})
+        code, out, err = self.oah("update", "--scheduled", "--check")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("--check", err)
+        self.assertFalse(self.state.exists())
+
+    def test_vendored_refuses_external_kit(self):
+        commit(self.upstream, {"skills/demo/ref.md": "new\n"})
+        before = (self.kit / "skills" / "demo" / "UPSTREAM.json").read_bytes()
+        code, out, err = self.oah("update", "--vendored", "--yes")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OAH_SKILLS_NOT_KIT", err)
+        self.assertEqual((self.kit / "skills" / "demo" / "UPSTREAM.json").read_bytes(), before)
+
+    def test_vendored_requires_consent_and_a_lease_covering_catalog_and_skills(self):
+        import shutil
+
+        kit = self.project / "skills"
+        shutil.copytree(self.kit / "skills", kit)
+        catalog = self.project / "src" / "oah" / "templates" / "toolkit" / "upstreams.json"
+        catalog.parent.mkdir(parents=True)
+        shutil.copyfile(self.catalog, catalog)
+        commit(self.upstream, {"skills/demo/ref.md": "new\n"})
+        from oah.toolkit.update import run_update as real_update
+        seen = []
+
+        def update_with_lease(**kwargs):
+            leases = Store(self.state).snapshot()
+            self.assertEqual(len(leases), 1)
+            lease, _ = leases[0]
+            self.assertEqual(set(lease.scope), {"skills", "src/oah/templates/toolkit/upstreams.json"})
+            self.assertEqual(pathlib.Path(lease.worktree).resolve(), self.project.resolve())
+            seen.append(True)
+            return real_update(**kwargs)
+
+        with mock.patch.dict(os.environ, {"OAH_KIT_DIR": str(self.project)}), \
+                mock.patch("oah.toolkit.catalog.CATALOG_PATH", catalog), \
+                mock.patch.object(skills_cli, "run_update", update_with_lease):
+            code, out, err = self.oah("update", "--vendored")
+            self.assertEqual(code, 1, out + err)
+            self.assertIn("CONSENT_REQUIRED", err)
+            store = Store(self.state)
+            store.start(task="editing-catalog", agent="codex", scope=["src/oah/templates/toolkit"],
+                        note="", ttl_hours=1, info=repo_info(self.project))
+            code, out, err = self.oah("update", "--vendored", "--yes")
+            self.assertEqual(code, 1, out + err)
+            self.assertIn("LEASE_CONFLICT", err)
+            self.assertEqual(seen, [])
+            store.release(task="editing-catalog", agent="codex", reason="done", force=False)
+            code, out, err = self.oah("update", "--vendored", "--yes")
+            self.assertEqual(code, 0, out + err)
+        self.assertEqual(seen, [True])
+        self.assertEqual(Store(self.state).snapshot(), [])
+
+    def test_public_maintenance_hook_is_safe_for_other_mutating_commands(self):
+        self.configure("auto_update = true")
+        commit(self.upstream, {"skills/demo/ref.md": "new\n"})
+        hook = getattr(skills_cli, "before_mutation", None)
+        self.assertTrue(callable(hook), "ordinary command owners need a public due-check function")
+        info = repo_info(self.project)
+        Store(self.state).start(task="working", agent="codex", scope=["src"], note="", ttl_hours=1,
+                                info=info)
+        hook(info, self.state)
+        self.assertFalse(cache_dir(self.state).exists())
+        Store(self.state).release(task="working", agent="codex", reason="done", force=False)
+        hook(info, self.state)
+        self.assertTrue((cache_dir(self.state) / "demo" / "UPSTREAM.json").exists())
+        with mock.patch.object(skills_cli, "scheduled_update", side_effect=OSError("offline")):
+            hook(info, self.state)  # maintenance failure must not fail its caller's task
+
     def installed_version(self) -> str:
         return read_skill(self.project / ".claude" / "skills" / "demo").version
 
@@ -349,6 +436,31 @@ class LocateTest(CliFixture):
 
 
 class ScheduleTest(unittest.TestCase):
+    def test_repeated_launchd_install_preserves_registration_and_plist(self):
+        entry = self.entry("darwin")
+        calls = []
+
+        def runner(argv, timeout):
+            calls.append(argv)
+            return RunResult(0 if len(calls) == 1 else 5, "", "already registered", False)
+
+        with mock.patch("oah.toolkit.schedule._tool", lambda name, path: (name,)):
+            install_entry(entry, runner=runner)
+            before = entry.path.read_bytes()
+            install_entry(entry, runner=runner)
+        self.assertEqual(entry.path.read_bytes(), before)
+        self.assertEqual(len(calls), 1, "an identical existing plist needs no bootstrap")
+
+    def test_failed_launchd_removal_preserves_plist(self):
+        entry = self.entry("darwin")
+        entry.path.parent.mkdir(parents=True)
+        entry.path.write_bytes(skills_plist(entry))
+        before = entry.path.read_bytes()
+        with mock.patch("oah.toolkit.schedule._tool", lambda name, path: (name,)):
+            with self.assertRaises(Exception):
+                remove_entry(entry, runner=lambda *a, **kw: RunResult(5, "", "denied", False))
+        self.assertEqual(entry.path.read_bytes(), before)
+
     def entry(self, platform: str):
         root = make_tmp_dir(self)
         return plan_entry(project_root=root / "my project", home=root / "home", state_dir=root / "state",

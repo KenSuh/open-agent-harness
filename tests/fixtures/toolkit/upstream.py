@@ -5,6 +5,8 @@ import dataclasses
 import datetime as dt
 import json
 import pathlib
+import shutil
+import stat
 import subprocess
 import unittest
 
@@ -37,6 +39,18 @@ APACHE_TEXT = """                                 Apache License
 TODAY = dt.date(2026, 10, 23)
 
 
+def remove_readonly(function, path, exc_info):
+    """Windows Git objects can be read-only; clear that bit and retry the failed removal."""
+    if not isinstance(exc_info[1], PermissionError):
+        raise exc_info[1]
+    pathlib.Path(path).chmod(stat.S_IREAD | stat.S_IWRITE)
+    function(path)
+
+
+def remove_tree(path: pathlib.Path) -> None:
+    shutil.rmtree(path, onerror=remove_readonly)
+
+
 def skill_text(name: str, description: str = "Does a thing.", body: str = "# Skill\n") -> str:
     return f"---\nname: {name}\ndescription: {description}\n---\n{body}"
 
@@ -45,6 +59,8 @@ def make_upstream(test: unittest.TestCase, files: dict | None = None) -> pathlib
     """A local upstream repository on branch main with one skill under skills/demo and an MIT LICENSE."""
     repo = make_tmp_dir(test) / "upstream"
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "core.autocrlf", "false"], check=True)
+    test.addCleanup(lambda: remove_tree(repo) if repo.exists() else None)
     content = {"LICENSE": MIT_TEXT, "README.md": "upstream\n",
                "skills/demo/SKILL.md": skill_text("demo", body="See [ref](ref.md).\n"),
                "skills/demo/ref.md": "reference\n"}

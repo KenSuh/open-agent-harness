@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import json
+import os
 import pathlib
 import tempfile
 from dataclasses import dataclass, field
@@ -32,8 +34,8 @@ from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Upstream, read_upstream
 from oah.toolkit.checks import DiffSummary, diff_summary, identify_license, privacy_problems, suspicious, text_digest
-from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, stage_item
-from oah.toolkit.install import KIT_MARK, build_copy, installed_skills, marker_of, swap_in, target_dirs
+from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, manifest_problems, stage_item
+from oah.toolkit.install import KIT_MARK, build_copy, installed_executables, installed_skills, marker_of, swap_in, target_dirs
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE, load_problems
 
 DEFAULTS = {"update_interval_days": 1, "auto_update": True, "size_jump_ratio": 2.0,
@@ -57,6 +59,10 @@ class LeasesActive(Exception):
         super().__init__(f"{self.code}: tasks {', '.join(holders)} hold leases; shared skill copies change only "
                          "when no session is working. Run this again after oah finish, or use --check to look "
                          "without changing anything")
+
+
+class CheckNotDue(Exception):
+    """Another check published while this check was preparing."""
 
 
 @dataclass(frozen=True)
@@ -166,18 +172,17 @@ def _new_copy(destination: Destination, entry: Bundled, staged: pathlib.Path, re
     return build_copy(staged, entry, destination.skill, record, out, installed_at=stamp)
 
 
-def _executables(destination: Destination, record: Upstream) -> list[str]:
+def _executables(destination: Destination, record: Upstream, entry: Bundled) -> list[str]:
     if destination.kind == "item":
         return list(record.executables)
-    prefix = "" if destination.skill == "." else destination.skill + "/"
-    return [name[len(prefix):] for name in record.executables if name.startswith(prefix)]
+    return installed_executables(entry, destination.skill, record)
 
 
 def _verify(destination: Destination, entry: Bundled) -> Callable[[pathlib.Path], list[str]]:
     def check(folder: pathlib.Path) -> list[str]:
         if destination.kind == "installed":
             return load_problems(folder)
-        problems: list[str] = []
+        problems = manifest_problems(folder, read_upstream(folder))
         for relative in entry.skills:
             skill = folder if relative == "." else folder.joinpath(*relative.split("/"))
             problems.extend(load_problems(skill, item_root=folder))
@@ -195,7 +200,7 @@ def _checks(destination: Destination, entry: Bundled, record: Upstream, new: pat
         return reasons + [f"the license file {record.license_file} is missing from the new copy"]
     reasons += suspicious(old_spdx=destination.spdx, new_spdx=identify_license(license_bytes.decode("utf-8", "replace")),
                           old_license=destination.license_sha256, new_license=text_digest(license_bytes),
-                          old_executables=destination.executables, new_executables=_executables(destination, record),
+                          old_executables=destination.executables, new_executables=_executables(destination, record, entry),
                           old_dir=baseline, new_dir=new,
                           size_jump_ratio=float(settings["size_jump_ratio"]),
                           size_jump_min_bytes=int(settings["size_jump_min_bytes"]))
@@ -216,6 +221,21 @@ def no_guard() -> Iterator[None]:
     yield
 
 
+def _identity(path: pathlib.Path) -> tuple:
+    """Bytes, modes and link/directory identity of a preparation input, including absence."""
+    if not path.exists() and not path.is_symlink():
+        return ("absent",)
+    paths = [path, *sorted(path.rglob("*"))] if path.is_dir() and not path.is_symlink() else [path]
+    found = []
+    for child in paths:
+        info = child.lstat()
+        kind = "link" if child.is_symlink() else "directory" if child.is_dir() else "file"
+        data = os.readlink(child).encode("utf-8") if kind == "link" else child.read_bytes() if kind == "file" else b""
+        found.append((child.relative_to(path).as_posix(), kind, info.st_dev, info.st_ino,
+                      info.st_mode, hashlib.sha256(data).hexdigest()))
+    return tuple(found)
+
+
 def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_only: bool, settings: Mapping,
                now: dt.datetime, gitleaks: Resolved | None, fetcher: Fetcher = fetch,
                catalog_path: pathlib.Path | None = None, guard: Guard = no_guard,
@@ -226,9 +246,29 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
     """
     results: list[UpdateResult] = []
     ready: list[tuple[UpdateResult, Destination, Bundled, pathlib.Path]] = []
+    inputs = {path for d in destinations for path in (d.path, d.baseline) if path is not None}
+    if catalog_path is not None:
+        inputs.add(catalog_path)
+    identities = {path: _identity(path) for path in inputs}
     by_item: dict[str, list[Destination]] = {}
     for destination in destinations:
+        if destination.baseline is not None:
+            if destination.kind == "installed":
+                record = marker_of(destination.baseline) or {}
+                identity = (record.get("commit"), record.get("spdx"), record.get("license_sha256"),
+                            tuple(record.get("executables", ())))
+            else:
+                record = read_upstream(destination.baseline)
+                identity = (record.commit, record.spdx, record.license_sha256, record.executables)
+            if identity != (destination.commit, destination.spdx, destination.license_sha256, destination.executables):
+                results.append(UpdateResult(destination.item, "deferred", str(destination.path), destination.commit,
+                                            reasons=["baseline changed before preparation; run the update again"]))
+                continue
         by_item.setdefault(destination.item, []).append(destination)
+    if results:
+        return [UpdateResult(d.item, "deferred", str(d.path), d.commit,
+                             reasons=["baseline changed before preparation; run the update again"])
+                for d in destinations]
     with tempfile.TemporaryDirectory(prefix="oah-update-") as scratch_text:
         scratch = pathlib.Path(scratch_text)
         for number, (item, group) in enumerate(by_item.items()):
@@ -294,6 +334,13 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
             return results
         try:
             with guard():
+                if any(_identity(path) != identity for path, identity in identities.items()):
+                    for result in results:
+                        if result.status not in ("", "current"):
+                            continue
+                        result.status = "deferred"
+                        result.reasons = ["destination or baseline changed during preparation; run the update again"]
+                    return results
                 for result, destination, entry, new in ready:
                     seeding = not destination.path.exists()
                     try:
@@ -385,9 +432,20 @@ def refresh_cache(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: path
                   fetcher: Fetcher = fetch, why: str = "automatic") -> list[UpdateResult]:
     """Bring the kit cache up to date; publication and the run record happen under the state lock with no
     lease active. Raises LeasesActive (nothing written) when a lease is active at publication."""
+    initial_state = read_state(state_dir)
     destinations = cache_destinations(catalog, state_dir=state_dir, bundle_dir=bundle_dir)
+
+    @contextlib.contextmanager
+    def publication_guard() -> Iterator[None]:
+        with idle_state(state_dir):
+            if why == "automatic":
+                current_state = read_state(state_dir)
+                if current_state != initial_state or not due(current_state, now, float(settings["update_interval_days"])):
+                    raise CheckNotDue()
+            yield
+
     return run_update(catalog=catalog, destinations=destinations, check_only=check_only, settings=settings,
-                      now=now, gitleaks=gitleaks, fetcher=fetcher, guard=lambda: idle_state(state_dir),
+                      now=now, gitleaks=gitleaks, fetcher=fetcher, guard=publication_guard,
                       after_publish=lambda results: record_run(state_dir, now, results, why))
 
 
@@ -414,4 +472,6 @@ def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: p
         return "deferred", [UpdateResult("*", "deferred", reasons=[f"waiting for active leases: {', '.join(exc.holders)}"])]
     except LockTimeout:
         return "busy", []
+    except CheckNotDue:
+        return "not-due", []
     return "ran", results

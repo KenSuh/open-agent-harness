@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import json
+import os
 import pathlib
 import shutil
+import threading
 import unittest
+from unittest import mock
 
 from oah.lease import Store
 from oah.paths import repo_info
@@ -62,6 +66,54 @@ class UpdateFixture(unittest.TestCase):
 
 
 class UpdateTest(UpdateFixture):
+    def test_generic_secret_assignment_blocks_without_gitleaks(self):
+        before = snapshot(self.installed)
+        assignment = "SERVICE_" + "PASSWORD=" + "aB3d" * 4 + "\n"
+        commit(self.upstream, {"skills/demo/ref.md": assignment})
+        self.assert_rolled_back(before, "env-secret")
+        results = refresh_cache(catalog=self.catalog, state_dir=self.state, bundle_dir=self.kit,
+                                settings=DEFAULTS, now=NOW, gitleaks=None)
+        self.assertEqual([r.status for r in results], ["rolled-back"])
+        self.assertFalse((cache_dir(self.state) / "demo").exists())
+
+    def test_update_refuses_collection_and_null_metadata(self):
+        before = snapshot(self.installed)
+        for fields in ("name: []\ndescription: ok", "name: demo\ndescription: null",
+                       "name: demo\ndescription: {a: b}", "name: demo\ndescription:\n  nested: value"):
+            with self.subTest(fields=fields):
+                commit(self.upstream, {"skills/demo/SKILL.md": f"---\n{fields}\n---\n"})
+                self.assert_rolled_back(before, "OAH_SKILL_INVALID" if "{" in fields or "[]" in fields else "description")
+
+    def test_support_executables_are_recorded_and_new_ones_refused(self):
+        entry = dataclasses.replace(bundled(self.upstream, name="humanize-korean", subpath="",
+                                            skills=("skills/demo",)),
+                                    support={"skills/demo": ("scripts",)})
+        commit(self.upstream, {"scripts/existing.sh": "echo old\n"})
+        make_executable(self.upstream, "scripts/existing.sh")
+        work = make_tmp_dir(self)
+        tree = fetch(str(self.upstream), "main", work / "fetch")
+        stage_item(entry, tree, work / "kit" / entry.name, fetched=TODAY)
+        catalog = Catalog((dataclasses.replace(entry, commit=tree.commit),), ())
+        plan = plan_install([entry.name], catalog=catalog, source_dirs=[work / "kit"], target="codex",
+                            level="project", project_root=self.project, home=self.home)
+        apply_install(plan, catalog=catalog, now=NOW)
+        global_plan = plan_install([entry.name], catalog=catalog, source_dirs=[work / "kit"], target="codex",
+                                   level="user", project_root=self.project, home=self.home)
+        apply_install(global_plan, catalog=catalog, now=NOW)
+        folder = self.project / ".agents" / "skills" / "demo"
+        marker = json.loads((folder / ".oah-skill.json").read_text(encoding="utf-8"))
+        self.assertIn("scripts/existing.sh", marker["executables"])
+        before = snapshot(folder)
+        commit(self.upstream, {"scripts/new-tool.sh": "echo new\n"})
+        make_executable(self.upstream, "scripts/new-tool.sh")
+        destinations = installed_destinations(catalog, project_root=self.project, home=self.home, level="project")
+        destinations += installed_destinations(catalog, project_root=self.project, home=self.home, level="global")
+        results = run_update(catalog=catalog, destinations=destinations, check_only=False, settings=DEFAULTS,
+                             now=NOW, gitleaks=None)
+        self.assertEqual([r.status for r in results], ["rolled-back", "rolled-back"])
+        self.assertIn("new executable file scripts/new-tool.sh", results[0].reasons)
+        self.assertEqual(snapshot(folder), before)
+
     def test_update_reports_current(self):
         self.assertEqual([r.status for r in self.update()], ["current"])
 
@@ -119,7 +171,9 @@ class UpdateTest(UpdateFixture):
         self.assert_rolled_back(before, "API key")
 
     def test_update_reports_fetch_failure(self):
-        shutil.rmtree(self.upstream)
+        from tests.fixtures.toolkit.upstream import remove_tree
+
+        remove_tree(self.upstream)
         results = self.update()
         self.assertEqual([r.status for r in results], ["failed"])
         self.assertIn("OAH_SKILLS_FETCH_FAILED", results[0].reasons[0])
@@ -135,6 +189,33 @@ class UpdateTest(UpdateFixture):
 
 
 class SwapTest(unittest.TestCase):
+    def test_cleanup_retries_a_read_only_file(self):
+        import stat
+        from tests.fixtures.toolkit.upstream import remove_readonly
+
+        path = make_tmp_dir(self) / "object"
+        path.write_bytes(b"object")
+        path.chmod(stat.S_IREAD)
+        calls = []
+
+        def remove(name):
+            calls.append(name)
+            self.assertTrue(path.stat().st_mode & stat.S_IWRITE)
+            path.unlink()
+
+        remove_readonly(remove, str(path), (PermissionError, PermissionError("read-only"), None))
+        self.assertEqual(calls, [str(path)])
+        self.assertFalse(path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows Git object files have the read-only attribute")
+    def test_cleanup_removes_read_only_git_objects_on_windows(self):
+        from tests.fixtures.toolkit.upstream import remove_tree
+
+        repo = make_upstream(self)
+        self.assertTrue(list((repo / ".git" / "objects").rglob("*")))
+        remove_tree(repo)
+        self.assertFalse(repo.exists())
+
     def test_failed_swap_restores_backup(self):
         root = make_tmp_dir(self)
         dest, new = root / "dest", root / "new"
@@ -149,6 +230,83 @@ class SwapTest(unittest.TestCase):
 
 
 class ScheduledTest(UpdateFixture):
+    def test_destination_metadata_changed_before_preparation_is_deferred(self):
+        destinations = self.destinations()
+        commit(self.upstream, {"skills/demo/ref.md": "new\n"})
+        self.update()
+        before = snapshot(self.installed)
+        results = run_update(catalog=self.catalog, destinations=destinations, check_only=False,
+                             settings=DEFAULTS, now=NOW, gitleaks=None)
+        self.assertEqual([r.status for r in results], ["deferred"])
+        self.assertEqual(snapshot(self.installed), before)
+
+    def test_cache_baseline_changed_during_preparation_is_deferred(self):
+        commit(self.upstream, {"skills/demo/ref.md": "candidate\n"})
+
+        def fetch_then_edit(*args, **kwargs):
+            tree = fetch(*args, **kwargs)
+            (self.kit / "demo" / "ref.md").write_text("new baseline\n", encoding="utf-8")
+            return tree
+
+        state, results = self.scheduled(NOW, fetcher=fetch_then_edit)
+        self.assertEqual([r.status for r in results], ["deferred"])
+        self.assertFalse((cache_dir(self.state) / "demo").exists())
+        self.assertEqual(read_state(self.state), {})
+
+    def test_concurrent_scheduled_checks_publish_only_once(self):
+        first_candidate = commit(self.upstream, {"skills/demo/ref.md": "older candidate\n"})
+        prepared, resume = threading.Event(), threading.Event()
+        outcome = []
+        errors = []
+
+        def slow_fetch(*args, **kwargs):
+            tree = fetch(*args, **kwargs)
+            prepared.set()
+            if not resume.wait(20):
+                raise RuntimeError("test publication did not resume")
+            return tree
+
+        def slow_check():
+            try:
+                outcome.append(self.scheduled(NOW, fetcher=slow_fetch))
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=slow_check)
+        worker.start()
+        try:
+            self.assertTrue(prepared.wait(20))
+            new = commit(self.upstream, {"skills/demo/ref.md": "newer candidate\n"})
+            self.assertNotEqual(first_candidate, new)
+            self.assertEqual(self.scheduled(NOW)[0], "ran")
+        finally:
+            resume.set()
+            worker.join(25)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(outcome[0][0], "not-due")
+        self.assertEqual(self.cached(), new)
+        log = (self.state / "toolkit" / "updates.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(log), 1)
+
+    def test_publication_discards_a_changed_destination_or_baseline(self):
+        import contextlib
+
+        commit(self.upstream, {"skills/demo/ref.md": "candidate\n"})
+        before = snapshot(self.installed)
+
+        @contextlib.contextmanager
+        def change_before_publication():
+            (self.installed / "ref.md").write_text("concurrent edit\n", encoding="utf-8")
+            yield
+
+        results = run_update(catalog=self.catalog, destinations=self.destinations(), check_only=False,
+                             settings=DEFAULTS, now=NOW, gitleaks=None, guard=change_before_publication)
+        self.assertEqual([r.status for r in results], ["deferred"])
+        self.assertIn("changed", results[0].reasons[0])
+        self.assertEqual((self.installed / "ref.md").read_text(encoding="utf-8"), "concurrent edit\n")
+        self.assertEqual((self.installed / ".oah-skill.json").read_bytes(), before[".oah-skill.json"])
+
     def scheduled(self, now, **overrides):
         options = dict(catalog=self.catalog, state_dir=self.state, bundle_dir=self.kit, settings=DEFAULTS, now=now)
         options.update(overrides)

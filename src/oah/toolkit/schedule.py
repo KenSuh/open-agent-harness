@@ -126,7 +126,8 @@ def _tool(name: str, search_path: str | None) -> tuple[str, ...]:
 
 def _ok(result: RunResult, what: str) -> None:
     if result.timed_out or result.returncode != 0:
-        raise ScheduleError("OAH_SCHEDULE_FAILED", f"{what} failed: {result.stderr.strip()[:300] or result.stdout.strip()[:300]}")
+        raise ScheduleError("OAH_SCHEDULE_FAILED", f"{what} failed: {result.stderr.strip()[:300] or result.stdout.strip()[:300]}; "
+                                                  "check the OS scheduler permissions and retry")
 
 
 def _domain() -> str:
@@ -137,12 +138,20 @@ def install_entry(entry: Entry, *, runner: Runner = run_command, search_path: st
     entry.log_path.parent.mkdir(parents=True, exist_ok=True)
     if entry.kind == "launchd":
         assert entry.path is not None
+        desired = launchd_plist(entry)
+        if entry.path.exists():
+            if entry.path.read_bytes() == desired:
+                return
+            raise ScheduleError("OAH_SCHEDULE_EXISTS", "a different scheduler plist already exists; "
+                                                       "run oah skills schedule remove before installing again")
         entry.path.parent.mkdir(parents=True, exist_ok=True)
-        entry.path.write_bytes(launchd_plist(entry))
-        result = runner((*_tool("launchctl", search_path), "bootstrap", _domain(), str(entry.path)), timeout=TOOL_TIMEOUT)
-        if result.timed_out or result.returncode != 0:
+        argv = _tool("launchctl", search_path)
+        entry.path.write_bytes(desired)
+        try:
+            _ok(runner((*argv, "bootstrap", _domain(), str(entry.path)), timeout=TOOL_TIMEOUT), "launchctl bootstrap")
+        except BaseException:
             entry.path.unlink(missing_ok=True)
-            _ok(result, "launchctl bootstrap")
+            raise
         return
     with tempfile.TemporaryDirectory(prefix="oah-task-") as scratch:
         xml_path = pathlib.Path(scratch) / "task.xml"
@@ -157,7 +166,8 @@ def remove_entry(entry: Entry, *, runner: Runner = run_command, search_path: str
         assert entry.path is not None
         if not entry.path.exists():
             return False
-        runner((*_tool("launchctl", search_path), "bootout", _domain(), str(entry.path)), timeout=TOOL_TIMEOUT)
+        _ok(runner((*_tool("launchctl", search_path), "bootout", _domain(), str(entry.path)), timeout=TOOL_TIMEOUT),
+            "launchctl bootout")
         entry.path.unlink()
         return True
     if not entry_installed(entry, runner=runner, search_path=search_path):

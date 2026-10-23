@@ -13,8 +13,8 @@ from typing import Iterator, Mapping
 from oah.atomic import StateCorrupt, StorageError
 from oah.config import ConfigError, load_config
 from oah.journal import PendingTransaction
-from oah.lease import LeaseError, Store
-from oah.lockfile import LockTimeout
+from oah.lease import Lease, LeaseError, Store
+from oah.lockfile import LockTimeout, StateLock
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, state_dir
 from oah.scope import ScopeError, normalize_scope
 from oah.toolkit import catalog as catalog_module
@@ -127,13 +127,14 @@ def _context() -> tuple[RepoInfo, pathlib.Path, pathlib.Path]:
 
 
 @contextlib.contextmanager
-def own_lease(info: RepoInfo, state: pathlib.Path, engines: tuple[str, ...], note: str) -> Iterator[None]:
+def own_lease(info: RepoInfo, state: pathlib.Path, engines: tuple[str, ...], note: str,
+              *, paths: tuple[str, ...] | None = None) -> Iterator[Lease]:
     """Tracked project skill folders change only as their own leased task, released when done."""
-    scope = normalize_scope(["/".join(SKILL_FOLDERS[engine]) for engine in engines], info.root)
+    scope = normalize_scope(paths if paths is not None else ["/".join(SKILL_FOLDERS[engine]) for engine in engines], info.root)
     store = Store(state)
-    store.start(task=OWN_TASK, agent=OWN_AGENT, scope=scope, note=note, ttl_hours=OWN_LEASE_HOURS, info=info)
+    lease = store.start(task=OWN_TASK, agent=OWN_AGENT, scope=scope, note=note, ttl_hours=OWN_LEASE_HOURS, info=info)
     try:
-        yield
+        yield lease
     finally:
         store.release(task=OWN_TASK, agent=OWN_AGENT, reason=f"{note} finished", force=False)
     print(f"OAH_SKILLS_LEASE task={OWN_TASK} scope={','.join(scope)} released")
@@ -161,16 +162,34 @@ def _report_scheduled(state: str, results: list) -> None:
         print(f"OAH_SKILLS_AUTO_UPDATE deferred: {results[0].reasons[0]}; it runs once no lease is active")
 
 
-def _after_mutation(info: RepoInfo, state: pathlib.Path) -> None:
-    """The automatic check rides on mutating commands: the kit cache only, once per interval, never under a lease."""
+def before_mutation(info: RepoInfo, state: pathlib.Path) -> None:
+    """Best-effort daily cache maintenance for any mutating command, before acquiring its task lease.
+
+    Active leases defer the check. Maintenance errors are reported without failing the caller's work.
+    Command owners call this only for writes, never for --check, --dry-run or read-only commands.
+    """
     try:
         outcome, results = scheduled_update(catalog=load_catalog(), state_dir=state, bundle_dir=kit_skills_dir(),
                                             settings=settings_for(info.root), now=dt.datetime.now(dt.timezone.utc),
                                             gitleaks=find_gitleaks())
-    except (CatalogError, ConfigError, FetchError, StateCorrupt, PendingTransaction, StorageError, OSError) as exc:
-        print(f"OAH_SKILLS_AUTO_UPDATE skipped: {exc}", file=sys.stderr)
+    except (CatalogError, ConfigError, FetchError, StageError, SkillError, LeaseError, GitMissing, NotARepo,
+            LockTimeout, StateCorrupt, PendingTransaction, StorageError, OSError, ValueError) as exc:
+        print(f"OAH_SKILLS_AUTO_UPDATE skipped: {exc}; run oah skills update to retry", file=sys.stderr)
         return
     _report_scheduled(outcome, results)
+
+
+def _after_mutation(info: RepoInfo, state: pathlib.Path) -> None:
+    before_mutation(info, state)
+
+
+@contextlib.contextmanager
+def _leased_publication(state: pathlib.Path, lease: Lease) -> Iterator[None]:
+    with StateLock(Store(state).lock_path):
+        if not any(current.id == lease.id and current.scope == lease.scope and current.worktree == lease.worktree
+                   for current, stale in Store(state).snapshot() if not stale):
+            raise Refused("OAH_SKILLS_LEASE_REQUIRED", "the kit update lease expired or changed; retry --vendored")
+        yield
 
 
 def _engines(target: str) -> tuple[str, ...]:
@@ -229,6 +248,8 @@ def _exit_code(results: list) -> int:
 
 
 def _update(args: argparse.Namespace) -> int:
+    if args.scheduled and args.check:
+        raise Refused("OAH_SKILLS_USAGE", "--scheduled cannot be combined with --check; use oah skills update --check")
     info, state, home = _context()
     catalog = load_catalog()
     settings = settings_for(info.root)
@@ -244,10 +265,23 @@ def _update(args: argparse.Namespace) -> int:
     common = dict(catalog=catalog, check_only=args.check, settings=settings, now=now, gitleaks=gitleaks)
     if args.vendored:
         kit = kit_skills_dir()
-        if kit is None:
-            raise Refused("OAH_SKILLS_NOT_KIT", "--vendored works only inside an open-agent-harness checkout")
-        results = run_update(destinations=vendored_destinations(catalog, kit),
-                             catalog_path=catalog_module.CATALOG_PATH, **common)
+        catalog_path = info.root / "src" / "oah" / "templates" / "toolkit" / "upstreams.json"
+        if (kit is None or kit.resolve() != (info.root / "skills").resolve()
+                or not kit.resolve().is_relative_to(info.root.resolve())
+                or catalog_module.CATALOG_PATH.resolve() != catalog_path.resolve()
+                or not catalog_path.resolve().is_relative_to(info.root.resolve())):
+            raise Refused("OAH_SKILLS_NOT_KIT", "--vendored requires this repository to be the actual kit checkout; "
+                                                "run it from that checkout with its local oah installation")
+        destinations = vendored_destinations(catalog, kit)
+        if any(not d.path.resolve().is_relative_to(info.root.resolve()) for d in destinations):
+            raise Refused("OAH_SKILLS_NOT_KIT", "a vendored destination points outside the checkout; remove the alias and retry")
+        if args.check:
+            return _print(run_update(destinations=destinations, **common))
+        _confirm("This updates the kit's skills and upstream catalog.", args)
+        with own_lease(info, state, (), "oah skills update --vendored",
+                       paths=("skills", "src/oah/templates/toolkit/upstreams.json")) as lease:
+            results = run_update(destinations=destinations, catalog_path=catalog_path,
+                                 guard=lambda: _leased_publication(state, lease), **common)
         if not args.check:
             log_results(state, now, results, "update --vendored")
         return _print(results)
