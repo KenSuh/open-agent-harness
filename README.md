@@ -354,7 +354,9 @@ TMPDIR="$PWD/.tmp/test-tmp" python3.11 -m unittest discover -s tests -t .
 ```
 
 - **CI** runs the tests on macOS and Windows for every pull request to `main`. Pull requests that change
-  only documentation skip it.
+  only documentation skip the tests.
+- **Secret scan.** A separate workflow runs on every pull request and every push, documentation
+  included. It runs gitleaks over the full history and the privacy scan, and any finding fails it.
 - **Before every push**, run the privacy scan with gitleaks required. It must print `PRIVACY_SCAN_CLEAN`.
 
 ```sh
@@ -371,8 +373,8 @@ this repository, its history, releases, issues or CI logs.
 - Keys are read only at runtime, from environment variables or the OS keychain, through one documented
   lookup. When a key is missing, the feature stays off and reports `unused(no key)`.
 - Templates use `${ENV_VAR}` placeholders only.
-- gitleaks and the privacy scan run before every push, and the privacy scan also runs in CI on every pull
-  request that changes code.
+- gitleaks and the privacy scan run before every push. They also run in CI on every pull request and every
+  push, over the full history, and any finding fails the build.
 - Keep your own keys in your environment or your keychain, never in project files.
 
 **철칙.** API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 이 저장소와 그 이력, 릴리스, 이슈, CI
@@ -381,14 +383,16 @@ this repository, its history, releases, issues or CI logs.
 - 키는 실행할 때만 환경 변수나 OS 키체인에서, 문서로 정한 한 가지 조회 경로로 읽는다. 키가 없으면 그 기능은
   꺼진 채로 두고 `unused(no key)` 라고 알린다.
 - 템플릿에는 `${ENV_VAR}` 자리표시자만 쓴다.
-- gitleaks 와 개인정보 스캔은 push 전마다 돌고, 개인정보 스캔은 코드를 바꾸는 pull request 마다 CI 에서도 돈다.
+- gitleaks 와 개인정보 스캔은 push 전마다 돈다. CI 에서도 모든 pull request 와 push 마다 전체 이력을 대상으로
+  돌고, 하나라도 걸리면 빌드가 실패한다.
 - 내 키는 내 환경 변수나 키체인에만 두고, 프로젝트 파일에는 절대 넣지 않는다.
 
 ## License and third-party notices
 
 `oah` is released under the [MIT License](LICENSE), copyright open-agent-harness contributors.
-It vendors no third-party code. The tools it runs or links to, such as unlazy, graphify, Claude Code and
-Codex CLI, are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+It vendors no third-party code yet. Bundled skills will ship unchanged with their own licenses, and only where
+those licenses allow it. The tools it runs or links to, such as unlazy, graphify, Claude Code and Codex CLI,
+are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ---
 
