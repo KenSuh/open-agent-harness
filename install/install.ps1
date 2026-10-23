@@ -37,7 +37,7 @@ $ErrorActionPreference = 'Continue'
 $UvInstallText = 'irm https://astral.sh/uv/install.ps1 | iex'
 $UvUrl = 'https://docs.astral.sh/uv/getting-started/installation/'
 $PythonToInstall = '3.13'
-$WindowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$WindowsPowerShell = [IO.Path]::Combine($env:SystemRoot, 'System32\WindowsPowerShell\v1.0\powershell.exe')
 
 function Say([string]$Text) {
     [Console]::Out.WriteLine($Text)
@@ -115,13 +115,8 @@ function Update-SessionPath {
     $env:Path = $merged -join ';'
 }
 
-# Run a command (or only print it in a dry run). The exit code goes to $script:StepCode.
+# Execution helpers are reachable only through Invoke-InstallPlan.
 function Invoke-Step([string[]]$Argv) {
-    if ($DryRun) {
-        Say ('  [dry-run] would run: ' + (Format-Command $Argv))
-        $script:StepCode = 0
-        return
-    }
     Say ('  Running: ' + (Format-Command $Argv))
     try {
         $script:StepCode = Start-Native $Argv[0] @($Argv | Select-Object -Skip 1)
@@ -134,23 +129,13 @@ function Invoke-Step([string[]]$Argv) {
 
 # Run an official PowerShell one-liner in a separate Windows PowerShell, showing its exact text.
 function Invoke-OneLiner([string]$Text) {
-    if ($DryRun) {
-        Say ('  [dry-run] would run: ' + $Text)
-        $script:StepCode = 0
-        return
-    }
     Say ('  Running: ' + $Text)
     $script:StepCode = Start-Native $WindowsPowerShell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $Text)
     Update-SessionPath
 }
 
-# Ask a yes/no question. A dry run only prints it and goes on as if the answer were yes,
-# so that every later step is printed too; nothing runs in a dry run anyway.
+# Ask only while executing a real plan.
 function Ask([string]$Question) {
-    if ($DryRun) {
-        Say ('  [dry-run] would ask: ' + $Question + ' [y/N]')
-        return $true
-    }
     try { $answer = Read-Host ('  ' + $Question + ' [y/N]') } catch { $answer = '' }
     return ($answer -match '^\s*(y|yes)\s*$')
 }
@@ -252,29 +237,9 @@ function Save-Release([Uri]$Uri, [string]$Destination) {
 
 # Download the pinned release, check its SHA-256, unpack it and return the folder that holds it.
 function Get-Release {
-    Say ''
-    Say '== Get the release (not running from a clone)'
-    $url = if ($env:OAH_RELEASE_URL) { $env:OAH_RELEASE_URL } else { $ReleaseUrl }
-    $digest = if ($env:OAH_RELEASE_SHA256) { $env:OAH_RELEASE_SHA256 } else { $ReleaseSha256 }
-    if (($url + $digest) -like '*__OAH_RELEASE_*') {
-        Fail ("OAH_INSTALL_NOT_PUBLISHED: no release has been published yet, so there is nothing to download.`r`n" +
-              "Clone the repository instead. It needs git (winget install --id Git.Git -e installs it):`r`n" +
-              "    git clone $Repository.git`r`n    cd open-agent-harness`r`n" +
-              '    powershell -ExecutionPolicy Bypass -File .\install\install.ps1')
-    }
-    $releaseUri = $null
-    if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$releaseUri) -or
-        $releaseUri.Scheme -ne 'https' -or -not $releaseUri.Host) {
-        Fail 'OAH_INSTALL_HTTPS_REQUIRED: use an HTTPS release URL, or run this installer from a clone.'
-    }
-    if ($DryRun) {
-        Say '  [dry-run] would create a temporary folder for the release.'
-        Say "  [dry-run] would download: $url (HTTPS only, including redirects)"
-        Say "  [dry-run] would verify SHA-256: $digest (before extraction)"
-        Say '  [dry-run] would extract: release.zip into <release-folder>'
-        Say '  [dry-run] would remove the temporary folder when finished.'
-        return '<release-folder>'
-    }
+    $url = $script:PlannedReleaseUrl
+    $digest = $script:PlannedReleaseSha256
+    $releaseUri = [Uri]$url
     $script:OahWork = Join-Path ([IO.Path]::GetTempPath()) ('oah-install-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:OahWork | Out-Null
     Say "  Downloading $url"
@@ -317,6 +282,262 @@ function Get-Release {
     Fail 'The release archive does not contain open-agent-harness. Report this, or clone the repository instead.'
 }
 
+# Build data only: no probes, subprocesses, prompts, downloads or PATH changes.
+# Tool names and <...> paths are resolved by the executor after earlier steps.
+function New-InstallPlan {
+    $script:PlannedRepo = $null
+    if ($OahScriptRoot) {
+        $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine($OahScriptRoot, '..'))
+        if ([IO.File]::Exists([IO.Path]::Combine($candidate, 'pyproject.toml')) -and
+            [IO.Directory]::Exists([IO.Path]::Combine($candidate, 'src\oah')) -and
+            [IO.File]::Exists([IO.Path]::Combine($candidate, 'install\install.ps1'))) {
+            $script:PlannedRepo = $candidate
+        }
+    }
+    $plan = @()
+    if (-not $script:PlannedRepo) {
+        $url = if ($env:OAH_RELEASE_URL) { $env:OAH_RELEASE_URL } else { $ReleaseUrl }
+        $digest = if ($env:OAH_RELEASE_SHA256) { $env:OAH_RELEASE_SHA256 } else { $ReleaseSha256 }
+        if (($url + $digest) -like '*__OAH_RELEASE_*') {
+            Fail ("OAH_INSTALL_NOT_PUBLISHED: no release has been published yet, so there is nothing to download.`r`n" +
+                  "Clone the repository instead. It needs git (winget install --id Git.Git -e installs it):`r`n" +
+                  "    git clone $Repository.git`r`n    cd open-agent-harness`r`n" +
+                  '    powershell -ExecutionPolicy Bypass -File .\install\install.ps1')
+        }
+        $releaseUri = $null
+        if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$releaseUri) -or
+            $releaseUri.Scheme -ne 'https' -or -not $releaseUri.Host) {
+            Fail 'OAH_INSTALL_HTTPS_REQUIRED: use an HTTPS release URL, or run this installer from a clone.'
+        }
+        $script:PlannedReleaseUrl = $url
+        $script:PlannedReleaseSha256 = $digest
+        $script:PlannedRepo = '<release-folder>'
+        $plan += [pscustomobject]@{
+            Action = 'release'; Title = '== Get the release (not running from a clone)'
+            Details = @(
+                'would create a temporary folder for the release.'
+                "would download: $url (HTTPS only, including redirects)"
+                "would verify SHA-256: $digest (.NET SHA-256 on the downloaded file; refuse a mismatch before extraction)"
+                'would extract: Expand-Archive -LiteralPath <temporary-folder>\release.zip -DestinationPath <release-folder>'
+                'would remove the temporary folder when finished, including on failure.'
+            )
+        }
+    }
+    $repo = $script:PlannedRepo
+    $plan += [pscustomobject]@{
+        Action = 'python'; Title = '== Step 1/5: Find Python 3.11 or newer'
+        Details = @(
+            "would check: py -3, python, python3 with -c '$PythonProbe'; then uv python find '>=3.11'."
+            'would ask before installing uv if Python and uv are missing (unless -Yes).'
+            "would run: $UvInstallText"
+            'would set UV_NO_MODIFY_PATH=1 for that installer; it must leave profiles alone.'
+            'would ask before downloading Python if needed (unless -Yes).'
+            "would run: uv python install $PythonToInstall"
+        )
+    }
+    $setupYes = if ($Yes) { ' --yes' } else { '' }
+    $toolDetails = if ($SkipTools) {
+        @('would refresh only this process PATH from the registry and discovered uv directory.'
+          'would skip the tool check (-SkipTools). Next: run oah doctor after installing.')
+    } else {
+        @('would refresh only this process PATH from the registry and discovered uv directory.'
+          "would run: python -m oah.setup --os windows$setupYes with PYTHONPATH='$repo\src' and PYTHONDONTWRITEBYTECODE=1"
+          'would ask before each tool installation (unless -Yes); the setup prints its exact official command first.')
+    }
+    $plan += [pscustomobject]@{
+        Action = 'tools'; Title = '== Step 2/5: Check the tools oah uses'; Details = $toolDetails
+    }
+    $plan += [pscustomobject]@{
+        Action = 'install'; Title = '== Step 3/5: Install oah'
+        Details = @(
+            'would select the first available installer, after tool setup:'
+            "would run: uv tool install --force '$repo'"
+            "or run: pipx install --force '$repo'"
+            "or run: python -m pip install --user '$repo'"
+            'would set UV_NO_MODIFY_PATH=1 for installation subprocesses and refresh only this process PATH.'
+        )
+    }
+    $plan += [pscustomobject]@{
+        Action = 'path'; Title = '== Step 4/5: Check that a new PowerShell window finds oah'
+        Details = @(
+            'would locate oah with uv tool dir --bin, pipx environment --value PIPX_BIN_DIR, or the Python user scripts directory.'
+            'would check that a new PowerShell window (PATH from the registry) finds oah.exe.'
+            'would offer: uv tool update-shell only with a separate yes; -Yes never changes saved PATH.'
+            'would otherwise print the PATH command to run yourself; then open a new PowerShell window.'
+        )
+    }
+    $plan += [pscustomobject]@{
+        Action = 'doctor'; Title = '== Step 5/5: Check everything with oah doctor'
+        Details = @('would locate the installed executable, then run: oah doctor'
+                    'would report missing tools and sign-ins. Next: open a new PowerShell window and run oah init in your project.')
+    }
+    return $plan
+}
+
+# Print strings only. Never invoke tools or the guided setup from this function.
+function Show-InstallPlan([object[]]$Plan) {
+    [Console]::Out.WriteLine('open-agent-harness installer (Windows)')
+    [Console]::Out.WriteLine('Dry run: conditional actions only; no tools are started.')
+    foreach ($item in $Plan) {
+        [Console]::Out.WriteLine('')
+        [Console]::Out.WriteLine($item.Title)
+        foreach ($line in $item.Details) { [Console]::Out.WriteLine('  [dry-run] ' + $line) }
+    }
+    [Console]::Out.WriteLine('')
+    [Console]::Out.WriteLine('Next: run this installer without -DryRun to review prompts and install.')
+    [Console]::Out.WriteLine('OAH_INSTALL_DRY_RUN_OK')
+}
+
+# The sole executor consumes the same ordered actions that Show-InstallPlan displays.
+function Invoke-InstallPlan([object[]]$Plan) {
+    $Repo = $script:PlannedRepo
+    $Py = $null
+    Say 'open-agent-harness installer (Windows)'
+    if ((Test-Path variable:IsWindows) -and -not $IsWindows) {
+        Say 'Note: this script is written for Windows. Use install/install.sh on macOS.'
+    }
+    try {
+        foreach ($item in $Plan) {
+            Say ''
+            Say $item.Title
+            switch ($item.Action) {
+                'release' { $Repo = Get-Release }
+                'python' {
+                    $script:Uv = Find-Uv
+                    $Py = Find-Python
+                    if ($Py) {
+                        Say "  Found: $Py"
+                    } else {
+                        Say '  Python 3.11 or newer was not found.'
+                        if (-not $script:Uv) {
+                            Say '  uv can download Python for you. Its official install command is:'
+                            Say "    $UvInstallText"
+                            Say '  It downloads the official script from astral.sh and runs it with UV_NO_MODIFY_PATH=1.'
+                            Say "  To change your user PATH, accept the separate PATH prompt in step 4. More: $UvUrl"
+                            if (Get-Consent 'Install uv now?') {
+                                Invoke-OneLiner $UvInstallText
+                                if ($script:StepCode -ne 0) { Fail 'The uv installer did not finish. Read its messages above, then run this script again.' }
+                                $script:Uv = Find-Uv
+                            }
+                        }
+                        if ($script:Uv) {
+                            if (Get-Consent "Download Python $PythonToInstall with uv?") {
+                                $uvExe = if ($script:Uv) { $script:Uv } else { 'uv' }
+                                Invoke-Step @($uvExe, 'python', 'install', $PythonToInstall)
+                                if ($script:StepCode -ne 0) { Fail 'uv could not download Python. Read its messages above, then run this script again.' }
+                                $Py = Find-Python
+                            }
+                        }
+                        if (-not $Py) {
+                            Fail ("oah needs Python 3.11 or newer. Next step: install uv with`r`n    $UvInstallText`r`n" +
+                                  'or install Python from https://www.python.org/downloads/, then run this script again.')
+                        }
+                    }
+                }
+                'tools' {
+                    Update-SessionPath
+                    if ($SkipTools) {
+                        Say "  Skipped (-SkipTools). Run 'oah doctor' later to see what is missing."
+                    } else {
+                        $setupArgs = @('-m', 'oah.setup', '--os', 'windows')
+                        if ($Yes) { $setupArgs += '--yes' }
+                        Say '  The guided setup checks each tool and asks before installing anything.'
+                        $savedPythonPath = $env:PYTHONPATH
+                        $env:PYTHONPATH = Join-Path $Repo 'src'
+                        $env:PYTHONDONTWRITEBYTECODE = '1'
+                        $setupCode = Start-Native $Py $setupArgs
+                        if ($setupCode -ne 0) { Say '  Some tools are not ready yet. The check at the end lists them again.' }
+                        $env:PYTHONPATH = $savedPythonPath
+                        Update-SessionPath
+                        $script:Uv = Find-Uv
+                    }
+                }
+                'install' {
+                    $Method = ''
+                    $Pipx = Find-Program 'pipx'
+                    if ($script:Uv) {
+                        $Method = 'uv'
+                        Invoke-Step @($script:Uv, 'tool', 'install', '--force', $Repo)
+                        if ($script:StepCode -ne 0) { Fail 'uv could not install oah. Read its messages above, then run this script again.' }
+                    } elseif ($Pipx) {
+                        $Method = 'pipx'
+                        Invoke-Step @($Pipx, 'install', '--force', $Repo)
+                        if ($script:StepCode -ne 0) { Fail 'pipx could not install oah. Read its messages above, then run this script again.' }
+                    } elseif ($Py) {
+                        $Method = 'pip'
+                        Say '  uv and pipx were not found, so oah is installed for your user with pip.'
+                        Invoke-Step @($Py, '-m', 'pip', 'install', '--user', $Repo)
+                        if ($script:StepCode -ne 0) { Fail 'pip could not install oah. Read its messages above, then run this script again.' }
+                    }
+                }
+                'path' {
+                    $BinDir = $null
+                    if ($Method -eq 'uv' -and $script:Uv) {
+                        $BinDir = (& $script:Uv tool dir --bin 2>$null | Select-Object -Last 1)
+                    } elseif ($Method -eq 'pipx') {
+                        $BinDir = (& $Pipx environment --value PIPX_BIN_DIR 2>$null | Select-Object -Last 1)
+                        if (-not $BinDir) { $BinDir = Join-Path $HOME '.local\bin' }
+                    } elseif ($Method -eq 'pip') {
+                        $code = 'import sysconfig; print(sysconfig.get_path(''scripts'', sysconfig.get_preferred_scheme(''user'')))'
+                        $BinDir = (& $Py -c $code 2>$null | Select-Object -Last 1)
+                    }
+                    if ($BinDir) { $BinDir = ([string]$BinDir).Trim() }
+                    $found = Find-OahInNewWindow
+                    if ($found) {
+                        Say "  A new PowerShell window finds oah: $found"
+                    } else {
+                        $where = if ($BinDir) { $BinDir } else { 'a folder that is not on PATH' }
+                        Say "  A new PowerShell window does not find oah yet. It is installed in $where."
+                        if ($Method -eq 'uv') {
+                            Say "  'uv tool update-shell' adds that folder to your user PATH setting."
+                            if ($Yes) {
+                                Say '  -Yes does not cover that, because it changes your PATH setting. Run it yourself if you want it:'
+                                Say ('    ' + (Format-Command @($script:Uv, 'tool', 'update-shell')))
+                            } elseif (Ask "Run 'uv tool update-shell' now?") {
+                                Invoke-Step @($script:Uv, 'tool', 'update-shell')
+                                $found = Find-OahInNewWindow
+                                if ($found) { Say "  A new PowerShell window now finds oah: $found" }
+                            } else {
+                                Say ('  Skipped. You can run it later: ' + (Format-Command @($script:Uv, 'tool', 'update-shell')))
+                            }
+                        } elseif ($BinDir) {
+                            Say '  To fix that, add the folder to your user PATH, for example with this PowerShell command:'
+                            Say ("    [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';" +
+                                 $BinDir + "', 'User')")
+                        }
+                        Say '  Then open a new PowerShell window so it takes effect.'
+                    }
+                }
+                'doctor' {
+                    $Oah = if ($BinDir) { Join-Path $BinDir 'oah.exe' } else { 'oah' }
+                    if (-not (Test-Path -LiteralPath $Oah)) {
+                        $Oah = Find-Program 'oah'
+                        if (-not $Oah) { Fail 'oah was installed, but this script cannot find it. Open a new PowerShell window and run: oah doctor' }
+                    }
+                    Invoke-Step @($Oah, 'doctor')
+                    if ($script:StepCode -eq 0) {
+                        Say ''
+                        Say 'oah is installed and every required tool is ready.'
+                        Say 'Next: open a new PowerShell window, go to your project folder and run: oah init'
+                        Say 'OAH_INSTALL_OK'
+                        return 0
+                    }
+                    Say ''
+                    Say 'oah is installed, but some required tools are not ready (see the list above).'
+                    Say 'Install or sign in to them as shown, run: oah doctor, then in your project folder: oah init'
+                    Say 'OAH_INSTALL_INCOMPLETE'
+                    return 1
+                }
+                default { Fail 'Unknown install action. Run an unchanged installer from the repository.' }
+            }
+        }
+    } finally {
+        if ($script:OahWork -and (Test-Path -LiteralPath $script:OahWork)) {
+            Remove-Item -LiteralPath $script:OahWork -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-OahInstall {
     if ($Help) { Show-Usage; return 0 }
     if ($OahExtraArgs.Count -gt 0) {
@@ -325,168 +546,12 @@ function Invoke-OahInstall {
         return 2
     }
 
-    $Repo = $null
-    if ($OahScriptRoot) {
-        $candidate = (Resolve-Path -LiteralPath (Join-Path $OahScriptRoot '..')).ProviderPath.TrimEnd('\')
-        if (Test-Clone $candidate) { $Repo = $candidate }
-    }
-
-    Say 'open-agent-harness installer (Windows)'
-    if ($DryRun) { Say 'Dry run: every step is printed, and nothing is installed or changed.' }
-    if ((Test-Path variable:IsWindows) -and -not $IsWindows) {
-        Say 'Note: this script is written for Windows. Use install/install.sh on macOS.'
-    }
-    $ReleaseDryRun = $false
-    if (-not $Repo) {
-        $Repo = Get-Release
-        $ReleaseDryRun = [bool]$DryRun
-    }
-
-    $script:Uv = Find-Uv
-    $Py = $null
-
-    Step 1 'Find Python 3.11 or newer'
-    $Py = Find-Python
-    if ($Py) {
-        Say "  Found: $Py"
-    } else {
-        Say '  Python 3.11 or newer was not found.'
-        if (-not $script:Uv) {
-            Say '  uv can download Python for you. Its official install command is:'
-            Say "    $UvInstallText"
-            Say '  It downloads the official script from astral.sh and runs it with UV_NO_MODIFY_PATH=1.'
-            Say "  To change your user PATH, accept the separate PATH prompt in step 4. More: $UvUrl"
-            if (Get-Consent 'Install uv now?') {
-                Invoke-OneLiner $UvInstallText
-                if ($script:StepCode -ne 0) { Fail 'The uv installer did not finish. Read its messages above, then run this script again.' }
-                $script:Uv = Find-Uv
-            }
-        }
-        if ($script:Uv -or $DryRun) {
-            if (Get-Consent "Download Python $PythonToInstall with uv?") {
-                $uvExe = if ($script:Uv) { $script:Uv } else { 'uv' }
-                Invoke-Step @($uvExe, 'python', 'install', $PythonToInstall)
-                if ($script:StepCode -ne 0) { Fail 'uv could not download Python. Read its messages above, then run this script again.' }
-                $Py = Find-Python
-            }
-        }
-        if (-not $Py -and -not $DryRun) {
-            Fail ("oah needs Python 3.11 or newer. Next step: install uv with`r`n    $UvInstallText`r`n" +
-                  'or install Python from https://www.python.org/downloads/, then run this script again.')
-        }
-    }
-
-    Update-SessionPath
-    Step 2 'Check the tools oah uses'
-    if ($SkipTools) {
-        Say "  Skipped (-SkipTools). Run 'oah doctor' later to see what is missing."
-    } elseif ($ReleaseDryRun) {
-        Say '  [dry-run] would run: python -m oah.setup --os windows --dry-run (after downloading and extracting the release)'
-    } elseif (-not $Py) {
-        Say '  [dry-run] would run: python -m oah.setup --os windows --dry-run (once Python is installed)'
-    } else {
-        $setupArgs = @('-m', 'oah.setup', '--os', 'windows')
-        if ($Yes) { $setupArgs += '--yes' }
-        if ($DryRun) { $setupArgs += '--dry-run' }
-        Say '  The guided setup checks each tool and asks before installing anything.'
-        $savedPythonPath = $env:PYTHONPATH
-        $env:PYTHONPATH = Join-Path $Repo 'src'
-        $env:PYTHONDONTWRITEBYTECODE = '1'
-        $setupCode = Start-Native $Py $setupArgs
-        if ($setupCode -ne 0) { Say '  Some tools are not ready yet. The check at the end lists them again.' }
-        $env:PYTHONPATH = $savedPythonPath
-        Update-SessionPath
-        $script:Uv = Find-Uv
-    }
-
-    Step 3 'Install oah'
-    $Method = ''
-    $Pipx = Find-Program 'pipx'
-    if ($script:Uv) {
-        $Method = 'uv'
-        Invoke-Step @($script:Uv, 'tool', 'install', '--force', $Repo)
-        if ($script:StepCode -ne 0) { Fail 'uv could not install oah. Read its messages above, then run this script again.' }
-    } elseif ($Pipx) {
-        $Method = 'pipx'
-        Invoke-Step @($Pipx, 'install', '--force', $Repo)
-        if ($script:StepCode -ne 0) { Fail 'pipx could not install oah. Read its messages above, then run this script again.' }
-    } elseif ($Py) {
-        $Method = 'pip'
-        Say '  uv and pipx were not found, so oah is installed for your user with pip.'
-        Invoke-Step @($Py, '-m', 'pip', 'install', '--user', $Repo)
-        if ($script:StepCode -ne 0) { Fail 'pip could not install oah. Read its messages above, then run this script again.' }
-    } else {
-        $Method = 'uv'
-        Invoke-Step @('uv', 'tool', 'install', '--force', $Repo)
-    }
-
-    Step 4 'Check that a new PowerShell window finds oah'
-    $BinDir = $null
-    if ($Method -eq 'uv' -and $script:Uv) {
-        $BinDir = (& $script:Uv tool dir --bin 2>$null | Select-Object -Last 1)
-    } elseif ($Method -eq 'pipx' -and -not $DryRun) {
-        # Skipped in a dry run: pipx writes a log file on every command.
-        $BinDir = (& $Pipx environment --value PIPX_BIN_DIR 2>$null | Select-Object -Last 1)
-        if (-not $BinDir) { $BinDir = Join-Path $HOME '.local\bin' }
-    } elseif ($Method -eq 'pip') {
-        $code = 'import sysconfig; print(sysconfig.get_path(''scripts'', sysconfig.get_preferred_scheme(''user'')))'
-        $BinDir = (& $Py -c $code 2>$null | Select-Object -Last 1)
-    }
-    if ($BinDir) { $BinDir = ([string]$BinDir).Trim() }
-    $found = if ($DryRun) { $null } else { Find-OahInNewWindow }
+    $plan = @(New-InstallPlan)
     if ($DryRun) {
-        Say '  [dry-run] would check that a new PowerShell window (PATH from the registry) finds oah.exe.'
-    } elseif ($found) {
-        Say "  A new PowerShell window finds oah: $found"
-    } else {
-        $where = if ($BinDir) { $BinDir } else { 'a folder that is not on PATH' }
-        Say "  A new PowerShell window does not find oah yet. It is installed in $where."
-        if ($Method -eq 'uv') {
-            Say "  'uv tool update-shell' adds that folder to your user PATH setting."
-            if ($Yes) {
-                Say '  -Yes does not cover that, because it changes your PATH setting. Run it yourself if you want it:'
-                Say ('    ' + (Format-Command @($script:Uv, 'tool', 'update-shell')))
-            } elseif (Ask "Run 'uv tool update-shell' now?") {
-                Invoke-Step @($script:Uv, 'tool', 'update-shell')
-                $found = Find-OahInNewWindow
-                if ($found) { Say "  A new PowerShell window now finds oah: $found" }
-            } else {
-                Say ('  Skipped. You can run it later: ' + (Format-Command @($script:Uv, 'tool', 'update-shell')))
-            }
-        } elseif ($BinDir) {
-            Say '  To fix that, add the folder to your user PATH, for example with this PowerShell command:'
-            Say ("    [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';" +
-                 $BinDir + "', 'User')")
-        }
-        Say '  Then open a new PowerShell window so it takes effect.'
-    }
-
-    Step 5 'Check everything with oah doctor'
-    $Oah = if ($BinDir) { Join-Path $BinDir 'oah.exe' } else { 'oah' }
-    if ($DryRun) {
-        Invoke-Step @($Oah, 'doctor')
-        Say ''
-        Say 'Dry run finished: nothing was installed or changed.'
-        Say 'OAH_INSTALL_DRY_RUN_OK'
+        Show-InstallPlan $plan
         return 0
     }
-    if (-not (Test-Path -LiteralPath $Oah)) {
-        $Oah = Find-Program 'oah'
-        if (-not $Oah) { Fail 'oah was installed, but this script cannot find it. Open a new PowerShell window and run: oah doctor' }
-    }
-    Invoke-Step @($Oah, 'doctor')
-    if ($script:StepCode -eq 0) {
-        Say ''
-        Say 'oah is installed and every required tool is ready.'
-        Say 'Next: open a new PowerShell window, go to your project folder and run: oah init'
-        Say 'OAH_INSTALL_OK'
-        return 0
-    }
-    Say ''
-    Say 'oah is installed, but some required tools are not ready (see the list above).'
-    Say 'Install or sign in to them as shown, run: oah doctor, then in your project folder: oah init'
-    Say 'OAH_INSTALL_INCOMPLETE'
-    return 1
+    return (Invoke-InstallPlan $plan)
 }
 
 $OahExitCode = 1
@@ -496,13 +561,10 @@ try {
     if ($_.Exception.Message -ne 'OAH_INSTALL_FAILED') {
         Say ''
         Say ('Unexpected error: ' + $_.Exception.Message)
+        Say 'Read the error above, fix the cause and run this installer again.'
         Say 'OAH_INSTALL_FAILED'
     }
     $OahExitCode = 1
-} finally {
-    if ($script:OahWork -and (Test-Path -LiteralPath $script:OahWork)) {
-        Remove-Item -LiteralPath $script:OahWork -Recurse -Force -ErrorAction SilentlyContinue
-    }
 }
 if ($OahScriptRoot) { exit $OahExitCode }
 $global:LASTEXITCODE = $OahExitCode

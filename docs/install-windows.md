@@ -37,9 +37,12 @@ stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then. To pass options this
 
 ## 2. What the installer does
 
-To see every step first without changing anything, add `-DryRun`. A public dry run only prints
-the planned release download, SHA-256 check and extraction; it creates no temporary folder and does
-not download or verify the archive. Actual release downloads and all redirects must use HTTPS.
+To see every step first without changing anything, add `-DryRun`. The installer builds an ordered
+plan and only prints it: it does not start tools, probe versions, run guided setup or refresh PATH.
+The plan includes conditional commands because installed tools are checked only during a real run.
+A public dry run also prints the release download, SHA-256 check, extraction and cleanup; it creates
+no temporary folder and does not download or verify the archive. Run without `-DryRun` to execute
+the plan with consent. Actual release downloads and all redirects must use HTTPS.
 
 The installer goes through five steps.
 

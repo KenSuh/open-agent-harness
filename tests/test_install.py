@@ -1,16 +1,15 @@
 # 설치 스크립트 검사 — 임시 클론과 가짜 도구로 install.sh 의 단계·대체 경로·드라이런 무변경을, install.ps1 의 ASCII·CRLF·드라이런을 확인한다.
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
 import pathlib
 import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 import zipfile
 from unittest import mock
@@ -58,12 +57,14 @@ def make_zip_release(test: unittest.TestCase) -> tuple[pathlib.Path, str]:
 
 
 def powershell_command(shell: str, script: str, env: dict) -> subprocess.CompletedProcess:
-    """Run PowerShell code given as -EncodedCommand, so no quoting reaches the command line."""
+    """Keep code in a file, below CreateProcess's command-line limit even for large fixtures."""
     script = "$ProgressPreference = 'SilentlyContinue'; " + script
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return subprocess.run([shutil.which(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                           "-EncodedCommand", encoded],
-                          env=env, capture_output=True, timeout=300)
+    with tempfile.TemporaryDirectory(prefix="oah-powershell-") as folder:
+        path = pathlib.Path(folder) / "test.ps1"
+        # A BOM lets Windows PowerShell 5.1 read fixture paths containing Korean characters.
+        path.write_text(script, encoding="utf-8-sig")
+        return subprocess.run([shutil.which(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-File", str(path)], env=env, capture_output=True, timeout=300)
 
 
 def powershell_env(test: unittest.TestCase, **extra: str) -> dict[str, str]:
@@ -139,87 +140,23 @@ def powershell_snapshot(env: dict[str, str]) -> dict[str, dict[str, tuple[int, s
 
 
 def assert_dry_run_branches(test: unittest.TestCase, source: str, shell: str) -> None:
-    """Fail closed on dry-run statements beyond printing, bookkeeping and the guarded run wrapper."""
+    """Pin all reviewed source, including declarations and executable inputs outside functions."""
     source = source.replace("\r\n", "\n")
-    if shell == "bash":
-        starts = list(re.finditer(r'(?m)^([ \t]*)(?:if|elif) \[ "\$(?:DRY_RUN|RELEASE_DRY_RUN)" = 1 \]; then([^\n]*)',
-                                  source))
-        branches = []
-        for match in starts:
-            if match[2].strip():
-                test.assertTrue(match[2].endswith("; fi"), match[0])
-                branches.append(match[2][:-4])
-            else:
-                end = re.search(r"(?m)^" + re.escape(match[1]) + r"(?:else|elif|fi)\b", source[match.end():])
-                test.assertIsNotNone(end, match[0])
-                branches.append(source[match.end():match.end() + end.start()])
-        allowed = {"return 0", "exit 0", "REPO='<release-folder>'", "RELEASE_DRY_RUN=1",
-                   'set -- "$@" --dry-run', 'run "$OAH" doctor'}
-    else:
-        starts = re.findall(r"\b(?:if|elseif) \(\$(?:DryRun|ReleaseDryRun)\) \{", source)
-        branches = re.findall(r"(?s)\b(?:if|elseif) \(\$(?:DryRun|ReleaseDryRun)\) \{([^{}]*)\}", source)
-        test.assertEqual(len(branches), len(starts), "nested or unrecognized dry-run branch")
-        allowed = {"$script:StepCode = 0", "return", "return $true", "return '<release-folder>'", "return 0",
-                   "$setupArgs += '--dry-run'", "$null", "Invoke-Step @($Oah, 'doctor')",
-                   "Say ('  [dry-run] would run: ' + (Format-Command $Argv))",
-                   "Say ('  [dry-run] would run: ' + $Text)",
-                   "Say ('  [dry-run] would ask: ' + $Question + ' [y/N]')"}
-    test.assertTrue(branches, "no dry-run branches checked")
-    for branch in branches:
-        for line in branch.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or line in allowed:
-                continue
-            if shell == "bash":
-                printed = line.replace('$(show "$@")', "<formatted-argv>")
-                test.assertFalse(any(token in printed for token in ("$(", "`", "<(", ">(")), line)
-                lexer = shlex.shlex(printed, posix=True, punctuation_chars=";&|<>")
-                lexer.whitespace_split = True
-                words = list(lexer)
-                test.assertTrue(len(words) == 2 and words[0] == "say", line)
-            else:
-                test.assertIsNotNone(re.fullmatch(r'''Say (?:'(?:[^']|'')*'|"(?:[^"`$]|\$\w+)*")''', line), line)
-
-    # A branch's Say/Format-Command/etc. is safe only while its callees are safe too. Pin the
-    # reviewed bodies rather than trying to recognize every possible shell or .NET write.
-    # These are safety-review pins, independent of the candidate source passed to this checker.
-    # Review changed bodies and their callees before updating a pin; snapshots remain necessary.
-    if shell == "bash":
-        # All bash helpers are nested in main, so its body includes the complete call graph.
-        functions = list(re.finditer(r"(?ms)^(main)\(\) \{\n.*^}", source))
-        reviewed = {"main": "84d649af81048994bc5b09f8822141c0dec4b3358d67d0d0ed6beb3fc5a489cc"}
-    else:
-        functions = list(re.finditer(r"(?ms)^function ([\w-]+)\b[^\n]*\n.*?^}", source))
-        reviewed = {
-            "Say": "a9b03cbb798c0e962b491b6d955018a9794111105be566978c0beb0d214049c6",
-            "Show-Usage": "b28ffce8d3d6d1208437a1bc063de45e950c5aa1836c08f3928e38b6016dd6fc",
-            "Step": "2775a08bf8a4f41584754a1468c863e9d1d895f4a1633919a97a00a7a5bad2bc",
-            "Fail": "b29cfebfd3527d9a0f8de730630138c047026cf870a65e6224eaa1fe9fae4426",
-            "Format-Command": "1168fec911843bb80f7cd7a5e4fab5c2d8344d014ccc2cb41bf5fed8c73ac333",
-            "Join-Arguments": "853015ff7b10a52cbd922c784f7844c6e0e88512866787739a92ac37739a5ed4",
-            "Start-Native": "cfa11f0593051a0245c6bcc01fb04af84708b6db7adb21a28a2d9ffa77935a56",
-            "Update-SessionPath": "e81264b195eb88bb76978045d711b0e99f4edd5f5722c1e2e93bada69af056d3",
-            "Invoke-Step": "5ba1263c3a734417494a5603ac606d0d9f7b926cb746b378b480fcde892a8ecf",
-            "Invoke-OneLiner": "861ebc764b45674603408be16aea930ce950e1a884143af392fb78d2ecc07c4a",
-            "Ask": "369bdb07dae58bb076a5671e03797abf684e8e2e4633342a2298c83dcc67bbb5",
-            "Get-Consent": "f07ea2ed1dabd34f4178254154fd8dc1deb9dbc566dedce946bb9acd099ec443",
-            "Find-Program": "189c3ae44bc4c765fe53239fb9ada37924035dfcb3a8ca3ea24f873dff929b84",
-            "Find-Uv": "91dd7fdc4211698e98052711d2144dca4f2f6eb24d4398f5b0fa367ba77898a5",
-            "Find-Python": "b050c5b5cf3c3bcc547199aa7b076073854ea9172161fad079c3ec426a6a4121",
-            "Test-Clone": "2a08650a4f62527228f03348473ac7e7158a3403c4deb460caecd094b593e2c3",
-            # Unreachable in a dry run; the guards in their callers are pinned here.
-            "Find-OahInNewWindow": None,
-            "Save-Release": None,
-            "Get-Release": "6d8dea91e8a805ecd91990ec02a816d13b23d534c904c14d72bb1d848ef68f22",
-            "Invoke-OahInstall": "d6c8fa858ec601693c1953b7c820c92691012253520b9b250de1a8a1609dd78a",
-        }
-    test.assertCountEqual([function[1] for function in functions], reviewed,
-                          "Installer functions changed; review dry-run reachability before updating the pins.")
-    for function in functions:
-        expected = reviewed[function[1]]
-        if expected is not None:
-            test.assertEqual(hashlib.sha256(function[0].encode("utf-8")).hexdigest(), expected,
-                             f"Review {function[1]} and its callees for dry-run writes before updating its pin.")
+    # Review the complete plan builder/printer and the entry boundary before updating these
+    # independent pins. Do not parse helper bodies: casing, indentation and top-level code matter.
+    # The executor and all external probes must stay beyond the dry-run return. Snapshots below
+    # remain necessary, and the mutation tests prove that unreviewed source fails closed.
+    reviewed = {
+        "bash": "94ff5efd2c70f1de2cf6f168840835b28914911ae9f05f25d47c345603204193",
+        "powershell": "ad85673cafb0083aa3ea990f644b3fe6d7215d919a1abaea2ef8f0cd3561bc53",
+    }
+    test.assertEqual(hashlib.sha256(source.encode("utf-8")).hexdigest(), reviewed[shell],
+                     "Review the complete installer and its dry-run boundary before updating its pin.")
+    boundary = ('build_plan\nif [ "$DRY_RUN" = 1 ]; then\n  print_plan\n  return 0\nfi\nexecute_plan'
+                if shell == "bash" else
+                '$plan = @(New-InstallPlan)\n    if ($DryRun) {\n'
+                '        Show-InstallPlan $plan\n        return 0\n    }\n    return (Invoke-InstallPlan $plan)')
+    test.assertIn(boundary, source)
 
 
 @unittest.skipIf(os.name == "nt" or BASH is None, "install.sh is the macOS installer")
@@ -342,10 +279,30 @@ cp "{archive}" "$destination"''')
         self.assertEqual(result.returncode, 0, text)
         for number in range(1, 6):
             self.assertIn(f"Step {number}/5", text)
-        self.assertIn("SETUP_DRY_RUN planned=", text)  # the guided setup ran in its dry-run mode
-        self.assertIn(f"[dry-run] would run: {self.bin / 'uv'} tool install --force '{self.clone}'", text)
-        self.assertIn(f"[dry-run] would run: {self.tool_bin / 'oah'} doctor", text)
-        self.assertNotIn("uv tool install", "\n".join(self.calls()))  # only read-only uv calls happened
+        self.assertIn("python -m oah.setup --os macos", text)
+        self.assertIn(f"uv tool install --force '{self.clone}'", text)
+        self.assertIn("oah doctor", text)
+        self.assertEqual(self.calls(), [])
+
+    def test_install_sh_dry_run_never_starts_tools_or_profiles(self):
+        # Even a version probe can write and then delete files before a snapshot sees them.
+        for name in ("python3.14", "python3.13", "python3.12", "python3.11", "python3", "python",
+                     "uv", "pipx", "uname", "dirname", "xcode-select"):
+            write_posix_tool(self.bin, name, f'''
+echo "FORBIDDEN {name}" >> "{self.log}"
+touch "{self.home / 'transient'}"
+rm "{self.home / 'transient'}"
+exit 91''')
+        for name in (".profile", ".bash_profile", ".zprofile"):
+            (self.home / name).write_text(f'echo "FORBIDDEN profile" >> "{self.log}"\n', encoding="utf-8")
+        before = snapshot(self.work), snapshot(self.clone)
+        for args in (("--dry-run",), ("--dry-run", "--yes"), ("--dry-run", "--skip-tools")):
+            with self.subTest(args=args):
+                result = self.run_sh(*args)
+                self.assertEqual(result.returncode, 0, self.text(result))
+                self.assertEqual(self.last_line(result), "OAH_INSTALL_DRY_RUN_OK")
+                self.assertEqual(self.calls(), [])
+                self.assertEqual((snapshot(self.work), snapshot(self.clone)), before)
 
     def test_install_sh_dry_run_without_python_shows_bootstrap(self):
         result = self.run_sh("--dry-run")
@@ -520,7 +477,7 @@ esac''')
         for number in range(1, 6):
             self.assertIn(f"Step {number}/5", text)
         self.assertIn("python -m oah.setup", text)
-        self.assertIn("tool install --force <release-folder>", text)
+        self.assertIn("tool install --force '<release-folder>'", text)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_DRY_RUN_OK")
         self.assertEqual(snapshot(self.home), before_home)
         self.assertEqual(snapshot(self.scratch), before_scratch)
@@ -598,15 +555,40 @@ esac''')
 
 class InstallPs1Test(unittest.TestCase):
     def test_powershell_command_is_noninteractive_and_suppresses_progress(self):
+        observed = {}
+
+        def run_file(argv, **kwargs):
+            self.assertIn("-File", argv)
+            observed["script"] = pathlib.Path(argv[-1]).read_text(encoding="utf-8-sig")
+
         with mock.patch.object(shutil, "which", return_value="powershell"), mock.patch.object(
-                subprocess, "run") as run:
+                subprocess, "run", side_effect=run_file) as run:
             powershell_command("powershell", "[Console]::Out.WriteLine('ready')", {})
         argv = run.call_args.args[0]
         self.assertIn("-NoProfile", argv)
         self.assertIn("-NonInteractive", argv)
-        script = base64.b64decode(argv[-1]).decode("utf-16-le")
+        script = observed["script"]
         self.assertTrue(script.startswith("$ProgressPreference = 'SilentlyContinue'; "))
         self.assertIn("[Console]::Out.WriteLine('ready')", script)
+
+    def test_powershell_command_keeps_large_scripts_off_the_command_line(self):
+        script = "[Console]::Out.WriteLine('ready')\n" + ("# more installer source\n" * 4000)
+        observed = []
+
+        def run_file(argv, **kwargs):
+            self.assertLess(len(subprocess.list2cmdline(argv)), 32767)
+            self.assertNotIn("-EncodedCommand", argv)
+            self.assertIn("-File", argv)
+            path = pathlib.Path(argv[-1])
+            self.assertEqual(path.read_text(encoding="utf-8-sig"),
+                             "$ProgressPreference = 'SilentlyContinue'; " + script)
+            observed.append(path)
+
+        with mock.patch.object(shutil, "which", return_value="powershell"), mock.patch.object(
+                subprocess, "run", side_effect=run_file):
+            powershell_command("powershell", script, {})
+        self.assertEqual(len(observed), 1)
+        self.assertFalse(observed[0].exists())
 
     def test_powershell_snapshot_catches_writes_in_every_redirected_location(self):
         env = powershell_env(self)
@@ -697,9 +679,9 @@ class InstallPs1Test(unittest.TestCase):
 
     def test_dry_run_static_check_rejects_writes_downloads_and_extraction(self):
         for shell, path, marker, operations in (
-                ("bash", INSTALL_SH, '    REPO=\'<release-folder>\'',
+                ("bash", INSTALL_SH, '  print_plan\n',
                  ('touch "$HOME/changed"', 'curl https://example.invalid/file', 'tar -xf release.tar.gz')),
-                ("powershell", INSTALL_PS1, "        return '<release-folder>'",
+                ("powershell", INSTALL_PS1, "        Show-InstallPlan $plan\n",
                  ("[IO.File]::WriteAllText('changed', 'data')", "Save-Release $releaseUri 'file'",
                   "Expand-Archive release.zip"))):
             source = path.read_text(encoding="utf-8")
@@ -710,56 +692,77 @@ class InstallPs1Test(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_dry_run_branches(self, mutated, shell)
 
-    def test_dry_run_static_check_rejects_writes_in_every_reachable_function(self):
-        for shell, path, pattern, unreachable, operation in (
-                ("bash", INSTALL_SH, r"(?m)^(\w+)\(\) \{", {"sha256_of", "fresh_shell_finds_oah"},
+    def test_dry_run_static_check_covers_builders_printers_and_the_executor_boundary(self):
+        for shell, path, markers, operation in (
+                ("bash", INSTALL_SH, ('build_plan() {', 'print_plan() {', 'execute_plan() {'),
                  'touch "$HOME/oah-created.txt"'),
-                ("powershell", INSTALL_PS1, r"(?m)^function ([\w-]+)\b[^\n{]*\{",
-                 {"Find-OahInNewWindow", "Save-Release"},
-                 "[IO.File]::WriteAllText((Join-Path $env:APPDATA 'Microsoft/PowerShell/oah-created.txt'), 'data')")):
+                ("powershell", INSTALL_PS1,
+                 ('function New-InstallPlan {', 'function Show-InstallPlan([object[]]$Plan) {',
+                  'function Invoke-InstallPlan([object[]]$Plan) {'),
+                 "[IO.File]::WriteAllText('oah-created.txt', 'data')")):
             source = path.read_text(encoding="utf-8")
-            for match in re.finditer(pattern, source):
-                if match[1] in unreachable:
-                    continue
-                with self.subTest(shell=shell, function=match[1]):
-                    mutated = source[:match.end()] + "\n    " + operation + "\n" + source[match.end():]
+            for marker in markers:
+                with self.subTest(shell=shell, marker=marker):
+                    mutated = source.replace(marker, marker + "\n    " + operation, 1)
+                    self.assertNotEqual(mutated, source)
+                    with self.assertRaises(AssertionError):
+                        assert_dry_run_branches(self, mutated, shell)
+
+    def test_dry_run_source_pins_normalize_only_line_endings(self):
+        for shell, path in (("bash", INSTALL_SH), ("powershell", INSTALL_PS1)):
+            with self.subTest(shell=shell):
+                source = path.read_text(encoding="utf-8")
+                assert_dry_run_branches(self, source.replace("\n", "\r\n"), shell)
+                for mutated in ("Write-UnreviewedCode\n" + source, source + "\nWrite-UnreviewedCode"):
                     with self.assertRaises(AssertionError):
                         assert_dry_run_branches(self, mutated, shell)
 
     def test_dry_run_static_check_rejects_new_and_shadowed_helpers(self):
         source = INSTALL_PS1.read_text(encoding="ascii")
-        for name in ("Say", "New-DryRunHelper"):
-            with self.subTest(function=name):
-                helper = (f"function {name} {{\n"
-                          "    [IO.File]::WriteAllText('oah-created.txt', 'data')\n}\n\n")
-                mutated = source.replace("function Invoke-OahInstall {", helper + "function Invoke-OahInstall {")
-                with self.assertRaises(AssertionError):
-                    assert_dry_run_branches(self, mutated, "powershell")
+        for declaration in ("function", "Function", "FUNCTION", "    function", "\tFunction"):
+            for name in ("Say", "New-DryRunHelper"):
+                with self.subTest(declaration=declaration, function=name):
+                    helper = (f"{declaration} {name} {{\n"
+                              "    [IO.File]::WriteAllText('oah-created.txt', 'data')\n}\n\n")
+                    mutated = source.replace("function Invoke-OahInstall {", helper + "function Invoke-OahInstall {")
+                    with self.assertRaises(AssertionError):
+                        assert_dry_run_branches(self, mutated, "powershell")
+
+    def test_dry_run_static_check_covers_executable_inputs_outside_functions(self):
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        marker = "$PythonProbe = '"
+        payload = ("import pathlib; p = pathlib.Path(str()); "
+                   "p.joinpath(str(1)).write_text(str()); p.joinpath(str(1)).unlink(); ")
+        mutated = source.replace(marker, marker + payload, 1)
+        self.assertNotEqual(mutated, source)
+        with self.assertRaises(AssertionError):
+            assert_dry_run_branches(self, mutated, "powershell")
+
+    def test_installers_build_a_plan_before_the_only_dry_run_branch(self):
+        for path, boundary in (
+                (INSTALL_SH, 'build_plan\nif [ "$DRY_RUN" = 1 ]; then\n  print_plan\n  return 0\nfi\nexecute_plan'),
+                (INSTALL_PS1, '$plan = @(New-InstallPlan)\n    if ($DryRun) {\n'
+                 '        Show-InstallPlan $plan\n        return 0\n    }\n    return (Invoke-InstallPlan $plan)')):
+            with self.subTest(installer=path.name):
+                self.assertIn(boundary, path.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_dry_run_detects_writes_inside_cache_parents(self):
-        source = INSTALL_PS1.read_text(encoding="ascii")
-        # Keep the real dry-run paths, without depending on installed tools or external programs.
-        source = source.replace("function Invoke-OahInstall {",
-                                "function Find-Python { return $null }\nfunction Find-Uv { return $null }\n"
-                                "function Invoke-OahInstall {")
         shells = [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]
         self.assertIn("powershell", shells)
         for shell in shells:
             for name in ("APPDATA", "LOCALAPPDATA"):
                 for relative in ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell"):
-                    for marker in ("        return '<release-folder>'", "function Update-SessionPath {"):
+                    for marker in ("function New-InstallPlan {", "function Show-InstallPlan([object[]]$Plan) {"):
                         with self.subTest(shell=shell, location=name, relative=relative, marker=marker):
                             env = powershell_env(self, OAH_RELEASE_URL="https://releases.example.invalid/oah.zip",
                                                  OAH_RELEASE_SHA256="a" * 64)
                             target = pathlib.Path(env[name]) / relative / "oah-created.txt"
                             target.parent.mkdir(parents=True, exist_ok=True)
                             operation = f"[IO.File]::WriteAllText({ps_literal(str(target))}, 'created')"
-                            replacement = (marker + "\n    " + operation if marker.startswith("function")
-                                           else operation + "\n" + marker)
-                            mutated = source.replace(marker, replacement, 1)
-                            self.assertNotEqual(mutated, source)
-                            script = (f"$installer = {ps_literal(mutated)}; "
+                            replacement = marker + "\n    " + operation
+                            script = (f"$installer = [IO.File]::ReadAllText({ps_literal(str(INSTALL_PS1))}); "
+                                      f"$installer = $installer.Replace({ps_literal(marker)}, {ps_literal(replacement)}); "
                                       "& ([scriptblock]::Create($installer)) -DryRun; exit $LASTEXITCODE")
                             before = powershell_snapshot(env)
                             result = powershell_command(shell, script, env)
@@ -767,6 +770,42 @@ class InstallPs1Test(unittest.TestCase):
                             self.assertIn(b"OAH_INSTALL_DRY_RUN_OK", result.stdout)
                             self.assertTrue(target.is_file())
                             self.assertNotEqual(powershell_snapshot(env), before)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_dry_run_never_calls_execution_helpers(self):
+        guards = "\n".join(
+            f"function {name} {{ throw 'FORBIDDEN {name}' }}"
+            for name in ("Find-Program", "Find-Python", "Find-Uv", "Update-SessionPath", "Find-OahInNewWindow",
+                         "Start-Native", "Invoke-Step", "Invoke-OneLiner", "Ask", "Get-Consent", "Get-Release",
+                         "Save-Release", "Test-Clone", "Invoke-InstallPlan", "Say", "Step", "Format-Command"))
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        clone = make_clone(self)
+        installer = clone / "install" / "install.ps1"
+        guarded = source.replace("function Invoke-OahInstall {", guards + "\nfunction Invoke-OahInstall {")
+        installer.write_bytes(guarded.replace("\n", "\r\n").encode("ascii"))
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            for args in ("-DryRun", "-DryRun -Yes", "-DryRun -SkipTools"):
+                with self.subTest(shell=shell, args=args):
+                    env = powershell_env(self, OAH_RELEASE_URL="https://releases.example.invalid/oah.zip",
+                                         OAH_RELEASE_SHA256="a" * 64)
+                    for invocation in (f"& {ps_literal(str(installer))}",
+                                       "& ([scriptblock]::Create($installer))"):
+                        script = (ps1_with_overrides(guards) + f"{invocation} {args}; exit $LASTEXITCODE")
+                        before = powershell_snapshot(env), snapshot(clone)
+                        result = powershell_command(shell, script, env)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(b"OAH_INSTALL_DRY_RUN_OK", result.stdout)
+                        self.assertNotIn(b"FORBIDDEN", result.stdout + result.stderr)
+                        self.assertEqual((powershell_snapshot(env), snapshot(clone)), before)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_powershell_file_runs_large_unicode_script(self):
+        script = "# Installer-sized fixture\n" * 4000 + "[Console]::Out.WriteLine('한글 path ready'); exit 0"
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                result = powershell_command(shell, script, powershell_env(self))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(b"path ready", result.stdout)
 
     def test_install_ps1_hashing_does_not_depend_on_modules(self):
         text = INSTALL_PS1.read_text(encoding="ascii")
