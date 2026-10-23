@@ -243,7 +243,7 @@ open-agent-harness/
 - **Atomic writes.** Write a temp file in the same directory, flush, fsync, then `os.replace`. On Windows,
   retry a few times on `PermissionError` (antivirus and indexers hold files briefly).
 - **Lease record.**
-  `{id, task, agent, scope[], note, worktree, branch, head_at_start, packet?, intent{id,revision,digest}?, gates[], created_at, expires_at}`.
+  `{id, task, agent, scope[], note, worktree, branch, head_at_start, packet?, intent{source,id,revision,digest}?, gates[], created_at, expires_at}`.
 - **Overlap.** `repo` overlaps everything. Path scopes overlap when one normalized, case-folded,
   repo-relative path is a prefix of the other. The source compared exact strings only, so `src` and
   `src/a.py` did not collide there.
@@ -615,8 +615,11 @@ After the review:
       - Publish the archive first without replacing an existing path, then atomically replace the
         log (including its generated archive index). Flush files and directories at each step;
         remove the journal only after both are durable. Individual writes use atomic replacement.
-      - Before any wiki read or write, recover a pending journal under the lock: an unchanged original
-        log with an absent or matching new archive is completed forward; matching replacement log
+      - Before any wiki read or write, check for a pending journal under the lock. Commands other
+        than `oah wiki recover` refuse with `OAH_WIKI_RECOVERY_PENDING`, leave wiki files and the
+        journal unchanged, and direct the user to run `oah wiki recover` explicitly. That command
+        recovers under the same lock: an unchanged original log with an absent or matching new
+        archive is completed forward; matching replacement log
         and archive is already complete. Recovery is idempotent. Any other bytes refuse with
         `OAH_WIKI_RECOVERY_CONFLICT`, preserve all files and journal, and require reconciliation;
         they are never overwritten. Editors outside the lock protocol must be quiescent during
@@ -720,7 +723,7 @@ leaves a backup.
 | Engines | `recommend`, `call` |
 | Gates | `gates new/status/check/lint`, `check exists/contains/absent/json` |
 | Review | `review`, `fix`, `review summary` |
-| Knowledge | `wiki new/log/lint/rollover/hygiene` (`lint --index` included), `graph …`, `impact` |
+| Knowledge | `wiki new/log/lint/rollover/recover/hygiene` (`lint --index` included), `graph …`, `impact` |
 | Agent files | `rules sync/check`, `tiers sync/check` |
 | Hooks | `hooks install/uninstall/status`, `hook stop/pre-commit` |
 
@@ -1118,7 +1121,7 @@ whose checklists carry it.
 - [ ] The tier agent files carry the shared intent footer inside their managed block, replaced on every sync. (A5, A7)
 - [ ] `oah wiki lint` counts only real problems. It resolves out-of-wiki link roots, ignores links in code spans and blocks, counts archive indexes as index sources, and judges staleness by last commit date. (A8a)
 - [ ] `oah wiki rollover` implements the exact thresholds, whole-entry parsing, oversized-entry rule, archive numbering and metadata-free concatenation order in 5.10. Tests cover threshold boundaries, invalid boundaries, fenced headings, multiple archives and oversized entries, comparing preservation streams byte for byte. (A8b)
-- [ ] Rollover serializes wiki access, journals and flushes staged writes, validates sources before archive-first publication, and recovers before wiki access as in 5.10. Failure injection at every journal/publication step and repeated recovery prove no lost or duplicated entries; concurrent-edit tests prove pre-publication refusal and recovery-conflict preservation. (A8b)
+- [ ] Rollover serializes wiki access, journals and flushes staged writes, and validates sources before archive-first publication. With a pending journal, commands other than `oah wiki recover` refuse with `OAH_WIKI_RECOVERY_PENDING` and direct the user to explicit recovery as in 5.10. Tests verify that read-only lint leaves wiki files and the journal byte-identical on refusal. Failure injection at every journal/publication step and repeated explicit recovery prove no lost or duplicated entries; concurrent-edit tests prove pre-publication refusal and recovery-conflict preservation. (A8b)
 - [ ] `oah hook pre-commit` is opt-in. It blocks missing archives, archive edits, raw-source edits and non-UTF-8 or surrogate bytes. New broken links are warned first, then blocked. (A8c)
 - [ ] `oah init` git-ignores editor UI state. (A8d)
 - [ ] `oah wiki lint --index` uses the banner patterns and configurable 120-code-point line limit in 5.10, resolves unindexed notes using normal lint rules, and writes candidates outside the wiki. Tests cover pattern matches, fenced-code exclusions and line-limit boundaries. (A8e)
