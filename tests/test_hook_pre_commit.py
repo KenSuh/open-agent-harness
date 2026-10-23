@@ -115,12 +115,44 @@ class PreCommitTest(unittest.TestCase):
         self.assertEqual(self.check().blocked, [])
 
     def test_new_broken_links_warn_then_block(self):
-        self.stage({"docs/wiki/a.md": "---\ntitle: A\n---\n[[nowhere]] `[[in code]]`\n"})
+        self.stage({"docs/wiki/a.md": "---\ntitle: A\n---\n[[nowhere]]\n`[[in code]]`\n"})
         verdict = self.check()
         self.assertEqual(verdict.blocked, [])
         self.assertTrue(any("[[nowhere]]" in line for line in verdict.warnings), verdict.warnings)
         self.assertFalse(any("in code" in line for line in verdict.warnings))
         self.assert_blocked(self.check(new_broken_links="block"), "[[nowhere]]")
+
+    def test_plain_paragraph_rule_from_staged_bytes(self):
+        cases = [("plain [[example]]\n", True),
+                 (">     [[example]]\n", False), ("> >     [[example]]\n", False),
+                 ("> - item\n>       [[example]]\n", False), ("- >     [[example]]\n", False),
+                 ("[[example]] <span>description</span>\n", False),
+                 ("[[example]] `code`\n", False), ("`code` [[example]]\n", False),
+                 ("- item\n  [[example]]\n", False), ("\t[[example]]\n", False),
+                 ("```\n[[example]]\n", False),
+                 ("  ~~~\ncode\n  ~~~\n\n[[example]]\n", False)]
+        for eol in ("\n", "\r\n"):
+            for text, certain in cases:
+                with self.subTest(eol=eol, text=text):
+                    data = text.replace("\n", eol).encode("utf-8")
+                    self.stage({"docs/wiki/a.md": data})
+                    staged = subprocess.run(["git", "-C", str(self.repo), "show", ":docs/wiki/a.md"],
+                                            check=True, capture_output=True).stdout
+                    self.assertEqual(staged, data)
+                    (self.wiki_dir / "a.md").write_bytes(b"[[wiki-guide]]\n")
+                    for mode in ("warn", "block"):
+                        verdict = self.check(new_broken_links=mode)
+                        if certain and mode == "block":
+                            self.assert_blocked(verdict, "[[example]]")
+                            self.assertEqual(verdict.warnings, [])
+                        else:
+                            self.assertEqual(verdict.blocked, [])
+                            self.assertEqual(len(verdict.warnings), 1)
+                            warning = verdict.warnings[0]
+                            self.assertIn("OAH_WIKI_NEW_BROKEN_LINKS" if certain else
+                                          "OAH_WIKI_UNCERTAIN_LINK", warning)
+                            self.assertIn("[[example]]", warning)
+                            self.assertIn("fix", warning)
 
     def test_certain_code_after_common_constructs_never_warns_or_blocks(self):
         cases = ["- [x] done\n\n```md\n[[example]]\n```\n",

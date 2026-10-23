@@ -55,6 +55,27 @@ class LintCase(unittest.TestCase):
 
 
 class LintTest(LintCase):
+    def test_plain_paragraph_rule_counts_only_certain_broken_links(self):
+        cases = [("plain [[example]]\n", True),
+                 (">     [[example]]\n", False), ("> >     [[example]]\n", False),
+                 ("> - item\n>       [[example]]\n", False), ("- >     [[example]]\n", False),
+                 ("[[example]] <span>description</span>\n", False),
+                 ("[[example]] `code`\n", False), ("`code` [[example]]\n", False),
+                 ("- item\n  [[example]]\n", False), ("\t[[example]]\n", False),
+                 ("```\n[[example]]\n", False),
+                 ("  ~~~\ncode\n  ~~~\n\n[[example]]\n", False)]
+        for eol in ("\n", "\r\n"):
+            for text, certain in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.write("index.md", ("- [[wiki-guide]]\n\n" + text).replace("\n", eol))
+                    report = self.wiki(new_broken_links="block").lint(now=NOW)
+                    self.assertEqual(len(report.problems), int(certain), report.problems)
+                    self.assertEqual(len(report.warnings), int(not certain), report.warnings)
+                    problem = (report.problems if certain else report.warnings)[0]
+                    self.assertEqual(problem.kind, "broken_link" if certain else "uncertain_link")
+                    self.assertIn("[[example]]", problem.detail)
+                    self.assertEqual(report.counts()["broken_links"], int(certain))
+
     def test_code_after_common_constructs_is_not_a_lint_candidate(self):
         cases = ["- [x] done\n\n```md\n[[example]]\n```\n",
                  "- [ ] pending\n\n```md\n[[example]]\n```\n",

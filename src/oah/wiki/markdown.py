@@ -230,19 +230,19 @@ def _blank_code(text: str) -> str:
     return "".join(char if char in "\r\n" else " " for char in text)
 
 
-def _mask_spans(line: str) -> tuple[str, int | None]:
-    """Mask owned spans; return the first position where HTML or ticks make prose uncertain."""
+def _mask_spans(line: str) -> tuple[str, bool]:
+    """Mask owned spans and flag unresolved HTML or ticks for subsequent inline masking."""
     out = list(line)
     position = 0
     while True:
         opening = _TICKS.search(line, position)
         html = line.find("<", position)
         if html >= 0 and (opening is None or html < opening.start()):
-            return "".join(out), html
+            return "".join(out), True
         if opening is None:
             break
         if opening.start() and line[opening.start() - 1] == "\\":
-            return "".join(out), opening.start()
+            return "".join(out), True
         size = len(opening.group())
         closing = opening.end()
         while True:
@@ -251,16 +251,23 @@ def _mask_spans(line: str) -> tuple[str, int | None]:
                 break
             closing = candidate.end()
         if candidate is None:
-            return "".join(out), opening.start()
+            return "".join(out), True
         for index in range(opening.start(), candidate.end()):
             if out[index] != "\n":
                 out[index] = " "
         position = candidate.end()
-    return "".join(out), None
+    return "".join(out), False
 
 
-def _masked_code(text: str) -> tuple[str, list[int]]:
-    """The code mask and each line's certainly-prose prefix, for the candidates left visible."""
+def _plain_paragraph(line: str) -> bool:
+    """Certainty is line-wide; any indentation may be a list continuation."""
+    return (bool(line) and not line.startswith((" ", "\t"))
+            and not any(char in line for char in "<`\t")
+            and not (_CONTAINER.match(line) or _HEADING.match(line) or _REFERENCE_START.match(line)))
+
+
+def _masked_code(text: str) -> tuple[str, list[bool]]:
+    """The code mask and one prose-certainty flag per line, for the candidates left visible."""
     lines = text.split("\n")
     fenced, inline, possible_code = _fenced_lines(lines)
     out = []
@@ -270,20 +277,17 @@ def _masked_code(text: str) -> tuple[str, list[int]]:
         blank = not strip_eol(line).strip(" \t")
         if blank:
             uncertain = False
-        prefix = 0 if uncertain or possible_code & (1 << number) else len(line)
+        certain = not (uncertain or possible_code & (1 << number)) and _plain_paragraph(line)
         if fenced & (1 << number):
             out.append(_blank_code(line))
         elif blank:
             out.append(line)
         else:
-            masked, uncertain_at = _mask_spans(line)
+            masked, unresolved = _mask_spans(line)
             out.append(masked if inline[number] and not uncertain else line)
-            if not inline[number] and masked != line:
-                prefix = 0
-            if uncertain_at is not None:
-                prefix = min(prefix, uncertain_at)
+            if unresolved:
                 uncertain = True
-        prose.append(prefix)
+        prose.append(certain)
     return "\n".join(out), prose
 
 
@@ -314,5 +318,5 @@ def wikilinks(text: str) -> list[Link]:
             target = target.split("#", 1)[0].strip()
             if target:
                 links.append(Link(number, target, match.group(0), bool(match.group(1)),
-                                  match.end() <= prose[number - 1]))
+                                  prose[number - 1]))
     return links

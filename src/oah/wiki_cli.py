@@ -40,8 +40,10 @@ def register(commands: argparse._SubParsersAction) -> None:
                           description="Links are ignored only in certainly closed top-level fences at column 0 "
                           "or unambiguous code spans that open and close on the same line. Indented code, "
                           "multiline spans and fences in a list or blockquote may leave candidates, as may "
-                          "uncertain HTML/front matter or escaped backticks. Uncertain candidates warn and "
-                          "never block. Inspect each candidate before editing notes.")
+                          "uncertain HTML/front matter or escaped backticks. Only plain paragraph lines "
+                          "without indentation, container prefixes, HTML/autolinks or backticks can have "
+                          "blocking links. Every candidate on any other line warns and never blocks, even "
+                          "prose before HTML or beside a code span. Inspect each candidate before editing notes.")
     lint.add_argument("--index", action="store_true",
                       help="check index.md for banners, over-long lines and unindexed notes")
     lint.add_argument("--json", action="store_true")

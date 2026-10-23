@@ -59,8 +59,8 @@ class MarkdownTest(unittest.TestCase):
                                      [("real", 1)])
 
     def test_link_candidates_carry_code_or_prose_certainty(self):
-        cases = [("plain [[real]]\n", True), ("`<span> code` [[real]]\n", True),
-                 ("- [x] [[real]]\n", True), ("```\ncode\n  ```\n[[real]]\n", True),
+        cases = [("plain [[real]]\n", True), ("`<span> code` [[real]]\n", False),
+                 ("- [x] [[real]]\n", False), ("```\ncode\n  ```\n[[real]]\n", True),
                  ("```\n[[real]]\n", False),
                  ("`open\n[[real]]\nclose`\n", False), ("    [[real]]\n", False),
                  ("- ```\n  [[real]]\n  ```\n", False),
@@ -72,6 +72,28 @@ class MarkdownTest(unittest.TestCase):
                     self.assertEqual([(link.target, link.certain)
                                       for link in markdown.wikilinks(text.replace("\n", eol))],
                                      [("real", certain)])
+
+    def test_only_plain_paragraph_lines_are_certain(self):
+        cases = ["[[example]] `code`\n", "`code` [[example]]\n", "[[example]] <span>text</span>\n",
+                 ">     [[example]]\n", "> >     [[example]]\n", "> - item\n>       [[example]]\n",
+                 "- >     [[example]]\n", "- item\n  [[example]]\n", "\t[[example]]\n",
+                 "1. [[example]]\n", "# [[example]]\n", "[ref]: [[example]]\n",
+                 "  ~~~\ncode\n  ~~~\n\n[[example]]\n",
+                 "---\ntitle: [[example]]\n---\n"]
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.assertEqual([(link.target, link.certain)
+                                      for link in markdown.wikilinks(text.replace("\n", eol))],
+                                     [("example", False)])
+            for indent in (" ", "  ", "   ", "    "):
+                with self.subTest(eol=eol, indent=indent):
+                    links = markdown.wikilinks(indent + "[[example]]" + eol)
+                    self.assertEqual([(link.target, link.certain) for link in links], [("example", False)])
+            with self.subTest(eol=eol, text="plain paragraph"):
+                self.assertEqual([(link.target, link.certain)
+                                  for link in markdown.wikilinks("plain [[example]]" + eol)],
+                                 [("example", True)])
 
     def test_mixed_indentation_fences_leave_following_link_visible(self):
         for eol in ("\n", "\r\n"):
@@ -474,6 +496,7 @@ class WikiCliTest(unittest.TestCase):
         self.assertIn("column 0", help_text)
         self.assertIn("same line", help_text)
         self.assertIn("list or blockquote", help_text)
+        self.assertIn("plain paragraph", help_text)
         self.assertIn("candidates", help_text)
         self.assertIn("Inspect", help_text)
 
@@ -496,6 +519,37 @@ class WikiCliTest(unittest.TestCase):
         code, out, err = run_cli(repo, "wiki", "lint", state=self.state)
         self.assertEqual(code, 1, out + err)
         self.assertIn("broken_link: [[certain]]", out)
+
+    def test_plain_paragraph_rule_in_text_and_json(self):
+        repo = scaffold(self)
+        path = repo / "docs" / "wiki" / "index.md"
+        cases = [("plain [[example]]\n", True),
+                 (">     [[example]]\n", False), ("> >     [[example]]\n", False),
+                 ("> - item\n>       [[example]]\n", False), ("- >     [[example]]\n", False),
+                 ("[[example]] <span>description</span>\n", False),
+                 ("[[example]] `code`\n", False), ("`code` [[example]]\n", False),
+                 ("- item\n  [[example]]\n", False), ("\t[[example]]\n", False),
+                 ("```\n[[example]]\n", False),
+                 ("  ~~~\ncode\n  ~~~\n\n[[example]]\n", False)]
+        for eol in ("\n", "\r\n"):
+            for text, certain in cases:
+                with self.subTest(eol=eol, text=text):
+                    data = ("- [[wiki-guide]]\n\n" + text).replace("\n", eol).encode("utf-8")
+                    path.write_bytes(data)
+                    code, out, err = run_cli(repo, "wiki", "lint", state=self.state)
+                    self.assertEqual(code, int(certain), out + err)
+                    self.assertIn("[[example]]", out)
+                    self.assertIn("broken_link:" if certain else "warning: uncertain_link:", out)
+                    self.assertIn("fix" if certain else "inspect", out.lower())
+                    code, out, err = run_cli(repo, "wiki", "lint", "--json", state=self.state)
+                    self.assertEqual(code, int(certain), out + err)
+                    report = json.loads(out)
+                    self.assertEqual(len(report["problems"]), int(certain))
+                    self.assertEqual(len(report["warnings"]), int(not certain))
+                    problem = (report["problems"] if certain else report["warnings"])[0]
+                    self.assertEqual(problem["kind"], "broken_link" if certain else "uncertain_link")
+                    self.assertIn("[[example]]", problem["detail"])
+                    self.assertEqual(path.read_bytes(), data)
 
     def test_cli_reads_wiki_config(self):
         repo = scaffold(self)
