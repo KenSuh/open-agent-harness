@@ -407,16 +407,22 @@ Status: draft            # becomes "accepted" when you approve it
     (`OAH_INTENT_PROCESS_STEP`) when a condition reads like one.
   - **Bound in the same start command.**
     - `oah start --packet <PACKET.md>` binds the lease to `{source, id, revision, digest}`.
-    - `oah status` and `oah intent show` report each lease's intent as one of:
-      - `current`;
-      - `stale`: the section changed after binding;
-      - `missing`: the source is gone;
-      - `unbound`.
+    - `oah status` and `oah intent show` use the first matching predicate below:
+      - `unbound`: the lease has no intent binding;
+      - `missing`: a binding exists, but its source does not exist;
+      - `current`: the source is readable and contains exactly one well-formed `OAH_INTENT`
+        marker pair and section, with `Status: accepted`, the bound ID and revision, and the
+        bound digest using the normalization above;
+      - `stale`: a binding exists and its source exists, but any `current` check fails. This includes
+        unreadable content, missing, malformed or duplicate markers, invalid fields, a non-accepted
+        status, or a changed identity or digest. Invalid content can never be `current`.
     - `oah call`, `oah review` and `oah fix` refuse to dispatch for a task whose intent is not
       `current` (`OAH_INTENT_NOT_CURRENT`).
   - **Returns.** Every return, from the lead, a worker or a subagent, carries `INTENT <id>@r<n> <digest>`
     and one `AC<n>: met|unmet|deferred — <evidence>` line per criterion. `oah finish` and `oah review`
-    check those lines structurally and report missing or invented ACs.
+    check those lines structurally against the binding: exactly one matching `INTENT` line and one
+    valid status/evidence line per bound AC. Missing, malformed, mismatched or duplicate lines and
+    invented ACs refuse with `OAH_INTENT_RETURN_INVALID`.
   - **One shared footer.** A single canonical intent footer states these rules.
     - `oah call`, `oah review` and `oah fix` append it to every worker brief.
     - The tier agent files carry it inside their managed block, replaced on every sync (A5).
@@ -573,16 +579,55 @@ After the review:
       - It ignores links inside code spans and code blocks.
       - It counts archive indexes as index sources.
       - It judges staleness by the note's last commit date (`git log -1`), not by file mtime.
-    - **`oah wiki lint --index`** reports banners, over-long lines and truly unindexed notes. It writes
-      the candidate lists outside the wiki, under the state folder, so the wiki stays clean.
+    - **`oah wiki lint --index`** reports banners, over-long lines and truly unindexed notes in
+      `index.md`. Outside fenced code, a banner is a trimmed line matching `^#{1,6} +.*$` or
+      `^(?:[-=*_] *){3,}$`; an over-long line exceeds `[wiki] index_line_limit` Unicode code points
+      (default 120, excluding CR/LF). Unindexed notes use the normal lint's index-source rules.
+      It writes candidate lists outside the wiki, under the state folder.
     - **`oah wiki rollover`** moves the oldest whole entries of `log.md` into the next numbered
-      `log_archive_NN.md`. It starts when the log passes about 500 KiB and stops when it is down to
-      about 400 KiB.
-      - The entry stream across the archives and the log stays byte-identical.
-      - The run refuses when `log.md` changes during it.
-      - Every write is atomic.
-      - The archive index table in `log.md` is generated.
-    - **`oah wiki hygiene`** prints one line of counts, with the delta since its last run.
+      `log_archive_NN.md`.
+      - Defaults are exactly 512,000 bytes to trigger (strictly greater) and 409,600 bytes as the
+        target maximum for the retained entry bytes. The trigger counts the whole file, including
+        metadata. Headers and the generated archive index are excluded from the target and entry
+        stream; a metadata-only excess with entry bytes already at target is a no-op.
+      - Entries begin at unindented `## YYYY-MM-DD <title>` lines outside fenced code, below the
+        single `<!-- OAH:LOG_INSERT_BELOW -->` marker in each log or archive. Headers and the
+        generated table between `<!-- OAH:ARCHIVE_INDEX:BEGIN -->` and
+        `<!-- OAH:ARCHIVE_INDEX:END -->` stay above that marker. Each entry includes every byte up
+        to the next entry or EOF, including blank lines. `wiki log` emits this format. Nonempty
+        content between the marker and first entry, invalid dates or ambiguous boundaries refuse
+        with `OAH_WIKI_LOG_INVALID`; blank prefix bytes there remain with their file.
+      - Entries stay newest first within each file. Move the smallest oldest suffix that leaves
+        retained entry bytes at or below target, keeping at least the newest entry. A newest entry
+        larger than target stays whole and is reported as oversized; an oversized older entry moves
+        whole. If no entry can move, report oversized without creating an archive; otherwise one
+        run creates one archive, even when it exceeds target.
+      - Archive numbers start at 01 and increase by one above the highest existing number, with at
+        least two digits and no reuse. The preservation stream concatenates entry bytes from
+        `log.md`, then archives in descending numeric order, newest first within each. It must be
+        byte-identical before and after rollover, with no newline normalization. Generated archive
+        headers and the marked archive-index table are metadata, excluded from that stream.
+      - All wiki commands, including rollover and recovery, hold one exclusive wiki lock. Under it,
+        snapshot the log and archive set, stage the archive and replacement log, and durably write
+        a state-folder journal containing paths, original and replacement bytes/digests, and phase.
+        Revalidate the source bytes and archive set immediately before publication; a difference
+        refuses with `OAH_WIKI_CONCURRENT_EDIT` before publishing either file.
+      - Publish the archive first without replacing an existing path, then atomically replace the
+        log (including its generated archive index). Flush files and directories at each step;
+        remove the journal only after both are durable. Individual writes use atomic replacement.
+      - Before any wiki read or write, recover a pending journal under the lock: an unchanged original
+        log with an absent or matching new archive is completed forward; matching replacement log
+        and archive is already complete. Recovery is idempotent. Any other bytes refuse with
+        `OAH_WIKI_RECOVERY_CONFLICT`, preserve all files and journal, and require reconciliation;
+        they are never overwritten. Editors outside the lock protocol must be quiescent during
+        publication; edits detected before publication or during recovery are refused as above.
+    - **`oah wiki hygiene`** prints one line of `count(delta)` values for `broken_links`, `unindexed`,
+      `missing_sources`, `missing_frontmatter`, `orphans`, `duplicate_titles`, `stale`, `banners` and
+      `overlong_lines`, using the normal and index lint definitions. After a successful scan it
+      atomically stores counts and effective lint configuration in the state folder. The first run,
+      or a configuration change, prints `delta=n/a` for every counter and establishes a baseline;
+      otherwise each signed delta is the current count minus the previous successful run's count.
+      A failed scan leaves the baseline unchanged.
     - **An opt-in commit check, `oah hook pre-commit`,** blocks a commit that:
       - shortens `log.md` without adding the archive files;
       - edits or deletes an existing archive;
@@ -675,9 +720,9 @@ leaves a backup.
 | Engines | `recommend`, `call` |
 | Gates | `gates new/status/check/lint`, `check exists/contains/absent/json` |
 | Review | `review`, `fix`, `review summary` |
-| Knowledge | `wiki new/log/lint`, `graph …`, `impact` |
+| Knowledge | `wiki new/log/lint/rollover/hygiene` (`lint --index` included), `graph …`, `impact` |
 | Agent files | `rules sync/check`, `tiers sync/check` |
-| Hooks | `hooks install/uninstall/status`, `hook stop` |
+| Hooks | `hooks install/uninstall/status`, `hook stop/pre-commit` |
 
 `oah doctor` checks git, Python, Node (only when gates are used), uv, claude, codex (`codex login status`)
 and the optional tools. It prints the official install command for this OS for each missing one, and
@@ -1051,16 +1096,18 @@ whose checklists carry it.
 - [ ] The packet template says what "no network" forbids and what it does not. (A2)
 - [ ] The Return section carries `rerank=used|unused(<reason>)` and the DB-impact line. (A2, A3)
 - [ ] `oah packet new` scaffolds a draft intent. `oah start --packet` binds `{source, id, revision, digest}` in the same command and refuses a draft with `OAH_INTENT_NOT_ACCEPTED`. The lease record gains an optional `intent` field, so the schema stays at version 1. (A7)
-- [ ] `oah status` and `oah intent show` report `current`, `stale`, `missing` or `unbound` for each lease. (A7)
+- [ ] `oah status` and `oah intent show` apply the ordered predicates in 5.6. Tests cover absent bindings and sources, accepted matching identity/digest, changed status/identity/digest, unreadable sources and missing, malformed or duplicate markers; invalid content is never `current`. (A7)
 - [ ] A changed goal raises the `Revision` of the same ID. A different `Intent-ID` for the same task is refused with `OAH_INTENT_ID_CHANGED`. (A7)
 - [ ] `oah packet check` warns with `OAH_INTENT_PROCESS_STEP` when a success condition reads like a process step. (A7)
-- [ ] `oah finish` checks the return's `INTENT` and `AC<n>` lines structurally, and reports missing or invented ACs. (A7)
+- [ ] `oah finish` checks the return's `INTENT` and `AC<n>` lines structurally against the binding as in 5.6; invalid returns refuse with `OAH_INTENT_RETURN_INVALID`. (A7)
 
 **P6**
 - [ ] A review round with lower header configuration or normalized inference effort fails with `OAH_EFFORT_DOWNGRADED`; any other header mismatch fails with `OAH_EFFORT_MISMATCH`. Failed rounds do not count; unreadable headers and unknown normalization never count as effort-verified reviews. (A1)
 - [ ] For DB changes, the review prompt requires the DB-impact query and graph identity. The reviewer checks that they are present. (A3)
 - [ ] Reviewers run as dispatched workers. (A6)
 - [ ] Review and correction briefs carry the same intent section byte for byte, with round instructions outside it, plus the shared footer. Receipts record the digest. (A7)
+- [ ] `oah review` and `oah fix` refuse before dispatch with `OAH_INTENT_NOT_CURRENT` for every non-current state. Tests exercise `unbound`, `missing` and `stale`, including invalid source content, for both commands, and allow `current`. (A7)
+- [ ] `oah review` structurally checks the return's `INTENT` identity/revision/digest against the binding and requires exactly one valid status/evidence line for each bound AC. Tests reject missing, malformed, duplicate or mismatched `INTENT` lines and missing, malformed, duplicate or invented AC lines with `OAH_INTENT_RETURN_INVALID`, and accept a complete return. `oah finish` uses the same checks. (A7)
 
 **P7**
 - [ ] `oah impact` always prints `rerank=...`. The re-ranker plugin interface is off only when named or when no key exists. (A2)
@@ -1070,11 +1117,12 @@ whose checklists carry it.
 - [ ] The rules block tells dispatched workers to skip session entry. (A6)
 - [ ] The tier agent files carry the shared intent footer inside their managed block, replaced on every sync. (A5, A7)
 - [ ] `oah wiki lint` counts only real problems. It resolves out-of-wiki link roots, ignores links in code spans and blocks, counts archive indexes as index sources, and judges staleness by last commit date. (A8a)
-- [ ] `oah wiki rollover` triggers at about 500 KiB and targets about 400 KiB. It moves whole entries only, keeps the entry stream byte-identical, refuses on a concurrent edit, writes atomically and generates the archive index. (A8b)
+- [ ] `oah wiki rollover` implements the exact thresholds, whole-entry parsing, oversized-entry rule, archive numbering and metadata-free concatenation order in 5.10. Tests cover threshold boundaries, invalid boundaries, fenced headings, multiple archives and oversized entries, comparing preservation streams byte for byte. (A8b)
+- [ ] Rollover serializes wiki access, journals and flushes staged writes, validates sources before archive-first publication, and recovers before wiki access as in 5.10. Failure injection at every journal/publication step and repeated recovery prove no lost or duplicated entries; concurrent-edit tests prove pre-publication refusal and recovery-conflict preservation. (A8b)
 - [ ] `oah hook pre-commit` is opt-in. It blocks missing archives, archive edits, raw-source edits and non-UTF-8 or surrogate bytes. New broken links are warned first, then blocked. (A8c)
 - [ ] `oah init` git-ignores editor UI state. (A8d)
-- [ ] `oah wiki lint --index` reports banners, over-long lines and unindexed notes, and writes its candidates outside the wiki. (A8e)
-- [ ] `oah wiki hygiene` prints one line with the delta since its last run. (A8f)
+- [ ] `oah wiki lint --index` uses the banner patterns and configurable 120-code-point line limit in 5.10, resolves unindexed notes using normal lint rules, and writes candidates outside the wiki. Tests cover pattern matches, fenced-code exclusions and line-limit boundaries. (A8e)
+- [ ] `oah wiki hygiene` prints the nine named counters in 5.10 and persists counts/configuration atomically. Tests cover first-run and changed-configuration `delta=n/a`, signed subsequent deltas, and failed scans preserving the baseline. (A8f)
 - [ ] No wiki command deletes, merges or moves notes on its own; they produce candidates only. (A8)
 
 **Later: session-start hook**
