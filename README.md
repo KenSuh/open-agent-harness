@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository" width="100%">
+  <img src="docs/assets/banner.svg" alt="open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository, with TypeSafe Jev as the judge" width="100%">
 </p>
 
 <p align="center">
@@ -12,14 +12,25 @@
 # open-agent-harness (`oah`)
 
 `oah` is a small command-line tool that makes **Claude Code** and **Codex CLI** work as one disciplined
-team on your own repository. It is written for people who are starting to program with AI.
+team on your own repository, with **TypeSafe Jev** as the judge. It is written for people who are starting
+to program with AI.
+
+| Role | Tool | What it does |
+|---|---|---|
+| Implements | **Claude Code** | The first implementation of every task. |
+| Reviews and corrects | **Codex CLI** | Review, correction and re-review, until the review converges. |
+| Judges | **TypeSafe Jev** | Ranks the closed list of candidates that fixed rules produce, such as skills or impact results. The engine checks the evidence before it acts. |
+
+Jev is recommended, not required. Guided `oah init` will ask you once before anything is sent to TypeSafe,
+and without Jev the fixed rules decide alone.
 
 Two AI coding sessions on one repository will happily edit the same files. "Done" means whatever the
-agent says, and a review has no rule for when it is finished and no proof. `oah` gives both engines one rulebook:
+agent says, and a review has no rule for when it is finished and no proof. `oah` gives the engines and the
+judge one rulebook:
 
 - **Claude implements first. Codex reviews, corrects and re-reviews** until the review converges.
-- **The task's difficulty picks the model, the effort and the skills.** Fixed rules decide first. An AI
-  judge is optional, and every result says whether it was used.
+- **The task's difficulty picks the model, the effort and the skills.** Fixed rules decide first, and Jev
+  ranks the candidates they found. Every result says whether Jev was used.
 - **An impact map** tells you what a change affects and which checks to run again.
 - **A project wiki** remembers why things were done.
 - **"Done" is a ledger of evidence**, and work lands only after the review converges and CI is green.
@@ -69,6 +80,10 @@ flowchart LR
         codex["Codex CLI<br/>review and correction"]
     end
 
+    subgraph judge["AI judge you enable, recommended"]
+        jev["TypeSafe Jev<br/>ranks closed candidates"]
+    end
+
     subgraph core["oah"]
         lease["Leases and preflight"]
         intent["Packets and intent"]
@@ -88,6 +103,7 @@ flowchart LR
     intent --> lease
     lease --> route
     route -->|"brief, tier, skills"| claude
+    route -.->|"candidates to rank: planned wiring, P4b"| jev
     claude --> gates
     gates --> rloop
     rloop -->|"snapshot, receipt"| codex
@@ -101,7 +117,7 @@ flowchart LR
     classDef review fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
     classDef progress fill:#fff1c2,stroke:#9a6700,color:#3d2a00
     classDef planned fill:#eef1f4,stroke:#6e7781,color:#24292f,stroke-dasharray: 5 5
-    class you,claude,codex,remote ext
+    class you,claude,codex,jev,remote ext
     class lease,intent avail
     class route,gates,impact,hooks review
     class wiki progress
@@ -117,7 +133,8 @@ Green is available, blue is in review, amber is in progress, grey dashed is plan
 |---|---|---|
 | **Engines by stage** | Claude does the initial implementation. Codex reviews, corrects and re-reviews. `oah call <engine> --stage <s>` refuses the wrong engine for a stage (`OAH_STAGE_ENGINE_MISMATCH`). | in review (#17) |
 | **Difficulty picks model and effort** | Four axes (kind, intensity, reasoning, risk) are scored by fixed rules into a tier: low, medium, high or max. Each tier maps to a model and an effort that the CLI really supports. An effort that cannot be verified is recorded as `unverified`, never assumed. | in review (#17) |
-| **Skills chosen for the task** | Skills are selected by kind, stage, risk and the file kinds in Scope, each with a reason. A separate consent- and key-gated re-ranker has a TypeSafe Jev provider and reports `used` or `unused(<reason>)`; connecting it to skill selection and briefs is planned (P4b). | selector and separate re-ranker: in review (#18) · integration: planned |
+| **Skills chosen for the task** | Skills are selected by kind, stage, risk and the file kinds in Scope, each with a reason. | in review (#18) |
+| **A judge for closed choices** | TypeSafe Jev ranks the candidates that fixed rules produce: skills first, impact results later. It never adds or removes a candidate. It runs only with your consent and a key, and guided `oah init` asks once. Every result says `rerank=used` or `rerank=unused(<reason>)`, so you can see when the fixed rules decided alone. | provider: in review (#18) · skills and briefs: planned (P4b) · impact results: planned · `oah init` question: planned (P7b) |
 | **Impact map** | "If I change this file, what must I re-check?" The result order is pin > exec > link > mention, but exact gate discovery is planned: #13 supplies the interface, to be connected to P5's ledger parser after #13 and #15 land. A SQL plugin maps tables, routines and GRANTs. A stale map is refreshed or refused, never used silently. | map and interface: in review (#13) · gate bindings: planned |
 | **Project wiki** | An Obsidian-compatible `docs/wiki/` with an index and a newest-first log, kept current by `oah wiki maintain` before every commit and review. | in progress (P7a) |
 | **Evidence gates** | "Done" is an [unlazy](https://github.com/Leonxlnx/unlazy) ledger of checks with evidence. `oah finish` refuses unmet gates, and an opt-in Stop hook keeps a Claude Code session from ending with them. | in review (#15) |
@@ -247,9 +264,11 @@ flowchart TD
 - **Skills are chosen by rules, too.** The selector reads the installed Claude and Codex skill folders and
   the kit cache, and picks by kind, stage, risk and the file kinds in Scope, with a reason for each
   skill. An empty Scope warns instead of silently selecting nothing. (in review, #18; A9)
-- **Jev is optional and off by default.** #18 builds a separate re-ranker with the TypeSafe Jev provider,
-  gated on your consent AND a key; a key alone never enables it. Its results report `used` or
-  `unused(<reason>)`. The deterministic skill selector does not call it or report those statuses.
+- **Jev is the recommended judge, and it runs only with your consent.** #18 builds a separate re-ranker
+  with the TypeSafe Jev provider, gated on your consent AND a key; a key alone never enables it. Guided
+  `oah init` asks once, says what it may cost and which candidate and evidence data it sends, and records
+  your choice (planned, P7b). You can also enable it in config. Its results report `used` or
+  `unused(<reason>)`. The deterministic skill selector does not call it or report those statuses yet.
   Connecting it to skill selection and briefs is planned (P4b); impact ranking integration is also
   planned. Selection telemetry stays in a local file. (in review, #18; A9, A10)
 
@@ -774,11 +793,13 @@ checks go in `[preflight].checks` in `.oah/config.toml`, as argv lists that must
 | Runtime | **Python 3.11+**. No third-party Python packages at runtime. | everything |
 | Version control | **git** | everything |
 | Engines | **Claude Code** and **Codex CLI**, installed and signed in by you | later phases (routing, `oah call`, review loop) |
+| Judge | **TypeSafe Jev**, recommended: a TypeSafe account and API key. `oah` reads the key only at runtime, from the environment or the OS keychain, and never writes it to the repository. | ranking skills and impact results (the provider is in review, #18). Without it, `oah` uses the fixed rules and records `rerank=unused(<reason>)`. |
 | Gates | **unlazy**, which needs **Node.js** | later phases (gates and the Stop hook) |
 | Optional | **uv** (recommended installer), **graphify** (knowledge graph), **gh** (pull requests from the terminal), **gitleaks** (secret scan before push) | convenience |
 
-`oah doctor` already checks all of these. It counts Claude Code, Codex CLI, Node.js and unlazy as
-required, because the planned workflow needs them.
+`oah doctor` already checks all of these except Jev. It counts Claude Code, Codex CLI, Node.js and
+unlazy as required, because the planned workflow needs them. Jev's consent and key status appear in every
+re-ranker result instead.
 
 ## Roadmap
 
@@ -926,14 +947,23 @@ are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 ### oah는 무엇인가
 
 `oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 규율 있게 한 팀으로 일하도록 돕는 작은 명령줄
-도구다. AI로 프로그래밍을 막 시작한 사람을 가장 먼저 염두에 두고 만든다.
+도구다. 판정은 **TypeSafe Jev**가 맡는다. AI로 프로그래밍을 막 시작한 사람을 가장 먼저 염두에 두고 만든다.
+
+| 역할 | 도구 | 하는 일 |
+|---|---|---|
+| 구현 | **Claude Code** | 모든 작업의 1차 구현을 맡는다. |
+| 리뷰와 수정 | **Codex CLI** | 리뷰가 수렴할 때까지 리뷰하고 고친 뒤 다시 리뷰한다. |
+| 판정 | **TypeSafe Jev** | 정해진 규칙이 만든 닫힌 후보 목록(스킬, 영향 결과)의 순위를 매긴다. 엔진은 근거를 확인한 뒤에 움직인다. |
+
+Jev는 필수가 아니라 권장 구성 요소다. 안내형 `oah init`이 TypeSafe로 무엇이든 보내기 전에 한 번 묻는다.
+Jev가 없으면 정해진 규칙만으로 판단한다.
 
 AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치기 쉽다. "끝났다"는 에이전트의 말뿐이고
-리뷰는 언제 끝나는지 정한 규칙도 증거도 없다. `oah`는 두 엔진에 같은 규칙을 적용한다.
+리뷰는 언제 끝나는지 정한 규칙도 증거도 없다. `oah`는 엔진과 판정기에 같은 규칙을 적용한다.
 
 - **Claude가 먼저 구현하고 Codex가 리뷰하고 고친 뒤 다시 리뷰한다.** 리뷰가 수렴할 때까지 이어 간다.
-- **작업 난이도에 따라 모델과 추론 강도, 스킬을 고른다.** 먼저 정해진 규칙으로 판단한다. AI 판정은
-  선택 사항이며 결과마다 AI를 썼는지 밝힌다.
+- **작업 난이도에 따라 모델과 추론 강도, 스킬을 고른다.** 먼저 정해진 규칙으로 판단하고 Jev가 그
+  후보의 순위를 매긴다. 결과마다 Jev를 썼는지 밝힌다.
 - **영향 지도**는 변경이 무엇에 닿는지, 어떤 검사를 다시 돌려야 하는지 알려 준다.
 - **프로젝트 위키**는 왜 그렇게 했는지를 기억한다.
 - **"끝났다"는 증거 원장으로 보인다.** 리뷰가 수렴하고 CI가 통과한 뒤에만 작업을 반영한다.
@@ -965,7 +995,8 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
 |---|---|---|
 | 단계별 엔진 | Claude가 1차 구현을 하고 Codex가 리뷰와 수정, 재리뷰를 맡는다. 단계에 맞지 않는 엔진은 `OAH_STAGE_ENGINE_MISMATCH`로 거절한다. | in review (#17) |
 | 난이도에 맞춘 모델과 강도 | 종류, 강도, 추론, 위험의 네 축을 정해진 규칙으로 점수 매겨 low, medium, high, max 중 하나로 정한다. 모델과 추론 강도는 CLI가 실제로 지원하는 값만 쓴다. 확인할 수 없는 강도는 `unverified`로 기록하고 짐작하지 않는다. | in review (#17) |
-| 작업에 맞춘 스킬 | 작업 종류, 단계, 위험, Scope의 파일 종류로 스킬을 고르고 스킬마다 이유를 붙인다. 별도의 재정렬기는 사용자 동의와 키가 있어야 돌며 TypeSafe Jev 제공자와 `used`·`unused(<이유>)` 상태를 갖춘다. 스킬 선택과 지시문에 연결하는 일은 planned (P4b)다. | 선택기와 별도 재정렬기는 in review (#18) · 연결은 planned |
+| 작업에 맞춘 스킬 | 작업 종류, 단계, 위험, Scope의 파일 종류로 스킬을 고르고 스킬마다 이유를 붙인다. | in review (#18) |
+| 닫힌 선택을 위한 판정기 | TypeSafe Jev가 정해진 규칙이 만든 후보의 순위를 매긴다. 스킬부터 시작하고 영향 결과가 뒤따른다. 후보를 더하거나 빼지는 않는다. 사용자 동의와 키가 있어야 돌며 안내형 `oah init`이 한 번 묻는다. 결과마다 `rerank=used`나 `rerank=unused(<이유>)`가 붙어서 정해진 규칙만으로 판단한 때도 드러난다. | 제공자는 in review (#18) · 스킬과 지시문 연결은 planned (P4b) · 영향 결과는 planned · `oah init` 질문은 planned (P7b) |
 | 영향 지도 | "이 파일을 바꾸면 무엇을 다시 확인해야 하나?"에 답한다. 결과 순서는 pin > exec > link > mention이지만 정확한 게이트 발견은 계획 단계다. #13의 인터페이스를 P5 원장 파서와 연결하는 일은 #13과 #15가 반영된 뒤에 한다. SQL 플러그인이 테이블과 루틴, GRANT를 이어 준다. 낡은 지도는 새로 만들거나 거절하며 몰래 쓰지 않는다. | 지도와 인터페이스는 in review (#13) · 게이트 결속은 planned |
 | 프로젝트 위키 | Obsidian에서 열리는 `docs/wiki/`다. 색인과 최신순 로그가 있다. 커밋과 리뷰 전마다 `oah wiki maintain`이 최신으로 유지한다. | in progress (P7a) |
 | 증거 게이트 | "끝났다"를 [unlazy](https://github.com/Leonxlnx/unlazy) 원장의 증거로 보인다. 게이트가 비어 있으면 `oah finish`가 거절한다. 선택형 Stop 훅은 Claude Code 세션이 그 상태로 끝나지 못하게 한다. | in review (#15) |
@@ -1030,11 +1061,12 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
   `unverified`로 남긴다(in review #17).
 - **스킬은 규칙으로 고른다.** 작업 종류, 단계, 위험, Scope의 파일 종류로 고르고 스킬마다 이유를 붙인다
   (in review #18).
-- **Jev는 선택 사항이고 기본으로 꺼져 있다.** #18은 사용자 동의와 키가 있어야 도는 별도의 재정렬기와
-  TypeSafe Jev 제공자를 만든다. 키만 있다고 켜지지 않으며 재정렬기 결과에는 `used`나 `unused(<이유>)`가 붙는다.
-  결정적 스킬 선택기는 재정렬기를 호출하지 않고 이 상태도 내보내지 않는다. 스킬 선택과 지시문에 연결하는
-  일은 planned (P4b)이고 영향 순위에 연결하는 일도 계획 단계다. 스킬 선택 기록은 로컬 파일에만 남는다
-  (in review #18).
+- **Jev는 권장 판정기이고 사용자가 동의해야 돈다.** #18은 사용자 동의와 키가 있어야 도는 별도의 재정렬기와
+  TypeSafe Jev 제공자를 만든다. 키만 있다고 켜지지 않는다. 안내형 `oah init`이 한 번 묻고, 예상 비용과
+  보내는 후보·근거 데이터를 밝힌 뒤 선택을 기록한다(planned, P7b). 설정에서 직접 켤 수도 있다. 재정렬기
+  결과에는 `used`나 `unused(<이유>)`가 붙는다. 결정적 스킬 선택기는 아직 재정렬기를 호출하지 않고 이 상태도
+  내보내지 않는다. 스킬 선택과 지시문에 연결하는 일은 planned (P4b)이고 영향 순위에 연결하는 일도 계획
+  단계다. 스킬 선택 기록은 로컬 파일에만 남는다(in review #18).
 
 ### 영향 지도
 
@@ -1118,6 +1150,7 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
 | 런타임 | Python 3.11 이상. 실행에 외부 파이썬 패키지가 필요 없다. |
 | 버전 관리 | git |
 | 엔진 | Claude Code, Codex CLI. 이후 단계(라우팅, `oah call`, 리뷰 루프)에 필요하다. |
+| 판정기 | TypeSafe Jev(권장). TypeSafe 계정과 API 키가 필요하다. `oah`는 키를 실행할 때만 환경 변수나 OS 키체인에서 읽고 저장소에는 쓰지 않는다. Jev가 없으면 정해진 규칙으로 판단하고 `rerank=unused(<이유>)`를 남긴다. 제공자는 in review (#18)다. |
 | 게이트 | unlazy와 Node.js. 이후 단계(게이트, Stop 훅)에 필요하다. |
 | 선택 | uv, graphify, gh, gitleaks |
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
   <title id="title">open-agent-harness</title>
-  <desc id="desc">Banner: Claude Code implements, Codex CLI reviews and corrects in bounded rounds, then the work lands.</desc>
+  <desc id="desc">Banner: Claude Code implements, Codex CLI reviews and corrects in bounded rounds, TypeSafe Jev judges by ranking the candidates, then the work lands.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0f172a"/>
@@ -18,6 +18,7 @@
     .node { font-size: 17px; font-weight: 600; fill: #0f172a; }
     .nodehint { font-size: 13px; fill: #334155; }
     .loop { font-size: 13px; fill: #cbd5e1; }
+    .judgehint { font-size: 13px; fill: #3b0764; }
   </style>
 
   <rect width="1200" height="300" rx="18" fill="url(#bg)"/>
@@ -25,12 +26,19 @@
 
   <!-- Title block -->
   <text class="title" x="60" y="118">open-agent-harness</text>
-  <text class="sub" x="62" y="160">Claude Code and Codex CLI as one disciplined team</text>
-  <text class="sub" x="62" y="190">on your own repository.</text>
-  <text class="small" x="62" y="240">oah · Python 3.11+ standard library · macOS and native Windows · MIT</text>
+  <text class="sub" x="62" y="156">Claude Code and Codex CLI as one disciplined team</text>
+  <text class="sub" x="62" y="186">on your own repository,</text>
+  <text class="sub" x="62" y="216">with TypeSafe Jev as the judge.</text>
+  <text class="small" x="62" y="256">oah · Python 3.11+ standard library · macOS and native Windows · MIT</text>
 
   <!-- Workflow sketch -->
   <g transform="translate(655 72)">
+    <!-- The judge ranks the candidates that fixed rules produce, before the engine acts -->
+    <rect x="100" y="-58" width="150" height="44" rx="12" fill="#e9d5ff"/>
+    <text class="node" x="175" y="-39" text-anchor="middle">Jev</text>
+    <text class="judgehint" x="175" y="-22" text-anchor="middle">judges and ranks</text>
+    <line x1="132" y1="-13" x2="96" y2="-3" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+
     <rect x="0" y="0" width="150" height="62" rx="12" fill="#fde68a"/>
     <text class="node" x="75" y="27" text-anchor="middle">Claude</text>
     <text class="nodehint" x="75" y="47" text-anchor="middle">implements</text>
