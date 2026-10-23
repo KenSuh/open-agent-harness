@@ -7,7 +7,10 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
+import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -230,6 +233,96 @@ class SwapTest(unittest.TestCase):
 
 
 class ScheduledTest(UpdateFixture):
+    def test_global_publication_is_serialized_across_repository_processes(self):
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
+                            project_root=self.project, home=self.home)
+        apply_install(plan, catalog=self.catalog, now=NOW)
+        older = commit(self.upstream, {"skills/demo/ref.md": "older candidate\n"})
+        newer = commit(self.upstream, {"skills/demo/ref.md": "newer candidate\n"})
+        other_project = make_git_repo(self)
+        sync = make_tmp_dir(self)
+        # Both real processes prepare from the same installed pin. Pause the first after its
+        # publication identity read; the second may enter publication only after that point.
+        script = '''
+import contextlib, datetime as dt, json, pathlib, sys, time
+import oah.toolkit.update as update
+from oah.toolkit.catalog import load_catalog
+from oah.toolkit.fetch import fetch
+catalog_path, project, home, state, sync, name, candidate = sys.argv[1:]
+project, home, state, sync = map(pathlib.Path, (project, home, state, sync))
+catalog = load_catalog(pathlib.Path(catalog_path))
+destinations = update.installed_destinations(catalog, project_root=project, home=home, level="global")
+publishing = False
+def wait_for(path):
+    deadline = time.monotonic() + 20
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("publication synchronization timed out")
+        time.sleep(.01)
+@contextlib.contextmanager
+def guard():
+    global publishing
+    with update.idle_state(state):
+        (sync / (name + "-ready")).touch()
+        wait_for(sync / (name + "-go"))
+        publishing = True
+        yield
+original = update._identity
+def identity(path):
+    result = original(path)
+    if publishing and path == destinations[0].path:
+        (sync / (name + "-checked")).touch()
+        if name == "newer":
+            wait_for(sync / "release")
+    return result
+update._identity = identity
+def pinned_fetch(repository, ref, scratch, **kwargs):
+    return fetch(repository, candidate, scratch, **kwargs)
+results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
+    settings=update.DEFAULTS, now=dt.datetime.now(dt.timezone.utc), gitleaks=None,
+    fetcher=pinned_fetch, guard=guard)
+print(json.dumps([r.status for r in results]))
+'''
+        processes = []
+        env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+        for name, candidate, project in (("newer", newer, self.project), ("older", older, other_project)):
+            process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(project),
+                                        str(self.home), str(sync / (name + "-state")), str(sync), name, candidate],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            processes.append(process)
+            self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
+
+        def wait_for(name, timeout=20):
+            deadline = time.monotonic() + timeout
+            while not (sync / name).exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            return (sync / name).exists()
+
+        try:
+            self.assertTrue(wait_for("older-ready"))
+            self.assertTrue(wait_for("newer-ready"))
+            (sync / "newer-go").touch()
+            self.assertTrue(wait_for("newer-checked"))
+            (sync / "older-go").touch()
+            # With the shared lock, the second identity read waits until release. Without it,
+            # both candidates pass validation against the same installed pin.
+            if wait_for("older-checked", timeout=1):
+                processes[1].wait(timeout=20)
+        finally:
+            (sync / "release").touch()
+        statuses = []
+        for process in processes:
+            out, err = process.communicate(timeout=25)
+            self.assertEqual(process.returncode, 0, err)
+            statuses += json.loads(out)
+        self.assertCountEqual(statuses, ["advanced", "deferred"])
+        installed = self.home / ".claude" / "skills" / "demo"
+        marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker["commit"], newer)
+        self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
+        locks = list((self.home / ".oah").rglob("*.lock"))
+        self.assertEqual(len(locks), 1, "the destination lock belongs in the user's oah folder")
+
     def test_destination_metadata_changed_before_preparation_is_deferred(self):
         destinations = self.destinations()
         commit(self.upstream, {"skills/demo/ref.md": "new\n"})

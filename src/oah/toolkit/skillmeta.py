@@ -56,16 +56,26 @@ def _scalar(raw: str, where: str) -> object:
         if len(text) < 2 or not text.endswith("'"):
             raise SkillError(f"{where}: unterminated single-quoted value")
         return text[1:-1].replace("''", "'")
-    if " #" in text:
-        text = text.split(" #", 1)[0].rstrip()
+    text = re.split(r"[ \t]+#", text, maxsplit=1)[0].rstrip()
     if text[0] in "[{&*!?%@`|>" or re.search(r":(?:\s|$)", text):
         raise SkillError(f"{where}: unsupported YAML value; use a quoted string or supported block")
-    if text.lower() in ("null", "~"):
+    # YAML 1.2 core schema: only these exact spellings have implicit non-string types.
+    if text in ("null", "Null", "NULL", "~"):
         return None
-    if text.lower() in ("true", "false", "yes", "no", "on", "off"):
-        return text.lower() in ("true", "yes", "on")
-    if re.fullmatch(r"[-+]?[0-9]+(?:\.[0-9]+)?", text):
-        return float(text) if "." in text else int(text)
+    if text in ("true", "True", "TRUE", "false", "False", "FALSE"):
+        return text in ("true", "True", "TRUE")
+    if re.fullmatch(r"[-+]?[0-9]+", text):
+        return int(text)
+    if re.fullmatch(r"0o[0-7]+", text):
+        return int(text[2:], 8)
+    if re.fullmatch(r"0x[0-9a-fA-F]+", text):
+        return int(text[2:], 16)
+    if re.fullmatch(r"[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?", text):
+        return float(text)
+    if re.fullmatch(r"[-+]?\.(?:inf|Inf|INF)", text):
+        return float(text.replace(".", "", 1))
+    if text in (".nan", ".NaN", ".NAN"):
+        return float("nan")
     return text
 
 

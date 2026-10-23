@@ -221,6 +221,24 @@ def no_guard() -> Iterator[None]:
     yield
 
 
+@contextlib.contextmanager
+def _global_locks(destinations: Sequence[Destination]) -> Iterator[None]:
+    """Serialize each user destination across repositories, in a stable lock order."""
+    locks = set()
+    for destination in destinations:
+        if destination.level != "global":
+            continue
+        path = destination.path.absolute()
+        home = path.parents[2].resolve()
+        key = os.path.normcase(str(path.resolve()))
+        digest = hashlib.sha256(os.fsencode(key)).hexdigest()
+        locks.add(home / ".oah" / "toolkit" / "locks" / (digest + ".lock"))
+    with contextlib.ExitStack() as stack:
+        for lock in sorted(locks):
+            stack.enter_context(StateLock(lock, timeout=LOCK_TIMEOUT))
+        yield
+
+
 def _identity(path: pathlib.Path) -> tuple:
     """Bytes, modes and link/directory identity of a preparation input, including absence."""
     if not path.exists() and not path.is_symlink():
@@ -249,26 +267,27 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
     inputs = {path for d in destinations for path in (d.path, d.baseline) if path is not None}
     if catalog_path is not None:
         inputs.add(catalog_path)
-    identities = {path: _identity(path) for path in inputs}
-    by_item: dict[str, list[Destination]] = {}
-    for destination in destinations:
-        if destination.baseline is not None:
-            if destination.kind == "installed":
-                record = marker_of(destination.baseline) or {}
-                identity = (record.get("commit"), record.get("spdx"), record.get("license_sha256"),
-                            tuple(record.get("executables", ())))
-            else:
-                record = read_upstream(destination.baseline)
-                identity = (record.commit, record.spdx, record.license_sha256, record.executables)
-            if identity != (destination.commit, destination.spdx, destination.license_sha256, destination.executables):
-                results.append(UpdateResult(destination.item, "deferred", str(destination.path), destination.commit,
-                                            reasons=["baseline changed before preparation; run the update again"]))
-                continue
-        by_item.setdefault(destination.item, []).append(destination)
-    if results:
-        return [UpdateResult(d.item, "deferred", str(d.path), d.commit,
-                             reasons=["baseline changed before preparation; run the update again"])
-                for d in destinations]
+    with no_guard() if check_only else _global_locks(destinations):
+        identities = {path: _identity(path) for path in inputs}
+        by_item: dict[str, list[Destination]] = {}
+        for destination in destinations:
+            if destination.baseline is not None:
+                if destination.kind == "installed":
+                    record = marker_of(destination.baseline) or {}
+                    identity = (record.get("commit"), record.get("spdx"), record.get("license_sha256"),
+                                tuple(record.get("executables", ())))
+                else:
+                    record = read_upstream(destination.baseline)
+                    identity = (record.commit, record.spdx, record.license_sha256, record.executables)
+                if identity != (destination.commit, destination.spdx, destination.license_sha256, destination.executables):
+                    results.append(UpdateResult(destination.item, "deferred", str(destination.path), destination.commit,
+                                                reasons=["baseline changed before preparation; run the update again"]))
+                    continue
+            by_item.setdefault(destination.item, []).append(destination)
+        if results:
+            return [UpdateResult(d.item, "deferred", str(d.path), d.commit,
+                                 reasons=["baseline changed before preparation; run the update again"])
+                    for d in destinations]
     with tempfile.TemporaryDirectory(prefix="oah-update-") as scratch_text:
         scratch = pathlib.Path(scratch_text)
         for number, (item, group) in enumerate(by_item.items()):
@@ -333,7 +352,7 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
         if check_only:
             return results
         try:
-            with guard():
+            with guard(), _global_locks(destinations):
                 if any(_identity(path) != identity for path, identity in identities.items()):
                     for result in results:
                         if result.status not in ("", "current"):

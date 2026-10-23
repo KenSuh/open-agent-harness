@@ -21,7 +21,7 @@ from oah.paths import git_argv
 from oah.toolkit.catalog import CatalogError, item_skill_dirs, load_catalog, read_upstream, validate_repository
 from oah.toolkit.checks import (blob_id, builtin_privacy_problems, diff_summary, identify_license, privacy_problems,
                                 suspicious, text_digest)
-from oah.toolkit.fetch import GIT_SAFE_CONFIG, StageError, fetch, git_env, stage_item
+from oah.toolkit.fetch import GIT_SAFE_CONFIG, FetchError, StageError, fetch, git_env, stage_item
 from tests.fixtures.toolkit.upstream import (APACHE_TEXT, MIT_TEXT, TODAY, bundled, commit, make_executable,
                                              make_upstream, write_catalog)
 from tests.helpers import make_tmp_dir, write_posix_tool
@@ -86,6 +86,30 @@ class ReadSkillTest(unittest.TestCase):
 
 
 class LoadProblemsTest(unittest.TestCase):
+    def test_required_metadata_uses_yaml_12_core_scalar_types(self):
+        root = make_tmp_dir(self)
+        scalars = ("null", "Null", "NULL", "~", "true", "True", "TRUE", "false", "False", "FALSE",
+                   "0", "+12", "-12", "012", "0o17", "0x10", ".nan", ".NaN", ".NAN",
+                   ".inf", "-.Inf", "+.INF", "1.0e+3", "1e3", "-2E-3", ".5", "1.", "+.5")
+        for value in scalars:
+            for suffix in ("", " # scalar comment", "\t# scalar comment"):
+                with self.subTest(value=value, suffix=suffix):
+                    skill = write_skill(root / "skill", f"name: demo\ndescription: {value}{suffix}\n")
+                    self.assertTrue(load_problems(skill))
+                    with self.assertRaises(SkillError):
+                        read_skill(skill)
+            for quoted in (json.dumps(value), "'" + value + "'"):
+                with self.subTest(quoted=quoted):
+                    skill = write_skill(root / "skill", f"name: demo\ndescription: {quoted}\n")
+                    self.assertEqual(load_problems(skill), [])
+                    self.assertEqual(read_skill(skill).description, value)
+        # YAML 1.1-only bools, timestamps and non-core numbers remain strings in 1.2 core.
+        for value in ("yes", "no", "on", "off", "0b10", "1_000", "1:20", "2026-10-23", "0xGG"):
+            with self.subTest(string=value):
+                skill = write_skill(root / "skill", f"name: demo\ndescription: {value}\n")
+                self.assertEqual(load_problems(skill), [])
+                self.assertEqual(read_skill(skill).description, value)
+
     def test_required_metadata_rejects_yaml_types_and_invalid_names(self):
         root = make_tmp_dir(self)
         for key, value in (("name", "[]"), ("description", "null"), ("description", "{a: b}"),
@@ -156,6 +180,78 @@ class CatalogTest(unittest.TestCase):
 
 
 class FetchStageTest(unittest.TestCase):
+    def test_git_environment_is_allowlisted_and_refuses_proxy_userinfo(self):
+        with mock.patch.dict(os.environ, {"OAH_TEST_SECRET": "private", "LD_PRELOAD": "untrusted",
+                                          "CURL_SSL_BACKEND": "untrusted", "LANG": "C",
+                                          "HTTPS_PROXY": "http://proxy.invalid:8080"}, clear=True):
+            env = git_env()
+        self.assertNotIn("OAH_TEST_SECRET", env)
+        self.assertNotIn("LD_PRELOAD", env)
+        self.assertNotIn("CURL_SSL_BACKEND", env)
+        self.assertEqual(env["LANG"], "C")
+        self.assertEqual(env["HTTPS_PROXY"], "http://proxy.invalid:8080")
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            for authority in ("someone@proxy.invalid", "someone:generated@proxy.invalid", ":generated@proxy.invalid"):
+                value = "http://" + authority
+                with self.subTest(key=key, authority=authority), mock.patch.dict(os.environ, {key: value}, clear=True):
+                    with self.assertRaises(FetchError) as caught:
+                        git_env()
+                    self.assertIn("OAH_", str(caught.exception))
+                    self.assertIn("proxy without embedded credentials", str(caught.exception))
+                    self.assertNotIn(value, str(caught.exception))
+
+    def test_git_process_uses_a_temporary_empty_home(self):
+        import oah.toolkit.fetch as fetch_module
+
+        upstream = make_upstream(self)
+        work = make_tmp_dir(self)
+        homes = []
+        original = fetch_module.run_command
+
+        def run_with_home(*args, **kwargs):
+            env = kwargs["env"]
+            home = pathlib.Path(env["HOME"])
+            self.assertTrue(home.is_dir())
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual({env[key] for key in ("USERPROFILE", "XDG_CONFIG_HOME", "CURL_HOME")}, {str(home)})
+            homes.append(home)
+            return original(*args, **kwargs)
+
+        with mock.patch("oah.toolkit.fetch.run_command", side_effect=run_with_home):
+            tree = fetch(str(upstream), "main", work / "scratch")
+            tree.read(tree.entries("LICENSE")[0][1])
+        self.assertTrue(homes)
+        self.assertTrue(all(not home.exists() for home in homes))
+
+    def test_fetch_refuses_authenticated_proxy_before_sending_credentials(self):
+        seen = []
+
+        class Proxy(http.server.BaseHTTPRequestHandler):
+            def do_CONNECT(self):
+                seen.append(self.headers.get("Proxy-Authorization"))
+                self.send_response(407)
+                self.send_header("Proxy-Authenticate", 'Basic realm="proxy"')
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        try:
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        except PermissionError:
+            self.skipTest("sandbox blocks loopback sockets; proxy refusal is also tested without sockets")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        work = make_tmp_dir(self)
+        proxy = "http://someone:" + os.urandom(12).hex() + f"@127.0.0.1:{server.server_address[1]}"
+        for index, key in enumerate(("HTTPS_PROXY", "http_proxy", "ALL_PROXY")):
+            with self.subTest(key=key), mock.patch.dict(os.environ, {key: proxy, "NO_PROXY": "", "no_proxy": ""}):
+                with self.assertRaises(FetchError) as caught:
+                    fetch("https://example.invalid/repo.git", "main", work / str(index), timeout=5)
+                self.assertIn("proxy without embedded credentials", str(caught.exception))
+        self.assertEqual(seen, [], "an authenticated proxy must never be contacted")
+
     def test_fetch_ignores_global_xdg_templates_filters_and_rewriting(self):
         upstream = make_upstream(self, {"skills/demo/lf.md": b"a\nb\n",
                                        "skills/demo/.gitattributes": "*.md filter=probe\n"})
@@ -244,10 +340,17 @@ class FetchStageTest(unittest.TestCase):
         blob = subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD:skills/demo/ref.md"],
                               capture_output=True, text=True, check=True).stdout.strip()
         license_blob = tree.entries("LICENSE")[0][1]
-        for index, paths in enumerate((("Foo.md", "foo.md"), ("é.md", "e\u0301.md"),
+        devices = ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+                   *(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(10)),
+                   "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³")
+        reserved_paths = [(device + suffix,) for device in devices
+                          for suffix in ("", ".txt", " .txt", "...txt", ".", " ", ".txt. ")]
+        reserved_paths += [("nested/" + device.lower() + " .txt/ref.md",) for device in devices]
+        for index, paths in enumerate([("Foo.md", "foo.md"), ("é.md", "e\u0301.md"),
                                        ("Foo", "foo/a.md"), ("Foo/a.md", "foo/b.md"),
                                        ("CON.txt",), ("a.",), ("a ",), ("a:b",), ("a\\b",),
-                                       (".git/config",), ("upstream.JSON",), (".OAH-SKILL.JSON",))):
+                                       (".git/config",), ("upstream.JSON",), (".OAH-SKILL.JSON",),
+                                       *reserved_paths]):
             with self.subTest(paths=paths):
                 # mktree accepts arbitrary byte paths; nested names use a subtree.
                 def make_tree(names, root=False):
@@ -266,9 +369,14 @@ class FetchStageTest(unittest.TestCase):
                 # Copy objects from the fetched repository: the blob is already available there.
                 bad = dataclasses.replace(tree, commit=make_tree(paths, root=True))
                 entry = bundled(upstream, subpath="", skills=(".",))
-                with self.assertRaises(StageError):
+                with mock.patch("oah.toolkit.fetch._write") as write, self.assertRaises(StageError):
                     stage_item(entry, bad, work / f"item-{index}", fetched=TODAY)
+                write.assert_not_called()
                 self.assertFalse((work / f"item-{index}").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows device names must be refused before filesystem access")
+    def test_windows_stage_rejects_reserved_devices(self):
+        self.test_stage_rejects_portable_path_collisions_and_reserved_names()
 
     def test_stage_verifies_written_bytes_against_manifest(self):
         import oah.toolkit.fetch as fetch_module

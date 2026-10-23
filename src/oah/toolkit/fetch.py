@@ -7,15 +7,18 @@ the upstream's .gitattributes nor the user's autocrlf can change a byte.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
 import pathlib
-import re
 import shutil
 import stat
+import tempfile
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass
+from typing import Iterator
 
 from oah.atomic import write_json_atomic
 from oah.engines.proc import RunResult, run_command
@@ -25,6 +28,8 @@ from oah.toolkit.checks import blob_id, files_under, identify_license, text_dige
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE
 
 FETCH_TIMEOUT = 600.0
+WINDOWS_DEVICES = frozenset({"con", "prn", "aux", "nul", "conin$", "conout$",
+                             *(f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(10))})
 GIT_SAFE_CONFIG = ("-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.autocrlf=false",
                    "-c", "core.hooksPath=" + os.devnull, "-c", "core.attributesFile=" + os.devnull,
                    "-c", "init.templateDir=", "-c", "http.extraHeader=",
@@ -47,18 +52,43 @@ class StageError(Exception):
 
 
 def git_env() -> dict[str, str]:
-    """The caller's environment with every way of prompting for or supplying credentials disabled."""
-    env = {key: value for key, value in os.environ.items()
-           if not key.upper().startswith(("GIT_", "GCM_"))}
+    """Allow only process essentials, locale and proxies without embedded credentials."""
+    allowed = {"PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MESSAGES",
+               "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE",
+               "COMSPEC", "PATHEXT", "TEMP", "TMP"}
+    proxies = {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+    env = {}
+    for key, value in os.environ.items():
+        if key.upper() in proxies:
+            try:
+                url = urllib.parse.urlsplit(value if "://" in value else "//" + value)
+                unsafe = url.username is not None or url.password is not None or "@" in value
+            except ValueError:
+                unsafe = True
+            if unsafe:
+                raise FetchError(f"{key} is not a credential-free proxy; use a proxy without embedded "
+                                 "credentials and retry")
+            env[key] = value
+        elif key.upper() in allowed:
+            env[key] = value
     env.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="", SSH_ASKPASS="", GCM_INTERACTIVE="never",
                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                HOME=os.devnull, USERPROFILE=os.devnull, XDG_CONFIG_HOME=os.devnull, CURL_HOME=os.devnull)
     return env
 
 
+@contextlib.contextmanager
+def _git_env() -> Iterator[dict[str, str]]:
+    env = git_env()
+    with tempfile.TemporaryDirectory(prefix="oah-git-home-") as home:
+        env.update(HOME=home, USERPROFILE=home, XDG_CONFIG_HOME=home, CURL_HOME=home)
+        yield env
+
+
 def _git(repo: pathlib.Path, *args: str, timeout: float = FETCH_TIMEOUT, stdin_text: str | None = None) -> RunResult:
-    return run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(repo), *args), timeout=timeout,
-                       env=git_env(), stdin_text=stdin_text)
+    with _git_env() as env:
+        return run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(repo), *args), timeout=timeout,
+                           env=env, stdin_text=stdin_text)
 
 
 def _checked(result: RunResult, what: str) -> str:
@@ -95,8 +125,9 @@ class Tree:
         return found
 
     def read(self, blob: str) -> bytes:
-        result = run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(self.repo), "cat-file", "blob", blob),
-                             timeout=FETCH_TIMEOUT, env=git_env(), encoding="latin-1")
+        with _git_env() as env:
+            result = run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(self.repo), "cat-file", "blob", blob),
+                                 timeout=FETCH_TIMEOUT, env=env, encoding="latin-1")
         _checked(result, f"reading blob {blob}")
         return result.stdout.encode("latin-1")
 
@@ -130,7 +161,7 @@ def _portable_paths(paths: list[str]) -> None:
                     or normalized.endswith((".", " "))
                     or any(ord(c) < 32 or ord(c) == 127 or c in '<>:"/\\|?*\ufffd'
                            or unicodedata.category(c) == "Cf" for c in normalized)
-                    or re.fullmatch(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", normalized)):
+                    or normalized.partition(".")[0].rstrip(" ") in WINDOWS_DEVICES):
                 raise StageError(f"unsafe or reserved upstream path {path!r}; ask upstream to rename it before retrying")
             spelling = "/".join(parts[:index + 1])
             key = "/".join(unicodedata.normalize("NFKC", p).casefold() for p in parts[:index + 1])

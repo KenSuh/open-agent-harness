@@ -47,12 +47,18 @@ For the same skill name, `oah` uses the first copy it finds:
   `oah skills update --project`, which takes its own lease on those folders.
   Reinstalling preserves existing pins; if the cache has advanced, run `oah skills update --project`.
 - **Global copies change only with `--global`** and your confirmation, never on a schedule.
+  A destination lock in `~/.oah/toolkit/locks/` serializes publication across repositories; a changed
+  baseline defers the update. Run the update again to prepare against the current copy.
+- **Fetches use an allowlisted environment and a temporary home.** Proxy URLs with embedded user
+  information are refused; configure a proxy without embedded credentials and retry.
 - **Hold an item** with `pins = ["<name>"]` under `[skills]`. unlazy is never updated by this mechanism;
   it is installed at the commit the gates lane tests.
 - **Every update is checked before it is published:** the license must keep the same SPDX id and text,
   each skill must load (frontmatter with `name` and `description`, links that resolve), and the files
   must pass the credential-assignment, key-shape and privacy scan (plus gitleaks when it is installed). A new executable, a
   binary file or a large size jump counts as suspicious.
+  Required metadata must resolve to strings under YAML 1.2 core rules; quote numeric-looking text.
+  Windows device names and portable path collisions are refused before staging writes any file.
 - **A failed or suspicious update keeps the last good copy** and is reported with the reason. A failed
   swap restores the previous copy. Every result is logged with old and new commits, when and why in
   `toolkit/updates.jsonl` in oah's state folder.
