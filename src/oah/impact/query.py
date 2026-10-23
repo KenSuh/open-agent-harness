@@ -173,6 +173,23 @@ def _graph(graph: Mapping | None, data: Mapping, target: str) -> list[Row]:
     return rows
 
 
+def merge_maps(worktree: Sequence[Row], default_branch: Sequence[Row]) -> tuple[list[Row], dict[Row, str]]:
+    """(ranked rows, where each was found: both, worktree or default-branch). Rows with the same binding, layer,
+    source, line and target are one row; the worktree's copy is kept, so nothing is printed twice and no pin or
+    exec row is dropped."""
+    def key(row: Row) -> tuple:
+        return row.binding, row.layer, row.source, row.line, row.target
+
+    theirs = {key(row) for row in default_branch}
+    found: dict[Row, str] = {row: "both" if key(row) in theirs else "worktree" for row in worktree}
+    mine = {key(row) for row in worktree}
+    for row in default_branch:
+        if key(row) not in mine:
+            mine.add(key(row))
+            found[row] = "default-branch"
+    return rank(found), found
+
+
 def normalize_entity(text: str) -> str | None:
     match = ENTITY.match(text)
     return f"db_{match.group(1)}:{match.group(2).strip().lower()}" if match else None
@@ -265,14 +282,19 @@ def query(data: Mapping, targets: Sequence[str], *, gates: Sequence = (), graph:
     return rank(rows)
 
 
-def db_identity(data: Mapping, commit: str, shown: Sequence[Row]) -> dict:
-    """The DB graph identity (A3): commit, graph digest and the digest of the DB rows returned."""
+def row_json(row: Row, found: Mapping[Row, str] | None = None) -> dict:
+    """A row as printed: with `found_in` (both, worktree or default-branch) when the maps were merged."""
+    return row.to_json() if found is None else dict(row.to_json(), found_in=found.get(row, "worktree"))
+
+
+def db_identity(data: Mapping, commit: str, shown: Sequence[Row], found: Mapping[Row, str] | None = None) -> dict:
+    """The DB graph identity (A3): commit, graph digest and the digest of the DB rows returned, as printed."""
     from oah.impact.mapstore import digest
 
     if data["db"] is None:
         return {"status": "unavailable", "reason": "no SQL migrations found"}
     return {"status": "available", "commit": commit, "graph": digest(data["db"]),
-            "output": digest([row.to_json() for row in shown if row.layer == "db"])}
+            "output": digest([row_json(row, found) for row in shown if row.layer == "db"])}
 
 
 def db_line(identity: Mapping) -> str:

@@ -1,4 +1,4 @@
-# 영향 명령 — oah impact build/refresh/status 와 경로·DB 개체 질의의 인자, 출력 형식(글·JSON), 종료 코드(0·1·69)를 맡는다.
+# 영향 명령 — oah impact build/refresh/status 와 경로·DB 개체 질의의 인자, 출력 형식(글·JSON), 종료 코드(0·1·69)를 맡는다. 질의는 작업 트리 지도와 기본 브랜치 지도를 함께 읽는다.
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,7 @@ import pathlib
 import sys
 
 from oah.atomic import StateCorrupt, StorageError
-from oah.impact import gatebind, lexical, mapstore, query
+from oah.impact import defaultbranch, gatebind, lexical, mapstore, query
 from oah.config import ConfigError
 from oah.impact.defaults import configured
 from oah.impact.errors import EXIT_ENVIRONMENT, EXIT_USAGE, ImpactError
@@ -31,6 +31,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     impact.add_argument("--json", action="store_true", help="print machine-readable JSON")
     impact.add_argument("--ref", metavar="REV", help="answer for another commit (built in memory, not stored)")
     impact.add_argument("--no-refresh", action="store_true", help="refuse a stale map instead of refreshing it")
+    impact.add_argument("--offline", action="store_true",
+                        help="do not fetch the default branch; use the last fetched commit, labelled stale")
     impact.add_argument("--no-rerank", action="store_true", help="do not re-rank (the brief says so)")
     impact.add_argument("--task", help="use this task's lease Scope as the targets")
     impact.add_argument("--kind", action="append", help="with --task: only files of this kind; repeat for more")
@@ -147,6 +149,30 @@ def _with_live_hits(root: pathlib.Path, data: dict, commit: str | None, targets:
     return dict(data, hits={**data["hits"], **extra})
 
 
+def _rows(data: dict, targets: list[str], **options) -> list[query.Row]:
+    """query.query, but each DB entity the map does not know is left out instead of refusing."""
+    graph = data["db"] or {"entities": {}}
+    known = [t for t in targets if query.normalize_entity(t) is None or query.normalize_entity(t) in graph["entities"]]
+    return query.query(data, known, **options)
+
+
+def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBranch, targets: list[str],
+               gates: list, settings: dict) -> tuple[list[query.Row], dict]:
+    """Rows from the worktree map and the default-branch map, merged (A23). An entity is refused only when
+    neither map knows it."""
+    graph = query.load_graph(root, settings)
+    if branch.data is None:
+        rows = query.query(data, targets, gates=gates, graph=graph, settings=settings)
+        return rows, {row: "worktree" for row in rows}
+    theirs = _with_live_hits(root, branch.data, branch.commit, targets, settings)
+    for target in targets:
+        entity = query.normalize_entity(target)
+        if entity and all(entity not in (m["db"] or {"entities": {}})["entities"] for m in (data, theirs)):
+            query.query(data, [target], settings=settings)  # raises the worktree map's refusal
+    mine = _rows(data, targets, gates=gates, graph=graph, settings=settings)
+    return query.merge_maps(mine, _rows(theirs, targets, settings=settings))
+
+
 def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     if args.kind and not args.task:
         raise ImpactError("OAH_IMPACT_USAGE", "--kind only filters a task's Scope; add --task <task>", EXIT_USAGE)
@@ -177,16 +203,22 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     add(changed)
     data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
     gates, gate_status = gatebind.discover(root)
-    rows = query.query(data, targets, gates=gates, graph=query.load_graph(root, settings), settings=settings)
+    branch = defaultbranch.refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
+    if branch.warning():
+        warnings.append(branch.warning())
+    rows, found = _both_maps(root, data, branch, targets, gates, settings)
     rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank, enabled=settings["rerank"])
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
-    identity = query.db_identity(data, info.commit, shown)
+    identity = query.db_identity(data, info.commit, shown, found)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []
     for warning in warnings[len(info.warnings()):]:
         print(warning, file=sys.stderr)
+    first = f"{'ref' if args.ref else 'worktree'}={info.commit}"
     if args.json:
-        report = {"targets": targets, "map": info.to_json(), "rerank": rerank, "gates": gate_status,
-                  "db_impact": identity, "warnings": warnings, "rows": [row.to_json() for row in shown],
+        report = {"targets": targets, "map": info.to_json(), "label": f"{first} {branch.label()}",
+                  "maps": {"worktree": {"commit": info.commit, "ref": args.ref}, "default_branch": branch.to_json()},
+                  "rerank": rerank, "gates": gate_status, "db_impact": identity, "warnings": warnings,
+                  "rows": [query.row_json(row, found) for row in shown],
                   "total": total, "shown": len(shown), "overflow": overflow,
                   "changed_since": {"rev": since, "files": changed, "rerun": plan} if since else None}
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -194,6 +226,7 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     listed = ", ".join(targets[:5]) + (f" and {len(targets) - 5} more" if len(targets) > 5 else "")
     print(f"impact: {listed or '(nothing selected)'}")
     print(f"map: {_identity(info)} ({info.action})")
+    print(f"maps: {first} {branch.details()}")
     print(f"rerank={rerank}")
     print(f"gates: {gate_status}")
     print(query.db_line(identity))
@@ -205,7 +238,8 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
         if not plan:
             print("re-run: nothing is bound to these files by pin or exec")
     for row in shown:
-        print(f"{row.binding:<8}{row.layer:<10}{row.kind:<10}{row.where}  {row.target}  {row.detail}")
+        only = "  [default-branch only]" if found.get(row) == "default-branch" else ""
+        print(f"{row.binding:<8}{row.layer:<10}{row.kind:<10}{row.where}  {row.target}  {row.detail}{only}")
     if not shown:
         print("no references found")
     print(query.count_line(total, len(shown), overflow))
