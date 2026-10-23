@@ -59,6 +59,6 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks" gitleaks
           echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
 
-      # --redact keeps the found value itself out of the log; any finding fails the job.
+      # Omit finding context and reports: --redact alone can expose adjacent values in verbose output.
       - name: Scan the full history for leaked keys
-        run: gitleaks detect --source . --redact --verbose
+        run: gitleaks detect --source . --redact --no-banner

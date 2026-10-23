@@ -6,6 +6,8 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,7 +15,7 @@ import unittest
 
 from oah import ci
 from oah.cli import build_parser, command_modules
-from tests.helpers import make_git_repo, make_tmp_dir
+from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = str(REPO / "src")
@@ -82,22 +84,57 @@ class DetectTest(unittest.TestCase):
     def test_pytest_plugin_counts_but_lookalike_does_not(self):
         found = self.detect_one({"pyproject.toml": "[project.optional-dependencies]\ndev = [\"pytest-cov\"]\n"})
         self.assertEqual(runs(found)[-1], "python -m pytest")
-        found = self.detect_one({"pyproject.toml": "[dependency-groups]\ndev = [\"pytestish\"]\n"})
-        self.assertEqual(runs(found), ["python -m unittest discover"])
+        found = self.detect_one({"pyproject.toml": "[dependency-groups]\ndev = [\"pytestish\"]\n",
+                                 "tests/test_math.py": "import unittest\n"})
+        self.assertEqual(runs(found), ["python -m unittest discover -s tests"])
 
     def test_python_unittest_from_tests_folder(self):
         found = self.detect_one({"tests/test_math.py": "import unittest\n"})
         self.assertEqual(found.ecosystem, "python")
-        self.assertEqual(runs(found), ["python -m unittest discover"])
+        self.assertEqual(runs(found), ["python -m unittest discover -s tests"])
         self.assertIn("tests", found.reason)
+
+    def test_unittest_command_runs_failing_test_without_package(self):
+        for filename, extra in (("tests/test_math.py", {}),
+                                ("tests/test_math.py", {"tests/__init__.py": ""}),
+                                ("test_math.py", {"pyproject.toml": ""})):
+            with self.subTest(filename=filename, extra=sorted(extra)):
+                root = make_project(self, {**extra, filename:
+                                          "import unittest\n"
+                                          "class MathTest(unittest.TestCase):\n"
+                                          "    def test_math(self):\n"
+                                          "        self.fail('discovery reached this test')\n"})
+                self.assertEqual((root / "tests" / "__init__.py").exists(), "tests/__init__.py" in extra)
+                command = runs(ci.detect(root)[0])[-1]
+                result = subprocess.run([sys.executable, *shlex.split(command)[1:]], cwd=root,
+                                        capture_output=True, text=True, encoding="utf-8", timeout=30)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("Ran 1 test", result.stderr)
+                self.assertIn("discovery reached this test", result.stderr)
+
+    def test_python_without_discoverable_test_layout_uses_placeholder(self):
+        for files in ({"pyproject.toml": "[project]\nname = 'x'\n"},
+                      {"setup.cfg": "[metadata]\nname = x\n"},
+                      {"tests/helpers.py": "import unittest\n"},
+                      {"tests/__init__.py": ""},
+                      {"tests/test-math.py": "import unittest\n"},
+                      {"pyproject.toml": "", "test math.py": "import unittest\n"},
+                      {"tests/sub/test_math.py": "import unittest\n"}):
+            with self.subTest(files=sorted(files)):
+                root = make_project(self, files)
+                self.assertEqual(ci.detect(root), ())
+                result = ci.plan(root, ["linux"])
+                self.assertTrue(result.placeholder)
+                self.assertIn("          exit 1\n", result.text)
 
     def test_tests_folder_without_python_files_is_not_python(self):
         self.assertEqual(ci.detect(make_project(self, {"tests/a.test.js": "", "tests/sub/b.txt": ""})), ())
 
     def test_python_installs_requirements_and_project(self):
-        found = self.detect_one({"pyproject.toml": "[project]\nname = \"x\"\n", "requirements.txt": "requests\n"})
+        found = self.detect_one({"pyproject.toml": "[project]\nname = \"x\"\n", "requirements.txt": "requests\n",
+                                 "tests/test_math.py": "import unittest\n"})
         self.assertEqual(runs(found), ["python -m pip install -r requirements.txt",
-                                       "python -m pip install -e .", "python -m unittest discover"])
+                                       "python -m pip install -e .", "python -m unittest discover -s tests"])
 
     def test_node_test_script(self):
         found = self.detect_one({"package.json": json.dumps({"scripts": {"test": "node --test"}})})
@@ -119,6 +156,7 @@ class DetectTest(unittest.TestCase):
 
     def test_several_in_order(self):
         root = make_project(self, {"Cargo.toml": "", "go.mod": "module x\n", "setup.cfg": "",
+                                   "tests/test_math.py": "import unittest\n",
                                    "package.json": json.dumps({"scripts": {"test": "jest"}})})
         self.assertEqual([found.ecosystem for found in ci.detect(root)], ["python", "node", "go", "rust"])
 
@@ -134,8 +172,7 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(found.ecosystem, "node")
 
     def test_broken_files_do_not_raise(self):
-        found = self.detect_one({"pyproject.toml": b"[tool.pytest.ini_options\n\xff\xfe"})
-        self.assertEqual(runs(found), ["python -m unittest discover"])
+        self.assertEqual(ci.detect(make_project(self, {"pyproject.toml": b"[tool.pytest.ini_options\n\xff\xfe"})), ())
         self.assertEqual(ci.detect(make_project(self, {"package.json": b"{not json\xff"})), ())
 
 
@@ -195,6 +232,49 @@ class RenderTest(unittest.TestCase):
                 self.assertLess(check, job.index("tar -xzf"))
                 self.assertLess(job.index("curl -fsSL"), check)
                 self.assertIn("gitleaks detect --source . --redact", job)
+
+    def test_gitleaks_never_prints_context_or_writes_a_report(self):
+        for name, text in self.renderings().items():
+            with self.subTest(name=name):
+                command = re.search(r"^\s*run: (gitleaks .+)$", text, re.MULTILINE).group(1)
+                self.assertEqual(shlex.split(command),
+                                 ["gitleaks", "detect", "--source", ".", "--redact", "--no-banner"])
+
+    def test_gitleaks_adjacent_credentials_are_absent_from_output(self):
+        gitleaks = shutil.which("gitleaks")
+        if gitleaks is None:
+            self.skipTest("install gitleaks 8.30.1 to run the redaction regression")
+        version = subprocess.run([gitleaks, "version"], check=True, capture_output=True,
+                                 text=True, encoding="utf-8", timeout=30).stdout.strip()
+        if version != "8.30.1":
+            self.skipTest("install gitleaks 8.30.1 to test the workflow's pinned version")
+        repo = make_git_repo(self)
+        text = ci.plan(repo, ["linux"]).text
+        command = re.search(r"^\s*run: (gitleaks .+)$", text, re.MULTILINE).group(1)
+        # These uppercase characters do not occur in gitleaks' summary logs. Checking
+        # each character catches even a one-character leak of an adjacent value.
+        alphabet = "CDEGHJLOQSTUVXYZ"
+        values = []
+        lines = []
+        for length in (6, 12, 64):
+            key = "".join(secrets.SystemRandom().sample(alphabet * 2, 32))
+            key += "".join(secrets.choice(alphabet) for _ in range(4))
+            password = "".join(secrets.choice(alphabet) for _ in range(length))
+            values.extend((key, password))
+            lines.append(f"api_key = 'ghp_{key}'; password = '{password}'\n")
+        git_commit(repo, {"credentials.txt": "".join(lines)})
+        before = tree(repo)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GITLEAKS_")}
+        result = subprocess.run([gitleaks, *shlex.split(command)[1:]], cwd=repo, env=env,
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 1, "the scan must fail on the generated keys")
+        output = result.stdout + result.stderr
+        count = re.search(r"leaks found: (\d+)", output)
+        self.assertIsNotNone(count, "the scan must report findings")
+        self.assertGreaterEqual(int(count.group(1)), 3, "every generated key must be detected")
+        for value in values:
+            self.assertFalse(any(char in output for char in value), "credential characters reached the log")
+        self.assertTrue(tree(repo) == before, "the scan must not create a report")
 
     def test_triggers_permissions_and_jobs(self):
         for name, text in self.renderings().items():

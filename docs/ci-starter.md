@@ -57,8 +57,9 @@ The workflow runs on every `push` and every `pull_request`. It has two jobs.
   own step, so the log shows exactly which one failed.
 - **secret scan** downloads [gitleaks](https://github.com/gitleaks/gitleaks), checks that the download
   is exactly the expected file (by its SHA-256 fingerprint) before running it, and scans your **whole
-  git history** for things that look like passwords or API keys. Findings are redacted in the log, so
-  the scan never prints the key itself.
+  git history** for things that look like passwords or API keys. It uses `--redact --no-banner`,
+  prints no finding context, and writes no report, so adjacent values cannot leak through context.
+  See the [pinned version's flags](https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#usage).
 
 It is also careful about what it can do:
 
@@ -72,7 +73,8 @@ It is also careful about what it can do:
 | Your project has | oah suggests |
 |---|---|
 | `pyproject.toml`, `setup.cfg`, or a `tests/` folder with Python files, and pytest is configured | `python -m pip install pytest`, then `python -m pytest` |
-| the same, without pytest | `python -m unittest discover` |
+| the same, without pytest, with `test*.py` files directly in `tests/` | `python -m unittest discover -s tests` |
+| `pyproject.toml` or `setup.cfg`, without pytest, with `test*.py` files at the project root | `python -m unittest discover` |
 | `package.json` with a `test` script | `npm ci`, then `npm test` |
 | `go.mod` | `go test ./...` |
 | `Cargo.toml` | `cargo test` |
@@ -81,6 +83,10 @@ For Python, a `requirements.txt` is installed first, and a `pyproject.toml` with
 installed with `python -m pip install -e .`. pytest counts as configured when the project has
 `pytest.ini`, a `conftest.py`, a `[tool.pytest.ini_options]` table, a `[tool:pytest]` section in
 `setup.cfg`, or pytest among its dependencies.
+
+The unittest fallback requires one of those test file layouts. `tests/__init__.py` is optional.
+Test filenames must be valid Python module names. Other layouts get the failing placeholder; replace
+it with your test command before pushing.
 
 `npm ci` needs a `package-lock.json`. Run `npm install` once and commit the lock file.
 

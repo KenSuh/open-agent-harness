@@ -115,7 +115,13 @@ def _python(root: pathlib.Path) -> Detection | None:
         steps += [Step("Install pytest", "python -m pip install pytest"), Step("Run tests", "python -m pytest")]
         return Detection("python", "Python (pytest)", f"found {found}; pytest is configured in {pytest_from}",
                          tuple(steps))
-    steps.append(Step("Run tests", "python -m unittest discover"))
+    if any(path.is_file() and path.stem.isidentifier() for path in (root / "tests").glob("test*.py")):
+        command = "python -m unittest discover -s tests"
+    elif any(path.is_file() and path.stem.isidentifier() for path in root.glob("test*.py")):
+        command = "python -m unittest discover"
+    else:
+        return None
+    steps.append(Step("Run tests", command))
     return Detection("python", "Python (unittest)", f"found {found}; no pytest configuration, so unittest",
                      tuple(steps))
 
