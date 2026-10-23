@@ -76,6 +76,18 @@ class ParseTest(unittest.TestCase):
         self.assertEqual([e.title for e in parsed.entries], ["real", "old"])
         self.assertEqual(parsed.entries[0].data, body)
 
+    def test_thematic_break_before_fence_keeps_log_parseable(self):
+        body = b"## 2026-01-02 real\n\n- - -\n  ~~~md\n## 2026-13-99 hidden\n  ~~~\n\n"
+        entries = [body, b"## 2026-01-01 old\n"]
+        parsed = log.parse_log(make_log(entries), "log.md")
+        self.assertEqual([e.data for e in parsed.entries], entries)
+
+    def test_lazy_list_continuation_never_swallows_log_entry(self):
+        body = b"## 2026-01-02 real\n\n- item\nlazy continuation\n  ~~~\n  [[hidden]]\n"
+        entries = [body, b"## 2026-01-01 old\n"]
+        parsed = log.parse_log(make_log(entries), "log.md")
+        self.assertEqual([e.data for e in parsed.entries], entries)
+
     def test_heading_without_digit_is_content(self):
         parsed = log.parse_log(make_log([b"## 2026-01-02 a\n\n## Notes\n### 2026-01-05 sub\n"]), "log.md")
         self.assertEqual(len(parsed.entries), 1)

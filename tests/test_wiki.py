@@ -74,7 +74,7 @@ class MarkdownTest(unittest.TestCase):
         self.assertEqual([link.line for link in links], [1, 1, 1, 1, 1, 1, 3])
         self.assertTrue(links[1].embed)
 
-    def test_fences_in_containers_with_blank_lines(self):
+    def test_container_fences_never_hide_following_real_link(self):
         cases = [
             "> ~~~md\n> [[hidden]]\n>\n> [[also hidden]]\n> ~~~\n",
             "> > ~~~\n> > [[hidden]]\n> > ~~~\n",
@@ -88,13 +88,40 @@ class MarkdownTest(unittest.TestCase):
         for text in cases:
             with self.subTest(text=text):
                 full = text + "\n[[real]]\n"
-                self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(full)],
-                                 [("real", full.splitlines().index("[[real]]") + 1)])
+                self.assertIn(("real", full.splitlines().index("[[real]]") + 1),
+                              [(link.target, link.line) for link in markdown.wikilinks(full)])
 
-    def test_unclosed_container_fence_ends_with_container(self):
+    def test_unclosed_container_fence_never_hides_following_real_link(self):
         for text in ("> ~~~\n> [[hidden]]\n", "- ~~~\n  [[hidden]]\n"):
             with self.subTest(text=text):
-                self.assertEqual([link.target for link in markdown.wikilinks(text + "[[real]]\n")], ["real"])
+                self.assertIn("real", [link.target for link in markdown.wikilinks(text + "[[real]]\n")])
+
+    def test_thematic_break_before_fence(self):
+        for rule in ("- - -", "* * *", "_ _ _"):
+            with self.subTest(rule=rule):
+                text = rule + "\n  ~~~md\n[[hidden]]\n  ~~~\n\n[[real]]"
+                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+
+    def test_lazy_list_continuation_never_hides_real_link(self):
+        for prefix in ("- item\nlazy continuation\n", "1. item\nlazy continuation\n",
+                       "- item\n  - - -\n"):
+            with self.subTest(prefix=prefix):
+                text = prefix + "  ~~~\n  [[hidden]]\n[[real]]"
+                self.assertIn("real", [link.target for link in markdown.wikilinks(text)])
+
+    def test_top_level_fence_after_list_termination(self):
+        for ending in ("\nparagraph\n", "# Heading\n", "- - -\n"):
+            with self.subTest(ending=ending):
+                text = "- item\nlazy continuation\n" + ending + "  ~~~\n[[hidden]]\n  ~~~\n[[real]]"
+                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+
+    def test_container_fences_are_candidates_only(self):
+        for text in ("> ~~~\n> [[candidate]]\n> ~~~\n",
+                     "- ~~~\n  [[candidate]]\n  ~~~\n",
+                     "- item\nlazy continuation\n  ~~~\n  [[candidate]]\n"):
+            with self.subTest(text=text):
+                self.assertEqual([link.target for link in markdown.wikilinks(text + "[[real]]\n")],
+                                 ["candidate", "real"])
 
 
 class FrontmatterTest(unittest.TestCase):
@@ -253,6 +280,17 @@ class WikiCliTest(unittest.TestCase):
     def test_commands_tuple(self):
         self.assertEqual(wiki_cli.COMMANDS, ("wiki",))
         self.assertIs(_command_table(command_modules())["wiki"], wiki_cli)
+
+    def test_lint_help_documents_fence_limit(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as ctx:
+            main(["wiki", "lint", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+        help_text = " ".join(out.getvalue().split())
+        self.assertIn("top-level fences", help_text)
+        self.assertIn("list or blockquote", help_text)
+        self.assertIn("candidates", help_text)
+        self.assertIn("Inspect", help_text)
 
     def test_cli_reads_wiki_config(self):
         repo = scaffold(self)

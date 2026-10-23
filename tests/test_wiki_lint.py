@@ -92,7 +92,7 @@ class LintTest(LintCase):
         self.assertEqual([(p.kind, p.detail) for p in report.problems],
                          [("broken_link", "[[gone]] does not resolve")])
 
-    def test_links_in_container_fences_ignored(self):
+    def test_links_in_container_fences_are_candidates(self):
         body = ("> ~~~md\n> [[hidden quote]]\n> ~~~\n\n"
                 "- outer\n  - ~~~\n    [[hidden list]]\n\n    [[hidden after blank]]\n    ~~~\n\n"
                 "[[gone]]\n")
@@ -100,7 +100,8 @@ class LintTest(LintCase):
         self.index("a")
         report = self.wiki().lint(now=NOW)
         self.assertEqual([(p.kind, p.detail) for p in report.problems],
-                         [("broken_link", "[[gone]] does not resolve")])
+                         [("broken_link", f"[[{target}]] does not resolve") for target in
+                          ("hidden quote", "hidden list", "hidden after blank", "gone")])
 
     def test_archive_index_counts_as_index(self):
         self.write("from-log-index.md", note("From log index"))

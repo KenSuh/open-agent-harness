@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 _FENCE_OPEN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 _LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
-_LIST_PREFIX = re.compile(r"^( {0,3}(?:[-*+]|\d{1,9}[.)]))( +|$)")
-_QUOTE_PREFIX = re.compile(r"^ {0,3}> ?")
+_THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_HEADING = re.compile(r"^#{1,6}(?:[ \t]|$)")
 _WIKILINK = re.compile(r"(!?)\[\[([^\[\]\n]*)\]\]")
 _TICKS = re.compile(r"`+")
 
@@ -37,12 +37,13 @@ def eol_of(data: bytes) -> bytes:
 
 
 class FenceTracker:
-    """Feed lines in order; feed() is True for fence lines and the code between them."""
+    """Track top-level fences only; container contents remain lint candidates."""
 
     def __init__(self) -> None:
         self._char = ""
         self._length = 0
-        self._containers: list[tuple[str, int]] = []
+        self._in_list = False
+        self._previous_blank = True
 
     @property
     def open(self) -> bool:
@@ -50,40 +51,6 @@ class FenceTracker:
 
     def feed(self, line: str) -> bool:
         line = strip_eol(line).expandtabs(4)
-        # Consume established container prefixes before interpreting fences. Blank lines may
-        # continue a list without indentation; blockquotes still require their `>` prefix.
-        matched = 0
-        for kind, width in self._containers:
-            if kind == "quote":
-                quote = _QUOTE_PREFIX.match(line)
-                if quote is None:
-                    break
-                line = line[quote.end():]
-            elif not line.strip():
-                line = ""
-            elif line.startswith(" " * width):
-                line = line[width:]
-            else:
-                break
-            matched += 1
-        if matched < len(self._containers):
-            self._containers = self._containers[:matched]
-            self._char, self._length = "", 0  # a fence ends when its container ends
-        if not self._char:
-            while True:
-                quote = _QUOTE_PREFIX.match(line)
-                item = _LIST_PREFIX.match(line)
-                if quote:
-                    self._containers.append(("quote", 0))
-                    line = line[quote.end():]
-                elif item:
-                    # More than four spaces after a marker mean one prefix space plus code indent.
-                    padding = len(item.group(2))
-                    width = len(item.group(1)) + (padding if 1 <= padding <= 4 else 1)
-                    self._containers.append(("list", width))
-                    line = line[width:]
-                else:
-                    break
         if self._char:
             stripped = line.lstrip(" ")
             indent = len(line) - len(stripped)
@@ -91,12 +58,22 @@ class FenceTracker:
             if indent <= 3 and run >= self._length and not stripped[run:].strip(" \t"):
                 self._char, self._length = "", 0
             return True
+        # Never strip list/quote prefixes to find a fence. Retain a conservative list hint
+        # across lazy paragraph lines so an indented nested delimiter cannot open a top-level
+        # fence. A blank followed by unindented text, a heading or a thematic break ends it.
+        thematic = _THEMATIC_BREAK.fullmatch(line) is not None
+        if line and not line.startswith(" ") and (thematic or _HEADING.match(line) or self._previous_blank):
+            self._in_list = False
+        if not thematic and _LIST_ITEM.match(line):
+            self._in_list = True
+        self._previous_blank = not line.strip()
         match = _FENCE_OPEN.match(line)
-        if match is None:
+        if match is None or (self._in_list and match.group(1)):
             return False
         fence, info = match.group(2), match.group(3)
         if fence[0] == "`" and "`" in info:
             return False
+        self._in_list = False
         self._char, self._length = fence[0], len(fence)
         return True
 

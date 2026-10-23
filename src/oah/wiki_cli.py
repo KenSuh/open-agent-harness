@@ -36,7 +36,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     log.add_argument("--body", default="", help="the entry text below the heading")
     log.add_argument("--date", type=_date, default=None, help="YYYY-MM-DD (default: today)")
 
-    lint = sub.add_parser("lint", help="list real wiki problems (reads only; exit 1 when any exist)")
+    lint = sub.add_parser("lint", help="list wiki problem candidates (reads only; exit 1 when any exist)",
+                          description="Code spans, top-level fences and indented code blocks are ignored. "
+                          "Fences nested in a list or blockquote are not parsed, so their links may be "
+                          "reported as candidates. Inspect each candidate before editing notes.")
     lint.add_argument("--index", action="store_true",
                       help="check index.md for banners, over-long lines and unindexed notes")
     lint.add_argument("--json", action="store_true")
