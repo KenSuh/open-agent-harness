@@ -308,5 +308,135 @@ class FinishTest(unittest.TestCase):
         self.assertIn("changed=1", finished.stdout)
 
 
+def accept(text: str, *, revision: int = 1, goals: tuple[str, ...] = ("the report lists every file",
+                                                                       "the digest is stable")) -> str:
+    """A scaffolded packet with its intent filled in and accepted."""
+    conditions = "\n".join(f"- AC{n}: {goal}" for n, goal in enumerate(goals, start=1))
+    text = (text.replace("<what is wrong or missing today>", "Reports miss files.")
+            .replace("<what is true when this task is done>", "Every changed file is listed.")
+            .replace("- AC1: <checkable condition>", conditions)
+            .replace('Status: draft            # becomes "accepted" when you approve it', "Status: accepted"))
+    return text.replace("Revision: 1\n", f"Revision: {revision}\n", 1)
+
+
+def toml_list(argv: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(part) for part in argv) + "]"
+
+
+class EndToEndTest(unittest.TestCase):
+    """Every success condition through the real CLI and the real modules, with no fake in between."""
+
+    def test_end_to_end_bind_stale_rebind_finish(self):
+        repo = Repo(self)
+        created = repo.ok("packet", "new", "t1", "--scope", "src")
+        self.assertIn("OAH_PACKET_CREATED .oah/tasks/t1/PACKET.md", created.stdout)
+        draft = repo.start_packet()
+        self.assertEqual(draft.returncode, 1)
+        self.assertTrue(draft.stderr.startswith("OAH_INTENT_NOT_ACCEPTED"), draft.stderr)
+
+        path = repo.path()
+        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8")
+        self.assertIn("intent=t1@r1", repo.ok(*shlex.split(briefs.lease_command("t1", "claude", PACKET.format(
+            task="t1")))[1:]).stdout)
+        self.assertEqual(repo.status()["t1"]["intent_state"], "current")
+        self.assertIn("state=current", repo.ok("intent", "show", "t1").stdout)
+
+        accepted = path.read_text(encoding="utf-8")
+        path.write_text(accepted.replace("the digest is stable", "the digest never changes"), encoding="utf-8")
+        self.assertEqual(repo.status()["t1"]["intent_state"], "stale")
+        refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
+        self.assertEqual(refused.returncode, 1)
+        self.assertTrue(refused.stderr.startswith("OAH_INTENT_NOT_CURRENT"), refused.stderr)
+        self.assertIn("is stale", refused.stderr)
+
+        path.write_text(accept(accepted.replace("Status: accepted", 'Status: draft            # becomes "accepted" '
+                                                "when you approve it"), revision=2,
+                               goals=("the report lists every file", "the digest never changes")), encoding="utf-8")
+        rebound = repo.start_packet()
+        self.assertEqual(rebound.returncode, 0, rebound.stderr)
+        self.assertIn("OAH_INTENT_REBOUND task=t1 intent=t1@r2", rebound.stdout)
+        self.assertEqual(repo.status()["t1"]["intent_state"], "current")
+
+        (repo.root / "src" / "app.py").write_text("x = 2\n", encoding="utf-8")
+        finish = ("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", "-")
+        invalid = repo.oah(*finish, stdin=repo.returned(acs={"AC1": "met"}))
+        self.assertEqual(invalid.returncode, 1)
+        self.assertTrue(invalid.stderr.startswith("OAH_INTENT_RETURN_INVALID"), invalid.stderr)
+        self.assertIn("the AC2 line is missing", invalid.stderr)
+        self.assertIn("t1", repo.status())
+        finished = repo.oah(*finish, stdin=repo.returned())
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("OAH_LEASE_FINISHED task=t1 agent=claude changed=1", finished.stdout)
+        self.assertEqual(repo.events()[-1]["intent"]["acs"], {"AC1": "met", "AC2": "met"})
+
+    def test_call_brief_carries_skills_intent_and_footer(self):
+        repo = Repo(self)
+        for name in ("test-driven-development", "receiving-code-review"):
+            folder = repo.home / ".claude" / "skills" / name
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+        codex_home = make_tmp_dir(self)
+        (codex_home / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-test-a", "is_default": True,
+             "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "max")]}]}),
+            encoding="utf-8")
+        fake_codex = [sys.executable, str(FAKES / "fake_codex.py")]
+        (repo.root / ".oah").mkdir()
+        (repo.root / ".oah" / "config.toml").write_text(f"[engines.codex]\ncommand = {toml_list(fake_codex)}\n",
+                                                        encoding="utf-8")
+        record = make_tmp_dir(self) / "record.json"
+        repo.env.update(CODEX_HOME=str(codex_home), FAKE_RECORD=str(record))
+        path = repo.write_packet(packet_text().replace("\n", "\r\n"))
+        repo.ok("start", "--task", "t1", "--agent", "claude", "--packet", PACKET.format(task="t1"))
+        called = repo.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low", "--json")
+        self.assertEqual(called.returncode, 0, called.stderr)
+        self.assertIn("OAH_SKILLS selected=test-driven-development,receiving-code-review "
+                      "rerank=unused(not-enabled)", called.stderr)
+        data = json.loads(called.stdout)
+        common = subprocess.run(["git", "-C", str(repo.root), "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, check=True).stdout.strip()
+        prompt = (pathlib.Path(common) / "oah" / "runs" / "t1" / data["run_id"] / "prompt.md").read_bytes()
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["stdin"].encode("utf-8"), prompt)
+        text = prompt.decode("utf-8")
+        section = briefs.raw_section(path.read_bytes().decode("utf-8"))
+        self.assertIn("\r\n", section)
+        self.assertEqual(text.count(section), 1)
+        self.assertTrue(text.endswith(intent.FOOTER))
+        self.assertEqual(sum(line == intent.FOOTER_MARKER for line in text.replace("\r\n", "\n").split("\n")), 1)
+        skills = text.split("## Skills\n", 1)[1].split(intent.BEGIN, 1)[0]
+        self.assertIn("Skill order: rerank=unused(not-enabled)", skills)
+        self.assertIn("- `test-driven-development` (user): `~/.claude/skills/test-driven-development/SKILL.md`",
+                      skills)
+        self.assertIn("  - why: code changes are written test-first (kind implementation, stage correction)", skills)
+        self.assertIn("  - why: corrections check each review finding before acting on it (stage correction)", skills)
+        self.assertIn("- Lease: before editing, run exactly `oah start --task t1 --agent codex --packet "
+                      ".oah/tasks/t1/PACKET.md`", text)
+
+    def test_packet_new_and_preflight_never_fetch_for_impact(self):
+        repo = Repo(self)
+        remote = make_tmp_dir(self) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        subprocess.run(["git", "-C", str(repo.root), "remote", "add", "origin", str(remote)], check=True)
+        subprocess.run(["git", "-C", str(repo.root), "push", "-q", "origin", "main"], check=True, capture_output=True)
+        other = make_tmp_dir(self) / "other"
+        subprocess.run(["git", "clone", "-q", str(remote), str(other)], check=True, capture_output=True)
+        git_commit(other, {"src/later.py": "y = 1\n"}, "moves the default branch")
+        subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True, capture_output=True)
+
+        def tracking() -> tuple[str, bool]:
+            ref = subprocess.run(["git", "-C", str(repo.root), "rev-parse", "refs/remotes/origin/main"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            return ref, (repo.root / ".git" / "FETCH_HEAD").exists()
+
+        before = tracking()
+        created = repo.ok("packet", "new", "t2", "--scope", "src")
+        self.assertTrue(any(line.startswith("impact=map ") for line in created.stdout.splitlines()), created.stdout)
+        checked = repo.oah("preflight", "--offline", "--touch", "src/app.py")
+        self.assertIn("impact: ", checked.stdout)
+        self.assertRegex(checked.stdout, r"\n {10}map (fresh|refreshed) at [0-9a-f]{12}\n")
+        self.assertEqual(tracking(), before)
+        self.assertIn("map: fresh", repo.ok("impact", "status").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
