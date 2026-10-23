@@ -197,8 +197,11 @@ class DoctorTest(unittest.TestCase):
                          {"uv", "node", "unlazy", "graphify", "gh", "gitleaks", "jq", "rg"})
         text = render_text(statuses, "darwin")
         for hint in ("brew install gitleaks", "brew install jq", "brew install ripgrep",
-                     "npx skills add Leonxlnx/unlazy", "curl -LsSf https://astral.sh/uv/install.sh | sh"):
+                     "Run oah init --with-unlazy after lane P5 lands to install unlazy at P5's "
+                     "contract-tested pin, verified by commit and scripts digest.",
+                     "curl -LsSf https://astral.sh/uv/install.sh | sh"):
             self.assertIn(hint, text)
+        self.assertNotIn("npx skills add", text)
         self.assertEqual(text.splitlines()[-1], "DOCTOR_OK")
 
     def test_missing_tool_hint_comes_from_catalog(self):
@@ -311,7 +314,10 @@ class DoctorTest(unittest.TestCase):
         statuses = check_tools(search_path=None, env={}, home=empty_home, repo_root=None, platform="darwin",
                                resolver=self.tools.resolve, runner=self.tools.run)
         self.assertEqual(self.by_name(statuses)["unlazy"].status, "missing")
-        self.assertIn("npx skills add Leonxlnx/unlazy", render_text(statuses, "darwin"))
+        self.assertIn("Run oah init --with-unlazy after lane P5 lands to install unlazy at P5's "
+                      "contract-tested pin, verified by commit and scripts digest.",
+                      render_text(statuses, "darwin"))
+        self.assertNotIn("npx skills add", render_text(statuses, "darwin"))
         self.assertEqual(exit_code(statuses), 0)  # unlazy is recommended, not required
 
     def test_python_status(self):
