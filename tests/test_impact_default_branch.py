@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
+import shlex
+import shutil
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -126,6 +130,122 @@ class RemoteSelectionTest(unittest.TestCase):
         self.assertEqual((result.state, result.reason, result.commit), ("stale", "fetch timed out", fetched))
         self.assertEqual(result.label(), "default-branch=stale(fetch timed out)")
         self.assertIn("OAH_IMPACT_DEFAULT_BRANCH_STALE", result.warning())
+
+    def test_discovered_trunk_survives_failed_fetch(self):
+        fx = RemoteFixture(self, default="trunk")
+        git(fx.lane, "remote", "set-head", "origin", "-d")
+        new = fx.advance(RELEASE)
+        settings = configured(fx.lane)
+        saved = defaultbranch.refresh(fx.lane, settings, env={})
+        self.assertEqual((saved.state, saved.branch, saved.commit), ("fresh", "trunk", new))
+        calls = []
+
+        def remove_after_discovery(argv, **kwargs):
+            result = run_command(argv, **kwargs)
+            if "ls-remote" in argv:
+                git(fx.bare, "update-ref", "-d", "refs/heads/trunk")
+            if "fetch" in argv:
+                calls.append(result.returncode)
+            return result
+
+        with patch("oah.impact.defaultbranch.run_command", side_effect=remove_after_discovery):
+            result = defaultbranch.refresh(fx.lane, settings, env={})
+        self.assertTrue(calls and calls[0] != 0, "the real fetch failed after discovery succeeded")
+        self.assertEqual((result.state, result.reason, result.branch, result.commit),
+                         ("stale", "fetch failed", "trunk", new))
+        self.assertEqual(result.data, saved.data)
+
+    def _assert_no_askpass(self, source: str) -> None:
+        marker = self.fx.tmp / "askpass-called"
+        marker.unlink(missing_ok=True)
+        script = self.fx.tmp / "askpass probe.py"
+        script.write_text("import pathlib\n" + f"pathlib.Path({str(marker)!r}).touch()\nraise SystemExit(1)\n",
+                          encoding="utf-8")
+        if os.name == "nt":
+            askpass = self.fx.tmp / "askpass probe.cmd"
+            askpass.write_text(f'@echo off\n"{sys.executable}" "{script}"\n', encoding="utf-8")
+        else:
+            askpass = self.fx.tmp / "askpass"
+            askpass.write_text(f"#!{sys.executable}\n" + script.read_text(encoding="utf-8"), encoding="utf-8")
+            askpass.chmod(0o755)
+        command = str(askpass)
+        if source == "core.askPass":
+            git(self.fx.lane, "config", "core.askPass", command)
+        calls = []
+
+        def probe(argv, **kwargs):
+            action = next((a for a in ("ls-remote", "fetch") if a in argv), None)
+            if action:
+                calls.append(action)
+                # Exercise Git's real credential path with the network command's config and environment,
+                # without contacting any host or returning a credential.
+                result = run_command((*argv[:argv.index(action)], "-c", "credential.helper=", "credential", "fill"),
+                                     timeout=5.0, env=kwargs["env"],
+                                     stdin_text="protocol=https\nhost=credential.invalid\n\n")
+                self.assertFalse(result.timed_out)
+                self.assertNotEqual(result.returncode, 0)
+            return run_command(argv, **kwargs)
+
+        with patch.dict(os.environ):
+            for name in ("GIT_ASKPASS", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+                os.environ.pop(name, None)
+            if source != "core.askPass":
+                os.environ[source] = command
+            control = run_command(("git", "-C", str(self.fx.lane), "-c", "credential.helper=", "credential", "fill"),
+                                  timeout=5.0, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                                  stdin_text="protocol=https\nhost=credential.invalid\n\n")
+            self.assertFalse(control.timed_out)
+            self.assertTrue(marker.exists(), "the offline probe must exercise the configured askpass")
+            marker.unlink()
+            with patch("oah.impact.defaultbranch.run_command", side_effect=probe):
+                self.assertEqual(defaultbranch.default_branch_name(self.fx.lane, "origin", network=True,
+                                                                  timeout=30.0), ("main", ""))
+                self.assertEqual(defaultbranch.fetch(self.fx.lane, "origin", "main", 30.0), "")
+        self.assertEqual(calls, ["ls-remote", "fetch"])
+        self.assertFalse(marker.exists(), f"{source} must not run during discovery or fetch")
+
+    def test_discovery_and_fetch_disable_askpass(self):
+        git(self.fx.lane, "remote", "set-head", "origin", "-d")
+        for source in ("GIT_ASKPASS", "core.askPass", "SSH_ASKPASS"):
+            with self.subTest(source=source):
+                git(self.fx.lane, "config", "core.askPass", "")
+                git(self.fx.lane, "config", "--unset", "core.askPass")
+                self._assert_no_askpass(source)
+
+    def test_discovery_and_fetch_force_noninteractive_ssh(self):
+        if shutil.which("ssh") is None:
+            self.skipTest("OpenSSH is required to inspect its effective configuration")
+        git(self.fx.lane, "remote", "set-head", "origin", "-d")
+        git(self.fx.lane, "config", "core.sshCommand", "ssh -oBatchMode=no")
+        calls = []
+
+        def probe(argv, **kwargs):
+            action = next((a for a in ("ls-remote", "fetch") if a in argv), None)
+            if action:
+                env = kwargs["env"]
+                config = run_command((*shlex.split(env["GIT_SSH_COMMAND"]), "-F", os.devnull, "-G", "oah.invalid"),
+                                     timeout=5.0, env=env)
+                self.assertEqual(config.returncode, 0, config.stderr)
+                options = dict(line.split(None, 1) for line in config.stdout.splitlines())
+                self.assertEqual(options["batchmode"], "yes")
+                self.assertIn(options["stricthostkeychecking"], ("yes", "true"))
+                self.assertEqual(options["numberofpasswordprompts"], "0")
+                self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "never")
+                self.assertEqual(env["GIT_SSH_VARIANT"], "ssh")
+                calls.append(action)
+            return run_command(argv, **kwargs)
+
+        with patch.dict(os.environ, {"GIT_SSH_COMMAND": "ssh -oBatchMode=no -oStrictHostKeyChecking=ask",
+                                     "GIT_SSH_VARIANT": "plink"}):
+            with patch("oah.impact.defaultbranch.run_command", side_effect=probe):
+                defaultbranch.default_branch_name(self.fx.lane, "origin", network=True, timeout=30.0)
+                self.assertEqual(defaultbranch.fetch(self.fx.lane, "origin", "main", 30.0), "")
+        self.assertEqual(calls, ["ls-remote", "fetch"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch askpass")
+    def test_windows_batch_askpass_is_disabled(self):
+        git(self.fx.lane, "remote", "set-head", "origin", "-d")
+        self._assert_no_askpass("GIT_ASKPASS")
 
 
 class RefMapTest(unittest.TestCase):
@@ -299,6 +419,32 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertRegex(trace_text(self.trace), r"built-in: git .*ls-remote")
         self.assertNotIn("refs/remotes/origin/HEAD", refs(fx.lane), "the remote HEAD ref is not written")
 
+    def test_saved_trunk_survives_skipped_or_failed_discovery(self):
+        for mode, reason in (("--offline", "offline"), ("--no-refresh", "no-refresh"),
+                             ("disabled", "refresh_default_branch=false"), ("failed", "fetch failed")):
+            with self.subTest(mode=mode):
+                fx = RemoteFixture(self, default="trunk")
+                git(fx.lane, "remote", "set-head", "origin", "-d")
+                new = fx.advance(RELEASE)
+                online = run_impact(fx.lane, "tools/check.py", "--json")
+                self.assertEqual(online.returncode, 0, online.stderr)
+                self.assertEqual(json.loads(online.stdout)["maps"]["default_branch"]["commit"], new)
+                self.assertNotIn("refs/remotes/origin/HEAD", refs(fx.lane))
+                options = [mode] if mode.startswith("--") else []
+                if mode == "disabled":
+                    (fx.lane / ".oah").mkdir()
+                    (fx.lane / ".oah/config.toml").write_text("[impact]\nrefresh_default_branch = false\n",
+                                                             encoding="utf-8")
+                elif mode == "failed":
+                    git(fx.lane, "remote", "set-url", "origin", str(fx.tmp / "gone.git"))
+                result = run_impact(fx.lane, "tools/check.py", "--json", *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                branch = report["maps"]["default_branch"]
+                self.assertEqual((branch["state"], branch["reason"], branch["branch"], branch["commit"]),
+                                 ("stale", reason, "trunk", new))
+                self.assertIn(".github/workflows/release.yml", {r["source"] for r in report["rows"]})
+
     def test_fetch_is_read_only(self):
         marker = self.fx.tmp / "helper-called"
         git(self.lane, "config", "credential.helper", f"!f() {{ echo called >> '{marker.as_posix()}'; }}; f")
@@ -319,6 +465,42 @@ class DefaultBranchCliTest(unittest.TestCase):
         changed = {name for name in set(refs_before) | set(after) if refs_before.get(name) != after.get(name)}
         self.assertEqual(changed, {"refs/remotes/origin/main"})
         self.assertEqual(after["refs/remotes/origin/main"], new)
+
+    def test_fetch_ignores_configured_refmaps(self):
+        git(self.lane, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/mirror/*")
+        git(self.lane, "config", "--add", "remote.origin.fetch", "+refs/heads/main:refs/heads/mapped-default")
+        before = refs(self.lane)
+        new = self.fx.advance(RELEASE)
+        self.query("tools/check.py")
+        after = refs(self.lane)
+        changed = {name for name in set(before) | set(after) if before.get(name) != after.get(name)}
+        self.assertEqual(changed, {"refs/remotes/origin/main"})
+        self.assertEqual(after["refs/remotes/origin/main"], new)
+
+    def test_default_branch_coverage_warnings_are_visible(self):
+        link = "tools/excluded.py"
+        self.fx.advance({link: "check.py\n", "db/unparsed.sql": "CREATE UNRECOGNISED widget;\n"})
+        blob = git(self.fx.pusher, "rev-parse", f"HEAD:{link}")
+        # Store a real Git symlink entry without requiring OS symlink privileges (including on Windows).
+        git(self.fx.pusher, "update-index", "--cacheinfo", f"120000,{blob},{link}")
+        git(self.fx.pusher, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "exclude symlink input")
+        git(self.fx.pusher, "push", "-q", "origin", "HEAD:main")
+        new = head(self.fx.pusher)
+        for options in ((), ("--json",)):
+            with self.subTest(options=options):
+                result = self.query("tools/check.py", *options)
+                for code, path in (("OAH_IMPACT_INCOMPLETE", link), ("OAH_IMPACT_SQL_UNPARSED", "db/unparsed.sql")):
+                    messages = [line for line in result.stderr.splitlines() if code in line]
+                    self.assertEqual(len(messages), 1, result.stderr)
+                    self.assertIn("default-branch", messages[0])
+                    self.assertIn(new, messages[0])
+                    self.assertIn(path, messages[0])
+                    self.assertRegex(messages[0], "replace|review")
+                if options:
+                    report = json.loads(result.stdout)
+                    self.assertEqual(report["map"]["warnings"], [])
+                    self.assertEqual(report["warnings"], result.stderr.splitlines())
+                    self.assertEqual(len(report["warnings"]), 2)
 
     def test_db_entity_new_in_lane_or_only_on_default_branch(self):
         git_commit(self.lane, {"db/001_users.sql": "CREATE TABLE users (id int);\n",

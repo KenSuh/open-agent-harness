@@ -506,6 +506,23 @@ def load(path: pathlib.Path) -> dict:
     return stored
 
 
+def _last_default_ref(root: pathlib.Path, env: Mapping[str, str] | None = None) -> str | None:
+    """Recover discovery metadata from this worktree's last persisted default-branch map."""
+    info = repo_info(pathlib.Path(root))
+    path = ref_map_path(state_dir(info, os.environ if env is None else env), info.root)
+    try:
+        stored = load(path)
+    except (OSError, ValueError):
+        return None
+    manifest = stored.get("manifest")
+    if stored.get("schema") != MAP_SCHEMA or not isinstance(manifest, dict) \
+            or stored.get("manifest_digest") != digest(manifest) \
+            or manifest.get("worktree") != hashlib.sha256(str(info.root.resolve()).encode("utf-8")).hexdigest():
+        return None
+    ref = manifest.get("ref")
+    return ref if isinstance(ref, str) else None
+
+
 def _context(root: pathlib.Path, env: Mapping[str, str] | None,
              settings: Mapping[str, object] | None) -> tuple[pathlib.Path, pathlib.Path, dict]:
     """(worktree root, map file, settings). The map file sits at <state>/impact/maps/<key>.json."""

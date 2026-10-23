@@ -373,6 +373,36 @@ class CliTest(unittest.TestCase):
         self.assertIn("OAH_SCOPE_NO_MATCH", none.stderr)
         self.assertEqual(none.stdout.splitlines()[-1], "total=0 shown=0 overflow=0")
 
+    def test_directory_and_task_scope_include_default_branch_files(self):
+        from tests.test_impact_default_branch import RemoteFixture
+
+        fx = RemoteFixture(self)
+        fx.advance({"tools/new.py": "print('new check')\n", "tools/notes.md": "New tools.\n",
+                    ".github/workflows/new.yml": "steps:\n  - run: python tools/new.py\n"})
+        directory = run_impact(fx.lane, "tools/", "--json")
+        self.assertEqual(directory.returncode, 0, directory.stderr)
+        report = json.loads(directory.stdout)
+        self.assertEqual(set(report["targets"]), {"tools/check.py", "tools/new.py", "tools/notes.md"})
+        self.assertIn(("tools/new.py", "exec", "default-branch"),
+                      {(r["target"], r["binding"], r["found_in"]) for r in report["rows"]})
+
+        start = subprocess.run([*_oah_module(), "start", "--task", "both", "--agent", "claude", "--scope", "tools"],
+                               cwd=fx.lane, capture_output=True, text=True, encoding="utf-8",
+                               env=dict(git_env(), PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src")))
+        self.assertEqual(start.returncode, 0, start.stderr)
+        for kinds, expected in (([], {"tools/check.py", "tools/new.py", "tools/notes.md"}),
+                                (["--kind", "code"], {"tools/check.py", "tools/new.py"}),
+                                (["--kind", "doc"], {"tools/notes.md"})):
+            with self.subTest(kinds=kinds):
+                result = run_impact(fx.lane, "--task", "both", "--json", *kinds)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                scoped = json.loads(result.stdout)
+                self.assertEqual(set(scoped["targets"]), expected)
+                self.assertNotIn("OAH_SCOPE_NO_MATCH", result.stderr)
+                if "tools/new.py" in expected:
+                    self.assertIn(("tools/new.py", "exec", "default-branch"),
+                                  {(r["target"], r["binding"], r["found_in"]) for r in scoped["rows"]})
+
     def test_cli_reads_impact_config(self):
         (self.repo / ".oah").mkdir()
         config = self.repo / ".oah" / "config.toml"

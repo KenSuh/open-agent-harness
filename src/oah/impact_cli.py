@@ -192,24 +192,29 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     def add(items: list[str]) -> None:
         targets.extend(item for item in items if item not in targets)
 
-    for raw in args.targets:
-        entity = query.normalize_entity(raw)
-        add([entity] if entity else _expand(_relative(raw, root), data["files"]))
-    if args.task:
-        selected, notes = query.select_scope(_task_scope(root, args.task), data["files"], args.kind)
+    requested = [query.normalize_entity(raw) or _relative(raw, root) for raw in args.targets]
+    scope = _task_scope(root, args.task) if args.task else None
+    branch = defaultbranch.refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
+    files = {**(branch.data["files"] if branch.data else {}), **data["files"]}
+    for target in requested:
+        add([target] if query.normalize_entity(target) else _expand(target, files))
+    if scope is not None:
+        selected, notes = query.select_scope(scope, files, args.kind)
         warnings += notes
         add(selected)
     changed = _changed(root, since, info.commit if args.ref else None) if since else []
     add(changed)
     data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
     gates, gate_status = gatebind.discover(root)
-    branch = defaultbranch.refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
     if branch.warning():
         warnings.append(branch.warning())
+    if branch.info:
+        warnings += [f"{warning} [default-branch map commit={branch.commit}]" for warning in branch.info.warnings()]
     rows, found = _both_maps(root, data, branch, targets, gates, settings)
     rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank, enabled=settings["rerank"])
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
-    identity = query.db_identity(data, info.commit, shown, found)
+    identity = query.db_identity(data, info.commit, shown, found,
+                                 default_branch=(branch.data, branch.commit) if branch.data is not None else None)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []
     for warning in warnings[len(info.warnings()):]:
         print(warning, file=sys.stderr)

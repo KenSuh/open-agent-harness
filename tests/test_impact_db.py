@@ -13,7 +13,7 @@ import unittest
 from contextlib import closing
 from itertools import product
 
-from oah.impact import sqlplugin
+from oah.impact import mapstore, sqlplugin
 from tests.helpers import git_commit, make_git_repo
 from tests.test_impact_map import SRC, run_impact
 
@@ -565,6 +565,57 @@ class ExtractTest(unittest.TestCase):
 
 
 class DbQueryTest(unittest.TestCase):
+    def test_default_branch_only_db_identity(self):
+        from tests.test_impact_default_branch import RemoteFixture
+
+        fx = RemoteFixture(self)
+        commit = fx.advance({"db/orders.sql": "CREATE TABLE orders (id int);\n",
+                             "src/orders.py": "SELECT id FROM orders\n"})
+        result = run_impact(fx.lane, "db_table:orders", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        identity = report["db_impact"]
+        self.assertEqual(identity["status"], "available")
+        graph = mapstore.snapshot(fx.lane, commit)[1]["db"]
+        self.assertEqual(identity["maps"], {"default_branch": {"commit": commit, "graph": mapstore.digest(graph)}})
+        db_rows = [row for row in report["rows"] if row["layer"] == "db"]
+        self.assertTrue(db_rows)
+        self.assertEqual({row["found_in"] for row in db_rows}, {"default-branch"})
+        self.assertEqual(identity["merged_output"], mapstore.digest(db_rows))
+        self.assertNotIn("commit", identity, "a merged identity must not attribute rows to one commit")
+        text = run_impact(fx.lane, "db_table:orders")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn(f"default-branch=(commit={commit} graph={mapstore.digest(graph)})", text.stdout)
+        self.assertIn(f"merged-output={identity['merged_output']}", text.stdout)
+
+    def test_merged_db_identity_names_both_maps(self):
+        from tests.test_impact_default_branch import RemoteFixture
+
+        fx = RemoteFixture(self)
+        migration = {"db/users.sql": "CREATE TABLE users (id int);\n"}
+        mine = git_commit(fx.lane, {**migration, "src/lane_users.py": "SELECT id FROM users\n"})
+        theirs = fx.advance({**migration, "db/audit.sql": "CREATE TABLE audit (id int);\n",
+                             "src/default_users.py": "SELECT id FROM users\n"})
+        result = run_impact(fx.lane, "db_table:users", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        identity = report["db_impact"]
+        expected = {name: {"commit": commit, "graph": mapstore.digest(mapstore.snapshot(fx.lane, commit)[1]["db"])}
+                    for name, commit in (("worktree", mine), ("default_branch", theirs))}
+        self.assertEqual(identity["status"], "available")
+        self.assertEqual(identity["maps"], expected)
+        self.assertNotEqual(expected["worktree"]["graph"], expected["default_branch"]["graph"])
+        db_rows = [row for row in report["rows"] if row["layer"] == "db"]
+        self.assertEqual({row["found_in"] for row in db_rows}, {"worktree", "default-branch", "both"})
+        self.assertEqual(identity["merged_output"], mapstore.digest(db_rows))
+        self.assertNotIn("output", identity, "the merged digest has a distinct name")
+        self.assertNotIn("commit", identity, "each map carries its own commit")
+        text = run_impact(fx.lane, "db_table:users")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        for name, values in expected.items():
+            self.assertIn(f"{name.replace('_', '-')}=(commit={values['commit']} graph={values['graph']})", text.stdout)
+        self.assertIn(f"merged-output={identity['merged_output']}", text.stdout)
+
     def test_unparsed_sql_reports_survive_all_output_paths(self):
         repo = make_git_repo(self)
         git_commit(repo, {'db/001.sql': '\nCREATE UNRECOGNISED widget;\n', 'app.py': 'x = 1\n'})

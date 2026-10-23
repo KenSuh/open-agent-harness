@@ -287,19 +287,34 @@ def row_json(row: Row, found: Mapping[Row, str] | None = None) -> dict:
     return row.to_json() if found is None else dict(row.to_json(), found_in=found.get(row, "worktree"))
 
 
-def db_identity(data: Mapping, commit: str, shown: Sequence[Row], found: Mapping[Row, str] | None = None) -> dict:
-    """The DB graph identity (A3): commit, graph digest and the digest of the DB rows returned, as printed."""
+def db_identity(data: Mapping, commit: str, shown: Sequence[Row], found: Mapping[Row, str] | None = None, *,
+                default_branch: tuple[Mapping, str] | None = None) -> dict:
+    """DB graph identities (A3), plus a separate digest of the returned DB rows when maps are merged.
+
+    default_branch is (data, commit). Without its DB graph, retain P7i's single-worktree identity.
+    """
     from oah.impact.mapstore import digest
 
+    output = digest([row_json(row, found) for row in shown if row.layer == "db"])
+    if default_branch is not None and default_branch[0]["db"] is not None:
+        theirs, their_commit = default_branch
+        maps = {}
+        if data["db"] is not None:
+            maps["worktree"] = {"commit": commit, "graph": digest(data["db"])}
+        maps["default_branch"] = {"commit": their_commit, "graph": digest(theirs["db"])}
+        return {"status": "available", "maps": maps, "merged_output": output}
     if data["db"] is None:
         return {"status": "unavailable", "reason": "no SQL migrations found"}
-    return {"status": "available", "commit": commit, "graph": digest(data["db"]),
-            "output": digest([row_json(row, found) for row in shown if row.layer == "db"])}
+    return {"status": "available", "commit": commit, "graph": digest(data["db"]), "output": output}
 
 
 def db_line(identity: Mapping) -> str:
     if identity["status"] != "available":
         return f"db-impact: {NO_SQL}"
+    if "maps" in identity:
+        maps = " ".join(f"{name.replace('_', '-')}=(commit={info['commit']} graph={info['graph']})"
+                        for name, info in identity["maps"].items())
+        return f"db-impact: {maps} merged-output={identity['merged_output']}"
     return f"db-impact: commit={identity['commit']} graph={identity['graph']} output={identity['output']}"
 
 

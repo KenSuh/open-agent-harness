@@ -2,8 +2,8 @@
 """The remote's default branch, fetched before a query (A23).
 
 `refresh` finds the remote (the current branch's upstream remote, else `origin`) and its default branch
-(`refs/remotes/<remote>/HEAD`, else `git ls-remote --symref`, else `main`), fetches that one branch into
-its remote-tracking ref and refreshes the default-branch map for the fetched commit.
+(`refs/remotes/<remote>/HEAD`, else `git ls-remote --symref`, else the saved branch or `main`), fetches that
+one branch into its remote-tracking ref and refreshes the default-branch map for the fetched commit.
 
 The fetch is read-only towards the remote and writes only `refs/remotes/<remote>/<branch>` (and objects):
 no tags, no `FETCH_HEAD`, no remote HEAD, no configuration, no maintenance. git uses the user's own setup;
@@ -27,7 +27,9 @@ from oah.paths import git_argv
 
 FALLBACK_BRANCH = "main"
 # No prompt may wait for an answer that cannot come: stdin is closed and the refresh runs unattended.
-QUIET_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+QUIET_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
+             "SSH_ASKPASS_REQUIRE": "never", "GIT_SSH_VARIANT": "ssh",
+             "GIT_SSH_COMMAND": "ssh -oBatchMode=yes -oNumberOfPasswordPrompts=0 -oStrictHostKeyChecking=yes"}
 _BAD_NAME = re.compile(r"[\s:~^?*\[\\]|\.\.|@\{|\A[-.]|[./]\Z|\.lock\Z|//")
 
 
@@ -86,6 +88,10 @@ def _git(root: pathlib.Path, *args: str, timeout: float, env: Mapping[str, str] 
     return run_command((*git_argv(), "-C", str(root), *args), timeout=timeout, env=env)
 
 
+def _network_git(root: pathlib.Path, *args: str, timeout: float):
+    return _git(root, "-c", "core.askPass=", *args, timeout=timeout, env={**os.environ, **QUIET_ENV})
+
+
 def _text(root: pathlib.Path, *args: str, timeout: float) -> str | None:
     result = _git(root, *args, timeout=timeout)
     return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
@@ -109,34 +115,47 @@ def _valid(branch: str) -> bool:
     return bool(branch) and not _BAD_NAME.search(branch)
 
 
+def _saved_branch(root: pathlib.Path, remote: str, env: Mapping[str, str] | None = None) -> str:
+    ref = mapstore._last_default_ref(root, env)
+    prefix = f"refs/remotes/{remote}/"
+    if ref and ref.startswith(prefix) and _valid(ref[len(prefix):]):
+        return ref[len(prefix):]
+    return FALLBACK_BRANCH
+
+
 def default_branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: float) -> tuple[str, str]:
     """(branch, reason): the remote's HEAD branch, from the local remote HEAD ref, else (network allowed) from
-    `git ls-remote --symref`, else main. reason is non-empty when the remote could not be asked."""
+    `git ls-remote --symref`, else the saved branch or main. reason is non-empty when the remote could not
+    be asked."""
+    return _branch_name(root, remote, network=network, timeout=timeout, fallback=_saved_branch(root, remote))
+
+
+def _branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: float,
+                fallback: str) -> tuple[str, str]:
     prefix = f"refs/remotes/{remote}/"
     local = _text(root, "symbolic-ref", "--quiet", prefix + "HEAD", timeout=timeout)
     if local and local.startswith(prefix) and _valid(local[len(prefix):]):
         return local[len(prefix):], ""
     if not network:
-        return FALLBACK_BRANCH, ""
-    result = _git(root, "ls-remote", "--symref", "--end-of-options", remote, "HEAD", timeout=timeout,
-                  env={**os.environ, **QUIET_ENV})
+        return fallback, ""
+    result = _network_git(root, "ls-remote", "--symref", "--end-of-options", remote, "HEAD", timeout=timeout)
     if result.timed_out:
-        return FALLBACK_BRANCH, "fetch timed out"
+        return fallback, "fetch timed out"
     if result.returncode != 0:
-        return FALLBACK_BRANCH, "fetch failed"
+        return fallback, "fetch failed"
     for line in result.stdout.splitlines():
         match = re.match(r"ref: refs/heads/(\S+)\tHEAD\Z", line.rstrip("\r"))
         if match and _valid(match.group(1)):
             return match.group(1), ""
-    return FALLBACK_BRANCH, ""
+    return fallback, ""
 
 
 def fetch(root: pathlib.Path, remote: str, branch: str, timeout: float) -> str:
     """Fetch one branch into its remote-tracking ref; "" on success, else the reason."""
     argv = ("-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", f"remote.{remote}.followRemoteHEAD=never",
             "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-prune",
-            "--end-of-options", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
-    result = _git(root, *argv, timeout=timeout, env={**os.environ, **QUIET_ENV})
+            "--refmap=", "--end-of-options", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
+    result = _network_git(root, *argv, timeout=timeout)
     if result.timed_out:
         return "fetch timed out"
     return "" if result.returncode == 0 else "fetch failed"
@@ -157,7 +176,8 @@ def refresh(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool
         skip = "refresh_default_branch=false"
     else:
         skip = ""
-    branch, reason = default_branch_name(root, remote, network=not skip, timeout=timeout)
+    branch, reason = _branch_name(root, remote, network=not skip, timeout=timeout,
+                                 fallback=_saved_branch(root, remote, env))
     if not skip and not reason:
         reason = fetch(root, remote, branch, timeout)
     reason = skip or reason
