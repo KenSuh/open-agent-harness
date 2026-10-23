@@ -736,8 +736,12 @@ After the review:
       - For every `OAH_WIKI_RECOVERY_CONFLICT`, the user reconciles the files by hand, then runs
         `oah wiki recover --resolved` under the same wiki lock. It checks that the log and all
         archives parse and that no entry appears twice. If any check fails, it refuses with
-        `OAH_WIKI_RECOVERY_CONFLICT` and changes nothing. If all checks pass, it records the
-        resolution in events, then removes the journal (A18).
+        `OAH_WIKI_RECOVERY_CONFLICT` and changes nothing. If all checks pass, it first lists
+        every entry present in the journal's original snapshot or captured live bytes but absent
+        from the reconciled files, comparing exact entry bytes. Missing entries never block
+        resolution. It then moves the journal byte-for-byte to a timestamped resolved record in
+        `resolved-records/` under the state folder and records the resolution time and record path
+        in events. `--resolved` never deletes journal bytes (A18).
     - **`oah wiki hygiene`** prints one line of `count(delta)` values for `broken_links`, `unindexed`,
       `missing_sources`, `missing_frontmatter`, `orphans`, `duplicate_titles`, `stale`, `banners` and
       `overlong_lines`, using the normal and index lint definitions. After a successful scan it
@@ -1607,7 +1611,7 @@ Consistency fix: `oah impact` uses exit 2 for usage errors, matching the shared 
 
 | # | Rule | Sections | Phases |
 |---|---|---|---|
-| A18 | **Safer log rollover.** `oah wiki rollover` is a dry run that prints its plan. `--apply` writes and needs a lease whose scope covers the log and the new archive. `oah wiki maintain` applies rollover under the wiki lock without a lease. Before the journal is removed, both files must hold exactly the published bytes. Otherwise wiki files stay unchanged and live bytes are recorded in the journal with reason `changed-after-publication`; commands refuse with `OAH_WIKI_RECOVERY_PENDING`, and recovery refuses with `OAH_WIKI_RECOVERY_CONFLICT`, naming the files that differ and the journal. For every recovery conflict, the user reconciles files by hand, then runs `oah wiki recover --resolved`: it checks that the log and all archives parse without duplicate entries, records the resolution in events and removes the journal. A failed check refuses with `OAH_WIKI_RECOVERY_CONFLICT` and changes nothing. Every `OAH_WIKI_LOG_INVALID` refusal names its case and happens before any write. Only the trigger and target are `[wiki]` config values; archive names stay `log_archive_NN.md` for scope exemptions, lint and recovery. | 5.10 | P7 (lane P7a) |
+| A18 | **Safer log rollover.** `oah wiki rollover` is a dry run that prints its plan. `--apply` writes and needs a lease whose scope covers the log and the new archive. `oah wiki maintain` applies rollover under the wiki lock without a lease. Before the journal is removed, both files must hold exactly the published bytes. Otherwise wiki files stay unchanged and live bytes are recorded in the journal with reason `changed-after-publication`; commands refuse with `OAH_WIKI_RECOVERY_PENDING`, and recovery refuses with `OAH_WIKI_RECOVERY_CONFLICT`, naming the files that differ and the journal. For every recovery conflict, the user reconciles files by hand, then runs `oah wiki recover --resolved`: it checks that the log and all archives parse without duplicate entries, then lists every entry from the journal's original snapshot or captured live bytes absent from the reconciled files, comparing exact entry bytes. Missing entries never block resolution. It moves the journal byte-for-byte to a timestamped resolved record in the state folder's `resolved-records/` folder and records the resolution time and record path in events; `--resolved` never deletes journal bytes. A failed check refuses with `OAH_WIKI_RECOVERY_CONFLICT` and changes nothing. Every `OAH_WIKI_LOG_INVALID` refusal names its case and happens before any write. Only the trigger and target are `[wiki]` config values; archive names stay `log_archive_NN.md` for scope exemptions, lint and recovery. | 5.10 | P7 (lane P7a) |
 | A19 | **The bound intent cannot be swapped.** Later rounds reuse the intent source bound at the first dispatch, and a brief with a different source refuses with `OAH_INTENT_SOURCE_MISMATCH`. Worktree selectors resolve to exactly one repository before the intent check. An ambiguous or unresolvable selector refuses before launch with `OAH_WORKTREE_UNRESOLVED` and a runnable retry command. | 5.6 | P3 (lane P3b) |
 
 #### Amendment 4 checklists
@@ -1621,7 +1625,9 @@ Consistency fix: `oah impact` uses exit 2 for usage errors, matching the shared 
 - [ ] The post-publication check removes the journal only when both files hold exactly the published bytes. (A18)
 - [ ] Any post-publication difference, including a late append, leaves wiki files unchanged, records live bytes in the journal with reason `changed-after-publication` and makes commands refuse with `OAH_WIKI_RECOVERY_PENDING`. (A18)
 - [ ] Recovery refuses a `changed-after-publication` journal or any other recovery conflict with `OAH_WIKI_RECOVERY_CONFLICT`, names the files that differ and the journal, and preserves all files and the journal. (A18)
-- [ ] After manual reconciliation of either conflict path, `oah wiki recover --resolved` validates the log and all archives, records the resolution in events and removes the journal when parsing succeeds and no entry appears twice. (A18)
+- [ ] After manual reconciliation of either conflict path, `oah wiki recover --resolved` moves the journal byte-for-byte to a timestamped resolved record under the state folder's `resolved-records/` when the log and all archives parse and no entry appears twice; it never deletes journal bytes. (A18)
+- [ ] Successful `oah wiki recover --resolved` records the resolution time and resolved-record path in events. (A18)
+- [ ] Dropping an original entry or a captured late append during reconciliation lists each missing entry by exact entry-byte comparison, does not block `--resolved`, and leaves each dropped entry recoverable from the resolved record. (A18)
 - [ ] If parsing fails or an entry appears twice, `oah wiki recover --resolved` refuses with `OAH_WIKI_RECOVERY_CONFLICT` and changes nothing. (A18)
 - [ ] Each invalid-log refusal names its case before any write. (A18)
 - [ ] Only the trigger and target come from `[wiki]`; archive names stay `log_archive_NN.md` for scope exemptions, lint and recovery. (A18)
