@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import TIERS, Candidate, ProviderError, _INTERRUPTIONS, _sanitize_interruption
+from oah.rerank.base import TIERS, Candidate, ProviderError, _raise_if_interrupted, _sanitize_interruption
 from oah.secrets import Secret
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
@@ -56,7 +56,11 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
         try:
             return action(*args, **kwargs)
         except BaseException as exc:
-            if isinstance(exc, _INTERRUPTIONS + (BaseExceptionGroup,)) or not isinstance(exc, Exception):
+            try:
+                _raise_if_interrupted(exc)
+            except BaseException as interruption:
+                return None, _sanitize_interruption(interruption)
+            if isinstance(exc, BaseExceptionGroup) or not isinstance(exc, Exception):
                 # The sanitizer also contains cleanup failures; do not clear its input a second time.
                 return None, _sanitize_interruption(exc)
             try:
@@ -75,6 +79,7 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
 def _finish(result: _T | None, code: _Failure) -> _T:
     """Raise only after sensitive helpers returned and their callers dropped every input."""
     try:
+        _raise_if_interrupted(code)
         if isinstance(code, BaseException):
             raise code.with_traceback(None) from None
         if code is not None:
@@ -112,9 +117,10 @@ def _number(value: object) -> float | None:
             return None
         try:
             number = float(value)
-        except _INTERRUPTIONS:
-            raise
-        except (OverflowError, TypeError, ValueError):
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if not isinstance(exc, (OverflowError, TypeError, ValueError)):
+                raise
             return None
         return number if math.isfinite(number) else None
     finally:
@@ -217,9 +223,10 @@ def _check_url(url: str) -> str | None:
         try:
             parts = urllib.parse.urlsplit(url)
             host = parts.hostname
-        except _INTERRUPTIONS:
-            raise
-        except ValueError:
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if not isinstance(exc, ValueError):
+                raise
             parts = None
         if parts is None:
             return "insecure-url"
@@ -261,10 +268,10 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         data = None
         try:
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        except _INTERRUPTIONS:
-            raise
-        except (TypeError, ValueError):
-            pass
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if not isinstance(exc, (TypeError, ValueError)):
+                raise
         if data is None:
             return None, "bad-request"
         from oah import __version__
@@ -281,27 +288,30 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
             with opener.open(request, timeout=timeout) as response:
                 raw = response.read(RESPONSE_LIMIT + 1)
-        except _INTERRUPTIONS:
-            raise
-        except urllib.error.HTTPError as exc:
-            code = STATUS_CODES.get(exc.code, f"http-{exc.code}")
-            exc.close()
-        except urllib.error.URLError as exc:
-            code = "timeout" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "network"
-        except (socket.timeout, TimeoutError):
-            code = "timeout"
-        except (OSError, http.client.HTTPException, ValueError, OverflowError):
-            code = "network"
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if isinstance(exc, urllib.error.HTTPError):
+                code = STATUS_CODES.get(exc.code, f"http-{exc.code}")
+                exc.close()
+            elif isinstance(exc, urllib.error.URLError):
+                code = "timeout" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "network"
+            elif isinstance(exc, (socket.timeout, TimeoutError)):
+                code = "timeout"
+            elif isinstance(exc, (OSError, http.client.HTTPException, ValueError, OverflowError)):
+                code = "network"
+            else:
+                raise
         if code is not None:
             return None, code
         if len(raw) > RESPONSE_LIMIT:
             return None, "bad-response"
         try:
             return json.loads(raw.decode("utf-8")), None
-        except _INTERRUPTIONS:
-            raise
-        except ValueError:  # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.
-            pass
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.
+            if not isinstance(exc, ValueError):
+                raise
         return None, "bad-response"
     finally:
         del url, payload, key, timeout, credential, data, raw, request, opener, response

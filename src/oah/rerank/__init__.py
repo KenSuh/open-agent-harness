@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from oah import secrets
-from oah.rerank.base import TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS, _sanitize_interruption
+from oah.rerank.base import (TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
+                             _raise_if_interrupted, _sanitize_interruption)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, TypeSafeProvider
 
 __all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "Provider", "ProviderError",
@@ -104,9 +105,10 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
             return None, None, unused("unknown-provider")
         try:
             key = secrets.get(provider.key_name(config), env=env, keychain=keychain)
-        except _INTERRUPTIONS:
-            raise
-        except ValueError:
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if not isinstance(exc, ValueError):
+                raise
             return None, None, unused("error:key-name")
         if not key:
             return None, None, unused("no key")
@@ -121,14 +123,14 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
     try:
         try:
             return action(), USED
-        except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
-            failure = _sanitize_interruption(exc)
-        except ProviderError as exc:
-            return None, unused(f"error:{exc.code}")
-        except Exception:  # noqa: BLE001 - optional plugins must not break the caller.
-            return None, unused("error:internal")
         except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if isinstance(exc, ProviderError):
+                return None, unused(f"error:{exc.code}")
+            if isinstance(exc, Exception):
+                return None, unused("error:internal")
             failure = _sanitize_interruption(exc)
+        _raise_if_interrupted(failure)
         if isinstance(failure, ProviderError):
             return None, unused(f"error:{failure.code}")
         raise failure.with_traceback(None) from None
@@ -145,9 +147,10 @@ def _valid_scores(scores: object, count: int) -> list[float] | None:
             return None
         try:
             number = float(value)
-        except _INTERRUPTIONS:
-            raise
-        except (OverflowError, TypeError, ValueError):
+        except BaseException as exc:
+            _raise_if_interrupted(exc)
+            if not isinstance(exc, (OverflowError, TypeError, ValueError)):
+                raise
             return None
         if not math.isfinite(number):
             return None
@@ -189,6 +192,7 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         failure = _sanitize_interruption(exc)
     finally:
         del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key, raw
+    _raise_if_interrupted(failure)
     raise failure.with_traceback(None) from None
 
 
@@ -222,4 +226,5 @@ def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, br
         failure = _sanitize_interruption(exc)
     finally:
         del axes, task, config, brief_disabled, env, keychain, providers, provider, key, answer, confidence
+    _raise_if_interrupted(failure)
     raise failure.with_traceback(None) from None

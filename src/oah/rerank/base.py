@@ -25,8 +25,11 @@ class ProviderError(Exception):
     """A provider failure, reported as `unused(error:<code>)`. It carries a code only, never text."""
 
     def __init__(self, code: str) -> None:
-        self.code = code if isinstance(code, str) and _CODE_RE.fullmatch(code) else "provider"
-        super().__init__(f"OAH_RERANK_PROVIDER_ERROR: {self.code}")
+        try:
+            self.code = code if isinstance(code, str) and _CODE_RE.fullmatch(code) else "provider"
+            super().__init__(f"OAH_RERANK_PROVIDER_ERROR: {self.code}")
+        finally:
+            del self, code
 
 
 def _interruption_type(error: BaseException) -> type[BaseException] | None:
@@ -83,6 +86,17 @@ def _sanitize_interruption(error: BaseException) -> BaseException:
         return clean
     finally:
         del error, exception_type, clean, fallback
+
+
+def _raise_if_interrupted(error: object) -> None:
+    """Give direct and grouped interruptions precedence over every ordinary error classification."""
+    failure = None
+    try:
+        if isinstance(error, BaseException) and _interruption_type(error) is not None:
+            failure = _sanitize_interruption(error)
+            raise failure.with_traceback(None) from None
+    finally:
+        del error, failure
 
 
 class Provider(Protocol):

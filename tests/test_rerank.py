@@ -801,9 +801,36 @@ class KeyLeakTest(unittest.TestCase):
         self.check_group_failure(0, StopNow, sibling_type=KeyboardInterrupt,
                                  expected_type=KeyboardInterrupt)
 
+    def test_provider_error_constructor_frames_drop_private_inputs(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        frames = []
+
+        def capture(frame, event, arg):
+            if event == "return" and frame.f_code is rerank.ProviderError.__init__.__code__:
+                frames.append(frame)
+
+        previous_profile = sys.getprofile()
+        try:
+            sys.setprofile(capture)
+            error = rerank.ProviderError(key + response_text)
+        finally:
+            sys.setprofile(previous_profile)
+        self.assertEqual(error.code, "provider")
+        self.assertTrue(frames)
+        for frame in frames:
+            self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+
     def test_multiple_inheritance_interruptions_are_never_ordinary_errors(self) -> None:
+        class ProviderErrorWithCode(rerank.ProviderError):
+            code = "internal"
+
+        class OrdinaryError(Exception):
+            pass
+
         for base in (KeyboardInterrupt, SystemExit, GeneratorExit):
-            for ordinary in (ValueError, OSError):
+            for ordinary in (rerank.ProviderError, ProviderErrorWithCode, OSError, ValueError,
+                             OrdinaryError):
                 # SystemExit and OSError have incompatible built-in instance layouts.
                 if base is SystemExit and ordinary is OSError:
                     continue
@@ -811,9 +838,9 @@ class KeyLeakTest(unittest.TestCase):
                 with self.subTest(base=base.__name__, ordinary=ordinary.__name__):
                     expected = base if ordinary is OSError else interruption
                     self.check_interrupted_request(interruption, expected)
-                    self.check_group_failure(0, interruption, expected_type=expected)
-                    self.check_group_failure(3, interruption, expected_type=expected)
-                    self.check_group_failure(600, interruption, expected_type=expected)
+                    for depth in (0, 1, 3, 600):
+                        with self.subTest(depth=depth):
+                            self.check_group_failure(depth, interruption, expected_type=expected)
 
     def test_gate_and_score_validation_interruptions_are_fresh(self) -> None:
         class Interrupted(KeyboardInterrupt, ValueError):
