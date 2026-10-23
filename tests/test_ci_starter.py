@@ -59,8 +59,9 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         return found[0]
 
-    def run_test_step(self, root: pathlib.Path):
-        step = ci.plan(root, ["linux"]).steps[-1]
+    def run_test_step(self, root: pathlib.Path, step: ci.Step | None = None):
+        if step is None:
+            step = ci.plan(root, ["linux"]).steps[-1]
         return subprocess.run([sys.executable, *shlex.split(step.run)[1:]], cwd=root,
                               capture_output=True, text=True, encoding="utf-8", timeout=30)
 
@@ -102,7 +103,7 @@ class DetectTest(unittest.TestCase):
                        "test_empty.py": "import unittest\n"}):
             with self.subTest(files=sorted(files)):
                 result = self.run_test_step(make_project(self, files))
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("Ran 0 tests", result.stderr)
                 self.assertIn("add tests or edit", result.stderr)
 
@@ -110,12 +111,15 @@ class DetectTest(unittest.TestCase):
         for code, summary, guidance in (
             (0, "", True),
             (1, "", True),
+            (2, "", True),
             (5, "NO TESTS RAN\n", True),
             (0, "Ran 0 tests in 0.000s\n", True),
+            (2, "Ran 0 tests in 0.000s\n", True),
             (5, "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n", True),
             (5, "Ran 1 test in 0.001s\n", True),
             (0, "Ran 1 test in 0.001s\n", False),
             (1, "Ran 2 tests in 0.001s\n", False),
+            (2, "Ran 2 tests in 0.001s\n", False),
         ):
             with self.subTest(code=code, summary=summary):
                 root = make_project(self, {"tests/test_runner.py":
@@ -124,7 +128,7 @@ class DetectTest(unittest.TestCase):
                                           f"    sys.stderr.write({summary!r})\n"
                                           f"    raise SystemExit({code})\n"})
                 result = self.run_test_step(root)
-                self.assertEqual(result.returncode, code or int(guidance), result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 1 if guidance else code, result.stdout + result.stderr)
                 self.assertIn(summary, result.stderr)
                 self.assertEqual("add tests or edit" in result.stderr, guidance, result.stderr)
 
@@ -138,23 +142,49 @@ class DetectTest(unittest.TestCase):
         result = subprocess.run([shutil.which("bash"), "--noprofile", "--norc", "-e", "-o", "pipefail",
                                  "-c", command], cwd=root, capture_output=True, text=True,
                                 encoding="utf-8", timeout=30)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("add tests or edit", result.stderr)
 
-    def test_unittest_root_layout_wins_over_nonpackage_tests_folder(self):
-        root = make_project(self, {
-            "tests/test_inside.py": "import unittest\n"
-                                    "class InsideTest(unittest.TestCase):\n"
-                                    "    def test_inside(self):\n"
-                                    "        self.fail('nonpackage folder was used')\n",
-            "test_root.py": "import unittest\n"
-                            "class RootTest(unittest.TestCase):\n"
-                            "    def test_root(self):\n"
-                            "        self.assertTrue(True)\n",
-        })
-        result = self.run_test_step(root)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Ran 1 test", result.stderr)
+    def test_unittest_nonpackage_mixed_layout_fails_in_either_location(self):
+        for failing in ("root", "inside"):
+            with self.subTest(failing=failing):
+                files = {}
+                for location, filename in (("root", "test_root.py"), ("inside", "tests/test_inside.py")):
+                    assertion = f"self.fail('{location} test was reached')" if location == failing else "pass"
+                    files[filename] = ("import unittest\nclass LayoutTest(unittest.TestCase):\n"
+                                       f"    def test_layout(self):\n        {assertion}\n")
+                root = make_project(self, files)
+                steps = ci.plan(root, ["linux"]).steps
+                results = [self.run_test_step(root, step) for step in steps]
+                self.assertEqual([result.returncode for result in results],
+                                 [int(failing == "root"), int(failing == "inside")])
+                for result in results:
+                    self.assertIn("Ran 1 test", result.stderr)
+                self.assertIn(f"{failing} test was reached", "".join(result.stderr for result in results))
+
+    def test_unittest_nonpackage_mixed_layout_guards_each_step(self):
+        body = ("import unittest\nclass LayoutTest(unittest.TestCase):\n"
+                "    def test_layout(self):\n        pass\n")
+        for empty in ("root", "inside", None):
+            with self.subTest(empty=empty):
+                root = make_project(self, {
+                    "test_root.py": "import unittest\n" if empty == "root" else body,
+                    "tests/test_inside.py": "import unittest\n" if empty == "inside" else body,
+                })
+                plan = ci.plan(root, ["linux"])
+                self.assertEqual(len(plan.steps), 2)
+                self.assertTrue(plan.steps[0].run.endswith(" -m unittest discover"))
+                self.assertTrue(plan.steps[1].run.endswith(" -m unittest discover -s tests"))
+                for location, step in zip(("root", "inside"), plan.steps):
+                    result = self.run_test_step(root, step)
+                    self.assertEqual(result.returncode, int(location == empty), result.stdout + result.stderr)
+                    self.assertIn(f"Ran {int(location != empty)} test", result.stderr)
+                    self.assertEqual("add tests or edit" in result.stderr, location == empty)
+                    self.assertIn(f"      - name: {step.name}\n        run: |\n          {step.run}\n", plan.text)
+
+    def test_pytest_takes_priority_over_mixed_unittest_layout(self):
+        found = self.detect_one({"pytest.ini": "[pytest]\n", "test_root.py": "", "tests/test_inside.py": ""})
+        self.assertEqual(runs(found), ["python -m pip install pytest", "python -m pytest"])
 
     def test_unittest_each_layout_passes_with_tests(self):
         body = ("import unittest\nclass MathTest(unittest.TestCase):\n"

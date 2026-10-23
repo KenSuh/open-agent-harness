@@ -18,7 +18,7 @@ _UNITTEST_GUARD = (
     "ran_tests = result.returncode != 5 and re.search(r'^Ran [1-9][0-9]* tests? in ', result.stderr, re.MULTILINE); "
     "sys.stderr.write('No tests ran; add tests or edit the Run tests step in "
     ".github/workflows/oah-ci.yml, then push again.\\n' if not ran_tests else ''); "
-    "sys.exit(result.returncode or (0 if ran_tests else 1))"
+    "sys.exit(result.returncode if ran_tests else 1)"
 )
 
 
@@ -131,7 +131,9 @@ def _python(root: pathlib.Path) -> Detection | None:
     if not tests_folder and not root_tests:
         return None
     command = f"python -c {shlex.quote(_UNITTEST_GUARD)} -m unittest discover"
-    if tests_folder and not (root / "tests" / "__init__.py").is_file() and not root_tests:
+    if tests_folder and not (root / "tests" / "__init__.py").is_file():
+        if root_tests:
+            steps.append(Step("Run tests at the project root", command))
         command += " -s tests"
     steps.append(Step("Run tests", command))
     return Detection("python", "Python (unittest)", f"found {found}; no pytest configuration, so unittest",
