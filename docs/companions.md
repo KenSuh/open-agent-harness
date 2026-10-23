@@ -47,8 +47,9 @@ python -m oah.setup.companions
 Add `--app orca` or `--app aside` to set up only one app, or `--dry-run` to only see the plan.
 It first prints every step with its exact command and where that command comes from. Steps marked
 `[global]` change files outside your project, in your user folder. Then it asks before each step:
-answer `y` to run it, or press Enter to skip it. `--yes` runs every step in the printed plan without
-asking, and nothing else.
+answer `y` to run it, or press Enter to skip it. `--yes` confirms the printed commands, but skips
+the Aside CLI installer unless you explicitly select `--app aside`. To install it without a prompt,
+review the plan with `--app aside --dry-run`, then run with `--app aside --yes`.
 
 **Orca steps**
 
@@ -71,20 +72,25 @@ asking, and nothing else.
      checks its publisher and timestamp, then runs it. Setup shows the whole script before asking.
 2. **Sign in.** You do this yourself. Open Aside and sign in inside the app (a free plan exists). Then,
    in a new terminal window, run `aside login` and approve the code in Aside's Settings > Account >
-   Devices. Setup checks only that `aside account status` succeeds.
-3. **Let Claude Code use Aside** `[global]`: `claude mcp add --transport stdio aside -- aside mcp`.
-   Claude Code keeps this in your user settings file, for this project.
+   Devices. Setup checks that the status column from `aside account status` says `signed in`. A
+   signed-out, paused or unrecognized state stays pending; finish signing in, then run setup again.
+3. **Let Claude Code use Aside** `[global]`: `claude mcp add --scope user --transport stdio aside -- aside mcp`.
+   Claude Code keeps this in your user settings file, available in all your projects.
 4. **Let Codex use Aside** `[global]`: `codex mcp add aside -- aside mcp`. Codex keeps this in its
    user settings file.
 
-Setup checks for an existing registration first (`claude mcp get aside`, `codex mcp get aside`) and
-skips a step that is already done.
+Setup checks an existing registration first (`claude mcp get aside`, `codex mcp get aside --json`).
+It skips only a usable stdio entry that launches `aside mcp`: Claude must report user scope and a
+connected server, and Codex must report it enabled. Disabled, conflicting or unrecognized entries
+stay pending and are left unchanged, including with `--yes`. Review the entry in your coding agent's
+MCP settings, enable or repair it yourself using the command shown above, then run setup again.
 
 ## 3. Your account stays yours
 
 `oah` never asks for, reads, prints or stores an account name, id, password or token. You sign in
-inside each app and in your own terminal. When setup checks a step, it looks only at whether the
-command succeeded and throws its output away.
+inside each app and in your own terminal. Setup examines only the sign-in status column and the MCP
+launch settings, ignores identity and credential fields, and discards command output without displaying
+or saving it.
 
 ## 4. The Aside rules
 
@@ -99,7 +105,7 @@ tells your agents to:
 
 **Aside**
 
-- Stop Claude Code and Codex from using it: `claude mcp remove aside` and `codex mcp remove aside`.
+- Stop Claude Code and Codex from using it: `claude mcp remove aside --scope user` and `codex mcp remove aside`.
 - Sign the `aside` command out: `aside logout`.
 - Remove the app: `brew uninstall --cask aside` on macOS, or uninstall Aside from Windows Settings >
   Apps. For the `aside` command itself, see https://docs.aside.com/help/developers.

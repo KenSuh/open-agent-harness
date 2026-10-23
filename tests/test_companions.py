@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import pathlib
 import re
@@ -356,7 +357,7 @@ class StepsTest(unittest.TestCase):
         self.assertIn("aside login", login.instruction)
         self.assertEqual(login.verify, ("aside", "account", "status"))
         claude = steps["aside-mcp-claude"]
-        self.assertEqual(claude.argv, ("claude", "mcp", "add", "--transport", "stdio", "aside", "--", "aside", "mcp"))
+        self.assertEqual(claude.argv, ("claude", "mcp", "add", "--scope", "user", "--transport", "stdio", "aside", "--", "aside", "mcp"))
         self.assertEqual(claude.skip_if, ("claude", "mcp", "get", "aside"))
         self.assertEqual(claude.needs, ("claude", "aside"))
         codex = steps["aside-mcp-codex"]
@@ -395,7 +396,7 @@ class StepsTest(unittest.TestCase):
             self.assertEqual("[global]" in line, step.global_write, line)
             if step.argv is not None:
                 self.assertIn(step.display.splitlines()[0], text)
-        self.assertIn("claude mcp add --transport stdio aside -- aside mcp", text)
+        self.assertIn("claude mcp add --scope user --transport stdio aside -- aside mcp", text)
         self.assertIn("Nothing runs until you answer y", text)
 
 
@@ -447,7 +448,7 @@ class RunStepsTest(unittest.TestCase):
             ("orca", "skills", "install", "--all"),
             ("orca", "project", "setup-existing-folder", "--project", "github:someone/sample", "--host", "local",
              "--path", str(self.root), "--kind", "git"),
-            ("claude", "mcp", "add", "--transport", "stdio", "aside", "--", "aside", "mcp"),
+            ("claude", "mcp", "add", "--scope", "user", "--transport", "stdio", "aside", "--", "aside", "mcp"),
             ("codex", "mcp", "add", "aside", "--", "aside", "mcp"),
         ])
         self.assertTrue(all(cwd == self.root for _, cwd in runner.calls))
@@ -565,6 +566,89 @@ class RunStepsTest(unittest.TestCase):
         self.assertEqual(buffer.getvalue(), "")
         self.assertIsNone(comp.default_probe(("oah-no-such-program-" + secrets.token_hex(4),), self.root))
 
+    def test_aside_authentication_requires_signed_in_status(self):
+        # Vendor account status exits zero even for signed-out and paused accounts.
+        identity = "user-" + secrets.token_hex(8) + "@example.invalid"
+        for status in ("signed in", "signed out", "signed out/paused", "local", "unknown"):
+            with self.subTest(status=status):
+                output = f"* u0  {identity}  {status}  profiles: none\n  provider: google\n"
+                with mock.patch.object(comp, "resolve_command", return_value=Resolved(("aside",), "aside", "native")), \
+                        mock.patch.object(comp, "run_command", return_value=RunResult(0, output, identity, False)):
+                    steps = [s for s in self.plan(apps=("aside",)) if s.key == "aside-login"]
+                    states = self.run_steps(steps, yes=True, probe=comp.default_probe)
+                self.assertEqual(states["aside-login"], "present" if status == "signed in" else "pending")
+                self.assertNotIn(identity, "\n".join(self.out))
+
+    def test_readiness_accepts_windows_line_endings(self):
+        outputs = {
+            ("aside", "account", "status"): "* u0  Local account  signed in  profiles: none\r\n",
+            ("claude", "mcp", "get", "aside"): (
+                "aside:\r\n  Scope: User config (available in all your projects)\r\n"
+                "  Status: ✓ Connected\r\n  Type: stdio\r\n  Command: aside\r\n  Args: mcp\r\n"),
+        }
+        for argv, output in outputs.items():
+            with self.subTest(argv=argv), \
+                    mock.patch.object(comp, "resolve_command", return_value=Resolved((argv[0],), argv[0], "native")), \
+                    mock.patch.object(comp, "run_command", return_value=RunResult(0, output, "", False)):
+                self.assertEqual(comp.default_probe(argv, self.root), 0)
+
+    def test_unknown_authentication_output_is_pending(self):
+        for output in ("", "signed in\n", "* u0  signed in  signed out  profiles: none\n"):
+            with self.subTest(output=output), \
+                    mock.patch.object(comp, "resolve_command", return_value=Resolved(("aside",), "aside", "native")), \
+                    mock.patch.object(comp, "run_command", return_value=RunResult(0, output, "", False)):
+                self.assertNotEqual(comp.default_probe(("aside", "account", "status"), self.root), 0)
+
+    def test_mcp_probe_preserves_unusable_entries(self):
+        claude = ("aside:\n  Scope: User config (available in all your projects)\n"
+                  "  Status: ✓ Connected\n  Type: stdio\n  Command: aside\n  Args: mcp\n")
+        codex = {"name": "aside", "enabled": True,
+                 "transport": {"type": "stdio", "command": "aside", "args": ["mcp"], "env": None}}
+        cases = [("claude", claude.replace("✓", tick), True) for tick in ("✓", "✔", "√")]
+        cases.append(("codex", json.dumps(codex), True))
+        for old, new in (("✓ Connected", "⊘ Disabled for this project (re-enable via /mcp)"),
+                         ("✓ Connected", "✗ Failed to connect"), ("Command: aside", "Command: other"),
+                         ("Args: mcp", "Args: exec mcp"), ("Type: stdio", "Type: sse"),
+                         ("User config (available in all your projects)", "Local config (private to you in this project)")):
+            cases.append(("claude", claude.replace(old, new), False))
+        for patch in ({"enabled": False}, {"transport": {"type": "sse", "url": "https://example.invalid"}},
+                      {"transport": {"type": "stdio", "command": "other", "args": ["mcp"]}},
+                      {"transport": {"type": "stdio", "command": "aside", "args": ["exec", "mcp"]}}):
+            cases.append(("codex", json.dumps(codex | patch), False))
+        cases += [("codex", "{}", False), ("codex", "not json", False), ("claude", "aside", False)]
+        for engine, output, valid in cases:
+            with self.subTest(engine=engine, output=output):
+                secret = "tok_" + secrets.token_hex(12)
+                if engine == "claude":
+                    output += f"  Environment:\n    PRIVATE={secret}\n"
+                else:
+                    output = output.replace('"env": null', '"env": ' + json.dumps({"PRIVATE": secret}))
+                runner = FakeRunner()
+                with mock.patch.object(comp, "resolve_command", return_value=Resolved((engine,), engine, "native")), \
+                        mock.patch.object(comp, "run_command", return_value=RunResult(0, output, secret, False)) as run:
+                    steps = [s for s in self.plan(apps=("aside",)) if s.key == f"aside-mcp-{engine}"]
+                    outcomes = comp.run_steps(steps, project_root=self.root, yes=True, which=self.everything,
+                                              ask=Answers(), out=self.out.append, runner=runner,
+                                              probe=comp.default_probe, refresh=lambda: None)
+                result = comp.CompanionResult(outcomes)
+                self.assertEqual(result.aside_registered, valid)
+                self.assertEqual(outcomes[0].status, "present" if valid else "pending")
+                self.assertEqual(runner.calls, [])
+                if engine == "codex":
+                    self.assertIn("--json", run.call_args.args[0])
+                self.assertNotIn(secret, "\n".join(self.out))
+
+    def test_companion_yes_skips_unnamed_optional_installer(self):
+        for os_name in ("macos", "windows"):
+            with self.subTest(os_name=os_name):
+                runner = FakeRunner()
+                result = comp.companion_setup(os_name=os_name, project_root=self.root, remote_url=None,
+                                             yes=True, which=fake_which("curl", "powershell"), ask=Answers(),
+                                             out=self.out.append, runner=runner, probe=FakeProbe(), refresh=lambda: None)
+                self.assertEqual(runner.calls, [])
+                self.assertIn("aside-cli", result.pending)
+                self.assertIn("--app aside", "\n".join(self.out))
+
     def test_default_runner_runs_in_project_root(self):
         target = self.root / "cwd.txt"
         code = "import os, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(os.getcwd(), encoding='utf-8')"
@@ -637,14 +721,18 @@ class CompanionsCliTest(unittest.TestCase):
         write_posix_tool(self.bin, "orca", log + 'if [ "$1" = "--version" ]; then echo 1.4.0; fi\nexit 0')
         write_posix_tool(self.bin, "npx", log + "exit 0")
         write_posix_tool(self.bin, "aside", log + (
-            'if [ "$1" = "account" ]; then echo "Signed in as {email} ({account})"; '
-            'echo "token={token}" >&2; fi\nexit 0').format(email=self.email, account=self.account, token=self.token))
+            'if [ "$1" = "account" ]; then echo "* u0  {email}  signed in  profiles: none"; '
+            'echo "token={token}" >&2; fi\nexit 0').format(email=self.email, token=self.token))
         for engine in ("claude", "codex"):
+            output = ("aside:\n  Scope: User config (available in all your projects)\n"
+                      "  Status: ✓ Connected\n  Type: stdio\n  Command: aside\n  Args: mcp\n") if engine == "claude" else json.dumps({
+                          "name": "aside", "enabled": True,
+                          "transport": {"type": "stdio", "command": "aside", "args": ["mcp"]}})
             write_posix_tool(self.bin, engine, log + (
-                'if [ "$2" = "get" ]; then echo "aside: aside mcp account={account}"; '
-                '[ -f "{state}/{engine}" ] && exit 0; exit 1; fi\n'
+                'if [ "$2" = "get" ]; then [ -f "{state}/{engine}" ] || exit 1; '
+                "printf '%s\\n' '{output}'; exit 0; fi\n"
                 'if [ "$2" = "add" ]; then touch "{state}/{engine}"; fi\nexit 0').format(
-                    account=self.account, state=self.state, engine=engine))
+                    output=output, state=self.state, engine=engine))
         self.home = work / "home"
         self.home.mkdir()
 
@@ -676,7 +764,7 @@ class CompanionsCliTest(unittest.TestCase):
         result = self.run_cli(stdin="n\n" * 10)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(sorted(set(self.calls())), sorted({"orca --version", "aside account status",
-                                                            "claude mcp get aside", "codex mcp get aside"}))
+                                                            "claude mcp get aside", "codex mcp get aside --json"}))
         self.assertIn("[global]", result.stdout)
         self.assertIn("orca skills install --all", result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith(
@@ -690,13 +778,29 @@ class CompanionsCliTest(unittest.TestCase):
         self.assertIn("orca skills install --all", calls)
         self.assertIn(f"orca project setup-existing-folder --project github:someone/sample --host local --path "
                       f"{self.repo} --kind git", calls)
-        self.assertIn("claude mcp add --transport stdio aside -- aside mcp", calls)
+        self.assertIn("claude mcp add --scope user --transport stdio aside -- aside mcp", calls)
         self.assertIn("codex mcp add aside -- aside mcp", calls)
         lines = self.log.read_text(encoding="utf-8").splitlines()
         add = next(line for line in lines if line.startswith("claude mcp add"))
         self.assertEqual(pathlib.Path(add.split("|")[1]).resolve(), self.repo.resolve())
         self.assertTrue(result.stdout.rstrip().endswith("COMPANIONS_OK"))
         self.assert_no_account_data(result)
+
+    def test_cli_yes_alone_skips_missing_aside_installer(self):
+        (self.bin / "aside").unlink()
+        write_posix_tool(self.bin, "curl", FAKE_TOOL.format(log=self.log) + "exit 0")
+        result = self.run_cli("--yes")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertFalse(any(call.startswith("curl ") for call in self.calls()))
+        self.assertIn("--app aside", result.stdout)
+        self.assertIn("aside-cli", result.stdout.splitlines()[-1])
+
+    def test_cli_yes_with_app_allows_cli_installer(self):
+        (self.bin / "aside").unlink()
+        write_posix_tool(self.bin, "curl", FAKE_TOOL.format(log=self.log) + "exit 0")
+        result = self.run_cli("--yes", "--app", "aside")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)  # fake installer adds no CLI
+        self.assertIn("curl -fsSL https://releases.aside.com/install.sh", self.calls())
 
     def test_cli_never_prints_account_data(self):
         for stdin in ("y\n" * 10, "n\n" * 10):
@@ -760,7 +864,7 @@ class DocsTest(unittest.TestCase):
                                "brew install --cask aside", "https://aside.com/download?os=mac",
                                "https://aside.com/download?os=win", "https://docs.aside.com/help/developers",
                                "curl -fsSL https://releases.aside.com/install.sh | bash",
-                               "claude mcp add --transport stdio aside -- aside mcp",
+                               "claude mcp add --scope user --transport stdio aside -- aside mcp",
                                "codex mcp add aside -- aside mcp", "claude mcp remove aside",
                                "codex mcp remove aside", "orca skills install --all", "aside login",
                                "python -m oah.setup.companions", "python -m oah.setup --with orca,aside"):

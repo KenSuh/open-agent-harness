@@ -46,7 +46,9 @@ python -m oah.setup.companions
 한 앱만 설정하려면 `--app orca`나 `--app aside`를 붙인다. 계획만 보려면 `--dry-run`을 붙인다. 이 명령은
 먼저 모든 단계를 정확한 명령과 그 명령의 출처와 함께 보여 준다. `[global]` 표시가 붙은 단계는 프로젝트
 밖, 사용자 폴더의 파일을 바꾼다. 그다음 단계마다 묻는다. 실행하려면 `y`라고 답하고, 건너뛰려면 그냥
-Enter를 누른다. `--yes`는 보여 준 계획 안의 단계만 묻지 않고 실행한다.
+Enter를 누른다. `--yes`는 보여 준 명령을 승인하지만, `--app aside`로 앱을 직접 지정하지 않으면 Aside CLI
+설치 프로그램은 건너뛴다. 묻지 않고 설치하려면 먼저 `--app aside --dry-run`으로 계획을 확인한 뒤
+`--app aside --yes`로 실행한다.
 
 **Orca 단계**
 
@@ -68,19 +70,23 @@ Enter를 누른다. `--yes`는 보여 준 계획 안의 단계만 묻지 않고 
      확인한 뒤 실행한다. 설치 안내는 묻기 전에 스크립트 전체를 보여 준다.
 2. **로그인.** 직접 한다. Aside를 열고 앱 안에서 로그인한다(무료 요금제가 있다). 그다음 새 터미널 창에서
    `aside login`을 실행하고 Aside의 Settings > Account > Devices에서 코드를 승인한다. 설치 안내는
-   `aside account status`가 성공하는지만 확인한다.
-3. **Claude Code가 Aside를 쓰게 하기** `[global]`. `claude mcp add --transport stdio aside -- aside mcp`를
-   실행한다. Claude Code는 이 설정을 이 프로젝트용으로 사용자 설정 파일에 둔다.
+   `aside account status`의 상태 열이 `signed in`인지 확인한다. 로그아웃·일시 중지·알 수 없는 상태는
+   미완료로 남는다. 로그인을 마친 뒤 설치 안내를 다시 실행한다.
+3. **Claude Code가 Aside를 쓰게 하기** `[global]`. `claude mcp add --scope user --transport stdio aside -- aside mcp`를
+   실행한다. Claude Code는 이 설정을 모든 프로젝트에서 쓰도록 사용자 설정 파일에 둔다.
 4. **Codex가 Aside를 쓰게 하기** `[global]`. `codex mcp add aside -- aside mcp`를 실행한다. Codex는 이 설정을
    사용자 설정 파일에 둔다.
 
-설치 안내는 먼저 이미 등록돼 있는지 확인하고(`claude mcp get aside`, `codex mcp get aside`) 끝난 단계는
-건너뛴다.
+설치 안내는 먼저 등록을 확인한다(`claude mcp get aside`, `codex mcp get aside --json`). `aside mcp`를
+실행하는 stdio 항목이고 Claude에서는 사용자 범위로 연결됐으며 Codex에서는 활성화돼 있어야 건너뛴다.
+비활성·충돌·알 수 없는 항목은 `--yes`에서도 바꾸지 않고 미완료로 남긴다. 코딩 에이전트의 MCP 설정에서
+항목을 확인하고 위 명령을 참고해 직접 활성화하거나 고친 뒤 설치 안내를 다시 실행한다.
 
 ## 3. 계정은 내 것으로 남는다
 
 `oah`는 계정 이름, id, 비밀번호, 토큰을 묻지도 읽지도 보여 주지도 저장하지도 않는다. 로그인은 각 앱 안과
-내 터미널에서 직접 한다. 설치 안내가 단계를 확인할 때는 명령이 성공했는지만 보고 출력은 버린다.
+내 터미널에서 직접 한다. 설치 안내는 로그인 상태 열과 MCP 실행 설정만 확인하고 식별자와 인증 정보
+필드는 무시한다. 명령 출력은 보여 주거나 저장하지 않고 버린다.
 
 ## 4. Aside 규칙
 
@@ -95,7 +101,7 @@ Aside가 등록되면 `AGENTS.md`의 규칙 블록에 짧은 선택 절이 붙�
 
 **Aside**
 
-- Claude Code와 Codex가 더는 쓰지 않게 하려면 `claude mcp remove aside`와 `codex mcp remove aside`를
+- Claude Code와 Codex가 더는 쓰지 않게 하려면 `claude mcp remove aside --scope user`와 `codex mcp remove aside`를
   실행한다.
 - `aside` 명령을 로그아웃하려면 `aside logout`을 실행한다.
 - 앱은 macOS에서 `brew uninstall --cask aside`로 지우고, Windows에서는 설정 > 앱에서 Aside를 제거한다.
