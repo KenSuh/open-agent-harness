@@ -124,6 +124,107 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_NODE_INVALID")
 
 
+class WindowsAclTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = make_tmp_dir(self)
+        self.folder = self.tmp / "snapshot"
+        self.folder.mkdir()
+        self.script = self.folder / "script.mjs"
+        self.script.write_text("verified bytes\n", encoding="utf-8")
+        self.sid = "S-1-5-21-100-200-300-1001"
+
+    def verify(self, sddl, *, snapshot):
+        with patch.object(unlazy, "_windows_user_sid", return_value=self.sid), \
+                patch.object(unlazy, "_windows_security_descriptor", return_value=sddl):
+            if snapshot:
+                unlazy._verify_snapshot_permissions(self.folder, platform="win32")
+            else:
+                unlazy._verify_state_ancestry(self.folder, platform="win32")
+
+    def test_standard_trusted_owners_and_grants_allow_ancestry_and_snapshots(self):
+        principals = (self.sid, "SY", "S-1-5-18", "BA", "S-1-5-32-544",
+                      "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+        for snapshot in (False, True):
+            for owner in principals:
+                for principal in (*principals, "OW"):
+                    with self.subTest(snapshot=snapshot, owner=owner, principal=principal):
+                        self.verify(f"O:{owner}D:P(A;OICI;GA;;;{principal})(A;OICIIO;GA;;;CO)"
+                                    "(A;OICIIO;FA;;;S-1-3-0)", snapshot=snapshot)
+
+    def test_foreign_read_traverse_and_create_subfolder_are_allowed(self):
+        for snapshot in (False, True):
+            for rights in ("FRFX", "GRGX", "LC", "0x100004", "0x1200a9"):
+                with self.subTest(snapshot=snapshot, rights=rights):
+                    good = f"O:{self.sid}D:P(A;OICI;FA;;;OW)"
+                    def descriptor(path):
+                        return good + (f"(A;;{rights};;;AU)" if path.is_dir() else "")
+                    with patch.object(unlazy, "_windows_user_sid", return_value=self.sid), \
+                            patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor):
+                        if snapshot:
+                            unlazy._verify_snapshot_permissions(self.folder, platform="win32")
+                        else:
+                            unlazy._verify_state_ancestry(self.folder, platform="win32")
+
+    def test_creator_owner_must_be_inherit_only(self):
+        for snapshot in (False, True):
+            for principal in ("CO", "S-1-3-0"):
+                with self.subTest(snapshot=snapshot, principal=principal):
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.verify(f"O:{self.sid}D:P(A;OICI;FA;;;OW)(A;;FA;;;{principal})",
+                                    snapshot=snapshot)
+                    self.assertIn("S-1-3-0", str(caught.exception))
+                    self.assertIn("FA", str(caught.exception))
+
+    def test_replacement_refusals_identify_path_sid_and_rights(self):
+        principal = "S-1-5-21-999"
+        for snapshot in (False, True):
+            for rights in ("SD", "DT", "WD", "WO", "GA", "FA", "0x10000", "0x40", "0x40000", "0x80000"):
+                with self.subTest(snapshot=snapshot, rights=rights):
+                    good = f"O:{self.sid}D:P(A;OICI;FA;;;OW)"
+                    def descriptor(path):
+                        return good + (f"(A;;{rights};;;{principal})" if path == self.folder else "")
+                    with patch.object(unlazy, "_windows_user_sid", return_value=self.sid), \
+                            patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor):
+                        with self.assertRaises(unlazy.UnlazyError) as caught:
+                            if snapshot:
+                                unlazy._verify_snapshot_permissions(self.folder, platform="win32")
+                            else:
+                                unlazy._verify_state_ancestry(self.folder, platform="win32")
+                    for detail in (str(self.folder), principal, rights, "OAH_STATE_DIR"):
+                        self.assertIn(detail, str(caught.exception))
+
+    def test_generic_write_allowed_on_ancestors_but_refused_on_snapshots(self):
+        for rights in ("GW", "FW", "0x40000000", "0x120116"):
+            with self.subTest(rights=rights):
+                sddl = f"O:{self.sid}D:P(A;OICI;FA;;;OW)(A;;{rights};;;AU)"
+                self.verify(sddl, snapshot=False)
+                with self.assertRaises(unlazy.UnlazyError) as caught:
+                    self.verify(sddl, snapshot=True)
+                self.assertIn(rights, str(caught.exception))
+                self.assertIn("S-1-5-11", str(caught.exception))
+
+    def test_foreign_file_write_cannot_replace_verified_script_contents(self):
+        for rights in ("DC", "LC", "0x2", "0x4"):
+            with self.subTest(rights=rights):
+                good = f"O:{self.sid}D:P(A;OICI;FA;;;OW)"
+                def descriptor(path):
+                    return good + (f"(A;;{rights};;;AU)" if path == self.script else "")
+                with patch.object(unlazy, "_windows_user_sid", return_value=self.sid), \
+                        patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor):
+                    with self.assertRaises(unlazy.UnlazyError):
+                        unlazy._verify_snapshot_permissions(self.folder, platform="win32")
+
+    @unittest.skipUnless(os.name == "nt", "Windows real temporary-folder and user-profile ACLs")
+    def test_real_temporary_folder_and_user_profile_chain_are_trusted(self):
+        import tempfile
+
+        for folder in (pathlib.Path(tempfile.gettempdir()), pathlib.Path(os.environ["TEMP"]), pathlib.Path.home()):
+            with self.subTest(folder=folder):
+                unlazy._verify_state_ancestry(folder.absolute())
+        unlazy._private_directory(self.tmp / "private")
+        unlazy._verify_snapshot_permissions(self.tmp / "private")
+
+
 class ExecutionSnapshotTest(unittest.TestCase):
     def setUp(self):
         self.tmp = make_tmp_dir(self)
@@ -324,7 +425,7 @@ class ExecutionSnapshotTest(unittest.TestCase):
         self.state.mkdir(mode=0o700)
         verify = unlazy._verify_snapshot_permissions
         for bad in (good + "(A;;FA;;;WD)", good + "(A;;0x40;;;AU)",
-                    good.replace(sid, "S-1-5-21-999"), good.replace(f"O:{sid}", "O:BA"), "", None):
+                    good.replace(sid, "S-1-5-21-999"), "", None):
             with self.subTest(descriptor=bad):
                 def descriptor(path):
                     return bad if path == self.state else good
@@ -606,15 +707,13 @@ class ExecutionSnapshotTest(unittest.TestCase):
                f"O:{sid}D:NO_ACCESS_CONTROL", f"O:{sid}D:P", good.replace("D:P", "D:"), "", None,
                good.replace("(A;", "(XA;"), good + "unexpected")
         verify = unlazy._verify_snapshot_permissions
-        for value in (*bad, "query-failed", "user-failed", "unknown-user", "copied-file", "directory-owner"):
+        for value in (*bad, "query-failed", "user-failed", "unknown-user", "copied-file"):
             with self.subTest(value=value):
                 def descriptor(path):
                     if value == "query-failed":
                         raise OSError("security descriptor query failed")
                     if value == "copied-file":
                         return good + "(A;;FA;;;WD)" if path.name == "gates.mjs" else good
-                    if value == "directory-owner":
-                        return good.replace(f"O:{sid}", "O:BA") if path.name == "scripts" else good
                     return value
                 def windows_verify(folder):
                     return verify(folder, platform="win32")

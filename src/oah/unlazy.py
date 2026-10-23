@@ -401,11 +401,66 @@ def _macos_mount_flags(path: pathlib.Path) -> int:
     return info.f_flags
 
 
+def _verify_windows_dacl(sddl: str, sid: str, *, snapshot: bool = False,
+                         directory: bool = True, protected: bool = False) -> None:
+    """Trust standard Windows owners; reject foreign replacement or snapshot-write rights."""
+    trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544",
+               "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
+    aliases = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "CO": "S-1-3-0",
+               "WD": "S-1-1-0", "AU": "S-1-5-11", "BU": "S-1-5-32-545"}
+    match = re.fullmatch(r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))", sddl or "")
+    if not match:
+        raise OSError("the owner or DACL cannot be parsed")
+    if match[1] not in trusted:
+        raise OSError(f"untrusted owner SID {aliases.get(match[1], match[1])} has implicit WRITE_DAC rights")
+    if protected and "P" not in match[2]:
+        raise OSError("the snapshot root DACL is not protected from inheritance")
+    aces = re.findall(r"\(([^()]*)\)", match[3])
+    if "".join(f"({ace})" for ace in aces) != match[3]:
+        raise OSError("the DACL cannot be parsed")
+    rights_masks = {"CC": 0x1, "DC": 0x2, "LC": 0x4, "SW": 0x8, "RP": 0x10, "WP": 0x20,
+                    "DT": 0x40, "LO": 0x80, "CR": 0x100, "SD": 0x10000, "RC": 0x20000,
+                    "WD": 0x40000, "WO": 0x80000, "FA": 0x1F01FF, "FR": 0x120089,
+                    "FW": 0x120116, "FX": 0x1200A0, "GA": 0x10000000, "GX": 0x20000000,
+                    "GW": 0x40000000, "GR": 0x80000000}
+    for ace in aces:
+        fields = ace.split(";")
+        if (len(fields) != 6 or fields[0] not in ("A", "D") or fields[3] or fields[4]
+                or not re.fullmatch(r"(?:OI|CI|NP|IO|ID|SA|FA)*", fields[1])):
+            raise OSError("the DACL has an unsupported entry")
+        # Inherit-only CREATOR OWNER (CO / S-1-3-0) is a standard default grant.
+        # No inherit-only entry or denial grants access to the object being checked.
+        if fields[0] == "D" or "IO" in fields[1] or fields[5] in trusted or fields[5] == "OW":
+            continue
+        rights, principal = fields[2], aliases.get(fields[5], fields[5])
+        if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
+            mask = int(rights, 16)
+        else:
+            tokens = [rights[i:i + 2] for i in range(0, len(rights), 2)]
+            if not tokens or any(token not in rights_masks for token in tokens):
+                raise OSError(f"SID {principal} grants unverified rights {rights!r}")
+            mask = 0
+            for token in tokens:
+                mask |= rights_masks[token]
+        rejected = [name for bit, name in ((0x10000, "DELETE"), (0x40, "FILE_DELETE_CHILD"),
+                    (0x40000, "WRITE_DAC"), (0x80000, "WRITE_OWNER"), (0x10000000, "GENERIC_ALL"))
+                    if mask & bit]
+        if snapshot and (mask & 0x40000000 or mask & 0x120116 == 0x120116):
+            rejected.append("GENERIC_WRITE")
+        # On files, the directory's create-child bits instead allow rewriting verified bytes.
+        if snapshot and not directory and mask & 0x116:
+            rejected.append("FILE_WRITE_DATA/APPEND_DATA/WRITE_EA/WRITE_ATTRIBUTES")
+        if mask & ~0xF01F01FF:  # Only known generic, standard and file-specific rights are verified.
+            rejected.append("unverified rights")
+        if rejected:
+            raise OSError(f"SID {principal} grants rejected rights {rights!r} ({', '.join(rejected)})")
+
+
 def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None) -> None:
     """Prove that no other account can replace any component leading to state.
 
-    System-owned ancestors are allowed; the state root must belong to this user. A POSIX
-    sticky ancestor protects its trusted child against rename, but state itself may not be
+    Trusted Windows system owners are allowed throughout; POSIX state must belong to this user.
+    A POSIX sticky ancestor protects its trusted child against rename, but state itself may not be
     group/other writable. Unknown ACLs fail closed rather than guessing effective access.
     """
     platform = sys.platform if platform is None else platform
@@ -415,7 +470,6 @@ def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None)
             sid = _windows_user_sid()
             if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
                 raise OSError("cannot identify the current user's SID")
-            trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544"}
         chain = (*reversed(folder.parents), folder)
         for path in chain:
             try:
@@ -427,35 +481,7 @@ def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None)
             if not stat.S_ISDIR(info.st_mode):
                 raise OSError("a directory component is not a directory")
             if platform == "win32":
-                sddl = _windows_security_descriptor(path)
-                match = re.fullmatch(r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))", sddl or "")
-                if not match or match[1] not in ({sid} if path == folder else trusted):
-                    raise OSError("the directory owner or DACL cannot be trusted")
-                aces = re.findall(r"\(([^()]*)\)", match[3])
-                if "".join(f"({ace})" for ace in aces) != match[3]:
-                    raise OSError("the directory DACL cannot be parsed")
-                for ace in aces:
-                    fields = ace.split(";")
-                    if (len(fields) != 6 or fields[0] not in ("A", "D") or fields[3] or fields[4]
-                            or not re.fullmatch(r"(?:OI|CI|NP|IO|ID|SA|FA)*", fields[1])):
-                        raise OSError("the directory DACL has an unsupported entry")
-                    # Denials and inherit-only entries grant no access to this directory.
-                    if fields[0] == "D" or "IO" in fields[1]:
-                        continue
-                    if fields[5] in trusted or fields[5] == "OW":
-                        continue
-                    rights = fields[2]
-                    # Creating children or writing this directory's attributes cannot replace an
-                    # existing protected child. Refuse DELETE_CHILD, DELETE, WRITE_DAC/OWNER,
-                    # full control and unknown rights; keep snapshot DACL checks owner-only.
-                    safe = bool(re.fullmatch(r"(?:FR|FW|FX|GR|GW|GX|CC|DC|LC|SW|RP|WP|LO|CR|RC)+", rights))
-                    if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
-                        # Generic read/write/execute, synchronize, READ_CONTROL and file-specific
-                        # rights except FILE_DELETE_CHILD (0x40).
-                        safe = not (int(rights, 16) & ~0xE01201BF)
-                    if not safe:
-                        raise OSError("the directory DACL grants another account replacement/delete/permission access "
-                                      "or contains unverified rights")
+                _verify_windows_dacl(_windows_security_descriptor(path), sid)
             else:
                 # Query every component: a nested mount can synthesize this caller's st_uid even
                 # when the volume above it enforces ownership. Modes alone then prove no privacy.
@@ -506,10 +532,6 @@ def _verify_snapshot_permissions(folder: pathlib.Path, *, platform: str | None =
             sid = _windows_user_sid()
             if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
                 raise OSError("cannot identify the current user's SID")
-            trusted = rf"(?:{re.escape(sid)}|SY|BA|S-1-5-18|S-1-5-32-544)"
-            # Accept only the simple full-access grants we create (plus SYSTEM/Administrators).
-            # OW means the actual owner, which must itself be trusted. Unknown ACEs fail closed.
-            ace = rf"\(A;(?:OI|CI|ID)*;FA;;;(?:OW|{trusted})\)"
         for path in (folder, *folder.rglob("*")):
             info = path.lstat()
             if path.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:  # reparse point
@@ -525,11 +547,8 @@ def _verify_snapshot_permissions(folder: pathlib.Path, *, platform: str | None =
                         or not lines[0].split() or not re.fullmatch(r"[d-][rwxStTs-]{9}@?", lines[0].split()[0])):
                     raise OSError("cannot confirm that every snapshot ACL was removed")
             else:
-                flags = r"P(?:AI|AR)*" if path == folder else r"(?:P|AI|AR)*"
-                sddl = _windows_security_descriptor(path)
-                owner = re.escape(sid) if stat.S_ISDIR(info.st_mode) else trusted
-                if not isinstance(sddl, str) or not re.fullmatch(rf"O:{owner}D:{flags}(?:{ace})+", sddl):
-                    raise OSError("a snapshot owner or DACL is not restricted to your account and SYSTEM/Administrators")
+                _verify_windows_dacl(_windows_security_descriptor(path), sid, snapshot=True,
+                                     directory=stat.S_ISDIR(info.st_mode), protected=path == folder)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         raise _permission_refused(f"{path}: {exc}") from exc
 
