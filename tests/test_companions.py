@@ -238,6 +238,47 @@ class DoctorAndGuideTest(unittest.TestCase):
         self.assertIn("OAH_SETUP_USAGE", str(caught.exception))
 
 
+class SetupWithFlagTest(unittest.TestCase):
+    """python -m oah.setup --with: a comma-separated list of optional apps, checked against the catalog."""
+
+    def run_setup(self, *args):
+        work = make_tmp_dir(self)
+        env = {key: value for key, value in os.environ.items() if key.upper() not in ("PATH", "PYTHONPATH")}
+        env.update(PATH=str(work / "empty-bin"), PYTHONPATH=str(SRC), HOME=str(work), USERPROFILE=str(work),
+                   PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run([sys.executable, "-m", "oah.setup", "--os", "windows", "--dry-run", *args], env=env,
+                                capture_output=True, timeout=60, cwd=str(work))
+        return result, result.stdout.decode("utf-8"), result.stderr.decode("utf-8")
+
+    def plan_line(self, text, name):
+        lines = text.splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith(f"  - {name} (optional)"))
+        return "\n".join(lines[index:index + 3])
+
+    def test_with_names_optional_apps(self):
+        skip_note = "--yes skips it"
+        result, text, err = self.run_setup()
+        self.assertEqual(result.returncode, 0, err)
+        self.assertIn(skip_note, self.plan_line(text, "orca"))
+        self.assertIn(skip_note, self.plan_line(text, "aside"))
+        result, text, err = self.run_setup("--with", "orca")
+        self.assertEqual(result.returncode, 0, err)
+        self.assertNotIn(skip_note, self.plan_line(text, "orca"))
+        self.assertIn(skip_note, self.plan_line(text, "aside"))
+        result, text, err = self.run_setup("--with", "orca,aside", "--yes")
+        self.assertEqual(result.returncode, 0, err)
+        self.assertNotIn(skip_note, text)
+
+    def test_with_rejects_unknown_names(self):
+        for value in ("jq", "orca,bogus", "", "orca,,aside"):
+            with self.subTest(value=value):
+                result, text, err = self.run_setup("--with", value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("OAH_SETUP_USAGE", err)
+                self.assertIn("orca, aside", err)
+                self.assertNotIn("SETUP_DRY_RUN", text)
+
+
 class StepsTest(unittest.TestCase):
     def setUp(self):
         self.root = make_tmp_dir(self) / "my project"
@@ -722,7 +763,7 @@ class DocsTest(unittest.TestCase):
                                "claude mcp add --transport stdio aside -- aside mcp",
                                "codex mcp add aside -- aside mcp", "claude mcp remove aside",
                                "codex mcp remove aside", "orca skills install --all", "aside login",
-                               "python -m oah.setup.companions"):
+                               "python -m oah.setup.companions", "python -m oah.setup --with orca,aside"):
                     self.assertIn(needle, text)
 
     def test_docs_never_name_plain_orca_cask(self):

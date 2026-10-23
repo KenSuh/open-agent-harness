@@ -355,7 +355,7 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
                        if step.display else step.note or "Install it from the official page below.")
             out(f"  - {step.tool.name} ({step.tool.requirement}): {how}")
             if step.tool.optional and step.tool.name not in named:
-                out("      Installed only if you name it or answer y for it; --yes skips it.")
+                out(f"      Installed only with --with {step.tool.name} or when you answer y for it; --yes skips it.")
             if step.manual and step.display and step.note:
                 out(f"      {step.note}")
             out(f"      {step.url}")
