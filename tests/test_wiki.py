@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
 import pathlib
 import subprocess
+import sys
+import time
 import unittest
 
 from oah import wiki, wiki_cli
@@ -331,3 +334,194 @@ class MaintainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HOLDER = (
+    "import pathlib, sys, time\n"
+    "sys.path.insert(0, sys.argv[3])\n"
+    "from oah.lockfile import StateLock\n"
+    "lock = StateLock(pathlib.Path(sys.argv[1]))\n"
+    "lock.__enter__()\n"
+    "pathlib.Path(sys.argv[2]).write_text('locked', encoding='utf-8')\n"
+    "time.sleep(60)\n"
+)
+SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
+
+
+class MaintainTaskTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = scaffold(self)
+        self.state = make_tmp_dir(self) / "state"
+        self.env = {"OAH_STATE_DIR": str(self.state)}
+        self.wiki_dir = self.repo / "docs" / "wiki"
+        self.records = self.state / "wiki" / "maintenance.jsonl"
+
+    def maintain(self, task: str = "t1", **kwargs) -> wiki.MaintainResult:
+        kwargs.setdefault("today", TODAY)
+        return wiki.maintain(self.repo, on={"log", "index", "rollover"}, task=task, env=self.env, **kwargs)
+
+    def verify(self, task: str = "t1", **kwargs) -> wiki.MaintenanceCheck:
+        return wiki.verify_maintenance(self.repo, task, env=self.env, **kwargs)
+
+    def records_for(self, task: str) -> list[dict]:
+        lines = self.records.read_text(encoding="utf-8").splitlines() if self.records.exists() else []
+        return [record for record in map(json.loads, lines) if record["task"] == task]
+
+    def task_entries(self, task: str) -> int:
+        marker = f"<!-- oah-task: {task} -->".encode()
+        return sum(path.read_bytes().count(marker) for path in self.wiki_dir.glob("log*.md"))
+
+    def test_cli_maintain_adds_entry_index_and_record(self):
+        code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t1", "--title", "Retry policy",
+                                 "--body", "See [[wiki-guide]].", state=self.state)
+        self.assertEqual(code, 0, err)
+        self.assertIn("OAH_WIKI_MAINTAINED task=t1 log=added index=added", out)
+        log_text = (self.wiki_dir / "log.md").read_text(encoding="utf-8")
+        self.assertRegex(log_text, r"## \d{4}-\d{2}-\d{2} Retry policy\n\n<!-- oah-task: t1 -->\nSee \[\[wiki-guide\]\]\.\n")
+        index = (self.wiki_dir / "index.md").read_text(encoding="utf-8").splitlines()
+        self.assertIn("- task t1: Retry policy", index)
+        self.assertLess(index.index("Tasks:"), index.index("- task t1: Retry policy"))
+        [record] = self.records_for("t1")
+        self.assertEqual(sorted(record["outputs"]), ["docs/wiki/index.md", "docs/wiki/log.md"])
+        for rel, digest in record["outputs"].items():
+            self.assertEqual(digest, hashlib.sha256((self.repo / rel).read_bytes()).hexdigest())
+        self.assertIn("at", record)
+        code, out, _ = run_cli(self.repo, "wiki", "lint", state=self.state)
+        self.assertEqual(code, 0, out)
+
+    def test_maintain_is_idempotent_by_task(self):
+        self.assertEqual(self.maintain(log_title="First").errors, [])
+        before = {p.name: p.read_bytes() for p in self.wiki_dir.glob("*.md")}
+        result = self.maintain(log_title="First")
+        self.assertEqual(result.errors, [])
+        self.assertIn("log=present index=present", result.lines[-1])
+        self.assertEqual({p.name: p.read_bytes() for p in self.wiki_dir.glob("*.md")}, before)
+        self.assertEqual(self.task_entries("t1"), 1)
+        self.assertEqual(len(self.records_for("t1")), 2)
+        self.maintain("t2")
+        self.assertEqual((self.task_entries("t1"), self.task_entries("t2")), (1, 1))
+
+    def test_retry_completes_missing_work(self):
+        self.maintain()
+        index = self.wiki_dir / "index.md"
+        index.write_text(index.read_text(encoding="utf-8").replace("- task t1: Task t1\n", ""), encoding="utf-8")
+        result = self.maintain()
+        self.assertIn("log=present index=added", result.lines[-1])
+        self.assertEqual(self.task_entries("t1"), 1)
+        self.assertEqual(index.read_text(encoding="utf-8").count("- task t1:"), 1)
+
+    def test_idempotent_after_rollover(self):
+        settings = WikiSettings(rollover_trigger_bytes=1500, rollover_target_bytes=700)
+        self.maintain(settings=settings)
+        for i in range(20):
+            wiki.maintain(self.repo, on={"log"}, log_title=f"filler {i}", log_body="f" * 60, env=self.env,
+                          settings=settings, today=TODAY)
+        result = wiki.maintain(self.repo, on={"rollover"}, env=self.env, settings=settings, today=TODAY)
+        self.assertTrue(result.lines[0].startswith("OAH_WIKI_ROLLED_OVER"), result.lines)
+        self.assertNotIn(b"oah-task: t1", (self.wiki_dir / "log.md").read_bytes())
+        self.assertFalse(self.verify(settings=settings).ok)
+        result = self.maintain(settings=settings)
+        self.assertEqual(result.errors, [])
+        self.assertIn("log=present", result.lines[-1])
+        self.assertEqual(self.task_entries("t1"), 1)
+        self.assertTrue(self.verify(settings=settings).ok)
+
+    def test_maintain_rolls_over_and_records_new_archive(self):
+        for i in range(20):
+            wiki.maintain(self.repo, on={"log"}, log_title=f"filler {i}", log_body="f" * 60, env=self.env,
+                          today=TODAY)
+        settings = WikiSettings(rollover_trigger_bytes=1500, rollover_target_bytes=700)
+        result = self.maintain(settings=settings)
+        self.assertEqual(result.errors, [])
+        self.assertIn("rollover=log_archive_01.md", result.lines[-1])
+        [record] = self.records_for("t1")
+        self.assertEqual(sorted(record["outputs"]),
+                         ["docs/wiki/index.md", "docs/wiki/log.md", "docs/wiki/log_archive_01.md"])
+        self.assertEqual(self.task_entries("t1"), 1)
+        self.assertIn(b"oah-task: t1", (self.wiki_dir / "log.md").read_bytes())
+        result = self.maintain(settings=settings)
+        [_, second] = self.records_for("t1")
+        self.assertEqual(sorted(second["outputs"]), ["docs/wiki/index.md", "docs/wiki/log.md"])
+
+    def test_lock_contention_refuses_with_retry_message(self):
+        lock = self.state / "wiki" / ".lock"
+        lock.parent.mkdir(parents=True)
+        ready = self.state / "ready"
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER, str(lock), str(ready), SRC])
+        self.addCleanup(lambda: (holder.kill(), holder.wait()))
+        deadline = time.monotonic() + 20
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "lock holder did not start")
+            time.sleep(0.05)
+        started = time.monotonic()
+        result = self.maintain(lock_timeout=0.5)
+        self.assertGreaterEqual(time.monotonic() - started, 0.5)
+        self.assertTrue(result.errors and result.errors[0].startswith("OAH_WIKI_BUSY"), result.errors)
+        self.assertIn("retry", result.errors[0])
+        self.assertFalse(self.records.exists())
+
+    def test_pending_journal_requires_recover(self):
+        journal = self.state / "wiki" / "rollover-journal.json"
+        journal.parent.mkdir(parents=True)
+        journal.write_text("{}", encoding="utf-8")
+        before = {p.name: p.read_bytes() for p in self.wiki_dir.glob("*.md")}
+        code, _, err = run_cli(self.repo, "wiki", "maintain", "--task", "t1", state=self.state)
+        self.assertEqual(code, 69)
+        self.assertTrue(err.startswith("OAH_WIKI_RECOVERY_PENDING"), err)
+        self.assertIn("oah wiki recover", err)
+        self.assertEqual({p.name: p.read_bytes() for p in self.wiki_dir.glob("*.md")}, before)
+        self.assertFalse(self.records.exists())
+        check = self.verify()
+        self.assertFalse(check.ok)
+        self.assertTrue(any(p.startswith("OAH_WIKI_RECOVERY_PENDING") for p in check.problems))
+
+    def test_task_id_validation(self):
+        for bad in ["", "../x", "a b", "-x", "x" * 65]:
+            with self.subTest(task=bad), self.assertRaises(ValueError):
+                self.maintain(bad)
+        code, _, err = run_cli(self.repo, "wiki", "maintain", "--task", "../x", state=self.state)
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_TASK_INVALID"), err)
+
+    def test_index_and_task_steps_need_a_task(self):
+        with self.assertRaises(ValueError):
+            wiki.maintain(self.repo, on={"index"}, env=self.env)
+
+    def test_verify_missing_then_ok_then_stale(self):
+        check = self.verify()
+        self.assertFalse(check.ok)
+        self.assertTrue(any(p.startswith("OAH_WIKI_MAINTENANCE_MISSING") for p in check.problems), check.problems)
+        self.maintain()
+        hygiene = self.state / "wiki" / "hygiene.json"
+        baseline = hygiene.read_bytes() if hygiene.exists() else None
+        before = {p.name: p.read_bytes() for p in self.wiki_dir.rglob("*") if p.is_file()}
+        check = self.verify()
+        self.assertTrue(check.ok, check.problems)
+        self.assertTrue(check.lint.startswith("OAH_WIKI_LINT"))
+        self.assertTrue(check.hygiene.startswith("OAH_WIKI_HYGIENE"))
+        self.assertEqual(check.record["task"], "t1")
+        self.assertEqual({p.name: p.read_bytes() for p in self.wiki_dir.rglob("*") if p.is_file()}, before)
+        self.assertEqual(hygiene.read_bytes() if hygiene.exists() else None, baseline)
+        wiki.maintain(self.repo, on={"log"}, log_title="later edit", env=self.env, today=TODAY)
+        check = self.verify()
+        self.assertFalse(check.ok)
+        self.assertTrue(any(p.startswith("OAH_WIKI_MAINTENANCE_STALE") and "log.md" in p for p in check.problems))
+        self.maintain()
+        self.assertTrue(self.verify().ok)
+
+    def test_verify_detects_removed_entry_or_index_line(self):
+        self.maintain()
+        log_path = self.wiki_dir / "log.md"
+        original = log_path.read_bytes()
+        log_path.write_bytes(original.replace(b"<!-- oah-task: t1 -->\n", b""))
+        self.assertTrue(any("log entry" in p for p in self.verify().problems))
+        log_path.write_bytes(original)
+        index = self.wiki_dir / "index.md"
+        index.write_text(index.read_text(encoding="utf-8").replace("- task t1:", "- other:"), encoding="utf-8")
+        self.assertTrue(any("index" in p for p in self.verify().problems))
+
+    def test_verify_other_worktree_record_does_not_count(self):
+        other = scaffold(self)
+        wiki.maintain(other, on={"log", "index", "rollover"}, task="t1", env=self.env, today=TODAY)
+        check = self.verify()
+        self.assertFalse(check.ok)

@@ -44,6 +44,12 @@ def register(commands: argparse._SubParsersAction) -> None:
     sub.add_parser("recover", help="finish or check an interrupted rollover")
     sub.add_parser("hygiene", help="print one line of problem counts and their change since the last run")
 
+    maintain = sub.add_parser("maintain", help="task upkeep before the final commit: log entry, index line and "
+                              "size-based rollover, once per task id")
+    maintain.add_argument("--task", required=True, help="the task id used with oah start")
+    maintain.add_argument("--title", default=None, help='log and index title (default: "Task <task>")')
+    maintain.add_argument("--body", default="", help="the log entry text below the heading")
+
 
 def _date(value: str) -> datetime.date:
     try:
@@ -117,5 +123,11 @@ def _hygiene(args: argparse.Namespace, wiki: Wiki) -> int:
     return EXIT_OK
 
 
-HANDLERS = {"new": _new, "log": _log, "lint": _lint, "rollover": _rollover, "recover": _recover,
+def _maintain(args: argparse.Namespace, wiki: Wiki) -> int:
+    for line in wiki.maintain_task(args.task, title=args.title, body=args.body):
+        print(line)
+    return EXIT_OK
+
+
+HANDLERS = {"maintain": _maintain, "new": _new, "log": _log, "lint": _lint, "rollover": _rollover, "recover": _recover,
             "hygiene": _hygiene}

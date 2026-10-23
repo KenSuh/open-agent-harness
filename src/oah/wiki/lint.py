@@ -293,8 +293,8 @@ def write_candidates(path: pathlib.Path, wiki: pathlib.Path, report: Report) -> 
 
 
 def hygiene(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, baseline: pathlib.Path, *,
-            now: float) -> str:
-    """One `count(delta)` line; the baseline is stored only after the whole scan succeeds."""
+            now: float, store: bool = True) -> str:
+    """One `count(delta)` line; the baseline is stored only after the whole scan succeeds (and when store)."""
     normal = scan(root, wiki, settings, now=now)
     index = scan_index(root, wiki, settings, now=now)
     counts = normal.counts()
@@ -311,6 +311,7 @@ def hygiene(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, base
         before = previous["counts"].get(counter) if same else None
         delta = f"{count - before:+d}" if isinstance(before, int) else "n/a"
         parts.append(f"{counter}={count}({delta})")
-    write_json_atomic(baseline, {"version": 1, "config": config, "counts": counts,
-                                 "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
+    if store:
+        write_json_atomic(baseline, {"version": 1, "config": config, "counts": counts,
+                                     "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
     return "OAH_WIKI_HYGIENE " + " ".join(parts)
