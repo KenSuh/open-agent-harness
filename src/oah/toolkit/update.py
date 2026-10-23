@@ -290,6 +290,8 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
                     result.reasons = reasons + ([] if check_only else [f"kept {destination.commit[:12]}"])
                 elif check_only:
                     result.status = "available"
+                    if not destination.path.exists():
+                        result.reasons = [f"not in {destination.level} yet; the next update copies it there"]
                 else:
                     ready.append((result, destination, entry, new))
         if check_only:
