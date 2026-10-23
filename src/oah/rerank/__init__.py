@@ -124,9 +124,15 @@ def _valid_scores(scores: object, count: int) -> list[float] | None:
         return None
     result = []
     for value in scores:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        result.append(float(value))
+        try:
+            number = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        result.append(number)
     return result
 
 
@@ -176,7 +182,9 @@ def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, br
     if not isinstance(answer, tuple) or len(answer) != 2 or answer[0] not in TIERS:
         return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
     tier, confidence = answer
-    if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-                                   or not math.isfinite(confidence)):
-        return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
-    return Advice(rule_tier, tier, None if confidence is None else float(confidence), USED, provider.name)
+    if confidence is not None:
+        validated = _valid_scores([confidence], 1)
+        if validated is None:
+            return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
+        confidence = validated[0]
+    return Advice(rule_tier, tier, confidence, USED, provider.name)

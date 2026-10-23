@@ -68,7 +68,10 @@ def build_rerank_request(model: str, kind: str, query: str, candidates: Sequence
 def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -138,6 +141,10 @@ def _check_url(url: str) -> None:
 def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object:
     """POST payload as JSON and return the parsed reply; any failure raises ProviderError(code)."""
     _check_url(url)
+    # Bearer credentials must be visible ASCII, with no whitespace or control characters.
+    # Reject them before http.client can include a rejected header value in an exception.
+    if not isinstance(key, str) or not key or any(not 0x21 <= ord(char) <= 0x7e for char in key):
+        raise ProviderError("invalid-header")
     try:
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError):
@@ -150,7 +157,7 @@ def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object
         "Authorization": f"Bearer {key}",
         "User-Agent": f"open-agent-harness/{__version__}",
     })
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     code: str | None = None
     raw = b""
     try:

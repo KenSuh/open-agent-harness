@@ -10,6 +10,7 @@
      `add-generic-password -s oah -a <name> -w` (it prompts for the value).
    - Windows: Credential Manager, a generic credential with target `oah:<name>`. Store one with
      `cmdkey /generic:oah:<name> /user:oah /pass` (it prompts for the value).
+     Credential blobs must use UTF-16-LE, as cmdkey does; other encodings are unsupported.
 3. Otherwise None. Callers then leave the feature off and report `unused(no key)`.
 
 Keys are never written anywhere by oah, never put in an exception message, and never shown by any
@@ -103,22 +104,14 @@ class MacKeychain:
 
 
 def decode_blob(data: bytes) -> str | None:
-    """A Credential Manager blob as text: UTF-16-LE (what cmdkey writes) or UTF-8; None when neither."""
+    """Decode a UTF-16-LE Credential Manager blob (cmdkey's format); never guess its encoding."""
     if not data:
         return None
-    candidates: list[str] = []
-    if len(data) % 2 == 0 and all(byte == 0 for byte in data[1::2]):
-        candidates.append("utf-16-le")
-    candidates.append("utf-8")
-    if len(data) % 2 == 0:
-        candidates.append("utf-16-le")
-    for encoding in candidates:
-        try:
-            text = data.decode(encoding).rstrip("\x00")
-        except UnicodeDecodeError:
-            continue
-        return text or None
-    return None
+    try:
+        text = data.decode("utf-16-le").rstrip("\x00")
+    except UnicodeDecodeError:
+        return None
+    return text or None
 
 
 if os.name == "nt":

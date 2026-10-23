@@ -283,7 +283,8 @@ def default_roots(repo_root: pathlib.Path, *, home: pathlib.Path, env: Mapping[s
         SkillRoot(repo_root / ".agents" / "skills", "project", ".agents/skills"),
     ]
     if kit_cache is not None:
-        roots.append(SkillRoot(pathlib.Path(kit_cache), "kit", "kit cache"))
+        folder = pathlib.Path(kit_cache).absolute()
+        roots.append(SkillRoot(folder, "kit", folder.as_posix()))
     for folder in (claude_home / "skills", codex_home / "skills", home / ".agents" / "skills"):
         roots.append(SkillRoot(folder, "user", _label(folder, home, repo_root)))
     return roots + _plugin_roots(claude_home, home, repo_root)

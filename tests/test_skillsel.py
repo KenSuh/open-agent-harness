@@ -351,6 +351,23 @@ class TelemetryTest(unittest.TestCase):
 
 
 class DefaultRootsTest(unittest.TestCase):
+    def test_cache_references_identify_installed_file(self) -> None:
+        base = make_tmp_dir(self)
+        kit = base / "state" / "skills-cache"
+        path = make_skill(kit, "verification-before-completion", body="x" * 2000)
+        roots = skillsel.default_roots(base / "repo", home=base / "home", env={}, kit_cache=kit)
+        for mode in ("reference", "attach"):
+            with self.subTest(mode=mode):
+                selection = skillsel.select("docs", "initial", "low", ["a.md"], roots=roots,
+                                            settings=dict(skillsel.DEFAULTS, mode=mode, attach_max_bytes=100))
+                (skill,) = selection.skills
+                self.assertEqual(pathlib.Path(skill.label), path)
+                self.assertTrue(pathlib.Path(skill.label).is_file())
+                self.assertIn(skill.label, selection.brief_text())
+                self.assertIsNone(skill.text)
+                if mode == "attach":
+                    self.assertTrue(any(skill.label in note for note in selection.notes))
+
     def test_default_roots_layout(self) -> None:
         base = make_tmp_dir(self)
         repo, home = base / "repo", base / "home"
@@ -371,7 +388,7 @@ class DefaultRootsTest(unittest.TestCase):
         self.assertEqual(table, [
             ("project", ".claude/skills", ""),
             ("project", ".agents/skills", ""),
-            ("kit", "kit cache", ""),
+            ("kit", kit.as_posix(), ""),
             ("user", "~/.claude/skills", ""),
             ("user", "~/.codex/skills", ""),
             ("user", "~/.agents/skills", ""),
@@ -398,6 +415,13 @@ class DefaultRootsTest(unittest.TestCase):
 
 
 class TemplateTest(unittest.TestCase):
+    def test_enablement_discloses_both_request_types(self) -> None:
+        text = resources.files("oah").joinpath("templates/skills/config.toml").read_text(encoding="utf-8")
+        disclosure = " ".join(text.split("[rerank]\n", 1)[1].split("enabled =", 1)[0].split())
+        for field in ("task kind", "query", "name", "description", "200", "difficulty advice",
+                      "kind", "intensity", "reasoning", "risk", "task summary", "500", "charge"):
+            self.assertIn(field, disclosure)
+
     def test_template_parses_and_validates(self) -> None:
         text = resources.files("oah").joinpath("templates/skills/config.toml").read_text(encoding="utf-8")
         tomllib.loads(text)

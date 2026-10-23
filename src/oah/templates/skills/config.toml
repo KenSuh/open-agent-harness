@@ -19,8 +19,10 @@ extra_rules = []
 
 [rerank]
 # Off until you turn it on. A key alone never turns it on.
-# When on, oah sends the task kind, the query, and each candidate's name and short description
-# to the provider, which may charge for each request.
+# When on, re-ranking sends the task kind, the query, and each candidate's name and description
+# (up to 200 characters). For difficulty advice, oah sends the four axes (kind, intensity,
+# reasoning, risk) and the task summary (up to 500 characters).
+# The provider may charge for either request type. Enable only if you consent to both.
 enabled = false
 provider = ""               # "typesafe" for TypeSafe Jev
 timeout_seconds = 10.0

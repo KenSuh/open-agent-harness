@@ -117,16 +117,25 @@ class MacKeychainTest(unittest.TestCase):
 
 
 class DecodeBlobTest(unittest.TestCase):
-    def test_decode_blob_utf16_and_utf8(self) -> None:
+    def test_non_ascii_utf16le_roundtrip(self) -> None:
+        for suffix in ("secretŁ", "секрет", "키", "🔑"):
+            for terminator in ("", "\x00"):
+                with self.subTest(suffix=suffix, terminated=bool(terminator)):
+                    value = fake_key() + suffix
+                    self.assertEqual(secrets.decode_blob((value + terminator).encode("utf-16-le")), value)
+
+    def test_decode_blob_utf16le(self) -> None:
         value = fake_key()
         self.assertEqual(secrets.decode_blob(value.encode("utf-16-le")), value)
-        self.assertEqual(secrets.decode_blob(value.encode("utf-8")), value)
         self.assertEqual(secrets.decode_blob((value + "\x00").encode("utf-16-le")), value)
-        self.assertEqual(secrets.decode_blob("키-abc".encode("utf-8")), "키-abc")
+        self.assertEqual(secrets.decode_blob("키-abc".encode("utf-16-le")), "키-abc")
 
     def test_decode_blob_rejects_empty_and_garbage(self) -> None:
         self.assertIsNone(secrets.decode_blob(b""))
         self.assertIsNone(secrets.decode_blob(b"\xff\xfe\xfd"))
+        self.assertIsNone(secrets.decode_blob(b"\x00\xd8"))  # unpaired surrogate
+        self.assertIsNone(secrets.decode_blob(b"\x00\x00"))
+        self.assertIsNone(secrets.decode_blob(fake_key().encode("utf-8")))  # odd-length, not UTF-16-LE
 
 
 @unittest.skipUnless(os.name == "nt", "Windows Credential Manager is Windows-only")
@@ -159,11 +168,20 @@ class WindowsCredentialsTest(unittest.TestCase):
         self.assertEqual(secrets.WindowsCredentials().lookup(name), value)
         self.assertEqual(secrets.get(name, env={}), value)
 
-    def test_windows_credential_utf8_blob(self) -> None:
+    def test_windows_credential_invalid_utf16le_blob(self) -> None:
         name = "OAH_TEST_" + token_source.token_hex(6).upper()
         value = fake_key()
         self._write(f"oah:{name}", value.encode("utf-8"))
-        self.assertEqual(secrets.WindowsCredentials().lookup(name), value)
+        self.assertIsNone(secrets.WindowsCredentials().lookup(name))
+
+    def test_windows_non_ascii_utf16le_roundtrip(self) -> None:
+        for suffix in ("secretŁ", "секрет", "키", "🔑"):
+            with self.subTest(suffix=suffix):
+                name = "OAH_TEST_" + token_source.token_hex(6).upper()
+                value = fake_key() + suffix
+                self._write(f"oah:{name}", value.encode("utf-16-le"))
+                self.assertEqual(secrets.WindowsCredentials().lookup(name), value)
+                self.assertEqual(secrets.get(name, env={}), value)
 
     def test_windows_missing_credential_is_none(self) -> None:
         name = "OAH_TEST_" + token_source.token_hex(6).upper()

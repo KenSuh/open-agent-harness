@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import copy
+import email.message
 import http.server
+import io
 import json
+import os
+import pathlib
 import secrets as token_source
 import threading
 import time
 import unittest
+import urllib.request
+import urllib.response
+from unittest import mock
 
 from oah import rerank
 from oah.config import ConfigError, load_config
@@ -152,6 +159,13 @@ class GatingTest(unittest.TestCase):
         self.assertEqual(result.status, "unused(error:timeout)")
         self.assertEqual(names(result), ["a", "b", "c"])
 
+    def test_oversized_integer_score_keeps_input_order(self) -> None:
+        self.provider.scores = {"a": 0.1, "b": 10**400, "c": 0.5}
+        result = self.run_rerank(enabled(), env={"FAKE_RERANK_KEY": self.key})
+        self.assertEqual(result.status, "unused(error:bad-response)")
+        self.assertEqual(names(result), ["a", "b", "c"])
+        self.assertEqual(result.scores, ())
+
     def test_unexpected_exception_is_internal_error(self) -> None:
         self.provider.error = RuntimeError(f"boom {self.key}")
         result = self.run_rerank(enabled(), env={"FAKE_RERANK_KEY": self.key})
@@ -239,7 +253,7 @@ class AdviceTest(unittest.TestCase):
         self.assertEqual(unused.tier, "high")
 
     def test_advice_bad_answers(self) -> None:
-        for answer in (("huge", 0.5), ("high", "x"), None, ("high",)):
+        for answer in (("huge", 0.5), ("high", "x"), ("high", 10**400), None, ("high",)):
             with self.subTest(answer=answer):
                 self.provider.advice_answer = answer
                 advice = self.advise(enabled())
@@ -392,6 +406,35 @@ class TypeSafeHttpTest(unittest.TestCase):
         self.assertEqual(result.status, "unused(error:http-307)")
         self.assertEqual([request["path"] for request in server.requests], ["/v1/systemone"])
 
+    def test_proxy_environment_cannot_redirect_credentials(self) -> None:
+        endpoint = FakeServer(self, lambda path, body: (200, {}, 0, {}))
+        proxy = FakeServer(self, lambda path, body: (200, {}, 0, {}))
+        environment = {name: proxy.url() for name in
+                       ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+        environment.update(no_proxy="", NO_PROXY="")
+        with mock.patch.dict(os.environ, environment), \
+                mock.patch("urllib.request.proxy_bypass", return_value=False):
+            typesafe.post_json(endpoint.url(), {}, key=self.key, timeout=5)
+        self.assertEqual(proxy.requests, [])
+        self.assertEqual(len(endpoint.requests), 1)
+        self.assertEqual(endpoint.requests[0]["headers"]["Authorization"], f"Bearer {self.key}")
+
+    def test_proxy_environment_does_not_change_transport_destination(self) -> None:
+        destinations = []
+
+        def http_open(handler, request):
+            destinations.append(request.host)
+            response = urllib.response.addinfourl(io.BytesIO(b"{}"), email.message.Message(),
+                                                 request.full_url, 200)
+            response.msg = "OK"
+            return response
+
+        with mock.patch.dict(os.environ, {"http_proxy": "http://proxy.invalid:8080", "no_proxy": ""}), \
+                mock.patch("urllib.request.proxy_bypass", return_value=False), \
+                mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+            typesafe.post_json("http://127.0.0.1:9876/v1/systemone", {}, key=self.key, timeout=5)
+        self.assertEqual(destinations, ["127.0.0.1:9876"])
+
     def test_typesafe_bad_bodies(self) -> None:
         bodies = [b"not json", {"answers": {}}, {"answers": {"c0": {"type": "noul", "noul": 2.0},
                                                            "c1": {"type": "noul", "noul": 0.1}}},
@@ -401,6 +444,12 @@ class TypeSafeHttpTest(unittest.TestCase):
                 server = FakeServer(self, lambda path, body, p=payload: (200, p, 0, {}))
                 result = self.run_typesafe(server, candidates("a", "b"))
                 self.assertEqual(result.status, "unused(error:bad-response)")
+
+    def test_oversized_integer_response_is_bad_response(self) -> None:
+        body = {"answers": {"c0": {"type": "noul", "noul": 10**400}}}
+        with self.assertRaises(rerank.ProviderError) as caught:
+            typesafe.parse_rerank_response(body, 1)
+        self.assertEqual(caught.exception.code, "bad-response")
 
     def test_typesafe_timeout(self) -> None:
         server = FakeServer(self, lambda path, body: (200, {}, 2.0, {}))
@@ -457,6 +506,17 @@ class TypeSafeHttpTest(unittest.TestCase):
 
 
 class KeyLeakTest(unittest.TestCase):
+    def test_post_json_rejects_malformed_credentials_without_echoing(self) -> None:
+        key = fake_key()
+        for suffix in ("\n", "\r\nInjected: value", "\n value", "\x00", "\x7f", "Ł"):
+            with self.subTest(suffix=suffix):
+                with self.assertRaises(rerank.ProviderError) as caught:
+                    typesafe.post_json("http://127.0.0.1:1", {}, key=key + suffix, timeout=0.1)
+                self.assertEqual(caught.exception.code, "invalid-header")
+                self.assertNotIn(key, str(caught.exception))
+                self.assertNotIn(key, repr(caught.exception))
+                self.assertIsNone(caught.exception.__context__)
+
     def test_key_never_in_record_repr_or_errors(self) -> None:
         key = fake_key()
         env = {"TYPESAFE_API_KEY": key}
@@ -491,12 +551,31 @@ class KeyLeakTest(unittest.TestCase):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_defaults_validate_with_windows_newline_translation(self) -> None:
+        write_text = pathlib.Path.write_text
+
+        def windows_write(path, data, *args, **kwargs):
+            kwargs.setdefault("newline", "\r\n")
+            return write_text(path, data, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "write_text", windows_write):
+            self.test_defaults_validate_with_config_loader()
+
+    def test_windows_path_in_literal_toml_string(self) -> None:
+        root = make_tmp_dir(self)
+        (root / ".oah").mkdir()
+        path = r"D:\oah-cache\skills"
+        (root / ".oah" / "config.toml").write_text(
+            f"[paths]\ncache = '{path}'\n", encoding="utf-8")
+        self.assertEqual(load_config(root).section("paths", {"cache": ""})["cache"], path)
+
     def test_defaults_validate_with_config_loader(self) -> None:
         root = make_tmp_dir(self)
         (root / ".oah").mkdir()
         (root / ".oah" / "config.toml").write_text(
             '[rerank]\r\nenabled = true\r\nprovider = "typesafe"\r\ntimeout_seconds = 5\r\n'
-            '[rerank.typesafe]\r\nmodel = "jev-latest"\r\nkey_name = "TYPESAFE_API_KEY"\r\n', encoding="utf-8")
+            '[rerank.typesafe]\r\nmodel = "jev-latest"\r\nkey_name = "TYPESAFE_API_KEY"\r\n',
+            encoding="utf-8", newline="")
         section = load_config(root).section("rerank", rerank.DEFAULTS)
         self.assertIs(section["enabled"], True)
         self.assertEqual(section["timeout_seconds"], 5.0)
