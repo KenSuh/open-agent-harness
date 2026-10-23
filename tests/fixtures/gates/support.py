@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import pathlib
 import subprocess
 import sys
 from typing import Sequence
+from unittest.mock import patch
 
 from oah.gates.ledger import definition_digest, parse_text
 
@@ -45,13 +48,24 @@ class StubNode:
 
 
 def make_unlazy_dir(folder: pathlib.Path) -> pathlib.Path:
-    """An unlazy install with the three scripts oah calls (contents unused under the stub)."""
-    (folder / "scripts").mkdir(parents=True, exist_ok=True)
-    for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
-        (folder / "scripts" / name).write_text("", encoding="utf-8")
-    (folder / "package.json").write_text(json.dumps({"name": "unlazy-skill", "version": "2.1.0"}),
-                                         encoding="utf-8")
+    """A stand-in unlazy: a git checkout holding every pinned script path (contents unused under the stub)."""
+    from oah.unlazy import PIN
+    from tests.helpers import git_commit
+
+    files = {relative: f"// stand-in for {relative}\n" for relative in PIN.files}
+    files["package.json"] = json.dumps({"name": "unlazy-skill", "version": "2.1.0"})
+    subprocess.run(["git", "init", "-q", "-b", "main", str(folder)], check=True)
+    git_commit(folder, files, "stand-in unlazy")
     return folder
+
+
+def stub_pin(folder: pathlib.Path):
+    """A pin that the stand-in unlazy at `folder` satisfies (its HEAD and its script digests)."""
+    from oah.unlazy import PIN, Pin, file_digest
+
+    head = subprocess.run(["git", "-C", str(folder), "rev-parse", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
+    return Pin(commit=head, files={relative: file_digest(folder / relative) for relative in PIN.files})
 
 
 def automatic_evidence(check: str, expect: str, cwd: str | None = None) -> str:
@@ -76,12 +90,31 @@ def met_ledger(text: str, *, skip: Sequence[str] = ()) -> str:
 
 
 def run_cli(argv: Sequence[str], *, cwd: pathlib.Path, env: dict | None = None, stdin: str | None = None,
-            timeout: float = 120) -> subprocess.CompletedProcess:
-    """Run `python -m oah <argv>` with this checkout's src on the path."""
-    full_env = dict(env if env is not None else os.environ)
-    full_env["PYTHONPATH"] = SRC
-    return subprocess.run([sys.executable, "-m", "oah", *argv], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", env=full_env, input=stdin, timeout=timeout)
+            pin=None) -> subprocess.CompletedProcess:
+    """Run `oah <argv>` in this process through the real command discovery.
+
+    In-process so that a test can stand in for the unlazy pin (`pin`); environment, working directory,
+    stdin, stdout and stderr are isolated for the call.
+    """
+    from oah import cli, unlazy
+
+    out, err = io.StringIO(), io.StringIO()
+    previous = os.getcwd()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, dict(env if env is not None else os.environ), clear=True))
+        stack.enter_context(patch("sys.stdin", io.StringIO(stdin or "")))
+        if pin is not None:
+            stack.enter_context(patch.object(unlazy, "PIN", pin))
+        stack.enter_context(contextlib.redirect_stdout(out))
+        stack.enter_context(contextlib.redirect_stderr(err))
+        os.chdir(cwd)
+        try:
+            code = cli.main(list(argv))
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 2
+        finally:
+            os.chdir(previous)
+    return subprocess.CompletedProcess(list(argv), code, out.getvalue(), err.getvalue())
 
 
 def build_args(argv: Sequence[str]) -> argparse.Namespace:

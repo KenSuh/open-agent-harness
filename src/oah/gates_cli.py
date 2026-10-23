@@ -7,15 +7,19 @@ import importlib.resources
 import os
 import pathlib
 import sys
+from typing import Callable
 
 from oah.atomic import StateCorrupt, StorageError, write_text_atomic
 from oah.config import ConfigError, load_config
 from oah.gates import check as check_mod
+from oah.gates import guard
+from oah.gates.summary import SummaryRejected
 from oah.gates.bindings import BindingStore
 from oah.gates.context import DEFAULTS, GateTools, default_ledger, find_tools
 from oah.gates.ledger import parse_ledger
 from oah.gates.status import STRUCTURAL_LABEL, ledger_status, structural_status
-from oah.lease import TASK_RE
+from oah.journal import PendingTransaction
+from oah.lease import TASK_RE, Store
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, state_dir
 from oah import unlazy as unlazy_mod
@@ -80,7 +84,7 @@ def _echo(text: str, stream=None) -> None:
         print(text.rstrip("\n"), file=stream or sys.stdout)
 
 
-def _new(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
+def _new(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools], settings: dict) -> int:
     task = _task(args.task)
     path = default_ledger(info.root, task)
     if path.exists():
@@ -91,9 +95,10 @@ def _new(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: d
     return EXIT_OK
 
 
-def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
+def _status(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools], settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
+    tools = find()
     if not tools.available:
         status = structural_status(parse_ledger(ledger))
         print(f"STRUCTURAL ONLY: {tools.reason}. Without unlazy oah can only read the boxes.")
@@ -120,9 +125,35 @@ def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings
     return EXIT_OK if status.verdict == "met" and not stale else EXIT_REFUSED
 
 
-def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
+def _write_summary(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> bool:
+    """Write GATES.summary.md for the task's ledgers once they all pass. False when the export is refused."""
+    if settings["commit_ledgers"]:
+        print("OAH_GATES_SUMMARY_SKIPPED: [gates] commit_ledgers = true, so commit the full ledger instead")
+        return True
+    state = state_dir(info, os.environ)
+    declared = next((lease.gates for lease, stale in Store(state).snapshot()
+                     if lease.task == args.task and not stale), [])
+    try:
+        verdict = guard.evaluate(info.root, args.task, declared, state, tools=tools, allow_structural=False,
+                                 env_names=settings["input_env"])
+    except check_mod.GateRefused as exc:
+        print(f"OAH_GATES_SUMMARY_NOT_WRITTEN: {exc}")
+        return True
+    except SummaryRejected as exc:
+        print(exc, file=sys.stderr)
+        return False
+    if verdict.summary_text is None:
+        print("OAH_GATES_SUMMARY_NOT_WRITTEN: no ledger governs this task (declare it with oah start --gates)")
+        return True
+    path = guard.write_summary(info.root, args.task, verdict.summary_text)
+    print(f"OAH_GATES_SUMMARY_WRITTEN {path.relative_to(info.root).as_posix()}: commit it with your work")
+    return True
+
+
+def _check(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools], settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
+    tools = find()
     if not tools.available:
         raise GatesError("OAH_UNLAZY_MISSING", f"{tools.reason}. oah gates status still gives a structural report")
     store = BindingStore(state_dir(info, os.environ), _task(args.task))
@@ -134,6 +165,8 @@ def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings:
         _echo(report.unlazy.stderr, sys.stderr)
     for line in report.lines:
         print(line)
+    if report.ok and not _write_summary(args, info, tools, settings):
+        return EXIT_REFUSED
     counts = {kind: sum(1 for action in report.actions.values() if action == kind) for kind in ("run", "attest", "carry")}
     if report.ok and not report.handoff:
         print(f"OAH_GATES_CHECKED task={args.task} run={counts['run']} attest={counts['attest']} "
@@ -155,9 +188,10 @@ def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings:
     return EXIT_REFUSED
 
 
-def _lint(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
+def _lint(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools], settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
+    tools = find()
     if not tools.available:
         parsed = parse_ledger(ledger)
         for error in parsed.errors:
@@ -180,14 +214,14 @@ def run(args: argparse.Namespace) -> int:
     try:
         info = repo_info(pathlib.Path.cwd())
         settings = load_config(info.root).section("gates", DEFAULTS)
-        tools = find_tools(info.root, os.environ, pathlib.Path.home())
-        return HANDLERS[args.gates_command](args, info, tools, settings)
+        return HANDLERS[args.gates_command](args, info, lambda: find_tools(info.root, os.environ, pathlib.Path.home()),
+                                            settings)
     except (GatesError, check_mod.GateRefused) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED
     except unlazy_mod.UnlazyError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
-    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, ConfigError) as exc:
+    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, ConfigError, PendingTransaction) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT

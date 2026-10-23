@@ -183,6 +183,105 @@ class PinnedUnlazyProbeTest(unittest.TestCase):
         (repo / "src" / "a.txt").write_text("two\n", encoding="utf-8")
         self.assertEqual(check_mod.freshness(repo, ledger, bindings, unlazy_dir=self.unlazy), {"G1": "stale"})
 
+    def test_live_copy_matches_the_pin(self):
+        self.assertEqual(unlazy.verify_pin(self.unlazy), [])
+
+    def test_pin_covers_the_call_closure(self):
+        import re
+
+        reference = re.compile(r"""["'](\.{1,2}/[\w./-]+\.mjs)["']""")
+        seen, queue = set(), ["scripts/gate-check.mjs", "scripts/gate-lint.mjs", "scripts/stop-hook.mjs"]
+        while queue:
+            relative = queue.pop()
+            if relative in seen:
+                continue
+            seen.add(relative)
+            text = (self.unlazy / relative).read_text(encoding="utf-8")
+            base = pathlib.PurePosixPath(relative).parent
+            for target in reference.findall(text):
+                queue.append(os.path.normpath(str(base / target)).replace(os.sep, "/"))
+        self.assertEqual(seen, set(unlazy.PIN.files))
+
+
+class PinTest(unittest.TestCase):
+    def setUp(self):
+        from tests.fixtures.gates.support import stub_pin
+
+        self.tmp = make_tmp_dir(self)
+        self.folder = make_unlazy_dir(self.tmp / "unlazy")
+        self.pin = stub_pin(self.folder)
+
+    def test_matching_checkout_passes(self):
+        self.assertEqual(unlazy.verify_pin(self.folder, self.pin), [])
+
+    def test_changed_script_is_refused(self):
+        (self.folder / "scripts" / "lib" / "gates.mjs").write_text("// changed\n", encoding="utf-8")
+        problems = unlazy.verify_pin(self.folder, self.pin)
+        self.assertEqual(problems, ["scripts/lib/gates.mjs differs from the pinned copy"])
+        (self.folder / "scripts" / "stop-hook.mjs").unlink()
+        self.assertIn("scripts/stop-hook.mjs is missing", unlazy.verify_pin(self.folder, self.pin))
+
+    def test_crlf_checkout_still_matches(self):
+        path = self.folder / "scripts" / "gate-check.mjs"
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        self.assertEqual(unlazy.verify_pin(self.folder, self.pin), [])
+
+    def test_other_commit_is_refused(self):
+        from tests.helpers import git_commit
+
+        git_commit(self.folder, {"README.md": "newer\n"})
+        problems = unlazy.verify_pin(self.folder, self.pin)
+        self.assertEqual(len(problems), 1)
+        self.assertIn(f"not the pinned {self.pin.commit[:12]}", problems[0])
+
+    def test_copy_without_its_own_git_checkout_is_refused(self):
+        import shutil
+        from tests.helpers import make_git_repo
+
+        loose = self.tmp / "loose"
+        shutil.copytree(self.folder, loose, ignore=shutil.ignore_patterns(".git"))
+        self.assertIn("not a git checkout", " ".join(unlazy.verify_pin(loose, self.pin)))
+        nested = make_git_repo(self) / ".agents" / "skills" / "unlazy"
+        shutil.copytree(self.folder, nested, ignore=shutil.ignore_patterns(".git"))
+        self.assertIn("not a git checkout", " ".join(unlazy.verify_pin(nested, self.pin)))
+
+    def test_require_pinned_names_the_install_command(self):
+        with self.assertRaises(unlazy.UnlazyError) as caught:
+            unlazy.require_pinned(self.folder)  # the real pin: a stand-in copy never matches it
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_UNPINNED")
+        self.assertIn(f"git clone {unlazy.UPSTREAM_GIT}", message)
+        self.assertIn(unlazy.PINNED_COMMIT, message)
+        self.assertNotIn("npx", message)
+
+    def test_install_commands_and_hints_pin_the_commit(self):
+        target = self.tmp / "skills" / "unlazy"
+        self.assertEqual(unlazy.install_commands(target), [
+            ["git", "clone", "--quiet", "https://github.com/Leonxlnx/unlazy.git", str(target)],
+            ["git", "-C", str(target), "checkout", "--quiet", "--detach", unlazy.PINNED_COMMIT]])
+        for hint in (unlazy.INSTALL_HINT, unlazy.install_hint(target)):
+            self.assertIn(unlazy.PINNED_COMMIT, hint)
+            self.assertNotIn("npx", hint)
+        self.assertEqual(unlazy.default_install_dir(self.tmp), self.tmp / ".agents" / "skills" / "unlazy")
+
+    def test_pin_lists_every_script_oah_calls(self):
+        for script in ("scripts/gate-check.mjs", "scripts/gate-lint.mjs", "scripts/stop-hook.mjs"):
+            self.assertIn(script, unlazy.PIN.files)
+        for digest in unlazy.PIN.files.values():
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(unlazy.PIN.commit, unlazy.PINNED_COMMIT)
+
+    def test_installed_pinned_copy_passes_find_tools(self):
+        from unittest.mock import patch
+        from oah.gates.context import find_tools
+
+        env = {"OAH_UNLAZY_DIR": str(self.folder), "OAH_NODE": json.dumps([sys.executable])}
+        with self.assertRaises(unlazy.UnlazyError) as caught:
+            find_tools(None, env, self.tmp)
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_UNPINNED")
+        with patch.object(unlazy, "PIN", self.pin):
+            self.assertTrue(find_tools(None, env, self.tmp).available)
+
 
 class LedgerParserTest(unittest.TestCase):
     def test_parses_gates_attributes_and_abandon(self):
@@ -323,7 +422,7 @@ from oah.gates import check as gate_check_mod  # noqa: E402
 from oah.gates.bindings import BindingStore  # noqa: E402
 from oah.gates.inputs import collect  # noqa: E402
 from oah.lease import TASK_RE  # noqa: E402
-from tests.fixtures.gates.support import run_cli  # noqa: E402
+from tests.fixtures.gates.support import run_cli, stub_pin  # noqa: E402
 from tests.helpers import git_commit, make_git_repo  # noqa: E402
 
 RUNNABLE = """# Gates: t1
@@ -518,8 +617,12 @@ class GatesCliTest(unittest.TestCase):
         return self.stub.env(OAH_UNLAZY_DIR=str(self.unlazy if unlazy else self.tmp / "absent"),
                              OAH_STATE_DIR=str(self.state))
 
+    def last_run_args(self):
+        """Arguments of the last gate-check call that could run a CHECK (not a --status read)."""
+        return [call for call in self.stub.calls("gate-check.mjs") if "--status" not in call["args"]][-1]["args"]
+
     def gates(self, *argv, unlazy=True):
-        return run_cli(["gates", *argv], cwd=self.repo, env=self.env(unlazy))
+        return run_cli(["gates", *argv], cwd=self.repo, env=self.env(unlazy), pin=stub_pin(self.unlazy))
 
     def test_new_writes_template_and_refuses_overwrite(self):
         made = self.gates("new", "t1")
@@ -578,11 +681,11 @@ class GatesCliTest(unittest.TestCase):
         self.stub.reply("gate-check.mjs", pass_reply(ledger, met_ledger(RUNNABLE)))
         done = self.gates("check", "t1")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertNotIn("--approve", self.stub.calls("gate-check.mjs")[-1]["args"])
+        self.assertNotIn("--approve", self.last_run_args())
         self.assertIn("OAH_GATES_CHECKED", done.stdout)
         ledger.write_text(RUNNABLE, encoding="utf-8")
         self.gates("check", "t1", "--approve")
-        self.assertIn("--approve", self.stub.calls("gate-check.mjs")[-1]["args"])
+        self.assertIn("--approve", self.last_run_args())
 
     def test_lint_delegates(self):
         self.gates("new", "t1")
@@ -601,16 +704,23 @@ class GatesCliTest(unittest.TestCase):
         ledger.write_text(RUNNABLE, encoding="utf-8")
         self.stub.reply("gate-check.mjs", pass_reply(ledger, met_ledger(RUNNABLE)))
         self.gates("check", "t1")
-        args = self.stub.calls("gate-check.mjs")[-1]["args"]
+        args = self.last_run_args()
         self.assertEqual(args[args.index("--timeout") + 1], "45")
         ledger.write_text(RUNNABLE, encoding="utf-8")
         self.gates("check", "t1", "--timeout", "7")
-        args = self.stub.calls("gate-check.mjs")[-1]["args"]
+        args = self.last_run_args()
         self.assertEqual(args[args.index("--timeout") + 1], "7")
         (self.repo / ".oah" / "config.toml").write_text("[gates]\nnope = 1\n", encoding="utf-8")
         refused = self.gates("status", "t1")
         self.assertEqual(refused.returncode, 69)
         self.assertTrue(refused.stderr.startswith("OAH_CONFIG_UNKNOWN_KEY"), refused.stderr)
+
+    def test_unpinned_unlazy_is_refused(self):
+        self.assertEqual(self.gates("new", "t1").returncode, 0)  # writing a ledger needs no unlazy
+        refused = run_cli(["gates", "status", "t1"], cwd=self.repo, env=self.env())  # the real pin
+        self.assertEqual(refused.returncode, 69)
+        self.assertTrue(refused.stderr.startswith("OAH_UNLAZY_UNPINNED"), refused.stderr)
+        self.assertEqual(self.stub.calls(), [])
 
     def test_custom_ledger_path(self):
         custom = self.repo / "elsewhere.md"

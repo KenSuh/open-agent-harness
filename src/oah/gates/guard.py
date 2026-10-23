@@ -1,11 +1,15 @@
 # 종료 가드 — 작업의 선언된 원장이 unlazy 기준으로 충족되고 바인딩이 최종 입력과 맞는지 판정하고, 포기는 인계로 보고하며 요약을 만든다.
-"""The gate check behind `oah finish` (and the lease-aware Stop hook).
+"""The gate check behind `oah finish` (and the lease-aware Stop hook), and the gate summary.
 
 A task's ledgers are the lease's declared `gates` paths, or `.oah/tasks/<task>/GATES.md` when none are
 declared and that file exists. With unlazy, every ledger must be met by unlazy's `--status`, and every
 non-abandoned gate must have a binding that matches the final inputs. Without unlazy, the structural
 parser decides, and finish passes only with `--allow-structural` (recorded as unverified). An
 abandoned gate never counts as success: the outcome is `handoff` and the ids are reported.
+
+`oah gates check` writes the path-free GATES.summary.md (`write_summary`) once the task's gates pass, so it
+is committed and reviewed with the work. `oah finish` writes nothing tracked: `verify_summary` refuses when
+the summary is missing or no longer matches the current gate records.
 """
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ from oah.gates import check as check_mod
 from oah.gates import summary as summary_mod
 from oah.gates.bindings import BindingStore
 from oah.gates.check import GateRefused
-from oah.gates.context import GateTools, default_ledger
+from oah.atomic import write_text_atomic
+from oah.gates.context import SUMMARY_NAME, GateTools, default_ledger, task_dir
 from oah.gates.inputs import collect
 from oah.gates.ledger import parse_ledger, sha256_text
 from oah.gates.status import LedgerStatus, ledger_status, structural_status
@@ -147,5 +152,32 @@ def evaluate(root: pathlib.Path, task: str, declared: Sequence[str], state_dir: 
                                                   "pass --allow-structural to finish on the boxes alone (recorded "
                                                   "as unverified)")
     outcome = "structural" if not found.verified else "handoff" if found.handoff else "met"
-    text = None if commit_ledgers else _summary(root, task, state_dir, found)
+    text = _summary(root, task, state_dir, found) if found.verified and not commit_ledgers else None
     return GuardReport(outcome, found.verified, found.handoff, text)
+
+
+def summary_path(root: pathlib.Path, task: str) -> pathlib.Path:
+    return task_dir(root, task) / SUMMARY_NAME
+
+
+def write_summary(root: pathlib.Path, task: str, text: str) -> pathlib.Path:
+    path = summary_path(root, task)
+    write_text_atomic(path, text)
+    return path
+
+
+def verify_summary(root: pathlib.Path, task: str, expected: str) -> None:
+    """Refuse unless the committed summary matches the current gate records (line endings aside)."""
+    path = summary_path(root, task)
+    relative = f".oah/tasks/{task}/{SUMMARY_NAME}"
+    try:
+        actual = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    except FileNotFoundError:
+        raise GateRefused("OAH_GATES_SUMMARY_MISSING", f"{relative} does not exist. Run oah gates check {task} to "
+                                                       "write it, commit it with your work, then finish") from None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GateRefused("OAH_GATES_SUMMARY_STALE", f"{relative} cannot be read ({exc}); run oah gates check "
+                                                     f"{task} again") from exc
+    if actual != expected:
+        raise GateRefused("OAH_GATES_SUMMARY_STALE", f"{relative} does not match the current gate records. Run "
+                                                     f"oah gates check {task} to rewrite it, commit it, then finish")

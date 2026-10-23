@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
+import re
 import sys
 
-from oah.atomic import StateCorrupt, StorageError, write_text_atomic
+from oah.atomic import StateCorrupt, StorageError
 from oah.config import ConfigError, load_config
 from oah.gates import guard
 from oah.gates.check import GateRefused
-from oah.gates.context import DEFAULTS as GATE_DEFAULTS, LEDGER_NAME, SUMMARY_NAME, find_tools, task_dir
+from oah.gates.context import DEFAULTS as GATE_DEFAULTS, LEDGER_NAME, SUMMARY_NAME, GateTools, find_tools
 from oah.gates.summary import SummaryRejected
 from oah.journal import PendingTransaction
 from oah.lease import DEFAULT_TTL_HOURS, Lease, LeaseError, Store
@@ -22,6 +24,8 @@ from oah.unlazy import UnlazyError
 
 EXIT_OK, EXIT_REFUSED, EXIT_ENVIRONMENT = 0, 1, 69
 GATE_ENVIRONMENT_CODES = {"OAH_UNLAZY_FAILED"}
+# The only wiki files `oah wiki maintain` may change outside a task's scope (a log archive only when new).
+WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:log|index)\.md|docs/wiki/log_archive_[0-9]{2}\.md")
 COMMANDS = ("start", "renew", "status", "finish", "release", "log")
 
 
@@ -51,6 +55,8 @@ def register(commands: argparse._SubParsersAction) -> None:
                         help="finish even though files outside the scope changed (recorded)")
     finish.add_argument("--allow-structural", action="store_true",
                         help="without unlazy, finish on the ledger's boxes alone (recorded as unverified)")
+    finish.add_argument("--allow-missing-wiki-maintenance", action="store_true",
+                        help="finish although oah wiki maintain was not run for this task (recorded)")
 
     release = commands.add_parser("release", help="drop a lease without finishing it")
     _identity(release)
@@ -187,23 +193,62 @@ def _changed_files(lease: Lease, info: RepoInfo) -> list[str]:
     return changed
 
 
+def _existed_at_start(root: pathlib.Path, lease: Lease, path: str) -> bool:
+    if lease.head_at_start is None:
+        return False
+    return run_git(root, "cat-file", "-e", f"{lease.head_at_start}:{path}").returncode == 0
+
+
+def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> tuple[set[str], dict | None]:
+    """Wiki maintenance outputs exempt from the scope check, and the record for the finish event."""
+    if not (root / "docs" / "wiki").is_dir():
+        return set(), None
+    try:
+        from oah.wiki import verify_maintenance
+    except ImportError:
+        return set(), None
+    check = verify_maintenance(root, lease.task)
+    if not check.ok:
+        if not allow_missing:
+            problems = "; ".join(check.problems) or "wiki maintenance was not run for this task"
+            raise LeaseError("OAH_WIKI_MAINTENANCE_MISSING",
+                             f"{problems}. Run oah wiki maintain --task {lease.task} before you commit, run the gates "
+                             "and ask for review; or pass --allow-missing-wiki-maintenance (recorded)")
+        return set(), {"task": lease.task, "override": True, "problems": list(check.problems)}
+    exempt = []
+    for path, digest in check.outputs:
+        if not (isinstance(path, str) and WIKI_MAINTENANCE_OUTPUTS.fullmatch(path)):
+            continue
+        try:
+            actual = hashlib.sha256((root / pathlib.PurePosixPath(path)).read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if actual != digest or (path.startswith("docs/wiki/log_archive_") and _existed_at_start(root, lease, path)):
+            continue
+        exempt.append([path, digest])
+    return {path for path, _ in exempt}, {"task": lease.task, "exempt": exempt}
+
+
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     lease = store.inspect(args.task)
     # The task's ledgers and summary are gate artifacts written by oah and unlazy, not changes to the scope.
     artifacts = {f".oah/tasks/{lease.task}/{LEDGER_NAME}", f".oah/tasks/{lease.task}/{SUMMARY_NAME}", *lease.gates}
-    changed = [name for name in _changed_files(lease, info) if name not in artifacts]
     root = pathlib.Path(lease.worktree)
+    wiki_exempt, wiki_report = _wiki_maintenance(root, lease, args.allow_missing_wiki_maintenance)
+    changed = [name for name in _changed_files(lease, info) if name not in artifacts and name not in wiki_exempt]
     settings = load_config(root).section("gates", GATE_DEFAULTS)
-    tools = find_tools(root, os.environ, pathlib.Path.home())
+    # unlazy is looked up (and its pin verified) only when a ledger governs this task.
+    ledgers = guard.resolve_ledgers(root, lease.task, lease.gates)
+    tools = find_tools(root, os.environ, pathlib.Path.home()) if ledgers else GateTools(None, None, "no ledger")
     report = guard.evaluate(root, lease.task, lease.gates, store.dir, tools=tools,
                             allow_structural=args.allow_structural, env_names=settings["input_env"],
                             commit_ledgers=settings["commit_ledgers"])
     if report.summary_text is not None:
-        write_text_atomic(task_dir(root, lease.task) / SUMMARY_NAME, report.summary_text)
-    ledgers = len(guard.resolve_ledgers(root, lease.task, lease.gates)) if report.outcome != "none" else 0
+        guard.verify_summary(root, lease.task, report.summary_text)  # finish writes nothing tracked
     lease, beyond = store.finish(task=args.task, agent=args.agent, lease_id=lease.id,
                                  summary=args.summary, changed=changed,
-                                 allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(ledgers))
+                                 allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(len(ledgers)),
+                                 wiki_report=wiki_report)
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
     print(f"OAH_LEASE_FINISHED task={lease.task} agent={lease.agent} changed={len(changed)} "
           f"gates={report.outcome}{extra}")
@@ -212,8 +257,8 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
               "them in your report and hand them to the owner")
     if report.outcome == "structural":
         print(f"OAH_GATES_UNVERIFIED: finished on the ledger's boxes alone ({tools.reason}); recorded as unverified")
-    if report.summary_text is not None:
-        print(f"Commit .oah/tasks/{lease.task}/{SUMMARY_NAME} with your work.")
+    if wiki_report and wiki_report.get("override"):
+        print("OAH_WIKI_MAINTENANCE_SKIPPED: finished without oah wiki maintain (recorded)")
     return EXIT_OK
 
 

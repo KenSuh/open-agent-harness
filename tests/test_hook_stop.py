@@ -7,12 +7,12 @@ import pathlib
 import unittest
 from unittest.mock import patch
 
-from oah import hook_stop
+from oah import hook_stop, unlazy as unlazy_mod
 from oah.gates import check as check_mod
 from oah.gates.bindings import BindingStore
 from oah.lease import Store
 from oah.paths import repo_info
-from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli
+from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
 RUNNABLE = """# Gates: t1
@@ -44,7 +44,8 @@ class StopHookTest(unittest.TestCase):
 
     def decide(self, unlazy=True, session="s1", **options):
         payload = {"session_id": session, "cwd": str(self.repo), "hook_event_name": "Stop", "stop_hook_active": False}
-        return hook_stop.decide(payload, env=self.env(unlazy), home=self.home, **options)
+        with patch.object(unlazy_mod, "PIN", stub_pin(self.unlazy)):
+            return hook_stop.decide(payload, env=self.env(unlazy), home=self.home, **options)
 
     def lease(self, worktree=None):
         info = repo_info(worktree or self.repo)
@@ -75,6 +76,13 @@ class StopHookTest(unittest.TestCase):
             {"type": "command", "command": "node \"/opt/skills/unlazy/scripts/stop-hook.mjs\" --unlazy-hook-v2"}]}]}}),
             encoding="utf-8")
         self.assertIsNone(self.decide())
+        self.assertEqual(self.stub.calls("stop-hook.mjs"), [])
+
+    def test_unpinned_unlazy_is_not_run_on_hand_over(self):
+        payload = {"session_id": "s1", "cwd": str(self.repo), "hook_event_name": "Stop"}
+        decision = hook_stop.decide(payload, env=self.env(), home=self.home)  # the real pin
+        self.assertIn("OAH_UNLAZY_UNPINNED", decision["systemMessage"])
+        self.assertNotIn("decision", decision)
         self.assertEqual(self.stub.calls("stop-hook.mjs"), [])
 
     def test_handover_output_that_is_not_a_decision_is_ignored(self):

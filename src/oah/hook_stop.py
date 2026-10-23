@@ -50,8 +50,13 @@ def _unlazy_hook_configured(root: pathlib.Path, home: pathlib.Path) -> bool:
 
 
 def _hand_over(payload: Mapping, root: pathlib.Path, env: Mapping[str, str], home: pathlib.Path) -> dict | None:
-    tools = find_tools(root, env, home)
-    if not tools.available or _unlazy_hook_configured(root, home):
+    if _unlazy_hook_configured(root, home):
+        return None
+    try:
+        tools = find_tools(root, env, home)
+    except unlazy_mod.UnlazyError as exc:
+        return {"systemMessage": f"oah: not running unlazy's Stop hook: {exc}"}
+    if not tools.available:
         return None
     result = unlazy_mod.stop_hook(tools.unlazy_dir, payload, node=tools.node, env=env, cwd=root)
     try:
@@ -104,10 +109,13 @@ def decide(payload: Mapping, *, env: Mapping[str, str] | None = None, home: path
                      if not stale and same_worktree(lease.worktree, info.root)]
         if not governing:
             return _hand_over(payload, info.root, env, home)
-        tools = find_tools(info.root, env, home)
+        tools = None
         problems, handoffs, notes, progress = [], [], [], []
         for lease in governing:
             try:
+                if not guard.resolve_ledgers(info.root, lease.task, lease.gates):
+                    continue
+                tools = tools or find_tools(info.root, env, home)
                 found = guard.assess(info.root, lease.task, lease.gates, state, tools=tools, env=env,
                                      env_names=settings["input_env"])
             except GateRefused as exc:

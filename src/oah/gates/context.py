@@ -38,10 +38,16 @@ class GateTools:
 
 
 def find_tools(root: pathlib.Path | None, env: Mapping[str, str], home: pathlib.Path) -> GateTools:
-    """Find unlazy (OAH_UNLAZY_DIR, the project's skill dirs, the user's) and node."""
+    """Find unlazy (OAH_UNLAZY_DIR, the project's skill dirs, the user's), verify its pin, and find node.
+
+    Raises UnlazyError (OAH_UNLAZY_UNPINNED) for a discovered copy that is not the pinned one.
+    """
     unlazy_dir, reason = unlazy_mod.find_unlazy_dir(root, env, home)
     if unlazy_dir is None:
-        return GateTools(None, None, f"{reason}; install it with: {unlazy_mod.INSTALL_HINT}")
+        target = unlazy_mod.default_install_dir(home)
+        reason = reason.split(" (install:")[0]
+        return GateTools(None, None, f"{reason}; install the pinned copy: {unlazy_mod.install_hint(target)}")
+    unlazy_mod.require_pinned(unlazy_dir)  # a copy that is not the pinned one is refused, never used
     node = unlazy_mod.resolve_node(env)
     if node is None:
         return GateTools(unlazy_dir, None, f"node was not found on PATH; {unlazy_mod.NODE_HINT}")

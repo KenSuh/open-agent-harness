@@ -1,17 +1,19 @@
 # 종료 가드 검사 — 충족·미충족·포기·구조 전용·낡은 입력·없는 바인딩에서 oah finish 가 하는 일과 경로 없는 요약을 본다.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import re
-import subprocess
 import sys
+import types
 import unittest
+from unittest.mock import patch
 
 from oah.gates import guard, summary
 from oah.gates.context import GateTools
-from tests.fixtures.gates.support import SRC, StubNode, make_unlazy_dir, met_ledger, run_cli
+from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "gates"
@@ -62,9 +64,8 @@ class FinishGuardTest(unittest.TestCase):
         return self.stub.env(OAH_UNLAZY_DIR=str(self.unlazy if unlazy else self.tmp / "absent"),
                              OAH_STATE_DIR=str(self.state))
 
-    def oah(self, *argv, unlazy=True):
-        return subprocess.run([sys.executable, "-m", "oah", *argv], cwd=self.repo, capture_output=True, text=True,
-                              encoding="utf-8", env=self.env(unlazy), timeout=120)
+    def oah(self, *argv, unlazy=True, pinned=True):
+        return run_cli(list(argv), cwd=self.repo, env=self.env(unlazy), pin=stub_pin(self.unlazy) if pinned else None)
 
     def start(self, *extra):
         started = self.oah("start", "--task", "t1", "--agent", "claude", "--scope", "src", *extra)
@@ -74,7 +75,7 @@ class FinishGuardTest(unittest.TestCase):
         return self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", *extra, unlazy=unlazy)
 
     def gates_check(self):
-        return run_cli(["gates", "check", "t1"], cwd=self.repo, env=self.env())
+        return run_cli(["gates", "check", "t1"], cwd=self.repo, env=self.env(), pin=stub_pin(self.unlazy))
 
     def write_ledger(self, text):
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -87,23 +88,52 @@ class FinishGuardTest(unittest.TestCase):
         path = self.state / "events.jsonl"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
-    def test_finish_met_writes_summary(self):
+    def test_gates_check_writes_summary_and_finish_only_verifies_it(self):
         self.start()
         self.write_ledger(RUNNABLE)
         self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET)
         checked = self.gates_check()
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
-        (self.repo / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")  # same bytes: still fresh
-        finished = self.finish()
-        self.assertEqual(finished.returncode, 0, finished.stderr)
-        self.assertIn("gates=met", finished.stdout)
+        self.assertIn("OAH_GATES_SUMMARY_WRITTEN .oah/tasks/t1/GATES.summary.md", checked.stdout)
         text = self.summary.read_text(encoding="utf-8")
         self.assertTrue(all(SUMMARY_LINE.match(line) for line in text.splitlines()), text)
         self.assertRegex(text, r"(?m)^G1 met binding=run ")
         self.assertIn("verified: unlazy", text)
+        (self.repo / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")  # same bytes: still fresh
+        before = self.summary.read_bytes()
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("gates=met", finished.stdout)
+        self.assertEqual(self.summary.read_bytes(), before)
         self.assertFalse(self.lease_active())
         self.assertEqual(self.events()[-1]["gates"]["outcome"], "met")
         self.assertTrue(self.events()[-1]["gates"]["verified"])
+
+    def test_finish_refuses_missing_summary(self):
+        self.start()
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET)
+        self.gates_check()
+        self.summary.unlink()
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1)
+        self.assertTrue(refused.stderr.startswith("OAH_GATES_SUMMARY_MISSING"), refused.stderr)
+        self.assertIn("oah gates check t1", refused.stderr)
+        self.assertFalse(self.summary.exists())
+        self.assertTrue(self.lease_active())
+
+    def test_finish_refuses_stale_summary(self):
+        self.start()
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET)
+        self.gates_check()
+        self.summary.write_text(self.summary.read_text(encoding="utf-8").replace("binding=run", "binding=carry"),
+                                encoding="utf-8")
+        refused = self.finish()
+        self.assertTrue(refused.stderr.startswith("OAH_GATES_SUMMARY_STALE"), refused.stderr)
+        crlf = self.summary.read_text(encoding="utf-8").replace("binding=carry", "binding=run").replace("\n", "\r\n")
+        self.summary.write_bytes(crlf.encode("utf-8"))
+        self.assertEqual(self.finish().returncode, 0)  # a CRLF checkout of the same summary still matches
 
     def test_finish_unmet_refuses(self):
         self.start()
@@ -149,7 +179,7 @@ class FinishGuardTest(unittest.TestCase):
         self.assertIn("OAH_GATES_UNVERIFIED", finished.stdout)
         event = self.events()[-1]["gates"]
         self.assertEqual((event["outcome"], event["verified"]), ("structural", False))
-        self.assertIn("verified: structural", self.summary.read_text(encoding="utf-8"))
+        self.assertFalse(self.summary.exists())  # finish writes nothing tracked
         self.assertEqual(self.stub.calls(), [])
 
     def test_finish_structural_unmet_refuses_even_with_flag(self):
@@ -185,7 +215,8 @@ class FinishGuardTest(unittest.TestCase):
         self.write_ledger(RUNNABLE)
         failing = {"write": {str(self.ledger): RUNNABLE},
                    "stdout": "  FAIL GATES:G1: x\nGATES.md: 1 gates\nUNMET: 1 (met: 0, reran: 1)\n", "code": 1}
-        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), failing, UNMET)
+        # Replies in call order: check (pass), its summary status, re-check (fail), finish's status.
+        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET, failing, UNMET)
         self.gates_check()
         (self.repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
         rerun = self.gates_check()
@@ -206,9 +237,15 @@ class FinishGuardTest(unittest.TestCase):
 
     def test_summary_rejects_non_g_ids(self):
         self.start()
-        self.write_ledger(met_ledger(RUNNABLE.replace("G1:", "tests-311:")))
-        refused = self.finish("--allow-structural", unlazy=False)
-        self.assertEqual(refused.returncode, 1)
+        text = RUNNABLE.replace("G1:", "tests-311:")
+        self.write_ledger(text)
+        self.stub.reply("gate-check.mjs", {"write": {str(self.ledger): met_ledger(text)},
+                                           "stdout": "  PASS GATES:tests-311: x\nALL MET (1 met)\n", "code": 0})
+        checked = self.gates_check()
+        self.assertEqual(checked.returncode, 1)
+        self.assertTrue(checked.stderr.startswith("OAH_SUMMARY_FIELD_REJECTED"), checked.stderr)
+        self.assertFalse(self.summary.exists())
+        refused = self.finish()
         self.assertTrue(refused.stderr.startswith("OAH_SUMMARY_FIELD_REJECTED"), refused.stderr)
         self.assertTrue(self.lease_active())
 
@@ -228,6 +265,16 @@ class FinishGuardTest(unittest.TestCase):
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_GATES_PATH_INVALID"), refused.stderr)
 
+    def test_unpinned_unlazy_refuses_only_when_a_ledger_governs(self):
+        self.start()
+        self.write_ledger(met_ledger(RUNNABLE))
+        refused = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", pinned=False)
+        self.assertEqual(refused.returncode, 69)
+        self.assertTrue(refused.stderr.startswith("OAH_UNLAZY_UNPINNED"), refused.stderr)
+        self.ledger.unlink()
+        finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", pinned=False)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+
     def test_no_ledger_finishes_with_gates_none(self):
         self.start()
         finished = self.finish()
@@ -237,8 +284,10 @@ class FinishGuardTest(unittest.TestCase):
     def test_commit_ledgers_config_skips_summary(self):
         git_commit(self.repo, {".oah/config.toml": "[gates]\ncommit_ledgers = true\n"})
         self.start()
-        self.write_ledger(met_ledger(RUNNABLE))
-        finished = self.finish("--allow-structural", unlazy=False)
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET)
+        self.assertIn("OAH_GATES_SUMMARY_SKIPPED", self.gates_check().stdout)
+        finished = self.finish()
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertFalse(self.summary.exists())
 
@@ -264,6 +313,101 @@ class FinishGuardTest(unittest.TestCase):
         refused = self.finish()
         self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
         self.assertIn(".oah/tasks/t2/GATES.summary.md", refused.stderr)
+
+
+class FakeCheck:
+    def __init__(self, ok, outputs=(), problems=()):
+        self.ok, self.outputs, self.problems = ok, list(outputs), list(problems)
+
+
+class WikiMaintenanceTest(unittest.TestCase):
+    """finish exempts only verified `oah wiki maintain` outputs; a fake oah.wiki stands in for lane P7a."""
+
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/wiki/log.md": "# Log\n", "docs/wiki/index.md": "# Index\n",
+                               "docs/wiki/log_archive_01.md": "# Old\n", "docs/wiki/page.md": "x\n"})
+        self.state = make_tmp_dir(self) / "state"
+        self.env = dict(os.environ, OAH_STATE_DIR=str(self.state), OAH_UNLAZY_DIR=str(self.state / "absent"))
+        self.check = FakeCheck(True)
+        self.calls = []
+
+        def verify_maintenance(root, task):
+            self.calls.append((pathlib.Path(root), task))
+            return self.check
+
+        fake = types.ModuleType("oah.wiki")
+        fake.verify_maintenance = verify_maintenance
+        patcher = patch.dict(sys.modules, {"oah.wiki": fake})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        started = self.oah("start", "--task", "t1", "--agent", "claude", "--scope", "src")
+        self.assertEqual(started.returncode, 0, started.stderr)
+
+    def oah(self, *argv):
+        return run_cli(list(argv), cwd=self.repo, env=self.env)
+
+    def finish(self, *extra):
+        return self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", *extra)
+
+    def write(self, name, text):
+        path = self.repo / name
+        path.write_text(text, encoding="utf-8")
+        return [name, hashlib.sha256(path.read_bytes()).hexdigest()]
+
+    def last_event(self):
+        lines = (self.state / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        return json.loads(lines[-1])
+
+    def test_verified_outputs_are_exempt_and_recorded(self):
+        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/index.md", "# Index\nnew\n"),
+                   self.write("docs/wiki/log_archive_02.md", "# Archive\n")]
+        self.check = FakeCheck(True, outputs)
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(self.calls, [(self.repo, "t1")])
+        self.assertEqual(self.last_event()["wiki_maintenance"], {"task": "t1", "exempt": outputs})
+
+    def test_other_wiki_edits_still_need_scope(self):
+        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/page.md", "edited\n")]
+        self.check = FakeCheck(True, outputs)
+        refused = self.finish()
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("docs/wiki/page.md", refused.stderr)
+        self.assertNotIn("docs/wiki/log.md", refused.stderr)
+
+    def test_digest_mismatch_and_existing_archive_are_not_exempt(self):
+        stale = self.write("docs/wiki/log.md", "# Log\n- t1\n")
+        self.write("docs/wiki/log.md", "# Log\n- changed after maintain\n")
+        archive = self.write("docs/wiki/log_archive_01.md", "# Old, rewritten\n")
+        self.check = FakeCheck(True, [stale, archive])
+        refused = self.finish()
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("docs/wiki/log.md", refused.stderr)
+        self.assertIn("docs/wiki/log_archive_01.md", refused.stderr)
+
+    def test_missing_maintenance_refuses_unless_overridden(self):
+        self.check = FakeCheck(False, problems=["no maintenance record for t1"])
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1)
+        self.assertTrue(refused.stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"), refused.stderr)
+        self.assertIn("oah wiki maintain --task t1", refused.stderr)
+        finished = self.finish("--allow-missing-wiki-maintenance")
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertIn("OAH_WIKI_MAINTENANCE_SKIPPED", finished.stdout)
+        self.assertEqual(self.last_event()["wiki_maintenance"],
+                         {"task": "t1", "override": True, "problems": ["no maintenance record for t1"]})
+
+    def test_no_wiki_folder_means_no_check(self):
+        import shutil
+
+        shutil.rmtree(self.repo / "docs" / "wiki")
+        git_commit(self.repo, {}, "drop wiki")
+        self.check = FakeCheck(False)
+        self.oah("renew", "--task", "t1", "--agent", "claude", "--scope", "src", "--scope", "docs")
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(self.calls, [])
 
 
 class SummaryPrivacyTest(unittest.TestCase):
@@ -323,18 +467,11 @@ class SummaryPrivacyTest(unittest.TestCase):
         self.assertIn("binding=run", result.summary_text)
         self.assertIn("binding=attest", result.summary_text)
 
-    def test_structural_summary_is_private_too(self):
+    def test_structural_result_exports_no_summary(self):
         self.ledger.write_text(met_ledger(self.text), encoding="utf-8")
         tools = GateTools(None, None, "unlazy not found")
         result = guard.evaluate(self.repo, "t1", [], self.tmp / "state", tools=tools, allow_structural=True)
         self.assertEqual(result.outcome, "structural")
-        self.assertPrivate(result.summary_text)
-
-    def test_commit_ledgers_skips_summary(self):
-        self.ledger.write_text(met_ledger(self.text), encoding="utf-8")
-        tools = GateTools(None, None, "unlazy not found")
-        result = guard.evaluate(self.repo, "t1", [], self.tmp / "state", tools=tools, allow_structural=True,
-                                commit_ledgers=True)
         self.assertIsNone(result.summary_text)
 
     def test_writer_rejects_fields_outside_the_allowlist(self):

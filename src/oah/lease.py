@@ -237,7 +237,8 @@ class Store:
             return lease
 
     def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
-               allow_out_of_scope: bool, gate_report: dict | None = None) -> tuple[Lease, list[str]]:
+               allow_out_of_scope: bool, gate_report: dict | None = None,
+               wiki_report: dict | None = None) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
         with self._lock():
             leases = self._load()
@@ -255,6 +256,8 @@ class Store:
                                  "oah renew --scope, or pass --allow-out-of-scope (recorded)")
             leases.remove(lease)
             gate_fields = {"gates": gate_report} if gate_report is not None else {}
+            if wiki_report is not None:
+                gate_fields["wiki_maintenance"] = wiki_report
             self._commit(leases, "lease_finished", task, agent, lease.id, summary=summary, out_of_scope=beyond,
                          allowed_out_of_scope=bool(beyond), **gate_fields)
             return lease, beyond

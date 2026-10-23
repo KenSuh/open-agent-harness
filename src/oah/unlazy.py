@@ -1,15 +1,22 @@
-# unlazy 연동 — 설치 위치 찾기(OAH_UNLAZY_DIR, 프로젝트, 사용자 스킬 폴더), 고정 커밋, gate-check·gate-lint·stop-hook 호출 계약을 맡는다.
+# unlazy 연동 — 설치 위치 찾기(OAH_UNLAZY_DIR, 프로젝트, 사용자 스킬 폴더), 고정 커밋·스크립트 다이제스트 검증, gate-check·gate-lint·stop-hook 호출 계약을 맡는다.
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
+import types
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from oah.engines.proc import RunResult, UnsupportedBatchShim, resolve_command, run_command
 
 ENV_VAR = "OAH_UNLAZY_DIR"
-INSTALL_HINT = "npx skills add Leonxlnx/unlazy"
+PINNED_COMMIT = "16671491f6679ad9378f52604d3bc2415b4120c7"
+UPSTREAM = "https://github.com/Leonxlnx/unlazy"
+UPSTREAM_GIT = UPSTREAM + ".git"
+# The only install instruction oah prints: a git checkout of the pinned commit (never an unversioned install).
+INSTALL_HINT = (f"git clone {UPSTREAM_GIT} <skills folder>/unlazy, then "
+                f"git -C <skills folder>/unlazy checkout --detach {PINNED_COMMIT}")
 
 
 def _is_unlazy(folder: pathlib.Path) -> bool:
@@ -65,9 +72,7 @@ def unlazy_version(unlazy_dir: pathlib.Path) -> str | None:
 # oah passes --approve only when the user asked for it, so running a CHECK always goes through
 # unlazy's own approval flow. oah never executes CHECK lines itself.
 
-PINNED_COMMIT = "16671491f6679ad9378f52604d3bc2415b4120c7"
 PINNED_VERSION = "2.1.0"
-UPSTREAM = "https://github.com/Leonxlnx/unlazy"
 NODE_ENV = "OAH_NODE"
 NODE_HINT = "install Node.js from https://nodejs.org (the LTS installer), then open a new terminal"
 STATUS_TIMEOUT = 120.0
@@ -79,6 +84,92 @@ class UnlazyError(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+# The pin --------------------------------------------------------------------------------------------
+#
+# A discovered unlazy is used only when it is a git checkout of PINNED_COMMIT and every script oah calls,
+# with everything those scripts load, has the pinned sha256 (of LF-normalized bytes, so a Windows
+# checkout with core.autocrlf still matches). A new unlazy commit is adopted only by updating PIN here
+# and passing the contract tests (tests/test_gates.py, ContractTest and PinnedUnlazyProbeTest).
+
+@dataclass(frozen=True)
+class Pin:
+    commit: str
+    files: Mapping[str, str]  # path inside the unlazy folder -> sha256 of its LF-normalized bytes
+
+
+PIN = Pin(commit=PINNED_COMMIT, files=types.MappingProxyType({
+    "scripts/gate-check.mjs": "29dee3acfdf566c24eedace85163a4e7a66eda01b712c5b4b76a99eae1eda8a1",
+    "scripts/gate-lint.mjs": "12fedaa4ad7bcfacf6da8d66f4ead0d186115e03fe941d3d20efd361dec7ee7e",
+    "scripts/stop-hook.mjs": "f18f2f189a3be2ff1bcdd01b09eea0ac53edcf9a3f9d9b1ba64817661ce4b683",
+    "scripts/lib/gates.mjs": "12758e27c415e619a93148fb71cd217d0c1b81de39fe932b2dda344fac778809",
+    "scripts/lib/dispatch.mjs": "101cc06361f2eae77946d5fa1d9dd5dd9effcfc039f376967565951909ad1baf",
+    "scripts/lib/process-tree.mjs": "2b6c28613b2686e3afaa32a0196eaa3c67fafa283fbbba11df872f4deb993682",
+    "scripts/lib/check-supervisor.mjs": "2bf15a383c0e64f77024820fedf9da8045c02cca9051ec0e6444e85814eb8c3b",
+    "scripts/lib/regex-worker.mjs": "76a9448f3c1b15b4904239608bd50381ee609e1edf0c6ac281d3f30473b36e0b",
+}))
+
+
+def default_install_dir(home: pathlib.Path) -> pathlib.Path:
+    """Where `oah init` installs unlazy for a user: the user's agent skills folder."""
+    return pathlib.Path(home) / ".agents" / "skills" / "unlazy"
+
+
+def install_commands(target: pathlib.Path, pin: Pin | None = None) -> list[list[str]]:
+    """The argv lists that install the pinned unlazy into `target` (run them in order, without a shell)."""
+    pin = pin or PIN
+    return [["git", "clone", "--quiet", UPSTREAM_GIT, str(target)],
+            ["git", "-C", str(target), "checkout", "--quiet", "--detach", pin.commit]]
+
+
+def install_hint(target: pathlib.Path, pin: Pin | None = None) -> str:
+    """The same commands as one line a person can copy."""
+    pin = pin or PIN
+    return f'git clone {UPSTREAM_GIT} "{target}", then git -C "{target}" checkout --detach {pin.commit}'
+
+
+def file_digest(path: pathlib.Path) -> str:
+    return hashlib.sha256(pathlib.Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def verify_pin(folder: pathlib.Path, pin: Pin | None = None) -> list[str]:
+    """Why `folder` is not the pinned unlazy; an empty list means it matches by commit and digests."""
+    from oah.paths import GitMissing, run_git
+
+    pin = pin or PIN
+    folder = pathlib.Path(folder)
+    problems = []
+    for relative, digest in pin.files.items():
+        path = folder / pathlib.PurePosixPath(relative)
+        try:
+            actual = file_digest(path)
+        except OSError:
+            problems.append(f"{relative} is missing")
+            continue
+        if actual != digest:
+            problems.append(f"{relative} differs from the pinned copy")
+    try:
+        top = run_git(folder, "rev-parse", "--show-toplevel")
+        head = run_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+    except GitMissing:
+        return problems + ["git is missing, so its commit cannot be confirmed"]
+    top_path = pathlib.Path(top.stdout.strip()) if top.returncode == 0 and top.stdout.strip() else None
+    if top_path is None or top_path.resolve() != folder.resolve():
+        problems.append("it is not a git checkout of its own, so its commit cannot be confirmed")
+    elif head.stdout.strip() != pin.commit:
+        problems.append(f"it is at commit {head.stdout.strip()[:12] or 'none'}, not the pinned {pin.commit[:12]}")
+    return problems
+
+
+def require_pinned(folder: pathlib.Path, pin: Pin | None = None) -> None:
+    """Refuse a discovered unlazy that is not the pinned one, with the command that installs it."""
+    pin = pin or PIN
+    problems = verify_pin(folder, pin)
+    if problems:
+        raise UnlazyError("OAH_UNLAZY_UNPINNED", f"{folder} is not the unlazy oah is pinned to "
+                                                 f"({'; '.join(problems)}). Move that folder aside, then install "
+                                                 f"the pinned copy: {install_hint(folder, pin)}")
 
 
 @dataclass(frozen=True)
@@ -129,8 +220,8 @@ def resolve_node(env: Mapping[str, str]) -> tuple[str, ...] | None:
 def _script(unlazy_dir: pathlib.Path, name: str) -> pathlib.Path:
     script = pathlib.Path(unlazy_dir) / "scripts" / name
     if not script.is_file():
-        raise UnlazyError("OAH_UNLAZY_INCOMPLETE", f"{unlazy_dir} has no scripts/{name}; update unlazy "
-                                                   f"({INSTALL_HINT}) to commit {PINNED_COMMIT[:12]} or newer")
+        raise UnlazyError("OAH_UNLAZY_INCOMPLETE", f"{unlazy_dir} has no scripts/{name}; install the pinned copy: "
+                                                   f"{install_hint(unlazy_dir)}")
     return script
 
 
