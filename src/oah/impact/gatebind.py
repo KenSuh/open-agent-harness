@@ -1,4 +1,4 @@
-# 게이트 결속 층 — 게이트의 CHECK·EXPECT 가 경로를 고정(pin)하거나 실행(exec)하는지 판정한다. 원장 읽기는 P5 의 oah.gates.parse_ledger 가 들어온 뒤 연결한다.
+# 게이트 결속 층 — 설정된 원장을 실제 게이트 파서로 읽고 CHECK·EXPECT 가 경로를 고정(pin)하거나 실행(exec)하는지 판정한다.
 from __future__ import annotations
 
 import pathlib
@@ -8,7 +8,8 @@ from typing import Iterable
 from oah.impact import lexical
 from oah.impact.query import Row
 
-UNAVAILABLE = "unavailable (this oah version does not read gate ledgers yet)"
+UNAVAILABLE = ("unavailable (no gate ledgers found; create .oah/tasks/<task>/GATES.md or configure "
+               "impact.ledger_globs)")
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,23 @@ def rows(gates: Iterable[GateRef], target: str, *, min_needle: int) -> list[Row]
 
 
 def discover(root: pathlib.Path) -> tuple[list[GateRef], str]:
-    """The gates of this repository and a status line.
+    """Read the same configured ledgers (including ignored files) that bind map freshness."""
+    from oah.gates import parse_ledger
+    from oah.impact.defaults import configured
+    from oah.impact.errors import ImpactError
+    from oah.impact.mapstore import _ledgers, _safe_worktree_path
 
-    Lane P5 lands `oah.gates.parse_ledger`; until this layer is wired to it, no ledger is read.
-    """
-    return [], UNAVAILABLE
+    root = pathlib.Path(root)
+    paths = _ledgers(root, configured(root))
+    gates = []
+    for relative in paths:
+        if not _safe_worktree_path(root, relative):
+            raise ImpactError("OAH_GATES_INVALID", f"{relative} is linked or outside the repository; replace it "
+                              "with a regular ledger inside the repository and retry")
+        ledger = parse_ledger(root / pathlib.PurePosixPath(relative))
+        if ledger.errors:
+            raise ImpactError("OAH_GATES_INVALID", f"{relative} cannot be parsed ({len(ledger.errors)} problems); "
+                              "fix it with oah gates lint before querying impact")
+        gates.extend(GateRef(relative, gate.id, gate.check or "", gate.expect or "") for gate in ledger.gates)
+    return gates, (f"{len(gates)} gates from {len(paths)} ledgers; re-run bound checks for touched paths"
+                   if paths else UNAVAILABLE)

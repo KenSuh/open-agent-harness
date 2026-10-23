@@ -17,10 +17,12 @@ import time
 import unittest
 from unittest import mock
 
-from oah import briefs, call, call_cli, launchers, skillsel
+from oah import briefs, call, call_cli, intent, launchers, skillsel
 from oah.engines.effort import EngineError
 from oah.engines.proc import resolve_command, run_command
 from oah.launchers import orca
+from oah.lease import Store
+from oah.paths import repo_info
 from oah.runs import UNVERIFIED, find_run, new_run
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 from tests.test_call import (FAKE_CLAUDE, FAKE_CODEX, FOOTER, SECTION, Project, add_worktree, has_footer,
@@ -68,16 +70,32 @@ class OrcaProject:
         ]}), encoding="utf-8")
         self.orca_command = [*FAKE_ORCA, "--state", str(self.orca_state)]
         orca_line = "" if orca_command == [] else f"orca_command = {toml_list(orca_command or self.orca_command)}\n"
-        git_commit(self.repo, {"README.md": "x\n", ".oah/config.toml":
-                               f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\n"
-                               f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n"
-                               f"[call]\n{orca_line}{config}"})
+        files = {"README.md": "x\n", ".oah/config.toml":
+                 f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\n"
+                 f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n"
+                 f"[call]\n{orca_line}{config}"}
+        for task in ("t1", "adhoc"):
+            files[f".oah/tasks/{task}/PACKET.md"] = SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}")
+        git_commit(self.repo, files)
         self.state = self.repo / ".git" / "oah"
+        for task in ("t1", "adhoc"):
+            self.bind(task)
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("FAKE_", "OAH_")) and key != "CLAUDE_CONFIG_DIR"}
         self.env.update(CODEX_HOME=str(self.home), FAKE_RECORD=str(self.record), FAKE_ORCA_STATE=str(self.orca_state),
                         PATH=_minimal_path(self.bin), HOME=str(work / "home"), USERPROFILE=str(work / "home"))
         self.host: subprocess.Popen | None = None
+
+    def bind(self, task="t1", root=None):
+        """Bind the launch fixture to a real accepted source in its execution worktree."""
+        root = root or self.repo
+        store = Store(self.state)
+        if any(lease.task == task for lease, _ in store.snapshot()):
+            store.release(task=task, agent="codex", reason="bind launch fixture worktree", force=False)
+        source = f".oah/tasks/{task}/PACKET.md"
+        bound = intent.parse(intent.read_source(root / source)).bind(source)
+        store.start(task=task, agent="codex", scope=(f".oah/tasks/{task}",), note="launch fixture", ttl_hours=1,
+                     info=repo_info(root), intent=bound)
 
     def start_host(self, **extra: str) -> None:
         """The fake Orca app; its environment is what terminals get (no OAH_* variables, like the real app)."""
@@ -606,10 +624,12 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
 
         run = find_run(project.state, run_id)
         prompt = run.prompt_path.read_bytes()
-        selection, rerank = skillsel.choose(worktree, kind="implementation", stage="initial", risk="normal", scope=[],
+        scope = [".oah/tasks/t1"]
+        selection, rerank = skillsel.choose(worktree, kind="implementation", stage="initial", risk="normal", scope=scope,
                                             state_dir=None, env=project.env)
-        expected = briefs.build(run_id=run_id, task="t1", stage="initial", engine="claude", scope=[],
-                                intent_section=None, binding=None, packet_source=None, round_instructions=message,
+        expected = briefs.build(run_id=run_id, task="t1", stage="initial", engine="claude", scope=scope,
+                                intent_section=SECTION, binding=intent.parse(SECTION),
+                                packet_source=".oah/tasks/t1/PACKET.md", round_instructions=message,
                                 footer=FOOTER, has_footer=has_footer, skills_block=selection.brief_text(rerank=rerank),
                                 skill_ids=[skill.id for skill in selection.skills])
         self.assertEqual(prompt, expected.encode("utf-8"))
@@ -639,10 +659,11 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
         project.start_host()
         lane = make_tmp_dir(self) / "lane"
         add_worktree(project.repo, lane, "lane-a")
-        section = SECTION.replace("Status: accepted\n", "Status: accepted\n### Problem\n한글 — café\n")
+        section = SECTION.replace("Reports miss files.", "한글 — café")
         packet = lane / ".oah" / "tasks" / "t1" / "PACKET.md"
-        packet.parent.mkdir(parents=True)
+        packet.parent.mkdir(parents=True, exist_ok=True)
         packet.write_bytes((section + "## Scope\n- src/a.py\n").replace("\n", "\r\n").encode("utf-8"))
+        project.bind(root=lane)
         code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
                                      "--launcher", "orca", "--worktree", "lane-a", "--json")
         self.assertEqual(code, 0, err)

@@ -13,7 +13,7 @@ timeout) and records the exit code, logs, header check and inference normalizati
 hands the same prepared run to a detached Python runner and returns at once; `wait` polls the record
 for at most `WAIT_LIMIT_S` seconds and can be called again.
 
-A task whose lease is bound to an intent (`oah start --packet`) dispatches only while that binding is
+A task must have a lease bound to an intent (`oah start --packet`) and dispatches only while that binding is
 `current` (`OAH_INTENT_NOT_CURRENT` otherwise), and only from the bound source. Every brief carries the
 skills `oah.skillsel.choose` selected for it, with a reason each and the `rerank=` status; the selection is
 also kept as `skills.json` in the run folder.
@@ -67,6 +67,8 @@ ENGINE_DEFAULTS = {
 }
 _PLAN_LINE = re.compile(r"^\s*(?:[-*]\s*)?`?(initial|review|correction)`?\s*(?:→|->|:)\s*`?(claude|codex)`?\s*"
                         r"(?:→|->|:)\s*`?(low|medium|high|max)`?\b")
+_PLAN_AXES = re.compile(r"^\s*[-*]\s*(initial|review|correction):\s+kind=(\S+)\s+intensity=(\S+)\s+"
+                        r"reasoning=(\S+)\s+risk=(\S+)(?:\s|$)")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +164,7 @@ class Packet:
     scope: tuple[str, ...]
     plan: dict  # stage -> (engine, tier)
     rerank_disabled: bool = False  # the packet's Constraints turn the re-ranker off
+    axes: dict[str, routing.Axes] = dataclasses.field(default_factory=dict)
 
 
 def _section_lines(text: str, heading: str) -> list[str]:
@@ -202,17 +205,23 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
         if match:
             scope.append(match.group(1))
     plan: dict = {}
+    axes: dict[str, routing.Axes] = {}
     for line in _section_lines(text, "Plan"):
         match = _PLAN_LINE.match(line)
         if match:
             plan[match.group(1)] = (match.group(2), match.group(3))
+        recorded = _PLAN_AXES.match(line)
+        if recorded:
+            values = routing.Axes(*recorded.groups()[1:])
+            routing.recommend(values)  # validate the recorded values before they reach selection
+            axes[recorded.group(1)] = values
     try:
         source = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         source = str(path)
     section = briefs.raw_section(text) if intent is not None else None
     return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan,
-                  rerank_disabled=oah_packet.rerank_disabled(text))
+                  rerank_disabled=oah_packet.rerank_disabled(text), axes=axes)
 
 
 BINDING_NAME = "intent-binding.json"
@@ -273,11 +282,11 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
 
 
 def bound_lease(state_dir: pathlib.Path, task: str):
-    """The task's lease when it is bound to an intent (`oah start --packet`), else None."""
+    """The task's active lease when it is bound to an intent (`oah start --packet`), else None."""
     from oah.lease import Store
 
-    for lease, _stale in Store(state_dir).snapshot():
-        if lease.task == task and lease.intent is not None:
+    for lease, stale in Store(state_dir).snapshot():
+        if lease.task == task and lease.intent is not None and not stale:
             return lease
     return None
 
@@ -295,11 +304,11 @@ def check_lease_binding(lease) -> None:
 
 
 def _check_lease_source(binding, packet: Packet | None, task: str) -> None:
-    if packet is None or packet.intent is None:
-        return
-    if packet.source != binding.source or getattr(packet.intent, "digest", None) != binding.digest:
+    if (packet is None or packet.intent is None or packet.source != binding.source
+            or getattr(packet.intent, "digest", None) != binding.digest):
+        source = packet.source if packet is not None else "no packet"
         raise EngineError(SOURCE_MISMATCH, f"task {task}'s lease is bound to {binding.line()} from {binding.source}, "
-                          f"but this dispatch reads {packet.source}. Run the command again without --packet, or "
+                          f"but this dispatch reads {source}. Run the command again without --packet, or "
                           f"with --packet {binding.source}; a changed goal is a new revision of the bound packet")
 
 
@@ -402,14 +411,16 @@ class Prepared:
         return cls(**fields)
 
 
-def advise(axes: routing.Axes, task: str, *, root: pathlib.Path) -> str:
+def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled: bool = False,
+           env: Mapping[str, str] | None = None, keychain=None) -> str:
     """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
     try:
         rerank = importlib.import_module("oah.rerank")
     except ImportError:
         return "unused(not-configured)"
     try:
-        advice = rerank.advise_difficulty(axes, task, root=root)
+        advice = rerank.advise_difficulty(axes, task, root=root, brief_disabled=brief_disabled, env=env,
+                                          keychain=keychain)
     except Exception as exc:  # a plugin failure must never block a launch
         return f"unused(error: {type(exc).__name__})"
     status = str(getattr(advice, "status", "unused(no status)"))
@@ -442,25 +453,32 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     if same:
         warnings.append(same)
     holder = bound_lease(state_dir, request.task)
-    if holder is not None:
-        check_lease_binding(holder)
-    leased = holder.binding() if holder is not None else None
+    if holder is None:
+        raise EngineError("OAH_INTENT_NOT_CURRENT", f"task {request.task} has no active lease with an intent binding. "
+                          "Nothing was launched. Accept the packet, then bind it with "
+                          f"oah start --task {request.task} --agent {request.engine} --packet "
+                          f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then call again")
+    check_lease_binding(holder)
+    leased = holder.binding()
     bound = dispatch_binding(state_dir, request.task)
-    default_source = (bound["source"] if bound else leased.source if leased is not None
-                      else f".oah/tasks/{request.task}/PACKET.md")
+    default_source = bound["source"] if bound else leased.source
     packet_path = request.packet or root / default_source
-    packet = None
-    if request.packet is not None or bound is not None or leased is not None or packet_path.is_file():
-        packet = read_packet(root, packet_path, parse_intent=parse_intent, read_source=read_source)
-        if leased is not None:
-            _check_lease_source(leased, packet, request.task)
-        check_dispatch_binding(bound, packet, request.task)
+    packet = read_packet(root, packet_path, parse_intent=parse_intent or oah_intent.parse,
+                         read_source=read_source or oah_intent.read_source)
+    _check_lease_source(leased, packet, request.task)
+    check_dispatch_binding(bound, packet, request.task)
     stored = None
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
         _stored_brief_matches(stored, packet)
-    scope = packet.scope if packet and packet.scope else _lease_scope(state_dir, request.task)
-    axes = reasons = None
+    scope = packet.scope or _lease_scope(state_dir, request.task)
+    disabled = request.no_rerank or packet.rerank_disabled
+    recorded = packet.axes.get(request.stage)
+    given = recorded.to_json() if recorded is not None else {}
+    given.update({axis: value for axis, value in request.axes.items() if value is not None})
+    scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+    axes = scored.axes if recorded is not None else None
+    reasons = None
     advisory = "unused(tier-given)"
     if request.tier:
         tier, tier_source = request.tier, "flag"
@@ -471,21 +489,17 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             warnings.append(f"OAH_PACKET_PLAN_ENGINE: the packet plans {planned_engine} for {request.stage}; "
                             f"its tier {tier} is used for {request.engine}")
     else:
-        given = {axis: value for axis, value in request.axes.items() if value is not None}
-        explicit = bool(given)
-        scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+        explicit = any(value is not None for value in request.axes.values())
         recommendation = routing.recommend(scored.axes)
         tier, axes = recommendation.tier, scored.axes
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
-        advisory = advise(axes, request.task, root=root)
-    skill_axes = axes or routing.score_axes(
-        stage=request.stage, kind=request.axes.get("kind"), scope=scope,
-        overrides={axis: value for axis, value in request.axes.items() if axis != "kind" and value is not None}).axes
+        advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
+    skill_axes = scored.axes
     selection = skillsel.choose(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
                                 state_dir=state_dir, env=env, keychain=keychain,
-                                brief_disabled=request.no_rerank or bool(packet and packet.rerank_disabled), now=now)
+                                brief_disabled=disabled, now=now)
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
                                 refresh=request.refresh_models, now=now)
     warnings.extend(resolution.warnings)

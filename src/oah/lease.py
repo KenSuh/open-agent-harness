@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from typing import Callable, Iterator, Sequence
 
 from oah.atomic import StateCorrupt, StorageError, read_json
-from oah.intent import Binding
+from oah.intent import Binding, explain_binding
 from oah.journal import Journal
 from oah.lockfile import StateLock
 from oah.paths import RepoInfo
@@ -275,11 +275,12 @@ class Store:
             return lease
 
     def rebind(self, *, task: str, agent: str, binding: Binding, ttl_hours: float,
-               scope: Sequence[str] | None = None) -> tuple[Lease, str]:
+               scope: Sequence[str] | None = None, gates: Sequence[str] | None = None) -> tuple[Lease, str]:
         """Bind your lease to `binding`, or move it to a raised Revision of the same Intent-ID.
 
         Returns the lease and `bound`, `rebound` or `unchanged`. The TTL is renewed; `scope`, when given,
-        replaces the lease scope after the same overlap check as renew.
+        replaces the lease scope after the same overlap check as renew. Supplied `gates` replace the
+        ledger paths in the same transaction; omitting them preserves the existing paths.
         """
         _check_names(task, agent)
         _check_ttl(ttl_hours)
@@ -300,15 +301,19 @@ class Store:
                                          f"scope {', '.join(scope)} overlaps {other.describe()}")
                 lease.scope = list(scope)
             lease.intent = binding.to_json()
+            if gates is not None:
+                lease.gates = list(gates)
             lease.expires_at = _expiration(self.now(), ttl_hours)
             event = {"bound": "intent_bound", "rebound": "intent_rebound", "unchanged": "lease_renewed"}[action]
             self._commit(leases, event, task, agent, lease.id, scope=lease.scope, expires_at=lease.expires_at,
-                         intent=lease.intent, **({"old_intent": old.to_json()} if old and action == "rebound" else {}))
+                         gates=lease.gates, intent=lease.intent,
+                         **({"old_intent": old.to_json()} if old and action == "rebound" else {}))
             return lease, action
 
     def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
                allow_out_of_scope: bool, gate_report: dict | None = None,
-               wiki_report: dict | None = None, intent_report: dict | None = None) -> tuple[Lease, list[str]]:
+               wiki_report: dict | None = None, intent_report: dict | None = None,
+               checked_binding: Binding | None = None) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
         with self._lock():
             leases = self._load()
@@ -318,6 +323,15 @@ class Store:
             if lease.id != lease_id:
                 raise LeaseError("OAH_LEASE_CHANGED", f"the lease for {task} was replaced during the change scan; "
                                                     "inspect the current lease and retry oah finish")
+            if lease.binding() != checked_binding:
+                raise LeaseError("OAH_LEASE_CHANGED", f"the intent binding for {task} changed during the finish "
+                                 "checks; inspect it with oah intent show, update the return and retry oah finish")
+            if checked_binding is not None:
+                state, reason = explain_binding(checked_binding, pathlib.Path(lease.worktree))
+                if state != "current":
+                    raise LeaseError("OAH_INTENT_NOT_CURRENT", f"the checked intent is {state}: {reason}. Restore "
+                                     "the bound source or accept and bind its new revision with oah start --packet, "
+                                     "then update the return and retry oah finish")
             beyond = outside(lease.scope, changed)
             if beyond and not allow_out_of_scope:
                 shown = ", ".join(beyond[:20]) + (f" and {len(beyond) - 20} more" if len(beyond) > 20 else "")

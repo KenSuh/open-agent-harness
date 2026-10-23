@@ -7,6 +7,7 @@ import pathlib
 import shlex
 import subprocess
 import sys
+import time
 import unittest
 
 from oah import briefs, intent
@@ -106,6 +107,25 @@ class StartPacketTest(unittest.TestCase):
         self.assertIn("state=current", shown)
         self.assertIn(f"bound={parsed.line()}", shown)
 
+    def test_rebind_applies_gates_and_finish_enforces_them(self):
+        self.repo.write_packet(packet_text())
+        self.repo.ok("start", "--task", "t1", "--agent", "claude", "--scope", "src")
+        ledger = self.repo.root / "checks" / "GATES.md"
+        ledger.parent.mkdir()
+        ledger.write_text("- [ ] G1: the owner accepts the result\n  EVIDENCE: pending\n", encoding="utf-8")
+        rebound = self.repo.start_packet("t1", "--gates", "checks/GATES.md")
+        self.assertEqual(rebound.returncode, 0, rebound.stderr)
+        self.assertEqual(self.repo.status()["t1"]["gates"], ["checks/GATES.md"])
+        self.assertEqual(self.repo.events()[-1]["gates"], ["checks/GATES.md"])
+        # A later start without --gates preserves the declaration.
+        self.assertEqual(self.repo.start_packet().returncode, 0)
+        self.assertEqual(self.repo.status()["t1"]["gates"], ["checks/GATES.md"])
+        finished = self.repo.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done",
+                                 "--return", "-", "--allow-structural", stdin=self.repo.returned())
+        self.assertEqual(finished.returncode, 1, finished.stdout + finished.stderr)
+        self.assertIn("OAH_GATES_UNMET", finished.stderr)
+        self.assertIn("t1", self.repo.status())
+
     def test_start_packet_refuses_draft(self):
         self.repo.write_packet(packet_text(status="draft"))
         refused = self.repo.start_packet()
@@ -200,6 +220,30 @@ class StartPacketTest(unittest.TestCase):
 
 
 class StatusTest(unittest.TestCase):
+    def test_task_commands_read_the_custom_bound_source(self):
+        repo = Repo(self)
+        custom = repo.root / "plans" / "T1.md"
+        custom.parent.mkdir()
+        custom.write_text(packet_text(), encoding="utf-8")
+        repo.ok("start", "--task", "t1", "--agent", "claude", "--packet", "plans/T1.md")
+        for decoy in (False, True):
+            if decoy:
+                repo.write_packet(packet_text(ident="decoy"))
+            for command in ("show", "check"):
+                with self.subTest(decoy=decoy, command=command):
+                    result = repo.ok("intent", command, "t1")
+                    self.assertIn("state=current", result.stdout)
+                    self.assertIn("intent=t1 revision=1 status=accepted", result.stdout)
+                    self.assertIn("source=plans/T1.md", result.stdout)
+                    self.assertNotIn("intent=decoy", result.stdout)
+        explicit = repo.ok("intent", "show", "--file", PACKET.format(task="t1"))
+        self.assertIn("intent=decoy", explicit.stdout)
+        self.assertIn("source=.oah/tasks/t1/PACKET.md", explicit.stdout)
+        explicit = repo.oah("intent", "check", "--file", PACKET.format(task="t1"))
+        self.assertEqual(explicit.returncode, 1)
+        self.assertIn("intent=decoy", explicit.stdout)
+        self.assertIn("OAH_INTENT_ID_CHANGED", explicit.stdout)
+
     def test_status_reports_each_binding_state(self):
         repo = Repo(self)
         repo.ok("start", "--task", "plain", "--agent", "claude", "--scope", "README.md")
@@ -238,7 +282,10 @@ class StatusTest(unittest.TestCase):
                                  encoding="utf-8", env=repo.env, timeout=120)
         self.assertEqual(started.returncode, 0, started.stderr)
         self.assertEqual(repo.status()["t1"]["intent_state"], "current")
-        self.assertIn("state=current", repo.oah("intent", "show", "t1").stdout)
+        for command in ("show", "check"):
+            result = repo.ok("intent", command, "t1")
+            self.assertIn("state=current", result.stdout)
+            self.assertIn("intent=t1 revision=1 status=accepted", result.stdout)
 
 
 class FinishTest(unittest.TestCase):
@@ -307,6 +354,81 @@ class FinishTest(unittest.TestCase):
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertIn("changed=1", finished.stdout)
 
+    def test_finish_rechecks_binding_after_reading_stdin(self):
+        for rebind in (False, True):
+            with self.subTest(rebind=rebind):
+                self.repo = Repo(self)
+                self.bound()
+                old_return = self.repo.returned()
+                old_id = self.repo.status()["t1"]["id"]
+                ready = make_tmp_dir(self) / "reading-return"
+                script = (
+                    "import pathlib, sys\n"
+                    "from oah import cli, lease_cli\n"
+                    "read_return = lease_cli._read_return\n"
+                    "def reading(raw):\n"
+                    "    pathlib.Path(sys.argv[1]).write_text('ready', encoding='utf-8')\n"
+                    "    return read_return(raw)\n"
+                    "lease_cli._read_return = reading\n"
+                    "raise SystemExit(cli.main(sys.argv[2:]))\n")
+                child = subprocess.Popen([sys.executable, "-c", script, str(ready), "finish", "--task", "t1",
+                                          "--agent", "claude", "--summary", "done", "--return", "-"],
+                                         cwd=self.repo.root, env=self.repo.env, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists(), "finish did not reach stdin reading")
+                    self.repo.write_packet(packet_text(revision=2))
+                    if rebind:
+                        self.assertEqual(self.repo.start_packet().returncode, 0)
+                    out, err = child.communicate(old_return.encode("utf-8"), timeout=30)
+                    self.assertEqual(child.returncode, 1, (out + err).decode("utf-8"))
+                    self.assertIn(b"OAH_INTENT_NOT_CURRENT", err)
+                    self.assertEqual(self.repo.status()["t1"]["id"], old_id)
+                    self.assertFalse(any(e["event"] == "lease_finished" for e in self.repo.events()))
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate(timeout=10)
+
+    def test_finish_rechecks_binding_after_gate_evaluation(self):
+        for rebind in (False, True):
+            with self.subTest(rebind=rebind):
+                self.repo = Repo(self)
+                self.bound()
+                old_return = self.repo.returned()
+                script = (
+                    "import os, pathlib, sys\n"
+                    "from oah import cli, intent\n"
+                    "from oah.gates import guard\n"
+                    "from oah.lease import Store\n"
+                    "from oah.paths import repo_info, state_dir\n"
+                    "evaluate = guard.evaluate\n"
+                    "def changed(*args, **kwargs):\n"
+                    "    report = evaluate(*args, **kwargs)\n"
+                    "    info = repo_info(pathlib.Path.cwd())\n"
+                    "    source = '.oah/tasks/t1/PACKET.md'\n"
+                    "    path = info.root / source\n"
+                    "    text = path.read_text(encoding='utf-8').replace('Revision: 1', 'Revision: 2')\n"
+                    "    path.write_text(text, encoding='utf-8')\n"
+                    "    if sys.argv[1] == 'rebind':\n"
+                    "        Store(state_dir(info, os.environ)).rebind(task='t1', agent='claude', ttl_hours=1,\n"
+                    "                                                       binding=intent.parse(text).bind(source))\n"
+                    "    return report\n"
+                    "guard.evaluate = changed\n"
+                    "raise SystemExit(cli.main(sys.argv[2:]))\n")
+                result = subprocess.run([sys.executable, "-c", script, "rebind" if rebind else "edit", "finish",
+                                         "--task", "t1", "--agent", "claude", "--summary", "done", "--return", "-"],
+                                        cwd=self.repo.root, env=self.repo.env, input=old_return, capture_output=True,
+                                        text=True, encoding="utf-8", timeout=30)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                code = "OAH_LEASE_CHANGED" if rebind else "OAH_INTENT_NOT_CURRENT"
+                self.assertIn(code, result.stderr)
+                self.assertIn("t1", self.repo.status())
+                self.assertFalse(any(e["event"] == "lease_finished" for e in self.repo.events()))
+
 
 def accept(text: str, *, revision: int = 1, goals: tuple[str, ...] = ("the report lists every file",
                                                                        "the digest is stable")) -> str:
@@ -325,6 +447,42 @@ def toml_list(argv: list[str]) -> str:
 
 class EndToEndTest(unittest.TestCase):
     """Every success condition through the real CLI and the real modules, with no fake in between."""
+
+    def test_packet_critical_axes_reach_delivered_skills(self):
+        repo = Repo(self)
+        for name in ("unlazy", "writing-plans"):
+            folder = repo.home / ".claude" / "skills" / name
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+        config = repo.root / ".oah" / "config.toml"
+        config.parent.mkdir()
+        fake_claude = [sys.executable, str(FAKES / "fake_claude.py")]
+        config.write_text(f"[engines.claude]\ncommand = {toml_list(fake_claude)}\n", encoding="utf-8")
+        record = make_tmp_dir(self) / "record.json"
+        repo.env["FAKE_RECORD"] = str(record)
+        repo.ok("packet", "new", "t1", "--scope", "src", "--kind", "security", "--intensity", "max",
+                "--reasoning", "xhigh", "--risk", "critical")
+        path = repo.path()
+        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8")
+        self.assertEqual(repo.start_packet().returncode, 0)
+        for overrides, expected_risk in (((), "critical"), (("--risk", "normal"), "normal"),
+                                         (("--tier", "low"), "critical")):
+            with self.subTest(overrides=overrides):
+                called = repo.ok("call", "claude", "--stage", "initial", "--task", "t1", "--json", *overrides)
+                data = json.loads(called.stdout)
+                self.assertEqual((data["tier"], data["tier_source"]),
+                                 ("low", "flag") if "--tier" in overrides else ("max", "packet"))
+                run = repo.root / ".git" / "oah" / "runs" / "t1" / data["run_id"]
+                selection = json.loads((run / "skills.json").read_text(encoding="utf-8"))
+                self.assertEqual((selection["kind"], selection["risk"]), ("security", expected_risk))
+                self.assertEqual(data["axes"], {"kind": "security", "intensity": "max", "reasoning": "xhigh",
+                                                "risk": expected_risk})
+                prompt = json.loads(record.read_text(encoding="utf-8"))["stdin"]
+                chosen = {skill["id"] for skill in selection["skills"]}
+                for name in ("unlazy", "writing-plans"):
+                    self.assertEqual(name in chosen, expected_risk == "critical")
+                    if expected_risk == "critical":
+                        self.assertIn(f"- `{name}` (user):", prompt)
 
     def test_end_to_end_bind_stale_rebind_finish(self):
         repo = Repo(self)

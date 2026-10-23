@@ -484,6 +484,17 @@ class UpdateCommandTest(CliFixture):
 
 
 class ConfigTest(CliFixture):
+    def test_update_accepts_shared_selector_settings(self):
+        from oah import skillsel
+
+        self.configure('mode = "attach"', 'pins = ["demo"]', "update_interval_days = 2")
+        self.assertEqual(skills_cli.settings_for(self.project), skillsel.settings_for(self.project))
+        for flags in (("--check",), ("--scheduled",)):
+            with self.subTest(flags=flags):
+                code, out, err = self.oah("update", *flags)
+                self.assertEqual(code, 0, out + err)
+                self.assertNotIn("OAH_CONFIG_UNKNOWN_KEY", err)
+
     def test_config_errors_exit_69(self):
         self.configure("auto_updates = true")
         code, _, err = self.oah("update")

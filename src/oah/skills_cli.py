@@ -17,6 +17,7 @@ from oah.lease import Lease, LeaseError, Store
 from oah.lockfile import LockTimeout, StateLock
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, state_dir
 from oah.scope import ScopeError, normalize_scope
+from oah.skillsel import config_defaults
 from oah.toolkit import catalog as catalog_module
 from oah.toolkit.catalog import CatalogError, kit_skills_dir, load_catalog
 from oah.toolkit.fetch import FetchError, StageError
@@ -94,8 +95,8 @@ def _confirm(what: str, args: argparse.Namespace) -> None:
 
 
 def settings_for(root: pathlib.Path) -> dict:
-    """The [skills] section of .oah/config.toml merged over DEFAULTS."""
-    settings = load_config(root).section("skills", DEFAULTS)
+    """The shared [skills] defaults, with the updater's validation preserved."""
+    settings = load_config(root).section("skills", config_defaults())
     pins = settings["pins"]
     if not all(isinstance(name, str) for name in pins):
         raise ConfigError("OAH_CONFIG_INVALID", "skills.pins must be an array of item names, such as "

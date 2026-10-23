@@ -491,12 +491,53 @@ class IntentBindingTest(unittest.TestCase):
             self.rebind(binding(3, digest="3"))
         self.assertEqual(caught.exception.code, "OAH_LEASE_EXPIRED")
 
-    def test_finish_records_intent_report(self):
+    def test_rebind_changes_gates_atomically_and_omission_preserves_them(self):
         lease = self.start(binding())
-        report = {"line": binding().line(), "acs": {"AC1": "met"}}
+        self.store.renew(task="t1", agent="claude", ttl_hours=4, gates=["checks/old.md"])
+        rebound, _ = self.rebind(binding(2, digest="2"), gates=["checks/new.md"])
+        self.assertEqual((rebound.id, rebound.gates), (lease.id, ["checks/new.md"]))
+        self.assertEqual(self.events()[-1]["gates"], ["checks/new.md"])
+        unchanged, _ = self.rebind(binding(2, digest="2"))
+        self.assertEqual(unchanged.gates, ["checks/new.md"])
+        self.store.start(task="t2", agent="codex", scope=("docs",), note="", ttl_hours=4, info=self.info)
+        before = self.records()
+        with self.assertRaises(LeaseError) as caught:
+            self.rebind(binding(3, digest="3"), scope=["docs"], gates=["checks/unmet.md"])
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CONFLICT")
+        self.assertEqual(self.records(), before)
+
+    def test_finish_records_intent_report(self):
+        from oah import intent, packet
+
+        path = packet.create(self.root, "t1", scope=("src",))
+        path.write_text(path.read_text(encoding="utf-8").replace('Status: draft', 'Status: accepted'),
+                        encoding="utf-8")
+        bound = intent.parse(intent.read_source(path)).bind(".oah/tasks/t1/PACKET.md")
+        lease = self.start(bound)
+        report = {"line": bound.line(), "acs": {"AC1": "met"}}
         self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
-                          allow_out_of_scope=False, intent_report=report)
+                          allow_out_of_scope=False, intent_report=report, checked_binding=bound)
         self.assertEqual(self.events()[-1]["intent"], report)
+
+    def test_finish_compares_the_checked_binding_under_the_lock(self):
+        old = binding()
+        lease = self.start(old)
+        self.rebind(binding(2, digest="2"))
+        with self.assertRaises(LeaseError) as caught:
+            self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
+                              allow_out_of_scope=False, checked_binding=old)
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
+        self.assertEqual(self.store.snapshot()[0][0].binding(), binding(2, digest="2"))
+        self.assertNotEqual(self.events()[-1]["event"], "lease_finished")
+
+    def test_finish_refuses_when_an_unbound_lease_was_bound_during_checks(self):
+        lease = self.start()
+        self.rebind(binding())
+        with self.assertRaises(LeaseError) as caught:
+            self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
+                              allow_out_of_scope=False)
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
+        self.assertEqual(self.store.snapshot()[0][0].binding(), binding())
 
 
 if __name__ == "__main__":

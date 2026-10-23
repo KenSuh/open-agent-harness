@@ -479,11 +479,14 @@ class TaskSelectionTest(unittest.TestCase):
         return next(skill.origin for skill in selection.skills if skill.id == skill_id)
 
     def test_settings_accept_toolkit_and_selector_keys(self) -> None:
+        from oah import skills_cli
+
         self.config('[skills]\nmode = "attach"\npins = ["ponytail"]\nupdate_interval_days = 2\n')
         settings = skillsel.settings_for(self.repo)
         self.assertEqual((settings["mode"], settings["pins"], settings["update_interval_days"]),
                          ("attach", ["ponytail"], 2))
         self.assertEqual(settings["rules"], skillsel.DEFAULTS["rules"])
+        self.assertEqual(skills_cli.settings_for(self.repo), settings)
         selection, status = self.choose()
         self.assertEqual(status, "unused(not-enabled)")
         self.assertEqual(selection.mode, "attach")

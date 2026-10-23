@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import hashlib
 import importlib.util
 import io
 import json
@@ -16,7 +15,6 @@ import sys
 import time
 import types
 import unittest
-from collections import namedtuple
 from unittest import mock
 
 from oah import call, call_cli, intent, rerank
@@ -34,22 +32,19 @@ FAKE_CODEX = [sys.executable, str(FAKES / "fake_codex.py")]
 FAKE_CLAUDE = [sys.executable, str(FAKES / "fake_claude.py")]
 MARKER = "<!-- OAH_INTENT_FOOTER -->"
 FOOTER = f"{MARKER}\n## Intent rules\n- End with INTENT and AC lines.\n"
-Intent = namedtuple("Intent", "section id revision digest")
-SECTION = "<!-- OAH_INTENT:BEGIN -->\n## Intent\nIntent-ID: t1\nRevision: 2\nStatus: accepted\n<!-- OAH_INTENT:END -->\n"
+SECTION = ("<!-- OAH_INTENT:BEGIN -->\n## Intent\nIntent-ID: t1\nRevision: 2\nStatus: accepted\n"
+           "### Problem\nReports miss files.\n### Desired outcome\nEvery file is listed.\n"
+           "### Success conditions\n- AC1: the report lists every file\n### Constraints\n"
+           "### Non-goals\n### Open questions\n<!-- OAH_INTENT:END -->\n")
 
 
 def has_footer(text: str) -> bool:
     return any(line == MARKER for line in text.replace("\r\n", "\n").split("\n"))
 
 
-def parse_intent(text: str) -> Intent:
-    """A small stand-in for oah.intent.parse: LF-normalized section, its fields and its digest."""
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    begin, end = lines.index("<!-- OAH_INTENT:BEGIN -->"), lines.index("<!-- OAH_INTENT:END -->")
-    section = "\n".join(lines[begin:end + 1]) + "\n"
-    fields = dict(line.split(": ", 1) for line in lines[begin:end] if line.startswith(("Intent-ID: ", "Revision: ")))
-    digest = "sha256:" + hashlib.sha256(section.encode("utf-8")).hexdigest()
-    return Intent(section, fields["Intent-ID"], int(fields["Revision"]), digest)
+def parse_intent(text: str) -> intent.Intent:
+    """Use the landed parser for launch fixtures as well as binding checks."""
+    return intent.parse(text)
 
 
 def toml_list(argv: list[str]) -> str:
@@ -82,12 +77,31 @@ class Project:
     def settings(self) -> call.Settings:
         return call_cli.load_settings(self.repo)
 
+    def bind(self, task: str = "t1", *, root: pathlib.Path | None = None, path: pathlib.Path | None = None):
+        """Establish a real accepted lease for positive launch tests; never refresh an existing binding."""
+        root = root or self.repo
+        store = Store(self.state)
+        holder = next((lease for lease, _ in store.snapshot() if lease.task == task), None)
+        if holder is not None and holder.binding() is not None:
+            return holder
+        path = path or root / f".oah/tasks/{task}/PACKET.md"
+        path = path if path.is_absolute() else root / path
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}"), encoding="utf-8")
+        bound = intent.parse(intent.read_source(path)).bind(path.relative_to(root).as_posix())
+        if holder is not None:
+            return store.rebind(task=task, agent=holder.agent, binding=bound, ttl_hours=1)[0]
+        return store.start(task=task, agent="codex", scope=(f".oah/tasks/{task}",), note="launch fixture",
+                           ttl_hours=1, info=repo_info(root), intent=bound)
+
     def prepare(self, engine: str = "codex", stage: str = "review", env: dict | None = None, **fields):
         fields.setdefault("task", "t1")
+        self.bind(fields["task"], path=fields.get("packet"))
         request = call.CallRequest(engine=engine, stage=stage, **fields)
         return call.prepare(request, self.settings(), root=self.repo, state_dir=self.state,
                             env=dict(self.env, **(env or {})), footer=FOOTER, has_footer=has_footer,
-                            parse_intent=parse_intent, keychain=NoKeychain())
+                            parse_intent=parse_intent, read_source=intent.read_source, keychain=NoKeychain())
 
     def run(self, engine: str = "codex", stage: str = "review", env: dict | None = None, **fields) -> dict:
         prepared = self.prepare(engine, stage, env=env, **fields)
@@ -111,7 +125,7 @@ class Project:
 class RunFolderTest(unittest.TestCase):
     def test_stored_spec_gets_the_current_worker_envelope(self):
         project = Project(self)
-        data = project.run(tier="low", stored_brief="Review this reusable spec.\n")
+        data = project.run(tier="low", stored_brief="Review this reusable spec.\n" + SECTION)
         prompt = project.recorded()["stdin"]
         self.assertTrue(prompt.startswith("You are a dispatched oah worker (OAH_WORKER=1, run " + data["run_id"]))
         self.assertIn("Stage: review · Engine: codex", prompt)
@@ -140,7 +154,8 @@ class RunFolderTest(unittest.TestCase):
     def test_stored_review_spec_with_lease_instruction_refuses(self):
         project = Project(self)
         with self.assertRaises(BriefError):
-            project.prepare(tier="low", stored_brief="Run oah start --task old --agent claude before reviewing.\n")
+            project.prepare(tier="low", stored_brief="Run oah start --task old --agent claude before reviewing.\n"
+                            + SECTION)
         self.assertFalse(project.record.exists())
 
     def test_refresh_failure_keeps_launch_version_separate_from_catalog(self):
@@ -205,7 +220,7 @@ class RunFolderTest(unittest.TestCase):
 
     def test_stored_brief_delivery(self):
         project = Project(self)
-        data = project.run(tier="low", stored_brief="An old spec that mentions " + MARKER + " inline.\n")
+        data = project.run(tier="low", stored_brief="An old spec that mentions " + MARKER + " inline.\n" + SECTION)
         prompt = find_run(project.state, data["run_id"]).prompt_path.read_text(encoding="utf-8")
         self.assertIn("## Round instructions\nAn old spec", prompt)
         self.assertTrue(prompt.endswith(FOOTER))
@@ -294,7 +309,7 @@ class RoutingTest(unittest.TestCase):
         rules = project.run(stage="review")
         self.assertEqual((rules["tier_source"], rules["tier"]), ("rules", "medium"))
         self.assertEqual(rules["axes"], {"kind": "review", "intensity": "low", "reasoning": "medium", "risk": "normal"})
-        self.assertTrue(any(w.startswith("OAH_SCOPE_EMPTY") for w in rules["warnings"]))
+        self.assertIn("Scope: .oah/tasks/t1", project.recorded()["stdin"])
         self.assertEqual(rules["advisory"], "unused(not-configured)")
         flagged = project.run(stage="review", axes={"risk": "critical"})
         self.assertEqual((flagged["tier_source"], flagged["tier"]), ("flag", "max"))
@@ -324,19 +339,19 @@ class RoutingTest(unittest.TestCase):
         project = Project(self)
         for status, tier in (("used", "max"), ("used", "low")):
             advice = types.SimpleNamespace(status=status, advisory_tier=tier)
-            module = types.SimpleNamespace(advise_difficulty=lambda axes, task, *, root, advice=advice: advice)
+            module = types.SimpleNamespace(advise_difficulty=lambda axes, task, *, root, advice=advice, **kw: advice)
             with mock.patch.dict(sys.modules, {"oah.rerank": module}):
                 data = project.run(stage="review")
             self.assertEqual((data["tier"], data["advisory"]), ("medium", f"used tier={tier}"))
 
-        def broken(axes, task, *, root):
+        def broken(axes, task, *, root, **kw):
             raise RuntimeError("provider down")
 
         with mock.patch.dict(sys.modules, {"oah.rerank": types.SimpleNamespace(advise_difficulty=broken)}):
             data = project.run(stage="review")
         self.assertEqual((data["tier"], data["advisory"]), ("medium", "unused(error: RuntimeError)"))
         no_key = types.SimpleNamespace(
-            advise_difficulty=lambda axes, task, *, root: types.SimpleNamespace(status="unused(no key)"))
+            advise_difficulty=lambda axes, task, *, root, **kw: types.SimpleNamespace(status="unused(no key)"))
         with mock.patch.dict(sys.modules, {"oah.rerank": no_key}):
             self.assertEqual(project.run(stage="review")["advisory"], "unused(no key)")
 
@@ -344,8 +359,8 @@ class RoutingTest(unittest.TestCase):
         project = Project(self, '[rerank]\nenabled = true\nprovider = "fake"\n')
         provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
                                          advise=mock.Mock())
+        project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
         with contextlib.chdir(project.repo), \
-                mock.patch.dict(os.environ, {"FAKE_RERANK_KEY": "fake-" + token_source.token_hex(16)}), \
                 mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
             for tier in ("max", "low"):
                 with self.subTest(advisory_tier=tier):
@@ -376,7 +391,7 @@ class RoutingTest(unittest.TestCase):
         self.assertFalse((project.state / "runs").exists())
 
 
-NON_ASCII = SECTION.replace("Status: accepted\n", "Status: accepted\n### Problem\n한글 목표 — 이모지 \U0001f600 그대로.\n")
+NON_ASCII = SECTION.replace("Reports miss files.", "한글 목표 — 이모지 \U0001f600 그대로.")
 
 
 class IntentLineageTest(unittest.TestCase):
@@ -391,6 +406,10 @@ class IntentLineageTest(unittest.TestCase):
 
         renamed = source.parent.with_name("my-packets")
         source.parent.rename(renamed)
+        path = renamed / source.name
+        path.write_text(path.read_text(encoding="utf-8").replace("Revision: 2", "Revision: 3"), encoding="utf-8")
+        Store(project.state).rebind(task="t1", agent="codex", ttl_hours=1,
+                                    binding=intent.parse(intent.read_source(path)).bind("my-packets/PACKET.md"))
         data = project.run(stage="correction", tier="low", packet=renamed / source.name)
         self.assertEqual(data["status"], "finished")
         self.assertEqual(call.dispatch_binding(project.state, "t1")["source"], "my-packets/PACKET.md")
@@ -445,7 +464,7 @@ class IntentLineageTest(unittest.TestCase):
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low", packet=other)
         self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
-        self.assertIn("raise Revision of Intent-ID t1", str(ctx.exception))
+        self.assertIn("new revision of the bound packet", str(ctx.exception))
         self.assertIn("--packet .oah/tasks/t1/PACKET.md", str(ctx.exception))
         self.assertEqual(project.runs(), [first["run_id"]])
 
@@ -453,12 +472,14 @@ class IntentLineageTest(unittest.TestCase):
         project = Project(self)
         path = project.packet()
         project.run(stage="review", tier="low")
-        path.write_text(SECTION.replace("Status: accepted", "Status: accepted\n### Problem\nedited"), encoding="utf-8")
+        path.write_text(SECTION.replace("Reports miss files.", "edited"), encoding="utf-8")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
-        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
-        self.assertIn("same revision with edited content", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
+        self.assertIn("digest differs", str(ctx.exception))
         path.write_text(SECTION.replace("Revision: 2", "Revision: 3"), encoding="utf-8")
+        Store(project.state).rebind(task="t1", agent="codex", ttl_hours=1,
+                                    binding=intent.parse(intent.read_source(path)).bind(".oah/tasks/t1/PACKET.md"))
         data = project.run(stage="correction", tier="low")
         self.assertEqual(data["status"], "finished")
         binding = json.loads((project.state / "runs" / "t1" / "intent-binding.json").read_text(encoding="utf-8"))
@@ -466,7 +487,8 @@ class IntentLineageTest(unittest.TestCase):
         path.write_text(SECTION, encoding="utf-8")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
-        self.assertIn("an older revision", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
+        self.assertIn("revision is 2, bound 3", str(ctx.exception))
 
     def test_later_round_reuses_bound_source(self):
         project = Project(self)
@@ -479,7 +501,7 @@ class IntentLineageTest(unittest.TestCase):
         custom.unlink()
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
-        self.assertEqual(ctx.exception.code, "OAH_PACKET_UNREADABLE")
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
 
     def test_stored_brief_with_other_intent_refused(self):
         project = Project(self)
@@ -507,6 +529,8 @@ class WorktreeSelectorTest(unittest.TestCase):
         self.first, self.second = base / "a" / "wt", base / "b" / "wt"
         add_worktree(self.project.repo, self.first, "lane-x")
         add_worktree(self.project.repo, self.second, "lane-y")
+        for task in ("t1", "adhoc"):
+            self.project.bind(task, root=self.first)
 
     def test_advice_uses_target_worktree_rerank_settings(self):
         config = (self.project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
@@ -565,7 +589,8 @@ class WorktreeSelectorTest(unittest.TestCase):
                 prompt = self.project.repo / "round instructions.txt"
                 spec = self.project.repo / "reused brief.txt"
                 prompt.write_bytes(text.encode("utf-8"))
-                spec.write_bytes(b"Reusable spec.\r\n")
+                stored = "Reusable spec.\r\n" + SECTION
+                spec.write_bytes(stored.encode("utf-8"))
                 extra = {"message": ["--message", text], "file": ["--prompt-file", str(prompt)],
                          "stdin": ["--prompt-file", "-"]}[source]
                 stdin = types.SimpleNamespace(buffer=io.BytesIO(text.encode("utf-8")))
@@ -587,7 +612,7 @@ class WorktreeSelectorTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 request = prepare.call_args.args[0]
                 self.assertEqual(request.round_instructions, text)
-                self.assertEqual(request.stored_brief, "Reusable spec.\r\n")
+                self.assertEqual(request.stored_brief, stored)
                 self.assertEqual((request.task, request.tier, request.timeout_s), ("t1", "low", 19))
                 self.assertIn(text, self.project.recorded()["stdin"])
 
@@ -674,10 +699,59 @@ class LeaseBindingTest(unittest.TestCase):
                 self.assertIn("oah start --task t1 --agent claude --packet .oah/tasks/t1/PACKET.md", str(ctx.exception))
                 self.assertEqual(self.project.runs(), before)
 
-    def test_unbound_lease_still_dispatches(self):
-        Store(self.project.state).start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1,
-                                        info=repo_info(self.project.repo))
-        self.assertIn("No intent section", self.prompt(self.prepare()))
+    def test_call_requires_a_current_lease_binding(self):
+        for leased in (False, True):
+            for packet_status in (None, "accepted", "draft"):
+                with self.subTest(leased=leased, packet_status=packet_status):
+                    project = Project(self)
+                    if packet_status is not None:
+                        project.packet(section=real_packet().replace("Status: accepted",
+                                                                    f"Status: {packet_status}"))
+                    if leased:
+                        Store(project.state).start(task="t1", agent="claude", scope=("src",), note="",
+                                                    ttl_hours=1, info=repo_info(project.repo))
+                    request = call.CallRequest(engine="codex", stage="review", task="t1", tier="low")
+                    with self.assertRaises(EngineError) as caught:
+                        call.prepare(request, project.settings(), root=project.repo, state_dir=project.state,
+                                     env=project.env, footer=intent.FOOTER, has_footer=intent.has_footer,
+                                     parse_intent=intent.parse, read_source=intent.read_source,
+                                     keychain=NoKeychain())
+                    self.assertEqual(caught.exception.code, "OAH_INTENT_NOT_CURRENT")
+                    self.assertIn("oah start --task t1", str(caught.exception))
+                    self.assertEqual(project.runs(), [])
+                    self.assertFalse(project.record.exists())
+
+    def test_call_refuses_a_bound_source_changed_to_draft(self):
+        path = self.bind()
+        path.write_text(path.read_text(encoding="utf-8").replace("Status: accepted", "Status: draft"),
+                        encoding="utf-8")
+        with self.assertRaises(EngineError) as caught:
+            self.prepare()
+        self.assertEqual(caught.exception.code, "OAH_INTENT_NOT_CURRENT")
+        self.assertEqual(self.project.runs(), [])
+
+    def test_dispatch_history_does_not_replace_a_live_lease(self):
+        self.bind()
+        self.prepare()
+        before = self.project.runs()
+        Store(self.project.state).release(task="t1", agent="claude", reason="task stopped", force=False)
+        self.assertIsNotNone(call.dispatch_binding(self.project.state, "t1"))
+        with self.assertRaises(EngineError) as caught:
+            self.prepare()
+        self.assertEqual(caught.exception.code, "OAH_INTENT_NOT_CURRENT")
+        self.assertEqual(self.project.runs(), before)
+
+    def test_explicit_draft_cannot_bypass_checks_when_parser_is_omitted(self):
+        self.bind()
+        draft = self.project.packet(name="plans/draft.md", section=real_packet().replace("Status: accepted",
+                                                                                       "Status: draft"))
+        request = call.CallRequest(engine="codex", stage="review", task="t1", tier="low", packet=draft)
+        with self.assertRaises(EngineError) as caught:
+            call.prepare(request, self.project.settings(), root=self.project.repo, state_dir=self.project.state,
+                         env=self.project.env, footer=intent.FOOTER, has_footer=intent.has_footer,
+                         keychain=NoKeychain())
+        self.assertEqual(caught.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
+        self.assertEqual(self.project.runs(), [])
 
     def test_call_uses_lease_binding_source(self):
         self.bind("plans/T1.md")
@@ -730,15 +804,37 @@ class LeaseBindingTest(unittest.TestCase):
             + '[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
         project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
         provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
-                                         score=lambda kind, query, items, *, key, config: list(range(len(items))))
+                                         score=mock.Mock(side_effect=lambda kind, query, items, *, key, config:
+                                                         list(range(len(items)))),
+                                         advise=mock.Mock(return_value=("max", 0.8)))
+        path = self.bind()
         with mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
-            used = self.prompt(self.prepare(task="t2"))
+            used = self.prompt(self.prepare(tier=None))
             self.assertIn("Skill order: rerank=used", used)
             order = used.split("- Skills: ", 1)[1].split(" (reasons", 1)[0]
             self.assertEqual(order, "verification-before-completion, receiving-code-review, test-driven-development")
-            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(self.prepare(task="t3", no_rerank=True)))
-            self.bind(constraints="No re-ranker for this task.")
-            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(self.prepare()))
+            provider.score.assert_called_once()
+            provider.advise.assert_called_once()
+            provider.score.reset_mock()
+            provider.advise.reset_mock()
+            disabled = self.prepare(tier=None, no_rerank=True)
+            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(disabled))
+            self.assertEqual(disabled.run.read()["advisory"], "unused(disabled-by-brief)")
+            provider.score.assert_not_called()
+            provider.advise.assert_not_called()
+            path.write_text(real_packet(revision=2, constraints="No re-ranker for this task."), encoding="utf-8")
+            Store(project.state).rebind(task="t1", agent="claude", ttl_hours=1,
+                                        binding=intent.parse(path.read_text(encoding="utf-8")).bind(
+                                            ".oah/tasks/t1/PACKET.md"))
+            disabled = self.prepare(tier=None)
+            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(disabled))
+            self.assertEqual(disabled.run.read()["advisory"], "unused(disabled-by-brief)")
+            provider.score.assert_not_called()
+            provider.advise.assert_not_called()
+        secret = project.env["FAKE_RERANK_KEY"]
+        for path in project.state.rglob("*"):
+            if path.is_file():
+                self.assertFalse(secret.encode() in path.read_bytes(), f"runtime key leaked into {path.name}")
 
 
 class HeaderTest(unittest.TestCase):
@@ -1015,6 +1111,9 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command")
     call_cli.register(commands)
+    args = parser.parse_args(list(argv))
+    if args.command == "call" and not args.worktree and not args.request_id:
+        project.bind(args.task, path=pathlib.Path(args.packet) if args.packet else None)
     out, err = io.StringIO(), io.StringIO()
     previous = os.getcwd()
     os.chdir(project.repo)
@@ -1023,7 +1122,7 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
                 mock.patch.object(call_cli, "intent_tools",
                                   return_value=call_cli.IntentTools(FOOTER, has_footer, parse_intent, call._read_text)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = call_cli.run(parser.parse_args(list(argv)))
+            code = call_cli.run(args)
     finally:
         os.chdir(previous)
     return code, out.getvalue(), err.getvalue()

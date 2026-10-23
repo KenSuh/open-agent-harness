@@ -189,7 +189,7 @@ def _start_packet(args: argparse.Namespace, info: RepoInfo, store: Store, gates:
         if exc.code != "OAH_LEASE_EXISTS":
             raise
         lease, action = store.rebind(task=args.task, agent=args.agent, binding=binding, ttl_hours=args.ttl_hours,
-                                     scope=scope)
+                                     scope=scope, gates=gates if args.gates else None)
         word = {"bound": "OAH_INTENT_BOUND", "rebound": "OAH_INTENT_REBOUND", "unchanged": "OAH_INTENT_UNCHANGED"}
         line = f"{word[action]} task={lease.task} {named} expires={lease.expires_at}"
     for warning in warnings:
@@ -324,8 +324,8 @@ def _read_return(raw: str) -> str:
                          "pass it with --return FILE, or --return - to read stdin") from None
 
 
-def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
-    """For a bound lease: refuse a binding that is not current or an invalid return; else the event record."""
+def _current_binding(lease: Lease) -> intent.Binding | None:
+    """The lease's checked binding, or a refusal if its source is no longer current."""
     try:
         binding = lease.binding()
     except ValueError as exc:
@@ -338,12 +338,21 @@ def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
                          f"the bound intent is {state}: {reason}. Restore {binding.source} as it was bound, or raise "
                          f"its Revision, accept it and rebind with oah start --task {lease.task} --agent {lease.agent} "
                          f"--packet {binding.source}; then run oah finish again")
+    return binding
+
+
+def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
+    """For a bound lease: refuse a binding that is not current or an invalid return; else the event record."""
+    binding = _current_binding(lease)
+    if binding is None:
+        return None
     shape = "one 'AC<n>: met|unmet|deferred — <evidence>' line per success condition"
     if args.return_file is None:
         raise LeaseError(intent.RETURN_INVALID,
                          f"this lease is bound to {binding.line()}; pass your return with --return FILE (or --return - "
                          f"for stdin). It needs that INTENT line and {shape}")
     text = _read_return(args.return_file)
+    _current_binding(lease)  # stdin may have blocked while the source changed
     problems = intent.check_return(text, binding)
     if problems:
         raise LeaseError(intent.RETURN_INVALID, "; ".join(problem.message for problem in problems) +
@@ -378,7 +387,7 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     lease, beyond = store.finish(task=args.task, agent=args.agent, lease_id=lease.id,
                                  summary=args.summary, changed=changed,
                                  allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(len(ledgers)),
-                                 wiki_report=wiki_report, intent_report=intent_report)
+                                 wiki_report=wiki_report, intent_report=intent_report, checked_binding=lease.binding())
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
     if intent_report is not None:
         extra += f" intent={intent_report['line'].split(' ')[1]}"

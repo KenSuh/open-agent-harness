@@ -124,6 +124,9 @@ def _run(args: argparse.Namespace) -> int:
     root = info.root if info is not None else None
     binding, unbound_reason, bound_root = (lease_binding(info, task) if info is not None
                                            else (None, "not in a repository", None))
+    if binding is not None and not args.file:
+        root = bound_root
+        path = bound_root / pathlib.PurePosixPath(binding.source)
     if binding is None:
         state, reason = "unbound", unbound_reason
     else:

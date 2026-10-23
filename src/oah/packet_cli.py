@@ -84,7 +84,8 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
                                             brief_disabled=args.no_rerank)
         plans.append(packet.StagePlan(stage, stages.get(stage, call.STAGE_DEFAULTS[stage]), scored.axes,
                                       recommendation.tier, tuple(scored.reasons) + recommendation.reasons,
-                                      call.advise(scored.axes, args.task, root=root), selection, status))
+                                      call.advise(scored.axes, args.task, root=root, brief_disabled=args.no_rerank,
+                                                  env=os.environ), selection, status))
     return plans
 
 

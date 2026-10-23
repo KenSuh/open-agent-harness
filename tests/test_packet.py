@@ -6,8 +6,10 @@ import io
 import os
 import pathlib
 import re
+import secrets
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oah import cli, intent, packet, packet_cli
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
@@ -390,6 +392,10 @@ class PacketPlanTest(unittest.TestCase):
         self.assertEqual(read.plan, {"initial": ("claude", "medium"), "review": ("codex", "medium"),
                                      "correction": ("codex", "medium")})
         self.assertEqual(read.scope, ("src/app.py",))
+        self.assertEqual({stage: axes.to_json() for stage, axes in read.axes.items()},
+                         {stage: {"kind": "review" if stage == "review" else "implementation",
+                                  "intensity": "low", "reasoning": "medium", "risk": "normal"}
+                          for stage in ("initial", "review", "correction")})
 
     def test_new_refreshes_impact_first(self):
         import oah.impact
@@ -429,6 +435,25 @@ class PacketPlanTest(unittest.TestCase):
     def test_no_rerank_flag_is_recorded(self):
         self.assertEqual(self.new("--scope", "src/app.py", "--no-rerank")[0], 0)
         self.assertIn("  - skills (rerank=unused(disabled-by-brief)):", self.plan().splitlines())
+
+    def test_no_rerank_skips_both_provider_methods(self):
+        from oah import rerank
+
+        config = self.repo / ".oah" / "config.toml"
+        config.parent.mkdir(exist_ok=True)
+        config.write_text('[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        secret = "fake-" + secrets.token_hex(16)
+        provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
+                                         score=Mock(return_value=[]), advise=Mock(return_value=("max", 0.8)))
+        with patch.dict(os.environ, {"FAKE_RERANK_KEY": secret}), \
+                patch.dict(rerank.PROVIDERS, {"fake": provider}):
+            code, out, err = self.new("--scope", "src/app.py", "--no-rerank")
+        self.assertEqual(code, 0, out + err)
+        provider.score.assert_not_called()
+        provider.advise.assert_not_called()
+        self.assertEqual(self.plan().count("(advice=unused(disabled-by-brief))"), 3)
+        self.assertFalse(secret in out + err + self.path.read_text(encoding="utf-8"),
+                         "runtime key leaked into packet output")
 
 
 if __name__ == "__main__":
