@@ -17,7 +17,6 @@ DEFAULTS: dict[str, object] = {
     "stale_days": 180,
     "rollover_trigger_bytes": 512_000,
     "rollover_target_bytes": 409_600,
-    "archive_prefix": "log_archive_",
     "new_broken_links": "warn",
 }
 EXIT_REFUSED, EXIT_ENVIRONMENT = 1, 69
@@ -40,7 +39,6 @@ class WikiSettings:
     stale_days: int = 180
     rollover_trigger_bytes: int = 512_000
     rollover_target_bytes: int = 409_600
-    archive_prefix: str = "log_archive_"
     new_broken_links: str = "warn"
 
     def __post_init__(self) -> None:
@@ -56,20 +54,16 @@ class WikiSettings:
             problems.append('new_broken_links must be "warn" or "block"')
         if not all(isinstance(item, str) and item for item in self.link_roots):
             problems.append("link_roots must be a list of folder paths")
-        try:
-            from oah.wiki.log import ArchiveNaming
-
-            object.__setattr__(self, "_naming", ArchiveNaming(self.archive_prefix))
-        except ValueError as exc:
-            problems.append(str(exc))
         if problems:
             raise WikiError("OAH_CONFIG_INVALID", "[wiki] " + "; ".join(problems)
                             + ". Fix .oah/config.toml and retry.", EXIT_ENVIRONMENT)
 
     @property
     def naming(self):
-        """The ArchiveNaming for archive_prefix."""
-        return self._naming
+        """Archive file naming (fixed: log_archive_NN.md)."""
+        from oah.wiki.log import DEFAULT_NAMING
+
+        return DEFAULT_NAMING
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, object]) -> "WikiSettings":
@@ -80,7 +74,7 @@ class WikiSettings:
         """The settings that change what lint counts; hygiene resets its baseline when they change."""
         data = asdict(self)
         return {name: (list(data[name]) if name == "link_roots" else data[name])
-                for name in ("dir", "link_roots", "index_line_limit", "stale_days", "archive_prefix")}
+                for name in ("dir", "link_roots", "index_line_limit", "stale_days")}
 
 
 def read_bytes(path: pathlib.Path) -> bytes | None:

@@ -578,22 +578,16 @@ class RolloverCliTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("rollover=log_archive_01.md", out)
 
-    def test_archive_prefix_from_config(self):
-        (self.repo / ".oah" / "config.toml").write_text(
-            '[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\narchive_prefix = "history-"\n',
-            encoding="utf-8")
+    def test_trigger_and_target_from_config_archive_name_fixed(self):
         code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t9", state=self.state)
         self.assertEqual(code, 0, err)
-        self.assertIn("rollover=history-01.md", out)
-        code, out, _ = run_cli(self.repo, "wiki", "lint", state=self.state)
-        self.assertEqual(code, 0, out)
-        (self.repo / ".oah" / "config.toml").write_text('[wiki]\narchive_prefix = "a/b"\n', encoding="utf-8")
+        self.assertIn("rollover=log_archive_01.md", out)  # 1500/700 from .oah/config.toml (setUp)
+        (self.repo / ".oah" / "config.toml").write_text('[wiki]\narchive_prefix = "history-"\n', encoding="utf-8")
         code, _, err = run_cli(self.repo, "wiki", "rollover", state=self.state)
         self.assertEqual(code, 69)
-        self.assertTrue(err.startswith("OAH_CONFIG_INVALID"), err)
+        self.assertTrue(err.startswith("OAH_CONFIG_UNKNOWN_KEY"), err)
 
     def test_rollover_settings_defaults(self):
-        self.assertEqual({key: wiki.DEFAULTS[key] for key in
-                          ("rollover_trigger_bytes", "rollover_target_bytes", "archive_prefix")},
-                         {"rollover_trigger_bytes": 512_000, "rollover_target_bytes": 409_600,
-                          "archive_prefix": "log_archive_"})
+        self.assertEqual({key: wiki.DEFAULTS[key] for key in ("rollover_trigger_bytes", "rollover_target_bytes")},
+                         {"rollover_trigger_bytes": 512_000, "rollover_target_bytes": 409_600})
+        self.assertNotIn("archive_prefix", wiki.DEFAULTS)

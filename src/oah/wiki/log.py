@@ -19,8 +19,7 @@ from oah.wiki.markdown import FenceTracker, eol_of, split_lines, strip_eol
 MARKER = "<!-- OAH:LOG_INSERT_BELOW -->"
 INDEX_BEGIN = "<!-- OAH:ARCHIVE_INDEX:BEGIN -->"
 INDEX_END = "<!-- OAH:ARCHIVE_INDEX:END -->"
-DEFAULT_ARCHIVE_PREFIX = "log_archive_"
-_ARCHIVE_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ARCHIVE_PREFIX = "log_archive_"  # fixed: the 5.4 scope exemption, lint and recovery rely on this name
 
 _ENTRY = re.compile(r"^## ([0-9]{4}-[0-9]{2}-[0-9]{2}) +(\S.*)$")
 _CANDIDATE = re.compile(r"^ {0,3}##[ \t]+[0-9]")
@@ -28,16 +27,13 @@ _HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 
 
 class ArchiveNaming:
-    """[wiki] archive_prefix: archives are named <prefix>NN.md, numbered from 01 with at least two digits."""
+    """Archives are named log_archive_NN.md, numbered from 01 with at least two digits."""
 
     digits = 2
+    prefix = ARCHIVE_PREFIX
 
-    def __init__(self, prefix: str = DEFAULT_ARCHIVE_PREFIX) -> None:
-        if not isinstance(prefix, str) or not _ARCHIVE_PREFIX.match(prefix) or prefix in ("log", "index"):
-            raise ValueError(f"archive_prefix {prefix!r} must be a plain file-name start of letters, digits, '.', "
-                             "'_' or '-' (up to 64), such as log_archive_")
-        self.prefix = prefix
-        self._regex = re.compile("^" + re.escape(prefix) + "([0-9]+)\\.md$")
+    def __init__(self) -> None:
+        self._regex = re.compile("^" + re.escape(self.prefix) + "([0-9]+)\\.md$")
 
     def number(self, name: str) -> int | None:
         """The archive number of a file name, or None when the name is not an archive."""

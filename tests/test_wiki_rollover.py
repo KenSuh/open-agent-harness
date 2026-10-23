@@ -640,22 +640,45 @@ class HardeningTest(unittest.TestCase):
         self.assertIsNone(result.archive)
         self.assertEqual(snapshot(self.folder, self.w.state), before)
 
-    def test_archive_prefix_setting(self):
-        w, folder = make_store(self, make_log(newest_first(20, body=40)), archive_prefix="history-")
-        stream = wiki_stream(folder)
-        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-01.md")
-        for i in range(12):
-            w.log(f"more {i}", body="m" * 40, today=TODAY)
-        self.assertEqual(w.rollover(today=TODAY).archive.name, "history-02.md")
-        header = log.parse_log((folder / "log.md").read_bytes(), "log.md").header.decode()
-        self.assertIn("[[history-02]]", header)
-        archives = {int(p.name[8:10]): p.read_bytes() for p in folder.glob("history-*.md")}
-        self.assertTrue(log.preservation_stream((folder / "log.md").read_bytes(), archives,
-                                                log.ArchiveNaming("history-")).endswith(stream))
-        (folder / "history-4.md").write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
-        with self.assertRaises(WikiError):
-            w.rollover(today=TODAY)
-        for bad in ("", "a/b_", "log", "-x", "x y"):
-            with self.subTest(bad=bad), self.assertRaises(WikiError) as ctx:
-                WikiSettings(archive_prefix=bad)
-            self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")
+    def test_restore_removes_the_new_archive_so_no_entry_is_in_two_files(self):
+        def assert_each_entry_once(expected_stream: bytes) -> None:
+            data = [e.data for p in sorted(self.folder.glob("log*.md")) for e in log.parse_log(p.read_bytes(), p.name).entries]
+            self.assertEqual(len(data), len(set(data)), "an entry is in two files")
+            self.assertEqual(wiki_stream(self.folder), expected_stream)
+            self.assertEqual(self.wiki_files(), ["log.md"])
+
+        late = self.stream + self.APPEND
+        with self.assertRaises(WikiError):  # live rollback after a late write
+            self.w.rollover(today=TODAY, fault=self.append_after_publication)
+        assert_each_entry_once(late)
+
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        self.w, self.folder, self.log_path = w, folder, folder / "log.md"
+
+        def fault(step: str) -> None:
+            self.append_after_publication(step)
+            if step == "rollback":
+                raise PermissionError("simulated")
+
+        with self.assertRaises(WikiError):  # restore by `oah wiki recover` after a failed rollback
+            w.rollover(today=TODAY, fault=fault)
+        self.assertTrue((folder / "log_archive_01.md").exists())
+        w.recover()
+        assert_each_entry_once(late)
+
+    def test_a_changed_new_archive_is_never_overwritten(self):
+        def fault(step: str) -> None:
+            if step == "log-replaced":
+                with open(self.folder / "log_archive_01.md", "ab") as handle:
+                    handle.write(b"edited archive\n")
+
+        with self.assertRaises(WikiError) as ctx:
+            self.w.rollover(today=TODAY, fault=fault)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
+        journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
+        self.assertEqual(journal["reason"], "changed-after-publication")
+        before = snapshot(self.folder, self.w.state)
+        with self.assertRaises(WikiError) as conflict:
+            self.w.recover()
+        self.assertEqual(conflict.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertEqual(snapshot(self.folder, self.w.state), before)
