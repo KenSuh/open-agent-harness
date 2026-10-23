@@ -5,6 +5,7 @@
 
 - **번들 스킬**은 `skills/<name>/` 에 들어 있다. 고정한 업스트림 커밋의 파일을 한 바이트도 바꾸지 않고 담으며,
   업스트림 라이선스 파일과 출처 기록 `UPSTREAM.json` 을 함께 둔다. 재배포를 허락하는 라이선스의 스킬만 번들한다.
+  **선택 사용** 항목은 `--all` 로 설치되지 않으며, 지정한 작업에만 고른다(예: 한국어 글에만 쓰는 `humanize-korean`).
 - **연결 항목**은 공식 설치 명령과 출처만 싣는다. 라이선스가 재배포를 허락하지 않거나, 고치지 않은 파일이
   이 저장소의 개인정보 검사를 통과하지 못하는 경우다.
 - **MCP 템플릿**(`mcp/`)은 Claude Code 나 Codex 에서 서버를 띄운다. 값은 절대 넣지 않고 `${NAME}` 자리표시자(Claude)나
@@ -61,6 +62,7 @@
 | `mattpocock-skills` | <https://github.com/mattpocock/skills> `skills` | `49dd158d1076` | MIT | vendor | `oah skills install mattpocock-skills` |
 | `codex-plugin-cc` | <https://github.com/openai/codex-plugin-cc> `plugins/codex` | `db52e28f4d9d` | Apache-2.0 | vendor | `oah skills install codex-plugin-cc` |
 | `ponytail` | <https://github.com/DietrichGebert/ponytail> `skills` | `2ed6c52c9d7e` | MIT | vendor | `oah skills install ponytail` |
+| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, 선택 사용 (다음 작업에만 고름: korean-prose) | `oah skills install humanize-korean` |
 
 ## 연결 스킬·플러그인
 

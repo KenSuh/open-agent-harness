@@ -163,6 +163,41 @@
       ],
       "purpose": "Simplest-solution mode: YAGNI, standard library first, no unrequested abstractions. Its hooks need the official plugin install.",
       "official_install": "codex plugin marketplace add DietrichGebert/ponytail && codex plugin add ponytail@ponytail"
+    },
+    {
+      "name": "humanize-korean",
+      "kind": "plugin",
+      "repository": "https://github.com/epoko77-ai/im-not-ai",
+      "subpath": "",
+      "ref": "main",
+      "commit": "b37e0206d31fffd9149bf57168d4d62eb2086bee",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "skills/humanize-korean",
+        "skills/humanize",
+        "skills/humanize-scan",
+        "skills/humanize-redo"
+      ],
+      "purpose": "Make Korean prose read naturally and check the result with its scripts. Opt-in: chosen only for Korean prose tasks. oah installs its skills and scripts; its subagents come with the official plugin install.",
+      "official_install": "/plugin marketplace add epoko77-ai/im-not-ai && /plugin install humanize-korean@im-not-ai",
+      "include": [
+        "skills",
+        "scripts",
+        "agents",
+        ".claude-plugin",
+        "LICENSE"
+      ],
+      "default": false,
+      "select_for": [
+        "korean-prose"
+      ],
+      "support": {
+        "skills/humanize-korean": [
+          "scripts"
+        ]
+      }
     }
   ],
   "linked": [

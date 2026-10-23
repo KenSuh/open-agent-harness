@@ -39,4 +39,5 @@ load and privacy checks pass.
 | `skill-creator` | [anthropics/skills](https://github.com/anthropics/skills) `skills/skill-creator` | `dbd4588f9e1033efb41dad4bef2f7947c8993d44` | Apache-2.0 | not stated in the license file | `LICENSE.txt` |
 | `mattpocock-skills` | [mattpocock/skills](https://github.com/mattpocock/skills) `skills` | `49dd158d1076134a641b33efb035946536778336` | MIT | Matt Pocock | `LICENSE` |
 | `codex-plugin-cc` | [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) `plugins/codex` | `db52e28f4d9ded852ab3942cea316258ae4ef346` | Apache-2.0 | OpenAI (per NOTICE) | `LICENSE`, `NOTICE` |
+| `humanize-korean` | [epoko77-ai/im-not-ai](https://github.com/epoko77-ai/im-not-ai) `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31fffd9149bf57168d4d62eb2086bee` | MIT | epoko77-ai | `LICENSE` |
 | `ponytail` | [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) `skills` | `2ed6c52c9d7e5e56942508591085fd45dea277d3` | MIT | DietrichGebert | `LICENSE` |

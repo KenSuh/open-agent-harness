@@ -5,7 +5,8 @@ with its source and license. It ships three kinds of item:
 
 - **Bundled skills** are vendored under `skills/<name>/`, byte for byte as published upstream at a
   pinned commit, with the upstream license file and an `UPSTREAM.json` provenance record. Only skills
-  whose license permits redistribution are bundled.
+  whose license permits redistribution are bundled. An **opt-in** item is never installed by `--all` and
+  is selected only for the tasks it names (for example `humanize-korean` for Korean prose).
 - **Linked items** ship only their official install command and source, because their license does not
   allow redistribution or a file would fail this repository's privacy scan unchanged.
 - **MCP templates** in `mcp/` start a server for Claude Code or Codex. They hold `${NAME}` placeholders
@@ -65,6 +66,7 @@ For the same skill name, `oah` uses the first copy it finds:
 | `mattpocock-skills` | <https://github.com/mattpocock/skills> `skills` | `49dd158d1076` | MIT | vendor | `oah skills install mattpocock-skills` |
 | `codex-plugin-cc` | <https://github.com/openai/codex-plugin-cc> `plugins/codex` | `db52e28f4d9d` | Apache-2.0 | vendor | `oah skills install codex-plugin-cc` |
 | `ponytail` | <https://github.com/DietrichGebert/ponytail> `skills` | `2ed6c52c9d7e` | MIT | vendor | `oah skills install ponytail` |
+| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, opt-in (selected only for: korean-prose) | `oah skills install humanize-korean` |
 
 ## Linked skills and plugins
 
