@@ -105,7 +105,7 @@ def grep(root: pathlib.Path, rev: str, needles: Sequence[str], *, paths: Sequenc
     patterns = sorted({needle for needle in needles if needle and "\n" not in needle})
     if not patterns or (paths is not None and not paths):
         return []
-    argv = [*git_argv(), "-c", "core.quotepath=false", "-C", str(root), "grep", "-n", "-I", "-F", "-z",
+    argv = [*git_argv(), "--literal-pathspecs", "-c", "core.quotepath=false", "-C", str(root), "grep", "-n", "-I", "-F", "-z",
             "--no-color", "-f", "-"]
     if ignore_case:
         argv.append("-i")
