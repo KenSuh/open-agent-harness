@@ -87,6 +87,42 @@ class NormalizeTest(unittest.TestCase):
             normalize_scope([], self.root)
         self.assertEqual(ctx.exception.code, "OAH_SCOPE_EMPTY")
 
+    def test_repo_alias_keeps_only_canonical_scope(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "repo")
+        for path in ("./repo", str(self.root / "repo")):
+            with self.subTest(path=path):
+                scope = normalize_scope([path], self.root)
+                self.assertEqual(scope, ("src",))
+                self.assertEqual(outside(scope, ["docs/other.md"]), ["docs/other.md"])
+                self.assertFalse(overlaps(scope, ("docs",)))
+        self.assertEqual(normalize_scope(["repo"], self.root), ("repo",))
+
+    def test_canonical_repo_path_is_refused_with_hint(self):
+        (self.root / "repo" / "src").mkdir(parents=True)
+        directory_alias(self.root / "repo", self.root / "link")
+        for path in ("./repo", "repo/", str(self.root / "repo"), "link", str(self.root / "link")):
+            with self.subTest(path=path):
+                with self.assertRaises(ScopeError) as caught:
+                    normalize_scope([path], self.root)
+                self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
+                self.assertIn("top-level path named 'repo'", str(caught.exception))
+                self.assertIn("collides with the whole-repository keyword", str(caught.exception))
+                self.assertIn("repo/src", str(caught.exception))
+                self.assertIn("use 'repo' for the whole repository", str(caught.exception))
+        for path, expected in (("repo", ("repo",)), (".", ("repo",)), (str(self.root), ("repo",)),
+                               ("repo/src", ("repo/src",))):
+            with self.subTest(path=path):
+                self.assertEqual(normalize_scope([path], self.root), expected)
+
+    def test_repo_case_variant_is_an_ordinary_path(self):
+        (self.root / "Repo").mkdir()
+        for path in ("Repo", "./Repo", str(self.root / "Repo")):
+            with self.subTest(path=path):
+                scope = normalize_scope([path], self.root)
+                self.assertEqual(scope, ("Repo",))
+                self.assertEqual(outside(scope, ["repo/src/a.py", "docs/other.md"]), ["docs/other.md"])
+
     def test_directory_alias_records_canonical_and_lexical_spellings(self):
         (self.root / "src").mkdir()
         directory_alias(self.root / "src", self.root / "link")
@@ -312,6 +348,9 @@ class OverlapTest(unittest.TestCase):
             (("SRC",), ("src/a.py",), True),
             (("repo",), ("docs",), True),
             (("docs",), ("repo",), True),
+            (("Repo",), ("docs",), False),
+            (("docs",), ("Repo",), False),
+            (("Repo",), ("repo/src",), True),
             (("docs",), ("src",), False),
             (("docs", "tests"), ("src", "tests/unit"), True),
             (("src/a.py", "link/a.py"), ("link",), True),

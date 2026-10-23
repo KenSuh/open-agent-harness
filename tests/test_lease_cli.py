@@ -218,6 +218,34 @@ class LeaseCliTest(unittest.TestCase):
         status = oah(self.repo, "status", "--json")
         self.assertEqual(json.loads(status.stdout)["leases"][0]["scope"], ["src/a.py", "link/a.py"])
 
+    def test_finish_refuses_unrelated_changes_with_repo_alias(self):
+        for absolute in (False, True):
+            with self.subTest(absolute=absolute):
+                repo = make_git_repo(self)
+                (repo / "src").mkdir()
+                directory_alias(repo / "src", repo / "repo")
+                git_commit(repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n"})
+                scope = str(repo / "repo") if absolute else "./repo"
+                started = oah(repo, "start", "--task", "t1", "--agent", "claude", "--scope", scope, "--json")
+                self.assertEqual(started.returncode, 0, started.stderr)
+                (repo / "docs" / "other.md").write_text("unrelated\n", encoding="utf-8")
+                refused = oah(repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "done")
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+                self.assertIn("docs/other.md", refused.stderr)
+                self.assertEqual(json.loads(started.stdout)["scope"], ["src"])
+
+    def test_start_refuses_canonical_repo_path_with_hint(self):
+        (self.repo / "repo" / "src").mkdir(parents=True)
+        directory_alias(self.repo / "repo", self.repo / "link")
+        for scope in ("./repo", "repo/", str(self.repo / "repo"), "link"):
+            with self.subTest(scope=scope):
+                refused = self.start("t1", "claude", scope)
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertTrue(refused.stderr.startswith("OAH_SCOPE_INVALID"), refused.stderr)
+                self.assertIn("repo/src", refused.stderr)
+                self.assertIn("use 'repo' for the whole repository", refused.stderr)
+
     def test_renew_records_alias_created_after_start(self):
         self.assertEqual(self.start("t1", "claude", "src/a.py").returncode, 0)
         directory_alias(self.repo / "src", self.repo / "link")

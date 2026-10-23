@@ -163,6 +163,17 @@ class StoreTest(unittest.TestCase):
         self.assertIn("docs/b.md", str(error))
         self.assertEqual(len(self.store.snapshot()), 1)
 
+    def test_finish_refuses_unrelated_changes_with_repo_alias(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "repo")
+        started = self.start(scope=normalize_scope(["./repo"], self.root))
+        error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                 lease_id=started.id, summary="done", changed=["docs/other.md"],
+                                 allow_out_of_scope=False)
+        self.assertIn("docs/other.md", str(error))
+        self.assertEqual(self.store.snapshot()[0][0].scope, ["src"])
+        self.assertEqual([event["event"] for event in self.events()], ["lease_started"])
+
     def test_finish_requires_alias_to_be_declared_by_scope_renewal(self):
         (self.root / "src").mkdir()
         directory_alias(self.root / "src", self.root / "link")

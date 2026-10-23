@@ -1,16 +1,21 @@
 # 리스 범위 규칙 — 경로를 저장소 기준 POSIX 형태로 정규화하고, 대소문자와 유니코드 정규화를 접어 겹침과 범위 밖 파일을 판정한다.
 """Lease scopes.
 
-A scope is `repo` (the whole repository) or repository-relative paths in POSIX form. Comparison folds
-case and Unicode normalization (macOS can report decomposed Hangul), so it errs towards reporting a
-conflict rather than missing one. `src` covers `src/a.py`; it does not cover `srcx`.
+A scope is the exact raw input `repo` (the whole repository) or repository-relative paths in POSIX form.
+The root itself (`.` or its absolute path) also means the whole repository. A canonical top-level path
+named `repo` is refused: scope paths below it, such as `repo/src`, or use `repo` for the whole repository.
+Case variants such as `Repo` stay ordinary paths. Comparison folds case and Unicode normalization
+(macOS can report decomposed Hangul), so it errs towards reporting a conflict rather than missing one.
+`src` covers `src/a.py`; it does not cover `srcx`.
 
 User scopes resolve as the host OS opens them: Windows collapses `link/..` lexically before following
 an alias; POSIX follows the link first. Acquisition records the canonical path followed by its lexical
-repository-relative spelling only if that spelling currently resolves to the same path. Both stay fixed
-until explicitly renewed and participate in overlap checks. Git's changed entries match these recorded
-spellings literally, folding only case and NFC; undeclared aliases fail closed, even if their canonical
-twins also changed. Git paths are never resolved, and their backslashes and colons stay literal.
+repository-relative spelling only if that spelling currently resolves to the same path. An alias spelling
+equal to `repo` is omitted, preserving the canonical path. Both stay fixed until explicitly renewed and
+participate in overlap checks. Only the exact stored entry `repo` is the keyword for overlaps and outside.
+Git's changed entries match these recorded spellings literally, folding only case and NFC; undeclared
+aliases fail closed, even if their canonical twins also changed. Git paths are never resolved, and their
+backslashes and colons stay literal.
 """
 from __future__ import annotations
 
@@ -51,7 +56,7 @@ def _normalize_one(raw: str, root: pathlib.Path) -> str:
     text = raw.replace("\\", "/")
     if not text.strip():
         raise ScopeError("OAH_SCOPE_INVALID", "an empty path is not a scope")
-    if text == REPO:
+    if raw == REPO:
         return REPO
     windows = pathlib.PureWindowsPath(text)
     if windows.drive and not windows.root:
@@ -66,6 +71,10 @@ def _normalize_one(raw: str, root: pathlib.Path) -> str:
         raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r}: ':' is not allowed in a scope path")
     if text == ".":
         return REPO
+    if text == REPO:
+        raise ScopeError("OAH_SCOPE_INVALID",
+                         f"{raw!r}: top-level path named 'repo' collides with the whole-repository keyword; "
+                         "scope paths below it, such as 'repo/src', or use 'repo' for the whole repository")
     return unicodedata.normalize("NFC", text)
 
 
@@ -92,7 +101,7 @@ def _alias_spelling(raw: str, root: pathlib.Path, canonical: str) -> str | None:
 
 
 def normalize_scope(raw: Sequence[str], root: pathlib.Path) -> tuple[str, ...]:
-    """Record canonical paths and verified lexical aliases; `repo` means the whole repository."""
+    """Record paths and verified aliases; only raw `repo` or the root grants repository scope."""
     if not raw:
         raise ScopeError("OAH_SCOPE_EMPTY",
                          "a lease needs at least one --scope: a path, or 'repo' for the whole repository")
@@ -104,7 +113,7 @@ def normalize_scope(raw: Sequence[str], root: pathlib.Path) -> tuple[str, ...]:
             return (REPO,)
         for entry in (normalized, _alias_spelling(value, root, normalized)):
             if entry == REPO:
-                return (REPO,)
+                continue
             if entry is not None and _key(entry) not in seen:
                 seen.add(_key(entry))
                 items.append(entry)
