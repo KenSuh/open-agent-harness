@@ -18,6 +18,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", metavar="<command>")
     doctor = commands.add_parser("doctor", help="check that the tools oah needs are installed")
     doctor.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    from oah import lease_cli
+
+    lease_cli.register(commands)
     return parser
 
 
@@ -37,5 +40,9 @@ def main(argv: list[str] | None = None) -> int:
         from oah.doctor import doctor_main
 
         return doctor_main(json_output=args.json)
+    from oah import lease_cli
+
+    if args.command in lease_cli.COMMANDS:
+        return lease_cli.run(args)
     parser.error(f"unknown command: {args.command}")
     return 2
