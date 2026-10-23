@@ -174,15 +174,10 @@
       "license": "MIT",
       "steps": [
         {
-          "run": [
-            "npx",
-            "skills",
-            "add",
-            "Leonxlnx/unlazy"
-          ]
+          "manual": "oah init --with-unlazy installs unlazy at the commit and scripts digest that lane P5 contract-tests (available once P5 lands); upstream: https://github.com/Leonxlnx/unlazy"
         }
       ],
-      "reason": "A test file in its repository holds an absolute home folder path, which this kit's privacy scan refuses. Vendored files are never edited, so it is linked.",
+      "reason": "unlazy is the gates' operational dependency: it is installed only at P5's contract-tested pin and never updated automatically. A test file in its repository also holds an absolute home folder path, which this kit's privacy scan refuses, and vendored files are never edited.",
       "purpose": "Completion discipline: acceptance gates, the depth tree and evidence before reporting."
     },
     {
@@ -327,6 +322,152 @@
       ],
       "reason": "Its source-available license (Sustainable Use 1.0) is not an open-source license, so the kit does not redistribute it.",
       "purpose": "Codex plugin with extra agent roles and workflows."
+    }
+  ],
+  "clis": [
+    {
+      "name": "git",
+      "command": "git",
+      "source": "https://github.com/git/git",
+      "version": "2.50.1 (Apple Git-155)",
+      "license": "GPL-2.0-only",
+      "install_macos": "xcode-select --install (or: brew install git)",
+      "purpose": "Version control."
+    },
+    {
+      "name": "gh",
+      "command": "gh",
+      "source": "https://github.com/cli/cli",
+      "version": "2.91.0",
+      "license": "MIT",
+      "install_macos": "brew install gh",
+      "purpose": "GitHub CLI for PRs, issues and API calls."
+    },
+    {
+      "name": "node",
+      "command": "node",
+      "source": "https://github.com/nodejs/node",
+      "version": "v24.6.0",
+      "license": "MIT",
+      "install_macos": "brew install node",
+      "purpose": "JavaScript runtime for MCP servers and hooks."
+    },
+    {
+      "name": "npm",
+      "command": "npm",
+      "source": "https://github.com/npm/cli",
+      "version": "11.5.1",
+      "license": "Artistic-2.0",
+      "install_macos": "ships with node",
+      "purpose": "Node package manager."
+    },
+    {
+      "name": "npx",
+      "command": "npx",
+      "source": "https://github.com/npm/cli",
+      "version": "11.5.1",
+      "license": "Artistic-2.0",
+      "install_macos": "ships with node",
+      "purpose": "Run npm packages without installing (MCP launchers)."
+    },
+    {
+      "name": "pnpm",
+      "command": "pnpm",
+      "source": "https://github.com/pnpm/pnpm",
+      "version": "10.32.1",
+      "license": "MIT",
+      "install_macos": "npm install -g pnpm (or: corepack enable pnpm)",
+      "purpose": "Fast Node package manager."
+    },
+    {
+      "name": "uv",
+      "command": "uv",
+      "source": "https://github.com/astral-sh/uv",
+      "version": "0.12.17",
+      "license": "MIT OR Apache-2.0",
+      "install_macos": "brew install uv",
+      "purpose": "Python package and tool manager."
+    },
+    {
+      "name": "python3",
+      "command": "python3",
+      "source": "https://github.com/python/cpython",
+      "version": "3.14.4",
+      "license": "PSF-2.0",
+      "install_macos": "brew install python@3.14",
+      "purpose": "Python runtime."
+    },
+    {
+      "name": "claude",
+      "command": "claude",
+      "source": "https://github.com/anthropics/claude-code",
+      "version": "2.1.309",
+      "license": "LicenseRef-Anthropic-Commercial",
+      "install_macos": "npm install -g @anthropic-ai/claude-code",
+      "purpose": "Claude Code CLI."
+    },
+    {
+      "name": "codex",
+      "command": "codex",
+      "source": "https://github.com/openai/codex",
+      "version": "codex-cli 0.163.0",
+      "license": "Apache-2.0",
+      "install_macos": "npm install -g @openai/codex (or: brew install --cask codex)",
+      "purpose": "OpenAI Codex CLI."
+    },
+    {
+      "name": "gitleaks",
+      "command": "gitleaks",
+      "source": "https://github.com/gitleaks/gitleaks",
+      "version": "8.30.1",
+      "license": "MIT",
+      "install_macos": "brew install gitleaks",
+      "purpose": "Secret scanner for git history and staged changes."
+    },
+    {
+      "name": "graphify",
+      "command": "graphify",
+      "source": "https://github.com/Graphify-Labs/graphify",
+      "version": "0.9.93 (PyPI graphifyy)",
+      "license": "Apache-2.0",
+      "install_macos": "pipx install graphifyy (or: uv tool install graphifyy)",
+      "purpose": "Knowledge-graph CLI behind the graphify skill."
+    },
+    {
+      "name": "aside",
+      "command": "aside",
+      "source": "https://aside.com/",
+      "version": "1.26.1010.1739",
+      "license": "LicenseRef-Proprietary",
+      "install_macos": "Download from https://aside.com/download",
+      "purpose": "Aside browser-agent CLI."
+    },
+    {
+      "name": "orca",
+      "command": "orca",
+      "source": "https://github.com/stablyai/orca",
+      "version": "1.4.237",
+      "license": "MIT",
+      "install_macos": "Download from https://github.com/stablyai/orca/releases (note: the Homebrew cask named 'orca' is a different project)",
+      "purpose": "Orca CLI for worktrees, terminals and agent orchestration."
+    },
+    {
+      "name": "jq",
+      "command": "jq",
+      "source": "https://github.com/jqlang/jq",
+      "version": "1.8.1",
+      "license": "MIT",
+      "install_macos": "brew install jq",
+      "purpose": "JSON processor."
+    },
+    {
+      "name": "rg",
+      "command": "rg",
+      "source": "https://github.com/BurntSushi/ripgrep",
+      "version": "15.2.0",
+      "license": "Unlicense OR MIT",
+      "install_macos": "brew install ripgrep",
+      "purpose": "ripgrep fast search."
     }
   ]
 }
