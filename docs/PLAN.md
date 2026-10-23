@@ -1,6 +1,6 @@
 # open-agent-harness — Phase 0 plan
 
-Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendments 1–3 (2026-10-23) in section 15 · intent revision 2 in section 1.
+Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendments 1–3 (2026-10-23) in section 15 · intent revision 3 in section 1.
 
 This plan turns a private, single-owner multi-agent harness (called "the source" below) into a
 general-purpose kit that one person can install on macOS or Windows and use on their own repository.
@@ -14,7 +14,7 @@ Section 13 separates what the owner decided from what the builder decided.
 <!-- OAH_INTENT:BEGIN -->
 ## Intent
 Intent-ID: open-agent-harness
-Revision: 2
+Revision: 3
 Status: accepted
 ### Problem
 A beginner who starts programming with AI gets two strong tools, Claude Code and Codex CLI. They get none of the working environment that makes the two reliable together:
@@ -42,7 +42,7 @@ Nothing paid or irreversible happens without the user's explicit confirmation.
   - The defaults match the owner's workflow: Claude initial implementation, then Codex review, correction and re-review.
   - While work continues, the impact map and the wiki stay fresh automatically. They refresh on commit, merge and task steps, and their log, index and hygiene are maintained.
 - AC4: Following the guided first task in `examples/hello-oah`, the beginner sees the whole loop finish: packet, preflight, lease, Claude implementation, gates, Codex review and fix, re-review, finish. Every step's result is explained in plain Korean or English.
-- AC5: When an engine ships a newer model, or a bundled or linked skill updates upstream, the next task uses it without manual steps. `oah` shows what changed, when and why. A model or skill the user pinned is never changed silently.
+- AC5: When a newer model or a validated skill update is available, the next task after oah's update check uses it without manual steps, and oah shows what changed, when and why. The model check runs before every launch; the skill check runs at least daily by default. A model or skill the user pinned is never changed silently.
 - AC6: Every decision prompt says what will happen and what it costs. Nothing paid or irreversible happens without the user's explicit confirmation: purchases, account changes, pushes, merges and global file edits.
 - AC7: The repository holds no private data from the owner's harness and no credentials of any kind (API keys, tokens, passwords), enforced by the scans of A17. Every bundled third-party item shows its source, version and license.
 ### Constraints
@@ -59,7 +59,8 @@ Nothing paid or irreversible happens without the user's explicit confirmation.
 **Revisions.** Revision 1 is the section 1 text the owner approved with this plan (PR #1). Revision 2
 (2026-10-23) follows the owner's product vision, quoted verbatim: «우리 하네스를 그대로 초보 사용자가 본인 처음 AI를
 통해 프로그래밍 할 때 자동으로 본인 하네스 환경이 우리 환경 처럼 구축되고 진행되도록 하는 깃 오픈 소스를 만들고 싶은거야».
-AC3 and AC7 carry the two additions recommended with the acceptance.
+AC3 and AC7 carry the two additions recommended with the acceptance. Revision 3 (2026-10-23) qualifies
+AC5 by the update check, as the owner decided after review.
 
 **GitHub is optional.** The worked example runs fully local in a fresh `git init` repository. A push and a
 PR are the optional last step: `oah` prints the `gh pr create` command when `gh` and a remote exist,
@@ -112,7 +113,7 @@ or Codex, ideally both. It is not for teams or servers.
 - **Runtime.** Python ≥ 3.11, standard library only (`tomllib` needs 3.11). There are no third-party
   runtime dependencies. Node.js is needed only for unlazy's checker.
 - **Beginner first.** There is one install command per OS. Every error says what to run next. Every
-  optional feature is opt-in. Project skill updates are part of the guided defaults and may be disabled (A15).
+  optional feature is opt-in. Kit-cache skill updates are part of the guided defaults and may be disabled (A15).
 - **Privacy.** The repository holds no personal paths, names, emails, product names, keys or vault material
   (section 10).
 - **Licensing.** The kit is MIT, with the copyright held by "open-agent-harness contributors".
@@ -540,8 +541,11 @@ output always ends with a "not proven by this preflight" list.
   prints a success token, so beginners on Windows can write gates without POSIX tools.
 - `oah gates status|check|lint` delegates to unlazy's `gate-check.mjs` / `gate-lint.mjs` when unlazy is
   installed. It is found through `OAH_UNLAZY_DIR`, then the project's skill dirs, then the user's skill
-  dirs. **Running** a CHECK always goes through unlazy's own approval flow; `oah` never executes CHECK
-  lines itself.
+  dirs. Before any gate command runs, verify the discovered copy's commit and scripts digest against
+  P5's contract-tested pin. A mismatch refuses without executing it or falling through to another copy;
+  the message identifies the mismatch, gives `oah init --with-unlazy --force` to install the pinned
+  project copy, and tells the user to clear an incompatible `OAH_UNLAZY_DIR` override if present.
+  **Running** a CHECK always goes through unlazy's own approval flow; `oah` never executes CHECK lines itself.
 - **unlazy is required for gates, which makes Node required.** `oah finish` refuses while the task's
   declared ledger is not met according to unlazy's status. An `ABANDON:` line is reported as a required
   handoff, never as success.
@@ -570,14 +574,16 @@ output always ends with a "not proven by this preflight" list.
     No raw titles, commands, expectations, paths, task labels or other free text are exported; the
     writer rejects fields outside this allowlist. Full text stays in the ignored ledger or runtime state.
   - `[gates] commit_ledgers = true` commits the full ledger instead.
-- **Pinned contract.** P5 pins an unlazy commit and writes down its CLI contract: arguments, output and
-  exit codes. unlazy is an operational dependency excluded from A15 updates. A new commit is adopted
+- **Pinned contract.** P5 pins an unlazy commit and scripts digest and writes down its CLI contract:
+  arguments, output and exit codes. `oah init --with-unlazy` installs that contract-tested commit and
+  verifies both identities; it never installs an unversioned upstream copy. unlazy is an operational
+  dependency excluded from A15 updates. A new commit is adopted
   only by an explicit change passing the adapter contract and gate-invalidation tests against that
   candidate commit; stub tests alone do not authorize a new pin.
 - **Stop hook (opt-in).** `oah hooks install` adds a Claude Code Stop hook that runs `oah hook stop`.
   When an active lease governs the session's worktree, the hook blocks while that task's ledger is
   unmet. A progress guard releases after N blocks with no progress, so it cannot wedge. When no lease
-  governs, the hook hands over to unlazy's own stop hook if one is installed. The hook writes to
+  governs, the hook hands over to unlazy's own stop hook only after the same pin verification. The hook writes to
   `.claude/settings.local.json` (untracked) by default. Because the command is just `oah hook stop`,
   a shared install contains no absolute paths.
 
@@ -725,6 +731,10 @@ After the review:
       `[wiki] new_broken_links = "block"` is set.
     - **`oah init`** git-ignores editor UI state such as graph zoom, for example
       `.obsidian/workspace*.json`.
+- **Skill maintenance (A15).** Automatic checks refresh only the kit cache in the state folder, outside
+  the working tree. Tracked project skill folders are pins; changing them requires an explicit
+  `oah skills update --project` in its own leased task with its own scope, without the wiki maintenance
+  exemption. Selection prefers the project copy, then the kit cache, then user and plugin copies.
 - **Graph (optional).** `oah graph update|query|path|explain|report` is a thin pass-through to
   graphify, run when it is installed (`uv tool install graphifyy`). `oah init --with-graph` writes
   `.graphifyignore` (wiki log, build outputs, `.oah/tasks/*/GATES.md` evidence).
@@ -777,12 +787,14 @@ After the review:
     the same text with no duplication.
   - The block template ships in English and Korean (`--lang`). `.oah/rules.local.md` is appended for
     project-specific rules.
-  - Rules and tier sync never write global files. Global skill updates require the separate explicit
-    command and confirmation in A15.
+  - Rules and tier sync never write global files. Automatic skill updates write only the state-folder
+    kit cache; tracked project skill pins require `oah skills update --project` in a separate leased
+    task with its own scope. Global skill updates require `oah skills update --global` with confirmation (A15).
 - **The block itself is under 6 KB.** It covers the stage order, leases, packets and intent, preflight,
   gates and the verify-what-changed rule, the review loop and its honest labels, "workers never
   push", keeping the wiki current, and "dispatched workers (`OAH_WORKER=1`) skip any session-entry
-  procedure and do only the task in their prompt".
+  procedure and do only the task in their prompt". It also states A15's cache-only automatic updates,
+  project skill pins and separate leased project updates, and 5.8's unlazy pin verification.
 - `oah init --with-agents` writes `.claude/agents/oah-{low,medium,high,max}.md` (frontmatter: `name`,
   `description`, `model`, `effort` from the config). The body says: stay in scope, cite evidence, no
   destructive git, and return honestly when blocked.
@@ -842,7 +854,7 @@ exits non-zero when a required tool is missing.
 | Node.js LTS (24 today; 26 becomes LTS on 2026-10-28) | unlazy's gate checker (Node 16+) | `brew install node@24` or the nodejs.org installer | `winget install OpenJS.NodeJS.LTS` | https://nodejs.org/en/download |
 | Claude Code | initial implementation stage | `curl -fsSL https://claude.ai/install.sh \| bash` | PowerShell: `irm https://claude.ai/install.ps1 \| iex` (WinGet: `Anthropic.ClaudeCode`) | https://code.claude.com/docs/en/setup |
 | Codex CLI | review and correction stages | `brew install --cask codex` or `npm install -g @openai/codex` | `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 \| iex"` | https://github.com/openai/codex · https://developers.openai.com/codex/windows/windows-sandbox |
-| unlazy (required for gates) | running gate checks, Stop hook | `npx skills add Leonxlnx/unlazy` | same | https://github.com/Leonxlnx/unlazy |
+| unlazy (required for gates) | running gate checks, Stop hook | `oah init --with-unlazy` (P5 pin, verified commit and scripts digest) | same | https://github.com/Leonxlnx/unlazy |
 | graphify (optional) | knowledge graph | `uv tool install graphifyy` | same | https://docs.graphify.com/installation |
 | GitHub CLI (optional) | PRs from the terminal | `brew install gh` | `winget install --id GitHub.cli --source winget` | https://cli.github.com |
 | gitleaks (optional) | secret scan before push | `brew install gitleaks` | `scoop install gitleaks` | https://github.com/gitleaks/gitleaks |
@@ -944,8 +956,10 @@ irreversible happens without the user's explicit confirmation.
      - the rules block (5.11);
      - the Obsidian wiki (A12);
      - the first impact map (A11);
-     - gate templates (5.8);
-     - automatically selected and updated skills (A9, A15);
+     - gate templates and, with consent, unlazy at P5's contract-tested commit, verified by commit and
+       scripts digest before any gate command (5.8);
+     - automatically selected skills and kit-cache updates, checked daily by default; tracked project
+       skills stay pinned until an explicit `oah skills update --project` in its own scoped, leased task (A9, A15);
      - `.gitignore` entries for editor state and local secret files (A8d, A17);
      - each opt-in hook the user accepts (5.12).
    - A second run refreshes a stale impact map and otherwise changes nothing (section 7).
@@ -982,8 +996,13 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - **Options.**
   - `--with-agents`: the tier agent files.
   - `--with-graph`: `.graphifyignore`, plus a hint to run `oah graph update`.
-  - `--with-unlazy`: runs `npx skills add Leonxlnx/unlazy` after a prompt.
+  - `--with-unlazy`: installs the P5 contract-tested unlazy commit as a project copy after a prompt,
+    verifying the commit and scripts digest (5.8); `--force` explicitly replaces an incompatible copy.
+    No unversioned install command is used.
   - `--with-hooks`: the Stop hook, after showing the diff.
+- **Skill updates.** Guided setup enables cache-only automatic updates with `update_interval_days = 1`
+  by default (A15). Tracked project skills remain pins; only `oah skills update --project`, as its own
+  leased task with its own scope, changes them. Global updates require `--global` with confirmation.
 - **Idempotent.** A second run refreshes a stale or unavailable map using the same failure handling;
   with a fresh map and unchanged inputs it changes nothing and says so.
 
@@ -1054,7 +1073,7 @@ The owner approved CI from P1 on 2026-10-23.
 | Piece | License | How the kit uses it |
 |---|---|---|
 | this kit | **MIT**, "Copyright (c) 2026 open-agent-harness contributors" | — |
-| unlazy (Leonxlnx/unlazy) | MIT | dependency, installed by the user; the docs link its format; the skill may be vendored under A13 |
+| unlazy (Leonxlnx/unlazy) | MIT | operational dependency installed by `oah init` at P5's contract-tested pin, verified by commit and scripts digest (5.8); vendored under A13 |
 | graphify (Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0 (earlier contributions under MIT, per NOTICE) | optional dependency, run as a CLI |
 | Claude Code | Anthropic's terms | external tool the user installs |
 | Codex CLI (openai/codex) | Apache-2.0 | external tool the user installs |
@@ -1357,7 +1376,7 @@ phase is planned, and is dropped only with a recorded reason.
 ### Amendment 3 (2026-10-23)
 
 These items come from the owner's notes of 2026-10-23. Each names the sections it changes and the phases
-that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.5 (onboarding), section 11
+that carry it. Section 1 (intent revision 3), section 4 (the re-judged rows), 6.5 (onboarding), section 11
 (lanes and the fix-round rule) and section 13 (decisions) were updated with them.
 
 | # | Rule | Sections | Phases |
@@ -1366,9 +1385,9 @@ that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.
 | A10 | **Difficulty-based model and effort, applied automatically.** `oah packet new` and `oah call` score the difficulty axes (kind, intensity, reasoning, risk) by rules, and apply `oah recommend` without a manual flag. `--tier` overrides and is recorded. The re-ranker plugin may add an advisory AI judgement, recorded next to the rule result, which never lowers the tier. Run records keep the axes, the tier source, and the requested and effective model and effort. | 4 (rows 6, 31), 5.5, 5.6 | P3, P4 |
 | A11 | **Impact map, generated and kept fresh.** `oah init` builds a persisted map per worktree in the state folder; failure warns and records `impact=unavailable` without failing the rest of init (7). Opt-in `post-commit` and `post-merge` hooks refresh it incrementally, and `preflight`, `packet new`, `review` and `finish` refresh it first. Freshness binds the worktree identity and effective input manifest: HEAD SHA, tracked index-state digest, digests of dirty and untracked inputs read by the map, ledger bytes including ignored ledgers, config bytes and tool version. Any change makes the map stale; a result digest is also recorded. A stale map is refreshed, or refused with `OAH_IMPACT_STALE`, never used silently. A default DB plugin extracts tables, views, routines, triggers, indexes and GRANTs from SQL migrations and links them to code references, so a project with SQL gets a DB impact graph without custom code. The re-ranker stays optional. The edit-time impact hint becomes an opt-in hook. | 4 (rows 16–18), 5.10, 5.12, 7 | P4, P5, P6, P7 |
 | A12 | **Obsidian wiki, created and maintained automatically.** `oah init` creates an Obsidian-compatible `docs/wiki/`: an index, a newest-first log with its insertion marker, note templates, and a minimal `.obsidian/` configuration with workspace files git-ignored. The lead or guided defaults run `oah wiki maintain --task T` for tracked log, index and rollover work before the final commit, gates and review, including after corrections. The outputs in 5.4 are scope-exempt and recorded in events. Maintenance uses the wiki lock, bounded retry, task-idempotent insertion and explicit journal recovery (5.10). `finish` writes nothing tracked: it verifies task maintenance, refusing unless the recorded `--allow-missing-wiki-maintenance` override is given. Lint and hygiene at `finish` and pre-commit leave tracked files unchanged. graphify stays optional (`oah graph`), and nothing rebuilds the graph automatically. | 4 (row 21), 5.1, 5.4, 5.10, 5.12 | P7 |
-| A13 | **Toolkit with provenance.** The kit bundles the skills, MCP server templates and CLI checks the owner uses, each with its source. It reverses row 30's "nothing vendored" only where the license allows. A skill is vendored only when its upstream license permits redistribution: unchanged, with its LICENSE, a pinned upstream commit and a `THIRD_PARTY_NOTICES.md` entry. A public item without a redistributable license is linked: install command and URL only. Owner-specific or private skills, account-bound connectors and product-specific tools are excluded. The kit ships `skills/`, `oah skills list/install/update`, `mcp/` templates with `${ENV_VAR}` placeholders only, `oah doctor` checks for the recommended CLIs with their official install commands, and a Toolkit page in English and Korean. The inventory is below. | 2, 3, 4 (row 30), 5.2, 9 | P7, P8, P9 |
-| A14 | **Models follow updates.** `oah` ships an editable strongest-first `quality_order` per engine in config defaults. Claude defaults to `["opus", "sonnet", "haiku"]`, using CLI aliases that Claude Code resolves to its newest models; low uses the last available entry, medium the second (or first if only one), high and max the first. Codex starts from its effective configured model for all tiers, varying effort by A1. With no user quality list, a resolvable CLI-reported default replaces that automatic mapping; otherwise retain the effective configured model. A user quality list uses the same tier mapping as Claude. A newer Codex model is adopted only if the CLI model list marks it as default or the user quality list names it. CLI reports supply availability and supported reasoning levels, not an inferred quality ranking. Precedence is explicit tier model pin, automatic catalog mapping, then 5.5's effective-configuration resolver. A fresh install with no resolvable model still refuses with `OAH_MODEL_UNRESOLVED`. The catalog is read before every launch, refreshed on CLI version change, TTL expiry or `oah models --refresh`, and A1 re-resolves effort for the selected model. Every resolved model or effort change is logged with old, new, when and why. A failed refresh reports the failure and keeps the last good mapping without downgrading; explicit pins always win. | 4 (row 7), 5.5 | P3 |
-| A15 | **Skills update automatically and are used automatically.** Updatable vendored and linked skills record an allowlisted upstream and installed commit; explicit user pins never advance automatically. unlazy is an operational dependency: A15 never updates it, and only a change passing P5's contract and gate-invalidation tests against the candidate commit may adopt it (5.8). Automatic updates write only project-owned `.claude/skills/` or `.agents/skills/` inside the repository, or a kit cache in its state folder. For the same skill ID, selection prefers the project copy, then the kit cache, then user and plugin copies; those discovered copies are read-only. Guided setup enables automatic project updates by default and the user may disable them. Scheduled means a due check at most once per `update_interval_days`, run by a mutating `oah` command when no lease is active in that repository. It holds the state lock from the idle check through update publication, so lease acquisition cannot race it; active leases defer the check. Optional launchd (macOS) or Task Scheduler (Windows) entries are installed and removed only with consent and invoke the same locked check. Global skill folders are updated only by an explicit `oah skills update --global` command with confirmation, never on a schedule. Before advancing an installed commit, check the license, record a diff summary, run the skill-load check and privacy scan, then publish atomically. Failed or suspicious updates roll back to the last good commit and are reported, never silent. A9 uses the selected installed version, so the next task uses a validated update without manual steps. | 4 (row 30), 5.11 | P4, P7 |
+| A13 | **Toolkit with provenance.** The kit bundles the skills, MCP server templates and CLI checks the owner uses, each with its source. It reverses row 30's "nothing vendored" only where the license allows. A skill is vendored only when its upstream license permits redistribution: unchanged, with its LICENSE, a pinned upstream commit and a `THIRD_PARTY_NOTICES.md` entry. A public item without a redistributable license is linked: install command and URL only. Owner-specific or private skills, account-bound connectors and product-specific tools are excluded. The kit ships `skills/`, `oah skills list/install/update`, `mcp/` templates with `${ENV_VAR}` placeholders only, `oah doctor` checks for the recommended CLIs with their official install commands, and a Toolkit page in English and Korean. unlazy installs only at P5's contract-tested pin and is verified by commit and scripts digest before gate commands (5.8). Automatic updates refresh the state-folder kit cache only; tracked project skill copies remain pins (A15). The inventory is below. | 2, 3, 4 (row 30), 5.2, 5.8, 9 | P7, P8, P9 |
+| A14 | **Models follow updates.** `oah` ships an editable strongest-first `quality_order` per engine in config defaults. Claude defaults to `["opus", "sonnet", "haiku"]`, using CLI aliases that Claude Code resolves to its newest models; low uses the last available entry, medium the second (or first if only one), high and max the first. Codex starts from its effective configured model for all tiers, varying effort by A1. With no user quality list, a resolvable CLI-reported default replaces that automatic mapping; otherwise retain the effective configured model. A user quality list uses the same tier mapping as Claude. A newer Codex model is adopted only if the CLI model list marks it as default or the user quality list names it. CLI reports supply availability and supported reasoning levels, not an inferred quality ranking. Precedence is explicit tier model pin, automatic catalog mapping, then 5.5's effective-configuration resolver. A fresh install with no resolvable model still refuses with `OAH_MODEL_UNRESOLVED`. The model update check runs before every launch: read the catalog and check its freshness, refreshing on CLI version change, TTL expiry or `oah models --refresh`. The next launch after a successful check uses the eligible mapping, and A1 re-resolves effort for the selected model. Every resolved model or effort change is logged with old, new, when and why. A failed refresh reports the failure and keeps the last good mapping without downgrading; explicit pins always win. | 4 (row 7), 5.5 | P3 |
+| A15 | **Skills update automatically and are used automatically.** Updatable vendored and linked skills record an allowlisted upstream and installed commit; explicit user pins never advance automatically. unlazy is an operational dependency: A15 never updates it, and only a change passing P5's contract and gate-invalidation tests against the candidate commit may adopt it (5.8). Automatic updates refresh only a kit cache in `oah`'s state folder, outside the working tree, serving skills the project has not vendored itself. Tracked project copies in `.claude/skills/` or `.agents/skills/` are pins: they change only through explicit `oah skills update --project`, run as its own leased task with its own scope. For the same skill ID, selection prefers the project copy, then the kit cache, then user and plugin copies; selection reads all copies without changing them. Guided setup enables automatic kit-cache updates by default and the user may disable them. `update_interval_days` defaults to 1 day: mutating `oah` commands run a due check before the next task when no lease is active in that repository, at most once per interval, so checks run at least daily by default while tasks continue. It holds the state lock from the idle check through update publication, so lease acquisition cannot race it; active leases defer the check. Optional launchd (macOS) or Task Scheduler (Windows) entries are installed and removed only with consent and invoke the same locked check. Global skill folders are updated only by an explicit `oah skills update --global` command with confirmation, never on a schedule. Before advancing an installed commit, check the license, record a diff summary with old/new commits, when and why, run the skill-load check and privacy scan, then publish atomically. Failed or suspicious updates roll back to the last good commit and are reported, never silent. A9 uses the selected installed version, so the next task after the update check uses an eligible validated update without manual steps; project and explicit user pins stay unchanged. | 4 (row 30), 5.10, 5.11, 6.5, 7 | P4, P7 |
 | A16 | **Upstream sync with the owner's harness.** `docs/UPSTREAM_SYNC.md` records the last reviewed commit of the source harness, and a table of every reviewed change. Each row gives the commit, a summary and a verdict (port as a generic feature, skip as private or owner-specific, or defer). For ports it names the plan item and PR. At the start of each phase, and at least daily while work continues, the builder reads the new commits read-only, writes every port fresh, and turns port verdicts into amendments and implementation under the standing fix-round rule. The source harness is never a runtime dependency; `oah` users get updates as normal releases. | 1, 13 | every phase; P9 docs |
 | A17 | **No credentials anywhere** (hard rule). No API key, token, password, cookie, OAuth secret or account identifier enters the repository, its history, releases, issues or CI logs.<br>• Keys are read only at runtime, from environment variables or the OS keychain, through one documented lookup (`oah.secrets`). A missing key leaves the feature off and reports `unused(no key)`, and `oah` never asks the user to paste a key into a project file.<br>• Templates use `${ENV_VAR}` placeholders only, and docs show placeholder names only.<br>• Tests generate fake keys at runtime, and committed fixtures contain none.<br>• gitleaks and `tools/privacy_scan.py` run in CI on every pull request and push, and over the full history before a release tag. Any finding fails the build, and no allowlist entry covers a real-looking credential.<br>• `oah init` git-ignores local secret files in user projects, and the docs say where users keep their keys.<br>• Anything copied from the owner's machine keeps names and sources only. | 2, 3, 8, 10 | every phase; CI now |
 | OB | **Beginner onboarding** (6.5). A one-command installer per OS hands over to the guided `oah init`. It checks and installs tools from official sources with consent, walks through the sign-ins without handling secrets, and sets up the environment with the owner's defaults. Then a first guided task (`examples/hello-oah`) runs, with plain-language messages and docs in Korean and English. | 6.5, 7 | P7, P8, P9 |
@@ -1381,19 +1400,19 @@ that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.
 - [ ] The skill selector reads the installed Claude and Codex skill directories (user, project and plugin skills) and kit cache read-only, using A15's precedence. It selects by kind, stage, risk and Scope file kinds, with a reason per skill, and warns on an empty Scope (A4). Briefs reference the selected skills by name and path, or attach their text when `[skills] mode = "attach"`. (A9)
 - [ ] The re-ranker plugin interface only re-orders, and records `rerank=used` or `rerank=unused(<reason>)`. The TypeSafe Jev provider requires explicit enablement AND a key through `oah.secrets`. Tests cover an existing key without consent (`unused(not-enabled)`), enabled without a key (`unused(no key)`), a disabled brief and a consent-enabled call using a fake provider and no network. (A9)
 - [ ] Skill-selection telemetry is a local JSON-lines file in the state folder and is never transmitted. Only a consent-enabled provider sends the data disclosed by A9. Selection text describes selection by kind, stage, risk and availability, and never promises zero optional skills. (A9, C6)
-- [ ] `oah models [--refresh]` uses the editable per-engine quality lists and exact tier mapping in A14. Tests cover Claude aliases, Codex effective defaults, CLI-reported default adoption and user-listed models, explicit tier pins winning over catalog mappings, effective-config fallback and `OAH_MODEL_UNRESOLVED`. The catalog is read at every launch and refreshed on CLI version change or TTL expiry. A1 re-resolves supported effort. Changes log old, new, when and why; refresh failure warns and retains the last good mapping without downgrading. (A14)
+- [ ] `oah models [--refresh]` uses the editable per-engine quality lists and exact tier mapping in A14. Tests cover Claude aliases, Codex effective defaults, CLI-reported default adoption and user-listed models, explicit tier pins winning over catalog mappings, effective-config fallback and `OAH_MODEL_UNRESOLVED`. The model update check runs before every launch, checking catalog freshness and refreshing on CLI version change, TTL expiry or `oah models --refresh`; the next launch after a successful check uses the eligible mapping. A1 re-resolves supported effort. Changes log old, new, when and why; refresh failure warns and retains the last good mapping without downgrading. (A14)
 - [ ] `oah.secrets.get(name)` is the one key lookup: environment variable first, then the OS keychain (macOS `security`, Windows Credential Manager). A missing key reports `unused(no key)`. Keys never reach logs, run records or briefs. (A17)
 - [ ] An optional Orca adapter dispatches `oah call` workers through Orca when it is installed. (row 8, lane P3o)
 
 **P4** (lane P4b)
 - [ ] `oah packet new` scores the axes by rules, and records them, the recommended tier and the selected skills with reasons in `## Plan`. (A9, A10)
 - [ ] `oah preflight` and `oah packet new` refresh the impact map first, or refuse with `OAH_IMPACT_STALE`. (A11)
-- [ ] Briefs and packets always use the installed skill versions, so a skill update between two tasks is picked up by the next brief. (A15)
+- [ ] Briefs and packets use A15's selection precedence, so the next task after an update check uses an eligible validated cache update; project and explicit user pins stay unchanged. (A15)
 
 **P5**
 - [ ] `oah hooks install` offers opt-in `post-commit` and `post-merge` git hooks, with the same show-diff, backup and uninstall rules as the Stop hook. (A11)
 - [ ] `oah hook pre-push` refuses while an unfinished lease exists on this worktree, and runs gitleaks over the commits being pushed when gitleaks is installed. (row 3, A17)
-- [ ] The unlazy pin is excluded from A15. Adopting a candidate commit requires the adapter contract and gate-invalidation tests against that commit, covering CLI arguments, status and evidence behavior. `gates check` writes the path-free summary before commit and review; `finish` verifies it without tracked writes. (A15, 5.8)
+- [ ] `oah init --with-unlazy` installs P5's contract-tested commit and scripts digest. Every gate command verifies discovered environment/project/user copies against both identities before execution; mismatch tests verify refusal and the exact pinned-install command plus override-removal guidance (5.8). The pin is excluded from A15. Adopting a candidate commit requires the adapter contract and gate-invalidation tests against that commit, covering CLI arguments, status and evidence behavior. `gates check` writes the path-free summary before commit and review; `finish` verifies it without tracked writes. (A15, 5.8)
 
 **P6**
 - [ ] `oah review` refreshes the impact map first, or refuses with `OAH_IMPACT_STALE`. (A11)
@@ -1402,8 +1421,8 @@ that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.
 **P7** (lanes P7a, P7i, P7t and P7b)
 - [ ] `oah impact build/refresh` persist maps per worktree with A11's effective input manifest. Tests invalidate on HEAD, tracked index, dirty/untracked input, ignored ledger, config or tool-version changes, and isolate worktrees sharing HEAD. A stale map refreshes or refuses. The default SQL plugin produces `db_table`, `db_routine` and `db_grant` entities linked to code references. `oah init` builds the first map; failure warns with `impact=unavailable` and leaves the rest of init successful, dry-run only lists the build, and a second run refreshes a stale map or changes nothing. The edit-time impact hint is opt-in. (A11)
 - [ ] `oah init` creates the Obsidian-compatible wiki: index, log with marker, templates, and a minimal `.obsidian/` with workspace files ignored. The lead or guided defaults run `wiki maintain --task T` before final commit, gates and review for log/index/rollover work. Tests cover scope-exempt output events, lock contention, idempotent retries including rollover/recovery, and finish refusing missing/stale maintenance unless the override is recorded. `finish` and pre-commit lint/hygiene write nothing tracked. Nothing rebuilds the graph automatically. (A12)
-- [ ] `skills/` holds only skills whose verified license permits redistribution, each unchanged, with its LICENSE, upstream URL, pinned commit and a `THIRD_PARTY_NOTICES.md` entry. Linked skills install through `oah skills install`. `mcp/` templates use `${ENV_VAR}` placeholders only. (A13)
-- [ ] Automatic project skill updates are on by default in guided setup and may be disabled. Only project `.claude/skills/`, `.agents/skills/` or the state-folder kit cache are writable automatically; selection uses A15's precedence. Tests verify that due checks run at most once per `update_interval_days` through mutating commands while idle, and hold the state lock through publication so a lease cannot start mid-update. Optional launchd/Task Scheduler entry install and removal require consent. Global updates require `skills update --global` with confirmation and never run on a schedule. Updates honor user pins, exclude unlazy, validate license/load/privacy, log a diff, and atomically publish or roll back and report failure. (A15)
+- [ ] `skills/` holds only skills whose verified license permits redistribution, each unchanged, with its LICENSE, upstream URL, pinned commit and a `THIRD_PARTY_NOTICES.md` entry. Linked skills install through `oah skills install`; unlazy installs at P5's contract-tested pin with commit and scripts-digest verification (5.8). Tracked project copies stay pinned under A15. `mcp/` templates use `${ENV_VAR}` placeholders only. (A13)
+- [ ] Automatic kit-cache skill updates are on by default in guided setup and may be disabled. Only the state-folder kit cache outside the working tree is writable automatically, serving skills the project has not vendored; selection prefers the project copy, then kit cache, then user and plugin copies. Tracked `.claude/skills/` and `.agents/skills/` copies are pins and change only through explicit `oah skills update --project` in its own leased task with its own scope. Tests verify automatic checks leave tracked project folders unchanged and project updates enforce that separate lease and scope. Tests verify `update_interval_days = 1` by default, due checks before the next task at most once per interval through mutating commands while idle, and the state lock held through publication so a lease cannot start mid-update. Optional launchd/Task Scheduler entry install and removal require consent. Global updates require `skills update --global` with confirmation and never run on a schedule. Updates honor user pins, exclude unlazy, validate license/load/privacy, log a diff with old/new commits, when and why, and atomically publish or roll back and report failure. (A15)
 - [ ] `oah init` is the guided setup. It checks tools through the catalog, installs only what the user confirms, and walks through the Claude and Codex sign-ins without handling secrets. It writes the rules block, tier agents, wiki, impact map, gate templates and the accepted hooks, with defaults that match the owner's workflow. (OB)
 - [ ] Guided `oah init` asks once about provider enablement, disclosing potential cost and candidate/evidence data sent and recording the answer; a key alone and `--yes` tool-install consent do not enable it. Config enablement is also supported. (A9, AC6)
 - [ ] `oah handoff`, and the opt-in SessionStart hook, which prints nothing when `OAH_WORKER=1`. (row 11)
@@ -1433,11 +1452,11 @@ that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.
 | P3o | optional Orca adapter | P3b |
 | P4a | packet, intent (with the shared footer), preflight core | P2 |
 | P4b | all intent wiring into `start`, `status`, `finish` and `call`, including call refusal/footer integration; A9 and A10 at `packet new`; A11 refreshes | P3b, P4a, P5, P7i |
-| P5 | gates, `check` helpers, `finish` guard, Stop and git hooks | P2 |
+| P5 | gates, verified unlazy commit/scripts pin and contract, `check` helpers, `finish` guard, Stop and git hooks | P2 |
 | P6 | review loop, landing check, A11 refresh; consumes P4b's current-intent binding | P3b, P4b, P5, P7i |
 | P7a | wiki (A8, A12), rules block, graph | P2 |
 | P7i | impact map (A11), SQL plugin | P2, then P5 for gate bindings |
-| P7t | toolkit (A13), skill updates (A15) | P3a |
+| P7t | toolkit (A13), cache-only automatic skill updates and separately leased `--project` updates (A15); pinned unlazy installation | P3a, P5 for the unlazy pin and contract |
 | P7b | guided `oah init` (OB), tiers, hook wiring, `handoff`, SessionStart | P3b, P4b, P5, P7a, P7i, P7t, P8 |
 | P8 | installers, tool catalog, `doctor` tool checks | P3a |
 | P9 | docs, example, troubleshooting, Toolkit page | all |
@@ -1452,7 +1471,9 @@ files. Where the check was weaker (for example a local copy of upstream at a pin
 vendors the item re-reads the LICENSE at the pinned commit first.
 
 Each row is one of four verdicts:
-- **vendor:** ship unchanged with LICENSE, pinned commit and notice.
+- **vendor:** ship unchanged with LICENSE, pinned commit and notice. Automatic updates refresh only the
+  state-folder kit cache for skills not vendored by the project. Tracked project copies stay pinned
+  until `oah skills update --project` runs in its own scoped, leased task (A15).
 - **template** (MCP servers): ship a launch template with `${ENV_VAR}` placeholders only.
 - **link:** ship the official install command and URL only.
 - **exclude:** not shipped.
@@ -1467,7 +1488,7 @@ Names that match a private term are masked. Values (env, headers, tokens) were n
 | skill | orca-cli | Operate Orca worktrees, terminals, repos, embedded browser and handoffs through the orca CLI. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orca-cli> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | orchestration | Coordinate supervised Orca worker agents: messages, task dispatch, DAGs, decision gates. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orchestration> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | typesafe-ai | Guidance for building features from TypeSafe typed-judgment AI primitives (routing, ranking, verification). | <https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai> | lock records no commit (folder hash 678c375b883794bf4292715a43acbba5c84681aa); upstream main HEAD at check 65a39f393687675ce170e6094757de20370365b9 | MIT | vendor |
-| skill | unlazy | Completion discipline and operational gate checker; pinned by P5 (5.8), excluded from A15 updates. | <https://github.com/Leonxlnx/unlazy> | 2.1.0 (package.json); lock hash 16671491f6679ad9378f52604d3bc2415b4120c7 equals upstream main HEAD at check | MIT | vendor |
+| skill | unlazy | Completion discipline and operational gate checker; installed at P5's contract-tested pin, verified by commit and scripts digest before gate commands (5.8), excluded from A15 updates. | <https://github.com/Leonxlnx/unlazy> | 2.1.0 (package.json); lock hash 16671491f6679ad9378f52604d3bc2415b4120c7 equals upstream main HEAD at check | MIT | vendor |
 | skill | vercel-react-best-practices | React and Next.js performance rules from Vercel Engineering. | <https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices> | skill metadata 1.0.0; lock records no commit; upstream main HEAD at check 063bee94c3f4df8453406c830b0a7df0f2860278 | NOASSERTION | link |
 | skill | graphify | Turn code and documents into a persistent knowledge graph with query, path and explain tools. | <https://github.com/Graphify-Labs/graphify> | graphifyy 0.9.93 (PyPI); upstream commit not recorded | Apache-2.0 | vendor |
 | skill | [private-term skill A] | excluded: matches a private term | - | - | - | exclude |
@@ -1537,6 +1558,10 @@ Names that match a private term are masked. Values (env, headers, tokens) were n
 | cli | orca | Orca CLI for worktrees, terminals and agent orchestration. | <https://github.com/stablyai/orca> | 1.4.237 | MIT | link |
 | cli | jq | JSON processor. | <https://github.com/jqlang/jq> | 1.8.1 | MIT | link |
 | cli | rg | ripgrep fast search. | <https://github.com/BurntSushi/ripgrep> | 15.2.0 | Unlicense OR MIT | link |
+
+unlazy's inventory commit is a source observation, not permission to install an untested checker. P5
+contract-tests and records the operational commit and scripts digest; init installs that pin, discovery
+refuses mismatches with the repair command in 5.8, and a new commit requires a P5 contract change.
 
 Open questions from the inventory. None of them blocks: every affected item is linked, not vendored.
 - `vercel-react-best-practices`: its README says MIT, but the upstream repository has no LICENSE file, so it
