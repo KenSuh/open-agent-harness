@@ -11,13 +11,15 @@
 
 # open-agent-harness (`oah`)
 
-`oah` is a small command-line tool that makes **Claude Code** and **Codex CLI** work as one disciplined
-team on your own repository. It is written for people who are starting to program with AI: you run one
-install command and `oah init`, and you get a complete, working harness without assembling it yourself.
+`oah` is a small command-line tool designed to make **Claude Code** and **Codex CLI** work as one disciplined
+team on your own repository. It is written for people who are starting to program with AI. The target is
+one install command and `oah init` to set up a complete, working harness without assembling it yourself.
+Today, leases and `oah doctor` work; the installer, `oah init` and agent orchestration are planned.
 The problem it solves is simple to state. When two AI coding sessions share one repository, nothing stops
 them from editing the same files, "done" means whatever the agent says, and reviews have no budget and
-no proof. `oah` gives them a shared rulebook: Claude implements, Codex reviews and corrects in bounded
-rounds, every claim of "done" is backed by evidence, and work lands only after the review converges.
+no proof. The planned workflow gives them a shared rulebook: Claude implements, Codex reviews and
+corrects in bounded rounds, every claim of "done" is backed by evidence, and work lands only after the
+review converges.
 
 > [!WARNING]
 > **Developer preview. Not ready for general use yet.**
@@ -40,13 +42,13 @@ rounds, every claim of "done" is backed by evidence, and work lands only after t
 ## How it works
 
 `oah` is a Python 3.11+ program that uses only the standard library. It runs natively on macOS and
-Windows (no WSL). It does not replace Claude Code or Codex. It drives them and keeps the records that
-make their work trustworthy.
+Windows (no WSL). It does not replace Claude Code or Codex. The planned workflow will drive them and
+keep the records that make their work trustworthy.
 
 | Piece | What it does | Status |
 |---|---|---|
 | Workflow by stage | Claude does the initial implementation. Codex reviews, corrects and re-reviews. Landing happens only after convergence. | planned (P3, P6) |
-| Leases | Parallel sessions and worktrees never edit the same files. | **works today** (P2) |
+| Leases | Prevent overlapping declared scopes across sessions and worktrees. Write-time scope is advisory; actual changes are checked at finish. | **works today** (P2) |
 | Evidence gates | "Done" is a ledger of checks with evidence, not a sentence. | planned (P5) |
 | Project wiki and impact map | An Obsidian-compatible wiki for project knowledge, and an impact map that is refreshed automatically. | planned (P7) |
 | Tier agents | Difficulty picks the model and the effort, and the model list follows engine updates. | planned (P3, P7) |
@@ -91,9 +93,11 @@ stateDiagram-v2
     [*] --> Active : oah start
     Active --> scope_check : oah finish
     scope_check --> Finished : changes within scope, or allow-out-of-scope (recorded)
-    scope_check --> Active : refused (OAH_SCOPE_EXCEEDED)
+    scope_check --> Active : refused (OAH_SCOPE_EXCEEDED), lease still active
+    scope_check --> Stale : refused (OAH_SCOPE_EXCEEDED), lease expired
     Active --> Released : oah release with a reason
     Active --> Stale : TTL passes
+    Stale --> scope_check : oah finish
     Stale --> Released : oah release with a reason
     Stale --> [*] : pruned by the next oah start
     Finished --> [*]
@@ -282,9 +286,10 @@ required, because the planned workflow needs them.
 ## Concepts
 
 **Leases** (works today). A lease says who is working on which paths of the repository, and until when.
-`oah start` refuses a scope that overlaps another lease, so two sessions never edit the same files.
-Nothing can intercept an editor's writes, so the scope is checked when you `finish`: changed files
-outside the scope are refused unless you widen the scope or record an exception.
+`oah start` prevents overlapping declared scopes by refusing a scope that overlaps another lease.
+Scope is advisory while writing; leases cannot prevent writes outside it. At `finish`, actual changes
+are checked against the scope, and finishing is refused for files outside it unless you widen the scope
+or record an exception.
 
 **Intent** (planned, P4). Every task carries one intent section: the problem, the desired outcome and
 success conditions written as results. The same section goes to every stage, worker and reviewer, and a
@@ -298,7 +303,9 @@ task's gates are unmet. An optional Stop hook keeps a Claude Code session from e
 **Review loop** (planned, P6). Codex reviews a clean snapshot of the branch head with the agent
 instruction files removed, and a canary token shows that it read the snapshot. Every round leaves a
 receipt, and the series stops at its round budget. Each receipt labels the review honestly: it is only
-called independent when the reviewer wrote none of the commits.
+called independent when every commit in base..head has a known author engine different from the
+reviewer engine. Unknown authorship cannot establish independence. A separate Codex session reviewing
+a Codex correction is still not independent.
 
 ## Roadmap
 
@@ -400,14 +407,15 @@ are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 
 ### oah 는 무엇인가
 
-`oah` 는 **Claude Code** 와 **Codex CLI** 를 내 저장소에서 규율 있는 한 팀처럼 일하게 해 주는 작은 명령줄
-도구다. AI 로 프로그래밍을 막 시작한 사람을 먼저 생각하고 만든다. 설치 명령 하나와 `oah init` 만 실행하면
-완성된 하네스가 자동으로 갖춰지는 것이 목표다.
+`oah` 는 **Claude Code** 와 **Codex CLI** 를 내 저장소에서 규율 있는 한 팀처럼 일하게 하는 것을 목표로 하는 작은
+명령줄 도구다. AI 로 프로그래밍을 막 시작한 사람을 먼저 생각하고 만든다. 설치 명령 하나와 `oah init` 만 실행하면
+완성된 하네스가 자동으로 갖춰지는 것이 목표다. 현재 리스와 `oah doctor` 는 동작하며, 설치 프로그램과 `oah init`,
+에이전트 오케스트레이션은 계획 단계다.
 
 두 AI 코딩 세션이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치는 일을 막을 장치가 없고, "끝났다" 는 에이전트의
-말뿐이며, 리뷰에는 횟수 제한도 증거도 없다. `oah` 는 둘에게 같은 규칙을 준다. Claude 가 1차 구현을 하고,
+말뿐이며, 리뷰에는 횟수 제한도 증거도 없다. 계획된 워크플로에서는 둘에게 같은 규칙을 준다. Claude 가 1차 구현을 하고,
 Codex 가 정해진 라운드 안에서 리뷰하고 고치고 다시 리뷰한다. "끝났다" 는 주장은 증거로 뒷받침하고, 리뷰가
-수렴한 뒤에만 작업을 반영한다.
+수렴한 뒤에만 작업을 반영하는 것이 목표다.
 
 ### 현재 상태
 
@@ -436,7 +444,8 @@ Codex 가 정해진 라운드 안에서 리뷰하고 고치고 다시 리뷰한�
 | `oah release` | 리스를 끝내지 않고 내려놓는다. `--reason` 이 필요하고, 다른 에이전트의 리스에는 `--force` 도 필요하다. |
 | `oah log` | 이벤트 로그에 메모를 남긴다. |
 
-만료된 리스는 `oah status` 에 STALE 로 보이고, 다음 `oah start` 가 정리한다.
+만료된 리스는 `oah status` 에 STALE 로 보이고, 다음 `oah start` 가 정리한다. 정리 전에는 같은 범위 검사로
+`oah finish` 를 할 수 있으며, 범위 밖 변경으로 거절되면 STALE 상태를 유지한다.
 
 ### 요구 사항
 
@@ -451,15 +460,18 @@ Codex 가 정해진 라운드 안에서 리뷰하고 고치고 다시 리뷰한�
 
 ### 핵심 개념
 
-- **리스(지금 동작).** 누가 저장소의 어느 경로를 언제까지 작업하는지 기록한다. 겹치는 범위는 시작할 때
-  거절하므로 두 세션이 같은 파일을 고치지 않는다. 범위는 `finish` 할 때 실제 변경 파일과 다시 대조한다.
+- **리스(지금 동작).** 누가 저장소의 어느 경로를 언제까지 작업하는지 기록한다. 시작할 때 선언된 범위가
+  겹치면 거절한다. 쓰는 동안 범위는 권고 사항이며, 범위 밖 쓰기를 막지는 못한다. `finish` 할 때 실제 변경
+  파일을 범위와 대조하고, 범위 밖 변경은 범위를 넓히거나 예외를 기록하지 않으면 종료를 거절한다.
 - **의도(계획, P4).** 모든 작업은 문제, 바라는 결과, 결과 기준의 성공 조건을 담은 의도 절 하나를 가진다. 이
   절은 모든 단계와 워커, 리뷰어에게 그대로 전달되고, 목표가 바뀌면 새 의도를 만들지 않고 개정 번호만 올린다.
 - **게이트(계획, P5).** 명령, 기대 결과, 기록된 증거로 이루어진 확인 항목이다. unlazy 원장 형식을 쓰며,
   게이트가 충족되지 않으면 `oah finish` 가 거절하게 된다.
 - **리뷰 루프(계획, P6).** Codex 가 에이전트 지시 파일을 뺀 깨끗한 스냅샷을 리뷰하고, 카나리 토큰으로
   스냅샷을 읽었음을 보인다. 라운드마다 영수증을 남기고, 정해진 라운드 수에서 멈추며, 남은 지적은 소유자에게
-  넘긴다.
+  넘긴다. base..head 의 모든 커밋에서 작성 엔진을 알고 그 엔진이 리뷰어 엔진과 달라야만 독립 리뷰로 표시한다.
+  작성 엔진을 모르는 커밋이 있으면 독립성을 입증할 수 없다. 별도 Codex 세션이 Codex 수정본을 리뷰해도
+  독립 리뷰가 아니다.
 
 ### 보안
 
