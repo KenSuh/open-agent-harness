@@ -1,27 +1,70 @@
-# oah 명령 진입점 — 파이썬 버전을 먼저 확인한 뒤 출력 인코딩을 안전하게 하고 하위 명령으로 넘긴다.
+# oah 명령 진입점 — 파이썬 버전을 먼저 확인한 뒤 출력 인코딩을 안전하게 하고, 찾아낸 명령 모듈로 넘긴다.
 from __future__ import annotations
 
 import argparse
+import importlib
+import pkgutil
 import sys
+from types import ModuleType
 
 MIN_PYTHON = (3, 11)
+COMMAND_MODULE_ATTRIBUTES = ("register", "COMMANDS", "run")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def command_modules() -> list[ModuleType]:
+    """Every oah/<name>_cli.py module, sorted by module name."""
+    import oah
+
+    names = sorted(info.name for info in pkgutil.iter_modules(oah.__path__) if info.name.endswith("_cli"))
+    return [importlib.import_module(f"oah.{name}") for name in names]
+
+
+def _command_table(modules: list[ModuleType]) -> dict[str, ModuleType]:
+    table: dict[str, ModuleType] = {}
+    for module in modules:
+        missing = [name for name in COMMAND_MODULE_ATTRIBUTES if not hasattr(module, name)]
+        if missing:
+            raise RuntimeError(f"oah command module {module.__name__} is missing {', '.join(missing)}")
+        for command in module.COMMANDS:
+            if command in table:
+                raise RuntimeError(f"oah command {command!r} is claimed by both "
+                                   f"{table[command].__name__} and {module.__name__}")
+            table[command] = module
+    return table
+
+
+def _group_title(module: ModuleType) -> str:
+    doc = (module.__doc__ or "").strip()
+    if doc:
+        return doc.splitlines()[0].rstrip(".")
+    return module.__name__.rpartition(".")[2].removesuffix("_cli")
+
+
+def _build(modules: list[ModuleType]) -> argparse.ArgumentParser:
     from oah import __version__
 
+    _command_table(modules)
+    groups = "\n".join(f"  {_group_title(module)}: {', '.join(module.COMMANDS)}" for module in modules)
     parser = argparse.ArgumentParser(
         prog="oah",
         description="open-agent-harness: run Claude Code and Codex CLI as a disciplined team on your repository.",
+        epilog=f"command groups:\n{groups}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"oah {__version__}")
     commands = parser.add_subparsers(dest="command", metavar="<command>")
-    doctor = commands.add_parser("doctor", help="check that the tools oah needs are installed")
-    doctor.add_argument("--json", action="store_true", help="print machine-readable JSON")
-    from oah import lease_cli
-
-    lease_cli.register(commands)
+    for module in modules:
+        before = set(commands.choices)
+        module.register(commands)
+        added = set(commands.choices) - before
+        if added != set(module.COMMANDS):
+            raise RuntimeError(f"oah command module {module.__name__} registered {sorted(added)} "
+                               f"but COMMANDS claims {sorted(module.COMMANDS)}")
     return parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    return _build(command_modules())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,18 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     from oah.console import configure_stdio
 
     configure_stdio()
-    parser = build_parser()
+    modules = command_modules()
+    parser = _build(modules)
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         return 0
-    if args.command == "doctor":
-        from oah.doctor import doctor_main
-
-        return doctor_main(json_output=args.json)
-    from oah import lease_cli
-
-    if args.command in lease_cli.COMMANDS:
-        return lease_cli.run(args)
-    parser.error(f"unknown command: {args.command}")
-    return 2
+    return _command_table(modules)[args.command].run(args)
