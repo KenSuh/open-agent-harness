@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import unittest
@@ -15,7 +16,7 @@ from oah.engines.proc import RunResult
 from oah.gates import ledger_status, parse_ledger
 from oah.gates.ledger import definition_digest, gate_state, parse_text
 from tests.fixtures.gates.support import (StubNode, automatic_evidence, make_unlazy_dir, met_ledger,
-                                          stub_pin, windows_sid)
+                                          remove_tree, stub_pin, windows_sid)
 from tests.helpers import directory_alias, git_commit, make_tmp_dir
 
 SIMPLE = """# Gates: demo
@@ -28,6 +29,35 @@ SIMPLE = """# Gates: demo
 - [ ] G2: the wording is reviewed
   EVIDENCE: pending
 """
+
+
+class CheckoutCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.checkout = make_unlazy_dir(make_tmp_dir(self) / "unlazy")
+        self.object_file = next(path for path in (self.checkout / ".git/objects").glob("*/*")
+                                if path.is_file())
+        self.object_file.chmod(stat.S_IREAD)
+
+    def test_readonly_permission_error_is_cleared_and_retried(self):
+        unlink = os.unlink
+        refused = []
+
+        def windows_unlink(path, *args, **kwargs):
+            if pathlib.Path(path).name == self.object_file.name:
+                if not self.object_file.stat().st_mode & stat.S_IWRITE:
+                    refused.append(path)
+                    raise PermissionError("read-only Git object")
+            return unlink(path, *args, **kwargs)
+
+        with patch("os.unlink", side_effect=windows_unlink):
+            remove_tree(self.checkout)
+        self.assertEqual(len(refused), 1)
+        self.assertFalse(self.checkout.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows read-only file semantics")
+    def test_real_readonly_git_checkout_is_removed(self):
+        remove_tree(self.checkout)
+        self.assertFalse(self.checkout.exists())
 
 
 class ContractTest(unittest.TestCase):
@@ -318,34 +348,36 @@ class ExecutionSnapshotTest(unittest.TestCase):
                     source_script.write_bytes(saved)
 
     def test_directory_alias_swap_cannot_change_loaded_dependency(self):
-        alias = self.tmp / "alias"
-        directory_alias(self.source, alias)
-        evil = self.tmp / "evil"
-        shutil.copytree(self.source, evil)
-        (evil / "scripts/lib/gates.mjs").write_text("print('unverified-dependency')\n", encoding="utf-8")
         original = unlazy._run
         for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
             with self.subTest(name=name):
+                case = self.tmp / name
+                case.mkdir()
+                source = case / "unlazy"
+                shutil.copytree(self.source, source)
+                alias = case / "alias"
+                directory_alias(source, alias)
+                evil = case / "evil"
+                shutil.copytree(source, evil)
+                (evil / "scripts/lib/gates.mjs").write_text("print('unverified-dependency')\n", encoding="utf-8")
                 def replace(argv, **options):
                     alias.rmdir() if os.name == "nt" else alias.unlink()
                     directory_alias(evil, alias)
                     # Also replace the resolved target directory, not just the discovery alias.
-                    moved = self.tmp / "moved"
-                    self.source.rename(moved)
-                    shutil.copytree(evil, self.source)
+                    moved = case / "moved"
+                    source.rename(moved)
+                    shutil.copytree(evil, source)
                     try:
                         return original(argv, **options)
                     finally:
-                        shutil.rmtree(self.source)
-                        moved.rename(self.source)
+                        remove_tree(source)
+                        moved.rename(source)
                 try:
                     with patch.object(unlazy, "_run", side_effect=replace):
                         result = self.invoke(name, alias)
                     self.assertEqual(result.stdout.strip(), "verified-closure", result.stderr)
                 finally:
                     alias.rmdir() if os.name == "nt" else alias.unlink()
-                    directory_alias(self.source, alias)
-        alias.rmdir() if os.name == "nt" else alias.unlink()
 
     def test_snapshot_contains_only_verified_files_under_state_until_process_exits(self):
         original = unlazy._run
@@ -1336,7 +1368,7 @@ class InputsTest(unittest.TestCase):
                 elif state == "different-head":
                     subprocess.run(["git", "-C", str(live), "checkout", "--quiet", "--force", first], check=True)
                 elif state == "missing":
-                    shutil.rmtree(live)
+                    remove_tree(live)
                 with self.assertRaises(InputsUncovered) as caught:
                     collect(self.repo)
                 self.assertEqual(caught.exception.code, "OAH_GATES_INPUTS_UNCOVERED")

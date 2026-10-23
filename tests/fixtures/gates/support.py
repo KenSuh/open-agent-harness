@@ -8,6 +8,8 @@ import json
 import os
 import pathlib
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from typing import Sequence
@@ -18,6 +20,20 @@ from oah.gates.ledger import definition_digest, parse_text
 HERE = pathlib.Path(__file__).resolve().parent
 STUB = HERE / "stub_node.py"
 SRC = str(HERE.parent.parent.parent / "src")
+
+
+def remove_tree(folder: pathlib.Path) -> None:
+    """Remove a test checkout, including Git's read-only object files."""
+    def retry(function, path, error):
+        if not isinstance(error, PermissionError):
+            raise error
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+        function(path)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(folder, onexc=retry)
+    else:
+        shutil.rmtree(folder, onerror=lambda function, path, info: retry(function, path, info[1]))
 
 
 def windows_sid(principal: str) -> str:
