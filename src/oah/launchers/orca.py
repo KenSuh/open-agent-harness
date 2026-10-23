@@ -18,16 +18,17 @@ source of truth, and a terminal that ends without a final record makes the run `
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
+import math
 import os
 import pathlib
 import secrets
 import time
 from typing import Mapping, Sequence
 
-from oah import briefs, call, runs
-from oah.atomic import read_json, write_json_atomic, write_text_atomic
+from oah import briefs, call, launchers, runs
+from oah.atomic import write_json_atomic, write_text_atomic
+from oah.engines import claude, codex
 from oah.engines.effort import EngineError
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.paths import STATE_ENV
@@ -66,12 +67,17 @@ class Orca:
     base: tuple[str, ...]
     version: str
     env: Mapping[str, str]
+    deadline: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env", _environment(self.env))
 
     def json(self, *args: str, timeout: float = CLI_TIMEOUT) -> dict:
         """Run one documented command with --json and return its `result` object."""
+        try:
+            timeout = launchers.remaining(self.deadline, timeout)
+        except launchers.DeadlineExpired:
+            raise OrcaReplyError("cli-timeout", "the wait budget expired; retry oah wait") from None
         try:
             result = run_command([*self.base, *args, "--json"], timeout=timeout, env=self.env)
         except (OSError, ValueError) as exc:
@@ -102,8 +108,9 @@ class Orca:
         return found
 
 
-def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None = None) -> Orca:
-    """The configured orca command after `orca --version` succeeds; OAH_LAUNCHER_UNAVAILABLE otherwise."""
+def connect(command: Sequence[str], env: Mapping[str, str], search_path: str | None = None, *,
+            version: str = runs.UNVERIFIED, deadline: float | None = None) -> Orca:
+    """Resolve the CLI without probing again when following an already launched terminal."""
     if not command or not all(isinstance(part, str) and part for part in command):
         raise EngineError("OAH_CONFIG_INVALID", ".oah/config.toml: call.orca_command must be a non-empty list of "
                           'strings, such as ["orca"]')
@@ -120,11 +127,22 @@ def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None
                               f"from {INSTALL_URL} and turn on its command-line tool, or set [call] orca_command "
                               f"in .oah/config.toml. {_WITHOUT}")
         base = [*found.argv, *command[1:]]
+    return Orca(tuple(base), version, dict(env), deadline)
+
+
+def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None = None, *,
+         deadline: float | None = None) -> Orca:
+    """The configured command after a bounded version probe; OAH_LAUNCHER_UNAVAILABLE otherwise."""
+    client = connect(command, env, search_path, deadline=deadline)
+    first = command[0]
     try:
-        probe = run_command([*base, "--version"], timeout=PROBE_TIMEOUT, env=_environment(env))
+        timeout = launchers.remaining(deadline, PROBE_TIMEOUT)
+        probe = run_command([*client.base, "--version"], timeout=timeout, env=client.env)
         output = probe.stdout.strip().splitlines()
         version = output[0].strip() if output and probe.returncode == 0 and not probe.timed_out else ""
         detail = (probe.stderr.strip().splitlines() or [f"exit code {probe.returncode}"])[-1]
+    except launchers.DeadlineExpired:
+        version, detail = "", "the deadline expired; retry the command"
     except UnsupportedBatchShim as exc:
         raise EngineError(UNAVAILABLE, "Orca's configured command is a batch shim. Install a native executable "
                           "or configure an explicit [interpreter.exe, script] command in [call] orca_command, "
@@ -135,7 +153,7 @@ def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None
         raise EngineError(UNAVAILABLE, f"`{first} --version` failed ({detail[:200]}), so Orca's command-line tool "
                           f"is not usable. Open Orca and turn on its command-line tool (install: {INSTALL_URL}), "
                           f"then retry. {_WITHOUT}")
-    return Orca(tuple(base), version, dict(env))
+    return dataclasses.replace(client, version=version)
 
 
 def check_runner(env: Mapping[str, str], search_path: str | None = None) -> None:
@@ -215,42 +233,62 @@ def terminal_args(placement: Placement, title: str, command: str, *, windows: bo
     return args
 
 
-def _launch_digest(data: dict) -> str:
-    return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
+@dataclasses.dataclass(frozen=True)
+class _WorkerPrepared(call.Prepared):
+    worker_run: runs.WorkerRun
+
+    @property
+    def run(self) -> runs.WorkerRun:
+        return self.worker_run
 
 
 def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) -> call.Prepared:
-    """Bind the saved execution to the located run before consuming any execution metadata."""
+    """Rebuild argv and permissions from the engine/stage, never from saved execution flags."""
+    if not isinstance(run, runs.WorkerRun):
+        raise runs._launch_invalid()
     data = run.read()
-    saved = read_json(run.launch_path, None)
+    saved = run._read_json("launch.json")
     launcher = data.get("launcher") or {}
 
     def invalid() -> runs.RunError:
         return runs.RunError("OAH_RUN_LAUNCH_INVALID", "the saved launch does not match this queued run; "
                              "start a new run with oah call")
 
-    if not isinstance(saved, dict) or _launch_digest(saved) != launcher.get("launch_digest"):
+    expected = {"run_dir": str(run.path), "run_id": run.id, "task": run.task,
+                "engine": data.get("engine"), "stage": data.get("stage"), "cwd": str(root),
+                "model": data.get("resolved_model"), "launch_effort": data.get("launch_effort"),
+                "cli_version": data.get("cli_version"), "warnings": data.get("warnings"),
+                "timeout_s": launcher.get("timeout_s")}
+    if (not isinstance(saved, dict) or set(saved) != set(expected) or
+            any(saved[key] != value for key, value in expected.items()) or
+            data.get("run_id") != run.id or data.get("task") != run.task or
+            data.get("engine") not in call.routing.ENGINES or data.get("stage") not in call.routing.STAGES or
+            data.get("cwd") != str(root) or launcher.get("worktree") != str(root) or
+            "command" in data or "read_only" in data or "launch_digest" in launcher or
+            not all(isinstance(saved[key], str) and saved[key] for key in (
+                "engine", "stage", "model", "launch_effort", "cli_version")) or
+            not isinstance(saved["warnings"], list) or
+            not all(isinstance(warning, str) for warning in saved["warnings"]) or
+            type(saved["timeout_s"]) not in (int, float) or not math.isfinite(saved["timeout_s"]) or
+            saved["timeout_s"] <= 0):
         raise invalid()
-    try:
-        prepared = call.Prepared.from_json(saved)
-    except (KeyError, TypeError, ValueError):
-        raise invalid() from None
-    if (prepared.run_id != run.id or prepared.task != run.task or prepared.run_dir != str(run.path) or
-            prepared.engine not in call.routing.ENGINES or prepared.stage not in call.routing.STAGES or
-            any(data.get(key) != saved[key] for key in ("run_id", "task", "engine", "stage", "cwd")) or
-            data.get("command") != list(prepared.argv) or data.get("resolved_model") != prepared.model or
-            data.get("launch_effort") != prepared.launch_effort or
-            data.get("cli_version") != (prepared.cli_version or runs.UNVERIFIED) or
-            data.get("read_only") is not (prepared.stage == "review") or
-            pathlib.Path(prepared.cwd).resolve() != root.resolve() or
-            launcher.get("worktree") != prepared.cwd):
-        raise invalid()
-    call.routing.check_stage(prepared.engine, prepared.stage, settings.stages,
+    engine, stage = data["engine"], data["stage"]
+    call.routing.check_stage(engine, stage, settings.stages,
                              override=data.get("override_stage") is True)
+    base = call.models.resolve_base(engine, settings.engines[engine]["command"])
+    if engine == "codex":
+        argv = codex.build_command(base, workdir=str(root), read_only=stage == "review",
+                                   model=saved["model"], effort=saved["launch_effort"],
+                                   output_last_message=str(run.file_path("last-message.md")))
+    else:
+        section = settings.engines[engine]
+        argv = claude.build_command(base, model=saved["model"], effort=saved["launch_effort"],
+                                    permission_mode=section["permission_mode"], tools=section["tools"],
+                                    read_only=stage == "review")
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": run.task}
-    if prepared.env_additions != additions:
-        raise invalid()
-    return dataclasses.replace(prepared, env_additions=additions)
+    run.bind(data)
+    return _WorkerPrepared(**dict(saved, argv=tuple(argv), env_additions=additions,
+                                  warnings=tuple(saved["warnings"]), worker_run=run))
 
 
 def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows: bool | None = None) -> dict:
@@ -258,13 +296,16 @@ def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows:
     run = prepared.run
     command = runner_command(prepared.run_id)
     launch = prepared.to_json()
+    launch.pop("argv")
+    launch.pop("env_additions")
+    launch["cli_version"] = prepared.cli_version or runs.UNVERIFIED
     write_json_atomic(run.launch_path, launch)
     info = {"name": "orca", "orca_version": orca.version, "worktree": str(placement.path),
             "worktree_id": placement.worktree_id, "worktree_created": placement.created, "terminal": None,
             "terminal_process_id": None, "host_platform": runs.UNVERIFIED, "command": command,
             "worker_env": "env", "reported_model": runs.UNVERIFIED, "reported_effort": runs.UNVERIFIED,
-            "terminal_cursor": "0", "launch_digest": _launch_digest(launch)}
-    run.result(status="queued", launcher=info)
+            "terminal_cursor": "0", "timeout_s": prepared.timeout_s}
+    run.result(status="queued", launcher=info, command=None, read_only=None)
     windows = os.name == "nt" if windows is None else windows
     try:
         terminal = orca.json(*terminal_args(placement, f"oah {prepared.task} {prepared.stage}", command,
@@ -356,10 +397,16 @@ def _lost(orca: Orca, run: runs.Run, handle: str, reason: str, deadline: float) 
 
 
 def wait(orca: Orca, state_dir: pathlib.Path, run_id: str, *, timeout: float = call.WAIT_LIMIT_S,
-         slice_s: float = WAIT_SLICE_S) -> dict:
+         slice_s: float = WAIT_SLICE_S, deadline: float | None = None) -> dict:
     """The run's record once it ends, or the current record after at most `timeout` (capped at 9 minutes)."""
     run = runs.find_run(state_dir, run_id)
-    deadline = time.monotonic() + min(max(timeout, 0.0), call.WAIT_LIMIT_S)
+    limit = time.monotonic() + min(max(timeout, 0.0), call.WAIT_LIMIT_S)
+    if deadline is None:
+        deadline = limit
+    else:
+        deadline = min(deadline, limit)
+    if getattr(orca, "deadline", None) is not None:
+        deadline = min(deadline, orca.deadline)
     while True:
         data = run.read()
         if data.get("status") in runs.TERMINAL:
@@ -404,5 +451,5 @@ def wait_until_done(orca: Orca, state_dir: pathlib.Path, run_id: str) -> dict:
     """A foreground call: follow the terminal in bounded waits until the run ends."""
     while True:
         data = wait(orca, state_dir, run_id)
-        if data.get("status") in runs.TERMINAL:
+        if data.get("status") in runs.TERMINAL or (orca.deadline is not None and time.monotonic() >= orca.deadline):
             return data

@@ -7,6 +7,7 @@ Host:  python fake_orca.py __host   (the test starts it; like the real app it ow
 
 FAKE_ORCA_STATE     folder for argv.jsonl, worktrees, terminals and host requests (required)
 FAKE_ORCA_VERSION   printed by --version (default 1.4.237)
+FAKE_ORCA_VERSION_SLEEP  seconds to delay --version (default 0)
 FAKE_ORCA_DISABLED  "1": --version fails, as when Orca's command-line tool is not enabled
 FAKE_ORCA_FAIL      one command such as "terminal create" that answers ok:false
 FAKE_ORCA_OAH       (host) JSON argv run in place of the word `oah` in a terminal command
@@ -194,6 +195,7 @@ def cli(argv: list[str]) -> int:
     with open(folder / "argv.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps(argv) + "\n")
     if argv == ["--version"]:
+        time.sleep(float(os.environ.get("FAKE_ORCA_VERSION_SLEEP", "0")))
         if os.environ.get("FAKE_ORCA_DISABLED") == "1":
             print("orca: the command-line tool is not enabled", file=sys.stderr)
             return 1

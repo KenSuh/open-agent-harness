@@ -9,12 +9,24 @@ A selected launcher that cannot run refuses; it never falls back to another one.
 """
 from __future__ import annotations
 
+import time
 from typing import Mapping
 
 from oah.engines.effort import EngineError
 
 NAMES = ("process", "orca")
 DEFAULTS = {"launcher": "process", "orca_command": ["orca"]}
+
+
+class DeadlineExpired(Exception):
+    """No subprocess may start after the caller's monotonic deadline."""
+
+
+def remaining(deadline: float | None, cap: float) -> float:
+    timeout = cap if deadline is None else min(cap, deadline - time.monotonic())
+    if timeout <= 0:
+        raise DeadlineExpired()
+    return timeout
 
 
 def choose(flag: str | None, section: Mapping) -> str:

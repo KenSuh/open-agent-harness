@@ -9,6 +9,7 @@ import pathlib
 import re
 import secrets
 import sys
+import time
 from typing import Callable, NamedTuple
 
 from oah import briefs, call, launchers, models, routing, runs
@@ -226,14 +227,18 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     return _report(call.execute(prepared), args.json)
 
 
-def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
+def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, deadline: float) -> int:
     current = runs.find_run(state, args.run_id).read()
     launcher = current.get("launcher")
     if isinstance(launcher, dict) and launcher.get("name") == "orca" and current.get("status") not in TERMINAL:
         from oah.launchers import orca as orca_launcher
 
-        orca = orca_launcher.find(load_call_section(root)["orca_command"], os.environ)
-        data = orca_launcher.wait(orca, state, args.run_id, timeout=args.timeout_seconds)
+        if time.monotonic() >= deadline:
+            data = current
+        else:
+            orca = orca_launcher.connect(load_call_section(root)["orca_command"], os.environ,
+                                         version=launcher.get("orca_version", runs.UNVERIFIED), deadline=deadline)
+            data = orca_launcher.wait(orca, state, args.run_id, deadline=deadline)
     else:
         data = call.wait(state, args.run_id, timeout=args.timeout_seconds)
     if data.get("status") in TERMINAL:
@@ -249,29 +254,57 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
 def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     from oah.launchers import orca as orca_launcher
 
-    run = runs.find_run(state, args.run_id)
-    data = run.read()
-    launcher = data.get("launcher")
-    if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
-        print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is {data.get('status')}, not a queued Orca run, so nothing "
-              "was started; start a new run with oah call", file=sys.stderr)
-        return EXIT_REFUSED
-    prepared = orca_launcher.worker_prepared(run, root, load_settings(root))
-    run.claim_queued_orca()
-    print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
-          f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
-    call.execute(prepared)
-    return _report(run.read(), False)
+    with runs.WorkerRun(runs.find_run(state, args.run_id)) as run:
+        data = run.read()
+        launcher = data.get("launcher")
+        if not (isinstance(launcher, dict) and launcher.get("name") == "orca") or data.get("status") != "queued":
+            print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is not a queued Orca run, so nothing "
+                  "was started; start a new run with oah call", file=sys.stderr)
+            return EXIT_REFUSED
+        prepared = orca_launcher.worker_prepared(run, root, load_settings(root))
+        run.claim_queued_orca()
+        print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
+              f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
+        call.execute(prepared)
+        return _report(run.read(), False)
+
+
+def _wait_repo_info(cwd: pathlib.Path, deadline: float):
+    """The two git reads needed by wait share its budget, before Orca is initialized."""
+    from oah.engines.proc import run_command
+    from oah.paths import GIT_TIMEOUT, RepoInfo, git_argv
+
+    def output(directory: pathlib.Path, *args: str) -> str:
+        argv = [*git_argv(), "-C", str(directory), *args]
+        timeout = launchers.remaining(deadline, GIT_TIMEOUT)
+        result = run_command(argv, timeout=timeout)
+        if result.timed_out:
+            raise launchers.DeadlineExpired()
+        if result.returncode != 0 or not result.stdout.strip():
+            raise NotARepo("OAH_NOT_A_REPO: cannot locate the repository; run oah wait inside its worktree")
+        return result.stdout.strip()
+
+    root = pathlib.Path(output(cwd, "rev-parse", "--show-toplevel"))
+    common = pathlib.Path(output(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    return RepoInfo(root, common, None, None)
 
 
 def run(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
 
+    deadline = (time.monotonic() + min(max(args.timeout_seconds, 0.0), call.WAIT_LIMIT_S)
+                if args.command == "wait" else None)
     try:
-        info = repo_info(pathlib.Path.cwd())
+        info = (_wait_repo_info(pathlib.Path.cwd(), deadline) if deadline is not None
+                else repo_info(pathlib.Path.cwd()))
         state = state_dir(info, os.environ)
-        handler = {"call": _call, "wait": _wait, "worker-run": _worker_run}[args.command]
+        if args.command == "wait":
+            return _wait(args, info.root, state, deadline=deadline)
+        handler = {"call": _call, "worker-run": _worker_run}[args.command]
         return handler(args, info.root, state)
+    except launchers.DeadlineExpired:
+        print(f"OAH_WAIT_TIMEOUT: the wait budget expired; call `oah wait {args.run_id}` again", file=sys.stderr)
+        return EXIT_AGAIN
     except EngineError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED

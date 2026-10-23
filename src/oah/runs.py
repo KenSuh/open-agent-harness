@@ -10,6 +10,7 @@ fields that nothing could observe stay `unverified`, never empty.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import pathlib
 import re
@@ -83,18 +84,29 @@ class Run:
         write_text_atomic(self.prompt_path, text)
 
     def write_logs(self, stdout: str, stderr: str) -> None:
-        write_text_atomic(self.stdout_path, stdout)
-        write_text_atomic(self.stderr_path, stderr)
+        self._write_text("stdout.log", stdout)
+        self._write_text("stderr.log", stderr)
+
+    def _write_text(self, name: str, text: str) -> None:
+        write_text_atomic(self.file_path(name), text)
+
+    def _read_json(self, name: str) -> object:
+        return read_json(self.file_path(name), None)
+
+    def _write_result(self, data: dict) -> None:
+        write_json_atomic(self.result_path, data)
 
     def read(self) -> dict:
-        data = read_json(self.result_path, None)
+        data = self._read_json("result.json")
         if not isinstance(data, dict):
             raise RunError("OAH_RUN_CORRUPT", f"{self.result_path} is missing or not a JSON object; the run folder "
                            "was changed by hand")
         return data
 
     def claim_queued_orca(self) -> None:
-        """Only one terminal may move a queued Orca run into execution."""
+        """Claim only the directory and record already validated by worker-run."""
+        if not isinstance(self, WorkerRun) or self._validated is None:
+            raise _launch_invalid()
         with StateLock(_contained_path(self.path.parents[2], ".lock")):
             data = self.read()
             launcher = data.get("launcher")
@@ -102,8 +114,17 @@ class Run:
                     launcher.get("name") != "orca"):
                 raise RunError("OAH_RUN_NOT_QUEUED", "this run is not a queued Orca run, so nothing was started; "
                                "start a new run with oah call")
+            if self._record_identity(data) != self._record_identity(self._validated):
+                raise _launch_invalid()
+            try:
+                fd = self._open_file("worker.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            except FileExistsError:
+                raise RunError("OAH_RUN_NOT_QUEUED", "this Orca run was already claimed, so nothing was started; "
+                               "start a new run with oah call") from None
+            os.close(fd)
+            self._check_directory()
             data.update(status="running", pid=os.getpid())
-            write_json_atomic(self.result_path, data)
+            self._write_result(data)
 
     def result(self, **fields: object) -> dict:
         """Merge fields into result.json; unknown names are refused so records keep one schema."""
@@ -121,11 +142,181 @@ class Run:
                     _PROGRESS.get(incoming, len(_PROGRESS)) < _PROGRESS.get(current, -1)):
                 return data  # ignore the entire stale update, including its pid and error
             data.update(fields)
+            if isinstance(data.get("launcher"), dict) and data["launcher"].get("name") == "orca":
+                for name in ("command", "read_only"):
+                    if name in fields and fields[name] is None:
+                        data.pop(name, None)
             for name in UNVERIFIED_FIELDS:
                 if data.get(name) in (None, ""):
                     data[name] = UNVERIFIED
-            write_json_atomic(self.result_path, data)
+            self._write_result(data)
             return data
+
+
+def _launch_invalid() -> RunError:
+    return RunError("OAH_RUN_LAUNCH_INVALID", "the run folder or saved launch changed; "
+                    "start a new run with oah call")
+
+
+def _open_worker_directory(path: pathlib.Path) -> int:
+    if os.name != "nt":
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.CloseHandle.argtypes = (wintypes.HANDLE,)
+    api.CloseHandle.restype = wintypes.BOOL
+    # BACKUP_SEMANTICS opens a directory; omit FILE_SHARE_DELETE to prevent rename/replacement.
+    handle = api.CreateFileW(str(path), 0x80000000, 0x1 | 0x2, None, 3, 0x02000000 | 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+
+
+@dataclass(frozen=True)
+class _WorkerPrompt:
+    run: WorkerRun
+
+    def read_bytes(self) -> bytes:
+        self.run._check_directory()
+        if self.run._prompt is None:
+            raise _launch_invalid()
+        return self.run._prompt
+
+
+class WorkerRun(Run):
+    """One open directory for validation, the exclusive claim and the validated prompt snapshot."""
+
+    def __init__(self, run: Run) -> None:
+        super().__init__(run.id, run.task, run.path)
+        self._fd: int | None = None
+        self._validated: dict | None = None
+        self._prompt: bytes | None = None
+
+    def __enter__(self) -> WorkerRun:
+        self.file_path("result.json")
+        self._fd = _open_worker_directory(self.path)
+        try:
+            self._identity = os.fstat(self._fd)
+            self._check_directory()
+        except BaseException:
+            os.close(self._fd)
+            self._fd = None
+            raise
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+    def _check_directory(self) -> None:
+        if self._fd is None:
+            raise _launch_invalid()
+        try:
+            info = self.path.stat(follow_symlinks=False)
+        except OSError:
+            raise _launch_invalid() from None
+        if (not stat.S_ISDIR(info.st_mode) or
+                getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT or
+                (info.st_dev, info.st_ino) != (
+                    self._identity.st_dev, self._identity.st_ino)):
+            raise _launch_invalid()
+
+    def file_path(self, name: str) -> pathlib.Path:
+        if self._fd is not None:
+            self._check_directory()
+        return super().file_path(name)
+
+    def _open_file(self, name: str, flags: int) -> int:
+        self._check_directory()
+        path = self.file_path(name)
+        if os.name == "nt":
+            fd = os.open(path, flags | os.O_BINARY, 0o600)  # the directory handle prevents replacement
+        else:
+            fd = os.open(name, flags | os.O_NOFOLLOW, 0o600, dir_fd=self._fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _launch_invalid()
+            self._check_directory()
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _read_bytes(self, name: str) -> bytes:
+        with os.fdopen(self._open_file(name, os.O_RDONLY), "rb") as handle:
+            raw = handle.read()
+        self._check_directory()
+        return raw
+
+    def _read_json(self, name: str) -> object:
+        try:
+            data = json.loads(self._read_bytes(name).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, FileNotFoundError):
+            raise _launch_invalid() from None
+        if name == "result.json":
+            if not isinstance(data, dict) or data.get("run_id") != self.id or data.get("task") != self.task:
+                raise _launch_invalid()
+            if self._validated is not None and any(data.get(key) != self._validated.get(key) for key in (
+                    "engine", "stage", "created_at", "cwd", "resolved_model", "launch_effort", "cli_version",
+                    "override_stage")):
+                raise _launch_invalid()
+        return data
+
+    def _write_text(self, name: str, text: str) -> None:
+        if os.name == "nt":
+            return super()._write_text(name, text)
+        temp = f".{name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        try:
+            with os.fdopen(self._open_file(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+                           "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.file_path(name)
+            os.replace(temp, name, src_dir_fd=self._fd, dst_dir_fd=self._fd)
+            os.fsync(self._fd)
+            self._check_directory()
+        finally:
+            try:
+                os.unlink(temp, dir_fd=self._fd)
+            except FileNotFoundError:
+                pass
+
+    def _write_result(self, data: dict) -> None:
+        self._write_text("result.json", json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _record_identity(data: dict) -> dict:
+        record = dict(data)
+        launcher = dict(record.get("launcher") or {})
+        for name in ("terminal", "terminal_process_id", "host_platform", "terminal_cursor"):
+            launcher.pop(name, None)  # Orca may finish creating the terminal while the worker validates.
+        return dict(record, launcher=launcher)
+
+    def bind(self, data: dict) -> None:
+        if data.get("run_id") != self.id or data.get("task") != self.task:
+            raise _launch_invalid()
+        self._validated = data
+        self._prompt = self._read_bytes("prompt.md")
+        try:
+            self._prompt.decode("utf-8")
+        except UnicodeDecodeError:
+            raise _launch_invalid() from None
+
+    @property
+    def prompt_path(self) -> _WorkerPrompt:
+        return _WorkerPrompt(self)
 
 
 def _contained_path(state_dir: pathlib.Path, *parts: str) -> pathlib.Path:
