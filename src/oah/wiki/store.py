@@ -28,7 +28,7 @@ from oah.wiki.base import (EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettin
 JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
-RESOLVED = "resolved"  # resolved rollover journals, kept with a UTC time stamp in their name
+RESOLVED = "resolved-records"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
 
@@ -58,7 +58,7 @@ def _identity(path: pathlib.Path) -> tuple[int, int, int, int] | None:
 
 
 def _entry_key(entry: log_module.Entry) -> bytes:
-    """An entry's identity for duplicate and dropped-entry checks: its bytes, CRLF folded, trailing space dropped."""
+    """An entry's identity for duplicate checks: its bytes, CRLF folded, trailing space dropped."""
     return entry.data.replace(b"\r\n", b"\n").rstrip()
 
 
@@ -317,29 +317,61 @@ class Wiki:
                 return self._resolve(journal)
             folder = pathlib.Path(journal["wiki_dir"])
             log_path, archive_path = folder / journal["log"], folder / journal["archive"]
+            identity = _identity(log_path)
             log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
             others = self._digests(folder, skip=journal["archive"]) if folder.is_dir() else None
             original, replacement, archive = (journal["original_log"], journal["replacement_log"],
                                               journal["archive_bytes"])
-            if journal.get("phase") == "changed-after-publication":
+            if journal.get("phase") in ("changed-after-publication", "changed-during-recovery"):
                 differ = self._differing(log_path, archive_path, replacement, archive)
-                raise self._conflict(log_path, archive_path, f"{differ} changed right after rollover published them "
-                                     "(reason changed-after-publication)")
+                raise self._conflict(log_path, archive_path, f"{differ} require manual reconciliation "
+                                     f"(reason {journal['phase']})")
             if others == journal["archive_set"]:
                 if log_now == replacement and archive_now == archive:
+                    self._revalidate_recovery(journal, log_path, archive_path, replacement, archive, identity)
                     unlink_durable(self.journal_path)
                     return f"OAH_WIKI_RECOVERED already complete: {archive_path.name} and log.md match the journal"
                 if log_now == original and archive_now in (None, archive):
+                    self._revalidate_recovery(journal, log_path, archive_path, original, archive_now, identity)
                     if archive_now is None and not publish_new(archive_path, archive):
                         archive_now = read_bytes(archive_path)
                         if archive_now != archive:
-                            raise self._conflict(log_path, archive_path)
+                            self._capture_recovery_conflict(journal, log_path, archive_path)
                     fault("archive-published")
+                    self._revalidate_recovery(journal, log_path, archive_path, original, archive, identity)
                     write_text_atomic(log_path, replacement.decode("utf-8"))
+                    published = _identity(log_path)
                     fault("log-replaced")
+                    self._revalidate_recovery(journal, log_path, archive_path, replacement, archive, published)
                     unlink_durable(self.journal_path)
                     return f"OAH_WIKI_RECOVERED completed: published {archive_path.name} and replaced log.md"
             raise self._conflict(log_path, archive_path)
+
+    def _revalidate_recovery(self, journal: dict, log_path: pathlib.Path, archive_path: pathlib.Path,
+                             expected_log: bytes, expected_archive: bytes | None,
+                             identity: tuple[int, int, int, int] | None) -> None:
+        # Check archives first so the log read is immediately before its replacement or journal removal.
+        if (self._digests(log_path.parent, skip=archive_path.name) != journal["archive_set"]
+                or read_bytes(archive_path) != expected_archive or _identity(log_path) != identity
+                or read_bytes(log_path) != expected_log):
+            reason = "changed-during-recovery" if expected_archive is None else "changed-after-publication"
+            self._capture_recovery_conflict(journal, log_path, archive_path, reason=reason)
+
+    def _capture_recovery_conflict(self, journal: dict, log_path: pathlib.Path, archive_path: pathlib.Path,
+                                   *, reason: str = "changed-after-publication") -> None:
+        """Keep detected live bytes without changing any wiki file; explicit reconciliation is required."""
+        recorded = {key: _b64(value) if isinstance(value, bytes) else value for key, value in journal.items()}
+        recorded.update(phase=reason, reason=reason, detected_at=_now())
+        for key, path in (("current_log", log_path), ("current_archive", archive_path)):
+            data = read_bytes(path)
+            recorded.pop(key, None)
+            recorded.pop(f"{key}_sha256", None)
+            if data is not None:
+                recorded[key], recorded[f"{key}_sha256"] = _b64(data), _sha(data)
+        write_json_atomic(self.journal_path, recorded)
+        differ = self._differing(log_path, archive_path, journal["replacement_log"], journal["archive_bytes"])
+        raise self._conflict(log_path, archive_path, f"{differ} or the archive set changed during recovery; "
+                             "detected live bytes are recorded in the journal")
 
     def _conflict(self, log_path: pathlib.Path, archive_path: pathlib.Path, what: str = "") -> WikiError:
         what = what or (f"{log_path.name} or the archives ({archive_path.name} and its siblings) no longer match "
@@ -361,8 +393,10 @@ class Wiki:
             files["log.md"] = log_data
             files.update({name: data for name, data in self._archives(folder).values()})
             seen: dict[bytes, str] = {}
+            present: set[bytes] = set()
             for name, data in files.items():
                 for entry in log_module.parse_log(data, name).entries:
+                    present.add(entry.data)
                     key = _entry_key(entry)
                     if key in seen:
                         problems.append(f"'## {entry.date} {entry.title}' is in both {seen[key]} and {name}")
@@ -373,7 +407,7 @@ class Wiki:
             raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", "the wiki is not reconciled yet; nothing was changed. "
                             + "; ".join(problems[:10]) + (f" (and {len(problems) - 10} more)" if len(problems) > 10 else "")
                             + ". Fix these by hand, then run `oah wiki recover --resolved` again.", EXIT_ENVIRONMENT)
-        missing = self._dropped_entries(journal, set(seen))
+        missing = self._dropped_entries(journal, present)
         moment = datetime.datetime.now(datetime.timezone.utc)
         kept = self.state / RESOLVED / f"rollover-journal-{moment.strftime('%Y%m%dT%H%M%S.%fZ')}.json"
         kept.parent.mkdir(parents=True, exist_ok=True)
@@ -409,7 +443,7 @@ class Wiki:
                 missing.append(f"{key}: could not be parsed; inspect it in the kept journal")
                 continue
             for entry in entries:
-                entry_key = _entry_key(entry)
+                entry_key = entry.data
                 if entry_key not in present and entry_key not in listed:
                     listed.add(entry_key)
                     missing.append(f"'## {entry.date} {entry.title}' (journal {key}, line {entry.line})")
@@ -439,6 +473,7 @@ class Wiki:
         lines: list[str] = []
         with self.session():
             self._require("log.md", "index.md")
+            index_line = tasks.index_line(task, title, self.settings.index_line_limit) if "index" in steps else None
             archive: pathlib.Path | None = None
             if "log" in steps:
                 found = self._task_entries(task)
@@ -450,8 +485,7 @@ class Wiki:
                 data = index_path.read_bytes()
                 present = tasks.index_lines(data, task) > 0
                 if not present:
-                    line = tasks.index_line(task, title, self.settings.index_line_limit)
-                    write_text_atomic(index_path, notes.add_to_index(data, tasks.INDEX_LABEL, line).decode("utf-8"))
+                    write_text_atomic(index_path, notes.add_to_index(data, tasks.INDEX_LABEL, index_line).decode("utf-8"))
                 status["index"] = "present" if present else "added"
             if "rollover" in steps:
                 result = self._rollover(today, _no_fault)  # under the wiki lock, no lease needed
@@ -469,6 +503,7 @@ class Wiki:
 
     def _record(self, task: str, archive: pathlib.Path | None, status: dict[str, str]) -> dict:
         outputs = [self.dir / "log.md", self.dir / "index.md", *([archive] if archive else [])]
+        outputs.extend(self.dir / name for name, _ in self._task_entries(task) if self.dir / name not in outputs)
         record = {
             "version": 1, "task": task, "worktree": str(self.root.resolve()),
             "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -502,6 +537,11 @@ class Wiki:
             else:
                 check.record = records[-1]
                 outputs = check.record.get("outputs")
+                for name, _ in found:
+                    rel = self._rel(self.dir / name)
+                    if not isinstance(outputs, dict) or rel not in outputs:
+                        check.problems.append(f"OAH_WIKI_MAINTENANCE_STALE: {rel} has no recorded digest for "
+                                              f"task {task}; {hint} again")
                 for rel, digest in (outputs.items() if isinstance(outputs, dict) else []):
                     current = read_bytes(self.root / rel)
                     if current is None or _sha(current) != digest:

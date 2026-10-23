@@ -74,6 +74,28 @@ class MarkdownTest(unittest.TestCase):
         self.assertEqual([link.line for link in links], [1, 1, 1, 1, 1, 1, 3])
         self.assertTrue(links[1].embed)
 
+    def test_fences_in_containers_with_blank_lines(self):
+        cases = [
+            "> ~~~md\n> [[hidden]]\n>\n> [[also hidden]]\n> ~~~\n",
+            "> > ~~~\n> > [[hidden]]\n> > ~~~\n",
+            "- ~~~\n  [[hidden]]\n\n  [[also hidden]]\n  ~~~\n",
+            "1. item\n\n   ~~~md\n   [[hidden]]\n\n   [[also hidden]]\n   ~~~\n",
+            "- outer\n  - inner\n\n    ~~~\n    [[hidden]]\n\n    [[also hidden]]\n    ~~~\n",
+            "> - outer\n>   - ~~~\n>     [[hidden]]\n>\n>     [[also hidden]]\n>     ~~~\n",
+            "- > ~~~\n  > [[hidden]]\n  >\n  > ~~~\n",
+            "> - ```md\n>   [[hidden]]\n>\n>   [[also hidden]]\n>   ```\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                full = text + "\n[[real]]\n"
+                self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(full)],
+                                 [("real", full.splitlines().index("[[real]]") + 1)])
+
+    def test_unclosed_container_fence_ends_with_container(self):
+        for text in ("> ~~~\n> [[hidden]]\n", "- ~~~\n  [[hidden]]\n"):
+            with self.subTest(text=text):
+                self.assertEqual([link.target for link in markdown.wikilinks(text + "[[real]]\n")], ["real"])
+
 
 class FrontmatterTest(unittest.TestCase):
     def test_frontmatter_subset(self):
@@ -425,6 +447,62 @@ class MaintainTaskTest(unittest.TestCase):
         self.assertIn("log=present", result.lines[-1])
         self.assertEqual(self.task_entries("t1"), 1)
         self.assertTrue(self.verify(settings=settings).ok)
+
+    def test_retry_records_task_archive_after_rollover_or_recovery(self):
+        from tests.test_wiki_rollover import Crash, crash_at
+
+        settings = WikiSettings(rollover_trigger_bytes=1500, rollover_target_bytes=700)
+        for recovered in (False, True):
+            with self.subTest(recovered=recovered):
+                self.setUp()
+                self.assertEqual(self.maintain(log_body="original body", settings=settings).errors, [])
+                store = Wiki(self.repo, settings, self.state)
+                for i in range(20):
+                    store.log(f"filler {i}", body="f" * 60, today=TODAY)
+                if recovered:
+                    with self.assertRaises(Crash):
+                        store.rollover(today=TODAY, fault=crash_at("archive-published"))
+                    store.recover()
+                else:
+                    store.rollover(today=TODAY)
+                self.assertEqual(self.maintain(settings=settings).errors, [])
+                archive = next(p for p in self.wiki_dir.glob("log_archive_*.md")
+                               if b"oah-task: t1" in p.read_bytes())
+                rel = archive.relative_to(self.repo).as_posix()
+                self.assertIn(rel, self.records_for("t1")[-1]["outputs"])
+                self.assertTrue(self.verify(settings=settings).ok)
+                records = [json.loads(line) for line in self.records.read_text(encoding="utf-8").splitlines()]
+                del records[-1]["outputs"][rel]  # an older retry record may lack the task archive digest
+                self.records.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+                self.assertFalse(self.verify(settings=settings).ok)
+                self.assertEqual(self.maintain(settings=settings).errors, [])
+                archive.write_bytes(archive.read_bytes().replace(b"original body", b"modified body"))
+                check = self.verify(settings=settings)
+                self.assertFalse(check.ok)
+                self.assertTrue(any("OAH_WIKI_MAINTENANCE_STALE" in p and rel in p for p in check.problems))
+
+    def test_long_task_id_with_insufficient_index_limit_refuses_before_writes(self):
+        task = "t" * 64
+        settings = WikiSettings(index_line_limit=40)
+        before = {p: p.read_bytes() for p in self.wiki_dir.rglob("*") if p.is_file()}
+        for _ in range(2):
+            result = self.maintain(task, settings=settings)
+            self.assertTrue(result.errors)
+            self.assertIn("index_line_limit", result.errors[0])
+            self.assertEqual({p: p.read_bytes() for p in self.wiki_dir.rglob("*") if p.is_file()}, before)
+            self.assertFalse(self.records.exists())
+
+    def test_long_task_id_truncates_only_title(self):
+        task = "t" * 64
+        settings = WikiSettings(index_line_limit=80)
+        for _ in range(2):
+            self.assertEqual(self.maintain(task, settings=settings, log_title="한글 title " * 20).errors, [])
+        lines = (self.wiki_dir / "index.md").read_text(encoding="utf-8").splitlines()
+        task_lines = [line for line in lines if line.startswith(f"- task {task}:")]
+        self.assertEqual(len(task_lines), 1)
+        self.assertEqual(len(task_lines[0]), 80)
+        self.assertTrue(task_lines[0].endswith("…"))
+        self.assertTrue(self.verify(task, settings=settings).ok)
 
     def test_maintain_rolls_over_and_records_new_archive(self):
         for i in range(20):

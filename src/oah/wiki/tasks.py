@@ -45,8 +45,13 @@ def task_entries(task: str, log_data: bytes, archives: dict[str, bytes]) -> list
 
 def index_line(task: str, title: str, limit: int) -> str:
     plain = re.sub(r"[\[\]|]", "", title).strip()
-    line = f"- task {task}: {plain}"
-    return line if len(line) <= limit else line[:max(limit - 1, 0)].rstrip() + "…"
+    prefix = f"- task {task}: "
+    if limit < len(prefix) + 1:
+        raise WikiError("OAH_CONFIG_INVALID", f"[wiki] index_line_limit={limit} cannot hold task {task!r}. "
+                        f"Set index_line_limit to at least {len(prefix) + 1} in .oah/config.toml and retry.")
+    room = limit - len(prefix)
+    title = plain if len(plain) <= room else plain[:room - 1].rstrip() + "…"
+    return prefix + title
 
 
 def index_lines(index_data: bytes, task: str) -> int:

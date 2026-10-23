@@ -39,6 +39,24 @@ class RulesTest(unittest.TestCase):
         self.assertTrue(data.endswith(END.encode() + b"\n"))
         self.assertEqual(self.claude.read_bytes(), b"@AGENTS.md\n")
 
+    def test_local_reserved_markers_refuse_before_either_write(self):
+        local = self.root / ".oah" / "rules.local.md"
+        local.parent.mkdir()
+        for existing in (False, True):
+            if existing:
+                rules.sync(self.root)
+            for marker in (BEGIN, END, "<!-- OAH:RULES:BEGIN v2 -->", "<!-- OAH:RULES:END"):
+                with self.subTest(existing=existing, marker=marker):
+                    local.write_bytes(f"Project rule.\r\n{marker}  \r\n".encode("utf-8"))
+                    before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+                    with self.assertRaises(RulesError) as ctx:
+                        rules.sync(self.root)
+                    self.assertIn("OAH_RULES_MARKER", ctx.exception.code)
+                    self.assertIn("rules.local.md", str(ctx.exception))
+                    self.assertTrue(rules.check(self.root))
+                    self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}, before)
+            local.write_text("Project rule.\n", encoding="utf-8")
+
     def test_append_when_absent_keeps_bytes(self):
         original = b"# My agents\r\n\r\nUse tabs.\r\nno final newline"
         self.agents.write_bytes(original)

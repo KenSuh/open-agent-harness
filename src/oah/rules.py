@@ -54,6 +54,9 @@ def render_block(lang: str, local: str, eol: str) -> str:
     lines = [BEGIN, f"<!-- oah rules lang={lang}; managed by `oah rules sync`. Put project rules in "
              f"{LOCAL_RULES}, not here. -->", *packaged("rules", f"block.{lang}.md").rstrip("\n").split("\n")]
     local = local.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if any(line.rstrip().startswith("<!-- OAH:RULES:") for line in local.split("\n")):
+        raise RulesError("OAH_RULES_MARKER_BROKEN", f"{LOCAL_RULES} contains a reserved rules marker line. "
+                         "Remove that marker, then run `oah rules sync` again. Nothing was written.")
     if local.strip():
         lines += ["", f"### Project rules ({LOCAL_RULES})", "", *local.split("\n")]
     lines.append(END)
@@ -138,6 +141,7 @@ def plan(root: pathlib.Path, *, lang: str | None = None) -> Plan:
             block = render_block(lang, local, eol)
             tail = lines[end][len(strip_eol(lines[end])):]
             after = ("".join(lines[:begin]) + block + tail + "".join(lines[end + 1:])).encode("utf-8")
+    find_block(_decode(after, "AGENTS.md"))
     size = len(block.encode("utf-8"))
     if size >= BLOCK_LIMIT:
         raise RulesError("OAH_RULES_BLOCK_TOO_LARGE", f"the managed block would be {size} bytes, over the "

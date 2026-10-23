@@ -8,7 +8,7 @@ import pathlib
 import unittest
 
 from oah import graph, graph_cli
-from oah.cli import _command_table, command_modules, main
+from oah.cli import _command_table, build_parser, command_modules, main
 from tests.helpers import make_git_repo, make_tmp_dir, write_posix_tool
 
 FAKE = 'printf "cwd=%s\\n" "$PWD"; for a in "$@"; do printf "arg=%s\\n" "$a"; done; echo "to stderr" >&2; exit ${FAKE_EXIT:-0}'
@@ -84,6 +84,21 @@ class GraphTest(unittest.TestCase):
         self.assertEqual((code, out.splitlines()[1:]), (0, ["arg=update", "arg=."]))
         code, out, _ = run_cli(self.repo, tools, "graph", "update", "src", "--no-cluster")
         self.assertEqual(out.splitlines()[1:], ["arg=update", "arg=src", "arg=--no-cluster"])
+
+    def test_leading_options_preserve_all_arguments(self):
+        extra = ["--no-cluster", "--budget=50", "src with spaces", "--", "한글", "$(x)"]
+        for command in ("update", "query", "path", "explain"):
+            with self.subTest(command=command):
+                args = build_parser().parse_args(["graph", command, *extra])
+                self.assertEqual(args.args, extra)
+
+    @unittest.skipIf(os.name == "nt", "the fake graphify is a POSIX shell script")
+    def test_leading_options_reach_graphify(self):
+        tools = make_tmp_dir(self)
+        write_posix_tool(tools, "graphify", FAKE)
+        code, out, err = run_cli(self.repo, tools, "graph", "update", "--no-cluster", "src with spaces")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines()[1:], ["arg=update", "arg=--no-cluster", "arg=src with spaces"])
 
     def test_report_reads_graph_report(self):
         tools = make_tmp_dir(self)

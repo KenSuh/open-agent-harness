@@ -20,12 +20,25 @@ HELP = {
 }
 
 
+class _GraphParser(argparse.ArgumentParser):
+    """Pass-through commands own their entire argv, including leading options and `--`."""
+
+    def parse_known_args(self, args=None, namespace=None):
+        if self.get_default("graph_command") in SUBCOMMANDS[:-1]:
+            namespace = namespace if namespace is not None else argparse.Namespace()
+            namespace.args = list(sys.argv[1:] if args is None else args)
+            return namespace, []
+        return super().parse_known_args(args, namespace)
+
+
 def register(commands: argparse._SubParsersAction) -> None:
     graph = commands.add_parser("graph", help="use the graphify knowledge graph when graphify is installed")
-    sub = graph.add_subparsers(dest="graph_command", metavar="<graph command>", required=True)
+    sub = graph.add_subparsers(dest="graph_command", metavar="<graph command>", required=True,
+                              parser_class=_GraphParser)
     for name in SUBCOMMANDS:
         command = sub.add_parser(name, help=HELP[name])
         if name != "report":
+            command.set_defaults(graph_command=name)
             command.add_argument("args", nargs=argparse.REMAINDER, help="passed to graphify unchanged")
 
 

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 _FENCE_OPEN = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 _LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
+_LIST_PREFIX = re.compile(r"^( {0,3}(?:[-*+]|\d{1,9}[.)]))( +|$)")
+_QUOTE_PREFIX = re.compile(r"^ {0,3}> ?")
 _WIKILINK = re.compile(r"(!?)\[\[([^\[\]\n]*)\]\]")
 _TICKS = re.compile(r"`+")
 
@@ -40,13 +42,48 @@ class FenceTracker:
     def __init__(self) -> None:
         self._char = ""
         self._length = 0
+        self._containers: list[tuple[str, int]] = []
 
     @property
     def open(self) -> bool:
         return bool(self._char)
 
     def feed(self, line: str) -> bool:
-        line = strip_eol(line)
+        line = strip_eol(line).expandtabs(4)
+        # Consume established container prefixes before interpreting fences. Blank lines may
+        # continue a list without indentation; blockquotes still require their `>` prefix.
+        matched = 0
+        for kind, width in self._containers:
+            if kind == "quote":
+                quote = _QUOTE_PREFIX.match(line)
+                if quote is None:
+                    break
+                line = line[quote.end():]
+            elif not line.strip():
+                line = ""
+            elif line.startswith(" " * width):
+                line = line[width:]
+            else:
+                break
+            matched += 1
+        if matched < len(self._containers):
+            self._containers = self._containers[:matched]
+            self._char, self._length = "", 0  # a fence ends when its container ends
+        if not self._char:
+            while True:
+                quote = _QUOTE_PREFIX.match(line)
+                item = _LIST_PREFIX.match(line)
+                if quote:
+                    self._containers.append(("quote", 0))
+                    line = line[quote.end():]
+                elif item:
+                    # More than four spaces after a marker mean one prefix space plus code indent.
+                    padding = len(item.group(2))
+                    width = len(item.group(1)) + (padding if 1 <= padding <= 4 else 1)
+                    self._containers.append(("list", width))
+                    line = line[width:]
+                else:
+                    break
         if self._char:
             stripped = line.lstrip(" ")
             indent = len(line) - len(stripped)

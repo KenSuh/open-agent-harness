@@ -6,6 +6,7 @@ import datetime
 import json
 import pathlib
 import unittest
+from unittest import mock
 
 from oah import wiki as wiki_pkg
 from oah.wiki import log
@@ -384,6 +385,84 @@ class RecoveryTest(unittest.TestCase):
             self.assertEqual(w.recover(), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
             self.assertEqual(snapshot(folder), after)
 
+    def test_recovery_revalidates_before_archive_publication(self):
+        w, folder, _ = self.crashed("validated")
+        path = folder / "log.md"
+        late = path.read_bytes() + HardeningTest.APPEND
+        digests = w._digests
+
+        def editor(*args, **kwargs):
+            result = digests(*args, **kwargs)
+            path.write_bytes(late)  # after recovery's first log snapshot
+            return result
+
+        with mock.patch.object(w, "_digests", side_effect=editor):
+            with self.assertRaises(WikiError) as ctx:
+                w.recover()
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertEqual(path.read_bytes(), late)
+        self.assertFalse((folder / "log_archive_01.md").exists())
+        journal = json.loads(w.journal_path.read_text(encoding="utf-8"))
+        self.assertEqual(base64.b64decode(journal["current_log"]), late)
+
+    def test_recovery_concurrent_edits_preserve_live_bytes_and_journal(self):
+        cases = [("archive-published", "log.md", "append"),
+                 ("archive-published", "log_archive_01.md", "append"),
+                 ("archive-published", "log_archive_01.md", "delete"),
+                 ("log-replaced", "log.md", "append"),
+                 ("log-replaced", "log_archive_01.md", "append"),
+                 ("log-replaced", "log_archive_01.md", "delete")]
+        for step, name, action in cases:
+            with self.subTest(step=step, name=name, action=action):
+                w, folder, _ = self.crashed("validated")
+                live = {}
+
+                def editor(current):
+                    if current == step:
+                        path = folder / name
+                        if action == "delete":
+                            path.unlink()
+                        else:
+                            path.write_bytes(path.read_bytes() + HardeningTest.APPEND)
+                        live.update(snapshot(folder))
+
+                with self.assertRaises(WikiError) as ctx:
+                    w.recover(fault=editor)
+                self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+                self.assertIn(name, str(ctx.exception))
+                self.assertIn(str(w.journal_path), str(ctx.exception))
+                self.assertEqual(snapshot(folder), live)
+                journal = json.loads(w.journal_path.read_text(encoding="utf-8"))
+                self.assertEqual(base64.b64decode(journal["current_log"]), (folder / "log.md").read_bytes())
+                if (folder / "log_archive_01.md").exists():
+                    self.assertEqual(base64.b64decode(journal["current_archive"]),
+                                     (folder / "log_archive_01.md").read_bytes())
+                before = snapshot(folder, w.state)
+                with self.assertRaises(WikiError):
+                    w.recover()
+                self.assertEqual(snapshot(folder, w.state), before)
+
+    def test_already_complete_recovery_rechecks_before_clearing_journal(self):
+        w, folder, _ = self.crashed("log-replaced")
+        path = folder / "log_archive_01.md"
+        digests = w._digests
+        calls = 0
+
+        def editor(*args, **kwargs):
+            nonlocal calls
+            result = digests(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                path.unlink()
+            return result
+
+        with mock.patch.object(w, "_digests", side_effect=editor):
+            with self.assertRaises(WikiError) as ctx:
+                w.recover()
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertFalse(path.exists())
+        self.assertTrue(w.journal_path.exists())
+
     def test_recover_conflict_preserves_everything(self):
         def edit_log(folder):
             (folder / "log.md").write_bytes((folder / "log.md").read_bytes() + b"edited\n")
@@ -649,7 +728,7 @@ class HardeningTest(unittest.TestCase):
         self.assertEqual(sorted(record["files"]), ["log.md", "log_archive_01.md"])
         self.assertTrue(self.w.log("works again", today=TODAY).title == "works again")
         self.assertEqual(self.w.recover(resolved=True), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
-        self.assertEqual(len(list((self.w.state / "resolved").glob("*.json"))), 1)
+        self.assertEqual(len(list((self.w.state / "resolved-records").glob("*.json"))), 1)
 
     def test_resolved_lists_a_dropped_entry_and_keeps_it_recoverable(self):
         self.assert_recorded_not_touched(self.append_after_publication, "log.md")
@@ -662,7 +741,7 @@ class HardeningTest(unittest.TestCase):
         for entry in moved:
             self.assertIn(f"'## {entry.date} {entry.title}'", line)
         self.assertFalse(self.w.journal_path.exists())
-        [kept] = list((self.w.state / "resolved").glob("rollover-journal-*.json"))
+        [kept] = list((self.w.state / "resolved-records").glob("rollover-journal-*.json"))
         self.assertRegex(kept.name, r"^rollover-journal-\d{8}T\d{6}\.\d{6}Z\.json$")
         self.assertEqual(kept.read_bytes(), journal_bytes)  # moved, never rewritten or deleted
         original = base64.b64decode(json.loads(kept.read_text(encoding="utf-8"))["original_log"])
@@ -672,6 +751,41 @@ class HardeningTest(unittest.TestCase):
             encoding="utf-8").splitlines()]
         self.assertEqual(record["resolved_journal"], str(kept))
         self.assertEqual(len(record["dropped_entries"]), len(moved))
+
+    def test_resolved_reports_exact_byte_changes_as_dropped(self):
+        for change in ("crlf", "trailing whitespace"):
+            with self.subTest(change=change):
+                original_entry = entry(1, eol=b"\r\n")
+                original = make_log([original_entry], eol=b"\r\n")
+                w, folder = make_store(self, original, rollover_trigger_bytes=1, rollover_target_bytes=1)
+                # Reconcile a real pending journal with an entry that differs only in its exact bytes.
+                (folder / "log.md").write_bytes(make_log([entry(2, 700), original_entry]))
+                with self.assertRaises(Crash):
+                    w.rollover(today=TODAY, fault=crash_at("archive-published"))
+                journal = json.loads(w.journal_path.read_text(encoding="utf-8"))
+                replacement = base64.b64decode(journal["replacement_log"])
+                archive_path = folder / journal["archive"]
+                if change == "crlf":
+                    altered = original_entry.replace(b"\r\n", b"\n")
+                else:
+                    altered = original_entry + b" \t\r\n"
+                archive_path.write_bytes(archive_path.read_bytes().replace(original_entry, altered))
+                (folder / "log.md").write_bytes(replacement)
+                journal_bytes = w.journal_path.read_bytes()
+                result = w.recover(resolved=True)
+                self.assertIn("OAH_WIKI_RECOVERY_DROPPED 1 entries", result)
+                [kept] = (w.state / "resolved-records").glob("*.json")
+                self.assertEqual(kept.read_bytes(), journal_bytes)
+
+    def test_dropped_report_deduplicates_exact_bytes_only(self):
+        first = entry(1)
+        second = first.replace(b"\n", b"\r\n")
+        journal = {"archive": "log_archive_01.md", "original_log": make_log([first]),
+                   "archive_bytes": make_log([first]), "current_log": make_log([second])}
+        missing = self.w._dropped_entries(journal, set())
+        self.assertEqual(len(missing), 2)
+        self.assertIn("original_log", missing[0])
+        self.assertIn("current_log", missing[1])
 
     def test_resolved_refuses_while_an_entry_is_duplicated(self):
         self.assert_recorded_not_touched(self.append_after_publication, "log.md")
