@@ -95,10 +95,13 @@ class Tool:
     sign_in: SignIn | None = None
     note: Mapping[str, str] = field(default_factory=dict)  # per OS, shown with the question
     required_for_gates: bool = False  # `oah doctor` counts it as required in a project that uses gates
+    optional: bool = False  # an optional companion app (A20), listed as "optional" rather than "recommended"
 
     @property
     def requirement(self) -> str:
-        return "required" if self.required else "recommended"
+        if self.required:
+            return "required"
+        return "optional" if self.optional else "recommended"
 
     def url_for(self, os_name: str) -> str:
         return self.os_url.get(os_name, self.url)
@@ -112,7 +115,9 @@ def _tool(name: str, required: bool, purpose: str, *, macos: tuple[Argv, ...], w
 
 
 def catalog() -> list[Tool]:
-    """Every required and recommended tool, in display order."""
+    """Every required and recommended tool, then the optional companion apps, in display order."""
+    from oah.setup.companions import companion_tools  # imported here: companions imports this module
+
     return [
         _tool("git", True, "version control",
               macos=(("brew", "install", "git"), ("xcode-select", "--install")),
@@ -165,7 +170,7 @@ def catalog() -> list[Tool]:
         _tool("rg", False, "fast code search (ripgrep)",
               macos=(("brew", "install", "ripgrep"),), windows=(("winget", "install", "BurntSushi.ripgrep.MSVC"),),
               url=URL_RG),
-    ]
+    ] + companion_tools()
 
 
 def os_name_for(platform: str) -> str:
