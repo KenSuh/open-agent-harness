@@ -1140,7 +1140,7 @@ phase is planned, and is dropped only with a recorded reason.
 |---|---|---|
 | C1 | Only implementation and correction briefs carry the exact lease command (`oah start --packet <source>`, with the id, revision and digest it will bind). Review briefs never carry it. A test follows the delivered command and expects `oah intent show` to report `current`. | P3, P4, P6 |
 | C2 | Briefs have one fixed layout: worker line, preamble, the intent section verbatim, round instructions, the verify footer (the verify-what-changed rule, 5.11), then the intent footer. A test that compares a brief with an older baseline strips exactly one intent footer at that position, and fails when the footer is missing or duplicated. | P3, P6 |
-| C3 | A dispatch that reuses a stored brief or spec, and so cannot append footers, prints `OAH_FOOTER_NOT_APPENDED` with the footer text to send separately. It never skips the footer silently. | P3 |
+| C3 | A dispatch that reuses a stored brief or spec constructs a delivered brief containing the canonical intent footer. If it cannot deliver that brief, it refuses dispatch with `OAH_FOOTER_NOT_APPENDED`. | P3 |
 | C4 | A footer counts as present only when its opening marker is a whole line at line start. A brief that merely mentions the marker still gets the footer. Tier sync uses the same rule for its managed block. | P3, P7 |
 | C5 | No current document claims a fixed effort cap, such as "max is rejected". Docs written in P9, and later edits, follow the supported-effort rule (A1). | P9 |
 | C6 | Any future skill-selection text describes the actual selection (by kind, stage, risk and availability) and never promises zero optional skills. | later |
@@ -1149,7 +1149,7 @@ phase is planned, and is dropped only with a recorded reason.
 - **P3:**
   - [ ] Implementation and correction briefs carry the exact lease command; review briefs do not. (C1)
   - [ ] Briefs use the fixed layout. (C2)
-  - [ ] Reusing a stored spec prints `OAH_FOOTER_NOT_APPENDED` with the footer to send separately. (C3)
+  - [ ] Reusing a stored brief or spec delivers a brief containing the canonical intent footer, or refuses dispatch with `OAH_FOOTER_NOT_APPENDED` if it cannot. (C3)
   - [ ] Footer presence means a marker line at line start. (C4)
 - **P4:**
   - [ ] A test runs the delivered lease command and gets `current` from `oah intent show`. (C1)
@@ -1160,3 +1160,5 @@ phase is planned, and is dropped only with a recorded reason.
   - [ ] Tier sync detects its managed block by a marker line at line start. (C4)
 - **P9:**
   - [ ] No document claims a fixed effort cap. (C5)
+- **Later:**
+  - [ ] Skill-selection text describes the actual selection by kind, stage, risk and availability, and never promises zero optional skills. (C6)
