@@ -48,7 +48,7 @@ def make_repo(test: unittest.TestCase) -> pathlib.Path:
     return repo
 
 
-def commit(repo: pathlib.Path, files: dict[str, str | None], message: str = "change",
+def commit(repo: pathlib.Path, files: dict[str, str | bytes | None], message: str = "change",
            email: str = NOREPLY) -> None:
     for name, content in files.items():
         path = repo / name
@@ -56,7 +56,10 @@ def commit(repo: pathlib.Path, files: dict[str, str | None], message: str = "cha
             path.unlink()
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", message, email=email)
 
@@ -139,6 +142,53 @@ class PrivacyScanTest(unittest.TestCase):
         code, out, _ = self.run_scan(repo)
         self.assertEqual(code, 1)
         self.assertEqual(out.count("PRIVACY_HIT env-secret"), 1, out)
+
+    def test_env_secret_assignment_with_punctuation(self):
+        password = "ab!cd@12" + "#ef$gh56"
+        for value in (password, "a'b" + password, 'a"b' + password,
+                      "'" + password + "'", '"' + password + '"',
+                      "'ab cd! " + password + "'", "$" + password,
+                      "ab<cd>" + password):
+            with self.subTest(value=value):
+                assignment = "PASS" + "WORD=" + value
+                self.assertIn(("env-secret", 1, assignment), self.scanner.scan_text(assignment, []))
+
+    def test_env_secret_assignment_placeholders_are_allowed(self):
+        for value in ("${{ secrets.CREDENTIAL }}", "$CREDENTIAL_VALUE", "${CREDENTIAL_VALUE}",
+                      "<placeholder>", "short!p@ss", "short!p@ss!"):
+            for quote in ("", "'", '"'):
+                with self.subTest(value=value, quote=quote):
+                    assignment = "PASS" + "WORD=" + quote + value + quote
+                    self.assertEqual(self.scanner.scan_text(assignment, []), [])
+
+    def test_utf16_secret_at_head(self):
+        for encoding, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+            with self.subTest(encoding=encoding):
+                repo = make_repo(self)
+                content = bom + ("note\r\n" + ENV_ASSIGNMENT + "\r\n").encode(encoding)
+                commit(repo, {"env.txt": content})
+                code, out, _ = self.run_scan(repo)
+                self.assertEqual(code, 1, out)
+                self.assertIn("PRIVACY_HIT env-secret env.txt:2", out)
+                self.assertEqual(out.count("PRIVACY_HIT env-secret"), 1, out)
+
+    def test_utf16_secret_removed_later_still_found_in_history(self):
+        for encoding, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+            for replacement in (None, "clean\n"):
+                with self.subTest(encoding=encoding, replacement=replacement):
+                    repo = make_repo(self)
+                    content = bom + (ENV_ASSIGNMENT + "\r\n").encode(encoding)
+                    commit(repo, {"env.txt": content})
+                    secret_sha = subprocess.check_output(
+                        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+                    commit(repo, {"env.txt": replacement})
+                    code, out, _ = self.run_scan(repo)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f"PRIVACY_HIT env-secret commit {secret_sha[:12]} env.txt", out)
+                    self.assertEqual(out.count("PRIVACY_HIT env-secret"), 1, out)
+
+    def test_binary_without_utf16_bom_is_skipped(self):
+        self.assertIsNone(self.scanner._decode(b"\0" + ENV_ASSIGNMENT.encode("utf-8")))
 
     def test_terms_word_and_substr(self):
         repo = make_repo(self)

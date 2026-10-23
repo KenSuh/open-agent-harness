@@ -36,7 +36,10 @@ CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("key", re.compile(r"(?<![A-Za-z0-9])AK" + "IA" + r"[0-9A-Z]{16}(?![A-Za-z0-9])")),
     ("key", re.compile(r"-----BEGIN [A-Z ]*PRIV" + "ATE " + r"KEY-----")),
     ("env-secret", re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9_]*)?(?:K" + "EY|T" + "OKEN|SEC" + "RET|PASS" + "WORD)"
-                              + r"(?![A-Za-z0-9_])\s*[:=]\s*['\"]?[A-Za-z0-9/+_.=-]{12,}")),
+                              + r"(?![A-Za-z0-9_])\s*[:=]\s*"
+                              + r"(?!['\"]?(?:\$\{\{|\$\{[A-Za-z_][A-Za-z0-9_]*\}|"
+                              + r"\$[A-Za-z_][A-Za-z0-9_]*(?=['\"\s]|$)|<))"
+                              + r"(?:'[^'\r\n]{12,}'|\"[^\"\r\n]{12,}\"|(?!['\"])\S{12,})")),
     ("keychain", re.compile(r"secu" + r"rity\s+find-(?:generic|internet)-password")),
 ]
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -44,6 +47,7 @@ ALLOWED_EMAILS = {"noreply@github.com", "noreply@anthropic.com", "git@github.com
 ALLOWED_EMAIL_DOMAINS = ("users.noreply.github.com", "example.com", "example.org", "example.net")
 ALLOWED_EMAIL_TLDS = (".example", ".test", ".invalid", ".localhost")
 IDENTITY = re.compile(r"^(?:\d+\+)?[A-Za-z0-9-]+@users\.noreply\.github\.com$")
+UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
 
 class ScanError(Exception):
@@ -135,6 +139,8 @@ def _git(repo: pathlib.Path, git: str, *args: str) -> bytes:
 
 
 def _decode(data: bytes) -> str | None:
+    if data.startswith(UTF16_BOMS):
+        return data.decode("utf-16", errors="replace")
     if b"\0" in data[:8000]:
         return None  # binary
     return data.decode("utf-8", errors="replace")
@@ -166,6 +172,30 @@ def scan_repo(repo: pathlib.Path, git: str, terms: list[Term]) -> tuple[list[Hit
             path = line[6:] if line.startswith("+++ b/") else ""
         elif line.startswith("+") and path:
             for rule, _, value in scan_text(line[1:], terms):
+                if (path, rule, value) not in seen:
+                    seen.add((path, rule, value))
+                    hits.append(Hit(rule, f"commit {commit} {path}", path, value))
+
+    # Git omits UTF-16 contents from patches as binary. Read changed blobs as well,
+    # including root and merge commits, so deleted or replaced versions remain visible.
+    changes = _git(repo, git, "log", "--raw", "-z", "-m", "--no-abbrev", "--no-renames",
+                   "--format=%x00commit %H", "HEAD").decode("utf-8", errors="replace")
+    records = iter(changes.split("\0"))
+    checked: set[tuple[str, str]] = set()
+    for record in records:
+        record = record.lstrip("\n")
+        if record.startswith("commit "):
+            commit = record[len("commit "):][:12]
+        elif record.startswith(":"):
+            _, mode, _, blob, status = record.split()
+            path = next(records)
+            if status == "D" or mode == "160000" or (path, blob) in checked:
+                continue
+            checked.add((path, blob))
+            data = _git(repo, git, "cat-file", "blob", blob)
+            if not data.startswith(UTF16_BOMS):
+                continue
+            for rule, _, value in scan_text(_decode(data), terms):
                 if (path, rule, value) not in seen:
                     seen.add((path, rule, value))
                     hits.append(Hit(rule, f"commit {commit} {path}", path, value))

@@ -164,6 +164,42 @@ class ResolveTest(unittest.TestCase):
             self.assertEqual(proc_module._find_command("codex", search, platform="win32"),
                              str(first / "codex.cmd"))
 
+    def test_windows_lookup_accepts_quoted_absolute_path_entries(self):
+        work = make_tmp_dir(self)
+        installed = work / "Program Files" / "Tool"
+        installed.mkdir(parents=True)
+        tool = installed / "git.exe"
+        tool.write_bytes(b"")
+        with contextlib.chdir(work), patch.dict(os.environ, PATHEXT=".exe"):
+            search = ';'.join(('"."', '"Program Files/Tool"', '"' + str(installed) + '"'))
+            self.assertEqual(proc_module._find_command("git", search, platform="win32"), str(tool))
+            self.assertIsNone(proc_module._find_command("git", '"Program Files/Tool"', platform="win32"))
+            self.assertIsNone(proc_module._find_command("git", '"' + str(installed), platform="win32"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows quoted PATH behaviour")
+    def test_windows_resolve_quoted_absolute_path_entry(self):
+        installed = make_tmp_dir(self) / "Program Files" / "Tool"
+        installed.mkdir(parents=True)
+        tool = installed / "git.exe"
+        tool.write_bytes(b"")
+        resolved = resolve_command("git", search_path='"' + str(installed) + '"')
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.source, str(tool))
+        self.assertEqual(resolved.argv, (str(tool),))
+
+    def test_windows_lookup_preserves_on_disk_filename_case(self):
+        installed = make_tmp_dir(self)
+        native, shim = installed / "Git.eXe", installed / "git.CmD"
+        native.write_bytes(b"")
+        shim.write_bytes(b"")
+        (installed / "git.COM").mkdir()  # A directory must not shadow an executable.
+        with patch.dict(os.environ, PATHEXT=".COM;.EXE;.CMD"):
+            self.assertEqual(proc_module._find_command("git", str(installed), platform="win32"), str(native))
+            self.assertEqual(proc_module._find_command("GIT.EXE", str(installed), platform="win32"), str(native))
+            self.assertEqual(proc_module._find_command(str(native), str(installed), platform="win32"), str(native))
+            native.unlink()
+            self.assertEqual(proc_module._find_command("git", str(installed), platform="win32"), str(shim))
+
     def test_npm_node_lookup_ignores_current_directory(self):
         work = make_tmp_dir(self)
         untrusted = work / "untrusted"

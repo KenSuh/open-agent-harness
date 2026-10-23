@@ -75,13 +75,19 @@ def _find_command(name: str, search_path: str | None, *, platform: str) -> str |
         name + ext for ext in extensions
     ]
     for entry in path.split(";"):
+        if entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
         directory = pathlib.Path(entry)
         if not directory.is_absolute():
             continue
         for filename in names:
             candidate = directory / filename
-            if candidate.is_file():
-                return str(candidate)
+            try:
+                for item in candidate.parent.iterdir():
+                    if item.name.lower() == candidate.name.lower() and item.is_file():
+                        return str(item)
+            except OSError:
+                continue
     return None
 
 
