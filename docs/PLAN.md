@@ -1,6 +1,6 @@
 # open-agent-harness — Phase 0 plan
 
-Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendment 1 (2026-10-23) in section 15.
+Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendments 1–3 (2026-10-23) in section 15 · intent revision 2 in section 1.
 
 This plan turns a private, single-owner multi-agent harness (called "the source" below) into a
 general-purpose kit that one person can install on macOS or Windows and use on their own repository.
@@ -11,16 +11,55 @@ Section 13 separates what the owner decided from what the builder decided.
 
 ## 1. Intent
 
-**Problem.** Claude Code and Codex CLI are strong alone, but a person who uses both on one repository has
-no shared memory between them. The tools don't know who is editing what. "Done" is whatever the agent
-says. Reviews have no budget, no proof that the reviewer read the code, and no honest label when an
-engine reviews its own work. Project knowledge evaporates between sessions. The source harness solved
-these for its owner, but it is welded to one machine, one product and one person's tool choices.
+<!-- OAH_INTENT:BEGIN -->
+## Intent
+Intent-ID: open-agent-harness
+Revision: 2
+Status: accepted
+### Problem
+A beginner who starts programming with AI gets two strong tools, Claude Code and Codex CLI. They get none of the working environment that makes the two reliable together:
+- shared leases;
+- stage routing;
+- evidence gates;
+- bounded reviews with honest labels;
+- a project memory;
+- an impact map;
+- skills and models that stay current.
 
-**Desired outcome.** A beginner on a Mac or a Windows 11 PC follows the README and runs one install
-script. They run `oah init` in their project and then finish the worked example end to end:
-packet → preflight → lease → implement (Claude) → gates → review (Codex) → fix (Codex) → re-review →
-finish → pull request. They edit nothing by hand except their own settings and their task text.
+The owner built that environment by hand for one machine; a beginner cannot.
+### Desired outcome
+On macOS or Windows, one install command and `oah init` build and run that environment for the beginner automatically, the same way the owner's harness works:
+- Claude Code implements first.
+- Codex reviews, corrects and re-reviews.
+- The wiki, impact map, gates and hooks are created and kept current.
+- Models and skills follow upstream updates.
+
+Nothing paid or irreversible happens without the user's explicit confirmation.
+### Success conditions
+- AC1: On a fresh macOS 13+ or Windows 11 machine, one command from the README installs `oah`, and `oah --version` prints the version in a new terminal.
+- AC2: In a new or existing project, `oah init` lists every missing tool with its official install command and installs only the tools the user confirms. It gets the user signed in to Claude Code and Codex through those tools' own login commands, and `oah` never sees a password, key or token.
+- AC3: After `oah init`, the project has the rules block, tier agents, an Obsidian-compatible wiki, a fresh impact map, gate templates and the hooks the user accepted.
+  - The defaults match the owner's workflow: Claude initial implementation, then Codex review, correction and re-review.
+  - While work continues, the impact map and the wiki stay fresh automatically. They refresh on commit, merge and task steps, and their log, index and hygiene are maintained.
+- AC4: Following the guided first task in `examples/hello-oah`, the beginner sees the whole loop finish: packet, preflight, lease, Claude implementation, gates, Codex review and fix, re-review, finish. Every step's result is explained in plain Korean or English.
+- AC5: When an engine ships a newer model, or a bundled or linked skill updates upstream, the next task uses it without manual steps. `oah` shows what changed, when and why. A model or skill the user pinned is never changed silently.
+- AC6: Every decision prompt says what will happen and what it costs. Nothing paid or irreversible happens without the user's explicit confirmation: purchases, account changes, pushes, merges and global file edits.
+- AC7: The repository holds no private data from the owner's harness and no credentials of any kind (API keys, tokens, passwords), enforced by the scans of A17. Every bundled third-party item shows its source, version and license.
+### Constraints
+- macOS 13+ and Windows 11 natively (Windows 10 22H2 best effort), and Python 3.11+ with the standard library only (section 3).
+- The owner's private harness is never a runtime dependency. `oah` follows it through fresh ports (A16).
+- Third-party pieces are linked, depended on, or vendored only where their license permits it (A13).
+### Non-goals
+- Teams, servers, a web UI or remote telemetry.
+- Linux as a supported OS. It may work, but it is not tested.
+### Open questions
+- None.
+<!-- OAH_INTENT:END -->
+
+**Revisions.** Revision 1 is the section 1 text the owner approved with this plan (PR #1). Revision 2
+(2026-10-23) follows the owner's product vision, quoted verbatim: «우리 하네스를 그대로 초보 사용자가 본인 처음 AI를
+통해 프로그래밍 할 때 자동으로 본인 하네스 환경이 우리 환경 처럼 구축되고 진행되도록 하는 깃 오픈 소스를 만들고 싶은거야».
+AC3 and AC7 carry the two additions recommended with the acceptance.
 
 **GitHub is optional.** The worked example runs fully local in a fresh `git init` repository. A push and a
 PR are the optional last step: `oah` prints the `gh pr create` command when `gh` and a remote exist,
@@ -30,8 +69,8 @@ and `oah review summary` prints the PR body.
 final scan. The install docs cover a clone (works now) and the git URL (after it is public). Publishing
 to PyPI is a later owner decision.
 
-**Who it serves.** One person with one repository and at least one of Claude Code or Codex, ideally both.
-Not teams, not servers.
+**Who it serves.** One person with one repository, beginners first. It needs at least one of Claude Code
+or Codex, ideally both. It is not for teams or servers.
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -44,12 +83,14 @@ Not teams, not servers.
 - Preflight before work starts.
 - A per-project knowledge wiki, a graph (graphify) and a code impact map.
 - Reviewer trust ideas that generalize: round budget, canary, sanitized snapshot, honest independence label.
+- Beginner onboarding that builds this environment automatically (6.5).
+- Skills and models that are selected, updated and used automatically (A9, A10, A14, A15).
 
 **Non-goals for v1.**
 - Linux as a supported OS. It will probably work, but it is not tested.
 - WSL as a requirement.
-- Team or server mode, a web UI, or telemetry.
-- Orca integration. It may come later as an optional adapter.
+- Team or server mode, a web UI, or remote telemetry. Usage records stay local (A9).
+- Orca by default. An optional Orca adapter is planned (row 8).
 - Re-implementing what Claude Code or Codex already do, such as sandboxes, sign-in and subagents.
 
 **Anti-goals (failure even if it "works").**
@@ -57,7 +98,9 @@ Not teams, not servers.
 - The kit installs, changes or deletes anything global without asking: shell profiles, global agent
   settings, hooks.
 - Private data from the source leaks into this repository.
-- Third-party code is vendored instead of depended on.
+- Third-party code is vendored where its license does not permit it, or without its LICENSE, a pinned upstream
+  commit and a notice (A13).
+- A credential of any kind enters the repository, its history, releases, issues or CI logs (A17).
 - The kit works in bash but breaks in PowerShell, or only works on the author's Mac.
 - Trust theater: a label or receipt that claims more than its mechanism proves.
 
@@ -73,8 +116,12 @@ Not teams, not servers.
 - **Privacy.** The repository holds no personal paths, names, emails, product names, keys or vault material
   (section 10).
 - **Licensing.** The kit is MIT, with the copyright held by "open-agent-harness contributors".
-  Third-party pieces are linked or depended on, never vendored (section 9).
-- **CI cost.** CI runs on pull requests only, with one macOS job and one Windows job (section 8).
+  Third-party pieces are linked or depended on. A skill is vendored only when its license permits
+  redistribution: unchanged, with its LICENSE, a pinned upstream commit and a notice (section 9, A13).
+- **Secrets.** No credential enters the repository. Keys are read only at runtime, from the environment or
+  the OS keychain (A17).
+- **CI cost.** The tests run on pull requests only, with one macOS job and one Windows job (section 8). A
+  separate Linux secret-scan job runs on every pull request and push (A17).
 
 ---
 
@@ -85,48 +132,56 @@ The source has 286 files and 7.7 MB. Its main CLI is one 10,635-line Python file
 tests, about 180 KB of top-level rule documents and about 130 KB of rule fragments. The measuring
 commands are in section 14.
 
-Verdicts: **keep** (port the idea, rewritten portable), **simplify** (port a much smaller version),
-**drop** (owner- or product-specific, historical, experimental, Orca-only, or too heavy for one person).
+Verdicts: **keep** (port the idea, rewritten portable), **simplify** (port a smaller version that gives a
+beginner the same outcome), **optional** (ship it, off by default, where it needs an account, a paid service or
+another app), **later** (after v0.1.0), **drop** (private or owner-specific content, or something that cannot
+work for a stranger).
+
+**Re-judged on 2026-10-23 (amendment 3).** Every row was checked against one test: does a beginner get the
+owner's working environment automatically? Only private or owner-specific content (names, paths, products,
+accounts, vault material) and things that cannot work for a stranger stay out. Weight alone is no longer a
+reason to drop a row; it ships with good defaults instead. Rows 2, 3, 7, 8, 9, 11, 17, 18, 21, 27–35 and 37
+changed or gained a reason below.
 
 | # | Source component | What it does there | Verdict | What the kit does instead |
 |---|---|---|---|---|
 | 1 | Lease core: `start`, `claim`, `finish`, `release`, `status`, `log`, `context-save/show` over JSON ledgers in a per-user state root | Shared locks and task notes so parallel agents don't collide; an event log | **keep** | `oah start/renew/status/finish/release/log`. One lease record per task, state under the git common dir, real path-prefix overlap, a portable lock (5.4) |
-| 2 | Hardened state publication: inode exchange through `renameatx_np`/`renameat2`, hardlink first-publish, `unlinkat` quarantine, `O_NOFOLLOW` | Defends ledgers against symlink and hardlink races | **drop** | Temp file + fsync + `os.replace`, with a Windows retry. The threat model is single-user (5.4) |
-| 3 | Git gate `mah git` (three allowlists; workers may not push or merge) | A mechanical stop on agents pushing | **simplify** | Engine sandboxes, the rules block, and an optional pre-push hook that refuses while an unfinished lease exists (later) |
+| 2 | Hardened state publication: inode exchange through `renameatx_np`/`renameat2`, hardlink first-publish, `unlinkat` quarantine, `O_NOFOLLOW` | Defends ledgers against symlink and hardlink races | **simplify (portable)** | Temp file + fsync + `os.replace`, with a Windows retry (5.4). Re-judged: the hardening needs macOS- and Linux-only system calls with no Windows equivalent, and the portable path gives one user the same guarantee |
+| 3 | Git gate `mah git` (three allowlists; workers may not push or merge) | A mechanical stop on agents pushing | **keep, as opt-in hooks** | The rules block says workers never push. An opt-in `pre-push` hook refuses while an unfinished lease exists and runs gitleaks when it is installed (P5, A17) |
 | 4 | Two lease roles (implementer vs. landing session) and the single-merge/push choreography (`READY_FOR_*` states) | Only one session lands | **simplify** | One rule: workers never push. You (the lead) push after `oah finish`. PR + CI decide |
 | 5 | Worker call `mah call` (Claude or Codex) with an injected preamble | Runs another engine non-interactively with the protocol attached | **keep** | `oah call <engine> --stage <s>`: prompt on stdin, executable resolved per OS, process-tree kill on timeout (5.5) |
-| 6 | Stage routing (`initial→claude`, `review/correction→codex`) plus kind/intensity/reasoning/risk scoring → profile → model/effort | Engine by stage, model and effort by difficulty | **keep, smaller** | `[stages]` and `[engines.*.tiers]` in `.oah/config.toml`, `oah recommend`, no model ids baked in (5.5) |
-| 7 | Model catalog with TTL refresh (refuses to run when stale) | Keeps model lists current | **drop** | Config names the models; empty means the CLI default; `oah doctor` shows CLI versions |
-| 8 | Orca dispatch: launch half of the dispatcher, launch matrix, heartbeat, orchestration gates and land queue (12 modules) | Supervised workers inside the Orca app | **drop** | None in v1; maybe an optional adapter later |
-| 9 | Tier subagents (5 Claude agent files, tier table, tier sync, PreToolUse tier guard) | Model + effort per subagent by difficulty | **simplify** | `oah init` writes `.claude/agents/oah-{low,medium,high,max}.md`; `oah tiers sync/check`. The guard hook comes later |
+| 6 | Stage routing (`initial→claude`, `review/correction→codex`) plus kind/intensity/reasoning/risk scoring → profile → model/effort | Engine by stage, model and effort by difficulty | **keep, smaller** | `[stages]` and `[engines.*.tiers]` in `.oah/config.toml`, and `oah recommend` applied automatically by `call` and `packet new` (A10). No model ids are baked in (5.5) |
+| 7 | Model catalog with TTL refresh (refuses to run when stale) | Keeps model lists current | **keep (A14)** | A model catalog per engine, built from what each CLI reports and refreshed on a TTL. Tiers follow quality order, so a newer model is adopted and logged automatically, and pins are never overridden (A14) |
+| 8 | Orca dispatch: launch half of the dispatcher, launch matrix, heartbeat, orchestration gates and land queue (12 modules) | Supervised workers inside the Orca app | **optional** | An optional Orca adapter for `oah call` when Orca is installed (lane P3o). The default stays the plain CLIs |
+| 9 | Tier subagents (5 Claude agent files, tier table, tier sync, PreToolUse tier guard) | Model + effort per subagent by difficulty | **keep** | `oah init` writes `.claude/agents/oah-{low,medium,high,max}.md`; `oah tiers sync/check`. The tier guard becomes an opt-in hook (P7) |
 | 10 | Rule-block sync (shared rules source, marker blocks in CLAUDE.md/AGENTS.md, AGENTS.md byte budget) | The same rules in every engine's instruction file | **keep** | `oah rules sync/check`: one block in `AGENTS.md`, and `CLAUDE.md` imports it with `@AGENTS.md`. Global files are never touched (5.11) |
-| 11 | Session continuity (entry-prompt generator, SessionStart hooks) | A new session resumes where the last one stopped | **simplify, later** | `oah handoff` plus an optional SessionStart hook |
+| 11 | Session continuity (entry-prompt generator, SessionStart hooks) | A new session resumes where the last one stopped | **keep** | `oah handoff`, plus an opt-in SessionStart hook that prints active leases, the last log entries and the latest handoff, and nothing when `OAH_WORKER=1` (P7) |
 | 12 | Dispatch packets (`mah packet`, worker brief template) | One file that holds intent, scope, preflight, gates and return format | **keep** | `oah packet new/check` → `.oah/tasks/<task>/PACKET.md` (5.6) |
 | 13 | Original-intent block (`MAH_INTENT`: id, revision, status, six sections, sha256 digest, per-criterion `AC<n>: met/unmet/deferred` lines) | The goal stays byte-identical across implement, review and fix | **keep** | `OAH_INTENT` block, the same digest rule (CRLF→LF), `oah intent show/check` (5.6) |
 | 14 | Preflight script: stale base, active locks, recent commits, dirty tree, migration-number check, impact on touched files; ABORT / PROCEED_WITH_WARNINGS / PROCEED | Stops work on a stale or contested base | **keep, port to Python** | `oah preflight`: generic checks; project-specific checks such as migration numbers become config commands (5.7) |
 | 15 | Gate ledgers through unlazy: `finish` refuses unmet gates, isolated re-run, Stop-hook routing, static ledger lint | "Done" means evidence, not a claim | **keep** | unlazy runs the checks. `oah` has a read-only status parser, the `finish` guard and a lease-aware Stop hook (5.8) |
 | 16 | Verify-what-changed rule: re-run only the gates bound to changed files; heavy gates once on the final head | Cheap review rounds without losing rigor | **keep** | Rule text in the rules block, plus `oah impact --changed-since` |
-| 17 | Impact map: lexical `git grep`, gate-CHECK bindings (pin/exec), a product database backend, an auto-fresh worktree, an external re-ranking layer | "If I change X, what must I re-check?" | **keep the generic part** | `oah impact`: names exact gates (`gates#G3`), lexical and wiki references, co-change history, optional graph neighbours. Backends become plugins later. An optional re-ranker may re-order results but never removes deterministic rows, and reports `used` or `unused(reason)` (5.10) |
-| 18 | Edit-time impact hint hook | Shows bindings before editing risky files | **later** | Optional hook |
+| 17 | Impact map: lexical `git grep`, gate-CHECK bindings (pin/exec), a product database backend, an auto-fresh worktree, an external re-ranking layer | "If I change X, what must I re-check?" | **keep (A11)** | `oah impact`, persisted and kept fresh. `oah init` builds it, it refreshes incrementally on commit, merge and task steps, and it records a freshness identity. It names exact gates (`gates#G3`), lexical and wiki references, co-change history and optional graph neighbours. A default SQL plugin gives a DB impact graph. An optional re-ranker may re-order results, never removes deterministic rows, and reports `used` or `unused(reason)` (5.10) |
+| 18 | Edit-time impact hint hook | Shows bindings before editing risky files | **keep, opt-in hook (A11)** | An opt-in Claude Code hook prints the impact bindings before a risky file is edited (P7) |
 | 19 | graphify wrapper (report/query/path/explain/update, with update blocked where unsafe) | Safe access to the knowledge graph | **keep, thin** | `oah graph …` when graphify is installed |
 | 20 | Wiki audit, inspired by `netwaif/knot` (broken wikilinks, unindexed, missing source, no frontmatter, orphans, duplicates, stale) | Wiki hygiene | **keep** | `oah wiki lint`, our own code (knot has no license, so nothing is copied) |
-| 21 | Wiki conventions: catalog index, newest-first log with an insertion marker, a source line on every note, wikilinks | Long-term project memory agents can trust | **keep** | `oah init` scaffolds `docs/wiki/`; `oah wiki new/log` |
+| 21 | Wiki conventions: catalog index, newest-first log with an insertion marker, a source line on every note, wikilinks | Long-term project memory agents can trust | **keep (A12)** | `oah init` scaffolds an Obsidian-compatible `docs/wiki/`, and opt-in automation keeps it current; `oah wiki new/log` (A12) |
 | 22 | Review loop: R1–R3 round ceiling counted at call time, series key, per-series lock, explicit extra-round override | Bounded review cycles | **keep** | `oah review` with `max_rounds = 3` and `--extra-round` (5.9) |
 | 23 | Review artifact schema and validation (verdict/findings consistency, base/head echo) | A machine-checkable review result | **keep, trimmed** | A JSON schema passed to `codex exec --output-schema`; one receipt per round |
 | 24 | Canary token (random per call, written into the reviewer's tree, never in the prompt, must appear in the evidence) | Proves access to the snapshot's token file only | **keep** | Same mechanism (5.9) |
 | 25 | Sanitized review snapshot (fresh clone at the exact head, agent instruction files removed, reviewer config and rules ignored, minimal environment) | Reduces automatic instruction loading from repo files | **keep** | Portable Python version that also strips `CLAUDE.md` and `.claude/` (5.9) |
 | 26 | "Same engine is not independent" rule | Honest trust labels | **keep, as a label** | Receipt field `independent: true/false` and a visible warning |
-| 27 | Reviewer binary pinning (hash + macOS code signature + login-mode requirement) | Trust the reviewer binary | **simplify** | Record CLI path, version and sha256; pinning is optional; no code-signature check |
-| 28 | Five-lane cooperative check (goal, QA, quality, security, context) | Self-check axes on the final head | **simplify** | A review rubric in the prompt and in the PR summary |
-| 29 | Landing audit: review bundles bound to CI check-runs, fast-path vs. critical audits, landing-closure receipts, `verify-landing` | Final audit before merge | **drop** | PR + CI + `oah review summary`, plus critical-path warnings |
-| 30 | Skill machinery: suggest/pack/route/audit/telemetry/lock, auto-maintenance, vendored third-party skills with local patches | Manage and inject skills | **drop** | Link to upstream skills; nothing vendored |
-| 31 | External AI re-ranking service layer (difficulty shadow judge, model-upgrade shadow, footers) | Optional AI re-ranking | **drop** | — |
-| 32 | Experimental third engine and free-model variants (OpenCode, Spark, shadow runs) | Experiments | **drop** | — |
-| 33 | Retired engines (Antigravity, Grok, Kimi) | Old routing targets | **drop** | — |
-| 34 | Web policy: route all web work to Aside and block built-in web tools | The owner's tool choice | **drop** | Aside is listed as an optional tool |
-| 35 | Owner operations scripts (pre-push checks with fixed paths, CI and lane watchers, two historical audit lanes, session context) | Daily operations | **drop** | The pre-push secret-scan idea is kept for this repository's own development (section 10) |
+| 27 | Reviewer binary pinning (hash + macOS code signature + login-mode requirement) | Trust the reviewer binary | **simplify** | Record the CLI path, version and sha256; pinning is optional. Re-judged: a code-signature check exists only on macOS, and the login-mode requirement is an account choice |
+| 28 | Five-lane cooperative check (goal, QA, quality, security, context) | Self-check axes on the final head | **simplify** | The five axes (goal, tests, quality, security, context) become the review rubric and a checklist in `oah review summary` |
+| 29 | Landing audit: review bundles bound to CI check-runs, fast-path vs. critical audits, landing-closure receipts, `verify-landing` | Final audit before merge | **keep, smaller** | `oah land --check` verifies that the converged review receipt, the CI check runs (through `gh`, when present), the scan and the gates all bind to the exact head. `--merge` lands only after the user confirms (P6) |
+| 30 | Skill machinery: suggest/pack/route/audit/telemetry/lock, auto-maintenance, vendored third-party skills with local patches | Manage and inject skills | **keep, generic (A9, A13, A15)** | Skill selection per brief, bundled skills with provenance where the license allows, and automatic updates. The source's own machinery is not copied; the selector is new code |
+| 31 | External AI re-ranking service layer (difficulty shadow judge, model-upgrade shadow, footers) | Optional AI re-ranking | **optional (A9, A10)** | A re-ranker plugin interface. Its first provider, TypeSafe Jev, runs only when its key is present, and its difficulty judgements are advisory |
+| 32 | Experimental third engine and free-model variants (OpenCode, Spark, shadow runs) | Experiments | **later, optional** | An optional OpenCode engine adapter after v0.1.0. It is not part of the owner's default routing. Provider-specific free-model variants stay out |
+| 33 | Retired engines (Antigravity, Grok, Kimi) | Old routing targets | **drop** | — (retired in the source too) |
+| 34 | Web policy: route all web work to Aside and block built-in web tools | The owner's tool choice | **optional** | When Aside is installed, `oah init` offers the web rule (route web work to Aside). Otherwise the engines' built-in web tools stay |
+| 35 | Owner operations scripts (pre-push checks with fixed paths, CI and lane watchers, two historical audit lanes, session context) | Daily operations | **simplify** | The pre-push secret scan ships as an opt-in hook (A17). The rest uses the owner's fixed paths and lanes |
 | 36 | 69 contract tests | Guard the source | **drop** | New tests written from scratch (section 8) |
-| 37 | Long rule documents (shared rules about 94 KB, routing policy about 47 KB, review procedure, rule fragments) | Operating manual | **drop** | Rewritten as beginner docs (section 11, P9) |
+| 37 | Long rule documents (shared rules about 94 KB, routing policy about 47 KB, review procedure, rule fragments) | Operating manual | **keep, rewritten** | Rewritten as beginner docs in English and Korean (P9) |
 
 **Private data in the source that must never be copied.** 57 files contain the owner's absolute home path.
 47 name the owner's product, and 23 mention keychain items (section 14). One test fixture alone has 681
@@ -201,10 +256,14 @@ open-agent-harness/
     packet.py  intent.py  preflight.py  gates.py  hooks.py
     review/{snapshot.py,canary.py,schema.py,receipts.py,rounds.py}
     wiki.py  graph.py  impact.py  rules.py  tiers.py  init.py  doctor.py
+    models.py  secrets.py  skillsel.py  rerank/  setup/  handoff.py  land.py   # amendment 3
     templates/                     # rules block (en, ko), packet, gates, wiki, agents, config
   install/install.sh  install/install.ps1
   docs/  PLAN.md  install-macos.md  install-windows.md  concepts.md  example.md  (+ ko/)
   examples/hello-oah/              # tiny Python project for the worked example
+  skills/                          # vendored skills, unchanged, each with its LICENSE and upstream pin (A13)
+  mcp/                             # MCP launch templates for Claude and Codex, ${ENV_VAR} placeholders only (A13)
+  docs/UPSTREAM_SYNC.md            # ports from the owner's harness, reviewed commit by commit (A16)
   tests/                           # stdlib unittest; fake engines; temp repos
   tools/privacy_scan.py            # this repository's own pre-push scan
   .github/workflows/ci.yml         # added only after the owner approves CI (section 8)
@@ -706,29 +765,33 @@ After the review:
 | Hook | Command | Phase |
 |---|---|---|
 | Claude Code Stop: block while the governing lease's gates are unmet | `oah hook stop` | P5 |
-| Claude Code SessionStart: active leases, last log entries, latest handoff; prints nothing when `OAH_WORKER=1` | `oah hook session-start` | later |
-| git pre-push: refuse while an unfinished lease exists on this worktree | `oah hook pre-push` | later |
-| Claude Code PreToolUse: impact hint before editing gates, workflows, migrations | `oah hook impact-hint` | later |
+| Claude Code SessionStart: active leases, last log entries, latest handoff; prints nothing when `OAH_WORKER=1` | `oah hook session-start` | P7 (row 11) |
+| git pre-push: refuse while an unfinished lease exists on this worktree; gitleaks over the pushed commits when installed | `oah hook pre-push` | P5 (row 3, A17) |
+| Claude Code PreToolUse: impact hint before editing gates, workflows, migrations | `oah hook impact-hint` | P7 (A11) |
 | git pre-commit: wiki commit check (archives, raw sources, encoding, new broken links) | `oah hook pre-commit` | P7 |
+| git post-commit and post-merge: refresh the impact map incrementally | `oah hook post-commit`, `oah hook post-merge` | P5 installer, P7 command (A11) |
 
 `oah hooks install|uninstall|status` shows the exact change before it writes. It writes atomically and
 leaves a backup.
+`oah hook <name>` runs the module `oah.hook_<name>`. P5 owns the installer, and each phase adds its hook
+modules without editing it. `oah init` offers every hook with the owner's defaults, and the user confirms
+each one (6.5).
 
 ### 5.13 v1 command set
 
 | Group | Commands |
 |---|---|
-| Setup | `doctor`, `init` |
-| Task | `packet new/check`, `intent show/check`, `preflight`, `start`, `renew`, `status`, `finish`, `release`, `log` |
+| Setup | `doctor`, `init` (guided, 6.5), `models` (A14), `skills list/install/update` (A13, A15) |
+| Task | `packet new/check`, `intent show/check`, `preflight`, `start`, `renew`, `status`, `finish`, `release`, `log`, `handoff` (row 11) |
 | Engines | `recommend`, `call` |
 | Gates | `gates new/status/check/lint`, `check exists/contains/absent/json` |
-| Review | `review`, `fix`, `review summary` |
-| Knowledge | `wiki new/log/lint/rollover/recover/hygiene` (`lint --index` included), `graph …`, `impact` |
+| Review | `review`, `fix`, `review summary`, `land --check/--merge` (row 29) |
+| Knowledge | `wiki new/log/lint/rollover/recover/hygiene` (`lint --index` included), `graph …`, `impact`, `impact build/refresh` (A11) |
 | Agent files | `rules sync/check`, `tiers sync/check` |
-| Hooks | `hooks install/uninstall/status`, `hook stop/pre-commit` |
+| Hooks | `hooks install/uninstall/status`, `hook stop/pre-commit/pre-push/post-commit/post-merge/session-start/impact-hint` |
 
 `oah doctor` checks git, Python, Node (only when gates are used), uv, claude, codex (`codex login status`)
-and the optional tools. It prints the official install command for this OS for each missing one, and
+and the recommended and optional tools from one catalog (A13). It prints the official install command for this OS for each missing one, and
 exits non-zero when a required tool is missing.
 
 ---
@@ -815,7 +878,48 @@ reviewed file under `RemoteSigned`.
 - Requiring WSL would add a Linux distribution, a second file system and a second set of credentials
   for a beginner, for no gain. WSL users can still run the macOS/Linux path.
 
+### 6.5 Beginner onboarding (amendment 3)
+
+This is the whole path a beginner follows, in plain Korean or English at every step. Nothing paid or
+irreversible happens without the user's explicit confirmation.
+
+1. **One command per OS, run from a clone.** `bash install/install.sh` on macOS, or
+   `powershell -ExecutionPolicy Bypass -File .\install\install.ps1` on Windows.
+   - It installs git when missing, uv and `oah`.
+   - It checks that `oah` resolves in a fresh shell.
+   - It hands over to `oah init`.
+2. **`oah init` is a guided setup.**
+   - **Tools.** It checks every tool in the catalog (`oah.setup`) and shows each missing tool's official
+     install command and URL. It installs only the tools the user confirms. `--yes` confirms them all; nothing
+     else does.
+   - **Sign-ins.** It walks the user through the Claude Code and Codex sign-ins. It names the command to run
+     in their own terminal, then verifies the result with that tool's own status command. `oah` never reads,
+     stores or asks for a password, key or token.
+   - **The environment.** It creates the project environment with defaults that match the owner's workflow:
+     - stages Claude → Codex → Codex;
+     - tier agents whose difficulty-based models follow updates (A10, A14);
+     - the rules block (5.11);
+     - the Obsidian wiki (A12);
+     - the first impact map (A11);
+     - gate templates (5.8);
+     - automatically selected and updated skills (A9, A15);
+     - `.gitignore` entries for editor state and local secret files (A8d, A17);
+     - each opt-in hook the user accepts (5.12).
+   - A second run changes nothing and says so (section 7).
+3. **A first guided task.** `examples/hello-oah` walks the whole loop end to end: packet, preflight,
+   lease, Claude implementation, gates, Codex review and fix, re-review, finish, and the optional PR.
+4. **Plain language.** Docs and messages exist in English and Korean (P9), and every error says what to
+   run next.
+
+The work is split across lanes: P8 (the installers and the tool catalog), P7b (`oah init`) and P9 (the
+example and the docs).
+
 ## 7. `oah init`
+
+Amendment 3 makes `oah init` the guided setup of 6.5. It runs the tool checks, the consent-based installs and
+the sign-in walkthrough, then the scaffolding below with the owner's defaults. Each `--with-*` option becomes
+a question in the guided flow, and the flag answers it without asking.
+
 
 ```text
 oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-graph] [--dry-run] [--force]
@@ -881,6 +985,10 @@ checkout (`.tmp/` is git-ignored). Run them again with the newest local Python.
   commit SHAs. Timeout is 15 minutes.
 - Steps: unit tests, the installer `--dry-run` (bash on macOS; `powershell` 5.1 **and** `pwsh` on
   Windows), and `oah init --dry-run` in a temp project.
+- A separate workflow, `secrets.yml`, runs on every pull request and push, docs-only changes included
+  (A17). It uses one ubuntu-latest job: gitleaks 8.30.1, pinned by SHA-256, scans the full history,
+  and `tools/privacy_scan.py --gitleaks require` scans the tree and commit identities. Any finding fails
+  it.
 
 **Cost.**
 - Private-repository list prices are $0.062 per minute for macOS and $0.010 for Windows; Linux is
@@ -899,7 +1007,7 @@ The owner approved CI from P1 on 2026-10-23.
 | Piece | License | How the kit uses it |
 |---|---|---|
 | this kit | **MIT**, "Copyright (c) 2026 open-agent-harness contributors" | — |
-| unlazy (Leonxlnx/unlazy) | MIT | dependency, installed by the user; the docs link its format; nothing copied |
+| unlazy (Leonxlnx/unlazy) | MIT | dependency, installed by the user; the docs link its format; the skill may be vendored under A13 |
 | graphify (Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0 (earlier contributions under MIT, per NOTICE) | optional dependency, run as a CLI |
 | Claude Code | Anthropic's terms | external tool the user installs |
 | Codex CLI (openai/codex) | Apache-2.0 | external tool the user installs |
@@ -911,6 +1019,10 @@ The owner approved CI from P1 on 2026-10-23.
 
 `THIRD_PARTY_NOTICES.md` lists these. If anything is ever copied verbatim, its license text goes in
 first.
+
+**Amendment 3 (A13).** A skill is vendored only where its verified upstream license permits it. Section 15
+lists every item with its verdict. Each vendored skill ships unchanged under `skills/<name>/`, with its
+LICENSE, upstream URL and pinned commit. Its `THIRD_PARTY_NOTICES.md` entry is added in the same PR.
 
 ## 10. Privacy guard for this repository
 
@@ -930,6 +1042,8 @@ first.
 
 No hook is installed on the development machine. The scan is a manual step in the process, and every
 report includes its result.
+It also runs in CI on every pull request and push, and over the full history before a release tag. Any
+finding fails the build, and no allowlist entry ever covers a real-looking credential (A17).
 
 ---
 
@@ -942,13 +1056,17 @@ Each phase is one branch and one PR into `main` of the private repository.
 | P0 | this plan | medium |
 | P1 | skeleton: LICENSE, notices, `pyproject.toml`, `oah --version`, `oah doctor`, `.gitattributes`, `.gitignore`, `tools/privacy_scan.py`, test scaffold, CI workflow (approved) | medium |
 | P2 | state and leases: paths, lock, atomic writes, lease store, `start/renew/status/finish/release/log` | highest = `max` (concurrency, Windows locking) |
-| P3 | config, routing, engines: `recommend`, adapters, `call` with stage enforcement, runs dir, process-tree kill | high |
-| P4 | packets, intent, preflight | high |
-| P5 | gates: parser, unlazy delegation, `check` helpers, `finish` guard, Stop hook and `hooks install` | high |
-| P6 | review loop: snapshot, canary, schema, receipts, rounds, `fix`, `review summary` | highest = `max` (trust boundary) |
-| P7 | knowledge and agent files: `init`, `rules`, `tiers`, `wiki`, `graph`, `impact` | high |
-| P8 | installers: `install.sh`, `install.ps1`, dry runs, install guides | highest = `max` (runs remote installers) |
-| P9 | docs: README en/ko, concepts, worked example (`examples/hello-oah`), troubleshooting | medium |
+| P3 | config, routing, engines: `recommend` applied automatically (A10), adapters, `call` with stage enforcement, runs dir, process-tree kill, skill selection and the re-ranker interface (A9), the model catalog (A14), the key lookup (A17), an optional Orca adapter | high |
+| P4 | packets, intent, preflight; skills and difficulty in `packet new` (A9, A10); impact refresh (A11) | high |
+| P5 | gates: parser, unlazy delegation, `check` helpers, `finish` guard, Stop hook and `hooks install`, git hooks (pre-push, post-commit, post-merge) | high |
+| P6 | review loop: snapshot, canary, schema, receipts, rounds, `fix`, `review summary`, impact refresh (A11), `land --check` (row 29) | highest = `max` (trust boundary) |
+| P7 | knowledge and agent files: guided `init` (6.5), `rules`, `tiers`, the Obsidian `wiki` (A12), `graph`, the persisted `impact` map with the SQL plugin (A11), the toolkit and skill updates (A13, A15), `handoff` and SessionStart (row 11) | high |
+| P8 | installers: `install.sh`, `install.ps1`, dry runs, install guides, the tool catalog and guided installs (6.5), `doctor` tool checks (A13) | highest = `max` (runs remote installers) |
+| P9 | docs: README en/ko, concepts, worked example (`examples/hello-oah`), troubleshooting, the Toolkit page, the upgrade path (A16), where users keep their keys (A17) | medium |
+
+**Lanes (amendment 3).** To finish quickly, phases are built in parallel lanes. Each lane is one branch, one
+worktree, one Claude implementer and one Codex review series, and lands as one PR in dependency order (the
+lane table is in section 15). A lane is rebased onto `main` only after what it needs has landed.
 
 **Process per PR** (the engine order the owner set):
 
@@ -963,8 +1081,13 @@ Each phase is one branch and one PR into `main` of the private repository.
    an unreadable header or unknown normalization leaves effort unverified. Neither counts as an
    effort-verified review. After P6, `oah review` dogfoods this.
 3. **Codex fixes** the findings with `codex exec -s workspace-write` in a worktree of this repository.
-   Claude commits the result, marked as a Codex correction. Then Codex re-reviews (R2, at most R3).
-   Findings left after R3 go to the owner.
+   Claude commits the result, marked as a Codex correction. Then Codex re-reviews.
+   - **Standing fix-round rule** (owner, 2026-10-23, every phase): continue automatically to the next
+     correction and re-review when every new finding is P0 or P1, small, inside the phase scope, and of a
+     class no earlier round tried to fix.
+   - Ask the owner only when a finding repeats a class an earlier round tried to fix, the fix needs a
+     design or stored-format change, or the next round would be R9 or later.
+   - When only P2 or P3 findings remain, run the checklist, merge, and record them as follow-ups.
 4. **Push and open the PR**, after the privacy scan is clean. CI runs on the PR. Claude merges once
    Codex review has converged, the scan is clean and CI passes, then reports the link.
 5. **Report at each stop:** what was built, commit and PR links, test commands and results, the scan
@@ -1013,6 +1136,15 @@ Each phase is one branch and one PR into `main` of the private repository.
 4. **Merging.** Claude merges each PR once Codex review has converged, the privacy scan is clean and CI
    passes, then reports the link.
 5. **This plan.** The owner approved it on 2026-10-23; P1 may start.
+6. **Intent revision 2** (2026-10-23): the beginner-first product vision in section 1. It is accepted with
+   the AC3 and AC7 additions.
+7. **Amendment 3** (2026-10-23): A9–A17 and the onboarding flow (section 15), from the owner's notes.
+8. **Fix rounds:** the standing rule in section 11 applies to every phase.
+9. **Parallel lanes:** independent phases run side by side, each with its own Claude session and Codex
+   review, and land in dependency order.
+10. **Release:** a v0.1.0 checklist ends the build (section 15). Making the repository public, or
+    inviting people, stays the owner's decision.
+11. **Credentials (A17):** a hard rule for every phase and PR.
 
 **Builder's calls** (change any of them):
 
@@ -1023,7 +1155,7 @@ Each phase is one branch and one PR into `main` of the private repository.
 - State in the git common dir.
 - Per-task folders `.oah/tasks/<task>/`.
 - Wiki in `docs/wiki/`.
-- No Orca in v1.
+- Orca only as an optional adapter (row 8).
 
 *Workflow*
 - Your interactive Claude Code session is the lead and does the initial implementation.
@@ -1048,6 +1180,12 @@ Each phase is one branch and one PR into `main` of the private repository.
 - All beginner docs in both English and Korean.
 - Test temp files kept inside the checkout.
 
+*Amendment 3*
+- The A13 verdicts follow the verified upstream licenses (section 15). For MCP servers, "template" means
+  a launch template with `${ENV_VAR}` placeholders; the server itself installs from its registry at run time.
+- The secret scan runs as one Linux job, separate from the macOS and Windows test jobs.
+- P3, P4 and P7 are split into lanes (section 15) so that independent parts land early.
+
 ## 14. Evidence for the numbers in this plan
 
 All commands are run from the source root, read-only.
@@ -1063,10 +1201,10 @@ All commands are run from the source root, read-only.
 | 681 home-path lines in one fixture | `grep -c '<home path>' test/fixtures/<fixture>.jsonl` |
 | round ceiling 3; stage table | `grep -nE '^REVIEW_ROUND_CEILING' bin/mah` · `config/routing.json` lines 5–9 |
 
-## 15. Amendments 1 and 2 (2026-10-23)
+## 15. Amendments 1–3 (2026-10-23)
 
 These are fixes the owner made to their own harness on 2026-10-23, carried into this plan at the owner's
-request in two batches: A1–A6, then A7–A8. Each item names the sections it changed and the phases
+request in three batches: A1–A6, A7–A8, then amendment 3 (A9–A17 and the onboarding flow). Each item names the sections it changed and the phases
 whose checklists carry it.
 
 | # | Rule | Sections | Phases |
@@ -1162,3 +1300,195 @@ phase is planned, and is dropped only with a recorded reason.
   - [ ] No document claims a fixed effort cap. (C5)
 - **Later:**
   - [ ] Skill-selection text describes the actual selection by kind, stage, risk and availability, and never promises zero optional skills. (C6)
+
+### Amendment 3 (2026-10-23)
+
+These items come from the owner's notes of 2026-10-23. Each names the sections it changes and the phases
+that carry it. Section 1 (intent revision 2), section 4 (the re-judged rows), 6.5 (onboarding), section 11
+(lanes and the fix-round rule) and section 13 (decisions) were updated with them.
+
+| # | Rule | Sections | Phases |
+|---|---|---|---|
+| A9 | **Skill automation.** `oah` selects skills for each brief from the installed Claude and Codex skill directories (user, project and plugin skills). It selects by task kind, stage, risk and the file kinds in Scope, and references or attaches each skill in the brief with a reason. An empty Scope warns (A4). A re-ranker plugin interface may re-order candidates; its first provider is TypeSafe Jev, enabled only when its key is present. Every result records `used` or `unused(<reason>)`. Selection telemetry stays local. The selector is new code; none of the source's skill machinery is copied. | 4 (rows 30, 31), 5.5, 5.6 | P3, P4 |
+| A10 | **Difficulty-based model and effort, applied automatically.** `oah packet new` and `oah call` score the difficulty axes (kind, intensity, reasoning, risk) by rules, and apply `oah recommend` without a manual flag. `--tier` overrides and is recorded. The re-ranker plugin may add an advisory AI judgement, recorded next to the rule result, which never lowers the tier. Run records keep the axes, the tier source, and the requested and effective model and effort. | 4 (rows 6, 31), 5.5, 5.6 | P3, P4 |
+| A11 | **Impact map, generated and kept fresh.** `oah init` builds a persisted map in the state folder. Opt-in `post-commit` and `post-merge` hooks refresh it incrementally, and `preflight`, `packet new`, `review` and `finish` refresh it first. The map records a freshness identity: commit SHA, tool digest and result digest. A stale map is refreshed, or refused with `OAH_IMPACT_STALE`, never used silently. A default DB plugin extracts tables, views, routines, triggers, indexes and GRANTs from SQL migrations and links them to code references, so a project with SQL gets a DB impact graph without custom code. The re-ranker stays optional. The edit-time impact hint becomes an opt-in hook. | 4 (rows 16–18), 5.10, 5.12 | P4, P5, P6, P7 |
+| A12 | **Obsidian wiki, created and maintained automatically.** `oah init` creates an Obsidian-compatible `docs/wiki/`: an index, a newest-first log with its insertion marker, note templates, and a minimal `.obsidian/` configuration with workspace files git-ignored. Opt-in automation keeps it current: a log entry at `oah finish`, an index entry at `oah wiki new`, size-based rollover, and lint plus hygiene at `finish` and pre-commit. graphify stays optional (`oah graph`), and nothing rebuilds the graph automatically. | 4 (row 21), 5.1, 5.10, 5.12 | P7 |
+| A13 | **Toolkit with provenance.** The kit bundles the skills, MCP server templates and CLI checks the owner uses, each with its source. It reverses row 30's "nothing vendored" only where the license allows. A skill is vendored only when its upstream license permits redistribution: unchanged, with its LICENSE, a pinned upstream commit and a `THIRD_PARTY_NOTICES.md` entry. A public item without a redistributable license is linked: install command and URL only. Owner-specific or private skills, account-bound connectors and product-specific tools are excluded. The kit ships `skills/`, `oah skills list/install/update`, `mcp/` templates with `${ENV_VAR}` placeholders only, `oah doctor` checks for the recommended CLIs with their official install commands, and a Toolkit page in English and Korean. The inventory is below. | 2, 3, 4 (row 30), 5.2, 9 | P7, P8, P9 |
+| A14 | **Models follow updates.** `oah` keeps a model catalog per engine from what each CLI reports: for Codex, its model list with `supported_reasoning_levels`; for Claude, its aliases. The catalog refreshes on a TTL, before a launch when stale, and on demand (`oah models --refresh`). Tiers are defined by quality order and capability, not model ids. A newer model therefore moves the tier mapping and `oah recommend` automatically, and A1's effort rules re-resolve against its supported levels. Every change of the resolved model or effort is logged with old, new, when and why. A per-tier pin is never overridden silently. A refresh that loses metadata keeps the last good mapping and warns, and never downgrades a tier. It reverses row 7. | 4 (row 7), 5.5 | P3 |
+| A15 | **Skills update automatically and are used automatically.** Vendored and linked skills carry a pinned upstream source and commit, taken from an allowlist of upstreams. `oah skills update` runs on a schedule and on demand. Before it advances a pin, it checks that the license is unchanged, records a diff summary, and runs a skill-load check and the privacy scan. Updates wait while any task holds an active lease, and resume when idle. A failed or suspicious update rolls back to the last good pin and is reported. Selection (A9) always uses the installed version, so the next brief picks up an update without manual steps. | 4 (row 30), 5.11 | P4, P7 |
+| A16 | **Upstream sync with the owner's harness.** `docs/UPSTREAM_SYNC.md` records the last reviewed commit of the source harness, and a table of every reviewed change. Each row gives the commit, a summary and a verdict (port as a generic feature, skip as private or owner-specific, or defer). For ports it names the plan item and PR. At the start of each phase, and at least daily while work continues, the builder reads the new commits read-only, writes every port fresh, and turns port verdicts into amendments and implementation under the standing fix-round rule. The source harness is never a runtime dependency; `oah` users get updates as normal releases. | 1, 13 | every phase; P9 docs |
+| A17 | **No credentials anywhere** (hard rule). No API key, token, password, cookie, OAuth secret or account identifier enters the repository, its history, releases, issues or CI logs.<br>• Keys are read only at runtime, from environment variables or the OS keychain, through one documented lookup (`oah.secrets`). A missing key leaves the feature off and reports `unused(no key)`, and `oah` never asks the user to paste a key into a project file.<br>• Templates use `${ENV_VAR}` placeholders only, and docs show placeholder names only.<br>• Tests generate fake keys at runtime, and committed fixtures contain none.<br>• gitleaks and `tools/privacy_scan.py` run in CI on every pull request and push, and over the full history before a release tag. Any finding fails the build, and no allowlist entry covers a real-looking credential.<br>• `oah init` git-ignores local secret files in user projects, and the docs say where users keep their keys.<br>• Anything copied from the owner's machine keeps names and sources only. | 2, 3, 8, 10 | every phase; CI now |
+| OB | **Beginner onboarding** (6.5). A one-command installer per OS hands over to the guided `oah init`. It checks and installs tools from official sources with consent, walks through the sign-ins without handling secrets, and sets up the environment with the owner's defaults. Then a first guided task (`examples/hello-oah`) runs, with plain-language messages and docs in Korean and English. | 6.5, 7 | P7, P8, P9 |
+
+#### Amendment 3 checklists
+
+**P3** (lanes P3b and P3o)
+- [ ] `oah call` scores the difficulty axes by rules when the packet has no tier, and applies `oah recommend` without a flag. `--tier` overrides and is recorded. (A10)
+- [ ] Run records keep the axes, the tier and its source (`rules`, `packet` or `flag`), the advisory judgement (`used` with its value, or `unused(<reason>)`), and the requested and effective model and effort. An advisory judgement never lowers the tier. Tests cover no plugin, no key, a plugin error, and higher and lower advice. (A10)
+- [ ] The skill selector reads the installed Claude and Codex skill directories (user, project and plugin skills) read-only. It selects by kind, stage, risk and Scope file kinds, with a reason per skill, and warns on an empty Scope (A4). Briefs reference the selected skills by name and path, or attach their text when `[skills] mode = "attach"`. (A9)
+- [ ] The re-ranker plugin interface only re-orders, and records `rerank=used` or `rerank=unused(<reason>)`. The TypeSafe Jev provider is enabled only when its key is present through `oah.secrets`. Tests use a fake provider and no network. (A9)
+- [ ] Skill-selection telemetry is a local JSON-lines file in the state folder, and nothing is sent anywhere. Selection text describes the actual selection by kind, stage, risk and availability, and never promises zero optional skills. (A9, C6)
+- [ ] `oah models [--refresh]` builds a catalog per engine from the CLIs' own reports, refreshed on a TTL and before a launch when stale. Tiers map by quality order and capability, so a newer model is adopted and A1's effort rules re-resolve. Every change of model or effort is logged with old, new, when and why. Pins are never overridden. A refresh that loses metadata keeps the last good mapping and warns. (A14)
+- [ ] `oah.secrets.get(name)` is the one key lookup: environment variable first, then the OS keychain (macOS `security`, Windows Credential Manager). A missing key reports `unused(no key)`. Keys never reach logs, run records or briefs. (A17)
+- [ ] An optional Orca adapter dispatches `oah call` workers through Orca when it is installed. (row 8, lane P3o)
+
+**P4** (lane P4b)
+- [ ] `oah packet new` scores the axes by rules, and records them, the recommended tier and the selected skills with reasons in `## Plan`. (A9, A10)
+- [ ] `oah preflight` and `oah packet new` refresh the impact map first, or refuse with `OAH_IMPACT_STALE`. (A11)
+- [ ] Briefs and packets always use the installed skill versions, so a skill update between two tasks is picked up by the next brief. (A15)
+
+**P5**
+- [ ] `oah hooks install` offers opt-in `post-commit` and `post-merge` git hooks, with the same show-diff, backup and uninstall rules as the Stop hook. (A11)
+- [ ] `oah hook pre-push` refuses while an unfinished lease exists on this worktree, and runs gitleaks over the commits being pushed when gitleaks is installed. (row 3, A17)
+
+**P6**
+- [ ] `oah review` refreshes the impact map first, or refuses with `OAH_IMPACT_STALE`. (A11)
+- [ ] `oah land --check` verifies that the converged review receipt, the CI check runs (through `gh`, when present), the scan and the gates bind to the exact head. `--merge` lands only after the user confirms. (row 29)
+
+**P7** (lanes P7a, P7i, P7t and P7b)
+- [ ] `oah impact build/refresh` keep a persisted map with a freshness identity, and a stale map is refreshed or refused, never used silently. The default SQL plugin produces `db_table`, `db_routine` and `db_grant` entities linked to code references. `oah init` builds the first map, and the edit-time impact hint is an opt-in hook. (A11)
+- [ ] `oah init` creates the Obsidian-compatible wiki: index, log with marker, templates, and a minimal `.obsidian/` with workspace files ignored. Opt-in automation adds a log entry at `finish`, an index entry at `wiki new`, rollover by size, and lint plus hygiene at `finish` and pre-commit. Nothing rebuilds the graph automatically. (A12)
+- [ ] `skills/` holds only skills whose verified license permits redistribution, each unchanged, with its LICENSE, upstream URL, pinned commit and a `THIRD_PARTY_NOTICES.md` entry. Linked skills install through `oah skills install`. `mcp/` templates use `${ENV_VAR}` placeholders only. (A13)
+- [ ] `oah skills update` runs on a schedule (opt-in) and on demand, reading its upstreams from an allowlist. Before it advances a pin, it checks the license, records a diff summary, and runs a load check and the privacy scan. It waits while a lease is active, and rolls back a failed or suspicious update. (A15)
+- [ ] `oah init` is the guided setup. It checks tools through the catalog, installs only what the user confirms, and walks through the Claude and Codex sign-ins without handling secrets. It writes the rules block, tier agents, wiki, impact map, gate templates and the accepted hooks, with defaults that match the owner's workflow. (OB)
+- [ ] `oah handoff`, and the opt-in SessionStart hook, which prints nothing when `OAH_WORKER=1`. (row 11)
+- [ ] `oah init` adds `.gitignore` entries for local secret files: `.env`, `.env.*`, `*.pem`, `*.key`, `.oah/secrets*` and local MCP files. (A17)
+
+**P8**
+- [ ] One command per OS installs `oah` and hands over to the guided setup. The tool catalog in `oah.setup` lists each tool's check, its official install command per OS and its official URL, and nothing is installed without consent. (OB)
+- [ ] `oah doctor` checks the recommended CLIs from the same catalog and prints their official install commands. (A13)
+
+**P9**
+- [ ] The docs cover skill automation, difficulty, the impact map, the wiki, the toolkit with its sources, model and skill updates, the upgrade path (A16), and where users keep their keys (A17), in English and Korean. The Toolkit page lists every item with its source and license, and `examples/hello-oah` walks the whole loop. (A9–A17, OB)
+
+**Release**
+- [ ] All phases merged, with CI green on macOS and Windows.
+- [ ] The privacy scan and gitleaks clean over the full history.
+- [ ] The README status box updated from "developer preview".
+- [ ] A `v0.1.0` tag with release notes.
+- [ ] Making the repository public, or inviting people, prepared and left to the owner.
+
+#### Lanes and dependencies
+
+| Lane | Content | Needs |
+|---|---|---|
+| P3a | config loader, command discovery, package data | P2 |
+| P3b | routing, engines, `call`, runs, briefs; A9, A10, A14, the A17 lookup | P3a, P4a |
+| P3o | optional Orca adapter | P3b |
+| P4a | packet, intent (with the shared footer), preflight core | P2 |
+| P4b | intent wiring into `start`, `status`, `finish` and `call`; A9 and A10 at `packet new`; A11 refreshes | P3b, P4a, P5, P7i |
+| P5 | gates, `check` helpers, `finish` guard, Stop and git hooks | P2 |
+| P6 | review loop, landing check, A11 refresh | P3b, P4a, P5, P7i |
+| P7a | wiki (A8, A12), rules block, graph | P2 |
+| P7i | impact map (A11), SQL plugin | P2, then P5 for gate bindings |
+| P7t | toolkit (A13), skill updates (A15) | P3a |
+| P7b | guided `oah init` (OB), tiers, hook wiring, `handoff`, SessionStart | P3b, P4b, P5, P7a, P7i, P7t, P8 |
+| P8 | installers, tool catalog, `doctor` tool checks | P3a |
+| P9 | docs, example, troubleshooting, Toolkit page | all |
+
+Every lane registers commands through P3a's discovery and reads settings through `oah.config`. Lanes that
+started before P3a landed rebase onto it before their review.
+
+#### A13 toolkit inventory (2026-10-23)
+
+This inventory was taken read-only on the owner's machine. Licenses were verified from the upstream LICENSE
+files. Where the check was weaker (for example a local copy of upstream at a pinned commit), the lane that
+vendors the item re-reads the LICENSE at the pinned commit first.
+
+Each row is one of four verdicts:
+- **vendor:** ship unchanged with LICENSE, pinned commit and notice.
+- **template** (MCP servers): ship a launch template with `${ENV_VAR}` placeholders only.
+- **link:** ship the official install command and URL only.
+- **exclude:** not shipped.
+
+Names that match a private term are masked. Values (env, headers, tokens) were never recorded.
+
+##### Skills
+
+| Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
+|---|---|---|---|---|---|---|
+| skill | computer-use | Drive the GUI of visible local app windows through the Orca CLI (accessibility tree, clicks, typing, screenshots). | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/computer-use> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
+| skill | orca-cli | Operate Orca worktrees, terminals, repos, embedded browser and handoffs through the orca CLI. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orca-cli> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
+| skill | orchestration | Coordinate supervised Orca worker agents: messages, task dispatch, DAGs, decision gates. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orchestration> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
+| skill | typesafe-ai | Guidance for building features from TypeSafe typed-judgment AI primitives (routing, ranking, verification). | <https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai> | lock records no commit (folder hash 678c375b883794bf4292715a43acbba5c84681aa); upstream main HEAD at check 65a39f393687675ce170e6094757de20370365b9 | MIT | vendor |
+| skill | unlazy | Completion discipline: acceptance-gate files written before work, evidence re-checked before reporting. | <https://github.com/Leonxlnx/unlazy> | 2.1.0 (package.json); lock hash 16671491f6679ad9378f52604d3bc2415b4120c7 equals upstream main HEAD at check | MIT | vendor |
+| skill | vercel-react-best-practices | React and Next.js performance rules from Vercel Engineering. | <https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices> | skill metadata 1.0.0; lock records no commit; upstream main HEAD at check 063bee94c3f4df8453406c830b0a7df0f2860278 | NOASSERTION | link |
+| skill | graphify | Turn code and documents into a persistent knowledge graph with query, path and explain tools. | <https://github.com/Graphify-Labs/graphify> | graphifyy 0.9.93 (PyPI); upstream commit not recorded | Apache-2.0 | vendor |
+| skill | [private-term skill A] | excluded: matches a private term | - | - | - | exclude |
+| skill | [private-term skill B] | excluded: matches a private term (account-synced copy) | - | - | - | exclude |
+| skill | [owner-specific article skill] | excluded: owner-specific; matches a private term | - | - | - | exclude |
+| skill | docx | Create, read and edit Word documents. | <https://github.com/anthropics/skills/tree/main/skills/docx> | account-synced copy; upstream main HEAD at check dbd4588f9e1033efb41dad4bef2f7947c8993d44 | LicenseRef-Anthropic-Proprietary | link |
+| skill | pdf | Read, merge, split, fill and create PDF files. | <https://github.com/anthropics/skills/tree/main/skills/pdf> | account-synced copy; upstream main HEAD at check dbd4588f9e1033efb41dad4bef2f7947c8993d44 | LicenseRef-Anthropic-Proprietary | link |
+| skill | pptx | Create, read and edit PowerPoint decks. | <https://github.com/anthropics/skills/tree/main/skills/pptx> | account-synced copy; upstream main HEAD at check dbd4588f9e1033efb41dad4bef2f7947c8993d44 | LicenseRef-Anthropic-Proprietary | link |
+| skill | xlsx | Create, read and edit spreadsheets. | <https://github.com/anthropics/skills/tree/main/skills/xlsx> | account-synced copy; upstream main HEAD at check dbd4588f9e1033efb41dad4bef2f7947c8993d44 | LicenseRef-Anthropic-Proprietary | link |
+| skill | skill-creator (Anthropic) | Create, edit and evaluate agent skills, including trigger-description tuning. | <https://github.com/anthropics/skills/tree/main/skills/skill-creator> | account-synced copy; upstream main HEAD at check dbd4588f9e1033efb41dad4bef2f7947c8993d44 | Apache-2.0 | vendor |
+| skill | built-in-browser | Use the Claude desktop app's built-in browser pane. | - | account-synced | LicenseRef-Anthropic-Proprietary | exclude |
+| skill | chrome-browser | Use the Claude in Chrome extension. | - | account-synced | LicenseRef-Anthropic-Proprietary | exclude |
+| skill | computer-use (Anthropic) | Control the desktop through the Claude desktop app. | - | account-synced | LicenseRef-Anthropic-Proprietary | exclude |
+| skill | docs | Claude Docs documents. | - | account-synced | NOASSERTION | exclude |
+| skill | google-workspace | Edit Google Docs/Sheets/Slides through account connectors. | - | account-synced | NOASSERTION | exclude |
+| skill | morning | Render a morning brief from account data. | - | account-synced | NOASSERTION | exclude |
+| skill | import-memory | Import another assistant's memory export into Claude memory. | - | account-synced | NOASSERTION | exclude |
+| skill | deep-research | Coordinate research subagents into a report. | - | account-synced | NOASSERTION | exclude |
+| skill | Codex system skills (imagegen, openai-docs, review-agent, skill-creator, skill-installer) | Skills bundled with the Codex CLI. | - | Codex system-skills marker 3eadc798bef12c4a | Apache-2.0 | exclude |
+| skill | Claude Code built-in skills (artifact-*, update-config, keybindings-help, code-review, simplify, loop, schedule, claude-api, init, security-review, run, plugin-authoring, workflow-authoring, dataviz, claude-in-chrome, fewer-permission-prompts) | Skills that ship inside Claude Code or claude.ai. | - | Claude Code 2.1.309 | LicenseRef-Anthropic-Commercial | exclude |
+
+##### Plugins
+
+| Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
+|---|---|---|---|---|---|---|
+| plugin | superpowers@claude-plugins-official | Workflow skills: brainstorming, plans, TDD, debugging, code review, worktrees, verification. | <https://github.com/obra/superpowers> | 7.0.0 @ bb92a77741419a4ab5f06e711a283343f1ada0c3 | MIT | vendor |
+| plugin | mattpocock-skills | Engineering and productivity skills: TDD, diagnosis, domain modeling, code review, PR writing, grilling. | <https://github.com/mattpocock/skills> | 1.3.1 @ 49dd158d1076134a641b33efb035946536778336 | MIT | vendor |
+| plugin | codex@openai-codex | Claude Code plugin that calls the Codex CLI for rescue, review and delegated work. | <https://github.com/openai/codex-plugin-cc> | 1.0.6 @ db52e28f4d9ded852ab3942cea316258ae4ef346 | Apache-2.0 | vendor |
+| plugin | ponytail@ponytail | 'Lazy senior dev' mode: skills that push agents to write less code, plus audit/debt/review helpers. | <https://github.com/DietrichGebert/ponytail> | 5.3.2; marketplace revision 2ed6c52c9d7e5e56942508591085fd45dea277d3 | MIT | vendor |
+| plugin | omo@sisyphuslabs (LazyCodex) | Codex harness plugin: agent roles, ultrawork/loop skills, LSP and code-graph tools, lifecycle hooks. | <https://github.com/code-yeongyu/oh-my-openagent> | 5.1.40 | LicenseRef-Sustainable-Use-1.0 | link |
+| plugin | cowork-plugin-management | Create and customize Claude Cowork plugins. | <https://github.com/anthropics/knowledge-work-plugins/tree/main/cowork-plugin-management> | account-synced version 0040; upstream plugin-dir last commit e7a5e58b7d08dbadf66e4121b06c449e4faa2fb4 | Apache-2.0 | exclude |
+| plugin | Codex openai-bundled plugins (browser, chrome, computer-use, unified-computer-use, codex-app-tools, code-review, visualize) | Plugins bundled with the Codex desktop app. | - | local bundled marketplace | NOASSERTION | exclude |
+| plugin | Codex openai-primary-runtime plugins (documents, presentations, spreadsheets, pdf, template-creator) | Office-file runtimes bundled with the Codex app. | - | 26.1017.11052 (runtime cache) | NOASSERTION | exclude |
+| plugin | Codex openai-curated connectors (github, notion) | Account-bound app connectors. | - | - | NOASSERTION | exclude |
+
+##### MCP servers
+
+| Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
+|---|---|---|---|---|---|---|
+| mcp | context7 | Fetch current library and framework documentation. | <https://github.com/upstash/context7> | launched as @upstash/context7-mcp@latest (npx cache holds 4.4.4 and 2.2.5); upstream master HEAD at check d980242a5b04be30ae8804124a8be259bcc2a227 | MIT | template |
+| mcp | korean-law | Search and read Korean statutes and court decisions. | <https://github.com/chrisryugj/korean-law-mcp> | launched as korean-law-mcp@latest (npx cache 4.15.9); upstream main HEAD at check 0a8f08ef4f697e08047f76bfab8be435f5bdda5a | MIT | template |
+| mcp | openai (mcp-openai) | Let an agent query OpenAI chat models as a tool. | <https://github.com/mzxrai/mcp-openai> | launched as @mzxrai/mcp-openai@latest (npx cache 0.1.1) | MIT | template |
+| mcp | aside | Browser agent for web search, page reading and site tasks. | <https://aside.com/> | CLI 1.26.1010.1739 | LicenseRef-Proprietary | link |
+| mcp | openaiDeveloperDocs | Hosted OpenAI developer-docs MCP endpoint. | <https://developers.openai.com/mcp> | hosted service | NOASSERTION | link |
+| mcp | node_repl | Node REPL tool shipped inside the ChatGPT desktop app. | - | - | NOASSERTION | exclude |
+| mcp | computer-use (Codex) | Codex Computer Use desktop-control client. | - | - | NOASSERTION | exclude |
+| mcp | claude-in-chrome | Claude in Chrome browser-extension tools. | - | - | LicenseRef-Anthropic-Commercial | exclude |
+| mcp | account-bound connectors | claude.ai connectors in these categories: mail, calendar, drive, office suite, docs, media generation. | - | - | - | exclude |
+
+##### CLIs
+
+| Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
+|---|---|---|---|---|---|---|
+| cli | git | Version control. | <https://github.com/git/git> | 2.50.1 (Apple Git-155) | GPL-2.0-only | link |
+| cli | gh | GitHub CLI for PRs, issues and API calls. | <https://github.com/cli/cli> | 2.91.0 | MIT | link |
+| cli | node | JavaScript runtime for MCP servers and hooks. | <https://github.com/nodejs/node> | v24.6.0 | MIT | link |
+| cli | npm | Node package manager. | <https://github.com/npm/cli> | 11.5.1 | Artistic-2.0 | link |
+| cli | npx | Run npm packages without installing (MCP launchers). | <https://github.com/npm/cli> | 11.5.1 | Artistic-2.0 | link |
+| cli | pnpm | Fast Node package manager. | <https://github.com/pnpm/pnpm> | 10.32.1 | MIT | link |
+| cli | uv | Python package and tool manager. | <https://github.com/astral-sh/uv> | 0.12.17 | MIT OR Apache-2.0 | link |
+| cli | python3 | Python runtime. | <https://github.com/python/cpython> | 3.14.4 | PSF-2.0 | link |
+| cli | claude | Claude Code CLI. | <https://github.com/anthropics/claude-code> | 2.1.309 | LicenseRef-Anthropic-Commercial | link |
+| cli | codex | OpenAI Codex CLI. | <https://github.com/openai/codex> | codex-cli 0.163.0 | Apache-2.0 | link |
+| cli | gitleaks | Secret scanner for git history and staged changes. | <https://github.com/gitleaks/gitleaks> | 8.30.1 | MIT | link |
+| cli | graphify | Knowledge-graph CLI behind the graphify skill. | <https://github.com/Graphify-Labs/graphify> | 0.9.93 (PyPI graphifyy) | Apache-2.0 | link |
+| cli | aside | Aside browser-agent CLI. | <https://aside.com/> | 1.26.1010.1739 | LicenseRef-Proprietary | link |
+| cli | orca | Orca CLI for worktrees, terminals and agent orchestration. | <https://github.com/stablyai/orca> | 1.4.237 | MIT | link |
+| cli | jq | JSON processor. | <https://github.com/jqlang/jq> | 1.8.1 | MIT | link |
+| cli | rg | ripgrep fast search. | <https://github.com/BurntSushi/ripgrep> | 15.2.0 | Unlicense OR MIT | link |
+
+Open questions from the inventory. None of them blocks: every affected item is linked, not vendored.
+- `vercel-react-best-practices`: its README says MIT, but the upstream repository has no LICENSE file, so it
+  is link only until upstream adds one.
+- The LazyCodex plugin: its local metadata says MIT, but upstream's LICENSE is the Sustainable Use License
+  1.0, so it is link only.
+- graphify ships both an Apache-2.0 and an MIT license file; either permits vendoring its skill. The lane
+  pins the upstream commit of the release it vendors.
+- `typesafe-ai`: its local lock records no commit, so the lane pins the upstream commit it vendors.
+- Aside is closed source: it is linked as optional, and the engines' built-in web tools remain the default
+  (row 34).
