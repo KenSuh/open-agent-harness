@@ -157,7 +157,7 @@ def _rows(data: dict, targets: list[str], **options) -> list[query.Row]:
 
 
 def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBranch, targets: list[str],
-               gates: list, settings: dict) -> tuple[list[query.Row], dict]:
+               gates: list, settings: dict, *, warnings: list[str] | None = None) -> tuple[list[query.Row], dict]:
     """Rows from the worktree map and the default-branch map, merged (A23). An entity is refused only when
     neither map knows it."""
     graph = query.load_graph(root, settings)
@@ -170,7 +170,18 @@ def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBran
             mapstore.resolve_rev(source, branch.commit, timeout=settings["git_timeout"])
         except ImpactError:
             source = root  # Maps recorded before mirror isolation still have their objects in the user's repo.
-    theirs = _with_live_hits(source, branch.data, branch.commit, targets, settings)
+    try:
+        theirs = _with_live_hits(source, branch.data, branch.commit, targets, settings)
+    except ImpactError:
+        if branch.state != "stale":
+            raise
+        # The disposable mirror may no longer contain this snapshot after a failed replacement.
+        # Its persisted rows remain usable, even when additional missing-path searches cannot run.
+        theirs = branch.data
+        if warnings is not None:
+            warnings.append(f"OAH_IMPACT_INCOMPLETE: additional path searches at default-branch commit={branch.commit} "
+                            "could not run; impact used its recorded rows. Restore the remote and retry without "
+                            "--offline or --no-refresh to fetch a complete map")
     for target in targets:
         entity = query.normalize_entity(target)
         if entity and all(entity not in (m["db"] or {"entities": {}})["entities"] for m in (data, theirs)):
@@ -200,28 +211,30 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
 
     requested = [query.normalize_entity(raw) or _relative(raw, root) for raw in args.targets]
     scope = _task_scope(root, args.task) if args.task else None
-    branch = defaultbranch.refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
-    maps = [data["files"]] + ([branch.data["files"]] if branch.data else [])
-    files = {path: kind for mapped in reversed(maps) for path, kind in mapped.items()}
-    for target in requested:
-        if query.normalize_entity(target):
-            add([target])
-        else:
-            selected = [path for mapped in maps for path in _expand(target, mapped)]
-            add(selected or [target])
-    if scope is not None:
-        selected, notes = query.select_scope(scope, files, args.kind)
-        warnings += notes
-        add(selected)
-    changed = _changed(root, since, info.commit if args.ref else None) if since else []
-    add(changed)
-    data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
-    gates, gate_status = gatebind.discover(root)
-    if branch.warning():
-        warnings.append(branch.warning())
-    if branch.info:
-        warnings += [f"{warning} [default-branch map commit={branch.commit}]" for warning in branch.info.warnings()]
-    rows, found = _both_maps(root, data, branch, targets, gates, settings)
+    # Keep the mirror alive through missing-target searches as well as fetch and map construction.
+    with defaultbranch._mirror_lock(root, float(settings["lock_timeout"])):
+        branch = defaultbranch._refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
+        maps = [data["files"]] + ([branch.data["files"]] if branch.data else [])
+        files = {path: kind for mapped in reversed(maps) for path, kind in mapped.items()}
+        for target in requested:
+            if query.normalize_entity(target):
+                add([target])
+            else:
+                selected = [path for mapped in maps for path in _expand(target, mapped)]
+                add(selected or [target])
+        if scope is not None:
+            selected, notes = query.select_scope(scope, files, args.kind)
+            warnings += notes
+            add(selected)
+        changed = _changed(root, since, info.commit if args.ref else None) if since else []
+        add(changed)
+        data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
+        gates, gate_status = gatebind.discover(root)
+        if branch.warning():
+            warnings.append(branch.warning())
+        if branch.info:
+            warnings += [f"{warning} [default-branch map commit={branch.commit}]" for warning in branch.info.warnings()]
+        rows, found = _both_maps(root, data, branch, targets, gates, settings, warnings=warnings)
     rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank, enabled=settings["rerank"])
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
     identity = query.db_identity(data, info.commit, shown, found,

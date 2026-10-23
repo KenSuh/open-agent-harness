@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from unittest.mock import patch
 from oah.engines.proc import run_command
 from oah.impact import ImpactError, defaultbranch, ensure_fresh, mapstore, query
 from oah.impact.defaults import DEFAULTS, MAP_KEYS, configured, effective
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
 from tests.test_impact_map import BASE, head, run_impact
 
 NETWORK_GIT = re.compile(r"built-in: git (fetch|ls-remote)\b|upload-pack")
@@ -66,7 +67,7 @@ def run(argv, **kwargs):
     if "fetch" in argv and sys.argv[1] == "timeout":
         return original((sys.executable, "-c", "import time; time.sleep(10)"), timeout=0.03)
     result = original(argv, **kwargs)
-    if "ls-remote" in argv and sys.argv[1] == "failure":
+    if "ls-remote" in argv and "--get-url" not in argv and sys.argv[1] == "failure":
         subprocess.run(["git", "-C", sys.argv[2], "update-ref", "-d", "refs/heads/main"],
                        check=True, capture_output=True)
     return result
@@ -181,7 +182,7 @@ class RemoteSelectionTest(unittest.TestCase):
 
         def remove_after_discovery(argv, **kwargs):
             result = run_command(argv, **kwargs)
-            if "ls-remote" in argv:
+            if "ls-remote" in argv and "--get-url" not in argv:
                 git(fx.bare, "update-ref", "-d", "refs/heads/trunk")
             if "fetch" in argv:
                 calls.append(result.returncode)
@@ -231,7 +232,7 @@ class RemoteSelectionTest(unittest.TestCase):
 
         def probe(argv, **kwargs):
             action = next((a for a in ("ls-remote", "fetch") if a in argv), None)
-            if action:
+            if action and "--get-url" not in argv:
                 calls.append(action)
                 # Exercise Git's real credential path with the network command's config and environment,
                 # without contacting any host or returning a credential.
@@ -294,7 +295,7 @@ class RemoteSelectionTest(unittest.TestCase):
 
         def probe(argv, **kwargs):
             action = next((a for a in ("ls-remote", "fetch") if a in argv), None)
-            if action:
+            if action and "--get-url" not in argv:
                 env = kwargs["env"]
                 config = run_command((*shlex.split(env["GIT_SSH_COMMAND"]), "-F", os.devnull, "-G", "oah.invalid"),
                                      timeout=5.0, env=env)
@@ -362,6 +363,252 @@ class RefMapTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(list((self.fx.lane / ".git/oah/impact/mirrors").glob("*.git")), [])
         self.assertNotRegex(trace_text(trace), NETWORK_GIT)
+
+
+class MirrorLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        self.fx = RemoteFixture(self)
+        self.settings = configured(self.fx.lane)
+
+    def test_conflicting_local_and_global_url_rewrites(self):
+        other = RemoteFixture(self)
+        other.advance({"wrong-repository.txt": "not the configured global destination\n"})
+        expected = self.fx.advance(RELEASE)
+        config = self.fx.tmp / "global-config"
+        alias = "oah-test-remote:"
+        stored = alias + "remote.git"
+        git(self.fx.lane, "config", "--file", str(config),
+            f"url.{self.fx.tmp.as_posix()}/.insteadOf", alias)
+        # The longer local match wins if URL expansion happens in the user's checkout.
+        git(self.fx.lane, "config", f"url.{other.bare.as_posix()}.insteadOf", stored)
+        git(self.fx.lane, "remote", "set-url", "origin", stored)
+        before = repository_bytes(self.fx.lane)
+        result = run_impact(self.fx.lane, "tools/check.py", "--json",
+                            env_extra={"GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        branch = json.loads(result.stdout)["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["commit"]), ("fresh", expected))
+        self.assertEqual(repository_bytes(self.fx.lane), before)
+
+    def test_concurrent_queries_keep_their_own_fetched_sha(self):
+        self._concurrent_queries("map")
+
+    def test_active_query_keeps_mirror_until_its_last_search(self):
+        self._concurrent_queries("search")
+
+    def _concurrent_queries(self, point: str):
+        git_commit(self.fx.lane, {"tools/future.py": "print('new in the lane')\n"})
+        expected_a = self.fx.advance({**RELEASE,
+            ".github/workflows/future.yml": "steps:\n  - run: python tools/future.py\n"})
+        other = RemoteFixture(self)
+        expected_b = other.advance({"repository-b.txt": "only in B\n"})
+        ready, release = self.fx.tmp / "a-ready", self.fx.tmp / "release-a"
+        fetched_b = self.fx.tmp / "b-fetched"
+        code = '''
+import json, pathlib, sys, time
+from oah.impact import defaultbranch, mapstore
+from oah import impact_cli
+from oah.impact.defaults import configured
+root = pathlib.Path.cwd()
+ready, release, fetched = map(pathlib.Path, sys.argv[2:5])
+original_map, original_run = mapstore._ref_map, defaultbranch.run_command
+original_hits = impact_cli._with_live_hits
+def pause():
+    if sys.argv[1] == "a":
+        ready.touch()
+        deadline = time.monotonic() + 15
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("release the paused query and retry")
+            time.sleep(0.01)
+def build(*args, **kwargs):
+    if sys.argv[5] == "map":
+        pause()
+    return original_map(*args, **kwargs)
+def hits(source, *args, **kwargs):
+    if source != root and sys.argv[5] == "search":
+        pause()
+    return original_hits(source, *args, **kwargs)
+def run(argv, **kwargs):
+    result = original_run(argv, **kwargs)
+    if sys.argv[1] == "b" and "fetch" in argv:
+        fetched.touch()
+    return result
+mapstore._ref_map, defaultbranch.run_command = build, run
+impact_cli._with_live_hits = hits
+if sys.argv[5] == "search":
+    from oah.cli import main
+    raise SystemExit(main(["impact", "tools/future.py", "--json"]))
+result = defaultbranch.refresh(root, configured(root), env={})
+print(json.dumps({"state": result.state, "commit": result.commit, "files": sorted(result.data["files"])}))
+'''
+        env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+        env.pop("OAH_STATE_DIR", None)
+        argv = [sys.executable, "-c", code]
+        a = subprocess.Popen([*argv, "a", str(ready), str(release), str(fetched_b), point], cwd=self.fx.lane,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        b = None
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.exists() and a.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "query A must finish its real fetch before query B starts")
+            git(self.fx.lane, "remote", "set-url", "origin", str(other.bare))
+            b = subprocess.Popen([*argv, "b", str(ready), str(release), str(fetched_b), point], cwd=self.fx.lane,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            # An unlocked implementation lets B replace A's ref here; a locked one waits for A.
+            deadline = time.monotonic() + 2
+            while not fetched_b.exists() and b.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            release.touch()
+            out_a, err_a = a.communicate(timeout=30)
+            out_b, err_b = b.communicate(timeout=30)
+            self.assertEqual(a.returncode, 0, err_a)
+            self.assertEqual(b.returncode, 0, err_b)
+        finally:
+            release.touch()
+            for process in (a, b):
+                if process is not None:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=30)
+        result_a, result_b = json.loads(out_a), json.loads(out_b)
+        if point == "search":
+            self.assertIn((".github/workflows/future.yml", "exec", "default-branch"),
+                          {(r["source"], r["binding"], r["found_in"]) for r in result_a["rows"]})
+            for report, expected in ((result_a, expected_a), (result_b, expected_b)):
+                branch = report["maps"]["default_branch"]
+                self.assertEqual((branch["state"], branch["commit"]), ("fresh", expected))
+            return
+        self.assertEqual((result_a["state"], result_a["commit"]), ("fresh", expected_a))
+        self.assertNotIn("repository-b.txt", result_a["files"])
+        self.assertEqual((result_b["state"], result_b["commit"]), ("fresh", expected_b))
+        self.assertIn("repository-b.txt", result_b["files"])
+
+    def test_killed_git_fetch_lock_is_discarded_before_retry(self):
+        saved = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        marker = self.fx.tmp / "fetch-held-ref-lock"
+        hook = mirror / "hooks/reference-transaction"
+        hook.parent.mkdir(exist_ok=True)
+        pause = ("import pathlib, time; " + f"p = pathlib.Path({str(marker)!r}); "
+                 "first = not p.exists(); p.touch(); time.sleep(30 if first else 0)")
+        hook.write_text('#!/bin/sh\nif [ "$1" = prepared ]; then\nexec ' +
+                        shlex.join([pathlib.Path(sys.executable).as_posix(), "-c", pause]) + "\nfi\n",
+                        encoding="utf-8")
+        hook.chmod(0o755)
+        expected = self.fx.advance(RELEASE)
+        interrupted = defaultbranch.refresh(self.fx.lane, {**self.settings, "git_timeout": 3.0}, env={})
+        self.assertTrue(marker.exists(), "a real Git fetch must reach its prepared ref transaction")
+        self.assertTrue(list(mirror.rglob("*.lock")), "terminating the fetch must leave a real Git ref lock behind")
+        self.assertEqual((interrupted.state, interrupted.reason, interrupted.commit),
+                         ("stale", "fetch timed out", saved.commit))
+        retried = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual((retried.state, retried.commit), ("fresh", expected))
+        self.assertFalse(list(mirror.rglob("*.lock")))
+        self.assertFalse(hook.exists(), "replace the poisoned mirror instead of repairing its lock")
+
+    def test_default_branch_change_discards_obsolete_refs_and_objects(self):
+        old = self.fx.advance(RELEASE)
+        defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        unrelated = make_git_repo(self)
+        expected = git_commit(unrelated, {"trunk.txt": "an unrelated default history\n"})
+        git(unrelated, "push", "-q", str(self.fx.bare), "HEAD:trunk")
+        git(self.fx.bare, "symbolic-ref", "HEAD", "refs/heads/trunk")
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual((result.state, result.branch, result.commit), ("fresh", "trunk", expected))
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        self.assertEqual(refs(mirror), {"refs/remotes/origin/trunk": expected})
+        absent = subprocess.run(["git", "-C", str(mirror), "cat-file", "-e", old + "^{commit}"],
+                                capture_output=True, env=git_env())
+        self.assertNotEqual(absent.returncode, 0, "discard the obsolete history along with its ref")
+
+    def test_remote_name_change_keeps_only_the_current_ref(self):
+        expected = self.fx.advance(RELEASE)
+        defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        git(self.fx.lane, "remote", "rename", "origin", "upstream")
+        git(self.fx.lane, "branch", "--set-upstream-to", "upstream/main")
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual((result.state, result.remote, result.commit), ("fresh", "upstream", expected))
+        self.assertEqual(refs(defaultbranch._mirror_path(self.fx.lane, {})),
+                         {"refs/remotes/upstream/main": expected})
+
+    def test_invalid_mirror_is_replaced_instead_of_repaired(self):
+        saved = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        marker = mirror / "old-cache"
+        marker.touch()
+        (mirror / "HEAD").write_text("invalid HEAD\n", encoding="utf-8")
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual((result.state, result.commit), ("fresh", saved.commit))
+        self.assertFalse(marker.exists())
+
+    def test_mirror_alias_cannot_delete_or_modify_user_repository(self):
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        before = repository_bytes(self.fx.lane)
+        directory_alias(self.fx.lane / ".git", mirror)
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual(result.state, "fresh")
+        self.assertEqual(repository_bytes(self.fx.lane), before)
+        self.assertFalse(mirror.is_symlink())
+
+    @unittest.skipUnless(os.name == "nt", "Windows dangling directory junction")
+    def test_windows_dangling_mirror_junction_is_discarded(self):
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        target = self.fx.tmp / "vanished-cache"
+        target.mkdir()
+        directory_alias(target, mirror)
+        target.rmdir()
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual(result.state, "fresh")
+        self.assertFalse(defaultbranch._linked(mirror))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory permissions")
+    def test_undiscardable_cache_falls_back_to_recorded_map(self):
+        saved = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        (mirror / "HEAD").write_text("invalid HEAD\n", encoding="utf-8")
+        mirror.chmod(0o500)
+        try:
+            if os.access(mirror, os.W_OK):
+                self.skipTest("this user can bypass directory write permissions")
+            result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+            self.assertEqual((result.state, result.reason, result.commit), ("stale", "fetch failed", saved.commit))
+            self.assertEqual(result.data, saved.data)
+        finally:
+            mirror.chmod(0o700)
+
+    def test_url_change_replaces_cache_even_when_the_commit_is_unchanged(self):
+        saved = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        replacement = self.fx.tmp / "replacement.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(self.fx.bare), str(replacement)],
+                       check=True, env=git_env())
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        marker = mirror / "old-cache"
+        marker.touch()
+        git(self.fx.lane, "remote", "set-url", "origin", str(replacement))
+        result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        self.assertEqual((result.state, result.commit), ("fresh", saved.commit))
+        self.assertFalse(marker.exists())
+
+    def test_failed_cache_replacement_keeps_the_recorded_map_usable(self):
+        git_commit(self.fx.lane, {"tools/future.py": "print('new in the lane')\n"})
+        expected = self.fx.advance(RELEASE)
+        saved = run_impact(self.fx.lane, "tools/check.py", "--json")
+        self.assertEqual(saved.returncode, 0, saved.stderr)
+        recorded = self.fx.map_files()[0].read_bytes()
+        git(self.fx.lane, "remote", "set-url", "origin", str(self.fx.tmp / "missing.git"))
+        result = run_impact(self.fx.lane, "tools/check.py", "tools/future.py", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        branch = report["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["reason"], branch["commit"]), ("stale", "fetch failed", expected))
+        self.assertEqual(self.fx.map_files()[0].read_bytes(), recorded)
+        self.assertIn(".github/workflows/release.yml", {r["source"] for r in report["rows"]})
+        self.assertIn("OAH_IMPACT_INCOMPLETE", result.stderr)
+        self.assertIn("retry", result.stderr)
 
 
 class DefaultBranchCliTest(unittest.TestCase):

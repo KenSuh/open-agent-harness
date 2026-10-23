@@ -720,14 +720,15 @@ def ref_map(root: pathlib.Path, ref: str, *, refresh: bool = True, env: Mapping[
 
 def _ref_map(root: pathlib.Path, ref: str, *, source: pathlib.Path | None, refresh: bool = True,
              env: Mapping[str, str] | None = None, settings: Mapping[str, object] | None = None,
-             remote: str | None = None) -> tuple[MapInfo, dict]:
+             remote: str | None = None, commit: str | None = None) -> tuple[MapInfo, dict]:
     """Read objects from source (the private mirror), but bind/store the map for the user's worktree."""
     top, worktree_path, current = _context(root, env, settings)
     source = top if source is None else source
     path = ref_map_path(_state(worktree_path), top)
 
     def manifest_inputs():
-        manifest, inputs, excluded = _ref_manifest(source, ref, current)
+        manifest, inputs, excluded = _ref_manifest(source, commit or ref, current)
+        manifest["ref"] = ref
         manifest["worktree"] = hashlib.sha256(str(top.resolve()).encode("utf-8")).hexdigest()
         if remote is not None:
             manifest["remote"] = remote
