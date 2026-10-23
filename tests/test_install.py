@@ -74,6 +74,9 @@ def powershell_env(test: unittest.TestCase, **extra: str) -> dict[str, str]:
                TEMP=str(cache / "Temp"), TMP=str(cache / "Temp"))
     env.pop("PYTHONPATH", None)
     env.update(extra)
+    # PowerShell 7 otherwise adds a version-dependent suffix. Keep the exemption one exact file.
+    env["PSModuleAnalysisCachePath"] = str(pathlib.Path(env["LOCALAPPDATA"]) /
+                                            "Microsoft/PowerShell/ModuleAnalysisCache")
     for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
         pathlib.Path(env[name]).mkdir(parents=True, exist_ok=True)
     return env
@@ -111,22 +114,24 @@ def snapshot(folder: pathlib.Path) -> dict[str, tuple[int, str]]:
 
 
 def powershell_snapshot(env: dict[str, str]) -> dict[str, dict[str, tuple[int, str]]]:
-    """Ignore only PowerShell's cache subtrees and their directory ancestors, never all AppData."""
+    """Ignore exact PowerShell cache files and ancestor directory entries, never their other contents."""
     cache_dirs = ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell")
+    cache_names = ("ModuleAnalysisCache", "StartupProfileData-NonInteractive", "StartupProfileData-Interactive")
     found = {}
     for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
         folder = pathlib.Path(env[name])
         allowed = cache_dirs if name in ("APPDATA", "LOCALAPPDATA") else ()
         if name in ("HOME", "USERPROFILE"):
             allowed = tuple(f"AppData/{kind}/{relative}" for kind in ("Local", "Roaming") for relative in cache_dirs)
+        files = {f"{cache}/{filename}".casefold() for cache in allowed for filename in cache_names}
+        directories = {parent.as_posix() for relative in files for parent in pathlib.PurePosixPath(relative).parents
+                       if parent != pathlib.PurePosixPath(".")}
         contents = {}
         for relative, value in snapshot(folder).items():
             path = folder / relative
             key = relative.casefold()
-            if not path.is_symlink() and any(
-                    key.startswith(cache.casefold() + "/") or
-                    (path.is_dir() and (key == cache.casefold() or cache.casefold().startswith(key + "/")))
-                    for cache in allowed):
+            if not path.is_symlink() and ((path.is_file() and key in files) or
+                                          (path.is_dir() and key in directories)):
                 continue
             contents[relative] = value
         found[name] = contents
@@ -135,6 +140,7 @@ def powershell_snapshot(env: dict[str, str]) -> dict[str, dict[str, tuple[int, s
 
 def assert_dry_run_branches(test: unittest.TestCase, source: str, shell: str) -> None:
     """Fail closed on dry-run statements beyond printing, bookkeeping and the guarded run wrapper."""
+    source = source.replace("\r\n", "\n")
     if shell == "bash":
         starts = list(re.finditer(r'(?m)^([ \t]*)(?:if|elif) \[ "\$(?:DRY_RUN|RELEASE_DRY_RUN)" = 1 \]; then([^\n]*)',
                                   source))
@@ -173,6 +179,47 @@ def assert_dry_run_branches(test: unittest.TestCase, source: str, shell: str) ->
                 test.assertTrue(len(words) == 2 and words[0] == "say", line)
             else:
                 test.assertIsNotNone(re.fullmatch(r'''Say (?:'(?:[^']|'')*'|"(?:[^"`$]|\$\w+)*")''', line), line)
+
+    # A branch's Say/Format-Command/etc. is safe only while its callees are safe too. Pin the
+    # reviewed bodies rather than trying to recognize every possible shell or .NET write.
+    # These are safety-review pins, independent of the candidate source passed to this checker.
+    # Review changed bodies and their callees before updating a pin; snapshots remain necessary.
+    if shell == "bash":
+        # All bash helpers are nested in main, so its body includes the complete call graph.
+        functions = list(re.finditer(r"(?ms)^(main)\(\) \{\n.*^}", source))
+        reviewed = {"main": "84d649af81048994bc5b09f8822141c0dec4b3358d67d0d0ed6beb3fc5a489cc"}
+    else:
+        functions = list(re.finditer(r"(?ms)^function ([\w-]+)\b[^\n]*\n.*?^}", source))
+        reviewed = {
+            "Say": "a9b03cbb798c0e962b491b6d955018a9794111105be566978c0beb0d214049c6",
+            "Show-Usage": "b28ffce8d3d6d1208437a1bc063de45e950c5aa1836c08f3928e38b6016dd6fc",
+            "Step": "2775a08bf8a4f41584754a1468c863e9d1d895f4a1633919a97a00a7a5bad2bc",
+            "Fail": "b29cfebfd3527d9a0f8de730630138c047026cf870a65e6224eaa1fe9fae4426",
+            "Format-Command": "1168fec911843bb80f7cd7a5e4fab5c2d8344d014ccc2cb41bf5fed8c73ac333",
+            "Join-Arguments": "853015ff7b10a52cbd922c784f7844c6e0e88512866787739a92ac37739a5ed4",
+            "Start-Native": "cfa11f0593051a0245c6bcc01fb04af84708b6db7adb21a28a2d9ffa77935a56",
+            "Update-SessionPath": "e81264b195eb88bb76978045d711b0e99f4edd5f5722c1e2e93bada69af056d3",
+            "Invoke-Step": "5ba1263c3a734417494a5603ac606d0d9f7b926cb746b378b480fcde892a8ecf",
+            "Invoke-OneLiner": "861ebc764b45674603408be16aea930ce950e1a884143af392fb78d2ecc07c4a",
+            "Ask": "369bdb07dae58bb076a5671e03797abf684e8e2e4633342a2298c83dcc67bbb5",
+            "Get-Consent": "f07ea2ed1dabd34f4178254154fd8dc1deb9dbc566dedce946bb9acd099ec443",
+            "Find-Program": "189c3ae44bc4c765fe53239fb9ada37924035dfcb3a8ca3ea24f873dff929b84",
+            "Find-Uv": "91dd7fdc4211698e98052711d2144dca4f2f6eb24d4398f5b0fa367ba77898a5",
+            "Find-Python": "b050c5b5cf3c3bcc547199aa7b076073854ea9172161fad079c3ec426a6a4121",
+            "Test-Clone": "2a08650a4f62527228f03348473ac7e7158a3403c4deb460caecd094b593e2c3",
+            # Unreachable in a dry run; the guards in their callers are pinned here.
+            "Find-OahInNewWindow": None,
+            "Save-Release": None,
+            "Get-Release": "6d8dea91e8a805ecd91990ec02a816d13b23d534c904c14d72bb1d848ef68f22",
+            "Invoke-OahInstall": "d6c8fa858ec601693c1953b7c820c92691012253520b9b250de1a8a1609dd78a",
+        }
+    test.assertCountEqual([function[1] for function in functions], reviewed,
+                          "Installer functions changed; review dry-run reachability before updating the pins.")
+    for function in functions:
+        expected = reviewed[function[1]]
+        if expected is not None:
+            test.assertEqual(hashlib.sha256(function[0].encode("utf-8")).hexdigest(), expected,
+                             f"Review {function[1]} and its callees for dry-run writes before updating its pin.")
 
 
 @unittest.skipIf(os.name == "nt" or BASH is None, "install.sh is the macOS installer")
@@ -575,7 +622,34 @@ class InstallPs1Test(unittest.TestCase):
                 target.write_text("modified", encoding="utf-8")
                 self.assertNotEqual(powershell_snapshot(env)[name], after[name])
 
-    def test_powershell_snapshot_allows_only_exact_cache_directories(self):
+    def test_powershell_snapshot_catches_writes_beside_cache_files(self):
+        env = powershell_env(self)
+        locations = [(name, relative) for name in ("APPDATA", "LOCALAPPDATA")
+                     for relative in ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell")]
+        locations += [(name, f"AppData/{kind}/{relative}") for name in ("HOME", "USERPROFILE")
+                      for kind in ("Local", "Roaming")
+                      for relative in ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell")]
+        for name, relative in locations:
+            with self.subTest(location=name, relative=relative):
+                target = pathlib.Path(env[name]) / relative / "oah-created.txt"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                before = powershell_snapshot(env)
+                subprocess.run([sys.executable, "-c",
+                                "import pathlib, sys; pathlib.Path(sys.argv[1]).write_bytes(b'created')",
+                                str(target)], check=True, capture_output=True, timeout=30)
+                created = powershell_snapshot(env)
+                self.assertNotEqual(created[name], before[name])
+                target.write_bytes(b"modified")
+                self.assertNotEqual(powershell_snapshot(env)[name], created[name])
+                target.unlink()
+                self.assertEqual(powershell_snapshot(env), before)
+
+    def test_powershell_env_pins_the_module_cache_filename(self):
+        env = powershell_env(self)
+        self.assertEqual(env.get("PSModuleAnalysisCachePath"),
+                         str(pathlib.Path(env["LOCALAPPDATA"]) / "Microsoft/PowerShell/ModuleAnalysisCache"))
+
+    def test_powershell_snapshot_allows_only_exact_cache_artifacts(self):
         env = powershell_env(self)
         before = powershell_snapshot(env)
         caches = {
@@ -587,7 +661,9 @@ class InstallPs1Test(unittest.TestCase):
             for relative in relatives:
                 folder = pathlib.Path(env[name]) / relative
                 folder.mkdir(parents=True)
-                (folder / "ModuleAnalysisCache").write_bytes(b"PowerShell cache")
+                for filename in ("ModuleAnalysisCache", "StartupProfileData-NonInteractive",
+                                 "StartupProfileData-Interactive"):
+                    (folder / filename).write_bytes(b"PowerShell cache")
         self.assertEqual(powershell_snapshot(env), before)
         for name, relative in (("HOME", "AppData/Local/Other/cache"),
                                ("APPDATA", "Microsoft/Windows/PowerShell-other/cache"),
@@ -599,6 +675,20 @@ class InstallPs1Test(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"must be caught")
                 self.assertNotEqual(powershell_snapshot(env)[name], previous[name])
+
+    def test_powershell_snapshot_rejects_cache_lookalikes_and_subdirectories(self):
+        env = powershell_env(self)
+        for relative in ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell"):
+            for filename in ("ModuleAnalysisCache-other", "StartupProfileData-oah-created.txt",
+                             "StartupProfileData-NonInteractive.txt", "other/oah-created.txt",
+                             "ModuleAnalysisCache/oah-created.txt",
+                             "StartupProfileData-NonInteractive/oah-created.txt"):
+                with self.subTest(relative=relative, filename=filename):
+                    before = powershell_snapshot(env)
+                    path = pathlib.Path(env["LOCALAPPDATA"]) / relative / filename
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"must be caught")
+                    self.assertNotEqual(powershell_snapshot(env), before)
 
     def test_installers_dry_run_branches_only_print(self):
         for shell, path in (("bash", INSTALL_SH), ("powershell", INSTALL_PS1)):
@@ -619,6 +709,64 @@ class InstallPs1Test(unittest.TestCase):
                     self.assertNotEqual(mutated, source)
                     with self.assertRaises(AssertionError):
                         assert_dry_run_branches(self, mutated, shell)
+
+    def test_dry_run_static_check_rejects_writes_in_every_reachable_function(self):
+        for shell, path, pattern, unreachable, operation in (
+                ("bash", INSTALL_SH, r"(?m)^(\w+)\(\) \{", {"sha256_of", "fresh_shell_finds_oah"},
+                 'touch "$HOME/oah-created.txt"'),
+                ("powershell", INSTALL_PS1, r"(?m)^function ([\w-]+)\b[^\n{]*\{",
+                 {"Find-OahInNewWindow", "Save-Release"},
+                 "[IO.File]::WriteAllText((Join-Path $env:APPDATA 'Microsoft/PowerShell/oah-created.txt'), 'data')")):
+            source = path.read_text(encoding="utf-8")
+            for match in re.finditer(pattern, source):
+                if match[1] in unreachable:
+                    continue
+                with self.subTest(shell=shell, function=match[1]):
+                    mutated = source[:match.end()] + "\n    " + operation + "\n" + source[match.end():]
+                    with self.assertRaises(AssertionError):
+                        assert_dry_run_branches(self, mutated, shell)
+
+    def test_dry_run_static_check_rejects_new_and_shadowed_helpers(self):
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        for name in ("Say", "New-DryRunHelper"):
+            with self.subTest(function=name):
+                helper = (f"function {name} {{\n"
+                          "    [IO.File]::WriteAllText('oah-created.txt', 'data')\n}\n\n")
+                mutated = source.replace("function Invoke-OahInstall {", helper + "function Invoke-OahInstall {")
+                with self.assertRaises(AssertionError):
+                    assert_dry_run_branches(self, mutated, "powershell")
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_dry_run_detects_writes_inside_cache_parents(self):
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        # Keep the real dry-run paths, without depending on installed tools or external programs.
+        source = source.replace("function Invoke-OahInstall {",
+                                "function Find-Python { return $null }\nfunction Find-Uv { return $null }\n"
+                                "function Invoke-OahInstall {")
+        shells = [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]
+        self.assertIn("powershell", shells)
+        for shell in shells:
+            for name in ("APPDATA", "LOCALAPPDATA"):
+                for relative in ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell"):
+                    for marker in ("        return '<release-folder>'", "function Update-SessionPath {"):
+                        with self.subTest(shell=shell, location=name, relative=relative, marker=marker):
+                            env = powershell_env(self, OAH_RELEASE_URL="https://releases.example.invalid/oah.zip",
+                                                 OAH_RELEASE_SHA256="a" * 64)
+                            target = pathlib.Path(env[name]) / relative / "oah-created.txt"
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            operation = f"[IO.File]::WriteAllText({ps_literal(str(target))}, 'created')"
+                            replacement = (marker + "\n    " + operation if marker.startswith("function")
+                                           else operation + "\n" + marker)
+                            mutated = source.replace(marker, replacement, 1)
+                            self.assertNotEqual(mutated, source)
+                            script = (f"$installer = {ps_literal(mutated)}; "
+                                      "& ([scriptblock]::Create($installer)) -DryRun; exit $LASTEXITCODE")
+                            before = powershell_snapshot(env)
+                            result = powershell_command(shell, script, env)
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assertIn(b"OAH_INSTALL_DRY_RUN_OK", result.stdout)
+                            self.assertTrue(target.is_file())
+                            self.assertNotEqual(powershell_snapshot(env), before)
 
     def test_install_ps1_hashing_does_not_depend_on_modules(self):
         text = INSTALL_PS1.read_text(encoding="ascii")
