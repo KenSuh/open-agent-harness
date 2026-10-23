@@ -1,6 +1,6 @@
 # open-agent-harness — Phase 0 plan
 
-Status: **draft for approval** · 2026-10-23 · owner decisions recorded in section 13 · nothing is built yet.
+Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendment 1 (2026-10-23) in section 15.
 
 This plan turns a private, single-owner multi-agent harness (called "the source" below) into a
 general-purpose kit that one person can install on macOS or Windows and use on their own repository.
@@ -106,7 +106,7 @@ Verdicts: **keep** (port the idea, rewritten portable), **simplify** (port a muc
 | 14 | Preflight script: stale base, active locks, recent commits, dirty tree, migration-number check, impact on touched files; ABORT / PROCEED_WITH_WARNINGS / PROCEED | Stops work on a stale or contested base | **keep, port to Python** | `oah preflight`: generic checks; project-specific checks such as migration numbers become config commands (5.7) |
 | 15 | Gate ledgers through unlazy: `finish` refuses unmet gates, isolated re-run, Stop-hook routing, static ledger lint | "Done" means evidence, not a claim | **keep** | unlazy runs the checks. `oah` has a read-only status parser, the `finish` guard and a lease-aware Stop hook (5.8) |
 | 16 | Verify-what-changed rule: re-run only the gates bound to changed files; heavy gates once on the final head | Cheap review rounds without losing rigor | **keep** | Rule text in the rules block, plus `oah impact --changed-since` |
-| 17 | Impact map: lexical `git grep`, gate-CHECK bindings (pin/exec), a product database backend, an auto-fresh worktree, an external re-ranking layer | "If I change X, what must I re-check?" | **keep the generic part** | `oah impact`: names exact gates (`gates#G3`), lexical and wiki references, co-change history, optional graph neighbours. Backends become plugins later (5.10) |
+| 17 | Impact map: lexical `git grep`, gate-CHECK bindings (pin/exec), a product database backend, an auto-fresh worktree, an external re-ranking layer | "If I change X, what must I re-check?" | **keep the generic part** | `oah impact`: names exact gates (`gates#G3`), lexical and wiki references, co-change history, optional graph neighbours. Backends become plugins later. An optional re-ranker may re-order results but never removes deterministic rows, and reports `used` or `unused(reason)` (5.10) |
 | 18 | Edit-time impact hint hook | Shows bindings before editing risky files | **later** | Optional hook |
 | 19 | graphify wrapper (report/query/path/explain/update, with update blocked where unsafe) | Safe access to the knowledge graph | **keep, thin** | `oah graph …` when graphify is installed |
 | 20 | Wiki audit, inspired by `netwaif/knot` (broken wikilinks, unindexed, missing source, no frontmatter, orphans, duplicates, stale) | Wiki hygiene | **keep** | `oah wiki lint`, our own code (knot has no license, so nothing is copied) |
@@ -279,7 +279,7 @@ command = ["codex"]
 low    = { model = "", effort = "low",    timeout_min = 15 }
 medium = { model = "", effort = "medium", timeout_min = 30 }
 high   = { model = "", effort = "high",   timeout_min = 60 }
-max    = { model = "", effort = "xhigh",  timeout_min = 90 }
+max    = { model = "", effort = "highest", timeout_min = 90 }  # the highest effort the model supports
 ```
 
 - **Difficulty to tier.** `oah recommend --kind <k> --intensity <i> --reasoning <r> --risk <r>`, or `--tier`
@@ -312,12 +312,34 @@ max    = { model = "", effort = "xhigh",  timeout_min = 90 }
 - **Command lines.** These are adapters, checked against the official CLI references on 2026-10-23.
   - Codex: `codex exec -C <dir> -s read-only|workspace-write [-m M] [-c model_reasoning_effort="E"] [--output-schema F] -o <out> [--ephemeral] -`, with the prompt on stdin.
   - Claude: `claude -p --output-format json [--model M] [--effort E] --permission-mode <mode> [--tools …]`, with the prompt on stdin. `--tools` restricts which tools exist; `--allowedTools` only pre-approves.
-  - When the requested effort is above what a non-interactive run allows, `oah` stops with
-    `OAH_SEPARATE_SESSION_REQUIRED` and prints the exact command for a separate session. It never
-    lowers the effort quietly.
+- **Effort comes from what the model supports, with no fixed cap.**
+  - For Codex, `oah` reads the configured model's `supported_reasoning_levels` from
+    `$CODEX_HOME/models_cache.json`.
+  - A literal tier effort must be on that list, otherwise `OAH_EFFORT_UNSUPPORTED`.
+  - `highest` resolves to the highest listed reasoning effort. It skips modes that change behaviour,
+    such as `ultra`, which adds task delegation. For `gpt-6.1-sol` on 2026-10-23 that is `max`.
+  - The source's old "max → xhigh" cap was measured stale: the Codex CLI (and Orca 1.4.237) accept
+    `max` for `gpt-6.1-sol`.
+  - When the cache is missing, the literal effort is used and the check below decides.
+  - When a launcher cannot run the requested effort, `oah` stops with `OAH_SEPARATE_SESSION_REQUIRED`
+    and prints the exact command for a separate session.
+- **The effective effort is checked after launch.**
+  - Codex prints the effort it actually uses (`reasoning effort: <e>` in its run header), and `oah`
+    compares it with the request.
+  - A lower effort fails the run with `OAH_EFFORT_DOWNGRADED`, and a review round with a downgraded
+    effort does not count.
+  - A header that cannot be read is recorded as `effective_effort: unverified`, never as a match.
+  - `oah` never lowers an effort silently.
+  - For Claude, P3 verifies whether the effective effort can be observed. Until then it is recorded
+    as unverified.
 - **Runs.** Each call writes `prompt.md`, `stdout.log`, `stderr.log` and `result.json` (exit code,
-  duration, CLI version, model, effort). The preamble is a short template: task, stage, scope, rules
-  (stay in scope, never push, write evidence into the ledger), the packet, and the return format.
+  duration, CLI version, model, requested and effective effort). The preamble is a short template:
+  task, stage, scope, rules (stay in scope, never push, write evidence into the ledger), the packet,
+  and the return format.
+- **Dispatched workers are marked.**
+  - Every worker `oah` launches gets `OAH_WORKER=1`, `OAH_RUN_ID` and `OAH_TASK` in its environment.
+  - The first line of its preamble says it is a dispatched worker.
+  - Workers skip any session-entry procedure (5.11, 5.12).
 
 ### 5.6 Packets and intent
 
@@ -340,7 +362,8 @@ Status: draft            # becomes "accepted" when you approve it
 ## Scope        (paths this task may write)
 ## Plan         (stage → engine → tier)
 ## Acceptance   (GATES.md in this folder)
-## Return       (INTENT <id>@r<n> <digest> + one "AC<n>: met|unmet|deferred — evidence" line each)
+## Return       (INTENT <id>@r<n> <digest> + one "AC<n>: met|unmet|deferred — evidence" line each;
+                rerank=used|unused(<reason>) when impact was used; the DB-impact line for DB changes)
 ```
 
 - `oah packet check` verifies the required sections, unique AC ids, `Status: accepted` before
@@ -351,6 +374,14 @@ Status: draft            # becomes "accepted" when you approve it
   receipts record the digest. A mismatch is reported.
 - **Not ported.** The source's POSIX owner and link-count checks on the packet file. The kit checks:
   regular file, not a symlink, under 1 MiB, unchanged between stat and read.
+- **An empty Scope is never silent.**
+  - `oah packet check` warns loudly (`OAH_SCOPE_EMPTY`) when `## Scope` lists no paths.
+  - `oah start --packet` refuses until Scope has paths, or until `--scope repo` is given explicitly.
+  - Anything that selects by the file kinds in Scope prints the same warning and never silently
+    selects nothing. That covers skills, tools, preflight checks, gate templates and impact queries.
+- **"No network" is narrow.**
+  - A packet constraint such as "no network" forbids installs, fetches and external web access.
+  - It does not turn off `oah impact` or a configured re-ranker. Only naming them does (5.10).
 
 ### 5.7 Preflight
 
@@ -502,8 +533,19 @@ After the review:
 - **`--changed-since REV`** turns the changed files into the list of gates to re-run. That is the
   verify-what-changed rule as a command. `--strong-only` lists every pin and exec result without a cap,
   ending with `total/shown/overflow`. Exit codes: 0 ok, 1 usage, 69 environment.
-- **Later.** Project-specific impact backends (for example a database-object map) plug in as commands
-  that print JSON.
+- **Re-ranker (optional plugin, later).**
+  - A configured re-ranker may re-order impact results. It never removes deterministic pin or exec rows.
+  - It is off only when the brief names it (`--no-rerank`, or the packet says so) or when no key exists.
+  - Every impact output, and every return that used impact, reports `rerank=used` or
+    `rerank=unused(<reason>)`. Reasons include `not-configured`, `no-key`, `disabled-by-brief` and
+    `error:<code>`.
+- **DB backend plugin (later; the rule already applies).**
+  - Project-specific backends, for example a database-object map, plug in as commands that print
+    JSON for entities such as `db_table:<name>`, `db_routine:<name>` and `db_grant:<name>`.
+  - Any task or review that touches DB tables, routines or GRANTs must query that plugin.
+  - Its return must include the query plus the graph identity: commit SHA and output digest.
+  - A project without the plugin returns `db-impact: unavailable (no plugin configured)` instead of
+    skipping silently.
 
 ### 5.11 Rules block and tier agents
 
@@ -521,18 +563,24 @@ After the review:
   - Global files (`~/.claude`, `~/.codex`) are never written.
 - **The block itself is under 6 KB.** It covers the stage order, leases, packets and intent, preflight,
   gates and the verify-what-changed rule, the review loop and its honest labels, "workers never
-  push", and keeping the wiki current.
+  push", keeping the wiki current, and "dispatched workers (`OAH_WORKER=1`) skip any session-entry
+  procedure and do only the task in their prompt".
 - `oah init --with-agents` writes `.claude/agents/oah-{low,medium,high,max}.md` (frontmatter: `name`,
   `description`, `model`, `effort` from the config). The body says: stay in scope, cite evidence, no
-  destructive git, and return honestly when blocked. `oah tiers sync|check` rewrites only those
-  frontmatter lines.
+  destructive git, and return honestly when blocked.
+- `oah tiers sync|check` owns the frontmatter `model` and `effort` lines, plus a managed rules block in
+  the body (`<!-- OAH:TIER-RULES:BEGIN v1 -->` … `<!-- OAH:TIER-RULES:END -->`).
+  - Sync **replaces** the block with the canonical text every time, so a wording change reaches
+    existing files.
+  - It inserts the block when it is missing and refuses broken markers.
+  - `check` reports drift when either the frontmatter or the block differs from canonical.
 
 ### 5.12 Hooks — all opt-in, project-local, removable
 
 | Hook | Command | Phase |
 |---|---|---|
 | Claude Code Stop: block while the governing lease's gates are unmet | `oah hook stop` | P5 |
-| Claude Code SessionStart: active leases, last log entries, latest handoff | `oah hook session-start` | later |
+| Claude Code SessionStart: active leases, last log entries, latest handoff; prints nothing when `OAH_WORKER=1` | `oah hook session-start` | later |
 | git pre-push: refuse while an unfinished lease exists on this worktree | `oah hook pre-push` | later |
 | Claude Code PreToolUse: impact hint before editing gates, workflows, migrations | `oah hook impact-hint` | later |
 
@@ -766,13 +814,13 @@ Each phase is one branch and one PR into `main` of the private repository.
 |---|---|---|
 | P0 | this plan | medium |
 | P1 | skeleton: LICENSE, notices, `pyproject.toml`, `oah --version`, `oah doctor`, `.gitattributes`, `.gitignore`, `tools/privacy_scan.py`, test scaffold, CI workflow (approved) | medium |
-| P2 | state and leases: paths, lock, atomic writes, lease store, `start/renew/status/finish/release/log` | xhigh (concurrency, Windows locking) |
+| P2 | state and leases: paths, lock, atomic writes, lease store, `start/renew/status/finish/release/log` | highest = `max` (concurrency, Windows locking) |
 | P3 | config, routing, engines: `recommend`, adapters, `call` with stage enforcement, runs dir, process-tree kill | high |
 | P4 | packets, intent, preflight | high |
 | P5 | gates: parser, unlazy delegation, `check` helpers, `finish` guard, Stop hook and `hooks install` | high |
-| P6 | review loop: snapshot, canary, schema, receipts, rounds, `fix`, `review summary` | xhigh (trust boundary) |
+| P6 | review loop: snapshot, canary, schema, receipts, rounds, `fix`, `review summary` | highest = `max` (trust boundary) |
 | P7 | knowledge and agent files: `init`, `rules`, `tiers`, `wiki`, `graph`, `impact` | high |
-| P8 | installers: `install.sh`, `install.ps1`, dry runs, install guides | xhigh (runs remote installers) |
+| P8 | installers: `install.sh`, `install.ps1`, dry runs, install guides | highest = `max` (runs remote installers) |
 | P9 | docs: README en/ko, concepts, worked example (`examples/hello-oah`), troubleshooting | medium |
 
 **Process per PR** (the engine order the owner set):
@@ -781,7 +829,9 @@ Each phase is one branch and one PR into `main` of the private repository.
    local Python, then the privacy scan.
 2. **Codex reviews (R1).** It uses `codex exec --ephemeral -s read-only` on a sanitized snapshot of the
    branch head, with a canary and an output schema. The model is the owner's chosen reviewer model
-   (currently `gpt-6.1-sol`); effort is from the table above. After P6, `oah review` dogfoods this.
+   (currently `gpt-6.1-sol`). Effort is from the table above. "highest" is the top effort the model
+   lists as supported (5.5), so the toughest setting is `max`. The runner checks the effective effort
+   in the Codex header and does not count a round that ran lower. After P6, `oah review` dogfoods this.
 3. **Codex fixes** the findings with `codex exec -s workspace-write` in a worktree of this repository.
    Claude commits the result, marked as a Codex correction. Then Codex re-reviews (R2, at most R3).
    Findings left after R3 go to the owner.
@@ -882,3 +932,47 @@ All commands are run from the source root, read-only.
 | 57 / 47 / 23 files with home path / product name / keychain mention | `grep -rlI --exclude-dir=__pycache__ --exclude-dir=.git '<pattern>' . \| wc -l` |
 | 681 home-path lines in one fixture | `grep -c '<home path>' test/fixtures/<fixture>.jsonl` |
 | round ceiling 3; stage table | `grep -nE '^REVIEW_ROUND_CEILING' bin/mah` · `config/routing.json` lines 5–9 |
+
+## 15. Amendment 1 (2026-10-23)
+
+These are fixes the owner made to their own harness on 2026-10-23, carried into this plan at the owner's
+request. Each item names the sections it changed and the phases whose checklists carry it.
+
+| # | Rule | Sections | Phases |
+|---|---|---|---|
+| A1 | Effort comes from what the model supports, with no fixed cap. `highest` means the top supported reasoning effort, which is `max` for `gpt-6.1-sol`. The effective effort is checked after launch, and a lower one fails the run. Effort is never downgraded silently. | 5.5, 11 | P2 review, P3, P6, this repo's runners |
+| A2 | "No network" does not turn off `oah impact` or a configured re-ranker. The re-ranker is off only when the brief names it or no key exists, and every result reports `used` or `unused(reason)`. | 4 (row 17), 5.6, 5.10 | P4, P7 |
+| A3 | A task or review that touches DB tables, routines or GRANTs queries the DB backend plugin, and returns the query plus the graph identity (commit SHA, digest). Without the plugin it says so. | 5.6, 5.10 | P4, P6, P7 |
+| A4 | An empty `## Scope` warns loudly (`OAH_SCOPE_EMPTY`). A selection that depends on Scope's file kinds never silently selects nothing. | 5.6 | P4, P7 |
+| A5 | `oah tiers sync` replaces the managed rules block with the canonical text, not only when it is missing. | 5.11 | P7 |
+| A6 | Dispatched workers carry `OAH_WORKER=1`. Generated hooks and the rules block tell them to skip any session-entry procedure. | 5.5, 5.11, 5.12 | P3, P7, session-start hook (later) |
+
+### Phase checklists
+
+**P2**
+- [ ] Review at the highest supported effort (`max`). The runner's effective-effort check passes. (A1)
+
+**P3**
+- [ ] Codex tier efforts resolve from `supported_reasoning_levels`. `highest` skips behaviour-changing modes. A literal effort that is not listed fails with `OAH_EFFORT_UNSUPPORTED`. (A1)
+- [ ] The effective effort is parsed after launch. Lower means `OAH_EFFORT_DOWNGRADED`, unreadable means `unverified`. Tests use a fake engine that reports a lower effort. (A1)
+- [ ] Workers are launched with `OAH_WORKER=1`, `OAH_RUN_ID` and `OAH_TASK`, and with the worker line first in the preamble. (A6)
+
+**P4**
+- [ ] `oah packet check` warns with `OAH_SCOPE_EMPTY`, and `oah start --packet` refuses an empty Scope unless `--scope repo` is given. (A4)
+- [ ] The packet template says what "no network" forbids and what it does not. (A2)
+- [ ] The Return section carries `rerank=used|unused(<reason>)` and the DB-impact line. (A2, A3)
+
+**P6**
+- [ ] A review round whose effective effort is lower than requested fails and does not count. (A1)
+- [ ] For DB changes, the review prompt requires the DB-impact query and graph identity. The reviewer checks that they are present. (A3)
+- [ ] Reviewers run as dispatched workers. (A6)
+
+**P7**
+- [ ] `oah impact` always prints `rerank=...`. The re-ranker plugin interface is off only when named or when no key exists. (A2)
+- [ ] The DB backend plugin contract is in place, and DB entities require the query plus the graph identity. (A3)
+- [ ] Every selection by Scope file kinds warns on an empty Scope and never selects nothing silently. (A4)
+- [ ] `oah tiers sync` replaces the managed block. A test changes the canonical wording and sees it reach an existing file. (A5)
+- [ ] The rules block tells dispatched workers to skip session entry. (A6)
+
+**Later: session-start hook**
+- [ ] `oah hook session-start` prints nothing when `OAH_WORKER=1`. (A6)
