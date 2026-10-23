@@ -103,7 +103,7 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
         provider = (PROVIDERS if providers is None else providers).get(name.strip())
         if provider is None:
             return None, None, unused("unknown-provider")
-        key_name, status = _call(lambda: provider.key_name(config))
+        key_name, status = _call(lambda: _valid_text(provider.key_name(config)))
         if status != USED:
             return None, None, status
         try:
@@ -121,7 +121,7 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
 
 
 def _call(action: Callable[[], object]) -> tuple[object, str]:
-    """Run a provider call; failures become a status code and never carry exception text."""
+    """Run a provider call and validate its result; consume only classified failure codes."""
     failure = None
     try:
         try:
@@ -135,24 +135,42 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
         del action, failure
 
 
-def _valid_scores(scores: object, count: int) -> list[float] | None:
-    if isinstance(scores, (str, bytes, Mapping)) or not isinstance(scores, Sequence) or len(scores) != count:
-        return None
+def _valid_text(value: object) -> str:
+    try:
+        if type(value) is not str:
+            raise ProviderError("bad-response")
+        return value
+    finally:
+        del value
+
+
+def _valid_scores(scores: object, count: int) -> list[float]:
+    if (type(scores) is not list and type(scores) is not tuple) or len(scores) != count:
+        raise ProviderError("bad-response")
     result = []
     for value in scores:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
+        if type(value) is not int and type(value) is not float:
+            raise ProviderError("bad-response")
+        number = None
         try:
             number = float(value)
-        except BaseException as exc:
-            _raise_if_interrupted(exc)
-            if not isinstance(exc, (OverflowError, TypeError, ValueError)):
-                raise
-            return None
-        if not math.isfinite(number):
-            return None
+        except OverflowError:
+            pass  # Only exact built-in numbers reach conversion; no provider hook can run.
+        if number is None or not math.isfinite(number):
+            raise ProviderError("bad-response")
         result.append(number)
     return result
+
+
+def _valid_advice(answer: object) -> tuple[str, float | None]:
+    if type(answer) is not tuple or len(answer) != 2:
+        raise ProviderError("bad-response")
+    tier, confidence = answer
+    if type(tier) is not str or tier not in TIERS:
+        raise ProviderError("bad-response")
+    if confidence is not None:
+        confidence = _valid_scores([confidence], 1)[0]
+    return tier, confidence
 
 
 def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query: str = "",
@@ -160,7 +178,7 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
            keychain: secrets.Keychain | None = None,
            providers: Mapping[str, Provider] | None = None) -> RerankResult:
     """Re-order candidates when the user enabled a provider and its key exists; else keep the order."""
-    provider = key = raw = failure = None
+    provider = key = failure = None
     try:
         items = tuple(candidates)
         if len({item.name for item in items}) != len(items):
@@ -170,25 +188,26 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         env = keychain = providers = None
         if provider is None:
             return RerankResult(items, status)
+        provider_name, status = _call(lambda: _valid_text(provider.name))
+        if status != USED:
+            return RerankResult(items, status)
         if not items:
-            return RerankResult(items, unused("no-candidates"), provider.name)
+            return RerankResult(items, unused("no-candidates"), provider_name)
         limit = config.get("max_candidates")
         limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(items)
         sent, rest = items[:limit], items[limit:]
-        raw, status = _call(lambda: provider.score(kind, query, sent, key=key, config=config))
+        scores, status = _call(lambda: _valid_scores(
+            provider.score(kind, query, sent, key=key, config=config), len(sent)))
         if status != USED:
-            return RerankResult(items, status, provider.name)
-        scores = _valid_scores(raw, len(sent))
-        if scores is None:
-            return RerankResult(items, unused("error:bad-response"), provider.name)
+            return RerankResult(items, status, provider_name)
         ranked = sorted(range(len(sent)), key=lambda index: -scores[index])
         order = tuple(sent[index] for index in ranked) + rest
-        return RerankResult(order, USED, provider.name,
+        return RerankResult(order, USED, provider_name,
                             tuple((item.name, score) for item, score in zip(sent, scores)))
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
         failure = _classify_failure(exc)
     finally:
-        del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key, raw
+        del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None
@@ -208,18 +227,14 @@ def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, br
         env = keychain = providers = None
         if provider is None:
             return Advice(rule_tier, None, None, status)
-        answer, status = _call(lambda: provider.advise(axes, task, key=key, config=config))
+        provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
-            return Advice(rule_tier, None, None, status, provider.name)
-        if not isinstance(answer, tuple) or len(answer) != 2 or answer[0] not in TIERS:
-            return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
+            return Advice(rule_tier, None, None, status)
+        answer, status = _call(lambda: _valid_advice(provider.advise(axes, task, key=key, config=config)))
+        if status != USED:
+            return Advice(rule_tier, None, None, status, provider_name)
         tier, confidence = answer
-        if confidence is not None:
-            validated = _valid_scores([confidence], 1)
-            if validated is None:
-                return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
-            confidence = validated[0]
-        return Advice(rule_tier, tier, confidence, USED, provider.name)
+        return Advice(rule_tier, tier, confidence, USED, provider_name)
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
         failure = _classify_failure(exc)
     finally:

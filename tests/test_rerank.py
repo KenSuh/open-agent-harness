@@ -155,6 +155,17 @@ class GatingTest(unittest.TestCase):
         result = self.run_rerank(enabled(), env={"FAKE_RERANK_KEY": self.key})
         self.assertEqual(names(result), ["c", "a", "b"])
 
+    def test_exact_builtin_result_types_are_accepted(self) -> None:
+        self.provider.scores = lambda items: (1, 3.0, 2)
+        result = self.run_rerank(enabled(), env={"FAKE_RERANK_KEY": self.key})
+        self.assertEqual((result.status, names(result)), ("used", ["b", "c", "a"]))
+        for confidence in (1, 0.5, None):
+            with self.subTest(confidence=confidence):
+                self.provider.advice_answer = ("high", confidence)
+                advice = rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                    env={"FAKE_RERANK_KEY": self.key}, keychain=NoKeychain(), providers=self.providers)
+                self.assertEqual((advice.status, advice.confidence), ("used", confidence))
+
     def test_bad_scores_keep_input_order(self) -> None:
         bad = [
             lambda items: [0.5, 0.5],                      # too few: would drop a row
@@ -687,8 +698,10 @@ class KeyLeakTest(unittest.TestCase):
         response_text = "private-response-" + token_source.token_hex(16)
         echo = key + response_text
         cfg = typesafe_config("http://127.0.0.1:9876/v1/systemone")
+        accesses = []
 
         def fail(*args, **kwargs):
+            accesses.append("fail")
             error = factory(echo)
             error.add_note(echo)
             error.private = echo
@@ -707,6 +720,9 @@ class KeyLeakTest(unittest.TestCase):
 
         class FailingBody(dict):
             get = fail
+
+        class UntrustedNumber(float):
+            __float__ = fail
 
         provider = typesafe.TypeSafeProvider()
         if source == "key-name":
@@ -731,9 +747,22 @@ class KeyLeakTest(unittest.TestCase):
                 env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain())
             actions["advice"] = lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=cfg,
                 env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain())
+        if source in ("validation", "result", "provider-name"):
+            number = UntrustedNumber(0.5) if source == "result" else 0.5
+            if source == "result":
+                number.private = echo
+            FailingProvider.score = staticmethod(lambda *args, **kwargs: [number])
+            FailingProvider.advise = staticmethod(lambda *args, **kwargs: ("high", number))
+            if source == "provider-name":
+                FailingProvider.name = property(fail)
+            actions = {api: action for api, action in actions.items() if api in ("rerank", "advice")}
         for api, action in actions.items():
-            patcher = (mock.patch.object(urllib.request.HTTPHandler, "http_open", fail)
-                       if source == "transport" else mock.patch.object(typesafe, "_post_json", fail))
+            if source == "validation":
+                patcher = mock.patch.object(rerank, "_valid_scores", fail)
+            elif source == "transport":
+                patcher = mock.patch.object(urllib.request.HTTPHandler, "http_open", fail)
+            else:
+                patcher = mock.patch.object(typesafe, "_post_json", fail)
             with self.subTest(api=api), patcher:
                 frames = []
 
@@ -749,13 +778,14 @@ class KeyLeakTest(unittest.TestCase):
                                                       interruption_type or rerank.ProviderError)
                     else:
                         result = None
+                        failure_text = ""
                         try:
                             result = action()
                         except BaseException as exc:
                             # Inspect the actual chain before reporting a failed status contract.
-                            text = "".join(traceback.format_exception(exc))
-                            self.assertFalse(key in text or response_text in text,
-                                             "provider exception chain exposes private data")
+                            failure_text = "".join(traceback.format_exception(exc))
+                        self.assertFalse(key in failure_text or response_text in failure_text,
+                                         "provider exception chain exposes private data")
                         self.assertIsNotNone(result, "ordinary provider failures must return a status")
                         self.assertEqual(result.status, f"unused(error:{code})")
                         self.assert_private_values_absent((result.to_record(),), key, response_text)
@@ -769,6 +799,8 @@ class KeyLeakTest(unittest.TestCase):
                 for frame in frames:
                     with self.subTest(helper=frame.f_code.co_name):
                         self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+        if source == "result":
+            self.assertEqual(accesses, [], "result validation must never call provider hooks")
 
     def test_provider_error_groups_are_sanitized_before_reading_code(self) -> None:
         class Group(ExceptionGroup, rerank.ProviderError):
@@ -864,10 +896,114 @@ class KeyLeakTest(unittest.TestCase):
                 expected = expected_type
                 if expected is None and shape == "nested":
                     expected = SystemExit
-                with self.subTest(kind=label, shape=shape):
-                    self.check_classified_failure(factory, code if shape == "direct" else "internal",
-                                                  expected)
-                    self.assertEqual(accesses, [], "classification must never evaluate code properties")
+                for source in ("call", "validation", "result"):
+                    with self.subTest(kind=label, shape=shape, source=source):
+                        self.check_classified_failure(
+                            factory, "bad-response" if source == "result" else
+                            code if shape == "direct" else "internal",
+                            None if source == "result" else expected, source=source)
+                        self.assertEqual(accesses, [], "classification must never evaluate code properties")
+
+    def test_provider_name_failures_use_the_same_classifier(self) -> None:
+        for kind in (rerank.ProviderError, ValueError, KeyboardInterrupt, SystemExit, GeneratorExit):
+            def factory(echo):
+                return kind("timeout" if kind is rerank.ProviderError else echo)
+
+            with self.subTest(kind=kind.__name__):
+                self.check_classified_failure(factory, "timeout" if kind is rerank.ProviderError else "internal",
+                                              kind if kind in base._INTERRUPTIONS else None,
+                                              source="provider-name")
+
+    def test_provider_results_reject_subclasses_without_running_hooks(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        accesses = []
+
+        def fail(*args, **kwargs):
+            accesses.append("hook")
+            error = rerank.ProviderError("timeout")
+            error.private = key + response_text
+            error.__cause__ = ValueError(key + response_text)
+            raise error
+
+        class HookedList(list):
+            __len__ = __iter__ = __getitem__ = fail
+
+        class HookedTuple(tuple):
+            __len__ = __iter__ = __getitem__ = fail
+
+        class HookedInt(int):
+            __float__ = fail
+
+        class HookedText(str):
+            __eq__ = __hash__ = fail
+
+        class Impostor:
+            __class__ = property(fail)
+
+        pairs = (
+            (HookedList([0.5]), ("high", 0.5), True, False),
+            (HookedTuple((0.5,)), HookedTuple(("high", 0.5)), True, True),
+            ([HookedInt(1)], ("high", HookedInt(1)), True, True),
+            ([Impostor()], ("high", Impostor()), True, True),
+            ([0.5], (HookedText("high"), 0.5), False, True),
+        )
+        for scores, answer, bad_scores, bad_advice in pairs:
+            provider = FakeProvider(scores=lambda items: scores, advice=answer)
+            for api, action, invalid in (
+                ("rerank", lambda: rerank.rerank("impact", candidates("a"), config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(), providers={"fake": provider}),
+                 bad_scores),
+                ("advice", lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(), providers={"fake": provider}),
+                 bad_advice),
+            ):
+                with self.subTest(api=api, scores_type=type(scores).__name__, answer_type=type(answer).__name__):
+                    result = None
+                    try:
+                        result = action()
+                    except BaseException:
+                        pass
+                    self.assertIsNotNone(result, "invalid provider values must return a status")
+                    self.assertEqual(result.status, "unused(error:bad-response)" if invalid else "used")
+                    self.assert_private_values_absent((result.to_record(),), key, response_text)
+        self.assertEqual(accesses, [], "result validation must use exact builtin types")
+
+    def test_provider_text_results_reject_subclasses_without_running_hooks(self) -> None:
+        key = fake_key()
+        accesses = []
+
+        def fail(*args, **kwargs):
+            accesses.append("hook")
+            raise ValueError(key)
+
+        class HookedText(str):
+            __eq__ = __hash__ = fail
+
+        for field in ("name", "key-name"):
+            class TextProvider(FakeProvider):
+                name = HookedText("fake") if field == "name" else "fake"
+
+                def key_name(self, config):
+                    return HookedText("FAKE_RERANK_KEY") if field == "key-name" else "FAKE_RERANK_KEY"
+
+            provider = TextProvider({"a": 0.5})
+            for action in (
+                lambda: rerank.rerank("impact", candidates("a"), config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(), providers={"fake": provider}),
+                lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(), providers={"fake": provider}),
+            ):
+                with self.subTest(field=field, api=action.__code__.co_firstlineno):
+                    result = None
+                    try:
+                        result = action()
+                    except BaseException:
+                        pass
+                    self.assertIsNotNone(result, "invalid provider text must return a status")
+                    self.assertEqual(result.status, "unused(error:bad-response)")
+                    self.assertEqual(provider.calls, [])
+        self.assertEqual(accesses, [], "provider text must be an exact builtin string")
 
     def test_non_interruption_base_exception_is_internal(self) -> None:
         self.check_classified_failure(BaseException)
@@ -1200,7 +1336,7 @@ class KeyLeakTest(unittest.TestCase):
                         with self.subTest(depth=depth):
                             self.check_group_failure(depth, interruption, expected_type=expected)
 
-    def test_gate_and_score_validation_interruptions_are_fresh(self) -> None:
+    def test_gate_interruptions_are_fresh_and_numeric_subclasses_are_rejected(self) -> None:
         class Interrupted(KeyboardInterrupt, ValueError):
             pass
 
@@ -1241,7 +1377,12 @@ class KeyLeakTest(unittest.TestCase):
                                                 providers={"fake": InterruptedProvider()}),
             ):
                 with self.subTest(phase=phase, api=action.__code__.co_firstlineno):
-                    self.assert_sanitized_failure(action, None, key, response_text, Interrupted)
+                    if phase == "gate":
+                        self.assert_sanitized_failure(action, None, key, response_text, Interrupted)
+                    else:
+                        result = action()
+                        self.assertEqual(result.status, "unused(error:bad-response)")
+                        self.assert_private_values_absent((result.to_record(),), key, response_text)
 
     def test_wide_and_shared_groups_preserve_interruptions(self) -> None:
         for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
