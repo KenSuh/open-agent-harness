@@ -512,9 +512,13 @@ Status: draft            # becomes "accepted" when you approve it
   - Anything that selects by the file kinds in Scope prints the same warning and never silently
     selects nothing. That covers skills, tools, preflight checks, gate templates and impact queries.
 - **"No network" is narrow.**
-  - A packet constraint such as "no network" forbids installs, fetches and external web access.
-  - It does not turn off `oah impact` or a consent-enabled re-ranker with a key. The brief must name
-    either to disable it; provider consent and key checks still apply (5.10).
+  - A packet constraint such as "no network" forbids installs, fetches and external web access, with two
+    exceptions `oah` needs: `oah impact`'s automatic refresh of the default branch (A23) and a
+    consent-enabled re-ranker with a key. Briefs write it as "no network except the re-ranker and
+    `oah impact`'s automatic default-branch refresh", so a worker never records the refresh as a limit
+    or turns it off.
+  - A brief may name the re-ranker to disable it; provider consent and key checks still apply (5.10).
+    No brief turns off the default-branch refresh (A23).
 
 ### 5.7 Preflight
 
@@ -598,7 +602,9 @@ output always ends with a "not proven by this preflight" list.
 `oah review --task T [--base REV]` (stage `review`, Codex by default) does this:
 
 1. **Resolve base and head.** Base is the merge-base with the default branch. Head is HEAD. Both are
-   resolved to full SHAs. The tracked tree must be clean, so that what is reviewed is a commit.
+   resolved to full SHAs. The tracked tree must be clean, so that what is reviewed is a commit. Evidence
+   commands run against that commit and its working tree, never against the refreshed default branch:
+   impact reads the latest default branch, evidence stays on the fixed HEAD (A23).
 2. **Rounds.** The series key is (task, base SHA). Only completed rounds count. There is no fixed
    ceiling (A22): rounds continue while each round's findings are new and in scope. The reviewer marks a
    finding that repeats a class an earlier round of the series already tried to fix, using the earlier
@@ -778,6 +784,12 @@ After the review:
   untracked inputs the map reads, all ledger bytes (including ignored ledgers), config bytes and the
   tool version. Any identity or manifest change makes the map stale; record the result digest too.
   Compare the manifest before and after building; changed inputs require a retry or stale refusal.
+  **The latest default branch (A23).** Impact is assessed against the latest default branch, because
+  work lands there one lane at a time and the landing check verifies again right before push. Before a
+  query, `oah impact` fetches the remote's default branch, read-only, with the user's own git setup, and
+  refreshes a second map for that ref in the state folder. Output labels both maps with their commit
+  SHAs. `[impact] refresh_default_branch = true` is the default. `--offline`, or a failed fetch, uses the
+  last fetched ref and labels the result `default-branch=stale(<reason>)`; it is never used silently.
   1. **Gate bindings.** Ledgers are parsed per gate. A CHECK or EXPECT that hashes, greps or pins the
      path is **pin**; one that runs it is **exec**. The output names the gate, for example
      `.oah/tasks/T/GATES.md#G3 binding=exec`. This closes a gap in the source, where mapping a file back
@@ -1499,6 +1511,7 @@ that carry it. Section 1 (intent revision 3), section 4 (the re-judged rows), 6.
 | P7c | CI starter for the user's project (A21): `oah ci init` and its templates | P3a |
 | P8 | installers, tool catalog, `doctor` tool checks | P3a |
 | P8c | optional companion apps Orca and Aside (A20): setup steps, MCP registration, rules section, `doctor` entries | P8 for wiring; its own module can start earlier |
+| P7j | default-branch impact refresh (A23) | P7i |
 | P9 | docs, example, troubleshooting, Toolkit page | all |
 
 Every lane registers commands through P3a's discovery and reads settings through `oah.config`. Lanes that
@@ -1645,9 +1658,9 @@ Consistency fix: `oah impact` uses exit 2 for usage errors, matching the shared 
 
 ### Amendment 5 (2026-10-23)
 
-Three requests from the owner after amendment 4. Beginners often miss CI and safe defaults when they push,
+Three requests from the owner after amendment 4, and one rule correction ported from the owner's harness (A23). Beginners often miss CI and safe defaults when they push,
 the owner's own workflow relies on two companion apps, and the owner removed the fixed review round ceiling
-from that workflow. Sections 4 (row 22), 5.9, 6.5, 14 and the lane table were updated with them.
+from that workflow. Sections 4 (row 22), 5.6, 5.9, 5.10, 6.5, 14 and the lane table were updated with them.
 
 | # | Rule | Sections | Phases |
 |---|---|---|---|
@@ -1655,6 +1668,8 @@ from that workflow. Sections 4 (row 22), 5.9, 6.5, 14 and the lane table were up
 | A21 | **A CI starter for the user's project.** `oah ci init`, and guided `oah init` with consent, writes `.github/workflows/oah-ci.yml` after showing it in full.<br>• A test job runs on the OSes the user picks (default: the current OS). It uses the test command `oah` detects in the project and the user confirms, or a clearly marked step to fill in.<br>• A secret-scan job runs gitleaks, pinned by version and SHA-256, on every push and pull request.<br>• Every action is pinned to a full commit SHA, `permissions` is `contents: read`, and the file holds no secret or token (A17).<br>• An existing workflow is never overwritten without showing the difference and asking.<br>• The docs explain how to read results and how to make the checks required on the default branch in GitHub's settings. `oah` does not change repository settings itself. | 6.5, 7 | P7 (lane P7c), P7b, P9 |
 
 | A22 | **Reviews run until they converge.** No fixed round ceiling. Rounds continue while each round's findings are new and in scope. A finding that repeats a class an earlier round already tried to fix, or one whose fix needs a design or stored-format change, stops the series with `OAH_REVIEW_NEEDS_DECISION` and asks the user. A series ends when a round approves or reports only P2/P3 findings, recorded as follow-ups. Users who want a budget set `[review] max_rounds` (unset by default); reaching it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`, and `--extra-round` continues and is recorded. | 4 (row 22), 5.9 | P6 |
+
+| A23 | **Impact reads the latest default branch; evidence stays pinned.** Impact is assessed against the latest default branch: work lands there one lane at a time, and the landing check verifies again right before push, so drift in between is caught there. Before a query, `oah impact` fetches the remote's default branch, read-only, with the user's own git setup (no credential is read or stored, A17), and refreshes a second map for that ref next to the worktree map. Output labels both maps with their commit SHAs. The refresh is on by default (`[impact] refresh_default_branch = true`), and briefs write "no network except the re-ranker and `oah impact`'s automatic default-branch refresh", never a wording that leads a worker to turn the refresh off. `--offline`, or a failed fetch, uses the last fetched ref and labels the result `default-branch=stale(<reason>)`. Review evidence commands stay pinned to the reviewed commit and its working tree. | 5.6, 5.9, 5.10 | P7 (lane P7j, after P7i), P4, P6 |
 
 #### Amendment 5 checklists
 
@@ -1680,3 +1695,14 @@ from that workflow. Sections 4 (row 22), 5.9, 6.5, 14 and the lane table were up
 - [ ] A finding marked as repeating an earlier round's class, or as needing a design or stored-format change, stops the series with `OAH_REVIEW_NEEDS_DECISION` and asks the user. (A22)
 - [ ] An approving round, or one with only P2/P3 findings, ends the series and records the follow-ups. (A22)
 - [ ] `[review] max_rounds`, when set, stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`; `--extra-round` continues and is recorded. (A22)
+
+**P7j** (after P7i)
+- [ ] `oah impact` refreshes the default-branch map before a query by default, and labels both maps with their commit SHAs. (A23)
+- [ ] `--offline` or a failed fetch uses the last fetched ref and labels the result `default-branch=stale(<reason>)`; tests use a local bare remote, no network. (A23)
+- [ ] The fetch reads no credential and changes no git configuration. (A23, A17)
+
+**P4**
+- [ ] The packet template's "no network" note names both exceptions, and a test pins the wording. (A23)
+
+**P6**
+- [ ] Review evidence commands run against the reviewed commit and its working tree, never the refreshed default branch. (A23)
