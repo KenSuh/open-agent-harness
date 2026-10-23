@@ -76,11 +76,11 @@ def _valid_utf8(data: bytes | None) -> bool:
     return True
 
 
-def _broken(blobs: dict[str, bytes], prefix: str, names: Names) -> collections.Counter:
+def _broken(blobs: dict[str, bytes], prefix: str, names: Names, naming) -> collections.Counter:
     found: collections.Counter = collections.Counter()
     for path, data in blobs.items():
         rel = path[len(prefix) + 1:]
-        if not links_checked(rel):
+        if not links_checked(rel, naming):
             continue
         for link in wikilinks(data.decode("utf-8", errors="replace")):
             if not names.resolve(link.target):
@@ -119,7 +119,7 @@ def check(root: pathlib.Path, settings: WikiSettings, state: pathlib.Path) -> Ve
     added_archives = []
     for status, path in changes:
         rel = path[len(prefix) + 1:]
-        archive = log_module.archive_number(rel) is not None
+        archive = settings.naming.number(rel) is not None
         if archive and status == "A":
             added_archives.append(rel)
         elif archive:
@@ -142,13 +142,14 @@ def check(root: pathlib.Path, settings: WikiSettings, state: pathlib.Path) -> Ve
                                    "staged; use `oah wiki rollover` to move old entries, or restore the removed "
                                    "entries")
         else:
-            problem = _lost_entries(prefix, head_blobs, staged_blobs)
+            problem = _lost_entries(prefix, head_blobs, staged_blobs, settings.naming)
             if problem:
                 verdict.blocked.append(f"OAH_WIKI_COMMIT_BLOCKED: {problem}")
 
     names_head = _names([path[len(prefix) + 1:] for path in head_files], root, settings)
     names_staged = _names([path[len(prefix) + 1:] for path in staged_files], root, settings)
-    new = _broken(staged_blobs, prefix, names_staged) - _broken(head_blobs, prefix, names_head)
+    new = (_broken(staged_blobs, prefix, names_staged, settings.naming)
+           - _broken(head_blobs, prefix, names_head, settings.naming))
     if new:
         lines = [f"{prefix}/{rel}: {link} does not resolve" for (rel, link) in sorted(new)]
         if settings.new_broken_links == "block":
@@ -161,15 +162,16 @@ def check(root: pathlib.Path, settings: WikiSettings, state: pathlib.Path) -> Ve
     return verdict
 
 
-def _lost_entries(prefix: str, head_blobs: dict[str, bytes], staged_blobs: dict[str, bytes]) -> str | None:
+def _lost_entries(prefix: str, head_blobs: dict[str, bytes], staged_blobs: dict[str, bytes],
+                  naming: log_module.ArchiveNaming) -> str | None:
     """None when every HEAD log entry survives in the staged log or archives, byte for byte."""
     def stream(blobs: dict[str, bytes]) -> bytes:
         archives = {}
         for path, data in blobs.items():
-            number = log_module.archive_number(path[len(prefix) + 1:])
+            number = naming.number(path[len(prefix) + 1:])
             if number is not None:
                 archives[number] = data
-        return log_module.preservation_stream(blobs.get(f"{prefix}/log.md", b""), archives)
+        return log_module.preservation_stream(blobs.get(f"{prefix}/log.md", b""), archives, naming)
 
     try:
         before, after = stream(head_blobs), stream(staged_blobs)

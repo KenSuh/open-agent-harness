@@ -1,3 +1,6 @@
 # Obsidian editor UI state (open panes, graph zoom); added by oah init.
 **/.obsidian/workspace*.json
 **/.obsidian/workspace
+# Rollover recovery files in the wiki folder; `oah wiki recover` reads and removes them.
+.oah-rollover-recovery.json
+.oah-rollover-stash

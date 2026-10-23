@@ -118,25 +118,25 @@ class _Page:
     note: bool
 
 
-def links_checked(rel: str) -> bool:
+def links_checked(rel: str, naming: log_module.ArchiveNaming = log_module.DEFAULT_NAMING) -> bool:
     """Whether lint counts broken links in this wiki page: not raw/, templates/ or frozen archives."""
     return (rel.lower().endswith(".md") and rel.split("/", 1)[0] not in _NOT_NOTES
-            and log_module.archive_number(rel) is None)
+            and naming.number(rel) is None)
 
 
-def _is_system(rel: str) -> bool:
+def _is_system(rel: str, naming: log_module.ArchiveNaming) -> bool:
     return (rel in ("index.md", "log.md") or bool(_INDEX_ARCHIVE.match(rel))
-            or log_module.archive_number(rel) is not None)
+            or naming.number(rel) is not None)
 
 
-def _pages(wiki: pathlib.Path) -> list[_Page]:
+def _pages(wiki: pathlib.Path, naming: log_module.ArchiveNaming) -> list[_Page]:
     pages = []
     for path in markdown_files(wiki):
         rel = path.relative_to(wiki).as_posix()
         if rel.split("/", 1)[0] in _NOT_NOTES:
             continue
         text = path.read_bytes().decode("utf-8", errors="replace")
-        pages.append(_Page(rel, text, wikilinks(text), not _is_system(rel)))
+        pages.append(_Page(rel, text, wikilinks(text), not _is_system(rel, naming)))
     return pages
 
 
@@ -194,12 +194,12 @@ def commit_times(root: pathlib.Path, wiki: pathlib.Path) -> dict[str, int]:
 def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now: float) -> Report:
     """The normal lint: real problems only, sorted by path and line."""
     root, wiki = pathlib.Path(root), pathlib.Path(wiki)
-    pages = _pages(wiki)
+    pages = _pages(wiki, settings.naming)
     names = Names([wiki, *link_root_paths(root, settings)])
     problems: list[Problem] = []
     inbound: dict[str, set[str]] = {}
     for page in pages:
-        if log_module.archive_number(page.rel) is not None:
+        if settings.naming.number(page.rel) is not None:
             continue  # archives are frozen history; their links cannot be fixed
         for link in page.links:
             resolved = names.resolve(link.target)

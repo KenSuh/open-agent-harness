@@ -10,6 +10,7 @@ import sys
 
 from oah.atomic import StateCorrupt, StorageError
 from oah.config import ConfigError, load_config
+from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
 from oah.wiki.base import DEFAULTS, EXIT_ENVIRONMENT, WikiError, WikiSettings
@@ -40,7 +41,10 @@ def register(commands: argparse._SubParsersAction) -> None:
                       help="check index.md for banners, over-long lines and unindexed notes")
     lint.add_argument("--json", action="store_true")
 
-    sub.add_parser("rollover", help="move the oldest whole log entries into the next numbered archive")
+    rollover = sub.add_parser("rollover", help="plan (default) or --apply moving the oldest whole log entries "
+                              "into the next numbered archive")
+    rollover.add_argument("--apply", action="store_true",
+                          help="write the plan; needs a lease whose scope covers log.md and the new archive")
     sub.add_parser("recover", help="finish or check an interrupted rollover")
     sub.add_parser("hygiene", help="print one line of problem counts and their change since the last run")
 
@@ -71,7 +75,7 @@ def run(args: argparse.Namespace) -> int:
     except WikiError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
-    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError) as exc:
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, PendingTransaction) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
 
@@ -109,8 +113,24 @@ def _lint(args: argparse.Namespace, wiki: Wiki) -> int:
 
 
 def _rollover(args: argparse.Namespace, wiki: Wiki) -> int:
-    print(wiki.rollover().line)
+    print(wiki.rollover(apply=args.apply, before_write=lambda plan: _require_lease(wiki, plan)).line)
     return EXIT_OK
+
+
+def _require_lease(wiki: Wiki, plan) -> None:
+    """--apply writes log.md and a new archive: an active lease of this worktree must cover both."""
+    from oah.lease import Store
+    from oah.scope import outside
+
+    paths = [(wiki.dir / name).relative_to(wiki.root).as_posix() for name in ("log.md", plan.archive_name)]
+    root = wiki.root.resolve()
+    for lease, stale in Store(wiki.state.parent).snapshot():
+        if not stale and pathlib.Path(lease.worktree).resolve() == root and not outside(lease.scope, paths):
+            return
+    raise WikiError("OAH_WIKI_LEASE_REQUIRED", f"`oah wiki rollover --apply` writes {paths[0]} and {paths[1]}, "
+                    "and no active lease in this worktree covers both. Nothing was written. Take one first, for "
+                    f"example `oah start --task <task> --agent <you> --scope {wiki.settings.dir}`, or let "
+                    "`oah wiki maintain --task <task>` roll the log over under the wiki lock.")
 
 
 def _recover(args: argparse.Namespace, wiki: Wiki) -> int:

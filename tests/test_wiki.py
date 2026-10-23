@@ -525,3 +525,81 @@ class MaintainTaskTest(unittest.TestCase):
         wiki.maintain(other, on={"log", "index", "rollover"}, task="t1", env=self.env, today=TODAY)
         check = self.verify()
         self.assertFalse(check.ok)
+
+
+class RolloverCliTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = scaffold(self)
+        self.state = make_tmp_dir(self) / "state"
+        self.wiki_dir = self.repo / "docs" / "wiki"
+        (self.repo / ".oah").mkdir()
+        (self.repo / ".oah" / "config.toml").write_text(
+            "[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\n", encoding="utf-8")
+        for i in range(20):
+            self.assertEqual(run_cli(self.repo, "wiki", "log", f"filler {i}", "--body", "f" * 60,
+                                     state=self.state)[0], 0)
+
+    def files(self) -> dict[str, bytes]:
+        return {p.relative_to(self.repo).as_posix(): p.read_bytes() for p in self.wiki_dir.rglob("*") if p.is_file()}
+
+    def test_dry_run_is_the_default_and_writes_nothing(self):
+        before = self.files()
+        code, out, err = run_cli(self.repo, "wiki", "rollover", state=self.state)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("OAH_WIKI_ROLLOVER_PLAN archive=log_archive_01.md"), out)
+        self.assertEqual(self.files(), before)
+        self.assertFalse((self.state / "wiki" / "rollover-journal.json").exists())
+
+    def test_apply_needs_a_covering_lease(self):
+        before = self.files()
+        code, _, err = run_cli(self.repo, "wiki", "rollover", "--apply", state=self.state)
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_WIKI_LEASE_REQUIRED"), err)
+        self.assertIn("docs/wiki/log_archive_01.md", err)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(run_cli(self.repo, "start", "--task", "narrow", "--agent", "claude", "--scope",
+                                 "docs/wiki/log.md", state=self.state)[0], 0)
+        code, _, err = run_cli(self.repo, "wiki", "rollover", "--apply", state=self.state)
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_WIKI_LEASE_REQUIRED"), err)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(run_cli(self.repo, "start", "--task", "wiki", "--agent", "claude", "--scope", "docs/wiki/log.md",
+                                 "--scope", "docs/wiki/log_archive_01.md", state=self.state)[0], 1)  # overlaps narrow
+        self.assertEqual(run_cli(self.repo, "release", "--task", "narrow", "--agent", "claude", "--reason", "test",
+                                 state=self.state)[0], 0)
+        self.assertEqual(run_cli(self.repo, "start", "--task", "wiki", "--agent", "claude", "--scope", "docs/wiki",
+                                 state=self.state)[0], 0)
+        code, out, err = run_cli(self.repo, "wiki", "rollover", "--apply", state=self.state)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("OAH_WIKI_ROLLED_OVER archive=log_archive_01.md"), out)
+
+    def test_maintain_rolls_over_without_a_lease(self):
+        code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t9", state=self.state)
+        self.assertEqual(code, 0, err)
+        self.assertIn("rollover=log_archive_01.md", out)
+
+    def test_archive_pattern_from_config(self):
+        (self.repo / ".oah" / "config.toml").write_text(
+            '[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\narchive_pattern = "history-{nnn}.md"\n',
+            encoding="utf-8")
+        code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t9", state=self.state)
+        self.assertEqual(code, 0, err)
+        self.assertIn("rollover=history-001.md", out)
+        code, out, _ = run_cli(self.repo, "wiki", "lint", state=self.state)
+        self.assertEqual(code, 0, out)
+        (self.repo / ".oah" / "config.toml").write_text('[wiki]\narchive_pattern = "nope.md"\n', encoding="utf-8")
+        code, _, err = run_cli(self.repo, "wiki", "rollover", state=self.state)
+        self.assertEqual(code, 69)
+        self.assertTrue(err.startswith("OAH_CONFIG_INVALID"), err)
+
+    def test_gitignore_snippet_names_the_recovery_files(self):
+        from oah.wiki import store
+
+        snippet = notes.gitignore_snippet()
+        self.assertIn(store.RECOVERY, snippet.splitlines())
+        self.assertIn(store.STASH, snippet.splitlines())
+        repo = make_git_repo(self)
+        (repo / ".gitignore").write_text(snippet, encoding="utf-8")
+        for rel in (f"docs/wiki/{store.RECOVERY}", f"docs/wiki/{store.STASH}"):
+            result = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", "--no-index", rel])
+            self.assertEqual(result.returncode, 0, rel)
