@@ -77,19 +77,25 @@ def _files(folder: pathlib.Path) -> list[pathlib.Path]:
     return found
 
 
-class _Names:
-    """Obsidian-style link resolution: by name anywhere, or by a trailing path, ignoring case and `.md`."""
+class Names:
+    """Obsidian-style link resolution: by name anywhere, or by a trailing path, ignoring case and `.md`.
+
+    The first root is the wiki (tags are wiki-relative paths); later roots are [wiki] link_roots.
+    """
 
     def __init__(self, roots: list[pathlib.Path]) -> None:
         self.by_name: dict[str, list[tuple[str, str]]] = {}
         for index, root in enumerate(roots):
-            if not root.is_dir():
-                continue
-            for path in _files(root):
-                rel = path.relative_to(root).as_posix()
-                key = rel[:-3] if rel.lower().endswith(".md") else rel
-                tag = rel if index == 0 else f"{root}:{rel}"
-                self.by_name.setdefault(key.rsplit("/", 1)[-1].casefold(), []).append((key.casefold(), tag))
+            self.add_folder(root, "" if index == 0 else f"{root}:")
+
+    def add_folder(self, root: pathlib.Path, tag_prefix: str) -> None:
+        if root.is_dir():
+            self.add([path.relative_to(root).as_posix() for path in _files(root)], tag_prefix)
+
+    def add(self, rels: list[str], tag_prefix: str = "") -> None:
+        for rel in rels:
+            key = rel[:-3] if rel.lower().endswith(".md") else rel
+            self.by_name.setdefault(key.rsplit("/", 1)[-1].casefold(), []).append((key.casefold(), tag_prefix + rel))
 
     def resolve(self, target: str) -> list[str]:
         wanted = target.replace("\\", "/").lstrip("/").removeprefix("./")
@@ -112,6 +118,12 @@ class _Page:
     note: bool
 
 
+def links_checked(rel: str) -> bool:
+    """Whether lint counts broken links in this wiki page: not raw/, templates/ or frozen archives."""
+    return (rel.lower().endswith(".md") and rel.split("/", 1)[0] not in _NOT_NOTES
+            and log_module.archive_number(rel) is None)
+
+
 def _is_system(rel: str) -> bool:
     return (rel in ("index.md", "log.md") or bool(_INDEX_ARCHIVE.match(rel))
             or log_module.archive_number(rel) is not None)
@@ -128,7 +140,7 @@ def _pages(wiki: pathlib.Path) -> list[_Page]:
     return pages
 
 
-def _link_roots(root: pathlib.Path, settings: WikiSettings) -> list[pathlib.Path]:
+def link_root_paths(root: pathlib.Path, settings: WikiSettings) -> list[pathlib.Path]:
     out = []
     for item in settings.link_roots:
         path = pathlib.Path(os.path.expanduser(item))
@@ -183,7 +195,7 @@ def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now:
     """The normal lint: real problems only, sorted by path and line."""
     root, wiki = pathlib.Path(root), pathlib.Path(wiki)
     pages = _pages(wiki)
-    names = _Names([wiki, *_link_roots(root, settings)])
+    names = Names([wiki, *link_root_paths(root, settings)])
     problems: list[Problem] = []
     inbound: dict[str, set[str]] = {}
     for page in pages:
@@ -231,7 +243,7 @@ def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now:
     return Report(problems, len(notes))
 
 
-def _indexed(pages: list[_Page], names: _Names) -> set[str]:
+def _indexed(pages: list[_Page], names: Names) -> set[str]:
     indexed: set[str] = set()
     for page in pages:
         if page.rel == "index.md" or _INDEX_ARCHIVE.match(page.rel):
