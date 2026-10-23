@@ -1,0 +1,482 @@
+# 위키 로그 롤오버 검사 — 항목 경계, 임계값, 큰 항목 규칙, 아카이브 번호, 보존 스트림 바이트 비교, 저널 복구·장애 주입·동시 편집을 본다.
+from __future__ import annotations
+
+import datetime
+import json
+import pathlib
+import unittest
+
+from oah import wiki as wiki_pkg
+from oah.wiki import log
+from oah.wiki.base import WikiError, WikiSettings
+from oah.wiki.store import Wiki
+from tests.helpers import make_tmp_dir
+
+TODAY = datetime.date(2026, 10, 23)
+HEADER = (b"# Log\n\nNewest first.\n\n<!-- OAH:ARCHIVE_INDEX:BEGIN -->\n<!-- OAH:ARCHIVE_INDEX:END -->\n\n"
+          b"<!-- OAH:LOG_INSERT_BELOW -->\n\n")
+STEPS = ("journal-written", "validated", "archive-published", "phase-recorded", "log-replaced")
+
+
+class Crash(Exception):
+    """Simulates the process dying at a publication step."""
+
+
+def crash_at(step: str):
+    def fault(name: str) -> None:
+        if name == step:
+            raise Crash(name)
+    return fault
+
+
+def entry(number: int, body: int = 10, eol: bytes = b"\n") -> bytes:
+    day = datetime.date(2026, 1, 1) + datetime.timedelta(days=number)
+    return (f"## {day.isoformat()} entry {number}".encode() + eol + eol + b"x" * body + eol + eol)
+
+
+def make_log(entries: list[bytes], header: bytes = HEADER, eol: bytes = b"\n") -> bytes:
+    return header.replace(b"\n", eol) + b"".join(entries)
+
+
+def newest_first(count: int, body: int = 10, eol: bytes = b"\n") -> list[bytes]:
+    return [entry(number, body, eol) for number in range(count, 0, -1)]
+
+
+def wiki_stream(folder: pathlib.Path) -> bytes:
+    archives = {log.archive_number(p.name): p.read_bytes() for p in folder.iterdir()
+                if log.archive_number(p.name) is not None}
+    return log.preservation_stream((folder / "log.md").read_bytes(), archives)
+
+
+def snapshot(*folders: pathlib.Path) -> dict[str, bytes]:
+    out = {}
+    for folder in folders:
+        if folder.exists():
+            for path in sorted(folder.rglob("*")):
+                if path.is_file() and path.name != ".lock":
+                    out[str(path)] = path.read_bytes()
+    return out
+
+
+class ParseTest(unittest.TestCase):
+    def test_entry_parsing_includes_blank_lines(self):
+        data = make_log([b"## 2026-01-03 c\n\nbody\n\n\n", b"## 2026-01-02 b\nno blank\n", b"## 2026-01-01 a"])
+        parsed = log.parse_log(data, "log.md")
+        self.assertEqual([e.data for e in parsed.entries],
+                         [b"## 2026-01-03 c\n\nbody\n\n\n", b"## 2026-01-02 b\nno blank\n", b"## 2026-01-01 a"])
+        self.assertEqual([(e.date, e.title) for e in parsed.entries],
+                         [("2026-01-03", "c"), ("2026-01-02", "b"), ("2026-01-01", "a")])
+        self.assertEqual(parsed.header + parsed.prefix + b"".join(e.data for e in parsed.entries), data)
+
+    def test_fenced_heading_is_not_entry(self):
+        body = b"## 2026-01-02 real\n\n```md\n## 2026-01-09 fenced\n```\n~~~\n## 2026-13-99 bad but fenced\n~~~\n"
+        parsed = log.parse_log(make_log([body, b"## 2026-01-01 old\n"]), "log.md")
+        self.assertEqual([e.title for e in parsed.entries], ["real", "old"])
+        self.assertEqual(parsed.entries[0].data, body)
+
+    def test_heading_without_digit_is_content(self):
+        parsed = log.parse_log(make_log([b"## 2026-01-02 a\n\n## Notes\n### 2026-01-05 sub\n"]), "log.md")
+        self.assertEqual(len(parsed.entries), 1)
+
+    def test_invalid_boundaries_refuse(self):
+        cases = {
+            "no marker": b"# Log\n\n## 2026-01-01 a\n",
+            "two markers": HEADER + b"<!-- OAH:LOG_INSERT_BELOW -->\n## 2026-01-01 a\n",
+            "marker inside entry": HEADER + b"## 2026-01-01 a\n<!-- OAH:LOG_INSERT_BELOW -->\n",
+            "bad date": HEADER + b"## 2026-13-01 a\n",
+            "no title": HEADER + b"## 2026-01-01\n",
+            "indented": HEADER + b"## 2026-01-02 a\n  ## 2026-01-01 b\n",
+            "short date": HEADER + b"## 2026-1-1 a\n",
+            "unclosed fence": HEADER + b"## 2026-01-01 a\n```\n## 2026-01-01 b\n",
+            "nonempty prefix": HEADER + b"stray text\n## 2026-01-01 a\n",
+            "fence in prefix": HEADER + b"```\n```\n## 2026-01-01 a\n",
+            "index below marker": b"<!-- OAH:LOG_INSERT_BELOW -->\n<!-- OAH:ARCHIVE_INDEX:BEGIN -->\n",
+            "index end only": b"<!-- OAH:ARCHIVE_INDEX:END -->\n<!-- OAH:LOG_INSERT_BELOW -->\n",
+            "not utf-8": HEADER + b"## 2026-01-01 a\n\xff\n",
+            "surrogate": HEADER + b"## 2026-01-01 a\n\xed\xa0\x80\n",
+        }
+        for name, data in cases.items():
+            with self.subTest(name), self.assertRaises(WikiError) as ctx:
+                log.parse_log(data, "log.md")
+            self.assertEqual(ctx.exception.code, "OAH_WIKI_LOG_INVALID")
+
+    def test_blank_prefix_stays_with_file(self):
+        prefix_log = make_log(newest_first(30, body=100), header=HEADER + b"\n  \n")
+        parsed = log.parse_log(prefix_log, "log.md")
+        self.assertEqual(parsed.prefix, b"\n\n  \n")
+        plan = log.plan_rollover(prefix_log, {}, trigger=1000, target=500, today=TODAY)
+        new = log.parse_log(plan.log, "log.md")
+        self.assertEqual(new.prefix, b"\n\n  \n")
+        self.assertTrue(plan.archive.split(b"<!-- OAH:LOG_INSERT_BELOW -->\n")[1].startswith(b"## "))
+
+
+class AddEntryTest(unittest.TestCase):
+    def test_wiki_log_inserts_parseable_entry(self):
+        data = make_log(newest_first(2))
+        out = log.add_entry(data, title="Shipped", body="Line one\nLine two", date=TODAY)
+        parsed = log.parse_log(out, "log.md")
+        self.assertEqual(parsed.entries[0].data, b"## 2026-10-23 Shipped\n\nLine one\nLine two\n\n")
+        self.assertEqual([e.data for e in parsed.entries[1:]], newest_first(2))
+        self.assertTrue(out.startswith(HEADER))
+
+    def test_wiki_log_into_empty_log_without_trailing_newline(self):
+        out = log.add_entry(b"<!-- OAH:LOG_INSERT_BELOW -->", title="First", body="", date=TODAY)
+        self.assertEqual(out, b"<!-- OAH:LOG_INSERT_BELOW -->\n## 2026-10-23 First\n\n")
+
+    def test_wiki_log_keeps_crlf(self):
+        data = make_log(newest_first(1, eol=b"\r\n"), eol=b"\r\n")
+        out = log.add_entry(data, title="Crlf", body="a\nb", date=TODAY)
+        self.assertIn(b"## 2026-10-23 Crlf\r\n\r\na\r\nb\r\n\r\n## 2026-01-02", out)
+        self.assertNotIn(b"\n", out.replace(b"\r\n", b""))
+
+    def test_wiki_log_refuses_breaking_body(self):
+        data = make_log(newest_first(1))
+        for body in ["x\n## 2026-01-05 sneaky", "<!-- OAH:LOG_INSERT_BELOW -->", "```\nopen fence"]:
+            with self.subTest(body=body), self.assertRaises(WikiError) as ctx:
+                log.add_entry(data, title="t", body=body, date=TODAY)
+            self.assertEqual(ctx.exception.code, "OAH_WIKI_LOG_INVALID")
+
+
+def sized_log(total: int, count: int = 10) -> bytes:
+    """A log of exactly `total` bytes with `count` equal-ish entries."""
+    base = make_log(newest_first(count, body=0))
+    pad = total - len(base)
+    per, extra = divmod(pad, count)
+    entries = [entry(n, per + (extra if n == 1 else 0)) for n in range(count, 0, -1)]
+    data = make_log(entries)
+    assert len(data) == total, len(data)
+    return data
+
+
+class PlanTest(unittest.TestCase):
+    def test_threshold_boundaries(self):
+        at = sized_log(512_000)
+        self.assertIsInstance(log.plan_rollover(at, {}, trigger=512_000, target=409_600, today=TODAY),
+                              log.RolloverNoOp)
+        over = sized_log(512_001)
+        plan = log.plan_rollover(over, {}, trigger=512_000, target=409_600, today=TODAY)
+        self.assertIsInstance(plan, log.RolloverPlan)
+        self.assertLessEqual(plan.retained_bytes, 409_600)
+        self.assertEqual(wiki_pkg.DEFAULTS["rollover_trigger_bytes"], 512_000)
+        self.assertEqual(wiki_pkg.DEFAULTS["rollover_target_bytes"], 409_600)
+
+    def test_metadata_only_excess_is_noop(self):
+        entries = newest_first(5, body=100)
+        target = sum(len(e) for e in entries)
+        header = HEADER.replace(b"Newest first.", b"Newest first. " + b"m" * 2000)
+        data = make_log(entries, header=header)
+        result = log.plan_rollover(data, {}, trigger=1000, target=target, today=TODAY)
+        self.assertIsInstance(result, log.RolloverNoOp)
+        self.assertIn("headers", result.reason)
+        plan = log.plan_rollover(data, {}, trigger=1000, target=target - 1, today=TODAY)
+        self.assertIsInstance(plan, log.RolloverPlan)
+
+    def test_smallest_oldest_suffix_moves(self):
+        sizes = [50, 300, 20, 400, 10, 90, 250, 60]
+        entries = [entry(len(sizes) - i, body) for i, body in enumerate(sizes)]
+        data = make_log(entries)
+        lengths = [len(e) for e in entries]
+        for target in [100, 400, 450, 900, 1300, sum(lengths) - 1]:
+            with self.subTest(target=target):
+                plan = log.plan_rollover(data, {}, trigger=10, target=target, today=TODAY)
+                expected = max([k for k in range(1, len(entries)) if sum(lengths[:k]) <= target], default=1)
+                self.assertEqual(plan.kept, expected)
+                self.assertEqual(plan.moved, len(entries) - expected)
+                self.assertEqual(log.parse_log(plan.log, "log.md").entries[-1].data, entries[expected - 1])
+
+    def test_retained_exactly_target_is_allowed(self):
+        entries = newest_first(4, body=50)
+        target = len(entries[0]) + len(entries[1])
+        plan = log.plan_rollover(make_log(entries), {}, trigger=10, target=target, today=TODAY)
+        self.assertEqual((plan.kept, plan.retained_bytes), (2, target))
+
+    def test_oversized_newest_stays(self):
+        entries = [entry(3, 5000), entry(2, 10), entry(1, 10)]
+        plan = log.plan_rollover(make_log(entries), {}, trigger=100, target=1000, today=TODAY)
+        self.assertEqual((plan.kept, plan.moved), (1, 2))
+        self.assertEqual(len(plan.oversized), 1)
+        self.assertIn("entry 3", plan.oversized[0])
+
+    def test_single_oversized_entry_creates_no_archive(self):
+        result = log.plan_rollover(make_log([entry(1, 5000)]), {}, trigger=100, target=1000, today=TODAY)
+        self.assertIsInstance(result, log.RolloverNoOp)
+        self.assertEqual(len(result.oversized), 1)
+
+    def test_oversized_older_entry_moves_whole(self):
+        entries = [entry(3, 10), entry(2, 5000), entry(1, 10)]
+        plan = log.plan_rollover(make_log(entries), {}, trigger=100, target=1000, today=TODAY)
+        self.assertEqual(plan.kept, 1)
+        moved = log.parse_log(plan.archive, plan.archive_name).entries
+        self.assertEqual([e.data for e in moved], entries[1:])
+
+    def test_one_run_one_archive_even_over_target(self):
+        entries = [entry(3, 10), entry(2, 3000), entry(1, 3000)]
+        plan = log.plan_rollover(make_log(entries), {}, trigger=100, target=1000, today=TODAY)
+        self.assertEqual(plan.moved, 2)
+        self.assertGreater(len(plan.archive), 1000)
+
+    def test_archive_numbering(self):
+        data = make_log(newest_first(10, body=100))
+        archive = log.plan_rollover(data, {}, trigger=10, target=200, today=TODAY).archive
+        for existing, expected in [({}, "log_archive_01.md"), ({1: archive, 2: archive}, "log_archive_03.md"),
+                                   ({7: archive}, "log_archive_08.md"), ({99: archive}, "log_archive_100.md")]:
+            with self.subTest(existing=sorted(existing)):
+                plan = log.plan_rollover(data, existing, trigger=10, target=200, today=TODAY)
+                self.assertEqual(plan.archive_name, expected)
+
+    def test_archive_index_regenerated(self):
+        data = make_log(newest_first(10, body=100))
+        plan = log.plan_rollover(data, {}, trigger=10, target=300, today=TODAY)
+        header = log.parse_log(plan.log, "log.md").header.decode()
+        self.assertIn("| [[log_archive_01]] | ", header)
+        self.assertLess(header.index("OAH:ARCHIVE_INDEX:BEGIN"), header.index("[[log_archive_01]]"))
+        self.assertLess(header.index("[[log_archive_01]]"), header.index("OAH:ARCHIVE_INDEX:END"))
+        bare = b"# Log\n<!-- OAH:LOG_INSERT_BELOW -->\n" + b"".join(newest_first(10, body=100))
+        plan = log.plan_rollover(bare, {}, trigger=10, target=300, today=TODAY)
+        self.assertIn(b"<!-- OAH:ARCHIVE_INDEX:BEGIN -->", plan.log)
+        self.assertIsNotNone(log.parse_log(plan.log, "log.md").index_span)
+
+
+def make_store(test: unittest.TestCase, data: bytes, **settings) -> tuple[Wiki, pathlib.Path]:
+    root = make_tmp_dir(test)
+    folder = root / "docs" / "wiki"
+    folder.mkdir(parents=True)
+    (folder / "log.md").write_bytes(data)
+    options = {"rollover_trigger_bytes": 600, "rollover_target_bytes": 300, **settings}
+    return Wiki(root, WikiSettings(**options), root / "state"), folder
+
+
+class StoreRolloverTest(unittest.TestCase):
+    def test_stream_preserved_crlf_and_multiple_archives(self):
+        for eol in (b"\n", b"\r\n"):
+            with self.subTest(eol=eol):
+                w, folder = make_store(self, make_log(newest_first(8, body=40, eol=eol), eol=eol))
+                original = wiki_stream(folder)
+                new_entries = []
+                for round_number in range(1, 4):
+                    result = w.rollover(today=TODAY)
+                    self.assertTrue(result.line.startswith("OAH_WIKI_ROLLED_OVER"), result.line)
+                    self.assertEqual(result.archive.name, f"log_archive_{round_number:02d}.md")
+                    self.assertEqual(wiki_stream(folder), b"".join(new_entries[::-1]) + original)
+                    for _ in range(6):
+                        w.log(f"round {round_number}", body="y" * 40, today=TODAY)
+                        new_entries.append(log.parse_log((folder / "log.md").read_bytes(), "log.md").entries[0].data)
+                    stream = wiki_stream(folder)
+                    self.assertEqual(stream, b"".join(new_entries[::-1]) + original)
+                for path in folder.iterdir():
+                    if eol == b"\r\n":
+                        self.assertNotIn(b"\n", path.read_bytes().replace(b"\r\n", b""), path.name)
+                header = log.parse_log((folder / "log.md").read_bytes(), "log.md").header.decode()
+                self.assertLess(header.index("log_archive_03"), header.index("log_archive_02"))
+
+    def test_noop_writes_nothing(self):
+        w, folder = make_store(self, make_log(newest_first(2)))
+        before = snapshot(folder, w.state)
+        self.assertTrue(w.rollover(today=TODAY).line.startswith("OAH_WIKI_ROLLOVER_NOOP"))
+        self.assertEqual(snapshot(folder, w.state), before)
+
+    def test_bad_archive_names_refuse(self):
+        for name in ("log_archive_1.md", "log_archive_00.md"):
+            with self.subTest(name=name):
+                w, folder = make_store(self, make_log(newest_first(20, body=40)))
+                (folder / name).write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
+                with self.assertRaises(WikiError) as ctx:
+                    w.rollover(today=TODAY)
+                self.assertEqual(ctx.exception.code, "OAH_WIKI_LOG_INVALID")
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        for name in ("log_archive_01.md", "log_archive_001.md"):
+            (folder / name).write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
+        with self.assertRaises(WikiError):
+            w.rollover(today=TODAY)
+
+    def test_rollover_publishes_archive_then_log(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        original = (folder / "log.md").read_bytes()
+        seen = {}
+
+        def fault(step: str) -> None:
+            seen[step] = ((folder / "log_archive_01.md").exists(), (folder / "log.md").read_bytes() == original,
+                          w.journal_path.exists())
+
+        w.rollover(today=TODAY, fault=fault)
+        self.assertEqual(seen["journal-written"], (False, True, True))
+        self.assertEqual(seen["archive-published"], (True, True, True))
+        self.assertEqual(seen["log-replaced"], (True, False, True))
+        self.assertFalse(w.journal_path.exists())
+        journal_phases = []
+
+        w2, folder2 = make_store(self, make_log(newest_first(20, body=40)))
+        w2.rollover(today=TODAY, fault=lambda step: journal_phases.append(
+            json.loads(w2.journal_path.read_text(encoding="utf-8"))["phase"]) if w2.journal_path.exists() else None)
+        self.assertEqual(journal_phases[0], "staged")
+        self.assertEqual(journal_phases[-1], "archive-published")
+
+    def test_journal_records_paths_bytes_digests_and_phase(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        with self.assertRaises(Crash):
+            w.rollover(today=TODAY, fault=crash_at("journal-written"))
+        journal = json.loads(w.journal_path.read_text(encoding="utf-8"))
+        for key in ("wiki_dir", "log", "archive", "phase", "original_log", "original_log_sha256",
+                    "replacement_log", "replacement_log_sha256", "archive_bytes", "archive_sha256", "archive_set"):
+            self.assertIn(key, journal)
+        self.assertEqual(journal["phase"], "staged")
+        self.assertEqual(journal["archive"], "log_archive_01.md")
+
+
+class RecoveryTest(unittest.TestCase):
+    def crashed(self, step: str, archives: int = 0) -> tuple[Wiki, pathlib.Path, bytes]:
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        for _ in range(archives):
+            w.rollover(today=TODAY)
+            for i in range(12):
+                w.log(f"more {_}-{i}", body="z" * 40, today=TODAY)
+        stream = wiki_stream(folder)
+        with self.assertRaises(Crash):
+            w.rollover(today=TODAY, fault=crash_at(step))
+        self.assertTrue(w.journal_path.exists())
+        return w, folder, stream
+
+    def assert_complete(self, w: Wiki, folder: pathlib.Path, stream: bytes) -> None:
+        self.assertFalse(w.journal_path.exists())
+        self.assertEqual(wiki_stream(folder), stream)
+        entries = log.parse_log((folder / "log.md").read_bytes(), "log.md").entries
+        archived = [e for p in sorted(folder.glob("log_archive_*.md"))
+                    for e in log.parse_log(p.read_bytes(), p.name).entries]
+        all_data = [e.data for e in entries + archived]
+        self.assertEqual(len(all_data), len(set(all_data)), "an entry is duplicated")
+
+    def test_fault_at_every_step_then_recover(self):
+        for archives in (0, 2):
+            for step in STEPS:
+                with self.subTest(step=step, archives=archives):
+                    w, folder, stream = self.crashed(step, archives)
+                    line = w.recover()
+                    self.assertTrue(line.startswith("OAH_WIKI_RECOVERED"), line)
+                    if step == "log-replaced":
+                        self.assertIn("already complete", line)
+                    self.assert_complete(w, folder, stream)
+                    self.assertEqual(w.recover(), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
+
+    def test_fault_during_recovery_then_recover_again(self):
+        for step in ("archive-published", "log-replaced"):
+            with self.subTest(step=step):
+                w, folder, stream = self.crashed("validated")
+                with self.assertRaises(Crash):
+                    w.recover(fault=crash_at(step))
+                self.assertTrue(w.journal_path.exists())
+                self.assertTrue(w.recover().startswith("OAH_WIKI_RECOVERED"))
+                self.assert_complete(w, folder, stream)
+
+    def test_recover_twice_is_idempotent(self):
+        w, folder, stream = self.crashed("archive-published")
+        w.recover()
+        after = snapshot(folder)
+        for _ in range(2):
+            self.assertEqual(w.recover(), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
+            self.assertEqual(snapshot(folder), after)
+
+    def test_recover_conflict_preserves_everything(self):
+        def edit_log(folder):
+            (folder / "log.md").write_bytes((folder / "log.md").read_bytes() + b"edited\n")
+
+        def edit_archive(folder):
+            (folder / "log_archive_01.md").write_bytes(b"other bytes")
+
+        def new_sibling(folder):
+            (folder / "log_archive_09.md").write_bytes(b"<!-- OAH:LOG_INSERT_BELOW -->\n")
+
+        def drop_archive(folder):
+            (folder / "log_archive_01.md").unlink()
+
+        cases = [("archive-published", edit_log), ("archive-published", edit_archive),
+                 ("validated", edit_archive), ("archive-published", new_sibling),
+                 ("log-replaced", drop_archive)]
+        for step, change in cases:
+            with self.subTest(step=step, change=change.__name__):
+                w, folder, _ = self.crashed(step)
+                change(folder)
+                before = snapshot(folder, w.state)
+                with self.assertRaises(WikiError) as ctx:
+                    w.recover()
+                self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+                self.assertEqual(snapshot(folder, w.state), before)
+
+    def test_corrupt_journal_is_never_reset(self):
+        w, folder, _ = self.crashed("validated")
+        w.journal_path.write_text("{not json", encoding="utf-8")
+        before = snapshot(folder, w.state)
+        with self.assertRaises(Exception):
+            w.recover()
+        data = json.loads(json.dumps({"version": 1}))
+        w.journal_path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(WikiError) as ctx:
+            w.recover()
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_JOURNAL_CORRUPT")
+        self.assertEqual(snapshot(folder), {k: v for k, v in before.items() if str(folder) in k})
+
+    def test_concurrent_edit_refused_before_publication(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+
+        def editor(step: str) -> None:
+            if step == "journal-written":
+                (folder / "log.md").write_bytes((folder / "log.md").read_bytes() + b"late edit\n")
+
+        with self.assertRaises(WikiError) as ctx:
+            w.rollover(today=TODAY, fault=editor)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
+        self.assertFalse((folder / "log_archive_01.md").exists())
+        self.assertFalse(w.journal_path.exists())
+        self.assertTrue((folder / "log.md").read_bytes().endswith(b"late edit\n"))
+
+    def test_concurrent_archive_change_refused(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        w.rollover(today=TODAY)
+        for i in range(12):
+            w.log(f"n{i}", body="q" * 40, today=TODAY)
+
+        def editor(step: str) -> None:
+            if step == "journal-written":
+                (folder / "log_archive_01.md").write_bytes(b"tampered")
+
+        with self.assertRaises(WikiError) as ctx:
+            w.rollover(today=TODAY, fault=editor)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
+        self.assertFalse((folder / "log_archive_02.md").exists())
+
+    def test_existing_archive_path_is_never_replaced(self):
+        w, folder = make_store(self, make_log(newest_first(20, body=40)))
+        original = (folder / "log.md").read_bytes()
+
+        def racer(step: str) -> None:
+            if step == "validated":
+                (folder / "log_archive_01.md").write_bytes(b"someone else's file")
+
+        with self.assertRaises(WikiError) as ctx:
+            w.rollover(today=TODAY, fault=racer)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
+        self.assertEqual((folder / "log_archive_01.md").read_bytes(), b"someone else's file")
+        self.assertEqual((folder / "log.md").read_bytes(), original)
+        self.assertFalse(w.journal_path.exists())
+
+    def test_pending_journal_blocks_every_command(self):
+        w, folder, _ = self.crashed("archive-published")
+        (folder / "index.md").write_text("Notes:\n", encoding="utf-8")
+        before = snapshot(folder, w.state)
+        calls = {
+            "lint": lambda: w.lint(),
+            "lint --index": lambda: w.lint(index=True),
+            "hygiene": lambda: w.hygiene(),
+            "new": lambda: w.new("Fresh", today=TODAY),
+            "log": lambda: w.log("Fresh", today=TODAY),
+            "rollover": lambda: w.rollover(today=TODAY),
+        }
+        for name, call in calls.items():
+            with self.subTest(name), self.assertRaises(WikiError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_PENDING")
+            self.assertIn("oah wiki recover", str(ctx.exception))
+            self.assertEqual(snapshot(folder, w.state), before)
+
+
+if __name__ == "__main__":
+    unittest.main()
