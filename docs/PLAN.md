@@ -686,8 +686,8 @@ After the review:
         target maximum for the retained entry bytes. The trigger counts the whole file, including
         metadata. Headers and the generated archive index are excluded from the target and entry
         stream; a metadata-only excess with entry bytes already at target is a no-op.
-      - The trigger, the target and the archive name prefix (`log_archive_`) are `[wiki]` config
-        values with these defaults (A18).
+      - Only the trigger and target are `[wiki]` config values with these defaults. Archive names
+        stay `log_archive_NN.md`, as required by scope exemptions, lint and recovery (A18).
       - `oah wiki rollover` prints its plan and writes nothing unless `--apply` is given. `--apply`
         needs a lease whose scope covers `log.md` and the new archive, or refuses with
         `OAH_WIKI_LEASE_REQUIRED`. `oah wiki maintain` applies rollover under the wiki lock without a
@@ -720,9 +720,13 @@ After the review:
         log (including its generated archive index). Flush files and directories at each step;
         remove the journal only after both are durable. Individual writes use atomic replacement.
       - Before removing the journal, re-read both files. The preservation stream must be unchanged,
-        and the log must hold exactly the published bytes, or the change rolls back from the journal.
-        If the rollback fails, the journal stays with a named reason, and commands refuse with
-        `OAH_WIKI_RECOVERY_PENDING` until `oah wiki recover` (A18).
+        and the log must hold exactly the published bytes. If the only difference is bytes appended
+        to the published log, restore the original log followed by those appended bytes and remove
+        only the archive this run created, so no entry remains in two files. Any other difference
+        leaves the files as they are. On a conflict or failed restore, the journal keeps the live
+        bytes with a named reason; commands refuse with `OAH_WIKI_RECOVERY_PENDING`, and
+        `oah wiki recover` refuses with `OAH_WIKI_RECOVERY_CONFLICT` rather than overwrite unknown
+        bytes (A18).
       - Before any wiki read or write, check for a pending journal under the lock. Commands other
         than `oah wiki recover` refuse with `OAH_WIKI_RECOVERY_PENDING`, leave wiki files and the
         journal unchanged, and direct the user to run `oah wiki recover` explicitly. That command
@@ -774,7 +778,7 @@ After the review:
   5. **Graph neighbours.** Read from graphify's output when it exists; skipped silently otherwise.
 - **`--changed-since REV`** turns the changed files into the list of gates to re-run. That is the
   verify-what-changed rule as a command. `--strong-only` lists every pin and exec result without a cap,
-  ending with `total/shown/overflow`. Exit codes: 0 ok, 1 usage, 69 environment.
+  ending with `total/shown/overflow`. Exit codes: 0 ok, 2 usage, 69 environment.
 - **Re-ranker (optional plugin, later).**
   - A configured re-ranker may re-order impact results. It never removes deterministic pin or exec rows.
   - A provider runs only when explicitly enabled by the user AND its key is present. Guided `oah init`
@@ -1597,10 +1601,11 @@ Open questions from the inventory. None of them blocks: every affected item is l
 
 Two changes the owner made to their harness after amendment 3, ported under A16 (the `82492ea30` rows of
 `docs/UPSTREAM_SYNC.md`). Sections 5.6 and 5.10 were updated with them.
+Consistency fix: `oah impact` uses exit 2 for usage errors, matching the shared CLI and argparse convention.
 
 | # | Rule | Sections | Phases |
 |---|---|---|---|
-| A18 | **Safer log rollover.** `oah wiki rollover` is a dry run that prints its plan. `--apply` writes and needs a lease whose scope covers the log and the new archive. `oah wiki maintain` applies rollover under the wiki lock without a lease. Before the journal is removed, both files are re-read: the preservation stream must be unchanged and the log must hold exactly the published bytes, or the change rolls back from the journal. A failed rollback keeps the journal with a named reason. Every `OAH_WIKI_LOG_INVALID` refusal names its case and happens before any write. The trigger, the target and the archive name prefix are `[wiki]` config values. | 5.10 | P7 (lane P7a) |
+| A18 | **Safer log rollover.** `oah wiki rollover` is a dry run that prints its plan. `--apply` writes and needs a lease whose scope covers the log and the new archive. `oah wiki maintain` applies rollover under the wiki lock without a lease. Before the journal is removed, both files are re-read: the preservation stream must be unchanged and the log must hold exactly the published bytes. An appended-only late change is preserved after the original log bytes on restore, and this run's archive is removed to avoid duplicate entries. Any other difference leaves the files as they are. A conflict or failed restore keeps live bytes in the journal with a named reason; commands refuse with `OAH_WIKI_RECOVERY_PENDING`, and recovery refuses with `OAH_WIKI_RECOVERY_CONFLICT` rather than overwrite unknown bytes. Every `OAH_WIKI_LOG_INVALID` refusal names its case and happens before any write. Only the trigger and target are `[wiki]` config values; archive names stay `log_archive_NN.md` for scope exemptions, lint and recovery. | 5.10 | P7 (lane P7a) |
 | A19 | **The bound intent cannot be swapped.** Later rounds reuse the intent source bound at the first dispatch, and a brief with a different source refuses with `OAH_INTENT_SOURCE_MISMATCH`. Worktree selectors resolve to exactly one repository before the intent check. An ambiguous or unresolvable selector refuses before launch with `OAH_WORKTREE_UNRESOLVED` and a runnable retry command. | 5.6 | P3 (lane P3b) |
 
 #### Amendment 4 checklists
@@ -1611,5 +1616,7 @@ Two changes the owner made to their harness after amendment 3, ported under A16 
 
 **P7** (lane P7a)
 - [ ] `oah wiki rollover` writes nothing without `--apply`, and `--apply` without a covering lease refuses with `OAH_WIKI_LEASE_REQUIRED`. (A18)
-- [ ] Tests inject a late write after publication and a failed rollback. The first rolls back from the journal; the second keeps the journal with a named reason, and commands refuse with `OAH_WIKI_RECOVERY_PENDING`. (A18)
-- [ ] Each invalid-log refusal names its case before any write, and the trigger, target and archive prefix come from `[wiki]`. (A18)
+- [ ] An entry appended after publication survives restore after the original log bytes, and this run's archive is removed so no entry remains in two files. (A18)
+- [ ] A different late edit or failed restore preserves live bytes in the journal with a named reason and refuses commands with `OAH_WIKI_RECOVERY_PENDING`; a failed recovery returns `OAH_WIKI_RECOVERY_CONFLICT` and leaves the late entry, files and journal unchanged. (A18)
+- [ ] Each invalid-log refusal names its case before any write. (A18)
+- [ ] Only the trigger and target come from `[wiki]`; archive names stay `log_archive_NN.md` for scope exemptions, lint and recovery. (A18)
