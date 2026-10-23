@@ -11,6 +11,7 @@ import os
 import pathlib
 import secrets as token_source
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -549,11 +550,12 @@ class KeyLeakTest(unittest.TestCase):
             elif not callable(value) and not isinstance(value, types.ModuleType) and hasattr(value, "__dict__"):
                 pending.append(vars(value))
 
-    def assert_sanitized_failure(self, action, code: str, key: str, response_text: str) -> None:
+    def assert_sanitized_failure(self, action, code: str | None, key: str, response_text: str,
+                                 exception_type=rerank.ProviderError) -> None:
         failure = None
         try:
             action()
-        except Exception as exc:
+        except BaseException as exc:
             failure = exc
         self.assertIsNotNone(failure, "the provider must refuse the failed request")
         pending = [failure]
@@ -586,10 +588,121 @@ class KeyLeakTest(unittest.TestCase):
                 for private in (key, response_text):
                     self.assertFalse(private in text, "exception exposes credential or response data")
             pending.extend(item for item in attributes.values() if isinstance(item, BaseException))
-        self.assertIsInstance(failure, rerank.ProviderError)
-        self.assertEqual(failure.code, code)
+        self.assertIs(type(failure), exception_type)
+        if exception_type is rerank.ProviderError:
+            self.assertEqual(failure.code, code)
+        else:
+            self.assertEqual(failure.args, ())
         self.assertTrue(failure.__context__ is None, "provider errors must have no exception context")
         self.assertTrue(failure.__cause__ is None, "provider errors must have no exception cause")
+
+    def check_interrupted_request(self, exception_type) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = response_text + key
+        endpoint = "http://127.0.0.1:9876/v1/systemone"
+        cfg = typesafe_config(endpoint)
+        provider = typesafe.TypeSafeProvider()
+        body = {"echo": echo, "answers": {"c0": {"type": "noul", "noul": 0.5},
+                                          "tier": {"type": "choice", "choice": "high"}}}
+
+        class InterruptedBytes(bytes):
+            def decode(self, *args, **kwargs):
+                raise exception_type(echo)
+
+        class InterruptedBody(dict):
+            def get(self, *args, **kwargs):
+                raise exception_type(echo)
+
+        for phase in ("transport", "read", "decode", "json", "answers"):
+            with self.subTest(phase=phase):
+                def http_open(handler, request):
+                    if phase == "transport":
+                        raise exception_type(echo)
+                    response = urllib.response.addinfourl(
+                        io.BytesIO(json.dumps(body).encode()), email.message.Message(), endpoint, 200)
+                    response.msg = echo
+                    if phase == "read":
+                        response.read = mock.Mock(side_effect=exception_type(echo))
+                    elif phase == "decode":
+                        response.read = mock.Mock(return_value=InterruptedBytes(echo.encode()))
+                    return response
+
+                loads = json.loads
+
+                def parse_json(raw):
+                    if phase == "json":
+                        raise exception_type(echo)
+                    return InterruptedBody(body) if phase == "answers" else loads(raw)
+
+                actions = [lambda: provider.score("impact", "q", candidates("a"), key=key, config=cfg),
+                           lambda: provider.advise(AdviceTest.AXES, "task", key=key, config=cfg)]
+                if phase != "answers":
+                    actions.extend((lambda: typesafe.post_json(endpoint, {}, key=key, timeout=5),
+                                    lambda: provider._post({}, key, cfg)))
+                else:
+                    actions.extend((lambda: typesafe.parse_rerank_response(InterruptedBody(body), 1),
+                                    lambda: typesafe.parse_advice_response(InterruptedBody(body))))
+                with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open), \
+                        mock.patch.object(json, "loads", parse_json):
+                    for action in actions:
+                        self.assert_sanitized_failure(action, None, key, response_text, exception_type)
+
+    def test_keyboard_interrupt_has_no_private_traceback(self) -> None:
+        self.check_interrupted_request(KeyboardInterrupt)
+
+    def test_other_base_exceptions_have_no_private_traceback(self) -> None:
+        for exception_type in (SystemExit, GeneratorExit, BaseException):
+            with self.subTest(exception_type=exception_type.__name__):
+                self.check_interrupted_request(exception_type)
+
+    def test_sensitive_frames_clear_inputs_on_every_exit(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = response_text + key
+        endpoint = "http://127.0.0.1:9876/v1/systemone"
+        cfg = typesafe_config(endpoint)
+        provider = typesafe.TypeSafeProvider()
+        body = {"echo": echo, "answers": {"c0": {"type": "noul", "noul": 0.5},
+                                          "tier": {"type": "choice", "choice": "high"}}}
+        for exception_type in (None, RuntimeError, KeyboardInterrupt, SystemExit, GeneratorExit):
+            with self.subTest(exception_type=exception_type):
+                frames = []
+
+                def capture(frame, event, arg):
+                    if event == "return" and frame.f_globals.get("__name__") == typesafe.__name__:
+                        frames.append(frame)
+
+                def http_open(handler, request):
+                    if exception_type is not None:
+                        raise exception_type(echo)
+                    response = urllib.response.addinfourl(
+                        io.BytesIO(json.dumps(body).encode()), email.message.Message(), endpoint, 200)
+                    response.msg = echo
+                    return response
+
+                previous_profile = sys.getprofile()
+                try:
+                    sys.setprofile(capture)
+                    with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+                        for action in (
+                            lambda: typesafe.post_json(endpoint, {}, key=key, timeout=5),
+                            lambda: provider._post({}, key, cfg),
+                            lambda: provider.score("impact", "q", candidates("a"), key=key, config=cfg),
+                            lambda: provider.advise(AdviceTest.AXES, "task", key=key, config=cfg),
+                            lambda: typesafe.parse_rerank_response(body, 1),
+                            lambda: typesafe.parse_advice_response(body),
+                        ):
+                            try:
+                                action()
+                            except BaseException:
+                                pass
+                finally:
+                    sys.setprofile(previous_profile)
+                self.assertTrue(frames)
+                for frame in frames:
+                    with self.subTest(helper=frame.f_code.co_name):
+                        self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
 
     def test_malformed_response_errors_have_no_chain(self) -> None:
         key = fake_key()
