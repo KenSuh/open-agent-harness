@@ -452,8 +452,8 @@ class ExtractTest(unittest.TestCase):
                                     and region['reason'] for region in graph['unparsed']))
 
     def test_construct_generators_scale_below_quadratic(self):
-        # Minimum timings reduce scheduler/GC noise; sub-50 ms runs are linear-enough.
-        # Fixed deadlines catch hangs; doubled sizes and a 3.3 ratio catch slower quadratic paths.
+        # Calibrated batches and minimum timings reduce timer/scheduler/GC noise.
+        # At 8x input, a 24x limit separates linear (~8x) from quadratic (~64x) growth.
         code = textwrap.dedent('''
             import gc, time, unittest
             from oah.impact import sqlplugin
@@ -469,36 +469,49 @@ class ExtractTest(unittest.TestCase):
                                              'SELECT 1;' + 'END;' * n,
             }
             def check_scaling(name, generate, extract=sqlplugin.extract, clock=time.perf_counter):
+                inputs = [generate(size) for size in (2000, 16000)]
+                def batch(text, repetitions):
+                    gc.collect()
+                    start = clock()
+                    for _ in range(repetitions):
+                        extract({'stress.sql': text})
+                    elapsed = clock() - start
+                    assert elapsed < 12, (name, len(text), elapsed)
+                    return elapsed
+
+                # Ten milliseconds dwarfs timer resolution; three minima and the wide
+                # ratio margin tolerate CI noise without making eight generators slow.
+                repetitions = 1
+                elapsed = batch(inputs[0], repetitions)
+                while elapsed < 0.01:
+                    repetitions *= 2
+                    elapsed = batch(inputs[0], repetitions)
+
                 times = []
-                for size in (16000, 32000):
-                    text = generate(size)
-                    samples = []
-                    for _ in range(3):
-                        gc.collect()
-                        start = clock()
-                        graph = extract({'stress.sql': text})
-                        elapsed = clock() - start
-                        assert elapsed < 12, (name, size, elapsed)
-                        samples.append(elapsed)
-                    times.append(min(samples))
-                if times[1] >= 0.05:
-                    assert times[1] / times[0] < 3.3, (name, times)
+                for text in inputs:
+                    times.append(min(batch(text, repetitions) for _ in range(3)))
+                assert times[1] / times[0] < 24, (name + ': scaling ratio', times)
                 print(name, round(times[1] / times[0], 3), times)
 
             for name, generate in generators.items():
                 check_scaling(name, generate)
 
-            # Count quadratic work with a deterministic clock to avoid a flaky negative check.
-            ticks = [0]
+            # Real quadratic work must be rejected even when single runs are below 50 ms.
             def quadratic_extract(files):
-                size = len(files['stress.sql']) // 1000
-                for _ in range(size):
-                    for _ in range(size):
-                        ticks[0] += 1
+                text = files['stress.sql']
+                for _ in range(len(text) // 100):
+                    text.count('x')
 
-            with unittest.TestCase().assertRaisesRegex(AssertionError, 'quadratic stub'):
-                check_scaling('quadratic stub', lambda n: 'x' * n,
-                              quadratic_extract, lambda: ticks[0] / 10000)
+            for size in (2000, 16000):
+                text = 'x' * size
+                samples = []
+                for _ in range(3):
+                    start = time.perf_counter()
+                    quadratic_extract({'stress.sql': text})
+                    samples.append(time.perf_counter() - start)
+                assert min(samples) < 0.05, (size, samples)
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'quadratic real: scaling ratio'):
+                check_scaling('quadratic real', lambda n: 'x' * n, quadratic_extract)
         ''')
         result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
                                 encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=120)
