@@ -19,6 +19,14 @@ RUNNERS = {"macos": "macos-latest", "windows": "windows-latest", "linux": "ubunt
 SETUP_TEMPLATES = {"python": "setup-python.yml", "node": "setup-node.yml", "go": "setup-go.yml"}
 
 
+class _Placeholder:
+    def __repr__(self) -> str:
+        return "PLACEHOLDER"
+
+
+PLACEHOLDER = _Placeholder()
+
+
 class CiError(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -159,20 +167,21 @@ def _read_existing(path: pathlib.Path) -> str | None:
 
 
 def plan(root: pathlib.Path, oses: Iterable[str] | None = None,
-         test_command: str | Detection | None = None) -> CiPlan:
+         test_command: str | Detection | _Placeholder | None = None) -> CiPlan:
     """What `oah ci init` would write. Reads the project; writes nothing.
 
     `oses` empty or None means the current OS. `test_command` None uses the only detected ecosystem
     (the placeholder step when none is found; OAH_CI_AMBIGUOUS when several are). A Detection uses
-    that one; a string becomes one "Run tests" step after the setup of every detected ecosystem.
+    that one. A string becomes one "Run tests" step, and PLACEHOLDER the failing placeholder step, each
+    after the setup of every detected ecosystem.
     """
     root = pathlib.Path(root)
     chosen = parse_oses(oses) if oses else (current_os(),)
     path = _target(root)
     existing = _read_existing(path)
     detection: Detection | None = None
-    if isinstance(test_command, str):
-        steps = (Step("Run tests", check_test_command(test_command)),)
+    if isinstance(test_command, (str, _Placeholder)):
+        steps = (Step("Run tests", check_test_command(test_command)),) if isinstance(test_command, str) else ()
         setups = [found.ecosystem for found in detect(root)]
     else:
         if test_command is None:

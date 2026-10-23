@@ -8,12 +8,15 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 
 from oah import ci
-from tests.helpers import make_tmp_dir
+from oah.cli import build_parser, command_modules
+from tests.helpers import make_git_repo, make_tmp_dir
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+SRC = str(REPO / "src")
 # Read with `git ls-remote` against each action's official repository (see the lane plan).
 EXPECTED_PINS = {
     "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
@@ -270,6 +273,14 @@ class RenderTest(unittest.TestCase):
                 for ecosystem, action in expected.items():
                     self.assertEqual(action in result.text, ecosystem == name)
 
+    def test_explicit_placeholder_keeps_detected_setup(self):
+        result = ci.plan(make_project(self, FIXTURES["go"]), ["linux"], ci.PLACEHOLDER)
+        self.assertTrue(result.placeholder)
+        self.assertIsNone(result.detection)
+        self.assertIn("actions/setup-go@", result.text)
+        self.assertNotIn("go test", result.text)
+        self.assertIn("could not find a test command", result.text)
+
     def test_test_command_rejects_line_breaks_and_expressions(self):
         root = make_project(self, {})
         for bad in ("", "   ", "a\nb", "a\rb", "a\x00b", "a\tb\x1b", "echo ${{ github.ref }}", "x\u2028y"):
@@ -386,6 +397,281 @@ class PlanWriteTest(unittest.TestCase):
             self.skipTest(f"cannot create a symlink here: {exc}")
         assert_ci_error(self, "OAH_CI_TARGET_INVALID", ci.plan, root, ["linux"])
         self.assertEqual(list(outside.iterdir()), [])
+
+
+def run_ci(cwd: pathlib.Path, *args: str, answers: str = "", env_extra: dict | None = None):
+    """`python -m oah ci init ARGS` in cwd, with `answers` on stdin; returns (rc, stdout, stderr)."""
+    env = dict(os.environ, PYTHONPATH=SRC)
+    env.update(env_extra or {})
+    result = subprocess.run([sys.executable, "-m", "oah", "ci", "init", *args], cwd=cwd,
+                            input=answers.encode("utf-8"), capture_output=True, env=env, timeout=60)
+    return result.returncode, result.stdout.decode("utf-8"), result.stderr.decode("utf-8")
+
+
+def tree(root: pathlib.Path) -> dict[str, bytes]:
+    """Every file under root except .git, with its bytes."""
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*"))
+            if path.is_file() and ".git" not in path.relative_to(root).parts}
+
+
+class CliTest(unittest.TestCase):
+    def repo(self, files: dict) -> pathlib.Path:
+        repo = make_git_repo(self)
+        for name, content in files.items():
+            path = repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return repo
+
+    def target(self, repo: pathlib.Path) -> pathlib.Path:
+        return repo / ".github" / "workflows" / "oah-ci.yml"
+
+    def expected(self, repo: pathlib.Path, oses=("linux",), test_command=None) -> str:
+        return ci.plan(repo, list(oses), test_command).text
+
+    def test_ci_is_discovered(self):
+        self.assertIn("oah.ci_cli", [module.__name__ for module in command_modules()])
+        args = build_parser().parse_args(["ci", "init", "--os", "macos,linux", "--test-command", "make t",
+                                          "--dry-run", "--yes", "--force"])
+        self.assertEqual((args.command, args.ci_command, args.os, args.test_command, args.dry_run, args.yes,
+                          args.force), ("ci", "init", "macos,linux", "make t", True, True, True))
+
+    def test_dry_run_writes_nothing(self):
+        repo = self.repo(FIXTURES["go"])
+        before = tree(repo)
+        for flags in (["--dry-run"], ["--dry-run", "--yes", "--force"]):
+            with self.subTest(flags=flags):
+                rc, out, err = run_ci(repo, "--os", "linux", *flags)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(self.expected(repo), out)
+                self.assertIn("dry run", out)
+                self.assertEqual(tree(repo), before)
+                self.assertFalse((repo / ".github").exists())
+        self.target(repo).parent.mkdir(parents=True)
+        self.target(repo).write_text("name: mine\n", encoding="utf-8")
+        before = tree(repo)
+        rc, out, err = run_ci(repo, "--os", "linux", "--dry-run", "--yes", "--force")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("-name: mine\n", out)
+        self.assertEqual(tree(repo), before)
+
+    def test_declined_writes_nothing(self):
+        repo = self.repo(FIXTURES["go"])
+        for answers in ("\nn\n", "\n\n", "\nmaybe\n", "n\n\nn\n"):
+            with self.subTest(answers=answers):
+                rc, out, err = run_ci(repo, "--os", "linux", answers=answers)
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("OAH_CI_NOT_WRITTEN", err)
+                self.assertFalse((repo / ".github").exists())
+
+    def test_end_of_input_writes_nothing(self):
+        repo = self.repo(FIXTURES["go"])
+        for answers in ("", "\n", "n\n"):
+            with self.subTest(answers=answers):
+                rc, out, err = run_ci(repo, "--os", "linux", answers=answers)
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("OAH_CI_NOT_WRITTEN", err)
+                self.assertFalse((repo / ".github").exists())
+
+    def test_confirmed_writes_file(self):
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--os", "linux", answers="\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("go test ./...", out)
+        self.assertIn(self.expected(repo), out)
+        self.assertIn("OAH_CI_WRITTEN", out)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+
+    def test_yes_writes_file(self):
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(self.expected(repo), out)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+
+    def test_runs_from_a_subfolder(self):
+        repo = self.repo({**FIXTURES["go"], "pkg/a.go": "package pkg\n"})
+        rc, out, err = run_ci(repo / "pkg", "--os", "linux", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.target(repo).is_file())
+        self.assertFalse((repo / "pkg" / ".github").exists())
+
+    def test_existing_file_shows_diff_and_asks(self):
+        repo = self.repo({**FIXTURES["go"], ".github/workflows/oah-ci.yml": "name: mine\n"})
+        rc, out, err = run_ci(repo, "--os", "linux", answers="\nn\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("-name: mine\n", out)
+        self.assertIn("+name: oah-ci\n", out)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), "name: mine\n")
+        rc, out, err = run_ci(repo, "--os", "linux", "--force", answers="\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), "name: mine\n")
+        rc, out, err = run_ci(repo, "--os", "linux", answers="\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+
+    def test_yes_without_force_refuses(self):
+        repo = self.repo({**FIXTURES["go"], ".github/workflows/oah-ci.yml": "name: mine\n"})
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("-name: mine\n", out)
+        self.assertIn("OAH_CI_EXISTS", err)
+        self.assertIn("--force --yes", err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), "name: mine\n")
+
+    def test_force_yes_overwrites(self):
+        repo = self.repo({**FIXTURES["go"], ".github/workflows/oah-ci.yml": "name: mine\n"})
+        rc, out, err = run_ci(repo, "--os", "linux", "--force", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("-name: mine\n", out)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+
+    def test_up_to_date_says_so(self):
+        repo = self.repo(FIXTURES["go"])
+        self.assertEqual(run_ci(repo, "--os", "linux", "--yes")[0], 0)
+        before = self.target(repo).stat().st_mtime_ns
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes", "--force")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("already up to date", out)
+        self.assertEqual(self.target(repo).stat().st_mtime_ns, before)
+
+    def test_several_matches_user_picks(self):
+        repo = self.repo({**FIXTURES["node"], **FIXTURES["go"]})
+        rc, out, err = run_ci(repo, "--os", "linux", answers="2\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("1. Node.js", out)
+        self.assertIn("2. Go", out)
+        text = self.target(repo).read_text(encoding="utf-8")
+        self.assertIn("go test ./...", text)
+        self.assertNotIn("npm test", text)
+        for answers in ("9\n", "x\n", ""):
+            with self.subTest(answers=answers):
+                self.target(repo).unlink()
+                rc, out, err = run_ci(repo, "--os", "linux", answers=answers)
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("OAH_CI_NOT_WRITTEN", err)
+                self.assertFalse(self.target(repo).exists())
+                self.target(repo).write_text("", encoding="utf-8")
+
+    def test_several_matches_with_yes_refuses(self):
+        repo = self.repo({**FIXTURES["node"], **FIXTURES["go"]})
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("OAH_CI_AMBIGUOUS", err)
+        self.assertIn("--test-command", err)
+        self.assertFalse((repo / ".github").exists())
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes", "--test-command", "npm test")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"),
+                         self.expected(repo, test_command="npm test"))
+
+    def test_several_matches_dry_run_shows_the_first(self):
+        repo = self.repo({**FIXTURES["node"], **FIXTURES["go"]})
+        rc, out, err = run_ci(repo, "--os", "linux", "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(self.expected(repo, test_command=ci.detect(repo)[0]), out)
+        self.assertIn("asks you to pick", out)
+
+    def test_detected_command_declined_then_typed(self):
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--os", "linux", answers="n\nmake check\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"),
+                         self.expected(repo, test_command="make check"))
+        self.target(repo).unlink()
+        rc, out, err = run_ci(repo, "--os", "linux", answers="n\n\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"),
+                         self.expected(repo, test_command=ci.PLACEHOLDER))
+        self.assertNotIn("go test", self.target(repo).read_text(encoding="utf-8"))
+
+    def test_no_detection_offers_typing_or_placeholder(self):
+        repo = self.repo({"README.md": "hi\n"})
+        rc, out, err = run_ci(repo, "--os", "linux", answers="\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("placeholder", out)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+        self.target(repo).unlink()
+        rc, out, err = run_ci(repo, "--os", "linux", answers="make t\ny\n")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo, test_command="make t"))
+        self.target(repo).unlink()
+        rc, out, err = run_ci(repo, "--os", "linux", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("edit", out.lower())
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+
+    def test_test_command_flag(self):
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--os", "linux", "--test-command", "make check", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.target(repo).read_text(encoding="utf-8"),
+                         self.expected(repo, test_command="make check"))
+        for bad in ("", "echo ${{ github.ref }}"):
+            with self.subTest(bad=bad):
+                rc, out, err = run_ci(repo, "--os", "linux", "--test-command", bad, "--yes", "--force")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn("OAH_CI_TEST_COMMAND_INVALID", err)
+
+    def test_config_section_is_used(self):
+        repo = self.repo({**FIXTURES["go"], ".oah/config.toml":
+                          "[ci]\nos = [\"windows\", \"linux\"]\ntest_command = \"make check\"\n"})
+        rc, out, err = run_ci(repo, "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(self.expected(repo, ("windows", "linux"), "make check"), out)
+        rc, out, err = run_ci(repo, "--dry-run", "--os", "macos", "--test-command", "go vet ./...")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(self.expected(repo, ("macos",), "go vet ./..."), out)
+
+    def test_config_errors_exit_69(self):
+        for body, code in (("[ci]\nfoo = 1\n", "OAH_CONFIG_UNKNOWN_KEY"),
+                           ("[ci]\nos = \"linux\"\n", "OAH_CONFIG_INVALID"),
+                           ("[ci]\nos = [\"beos\"]\n", "OAH_CONFIG_INVALID"),
+                           ("[ci]\nos = [1]\n", "OAH_CONFIG_INVALID"),
+                           ("[ci]\ntest_command = \"a\\nb\"\n", "OAH_CONFIG_INVALID")):
+            with self.subTest(body=body):
+                repo = self.repo({**FIXTURES["go"], ".oah/config.toml": body})
+                rc, out, err = run_ci(repo, "--yes")
+                self.assertEqual(rc, 69, out + err)
+                self.assertIn(code, err)
+                self.assertFalse((repo / ".github").exists())
+
+    def test_not_a_repository_exits_69(self):
+        folder = make_tmp_dir(self) / "plain"
+        folder.mkdir()
+        rc, out, err = run_ci(folder, "--yes", env_extra={"GIT_CEILING_DIRECTORIES": str(folder.parent)})
+        self.assertEqual(rc, 69, out + err)
+        self.assertIn("OAH_NOT_A_REPO", err)
+        self.assertEqual(list(folder.iterdir()), [])
+
+    def test_bad_os_exits_2(self):
+        repo = self.repo(FIXTURES["go"])
+        for value in ("macos,beos", "", ","):
+            with self.subTest(value=value):
+                rc, out, err = run_ci(repo, "--os", value, "--yes")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn("OAH_CI_OS_INVALID", err)
+                self.assertFalse((repo / ".github").exists())
+
+    def test_target_problems_exit_69(self):
+        repo = self.repo({**FIXTURES["go"], ".github/workflows/oah-ci.yml/inside": ""})
+        rc, out, err = run_ci(repo, "--yes", "--force")
+        self.assertEqual(rc, 69, out + err)
+        self.assertIn("OAH_CI_TARGET_INVALID", err)
+
+    def test_default_runner_is_current_os(self):
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"os: [{ci.RUNNERS[ci.current_os()]}]", out)
+
+    @unittest.skipUnless(os.name == "nt", "Windows only")
+    def test_windows_default_runner(self):
+        self.assertEqual(ci.current_os(), "windows")
+        repo = self.repo(FIXTURES["go"])
+        rc, out, err = run_ci(repo, "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("os: [windows-latest]", out)
 
 
 if __name__ == "__main__":
