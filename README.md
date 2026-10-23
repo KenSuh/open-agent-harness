@@ -91,7 +91,7 @@ flowchart LR
     claude --> gates
     gates --> rloop
     rloop -->|"snapshot, receipt"| codex
-    impact -.->|"what to re-check"| gates
+    impact -.->|"exact gate bindings: planned"| gates
     gates -.-> wiki
     rloop --> hooks
     hooks --> remote
@@ -117,8 +117,8 @@ Green is available, blue is in review, amber is in progress, grey dashed is plan
 |---|---|---|
 | **Engines by stage** | Claude does the initial implementation. Codex reviews, corrects and re-reviews. `oah call <engine> --stage <s>` refuses the wrong engine for a stage (`OAH_STAGE_ENGINE_MISMATCH`). | in review (#17) |
 | **Difficulty picks model and effort** | Four axes (kind, intensity, reasoning, risk) are scored by fixed rules into a tier: low, medium, high or max. Each tier maps to a model and an effort that the CLI really supports. An effort that cannot be verified is recorded as `unverified`, never assumed. | in review (#17) |
-| **Skills chosen for the task** | Skills are selected by kind, stage, risk and the file kinds in Scope, each with a reason. TypeSafe Jev can re-rank them, but only when you enable it and a key is present. Every result says `used` or `unused(<reason>)`. | in review (#18) |
-| **Impact map** | "If I change this file, what must I re-check?" Results are ranked pin > exec > link > mention, and name the exact gates to run again. A SQL plugin maps tables, routines and GRANTs. A stale map is refreshed or refused, never used silently. | in review (#13) |
+| **Skills chosen for the task** | Skills are selected by kind, stage, risk and the file kinds in Scope, each with a reason. A separate consent- and key-gated re-ranker has a TypeSafe Jev provider and reports `used` or `unused(<reason>)`; connecting it to skill selection and briefs is planned (P4b). | selector and separate re-ranker: in review (#18) · integration: planned |
+| **Impact map** | "If I change this file, what must I re-check?" The result order is pin > exec > link > mention, but exact gate discovery is planned: #13 supplies the interface, to be connected to P5's ledger parser after #13 and #15 land. A SQL plugin maps tables, routines and GRANTs. A stale map is refreshed or refused, never used silently. | map and interface: in review (#13) · gate bindings: planned |
 | **Project wiki** | An Obsidian-compatible `docs/wiki/` with an index and a newest-first log, kept current by `oah wiki maintain` before every commit and review. | in progress (P7a) |
 | **Evidence gates** | "Done" is an [unlazy](https://github.com/Leonxlnx/unlazy) ledger of checks with evidence. `oah finish` refuses unmet gates, and an opt-in Stop hook keeps a Claude Code session from ending with them. | in review (#15) |
 | **Intent that travels** | One intent section (problem, outcome, success conditions) goes to every stage, worker and reviewer, byte for byte. A changed goal raises its revision. | packets and checks: available · in worker briefs: in review (#17) · bound to leases: planned (P4b) |
@@ -141,7 +141,7 @@ These are the slips that most often hurt people who build something with AI and 
 | Pushing in the middle of a task | The `pre-push` hook refuses while an unfinished lease exists on this worktree. | in review (#15) |
 | Letting an AI agent push, force-push or rewrite history | The rules block that `oah rules sync` writes into `AGENTS.md` (and `CLAUDE.md` imports) says workers never push, merge, force-push, rewrite shared history or delete branches. You push after `oah finish`. | in progress (P7a) |
 | An AI saying "done" with no evidence | Gates hold a command, an expected result and recorded evidence. `oah finish` refuses unmet gates, and the Stop hook keeps a Claude Code session from ending with them. | in review (#15) |
-| Not knowing what a change breaks | `oah impact` names the gates, tests, workflows, migrations and wiki pages tied to a file. `--changed-since REV` turns a diff into the list of gates to re-run. | in review (#13) |
+| Not knowing what a change breaks | `oah impact` lists references to a file in code, tests, workflows, migrations and wiki pages; `--changed-since REV` takes paths from a diff. Naming exact gates to re-run is planned, connecting #13's discovery interface to P5's ledger parser after #13 and #15 land. | references: in review (#13) · gate bindings: planned |
 | Merging without review | Codex reviews in rounds until the review converges, with a receipt per round. `oah land --check` needs a converged review receipt, the CI runs, the scan and the gates, all bound to the exact head. `--merge` lands only after you confirm. | planned (P6) |
 | Losing track of why a change was made | Each task has a packet with its intent and success conditions. The wiki log gets an entry for each task. Commits record the engine that wrote them (`Agent-Engine:` trailer). | packets: available · wiki log: in progress (P7a) · engine trailer: planned (P6) |
 | Pushing with no CI, or testing on one OS only | `oah ci init` shows a starter GitHub Actions workflow for your project and writes it only with your consent. It runs your tests on the OSes you pick and a pinned gitleaks secret scan, with actions pinned to full SHAs and no secrets in the file. `oah land --check` reads the CI runs through `gh`. This repository's own CI already tests on macOS and Windows. | `oah ci init`: planned (P7c; A21 in PR #20) · this repository: available |
@@ -209,15 +209,18 @@ flowchart TD
     model["Model and effort the CLI supports<br/>unverifiable effort is labelled unverified"]
     skills["Deterministic skill list<br/>with a reason for each skill"]
     ask{"Re-ranker enabled by you<br/>AND key present?"}
-    jev["TypeSafe Jev re-orders the skills<br/>and adds an advisory difficulty"]
-    used["rerank=used<br/>advice never lowers the tier"]
+    jev["TypeSafe Jev provider<br/>in a separate re-ranker"]
+    used["rerank=used"]
     unused["rerank=unused(reason)<br/>not-enabled, no key, disabled-by-brief, error"]
-    brief["Brief for the engine"]
+    brief["Brief for the engine<br/>integration planned, P4b"]
 
     task --> score --> tier --> model --> brief
-    task --> skills --> ask
-    ask -->|"yes"| jev --> used --> brief
-    ask -->|"no"| unused --> brief
+    task --> skills
+    skills -.->|"planned wiring, P4b"| ask
+    ask -->|"yes"| jev --> used
+    ask -->|"no"| unused
+    used -.->|"planned, P4b"| brief
+    unused -.->|"planned, P4b"| brief
 
     classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
     classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
@@ -244,10 +247,11 @@ flowchart TD
 - **Skills are chosen by rules, too.** The selector reads the installed Claude and Codex skill folders and
   the kit cache, and picks by kind, stage, risk and the file kinds in Scope, with a reason for each
   skill. An empty Scope warns instead of silently selecting nothing. (in review, #18; A9)
-- **Jev is optional and off by default.** The TypeSafe Jev provider runs only when you enable it AND its key
-  is present; a key alone never enables it. It re-orders candidates and gives an advisory difficulty that
-  is recorded next to the rule result and never lowers the tier. Selection telemetry stays in a local file.
-  (in review, #18; A9, A10)
+- **Jev is optional and off by default.** #18 builds a separate re-ranker with the TypeSafe Jev provider,
+  gated on your consent AND a key; a key alone never enables it. Its results report `used` or
+  `unused(<reason>)`. The deterministic skill selector does not call it or report those statuses.
+  Connecting it to skill selection and briefs is planned (P4b); impact ranking integration is also
+  planned. Selection telemetry stays in a local file. (in review, #18; A9, A10)
 
 ### The impact map
 
@@ -259,33 +263,36 @@ flowchart LR
     stale["OAH_IMPACT_STALE<br/>never used silently"]
 
     subgraph ranked["Ranked results"]
-        pinR["pin: a gate hashes, greps or pins it"]
-        execR["exec: a gate runs it"]
+        pinR["pin: a gate hashes, greps or pins it<br/>planned discovery"]
+        execR["exec: a gate runs it<br/>planned discovery"]
         linkR["link: code, tests or wiki name its path"]
         mentionR["mention: name match, co-change, graph"]
     end
 
-    rerun["Gates to re-run<br/>gate G3 in GATES.md, binding=exec"]
+    rerun["Exact gates to re-run<br/>planned after PRs 13 and 15 land"]
 
     change --> fresh
-    fresh -->|"yes"| pinR
-    fresh -->|"no"| refresh --> pinR
+    fresh -->|"yes"| linkR
+    fresh -->|"no"| refresh --> linkR
     refresh -.->|"cannot refresh"| stale
-    pinR --> execR --> linkR --> mentionR
-    pinR --> rerun
-    execR --> rerun
+    linkR --> mentionR
+    linkR -.->|"planned ledger binding"| pinR
+    pinR -.-> execR
+    pinR -.-> rerun
+    execR -.-> rerun
 
-    classDef strong fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef planned fill:#eef1f4,stroke:#6e7781,color:#24292f,stroke-dasharray: 5 5
     classDef weak fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
     classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
-    class pinR,execR,rerun strong
+    class pinR,execR,rerun planned
     class linkR,mentionR weak
     class stale stop
 ```
 
-- `oah impact <path>… [--changed-since REV] [--strong-only] [--json]` uses deterministic layers only: gate
-  bindings, `git grep` references, wiki pages, files that changed together and, when graphify is
-  installed, graph neighbours.
+- `oah impact <path>… [--changed-since REV] [--strong-only] [--json]` uses deterministic layers only:
+  `git grep` references, wiki pages, files that changed together and, when graphify is installed, graph
+  neighbours. #13's gate-discovery interface currently returns no bindings and reports unavailable.
+  Connecting it to P5's ledger parser is planned after #13 and #15 land, to name exact gates to re-run.
 - **Freshness has an identity.** The map is stored per worktree and bound to HEAD, the staged index, the
   dirty and untracked files it reads, every gate ledger, the config bytes and the tool version. Any change
   makes it stale.
@@ -293,7 +300,8 @@ flowchart LR
   triggers, indexes and GRANTs, and links them to code as `db_table:`, `db_routine:` and `db_grant:`
   entities. A task that touches the database must report that query. A project without the plugin says
   `db-impact: unavailable` instead of skipping it.
-- An optional re-ranker may re-order results but never removes a pin or exec row, and every output says
+- **Impact re-ranking is planned.** #13 contains a stub; it does not call #18's separate Jev re-ranker.
+  The planned integration may re-order results but must never remove a pin or exec row, and will report
   `rerank=used` or `rerank=unused(<reason>)`.
 
 Status: in review (#13). Automatic refresh in `preflight`, `packet new` and `review` is planned (P4b,
@@ -433,7 +441,7 @@ flowchart LR
     end
 
     subgraph actions["GitHub Actions in this repository"]
-        tests["ci: tests on macOS and Windows<br/>every pull request"]
+        tests["ci: tests on macOS and Windows<br/>pull requests to main, except docs-only"]
         secrets["secrets: gitleaks and privacy scan<br/>every pull request and push"]
     end
 
@@ -957,8 +965,8 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
 |---|---|---|
 | 단계별 엔진 | Claude가 1차 구현을 하고 Codex가 리뷰와 수정, 재리뷰를 맡는다. 단계에 맞지 않는 엔진은 `OAH_STAGE_ENGINE_MISMATCH`로 거절한다. | in review (#17) |
 | 난이도에 맞춘 모델과 강도 | 종류, 강도, 추론, 위험의 네 축을 정해진 규칙으로 점수 매겨 low, medium, high, max 중 하나로 정한다. 모델과 추론 강도는 CLI가 실제로 지원하는 값만 쓴다. 확인할 수 없는 강도는 `unverified`로 기록하고 짐작하지 않는다. | in review (#17) |
-| 작업에 맞춘 스킬 | 작업 종류, 단계, 위험, Scope의 파일 종류로 스킬을 고르고 스킬마다 이유를 붙인다. TypeSafe Jev가 순서를 다시 매길 수 있다. 다만 사용자가 켜고 키도 있을 때만 돈다. 결과에는 늘 `used`나 `unused(<이유>)`가 붙는다. | in review (#18) |
-| 영향 지도 | "이 파일을 바꾸면 무엇을 다시 확인해야 하나?"에 답한다. 결과는 pin > exec > link > mention 순으로 매기고 다시 돌릴 게이트를 정확히 짚는다. SQL 플러그인이 테이블과 루틴, GRANT를 이어 준다. 낡은 지도는 새로 만들거나 거절하며 몰래 쓰지 않는다. | in review (#13) |
+| 작업에 맞춘 스킬 | 작업 종류, 단계, 위험, Scope의 파일 종류로 스킬을 고르고 스킬마다 이유를 붙인다. 별도의 재정렬기는 사용자 동의와 키가 있어야 돌며 TypeSafe Jev 제공자와 `used`·`unused(<이유>)` 상태를 갖춘다. 스킬 선택과 지시문에 연결하는 일은 planned (P4b)다. | 선택기와 별도 재정렬기는 in review (#18) · 연결은 planned |
+| 영향 지도 | "이 파일을 바꾸면 무엇을 다시 확인해야 하나?"에 답한다. 결과 순서는 pin > exec > link > mention이지만 정확한 게이트 발견은 계획 단계다. #13의 인터페이스를 P5 원장 파서와 연결하는 일은 #13과 #15가 반영된 뒤에 한다. SQL 플러그인이 테이블과 루틴, GRANT를 이어 준다. 낡은 지도는 새로 만들거나 거절하며 몰래 쓰지 않는다. | 지도와 인터페이스는 in review (#13) · 게이트 결속은 planned |
 | 프로젝트 위키 | Obsidian에서 열리는 `docs/wiki/`다. 색인과 최신순 로그가 있다. 커밋과 리뷰 전마다 `oah wiki maintain`이 최신으로 유지한다. | in progress (P7a) |
 | 증거 게이트 | "끝났다"를 [unlazy](https://github.com/Leonxlnx/unlazy) 원장의 증거로 보인다. 게이트가 비어 있으면 `oah finish`가 거절한다. 선택형 Stop 훅은 Claude Code 세션이 그 상태로 끝나지 못하게 한다. | in review (#15) |
 | 따라다니는 의도 | 문제, 바라는 결과, 성공 조건을 담은 의도 절 하나가 모든 단계와 워커, 리뷰어에게 바이트 그대로 간다. 목표가 바뀌면 개정 번호를 올린다. | 패킷과 검사는 available · 워커 지시문에 싣는 일은 in review (#17) · 리스와의 결속은 planned (P4b) |
@@ -981,7 +989,7 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
 | 작업 도중에 push한다 | 이 워크트리에 끝나지 않은 리스가 있으면 `pre-push` 훅이 거절한다. | in review (#15) |
 | AI 에이전트가 push나 force-push를 하거나 이력을 고쳐 쓴다 | `oah rules sync`가 `AGENTS.md`에 규칙 블록을 쓰고 `CLAUDE.md`는 그 파일을 불러온다. 이 블록은 워커가 push, merge, force-push, 공유 이력 고쳐 쓰기, 브랜치 삭제를 하지 못한다고 정한다. push는 `oah finish` 뒤에 사용자가 한다. | in progress (P7a) |
 | AI가 증거 없이 "끝났다"고 한다 | 게이트에는 명령과 기대 결과, 기록된 증거가 있다. 게이트가 비어 있으면 `oah finish`가 거절하고 Stop 훅은 Claude Code 세션이 끝나지 못하게 한다. | in review (#15) |
-| 변경이 무엇을 깨뜨릴지 모른다 | `oah impact`가 파일에 묶인 게이트와 테스트, 워크플로, 마이그레이션, 위키 문서를 짚는다. `--changed-since REV`는 diff를 다시 돌릴 게이트 목록으로 바꾼다. | in review (#13) |
+| 변경이 무엇을 깨뜨릴지 모른다 | `oah impact`는 코드와 테스트, 워크플로, 마이그레이션, 위키 문서에서 파일을 참조하는 곳을 보여 준다. `--changed-since REV`는 diff에서 경로를 가져온다. 정확히 다시 돌릴 게이트를 짚는 일은 #13과 #15가 반영된 뒤 #13의 발견 인터페이스를 P5 원장 파서에 연결할 계획이다. | 참조는 in review (#13) · 게이트 결속은 planned |
 | 리뷰 없이 병합한다 | Codex가 라운드마다 영수증을 남기며 리뷰한다. 리뷰가 수렴할 때까지 라운드를 이어 간다. `oah land --check`는 수렴한 리뷰 영수증과 CI 실행, 스캔, 게이트가 모두 같은 head에 묶여 있어야 통과한다. `--merge`는 사용자가 확인한 뒤에만 반영한다. | planned (P6) |
 | 왜 바꿨는지 잊어버린다 | 작업마다 의도와 성공 조건을 담은 패킷이 있다. 위키 로그에는 작업마다 항목이 남는다. 커밋에는 쓴 엔진이 `Agent-Engine:` 트레일러로 남는다. | 패킷은 available · 위키 로그는 in progress (P7a) · 엔진 트레일러는 planned (P6) |
 | CI 없이 push하거나 한 OS에서만 테스트한다 | `oah ci init`이 내 프로젝트용 GitHub Actions 시작 워크플로를 먼저 보여 주고 사용자가 동의할 때만 쓴다. 이 워크플로는 사용자가 고른 OS에서 테스트를 돌리고 버전을 고정한 gitleaks로 비밀을 검사한다. action은 전체 SHA로 고정하고 파일에는 비밀을 넣지 않는다. `oah land --check`는 CI 실행 결과를 `gh`로 읽는다. 이 저장소의 CI는 이미 macOS와 Windows에서 테스트한다. | `oah ci init`은 planned (P7c, PR #20의 A21) · 이 저장소는 available |
@@ -1020,20 +1028,28 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
 - **추론 강도에는 고정 상한이 없다.** `highest`는 Codex가 그 모델에 대해 밝힌 가장 높은 추론 단계로
   풀린다. 실행 헤더가 더 낮은 강도를 보고하면 `OAH_EFFORT_DOWNGRADED`로 실패한다. 읽을 수 없는 강도는
   `unverified`로 남긴다(in review #17).
-- **Jev는 선택 사항이고 기본으로 꺼져 있다.** TypeSafe Jev 제공자는 사용자가 켜고 키도 있을 때만 돈다.
-  키만 있다고 켜지지 않는다. 후보 순서를 다시 매기고 난이도 의견을 기록한다. 그 의견은 tier를 낮추지 않는다.
-  스킬 선택 기록은 로컬 파일에만 남는다(in review #18).
+- **스킬은 규칙으로 고른다.** 작업 종류, 단계, 위험, Scope의 파일 종류로 고르고 스킬마다 이유를 붙인다
+  (in review #18).
+- **Jev는 선택 사항이고 기본으로 꺼져 있다.** #18은 사용자 동의와 키가 있어야 도는 별도의 재정렬기와
+  TypeSafe Jev 제공자를 만든다. 키만 있다고 켜지지 않으며 재정렬기 결과에는 `used`나 `unused(<이유>)`가 붙는다.
+  결정적 스킬 선택기는 재정렬기를 호출하지 않고 이 상태도 내보내지 않는다. 스킬 선택과 지시문에 연결하는
+  일은 planned (P4b)이고 영향 순위에 연결하는 일도 계획 단계다. 스킬 선택 기록은 로컬 파일에만 남는다
+  (in review #18).
 
 ### 영향 지도
 
-- `oah impact <path>…`는 결정적인 근거만 쓴다. 게이트 결속, `git grep` 참조, 위키 문서, 함께 바뀐 파일,
-  graphify가 있을 때의 그래프 이웃이 그 근거다.
+- `oah impact <path>…`는 결정적인 근거만 쓴다. `git grep` 참조, 위키 문서, 함께 바뀐 파일,
+  graphify가 있을 때의 그래프 이웃이 그 근거다. #13의 게이트 발견 인터페이스는 현재 빈 결속 목록과
+  사용 불가 상태를 반환한다. 정확히 다시 돌릴 게이트를 짚도록 P5 원장 파서와 연결하는 일은 #13과 #15가
+  반영된 뒤에 할 계획이다.
 - 지도는 워크트리마다 저장된다. HEAD와 스테이징된 색인, 지도가 읽는 변경 파일, 모든 게이트 원장, 설정,
   도구 버전에 묶인다. 하나라도 바뀌면 낡은 지도가 되고 새로 만들거나 `OAH_IMPACT_STALE`로 거절한다.
 - 기본 SQL 플러그인은 마이그레이션에서 테이블과 뷰, 루틴, 트리거, 인덱스, GRANT를 읽는다. 그리고 이를
   코드와 이어 `db_table:`, `db_routine:`, `db_grant:` 항목으로 만든다. 플러그인이 없는 프로젝트는 건너뛰지
   않고 `db-impact: unavailable`이라고 밝힌다.
 - 상태는 in review (#13)다. `post-commit`과 `post-merge` 훅에서 지도를 새로 만드는 일도 in review (#13, #15)다.
+- **영향 결과 재정렬은 계획 단계다.** #13에는 스텁만 있으며 #18의 별도 Jev 재정렬기를 호출하지 않는다.
+  연결 후에는 pin이나 exec 행을 빼지 않고 순서만 바꾸며 `rerank=used`나 `rerank=unused(<이유>)`를 보고할 계획이다.
 
 ### 프로젝트 위키
 
@@ -1052,7 +1068,8 @@ Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 �
   영향 지도를 새로 만드는 `post-commit`·`post-merge`는 in review (#13)다. 위키용 `pre-commit` 검사는
   in progress (P7a)다.
 - **이 저장소의 CI/CD**는 지금 동작한다. `ci.yml`은 `main`으로 가는 pull request마다 macOS와 Windows에서
-  테스트를 돌린다. `secrets.yml`은 pull request와 push마다 gitleaks와 개인정보 스캔으로 전체 이력을 검사한다.
+  테스트를 돌리지만 `docs/**`와 루트 Markdown 파일만 바꾸는 pull request는 건너뛴다.
+  `secrets.yml`은 pull request와 push마다 gitleaks와 개인정보 스캔으로 전체 이력을 검사한다.
   gitleaks는 버전과 SHA-256으로 고정했다. 릴리스 태그 전에도 전체 이력을 한 번 더 검사한다.
 - **내 프로젝트의 CI**는 계획 단계다(P7c, PR #20의 A21). `oah ci init`은 `.github/workflows/oah-ci.yml`을
   먼저 전부 보여 주고 사용자가 동의할 때만 쓴다. 테스트는 사용자가 고른 OS에서 돌고 비밀 검사는
