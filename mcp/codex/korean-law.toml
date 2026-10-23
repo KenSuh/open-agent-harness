@@ -1,0 +1,6 @@
+# Add to ~/.codex/config.toml or the project's .codex/config.toml.
+# env_vars passes LAW_OC from your environment; no value is ever written here.
+[mcp_servers.korean-law]
+command = "npx"
+args = ["-y", "korean-law-mcp@4.15.9"]
+env_vars = ["LAW_OC"]

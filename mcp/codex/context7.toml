@@ -1,0 +1,6 @@
+# Add to ~/.codex/config.toml or the project's .codex/config.toml.
+# env_vars passes CONTEXT7_API_KEY from your environment; no value is ever written here.
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@4.4.4"]
+env_vars = ["CONTEXT7_API_KEY"]

@@ -1,0 +1,6 @@
+# Add to ~/.codex/config.toml or the project's .codex/config.toml.
+# env_vars passes OPENAI_API_KEY from your environment; no value is ever written here.
+[mcp_servers.mcp-openai]
+command = "npx"
+args = ["-y", "@mzxrai/mcp-openai@0.1.1"]
+env_vars = ["OPENAI_API_KEY"]
