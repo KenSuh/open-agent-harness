@@ -1,7 +1,7 @@
 # 패킷 명령 — oah packet new/check 의 인자, 저장소 루트 찾기, 결과 출력과 종료 코드를 맡는다.
-"""`oah packet new` refreshes the impact map first (A11), then scores each stage's difficulty axes by rules
-(A10), selects and optionally re-ranks its skills (A9, A15) and records all of it in `## Plan`. `oah packet
-check` checks a packet."""
+# `oah packet new` refreshes the impact map first (A11), then scores each stage's difficulty axes by rules
+# (A10), selects and optionally re-ranks its skills (A9, A15) and records all of it in `## Plan`. No module
+# docstring: `oah --help` names command groups by it.
 from __future__ import annotations
 
 import argparse

@@ -1,8 +1,7 @@
 # 리스 명령 — oah start/renew/status/finish/release/log 의 인자, 저장소·상태 경로 찾기, 출력 형식, 종료 코드를 맡는다.
-"""Lease commands. `start --packet` binds the packet's accepted intent in the same command, or moves an
-existing binding to a raised Revision; `status` shows each lease's binding state; `finish` checks a bound
-lease's return (`--return`) against the binding (PLAN 5.6, A7).
-"""
+# `start --packet` binds the packet's accepted intent in the same command, or moves an existing binding to a
+# raised Revision; `status` shows each lease's binding state; `finish` checks a bound lease's return
+# (`--return`) against the binding (PLAN 5.6, A7). No module docstring: `oah --help` names groups by it.
 from __future__ import annotations
 
 import argparse
