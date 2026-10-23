@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import email.message
+import http.client
 import http.server
 import io
 import json
@@ -13,6 +14,7 @@ import socket
 import threading
 import time
 import traceback
+import types
 import unittest
 import urllib.request
 import urllib.response
@@ -437,6 +439,27 @@ class TypeSafeHttpTest(unittest.TestCase):
             typesafe.post_json("http://127.0.0.1:9876/v1/systemone", {}, key=self.key, timeout=5)
         self.assertEqual(destinations, ["127.0.0.1:9876"])
 
+    def test_typesafe_success_preserves_public_return_values(self) -> None:
+        body = {"answers": {"c0": {"type": "noul", "noul": 0.7},
+                            "tier": {"type": "choice", "choice": "max", "confidence": 0.8}}}
+        url = "http://127.0.0.1:9876/v1/systemone"
+        cfg = typesafe_config(url)
+        provider = typesafe.TypeSafeProvider()
+
+        def http_open(handler, request):
+            response = urllib.response.addinfourl(io.BytesIO(json.dumps(body).encode()),
+                                                 email.message.Message(), request.full_url, 200)
+            response.msg = "OK"
+            return response
+
+        with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+            self.assertEqual(typesafe.post_json(url, {}, key=self.key, timeout=5), body)
+            self.assertEqual(provider._post({}, self.key, cfg), body)
+            self.assertEqual(provider.score("impact", "q", candidates("a"), key=self.key, config=cfg), [0.7])
+            self.assertEqual(provider.advise(AdviceTest.AXES, "task", key=self.key, config=cfg), ("max", 0.8))
+        self.assertEqual(typesafe.parse_rerank_response(body, 1), [0.7])
+        self.assertEqual(typesafe.parse_advice_response(body), ("max", 0.8))
+
     def test_typesafe_bad_bodies(self) -> None:
         bodies = [b"not json", {"answers": {}}, {"answers": {"c0": {"type": "noul", "noul": 2.0},
                                                            "c1": {"type": "noul", "noul": 0.1}}},
@@ -508,6 +531,24 @@ class TypeSafeHttpTest(unittest.TestCase):
 
 
 class KeyLeakTest(unittest.TestCase):
+    def assert_private_values_absent(self, values, key: str, response_text: str) -> None:
+        pending = list(values)
+        seen = set()
+        while pending:
+            value = pending.pop()
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            for private in (key, response_text):
+                self.assertFalse(private in repr(value), "provider frame retains private data")
+            if isinstance(value, dict):
+                pending.extend(value.keys())
+                pending.extend(value.values())
+            elif isinstance(value, (tuple, list, set, frozenset)):
+                pending.extend(value)
+            elif not callable(value) and not isinstance(value, types.ModuleType) and hasattr(value, "__dict__"):
+                pending.append(vars(value))
+
     def assert_sanitized_failure(self, action, code: str, key: str, response_text: str) -> None:
         failure = None
         try:
@@ -524,8 +565,23 @@ class KeyLeakTest(unittest.TestCase):
             seen.add(id(error))
             attributes = {name: getattr(error, name) for name in dir(error)
                           if name != "__traceback__" and not callable(getattr(error, name))}
+            # Only provider-owned frames are in scope: fixtures and callers deliberately hold keys.
+            frames = []
+            current = error.__traceback__
+            provider_root = pathlib.Path(typesafe.__file__).parent
+            while current is not None:
+                if pathlib.Path(current.tb_frame.f_code.co_filename).parent == provider_root:
+                    frames.append(current)
+                    self.assert_private_values_absent(current.tb_frame.f_locals.values(), key, response_text)
+                current = current.tb_next
+            provider_traceback = None
+            for frame in reversed(frames):
+                provider_traceback = types.TracebackType(provider_traceback, frame.tb_frame,
+                                                        frame.tb_lasti, frame.tb_lineno)
             texts = (repr(error), repr(error.args), repr(attributes),
-                     "".join(traceback.format_exception(error)))
+                     "".join(traceback.format_exception(error)),
+                     "".join(traceback.TracebackException(type(error), error, provider_traceback,
+                                                         capture_locals=True).format()))
             for text in texts:
                 for private in (key, response_text):
                     self.assertFalse(private in text, "exception exposes credential or response data")
@@ -546,6 +602,20 @@ class KeyLeakTest(unittest.TestCase):
                     lambda: typesafe.post_json(server.url(), {}, key=key, timeout=5),
                     "bad-response", key, response_text)
 
+    def test_response_parser_failures_have_no_private_frames(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = response_text + key
+        for answers in (None, {}, {"c0": {"type": "choice", "choice": echo},
+                                  "tier": {"type": "noul", "noul": echo}},
+                        {"c0": {"type": "noul", "noul": echo},
+                         "tier": {"type": "choice", "choice": echo}}):
+            with self.subTest():
+                body = {"echo": echo, "answers": answers}
+                for action in (lambda: typesafe.parse_rerank_response(body, 1),
+                               lambda: typesafe.parse_advice_response(body)):
+                    self.assert_sanitized_failure(action, "bad-response", key, response_text)
+
     def test_every_failure_path_has_only_sanitized_exception_data(self) -> None:
         key = fake_key()
         response_text = "private-response-" + token_source.token_hex(16)
@@ -558,8 +628,16 @@ class KeyLeakTest(unittest.TestCase):
             ("bad-request", "bad-request", 200, {}, 0, key, {echo: b"bytes"}, 5, None),
             ("bad-request-encoding", "bad-request", 200, {}, 0, key, {echo: "\ud800"}, 5, None),
             ("http-error", "unauthorized", 401, {"echo": echo}, 0, key, {}, 5, None),
+            ("http-rate-limit", "rate-limited", 429, {"echo": echo}, 0, key, {}, 5, None),
+            ("http-overloaded", "overloaded", 529, {"echo": echo}, 0, key, {}, 5, None),
+            ("http-other", "http-422", 422, {"echo": echo}, 0, key, {}, 5, None),
             ("timeout", "timeout", 200, {"echo": echo}, 0.3, key, {}, 0.05, None),
+            ("url-timeout", "timeout", 200, {}, 0, key, {}, 5, None),
             ("network", "network", 200, {}, 0, key, {}, 5, None),
+            ("os-error", "network", 200, {}, 0, key, {}, 5, None),
+            ("http-exception", "network", 200, {}, 0, key, {}, 5, None),
+            ("transport-value-error", "network", 200, {}, 0, key, {}, 5, None),
+            ("unexpected-error", "internal", 200, {}, 0, key, {}, 5, None),
             ("bad-utf8", "bad-response", 200, echo.encode() + b"\xff", 0, key, {}, 5, None),
             ("bad-json", "bad-response", 200, echo.encode(), 0, key, {}, 5, None),
             ("bad-shape", "bad-response", 200, {"echo": echo}, 0, key, {}, 5, None),
@@ -584,6 +662,12 @@ class KeyLeakTest(unittest.TestCase):
                         raise socket.timeout(echo)
                     if label == "network":
                         raise urllib.error.URLError(echo)
+                    if label == "url-timeout":
+                        raise urllib.error.URLError(socket.timeout(echo))
+                    errors = {"os-error": OSError, "http-exception": http.client.HTTPException,
+                              "transport-value-error": ValueError, "unexpected-error": RuntimeError}
+                    if label in errors:
+                        raise errors[label](echo)
                     if label == "transport-overflow":
                         raise OverflowError(echo)
                     if label == "invalid-port":
@@ -597,9 +681,12 @@ class KeyLeakTest(unittest.TestCase):
 
                 with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
                     if label not in ("bad-shape", "number-overflow"):
-                        self.assert_sanitized_failure(
+                        cfg = typesafe_config(endpoint, timeout_seconds=timeout)
+                        for action in (
                             lambda: typesafe.post_json(endpoint, payload, key=credential, timeout=timeout),
-                            code, key, response_text)
+                            lambda: provider._post(payload, credential, cfg),
+                        ):
+                            self.assert_sanitized_failure(action, code, key, response_text)
                     # Shape and score validation happen in the provider after transport succeeds.
                     if label not in ("bad-request", "bad-request-encoding", "transport-overflow"):
                         cfg = typesafe_config(endpoint, timeout_seconds=timeout)
