@@ -97,6 +97,20 @@ class CliTest(unittest.TestCase):
         self.assertEqual(last, "DOCTOR_MISSING required=3")
         self.assertEqual(node["requirement"], "recommended")
 
+    def test_doctor_points_to_the_future_p5_unlazy_pin(self):
+        work = make_tmp_dir(self)
+        empty_path = work / "empty-path"
+        empty_path.mkdir()
+        env = {"PATH": str(empty_path), "HOME": str(work), "USERPROFILE": str(work)}
+        text = run_oah("doctor", env_extra=env, cwd=work).stdout.decode("utf-8")
+        self.assertIn("oah init --with-unlazy after lane P5 lands", text)
+        self.assertNotIn("npx skills add", text)
+        result = run_oah("doctor", "--json", env_extra=env, cwd=work)
+        tool = next(row for row in json.loads(result.stdout)["tools"] if row["name"] == "unlazy")
+        self.assertEqual(tool["status"], "missing")
+        self.assertIn("contract-tested pin", tool["install"][0])
+        self.assertNotIn("npx", " ".join(tool["install"]))
+
 
 def add_command_module(test: unittest.TestCase, name: str, body: str) -> None:
     """Put a temporary oah.<name> module on the package path for the rest of the test."""

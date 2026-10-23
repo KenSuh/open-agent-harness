@@ -32,7 +32,7 @@ URL_GITLEAKS = "https://github.com/gitleaks/gitleaks"
 URL_JQ = "https://jqlang.org/download/"
 URL_RG = "https://github.com/BurntSushi/ripgrep#installation"
 
-UNLAZY_COMMAND: Argv = ("npx", "skills", "add", "Leonxlnx/unlazy")
+UNLAZY_COMMAND: Argv = ("oah", "init", "--with-unlazy")
 
 
 def sh(text: str) -> Argv:
@@ -143,9 +143,11 @@ def catalog() -> list[Tool]:
               windows=(powershell("irm https://chatgpt.com/codex/install.ps1 | iex"),),
               url=URL_CODEX, sign_in=SignIn(("login", "status"), "codex login")),
         _tool("unlazy", False, "gate checks and the Stop hook",
-              macos=(UNLAZY_COMMAND,), windows=(UNLAZY_COMMAND,),
+              macos=(), windows=(),
               url=URL_UNLAZY, check=(), detect="unlazy",
-              note={os_name: "The skills tool may ask which agents and which folder to install into."
+              note={os_name: f"Run {display(UNLAZY_COMMAND)} after lane P5 lands to install unlazy at P5's "
+                             "contract-tested pin, verified by commit and scripts digest. "
+                             "This guided setup does not install it."
                     for os_name in ("macos", "windows")}),
         _tool("graphify", False, "knowledge graph",
               macos=(("uv", "tool", "install", "graphifyy"),), windows=(("uv", "tool", "install", "graphifyy"),),

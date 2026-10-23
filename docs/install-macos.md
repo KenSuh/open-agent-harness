@@ -34,13 +34,16 @@ To pass options this way, write them after `bash -s --`, for example
 
 ## 2. What the installer does
 
-To see every step first without changing anything, add `--dry-run`.
+To see every step first without changing anything, add `--dry-run`. A public dry run only prints
+the planned release download, SHA-256 check and extraction; it creates no temporary folder and does
+not download or verify the archive. Actual release downloads and all redirects must use HTTPS.
 
 The installer goes through five steps.
 
 1. **Find Python 3.11 or newer.** If there is none, it offers **uv**, which can download Python for
    you. It shows the official command (`curl -LsSf https://astral.sh/uv/install.sh | sh`) and asks
-   before running it.
+   before running it. The subprocess gets `UV_NO_MODIFY_PATH=1`, so uv leaves shell profiles and
+   persistent PATH settings alone. To change those, accept the separate prompt in step 4.
 2. **Check the tools `oah` uses.** It prints a table of what is found and what is missing, then a
    plan. For each missing tool it shows the **exact official command**, a short note and the
    official page, and asks `Install now? [y/N]`. Only `y` installs it. Anything else skips it.
@@ -90,7 +93,7 @@ an API key.
 | Codex CLI | required | `brew install --cask codex` or `npm install -g @openai/codex` |
 | uv | recommended | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js | recommended; required in a project that uses gates | `brew install node` |
-| unlazy | recommended (gates) | `npx skills add Leonxlnx/unlazy` |
+| unlazy | recommended (gates) | After lane P5 lands: `oah init --with-unlazy` at P5's contract-tested pin |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `brew install gh` |
 | gitleaks | recommended | `brew install gitleaks` |
@@ -100,6 +103,9 @@ an API key.
 Commands that start with `brew` need [Homebrew](https://brew.sh). Without it, the setup shows the
 tool's download page instead. `brew install node` installs the current Node.js release and puts it
 on your PATH; unlazy needs Node 16 or newer.
+
+Guided setup does not install unlazy in this lane. After P5 lands, use `oah init --with-unlazy`;
+it will verify the contract-tested commit and scripts digest before running gate commands.
 
 `oah doctor` counts Node as required once your project uses gates: when it has
 `.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say

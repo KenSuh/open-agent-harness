@@ -8,11 +8,13 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
+from oah.engines import proc
 from oah.engines.proc import UnsupportedBatchShim
 from oah.setup import guide
 from oah.setup import tools as cat
-from tests.helpers import make_tmp_dir, make_unlazy
+from tests.helpers import make_tmp_dir, make_unlazy, npm_layout, require_node
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 OS_NAMES = ("macos", "windows")
@@ -34,9 +36,9 @@ class CatalogTest(unittest.TestCase):
                         if argv[0] not in ("/bin/sh", "powershell"):
                             # Plain argv lists are shown joined by spaces, so no part may contain one.
                             self.assertFalse(any(" " in part for part in argv), argv)
-                # Every tool can be installed by command on both OSes; node on macOS without
-                # Homebrew falls back to the download page at plan time.
-                self.assertTrue(tool.install.get("macos") and tool.install.get("windows"))
+                # Manual pointers have no executable alternatives and explain what to do next.
+                for os_name in OS_NAMES:
+                    self.assertTrue(tool.install.get(os_name) or tool.note.get(os_name))
 
     def test_catalog_lists_amendment_tools(self):
         names = [t.name for t in cat.catalog()]
@@ -60,7 +62,6 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(tools["codex"].install["windows"][0][-1], "irm https://chatgpt.com/codex/install.ps1 | iex")
         self.assertEqual(tools["git"].install["windows"][0], ("winget", "install", "--id", "Git.Git", "-e",
                                                               "--source", "winget"))
-        self.assertEqual(tools["unlazy"].install["windows"][0], ("npx", "skills", "add", "Leonxlnx/unlazy"))
         # Shell one-liners are shown exactly as the official page prints them.
         self.assertEqual(cat.display(tools["uv"].install["macos"][0]),
                          "curl -LsSf https://astral.sh/uv/install.sh | sh")
@@ -90,6 +91,16 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual((tools["codex"].sign_in.status_args, tools["codex"].sign_in.login),
                          (("login", "status"), "codex login"))
         self.assertEqual([t.name for t in tools.values() if t.sign_in], ["claude", "codex"])
+
+    def test_unlazy_has_only_a_manual_pointer_to_the_p5_pin(self):
+        tool = next(t for t in cat.catalog() if t.name == "unlazy")
+        for os_name in OS_NAMES:
+            with self.subTest(os_name=os_name):
+                self.assertEqual(tool.install[os_name], ())
+                self.assertIn("oah init --with-unlazy", tool.note[os_name])
+                self.assertIn("P5", tool.note[os_name])
+                self.assertIn("contract-tested pin", tool.note[os_name])
+                self.assertIn("after", tool.note[os_name])
 
     def test_os_name_for(self):
         self.assertEqual(cat.os_name_for("darwin"), "macos")
@@ -141,6 +152,12 @@ class CheckAndPlanTest(unittest.TestCase):
         statuses = by_name(self.check(fake_which(), version_info=(3, 11, 0)))
         self.assertTrue(statuses["python"].present)
 
+    def test_unlazy_detection_does_not_repeat_the_old_unpinned_install_hint(self):
+        status = by_name(self.check(fake_which()))["unlazy"]
+        self.assertFalse(status.present)
+        self.assertIn("not found", status.reason)
+        self.assertNotIn("npx", status.reason)
+
     def test_plan_picks_first_available_alternative(self):
         statuses = self.check(fake_which())
         steps = by_name(guide.plan_installs(statuses, os_name="macos", which=fake_which("brew", "xcode-select")))
@@ -163,7 +180,7 @@ class CheckAndPlanTest(unittest.TestCase):
         steps = by_name(guide.plan_installs(statuses, os_name="windows", which=fake_which("powershell", "winget")))
         self.assertEqual(steps["uv"].argv[-1], "irm https://astral.sh/uv/install.ps1 | iex")
         self.assertEqual(steps["graphify"].argv, ("uv", "tool", "install", "graphifyy"))
-        self.assertEqual(steps["unlazy"].argv, ("npx", "skills", "add", "Leonxlnx/unlazy"))
+        self.assertTrue(steps["unlazy"].manual)
         self.assertIn("official install script from astral.sh", steps["uv"].note)
         self.assertTrue(steps["gitleaks"].manual)  # scoop is not installed and nothing installs it
         names = [step.tool.name for step in guide.plan_installs(statuses, os_name="windows",
@@ -178,6 +195,22 @@ class CheckAndPlanTest(unittest.TestCase):
 
 
 class RunInstallsTest(unittest.TestCase):
+    def test_uv_install_subprocesses_disable_profile_changes(self):
+        work = make_tmp_dir(self)
+        probe = work / "installer.py"
+        output = work / "env.txt"
+        probe.write_text("import os, pathlib\npathlib.Path(os.environ['OAH_ENV_PROBE']).write_text("
+                         "os.environ.get('UV_NO_MODIFY_PATH', ''), encoding='utf-8')\n", encoding="utf-8")
+        uv = next(t for t in cat.catalog() if t.name == "uv")
+        resolved = proc.Resolved((sys.executable, str(probe)), "test installer", "native")
+        for os_name in OS_NAMES:
+            with self.subTest(os_name=os_name), mock.patch.dict(
+                    os.environ, OAH_ENV_PROBE=str(output), UV_NO_MODIFY_PATH="0"), mock.patch.object(
+                    guide, "resolve_command", return_value=resolved):
+                self.assertEqual(guide.run_interactive(uv.install[os_name][0]), 0)
+                self.assertEqual(output.read_text(encoding="utf-8"), "1")
+                self.assertEqual(os.environ["UV_NO_MODIFY_PATH"], "0")
+
     def steps(self):
         statuses = guide.check_tools(cat.catalog(), which=fake_which("python3"), env={},
                                      home=make_tmp_dir(self))
@@ -255,6 +288,7 @@ class RefreshPathTest(unittest.TestCase):
                            read_registry=lambda: (r"%SystemRoot%;%SystemRoot%\System32", r"%USERPROFILE%\.local\bin;"))
         self.assertEqual(env["PATH"], r"C:\Windows;C:\Windows\System32;C:\home\someone\.local\bin;C:\py")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX PATH and local-bin layout")
     def test_refresh_path_adds_local_bin_on_posix(self):
         home = make_tmp_dir(self)
         env = {"PATH": "/usr/bin:/bin"}
@@ -264,6 +298,14 @@ class RefreshPathTest(unittest.TestCase):
         guide.refresh_path(env, platform="darwin", home=home)
         guide.refresh_path(env, platform="darwin", home=home)
         self.assertEqual(env["PATH"], "/usr/bin:/bin:" + str(home / ".local" / "bin"))
+
+    def test_refresh_path_windows_uses_registry_instead_of_posix_local_bin(self):
+        home = make_tmp_dir(self)
+        (home / ".local" / "bin").mkdir(parents=True)
+        env = {"PATH": r"C:\session"}
+        guide.refresh_path(env, platform="win32", home=home,
+                           read_registry=lambda: (r"C:\Windows", r"C:\tools"))
+        self.assertEqual(env["PATH"], r"C:\Windows;C:\tools;C:\session")
 
     @unittest.skipUnless(os.name == "nt", "reads the Windows registry")
     def test_refresh_path_reads_real_registry(self):
@@ -287,8 +329,45 @@ class SignInTest(unittest.TestCase):
 
         self.assertTrue(guide.check_sign_in(self.tools["codex"], "/x/codex", status_runner=status))
         self.assertFalse(guide.check_sign_in(self.tools["claude"], "/x/claude", status_runner=status))
-        self.assertEqual(calls, [("/x/codex", "login", "status"), ("/x/claude", "auth", "status")])
+        self.assertEqual(calls, [("codex", "login", "status"), ("claude", "auth", "status")])
         self.assertFalse(guide.check_sign_in(self.tools["codex"], "/x/codex", status_runner=lambda argv: (None, "")))
+
+    def test_npm_sign_in_resolves_the_catalog_name_and_runs_the_declared_bin(self):
+        prefix = make_tmp_dir(self) / "npm with spaces"
+        shim = npm_layout(prefix, "@openai/codex", {"codex": "bin/status.py"}, command="codex",
+                          script_rel="bin/status.py", local_node=True,
+                          script_body="import sys\nassert sys.argv[1:] == ['login', 'status']\n"
+                                      "print('signed in')\n")
+        calls = []
+
+        def resolve(name):
+            return proc.classify(shim, name, platform="win32", search_path=None)
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            # Python stands in for node, but the real manifest, resolver and child process run.
+            return proc.run_command((sys.executable,) + argv[1:], **kwargs)
+
+        with mock.patch.object(guide, "resolve_command", side_effect=resolve), mock.patch.object(
+                guide, "run_command", side_effect=run):
+            self.assertTrue(guide.check_sign_in(self.tools["codex"], str(shim)))
+        self.assertEqual(calls, [(str(prefix / "node.exe"),
+                                 str(prefix / "node_modules" / "@openai" / "codex" / "bin" / "status.py"),
+                                 "login", "status")])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows npm discovery and execution")
+    def test_windows_npm_sign_in_uses_node_without_launching_the_shim(self):
+        node = require_node(self)
+        prefix = make_tmp_dir(self) / "npm space & 도구"
+        shim = npm_layout(prefix, "@openai/codex", {"codex": "bin/status.js"}, command="codex",
+                          script_rel="bin/status.js",
+                          script_body="process.exit(process.argv.slice(2).join(' ') === 'login status' ? 0 : 1);",
+                          shim_body='@echo off\r\necho ran> "%~dp0shim-ran.txt"\r\n')
+        with mock.patch.dict(os.environ, PATH=os.pathsep.join((str(prefix), str(pathlib.Path(node).parent)))):
+            status = guide.check_tools([self.tools["codex"]])[0]
+            self.assertEqual(status.path, str(shim))
+            self.assertTrue(guide.check_sign_in(status.tool, status.path))
+        self.assertFalse((prefix / "shim-ran.txt").exists())
 
     def test_sign_in_reads_logged_in_flag_only(self):
         out = json.dumps({"loggedIn": False, "email": self.secret})
@@ -385,6 +464,20 @@ class GuidedSetupTest(unittest.TestCase):
         # The fake runner installs nothing, so the re-check still finds the required tools missing.
         self.assertEqual(code, 1)
         self.assertEqual(self.lines[-1], "SETUP_INCOMPLETE missing=git,claude,codex")
+
+    def test_unlazy_manual_pointer_is_shown_without_running_an_installer(self):
+        for dry_run in (False, True):
+            with self.subTest(dry_run=dry_run):
+                self.lines.clear()
+                self.calls.clear()
+                code = self.setup(fake_which("npx"), tools=[next(t for t in cat.catalog() if t.name == "unlazy")],
+                                  yes=True, dry_run=dry_run)
+                self.assertEqual(code, 0)
+                self.assertEqual(self.calls, [])
+                text = "\n".join(self.lines)
+                self.assertIn("oah init --with-unlazy", text)
+                self.assertIn("contract-tested pin", text)
+                self.assertNotIn("npx skills add", text)
 
     def test_guided_setup_reports_required_tool_not_signed_in(self):
         which = fake_which(*(t.check[0] for t in cat.catalog() if t.check))

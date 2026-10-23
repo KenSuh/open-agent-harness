@@ -84,6 +84,7 @@ def check_tools(tools: Iterable[Tool], *, which: Which = shutil.which, env: Mapp
                                        f"Python {version}" if ok else f"Python {version} is older than 3.11"))
         elif tool.detect == "unlazy":
             folder, reason = find_unlazy_dir(repo_root, env, home)
+            reason = reason.partition(" (install: ")[0]  # install advice comes from the pinned catalog
             statuses.append(ToolStatus(tool, folder is not None, str(folder) if folder else None, reason))
         else:
             found = which(tool.check[0])
@@ -100,7 +101,7 @@ def _one_liner_note(argv: Argv) -> str:
 def plan_installs(statuses: Iterable[ToolStatus], *, os_name: str, which: Which = shutil.which) -> list[Step]:
     """One step per missing tool: the first official command whose program exists here, else a manual step.
 
-    A program that an earlier step installs counts as available (uv before graphify, Node before unlazy).
+    A program that an earlier step installs counts as available (uv before graphify).
     """
     provided: set[str] = set()
     steps = []
@@ -118,9 +119,10 @@ def plan_installs(statuses: Iterable[ToolStatus], *, os_name: str, which: Which 
             steps.append(Step(tool, chosen, display(chosen), tool.url_for(os_name), " ".join(notes)))
             provided.update(_programs(tool))
         else:
-            wanted = sorted({needs(argv) for argv in alternatives})
-            notes.append(f"{' or '.join(wanted) or 'An installer'} is not installed, so oah cannot run the "
-                         "command here. Install it from the official page instead.")
+            if alternatives:
+                wanted = sorted({needs(argv) for argv in alternatives})
+                notes.append(f"{' or '.join(wanted)} is not installed, so oah cannot run the "
+                             "command here. Install it from the official page instead.")
             preferred = display(alternatives[0]) if alternatives else ""
             steps.append(Step(tool, None, preferred, tool.url_for(os_name), " ".join(notes)))
     return steps
@@ -133,7 +135,9 @@ def run_interactive(argv: Argv) -> int:
         raise FileNotFoundError(f"{argv[0]} was not found on PATH")
     if is_batch(resolved.argv[0]):
         raise UnsupportedBatchShim(resolved.argv[0], "batch files are never launched directly")
-    return subprocess.run(list(resolved.argv) + list(argv[1:]), check=False).returncode
+    # uv must not edit profiles or persistent PATH before the separate consent prompt.
+    return subprocess.run(list(resolved.argv) + list(argv[1:]), check=False,
+                          env=dict(os.environ, UV_NO_MODIFY_PATH="1")).returncode
 
 
 def run_installs(steps: Iterable[Step], *, confirm: Callable[[Step], bool], runner: Callable[[Argv], int] = run_interactive,
@@ -144,7 +148,8 @@ def run_installs(steps: Iterable[Step], *, confirm: Callable[[Step], bool], runn
     for step in steps:
         name = step.tool.name
         if step.manual:
-            out(f"{name}: install it from {step.url}")
+            out(f"{name}: {step.note}" if step.note else f"{name}: install it from {step.url}")
+            out(f"  Official page: {step.url}")
             results.append(StepResult(step, "manual"))
             continue
         if not confirm(step):
@@ -230,7 +235,9 @@ def default_status_runner(argv: Argv) -> tuple[int | None, str]:
 def check_sign_in(tool: Tool, path: str, *, status_runner: StatusRunner = default_status_runner) -> bool:
     """True when the tool's own status command says it is signed in. Reads only a `loggedIn` flag."""
     assert tool.sign_in is not None
-    return signed_in(*status_runner((path,) + tool.sign_in.status_args))
+    # The resolver needs the catalog name to match an npm manifest, not the discovered .cmd path.
+    # default_status_runner keeps its resolved argv (node + declared bin) for the status command.
+    return signed_in(*status_runner((tool.check[0],) + tool.sign_in.status_args))
 
 
 def signed_in(code: int | None, stdout: str) -> bool:
@@ -330,9 +337,13 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
     else:
         out(f"Plan: {len(steps)} tool(s) to install.")
         for step in steps:
-            how = step.display if not step.manual else (
-                f"no installer for it here; get it from the page below (official command: {step.display})")
+            how = step.display
+            if step.manual:
+                how = (f"no installer for it here; get it from the page below (official command: {step.display})"
+                       if step.display else step.note or "Install it from the official page below.")
             out(f"  - {step.tool.name} ({step.tool.requirement}): {how}")
+            if step.manual and step.display and step.note:
+                out(f"      {step.note}")
             out(f"      {step.url}")
     if dry_run:
         out("")

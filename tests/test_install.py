@@ -62,6 +62,34 @@ def powershell_command(shell: str, script: str, env: dict) -> subprocess.Complet
                           env=env, capture_output=True, timeout=300)
 
 
+def powershell_env(test: unittest.TestCase, **extra: str) -> dict[str, str]:
+    """Keep PowerShell's own module/profile caches outside the installer's fake home."""
+    cache = make_tmp_dir(test)
+    env = dict(os.environ, APPDATA=str(cache / "Roaming"), LOCALAPPDATA=str(cache / "Local"))
+    env.pop("PYTHONPATH", None)
+    env.update(extra)
+    return env
+
+
+def ps_literal(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def ps1_with_overrides(overrides: str) -> str:
+    """Load the real installer, replacing only external collaborators for offline process tests."""
+    replacement = overrides + "\nfunction Invoke-OahInstall {"
+    return (f"$installer = [IO.File]::ReadAllText({ps_literal(str(INSTALL_PS1))}); "
+            f"$installer = $installer.Replace('function Invoke-OahInstall {{', {ps_literal(replacement)}); ")
+
+
+def ps1_release_fixture(archive: pathlib.Path) -> str:
+    return ("function Save-Release([Uri]$Uri, [string]$Destination) { "
+            f"[IO.File]::Copy({ps_literal(str(archive))}, $Destination) }}\n"
+            # No actual tool installs are needed to test release verification.
+            "function Find-Python { return $null }\nfunction Find-Uv { return $null }\n"
+            "function Ask([string]$Question) { return $false }\n")
+
+
 def snapshot(folder: pathlib.Path) -> dict[str, tuple[int, str]]:
     found = {}
     for path in sorted(folder.rglob("*")):
@@ -137,6 +165,14 @@ exit 0''')
     def calls(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
+    def release_download(self, archive: pathlib.Path) -> str:
+        """Serve a local fixture through a fake HTTPS downloader, never a production URL exception."""
+        write_posix_tool(self.bin, "curl", f'''
+echo "curl $*" >> "{self.log}"
+for destination in "$@"; do :; done
+cp "{archive}" "$destination"''')
+        return "https://releases.example.invalid/" + archive.name
+
     def env(self, **extra: str) -> dict[str, str]:
         env = {"PATH": os.pathsep.join([str(self.bin), *self.extra_path, SYSTEM_PATH]), "HOME": str(self.home),
                "LANG": "en_US.UTF-8", "TMPDIR": str(self.scratch), "SHELL": "/bin/bash"}
@@ -199,6 +235,63 @@ exit 0''')
         self.assertIn("[dry-run] would run: uv python install 3.13", text)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_DRY_RUN_OK")
         self.assertEqual(snapshot(self.home), {})
+
+    def test_install_sh_uv_bootstrap_disables_profile_changes(self):
+        self.fake_uv()
+        uv_template = self.work / "uv-template"
+        (self.bin / "uv").rename(uv_template)
+        write_posix_tool(self.bin, "curl", f'''cat <<'EOF'
+[ "$UV_NO_MODIFY_PATH" = 1 ] || exit 23
+printf '%s' "$UV_NO_MODIFY_PATH" > "{self.work / 'uv-env.txt'}"
+mkdir -p "$HOME/.local/bin"
+cp "{uv_template}" "$HOME/.local/bin/uv"
+EOF''')
+        result = self.run_sh("--yes", "--skip-tools")
+        self.assertTrue((self.work / "uv-env.txt").is_file(), self.text(result))
+        self.assertEqual((self.work / "uv-env.txt").read_text(encoding="utf-8"), "1")
+        self.assertNotIn("uv tool update-shell", self.calls())
+
+    def check_install_sh_path_refresh(self, *, bootstrapped_uv: bool):
+        self.fake_every_tool()
+        local_bin = self.home / ".local" / "bin"
+        (self.bin / "claude").unlink()
+        write_posix_tool(self.bin, "curl", f'''cat <<'EOF'
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/claude" <<'CLAUDE'
+#!/bin/sh
+printf '%s\\n' '{{"loggedIn": true}}'
+CLAUDE
+chmod +x "$HOME/.local/bin/claude"
+EOF''')
+        # Install a real doctor entry point so the final check probes the actual refreshed PATH.
+        write_posix_tool(self.bin, "uv", f'''
+case "$1 $2" in
+  "tool install")
+    mkdir -p "{self.tool_bin}"
+    printf '#!/bin/sh\\nPYTHONPATH="{self.clone}/src" exec "{sys.executable}" -m oah "$@"\\n' > "{self.tool_bin}/oah"
+    chmod +x "{self.tool_bin}/oah" ;;
+  "tool dir") echo "{self.tool_bin}" ;;
+esac''')
+        if bootstrapped_uv:
+            # Setup must discover uv even though its bootstrap directory was not on the initial PATH.
+            local_bin.mkdir(parents=True)
+            (self.bin / "uv").rename(local_bin / "uv")
+        else:
+            self.assertFalse(local_bin.exists())  # setup's Claude install creates it
+        self.fake_python()
+        result = self.run_sh("--yes")
+        text = self.text(result)
+        self.assertEqual(result.returncode, 0, text)
+        self.assertNotIn("Install uv", text)
+        self.assertNotIn("Running: curl -LsSf https://astral.sh/uv/install.sh", text)
+        self.assertIn("DOCTOR_OK", text)
+        self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
+
+    def test_install_sh_refreshes_path_before_setup_with_bootstrapped_uv(self):
+        self.check_install_sh_path_refresh(bootstrapped_uv=True)
+
+    def test_install_sh_refreshes_path_before_doctor_with_new_local_bin(self):
+        self.check_install_sh_path_refresh(bootstrapped_uv=False)
 
     def test_install_sh_is_bash_32_compatible(self):
         source = INSTALL_SH.read_text(encoding="utf-8")
@@ -288,23 +381,30 @@ exit 0''')
         self.assertIn("DOCTOR_RESULT", self.text(result))
         self.assertEqual(self.last_line(result), "OAH_INSTALL_INCOMPLETE")
 
-    def test_piped_dry_run_verifies_the_release_and_changes_nothing(self):
+    def test_piped_dry_run_prints_release_operations_without_invoking_them(self):
         self.fake_python()
         self.fake_uv()
-        archive, digest = make_release(self)
+        # Fail even if a command's transient files would have been cleaned up before snapshotting.
+        for name in ("mktemp", "mkdir", "cp", "curl", "tar", "rm", "shasum", "sha256sum"):
+            write_posix_tool(self.bin, name, f'echo "FORBIDDEN {name}" >> "{self.log}"; exit 91')
         before_home = snapshot(self.home)
-        result = self.run_piped("--dry-run", url=str(archive), digest=digest.upper())
+        before_scratch = snapshot(self.scratch)
+        url, digest = "https://releases.example.invalid/oah.tar.gz", "a" * 64
+        result = self.run_piped("--dry-run", url=url, digest=digest.upper())
         text = self.text(result)
         self.assertEqual(result.returncode, 0, text)
-        self.assertIn(f"SHA-256 verified: {digest}", text)
+        self.assertIn(f"[dry-run] would download: {url}", text)
+        self.assertIn("[dry-run] would verify SHA-256:", text)
+        self.assertIn("[dry-run] would extract:", text)
+        self.assertNotIn("SHA-256 verified:", text)
         for number in range(1, 6):
             self.assertIn(f"Step {number}/5", text)
-        self.assertIn("SETUP_DRY_RUN planned=", text)
-        self.assertRegex(text, r"\[dry-run\] would run: \S+/uv tool install --force \S+/oah-install\.\w+/release/"
-                               r"open-agent-harness-1\.0\.0")
+        self.assertIn("python -m oah.setup", text)
+        self.assertIn("tool install --force <release-folder>", text)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_DRY_RUN_OK")
         self.assertEqual(snapshot(self.home), before_home)
-        self.assertEqual(list(self.scratch.iterdir()), [])  # the temporary download is gone
+        self.assertEqual(snapshot(self.scratch), before_scratch)
+        self.assertNotIn("FORBIDDEN", "\n".join(self.calls()))
         self.assertNotIn("uv tool install", "\n".join(self.calls()))
 
     def test_piped_install_uses_the_unpacked_release(self):
@@ -312,25 +412,40 @@ exit 0''')
         self.fake_uv()
         self.new_terminal_finds(self.tool_bin)
         archive, digest = make_release(self)
-        result = self.run_piped("--skip-tools", url=str(archive), digest=digest)
+        result = self.run_piped("--skip-tools", url=self.release_download(archive), digest=digest)
         self.assertEqual(result.returncode, 0, self.text(result))
         installs = [call for call in self.calls() if call.startswith("uv tool install --force ")]
         self.assertEqual(len(installs), 1)
         self.assertRegex(installs[0], r"/oah-install\.\w+/release/open-agent-harness-1\.0\.0$")
         self.assertIn("oah doctor", self.calls())
+        download = next(call for call in self.calls() if call.startswith("curl "))
+        self.assertIn("--proto =https", download)
+        self.assertIn("--proto-redir =https", download)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
         self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_piped_refuses_a_digest_mismatch_before_unpacking(self):
         self.fake_python()
         archive, digest = make_release(self)
-        result = self.run_piped("--dry-run", url=str(archive), digest="0" * 64)
+        result = self.run_piped(url=self.release_download(archive), digest="0" * 64)
         text = self.text(result)
         self.assertEqual(result.returncode, 1, text)
         self.assertIn(f"OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is {digest}", text)
         self.assertNotIn("Step 1/5", text)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_FAILED")
         self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_piped_refuses_non_https_release_urls_before_writing_or_downloading(self):
+        archive, digest = make_release(self)
+        self.release_download(archive)
+        for url in ("http://releases.example.invalid/oah.tar.gz", archive.as_uri(), str(archive)):
+            with self.subTest(url=url):
+                result = self.run_piped(url=url, digest=digest)
+                self.assertEqual(result.returncode, 1, self.text(result))
+                self.assertIn("OAH_INSTALL_HTTPS_REQUIRED", self.text(result))
+                self.assertNotIn("Step 1/5", self.text(result))
+                self.assertEqual(list(self.scratch.iterdir()), [])
+                self.assertEqual(self.calls(), [])
 
     def test_piped_refuses_while_the_release_is_unpublished(self):
         result = self.run_piped("--dry-run")
@@ -347,7 +462,7 @@ exit 0''')
         # No Python and no uv: the first question is "Install uv now?". With the script on stdin and no
         # terminal, the answer must read as "no" instead of swallowing the rest of the script.
         archive, digest = make_release(self)
-        result = self.run_piped(url=str(archive), digest=digest)
+        result = self.run_piped(url=self.release_download(archive), digest=digest)
         text = self.text(result)
         self.assertEqual(result.returncode, 1, text)
         self.assertIn("Install uv now? [y/N]", text)
@@ -362,6 +477,20 @@ exit 0''')
 
 
 class InstallPs1Test(unittest.TestCase):
+    def test_install_ps1_hashing_does_not_depend_on_modules(self):
+        text = INSTALL_PS1.read_text(encoding="ascii")
+        self.assertNotIn("Get-FileHash", text)
+        self.assertIn("[System.Security.Cryptography.SHA256]::Create()", text)
+        self.assertIn("[IO.File]::OpenRead($archive)", text)
+        self.assertIn(".ComputeHash(", text)
+
+    def test_install_ps1_restricts_redirects_to_https(self):
+        text = INSTALL_PS1.read_text(encoding="ascii")
+        self.assertIn("OAH_INSTALL_HTTPS_REQUIRED", text)
+        self.assertIn(".AllowAutoRedirect = $false", text)
+        self.assertIn("$Uri.Scheme -ne 'https'", text)
+        self.assertNotIn("Test-Path -LiteralPath $url", text)
+
     def test_install_ps1_is_ascii_with_crlf(self):
         data = INSTALL_PS1.read_bytes()
         self.assertTrue(all(byte < 128 for byte in data), "install.ps1 must be ASCII only")
@@ -407,32 +536,127 @@ class InstallPs1Test(unittest.TestCase):
                       'open-agent-harness-$ReleaseVersion.zip"', lines)
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
-    def test_install_ps1_piped_dry_run_verifies_the_release(self):
+    def test_install_ps1_piped_dry_run_never_downloads_or_writes(self):
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                scratch = make_tmp_dir(self)
+                home = make_tmp_dir(self)
+                url = "https://releases.example.invalid/oah.zip"
+                env = powershell_env(self, OAH_RELEASE_URL=url, OAH_RELEASE_SHA256="a" * 64,
+                                     TEMP=str(scratch), TMP=str(scratch), HOME=str(home), USERPROFILE=str(home))
+                guards = "\n".join(
+                    f"function {command} {{ [Console]::Out.WriteLine('FORBIDDEN {command}'); throw 'forbidden' }}"
+                    for command in ("New-Item", "Copy-Item", "Expand-Archive", "Remove-Item", "Save-Release",
+                                    "Invoke-WebRequest"))
+                script = ps1_with_overrides(guards) + (
+                    "& ([scriptblock]::Create($installer)) -DryRun; exit $LASTEXITCODE")
+                before_scratch = snapshot(scratch)
+                result = powershell_command(shell, script, env)
+                text = result.stdout.decode("utf-8", "replace")
+                self.assertEqual(result.returncode, 0, text + result.stderr.decode("utf-8", "replace"))
+                self.assertIn(f"[dry-run] would download: {url}", text)
+                self.assertIn("[dry-run] would verify SHA-256:", text)
+                self.assertIn("[dry-run] would extract:", text)
+                self.assertIn("python -m oah.setup", text)
+                self.assertNotIn("SHA-256 verified:", text)
+                self.assertNotIn("FORBIDDEN", text)
+                self.assertEqual(text.rstrip().splitlines()[-1], "OAH_INSTALL_DRY_RUN_OK")
+                self.assertEqual(snapshot(scratch), before_scratch)
+                self.assertEqual(snapshot(home), {})
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_verifies_release_without_get_filehash(self):
         archive, digest = make_zip_release(self)
         for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
             with self.subTest(shell=shell):
                 scratch = make_tmp_dir(self)
-                env = dict(os.environ, OAH_RELEASE_URL=str(archive), OAH_RELEASE_SHA256=digest.upper(),
-                           TEMP=str(scratch), TMP=str(scratch))
-                env.pop("PYTHONPATH", None)
-                script = (f"& ([scriptblock]::Create([IO.File]::ReadAllText('{INSTALL_PS1}'))) -DryRun; "
-                          "exit $LASTEXITCODE")
+                env = powershell_env(self, OAH_RELEASE_URL="https://releases.example.invalid/oah.zip",
+                                     OAH_RELEASE_SHA256=digest.upper(), TEMP=str(scratch), TMP=str(scratch))
+                overrides = ps1_release_fixture(archive) + (
+                    "function Get-FileHash { throw 'Get-FileHash must not be used' }\n")
+                script = ps1_with_overrides(overrides) + "$installer | Invoke-Expression; " + (
+                    "[Console]::Out.WriteLine('SESSION_ALIVE ' + $LASTEXITCODE)")
                 result = powershell_command(shell, script, env)
                 text = result.stdout.decode("utf-8", "replace")
-                self.assertEqual(result.returncode, 0, text + result.stderr.decode("utf-8", "replace"))
                 self.assertIn(f"SHA-256 verified: {digest}", text)
-                self.assertIn("SETUP_DRY_RUN planned=", text)
-                self.assertEqual(text.rstrip().splitlines()[-1], "OAH_INSTALL_DRY_RUN_OK")
+                self.assertIn("Step 1/5", text)
+                self.assertEqual(text.rstrip().splitlines()[-1], "SESSION_ALIVE 1")
                 self.assertEqual([p.name for p in scratch.iterdir() if p.name.startswith("oah-install-")], [])
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_uv_bootstrap_environment(self):
+        # Run the actual process-start helpers with an inert installer that only reads its env.
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        functions = "\n".join(re.search(r"(?ms)^function " + name + r"\b.*?^}", source).group(0)
+                              for name in ("Join-Arguments", "Start-Native", "Invoke-OneLiner"))
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                script = (functions + "\nfunction Say {}\nfunction Update-SessionPath {}\n"
+                          "$DryRun = $false; $env:UV_NO_MODIFY_PATH = '0'; "
+                          "$WindowsPowerShell = Join-Path $env:SystemRoot "
+                          "'System32\\WindowsPowerShell\\v1.0\\powershell.exe'; "
+                          "Invoke-OneLiner 'if ($env:UV_NO_MODIFY_PATH -ne ''1'') { exit 23 }'; "
+                          "if ($env:UV_NO_MODIFY_PATH -ne '0') { exit 24 }; exit $script:StepCode")
+                result = powershell_command(shell, script, powershell_env(self))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_refuses_http_redirects_before_downloading(self):
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        match = re.search(r"(?ms)^function Save-Release\b.*?^}", source)
+        self.assertIsNotNone(match, "the downloader must be separate from local archive fixtures")
+        function = match.group(0).replace("[Net.WebRequest]::Create($Uri)", "(New-TestRequest $Uri)")
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                output = make_tmp_dir(self) / "must-not-exist.zip"
+                script = function + """
+$script:requests = 0
+function New-TestRequest($Uri) {
+    $script:requests++
+    $response = [pscustomobject]@{StatusCode=302; Headers=@{Location='http://example.invalid/oah.zip'}}
+    $response | Add-Member ScriptMethod Dispose {}
+    $request = [pscustomobject]@{AllowAutoRedirect=$true; Response=$response}
+    $request | Add-Member ScriptMethod GetResponse { return $this.Response }
+    return $request
+}
+try {
+""" + f"Save-Release ([Uri]'https://example.invalid/oah.zip') {ps_literal(str(output))}\n" + """
+    exit 2
+} catch {
+    if ($_.Exception.Message -notmatch 'HTTPS' -or $script:requests -ne 1) { throw }
+}
+"""
+                result = powershell_command(shell, script, powershell_env(self))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(output.exists())
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_refuses_non_https_release_urls_before_writing(self):
+        archive, digest = make_zip_release(self)
+        for url in ("http://example.invalid/oah.zip", archive.as_uri(), str(archive)):
+            for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+                with self.subTest(shell=shell, url=url):
+                    scratch = make_tmp_dir(self)
+                    env = powershell_env(self, OAH_RELEASE_URL=url, OAH_RELEASE_SHA256=digest,
+                                         TEMP=str(scratch), TMP=str(scratch))
+                    guards = ("function New-Item { throw 'FORBIDDEN mkdir' }\n"
+                              "function Save-Release { throw 'FORBIDDEN download' }\n")
+                    script = ps1_with_overrides(guards) + "$installer | Invoke-Expression; exit $LASTEXITCODE"
+                    result = powershell_command(shell, script, env)
+                    text = result.stdout.decode("utf-8", "replace")
+                    self.assertEqual(result.returncode, 1, text + result.stderr.decode("utf-8", "replace"))
+                    self.assertIn("OAH_INSTALL_HTTPS_REQUIRED", text)
+                    self.assertNotIn("FORBIDDEN", text)
+                    self.assertEqual(list(scratch.iterdir()), [])
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_piped_iex_keeps_the_session_open(self):
         archive, digest = make_zip_release(self)
         scratch = make_tmp_dir(self)
-        env = dict(os.environ, OAH_RELEASE_URL=str(archive), OAH_RELEASE_SHA256="0" * 64, TEMP=str(scratch),
-                   TMP=str(scratch))
-        script = (f"[IO.File]::ReadAllText('{INSTALL_PS1}') | Invoke-Expression; "
-                  "[Console]::Out.WriteLine('SESSION_ALIVE ' + $LASTEXITCODE)")
+        env = powershell_env(self, OAH_RELEASE_URL="https://releases.example.invalid/oah.zip",
+                             OAH_RELEASE_SHA256="0" * 64, TEMP=str(scratch), TMP=str(scratch))
+        script = ps1_with_overrides(ps1_release_fixture(archive)) + (
+            "$installer | Invoke-Expression; [Console]::Out.WriteLine('SESSION_ALIVE ' + $LASTEXITCODE)")
         result = powershell_command("powershell", script, env)
         text = result.stdout.decode("utf-8", "replace")
         self.assertIn(f"OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is {digest}", text)
@@ -448,8 +672,7 @@ class InstallPs1Test(unittest.TestCase):
                 clone = make_clone(self)
                 home = make_tmp_dir(self)
                 before_clone = snapshot(clone)
-                env = dict(os.environ, USERPROFILE=str(home), HOME=str(home))
-                env.pop("PYTHONPATH", None)
+                env = powershell_env(self, USERPROFILE=str(home), HOME=str(home))
                 result = subprocess.run([shutil.which(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                          str(clone / "install" / "install.ps1"), "-DryRun"],
                                         env=env, capture_output=True, timeout=300, cwd=str(home))

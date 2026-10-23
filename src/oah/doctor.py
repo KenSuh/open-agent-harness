@@ -121,6 +121,7 @@ def _check_unlazy(tool: Tool, *, env: Mapping[str, str], home: pathlib.Path,
                   repo_root: pathlib.Path | None) -> ToolStatus:
     folder, reason = find_unlazy_dir(repo_root, env, home)
     if folder is None:
+        reason = reason.partition(" (install: ")[0]  # install advice comes from the pinned catalog
         return ToolStatus(tool.name, tool.requirement, "missing", None, None, f"{tool.purpose}; {reason}")
     version = unlazy_version(folder) or "unknown version"
     return ToolStatus(tool.name, tool.requirement, "ok", version, str(folder), f"{tool.purpose}; {folder}")
@@ -155,7 +156,10 @@ def _install_texts(name: str, platform: str) -> tuple[list[str], str]:
     os_name = os_name_for(platform)
     for tool in catalog():
         if tool.name == name:
-            return [display(argv) for argv in tool.install.get(os_name, ())], tool.url_for(os_name)
+            commands = [display(argv) for argv in tool.install.get(os_name, ())]
+            if not commands and os_name in tool.note:
+                commands = [tool.note[os_name]]
+            return commands, tool.url_for(os_name)
     raise KeyError(name)
 
 

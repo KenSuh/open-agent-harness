@@ -95,6 +95,7 @@ function Start-Native([string]$Exe, [string[]]$Arguments) {
     $info.FileName = $Exe
     $info.Arguments = Join-Arguments $Arguments
     $info.UseShellExecute = $false
+    $info.EnvironmentVariables['UV_NO_MODIFY_PATH'] = '1'
     $process = [System.Diagnostics.Process]::Start($info)
     $process.WaitForExit()
     return $process.ExitCode
@@ -217,6 +218,36 @@ function Find-OahInNewWindow {
     return $null
 }
 
+# Follow redirects ourselves so an HTTPS release can never redirect to HTTP or a local file.
+function Save-Release([Uri]$Uri, [string]$Destination) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    for ($redirects = 0; $redirects -le 5; $redirects++) {
+        if ($Uri.Scheme -ne 'https') { throw 'Use an HTTPS release URL with HTTPS-only redirects, or clone the repository instead.' }
+        $request = [Net.WebRequest]::Create($Uri)
+        $request.AllowAutoRedirect = $false
+        $response = $request.GetResponse()
+        try {
+            if ([int]$response.StatusCode -in @(301, 302, 303, 307, 308)) {
+                if ($redirects -eq 5 -or -not $response.Headers['Location']) {
+                    throw 'The release has too many redirects or no redirect target. Clone the repository instead.'
+                }
+                $Uri = [Uri]::new($Uri, [string]$response.Headers['Location'])
+                continue
+            }
+            $downloadStream = $response.GetResponseStream()
+            try {
+                $outputStream = [IO.File]::Create($Destination)
+                try { $downloadStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
+            } finally {
+                $downloadStream.Dispose()
+            }
+            return
+        } finally {
+            $response.Dispose()
+        }
+    }
+}
+
 # Download the pinned release, check its SHA-256, unpack it and return the folder that holds it.
 function Get-Release {
     Say ''
@@ -229,25 +260,39 @@ function Get-Release {
               "    git clone $Repository.git`r`n    cd open-agent-harness`r`n" +
               '    powershell -ExecutionPolicy Bypass -File .\install\install.ps1')
     }
+    $releaseUri = $null
+    if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$releaseUri) -or
+        $releaseUri.Scheme -ne 'https' -or -not $releaseUri.Host) {
+        Fail 'OAH_INSTALL_HTTPS_REQUIRED: use an HTTPS release URL, or run this installer from a clone.'
+    }
+    if ($DryRun) {
+        Say '  [dry-run] would create a temporary folder for the release.'
+        Say "  [dry-run] would download: $url (HTTPS only, including redirects)"
+        Say "  [dry-run] would verify SHA-256: $digest (before extraction)"
+        Say '  [dry-run] would extract: release.zip into <release-folder>'
+        Say '  [dry-run] would remove the temporary folder when finished.'
+        return '<release-folder>'
+    }
     $script:OahWork = Join-Path ([IO.Path]::GetTempPath()) ('oah-install-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:OahWork | Out-Null
-    if ($DryRun) { Say '  Dry run: the release is downloaded to a temporary folder only to check it, and removed at the end.' }
     Say "  Downloading $url"
     $archive = Join-Path $script:OahWork 'release.zip'
     try {
-        if (Test-Path -LiteralPath $url) {
-            Copy-Item -LiteralPath $url -Destination $archive
-        } else {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-            $saved = $ProgressPreference
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
-            $ProgressPreference = $saved
-        }
+        Save-Release $releaseUri $archive
     } catch {
         Fail ('The download failed (' + $_.Exception.Message + '). Check your internet connection and run this again.')
     }
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($archive)
+        try {
+            $actual = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
     $wanted = $digest.Trim().ToLowerInvariant()
     if ($actual -ne $wanted) {
         Fail ("OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is $actual, but the release says $wanted.`r`n" +
@@ -258,7 +303,7 @@ function Get-Release {
     try {
         Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
     } catch {
-        Fail 'The release archive could not be unpacked.'
+        Fail 'The release archive could not be unpacked. Clone the repository instead.'
     }
     $candidates = @($unpacked) + @(Get-ChildItem -LiteralPath $unpacked -Directory | ForEach-Object { $_.FullName })
     foreach ($candidate in $candidates) {
@@ -289,7 +334,11 @@ function Invoke-OahInstall {
     if ((Test-Path variable:IsWindows) -and -not $IsWindows) {
         Say 'Note: this script is written for Windows. Use install/install.sh on macOS.'
     }
-    if (-not $Repo) { $Repo = Get-Release }
+    $ReleaseDryRun = $false
+    if (-not $Repo) {
+        $Repo = Get-Release
+        $ReleaseDryRun = [bool]$DryRun
+    }
 
     $script:Uv = Find-Uv
     $Py = $null
@@ -303,8 +352,8 @@ function Invoke-OahInstall {
         if (-not $script:Uv) {
             Say '  uv can download Python for you. Its official install command is:'
             Say "    $UvInstallText"
-            Say '  It downloads the official script from astral.sh and runs it, and it adds its folder'
-            Say "  to your user PATH. More: $UvUrl"
+            Say '  It downloads the official script from astral.sh and runs it with UV_NO_MODIFY_PATH=1.'
+            Say "  To change your user PATH, accept the separate PATH prompt in step 4. More: $UvUrl"
             if (Get-Consent 'Install uv now?') {
                 Invoke-OneLiner $UvInstallText
                 if ($script:StepCode -ne 0) { Fail 'The uv installer did not finish. Read its messages above, then run this script again.' }
@@ -328,6 +377,8 @@ function Invoke-OahInstall {
     Step 2 'Check the tools oah uses'
     if ($SkipTools) {
         Say "  Skipped (-SkipTools). Run 'oah doctor' later to see what is missing."
+    } elseif ($ReleaseDryRun) {
+        Say '  [dry-run] would run: python -m oah.setup --os windows --dry-run (after downloading and extracting the release)'
     } elseif (-not $Py) {
         Say '  [dry-run] would run: python -m oah.setup --os windows --dry-run (once Python is installed)'
     } else {

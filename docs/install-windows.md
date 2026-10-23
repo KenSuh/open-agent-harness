@@ -37,13 +37,17 @@ stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then. To pass options this
 
 ## 2. What the installer does
 
-To see every step first without changing anything, add `-DryRun`.
+To see every step first without changing anything, add `-DryRun`. A public dry run only prints
+the planned release download, SHA-256 check and extraction; it creates no temporary folder and does
+not download or verify the archive. Actual release downloads and all redirects must use HTTPS.
 
 The installer goes through five steps.
 
 1. **Find Python 3.11 or newer.** It tries `py -3`, `python` and `python3`. If there is none, it
    offers **uv**, which can download Python for you. It shows the official command
-   (`irm https://astral.sh/uv/install.ps1 | iex`) and asks before running it.
+   (`irm https://astral.sh/uv/install.ps1 | iex`) and asks before running it. The subprocess gets
+   `UV_NO_MODIFY_PATH=1`, so uv leaves profiles and persistent PATH settings alone. To change those,
+   accept the separate prompt in step 4.
 2. **Check the tools `oah` uses.** It prints a table of what is found and what is missing, then a
    plan. For each missing tool it shows the **exact official command**, a short note and the
    official page, and asks `Install now? [y/N]`. Only `y` installs it. Anything else skips it.
@@ -93,7 +97,7 @@ an API key.
 | Codex CLI | required | `irm https://chatgpt.com/codex/install.ps1 \| iex` |
 | uv | recommended | `irm https://astral.sh/uv/install.ps1 \| iex` |
 | Node.js | recommended; required in a project that uses gates | `winget install OpenJS.NodeJS.LTS` |
-| unlazy | recommended (gates) | `npx skills add Leonxlnx/unlazy` |
+| unlazy | recommended (gates) | After lane P5 lands: `oah init --with-unlazy` at P5's contract-tested pin |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `winget install --id GitHub.cli --source winget` |
 | gitleaks | recommended | `scoop install gitleaks` (needs [Scoop](https://scoop.sh)) |
@@ -101,6 +105,9 @@ an API key.
 | ripgrep (`rg`) | recommended | `winget install BurntSushi.ripgrep.MSVC` |
 
 The `irm … | iex` one-liners run in a separate Windows PowerShell process.
+
+Guided setup does not install unlazy in this lane. After P5 lands, use `oah init --with-unlazy`;
+it will verify the contract-tested commit and scripts digest before running gate commands.
 
 `oah doctor` counts Node as required once your project uses gates: when it has
 `.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say

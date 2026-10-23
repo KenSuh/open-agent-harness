@@ -31,6 +31,7 @@ PYTHON_TO_INSTALL='3.13'
 YES=0
 DRY_RUN=0
 SKIP_TOOLS=0
+RELEASE_DRY_RUN=0
 
 usage() {
   cat <<'EOF'
@@ -96,7 +97,7 @@ run_text() {
     return 0
   fi
   say "  Running: $1"
-  /bin/sh -c "$1" <"$ANSWERS"
+  UV_NO_MODIFY_PATH=1 /bin/sh -c "$1" <"$ANSWERS"
 }
 
 # Ask a yes/no question. A dry run only prints it and goes on as if the answer were yes,
@@ -140,6 +141,19 @@ find_uv() {
     fi
   done
   return 1
+}
+
+# Refresh only this process; never source or edit a profile to find newly installed tools.
+refresh_session_path() {
+  for folder in "${XDG_BIN_HOME:-$HOME/.local/bin}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    if [ -d "$folder" ]; then
+      case ":${PATH:-}:" in
+        *":$folder:"*) ;;
+        *) PATH="${PATH:+$PATH:}$folder" ;;
+      esac
+    fi
+  done
+  export PATH
 }
 
 find_python() {
@@ -226,35 +240,42 @@ Clone the repository instead. It needs git (xcode-select --install installs it):
     cd open-agent-harness
     bash install/install.sh" ;;
   esac
-  WORK=$(mktemp -d "${TMPDIR:-/tmp}/oah-install.XXXXXX") || fail "OAH_INSTALL_FAILED: cannot create a temporary folder."
-  trap 'rm -rf "$WORK"' EXIT
+  case "$url" in
+    https://?*) ;;
+    *) fail "OAH_INSTALL_HTTPS_REQUIRED: use an HTTPS release URL, or run this installer from a clone." ;;
+  esac
   if [ "$DRY_RUN" = 1 ]; then
-    say "  Dry run: the release is downloaded to a temporary folder only to check it, and removed at the end."
-  fi
-  say "  Downloading $url"
-  if [ -f "$url" ]; then
-    cp "$url" "$WORK/release.tar.gz" || fail "Could not read $url."
+    say "  [dry-run] would create a temporary folder for the release."
+    say "  [dry-run] would download: $url (HTTPS only, including redirects)"
+    say "  [dry-run] would verify SHA-256: $digest (before extraction)"
+    say "  [dry-run] would extract: release.tar.gz into <release-folder>"
+    say "  [dry-run] would remove the temporary folder when finished."
+    REPO='<release-folder>'
+    RELEASE_DRY_RUN=1
   else
-    curl -fsSL "$url" -o "$WORK/release.tar.gz" || fail "The download failed. Check your internet connection and run this again."
-  fi
-  actual=$(sha256_of "$WORK/release.tar.gz")
-  wanted=$(printf '%s' "$digest" | tr 'A-F' 'a-f')
-  if [ "$actual" != "$wanted" ]; then
-    fail "OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is $actual, but the release says $wanted.
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/oah-install.XXXXXX") || fail "OAH_INSTALL_FAILED: cannot create a temporary folder."
+    trap 'rm -rf "$WORK"' EXIT
+    say "  Downloading $url"
+    curl --proto '=https' --proto-redir '=https' -fsSL "$url" -o "$WORK/release.tar.gz" || fail "The download failed. Check your internet connection and run this again."
+    actual=$(sha256_of "$WORK/release.tar.gz")
+    wanted=$(printf '%s' "$digest" | tr 'A-F' 'a-f')
+    if [ "$actual" != "$wanted" ]; then
+      fail "OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is $actual, but the release says $wanted.
 Nothing was unpacked or installed. Download again later, or clone the repository instead."
-  fi
-  say "  SHA-256 verified: $actual"
-  mkdir "$WORK/release" && tar -xzf "$WORK/release.tar.gz" -C "$WORK/release" || fail "The release archive could not be unpacked."
-  for candidate in "$WORK/release" "$WORK/release"/*; do
-    if [ -d "$candidate" ] && is_clone "$candidate"; then
-      REPO=$(cd "$candidate" && pwd -P)
-      break
     fi
-  done
-  if [ -z "$REPO" ]; then
-    fail "The release archive does not contain open-agent-harness. Report this, or clone the repository instead."
+    say "  SHA-256 verified: $actual"
+    mkdir "$WORK/release" && tar -xzf "$WORK/release.tar.gz" -C "$WORK/release" || fail "The release archive could not be unpacked. Clone the repository instead."
+    for candidate in "$WORK/release" "$WORK/release"/*; do
+      if [ -d "$candidate" ] && is_clone "$candidate"; then
+        REPO=$(cd "$candidate" && pwd -P)
+        break
+      fi
+    done
+    if [ -z "$REPO" ]; then
+      fail "The release archive does not contain open-agent-harness. Report this, or clone the repository instead."
+    fi
+    say "  Unpacked to a temporary folder; it is removed when this script ends."
   fi
-  say "  Unpacked to a temporary folder; it is removed when this script ends."
 fi
 
 UV=""
@@ -269,8 +290,8 @@ else
   if [ -z "$UV" ]; then
     say "  uv can download Python for you. Its official install command is:"
     say "    $UV_INSTALL_TEXT"
-    say "  It downloads the official script from astral.sh and runs it, and it may add its folder"
-    say "  to your PATH. More: $UV_URL"
+    say "  It downloads the official script from astral.sh and runs it with UV_NO_MODIFY_PATH=1."
+    say "  To change your shell profile, accept the separate PATH prompt in step 4. More: $UV_URL"
     if consent "Install uv now?"; then
       run_text "$UV_INSTALL_TEXT" || fail "The uv installer did not finish. Read its messages above, then run this script again."
       find_uv || true
@@ -289,9 +310,12 @@ or install Python from https://www.python.org/downloads/, then run this script a
   fi
 fi
 
+refresh_session_path
 step 2 "Check the tools oah uses"
 if [ "$SKIP_TOOLS" = 1 ]; then
   say "  Skipped (--skip-tools). Run 'oah doctor' later to see what is missing."
+elif [ "$RELEASE_DRY_RUN" = 1 ]; then
+  say "  [dry-run] would run: python -m oah.setup --os macos --dry-run (after downloading and extracting the release)"
 elif [ -z "$PY" ]; then
   say "  [dry-run] would run: python -m oah.setup --os macos --dry-run (once Python is installed)"
 else
@@ -364,6 +388,7 @@ else
   say "  Then open a new terminal window so it takes effect."
 fi
 
+refresh_session_path
 step 5 "Check everything with oah doctor"
 OAH="${BIN_DIR:+$BIN_DIR/}oah"
 if [ "$DRY_RUN" = 1 ]; then
