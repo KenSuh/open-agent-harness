@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest import mock
 
-from oah import briefs, call, call_cli, launchers
+from oah import briefs, call, call_cli, launchers, skillsel
 from oah.engines.effort import EngineError
 from oah.engines.proc import resolve_command, run_command
 from oah.launchers import orca
@@ -73,9 +73,10 @@ class OrcaProject:
                                f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n"
                                f"[call]\n{orca_line}{config}"})
         self.state = self.repo / ".git" / "oah"
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(("FAKE_", "OAH_"))}
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("FAKE_", "OAH_")) and key != "CLAUDE_CONFIG_DIR"}
         self.env.update(CODEX_HOME=str(self.home), FAKE_RECORD=str(self.record), FAKE_ORCA_STATE=str(self.orca_state),
-                        PATH=_minimal_path(self.bin))
+                        PATH=_minimal_path(self.bin), HOME=str(work / "home"), USERPROFILE=str(work / "home"))
         self.host: subprocess.Popen | None = None
 
     def start_host(self, **extra: str) -> None:
@@ -605,9 +606,12 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
 
         run = find_run(project.state, run_id)
         prompt = run.prompt_path.read_bytes()
+        selection, rerank = skillsel.choose(worktree, kind="implementation", stage="initial", risk="normal", scope=[],
+                                            state_dir=None, env=project.env)
         expected = briefs.build(run_id=run_id, task="t1", stage="initial", engine="claude", scope=[],
                                 intent_section=None, binding=None, packet_source=None, round_instructions=message,
-                                footer=FOOTER, has_footer=has_footer)
+                                footer=FOOTER, has_footer=has_footer, skills_block=selection.brief_text(rerank=rerank),
+                                skill_ids=[skill.id for skill in selection.skills])
         self.assertEqual(prompt, expected.encode("utf-8"))
         worker = project.recorded()
         self.assertEqual(worker["stdin"].encode("utf-8"), prompt)

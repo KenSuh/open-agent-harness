@@ -225,9 +225,9 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         raise
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
-    _print_skills(prepared)
     if orca is not None:
         info = orca_launcher.start(orca, prepared, placement)["launcher"]
+        _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "
               f"worktree={info['worktree']}", file=sys.stdout if args.background else sys.stderr)
         if args.background:
@@ -236,9 +236,11 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         return _report(orca_launcher.wait_until_done(orca, state, prepared.run_id), args.json)
     if args.background:
         run_id = call.start_background(prepared, require_detach=args.require_detach)
+        _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={run_id} folder={prepared.run_dir}")
         print(f"Wait for it with: oah wait {run_id}")
         return EXIT_OK
+    _print_skills(prepared)
     return _report(call.execute(prepared), args.json)
 
 
