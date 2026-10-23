@@ -45,7 +45,7 @@ def make_project(test: unittest.TestCase, files: dict) -> pathlib.Path:
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
-            path.write_text(content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8", newline="\n")
     return root
 
 
@@ -580,11 +580,12 @@ class PlanWriteTest(unittest.TestCase):
         assert_ci_error(self, "OAH_CI_CHANGED", ci.write, result, confirm=True, overwrite=True)
         self.assertEqual(self.target(root).read_text(encoding="utf-8"), "name: edited\n")
 
-    def test_write_keeps_crlf(self):
+    def test_write_replaces_crlf_with_lf(self):
         root = make_project(self, {**FIXTURES["go"], ".github/workflows/oah-ci.yml": b"name: mine\r\n"})
         result = ci.plan(root, ["linux"])
         ci.write(result, confirm=True, overwrite=True)
-        self.assertEqual(self.target(root).read_bytes(), result.text.replace("\n", "\r\n").encode("utf-8"))
+        self.assertNotIn(b"\r", self.target(root).read_bytes())
+        self.assertEqual(self.target(root).read_bytes(), result.text.encode("utf-8"))
         again = ci.plan(root, ["linux"])
         self.assertTrue(again.up_to_date)
         self.assertEqual(again.diff, "")
@@ -621,12 +622,13 @@ class PlanWriteTest(unittest.TestCase):
 
 
 def run_ci(cwd: pathlib.Path, *args: str, answers: str = "", env_extra: dict | None = None):
-    """`python -m oah ci init ARGS` in cwd, with `answers` on stdin; returns (rc, stdout, stderr)."""
+    """Run the CLI with answers on stdin; return (rc, stdout, stderr) with terminal newlines as LF."""
     env = dict(os.environ, PYTHONPATH=SRC)
     env.update(env_extra or {})
     result = subprocess.run([sys.executable, "-m", "oah", "ci", "init", *args], cwd=cwd,
                             input=answers.encode("utf-8"), capture_output=True, env=env, timeout=60)
-    return result.returncode, result.stdout.decode("utf-8"), result.stderr.decode("utf-8")
+    return (result.returncode, result.stdout.decode("utf-8").replace("\r\n", "\n"),
+            result.stderr.decode("utf-8").replace("\r\n", "\n"))
 
 
 def tree(root: pathlib.Path) -> dict[str, bytes]:
@@ -701,7 +703,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("go test ./...", out)
         self.assertIn(self.expected(repo), out)
         self.assertIn("OAH_CI_WRITTEN", out)
-        self.assertEqual(self.target(repo).read_text(encoding="utf-8"), self.expected(repo))
+        self.assertEqual(self.target(repo).read_bytes(), self.expected(repo).encode("utf-8"))
 
     def test_yes_writes_file(self):
         repo = self.repo(FIXTURES["go"])
@@ -885,6 +887,19 @@ class CliTest(unittest.TestCase):
         rc, out, err = run_ci(repo, "--dry-run")
         self.assertEqual(rc, 0, err)
         self.assertIn(f"os: [{ci.RUNNERS[ci.current_os()]}]", out)
+
+    @unittest.skipUnless(os.name == "nt", "Windows only")
+    def test_windows_workflow_uses_lf_bytes(self):
+        repo = self.repo(FIXTURES["go"])
+        for existing in (None, b"name: mine\r\n"):
+            with self.subTest(existing=existing):
+                if existing is not None:
+                    self.target(repo).write_bytes(existing)
+                rc, out, err = run_ci(repo, "--os", "windows", "--force", "--yes")
+                self.assertEqual(rc, 0, out + err)
+                data = self.target(repo).read_bytes()
+                self.assertNotIn(b"\r", data)
+                self.assertEqual(data, self.expected(repo, ("windows",)).encode("utf-8"))
 
     @unittest.skipUnless(os.name == "nt", "Windows only")
     def test_windows_default_runner(self):

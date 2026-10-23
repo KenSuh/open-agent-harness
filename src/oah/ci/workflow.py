@@ -202,7 +202,7 @@ def write(plan: CiPlan, *, confirm: bool, overwrite: bool = False) -> pathlib.Pa
     """Write the planned workflow once the user confirmed it.
 
     The file on disk must still be what the plan showed: OAH_CI_CHANGED otherwise. An existing file is
-    replaced only with overwrite=True, keeping CRLF line endings when it used them.
+    replaced only with overwrite=True. The written file always uses LF line endings.
     """
     if not confirm:
         raise CiError("OAH_CI_NOT_CONFIRMED", f"nothing was written to {plan.path}; "
@@ -215,6 +215,5 @@ def write(plan: CiPlan, *, confirm: bool, overwrite: bool = False) -> pathlib.Pa
     if current is not None and not overwrite:
         raise CiError("OAH_CI_EXISTS", f"{path} already exists; nothing was written. Run oah ci init "
                                        "without --yes to see the diff and confirm, or pass --force --yes")
-    text = plan.text.replace("\n", "\r\n") if current is not None and "\r\n" in current else plan.text
-    write_text_atomic(path, text)
+    write_text_atomic(path, plan.text)
     return path

@@ -40,6 +40,9 @@ test_command = "make test"
 
 A flag on the command line wins over the config file.
 
+Workflow files are written with LF line endings on every OS, including when replacing a CRLF file.
+Terminal output may use your platform's line endings. Commit and push the written workflow to run it.
+
 ### If the file already exists
 
 oah never replaces your workflow silently. When `.github/workflows/oah-ci.yml` already exists, oah shows
