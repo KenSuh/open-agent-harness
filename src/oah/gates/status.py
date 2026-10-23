@@ -20,6 +20,7 @@ class LedgerStatus:
     abandoned: tuple[str, ...]
     errors: tuple[str, ...]
     detail: str = ""
+    output: str = ""  # unlazy's own report, when unlazy gave the verdict
 
     @property
     def structural_only(self) -> bool:
@@ -51,13 +52,14 @@ def ledger_status(path: pathlib.Path, *, unlazy: pathlib.Path | None = None, nod
         return structural
     result = unlazy_mod.gate_check(unlazy, pathlib.Path(path), node=node, mode="status", env=env,
                                    root=root or pathlib.Path(path).parent)
+    output = "\n".join(part.rstrip("\n") for part in (result.stdout, result.stderr) if part.strip())
     if result.verdict == "error":
         message = (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}").splitlines()
         return LedgerStatus("invalid", "unlazy", structural.states, structural.unmet, structural.abandoned,
-                            tuple(message[:3]), "unlazy gate-check failed: " + " ".join(message[:3]))
+                            tuple(message[:3]), "unlazy gate-check failed: " + " ".join(message[:3]), output)
     if result.verdict != structural.verdict:
         return LedgerStatus("unmet", "unlazy", structural.states, structural.unmet or tuple(
             gate_id for gate_id, _ in structural.states), structural.abandoned, (),
             f"unlazy says {result.verdict} but the built-in parser says {structural.verdict}; "
-            "they disagree, so oah treats the ledger as unmet. Update unlazy or oah.")
-    return dataclasses.replace(structural, source="unlazy")
+            "they disagree, so oah treats the ledger as unmet. Update unlazy or oah.", output)
+    return dataclasses.replace(structural, source="unlazy", output=output)

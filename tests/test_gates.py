@@ -288,3 +288,288 @@ class LedgerStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Inputs, bindings and `oah gates` -----------------------------------------------------------------
+
+from oah import gates_cli  # noqa: E402
+from oah.gates import check as gate_check_mod  # noqa: E402
+from oah.gates.bindings import BindingStore  # noqa: E402
+from oah.gates.inputs import collect  # noqa: E402
+from oah.lease import TASK_RE  # noqa: E402
+from tests.fixtures.gates.support import run_cli  # noqa: E402
+from tests.helpers import git_commit, make_git_repo  # noqa: E402
+
+RUNNABLE = """# Gates: t1
+
+- [ ] G1: the module exists
+  CHECK: oah check exists src/a.py
+  EXPECT: OAH_CHECK_OK
+  EVIDENCE: pending
+"""
+
+SPLIT = """# Gates: t1
+
+- [ ] G1: the module exists
+  CHECK: oah check exists src/a.py
+  OAH-INPUTS: src
+  EXPECT: OAH_CHECK_OK
+  EVIDENCE: pending
+
+- [x] G2: the docs were reviewed
+  OAH-INPUTS: docs
+  EVIDENCE: reviewed against the outline
+"""
+
+
+def pass_reply(ledger: pathlib.Path, text: str, ids=("G1",), extra_writes=None) -> dict:
+    lines = "".join(f"  PASS GATES:{gate_id}: title\n" for gate_id in ids)
+    writes = {str(ledger): text}
+    writes.update(extra_writes or {})
+    return {"write": writes, "stdout": f"{lines}GATES.md: 1 gates\nALL MET (1 met, reran: {len(ids)})\n", "code": 0}
+
+
+class InputsTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n", ".gitignore": "build/\n"})
+
+    def digest(self, prefixes=None):
+        return collect(self.repo).digest_for(prefixes)
+
+    def test_manifest_covers_mode_bytes_add_delete(self):
+        base = self.digest()
+        (self.repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        changed = self.digest()
+        self.assertNotEqual(base, changed)
+        (self.repo / "src" / "new.py").write_text("", encoding="utf-8")
+        added = self.digest()
+        self.assertNotEqual(changed, added)
+        (self.repo / "build").mkdir()
+        (self.repo / "build" / "out.bin").write_bytes(b"x")
+        self.assertEqual(added, self.digest())  # ignored files are not inputs
+        (self.repo / "docs" / "readme.md").unlink()
+        self.assertNotEqual(added, self.digest())
+
+    @unittest.skipIf(os.name == "nt", "the executable bit is a POSIX file mode")
+    def test_execution_mode_is_an_input(self):
+        base = self.digest()
+        path = self.repo / "src" / "a.py"
+        path.chmod(path.stat().st_mode | 0o111)
+        self.assertNotEqual(base, self.digest())
+
+    def test_declared_prefixes_narrow_inputs(self):
+        base_src, base_all = self.digest(("src",)), self.digest()
+        (self.repo / "docs" / "readme.md").write_text("changed\n", encoding="utf-8")
+        self.assertEqual(base_src, self.digest(("src",)))
+        self.assertNotEqual(base_all, self.digest())
+        self.assertNotEqual(self.digest(("src",)), self.digest(("src", "docs")))
+
+    def test_generated_outputs_excluded(self):
+        base = self.digest()
+        for name in (".oah/tasks/t1/GATES.md", ".oah/tasks/t1/GATES.summary.md", ".unlazy/locks/x",
+                     ".unlazy-hook-state.json"):
+            target = self.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("generated\n", encoding="utf-8")
+        self.assertEqual(base, self.digest())
+
+    def test_env_names_and_tools_are_inputs(self):
+        manifest = collect(self.repo, env_names=("OAH_DEMO_VAR",), env={"OAH_DEMO_VAR": "1"})
+        other = collect(self.repo, env_names=("OAH_DEMO_VAR",), env={"OAH_DEMO_VAR": "2"})
+        self.assertNotEqual(manifest.digest_for(None), other.digest_for(None))
+        tooled = collect(self.repo, tools={"node": "v1"})
+        self.assertNotEqual(tooled.digest_for(None), collect(self.repo, tools={"node": "v2"}).digest_for(None))
+
+
+class GateCheckFlowTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n"})
+        self.tmp = make_tmp_dir(self)
+        self.stub = StubNode(self.tmp / "stub")
+        self.unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        self.ledger = self.repo / ".oah" / "tasks" / "t1" / "GATES.md"
+        self.ledger.parent.mkdir(parents=True)
+        self.store = BindingStore(self.tmp / "state", "t1")
+
+    def check(self, approve=False):
+        return gate_check_mod.run_check(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                        node=self.stub.node, approve=approve, env=self.stub.env())
+
+    def test_unchanged_check_with_changed_source_reverifies(self):
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(RUNNABLE)))
+        report = self.check()
+        self.assertTrue(report.ok, report.lines)
+        self.assertEqual(report.actions["G1"], "run")
+        self.assertIn("--reverify", self.stub.calls("gate-check.mjs")[-1]["args"])
+        self.assertEqual(len(self.stub.calls("gate-check.mjs")), 1)
+        again = self.check()
+        self.assertEqual(again.actions["G1"], "carry")
+        self.assertEqual(len(self.stub.calls("gate-check.mjs")), 1)  # nothing affected, nothing run
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"],
+                         "fresh")
+        (self.repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"], "stale")
+        third = self.check()
+        self.assertEqual(len(self.stub.calls("gate-check.mjs")), 2)
+        self.assertIn("--reverify", self.stub.calls("gate-check.mjs")[-1]["args"])
+        self.assertEqual(third.actions["G1"], "run")
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"], "fresh")
+
+    def test_unaffected_gate_gets_carry_record(self):
+        self.ledger.write_text(SPLIT, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(SPLIT)))
+        first = self.check()
+        self.assertEqual((first.actions["G1"], first.actions["G2"]), ("run", "attest"))
+        before = self.store.load()[gate_check_mod.ledger_key(self.repo, self.ledger)]["G2"]
+        (self.repo / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
+        second = self.check()
+        self.assertEqual((second.actions["G1"], second.actions["G2"]), ("run", "carry"))
+        carried = self.store.load()[gate_check_mod.ledger_key(self.repo, self.ledger)]["G2"]
+        self.assertEqual(carried["kind"], "carry")
+        self.assertEqual(carried["carry"]["old_inputs"], before["inputs"])
+        self.assertEqual(carried["carry"]["new_inputs"], before["inputs"])
+        self.assertEqual(carried["carry"]["evidence"], before["evidence"])
+
+    def test_manual_gate_with_changed_inputs_is_stale_until_reattested(self):
+        self.ledger.write_text(SPLIT, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(SPLIT)))
+        self.check()
+        (self.repo / "docs" / "readme.md").write_text("new text\n", encoding="utf-8")
+        report = self.check()
+        self.assertEqual(report.actions["G2"], "stale")
+        self.assertFalse(report.ok)
+        self.ledger.write_text(met_ledger(SPLIT).replace("reviewed against the outline", "re-reviewed"),
+                               encoding="utf-8")
+        self.assertEqual(self.check().actions["G2"], "attest")
+
+    def test_inputs_changed_during_check_invalidate_run(self):
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        sneaky = {str(self.repo / "src" / "a.py"): "a = 99\n"}
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(RUNNABLE), extra_writes=sneaky))
+        report = self.check()
+        self.assertFalse(report.ok)
+        self.assertEqual(report.actions["G1"], "invalidated")
+        self.assertNotIn("G1", self.store.load().get(gate_check_mod.ledger_key(self.repo, self.ledger), {}))
+
+    def test_unapproved_gate_is_not_bound(self):
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", {"stdout": "APPROVAL REQUIRED GATES:G1\n    NOT RUN: inspect\n"
+                                                     "GATES.md: 1 gates\nUNMET: 1 (met: 0)\n  GATES:G1\n",
+                                           "code": 1})
+        report = self.check()
+        self.assertFalse(report.ok)
+        self.assertEqual(report.actions["G1"], "not-run")
+        self.assertTrue(report.approval_required)
+
+    def test_unlazy_error_raises(self):
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", {"stderr": "gate-check: boom\n", "code": 2})
+        with self.assertRaises(gate_check_mod.GateRefused) as caught:
+            self.check()
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_FAILED")
+
+    def test_invalid_ledger_refuses_before_running(self):
+        self.ledger.write_text("# none\n", encoding="utf-8")
+        with self.assertRaises(gate_check_mod.GateRefused) as caught:
+            self.check()
+        self.assertEqual(caught.exception.code, "OAH_GATES_INVALID")
+        self.assertEqual(self.stub.calls(), [])
+
+
+class GatesCliTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/a.py": "a = 1\n"})
+        self.tmp = make_tmp_dir(self)
+        self.stub = StubNode(self.tmp / "stub")
+        self.unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        self.state = self.tmp / "state"
+
+    def env(self, unlazy=True):
+        return self.stub.env(OAH_UNLAZY_DIR=str(self.unlazy if unlazy else self.tmp / "absent"),
+                             OAH_STATE_DIR=str(self.state))
+
+    def gates(self, *argv, unlazy=True):
+        return run_cli("gates_cli", ["gates", *argv], cwd=self.repo, env=self.env(unlazy))
+
+    def test_new_writes_template_and_refuses_overwrite(self):
+        made = self.gates("new", "t1")
+        self.assertEqual(made.returncode, 0, made.stderr)
+        ledger = self.repo / ".oah" / "tasks" / "t1" / "GATES.md"
+        self.assertIn("OAH_GATES_CREATED", made.stdout)
+        text = ledger.read_text(encoding="utf-8")
+        self.assertIn("# Gates: t1", text)
+        self.assertEqual(parse_text(text).errors, ())
+        again = self.gates("new", "t1")
+        self.assertEqual(again.returncode, 1)
+        self.assertTrue(again.stderr.startswith("OAH_GATES_EXISTS"), again.stderr)
+        self.assertEqual(self.gates("new", "../bad").returncode, 1)
+
+    def test_template_checks_are_portable(self):
+        text = gates_cli.template_text("demo")
+        ledger = parse_text(text)
+        self.assertEqual(ledger.errors, ())
+        self.assertTrue(ledger.gates)
+        for gate in ledger.gates:
+            self.assertIsNotNone(gate.check, gate.id)
+            self.assertIn(gate.check.split()[0], ("python", "node", "oah"), gate.check)
+            for token in ("|", "&&", ";", ">", "<", "`", "$(", "%", "grep"):
+                self.assertNotIn(token, gate.check, gate.check)
+            self.assertRegex(gate.id, r"^G[1-9][0-9]*$")
+        self.assertTrue(TASK_RE.fullmatch("demo"))
+
+    def test_status_without_unlazy_is_structural_only(self):
+        self.gates("new", "t1")
+        status = self.gates("status", "t1", unlazy=False)
+        self.assertEqual(status.returncode, 1, status.stdout + status.stderr)
+        self.assertIn("STRUCTURAL ONLY", status.stdout)
+        self.assertIn("G1", status.stdout)
+        self.assertEqual(self.stub.calls(), [])
+
+    def test_status_with_unlazy_delegates_and_reports_bindings(self):
+        self.gates("new", "t1")
+        self.stub.reply("gate-check.mjs", {"stdout": "  UNMET GATES:G1 (unchecked): x\nGATES.md: 3 gates\n"
+                                                     "UNMET: 3 (met: 0)\n", "code": 1})
+        status = self.gates("status", "t1")
+        self.assertEqual(status.returncode, 1)
+        self.assertIn("UNMET: 3", status.stdout)
+        self.assertIn("OAH_GATES_STATUS verdict=unmet source=unlazy", status.stdout)
+        self.assertEqual(self.stub.calls("gate-check.mjs")[-1]["args"][0], "--status")
+
+    def test_check_without_unlazy_refuses(self):
+        self.gates("new", "t1")
+        refused = self.gates("check", "t1", unlazy=False)
+        self.assertEqual(refused.returncode, 69)
+        self.assertTrue(refused.stderr.startswith("OAH_UNLAZY_MISSING"), refused.stderr)
+
+    def test_check_cli_passes_approve_only_when_asked(self):
+        ledger = self.repo / ".oah" / "tasks" / "t1" / "GATES.md"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(ledger, met_ledger(RUNNABLE)))
+        done = self.gates("check", "t1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("--approve", self.stub.calls("gate-check.mjs")[-1]["args"])
+        self.assertIn("OAH_GATES_CHECKED", done.stdout)
+        ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.gates("check", "t1", "--approve")
+        self.assertIn("--approve", self.stub.calls("gate-check.mjs")[-1]["args"])
+
+    def test_lint_delegates(self):
+        self.gates("new", "t1")
+        self.stub.reply("gate-lint.mjs", {"stdout": "LINT OK\n", "code": 0})
+        linted = self.gates("lint", "t1", "--strict")
+        self.assertEqual(linted.returncode, 0, linted.stderr)
+        self.assertEqual(self.stub.calls("gate-lint.mjs")[-1]["args"][0], "--strict")
+        structural = self.gates("lint", "t1", unlazy=False)
+        self.assertIn("structural only", structural.stdout)
+        self.assertEqual(structural.returncode, 0)
+
+    def test_custom_ledger_path(self):
+        custom = self.repo / "elsewhere.md"
+        custom.write_text(RUNNABLE, encoding="utf-8")
+        status = self.gates("status", "t1", "--ledger", "elsewhere.md", unlazy=False)
+        self.assertIn("G1", status.stdout)
