@@ -294,6 +294,36 @@ class StoreTest(unittest.TestCase):
                 with self.assertRaises(StateCorrupt):
                     Lease.from_json(record, self.store.leases_path)
 
+    def test_lease_without_gates_field_loads(self):
+        record = self.start().to_json()
+        self.assertEqual(record["gates"], [])
+        del record["gates"]
+        self.store.leases_path.write_text(json.dumps({"version": 1, "leases": [record]}), encoding="utf-8")
+        (lease, _), = self.store.snapshot()
+        self.assertEqual(lease.gates, [])
+        bad = dict(record, gates="GATES.md")
+        with self.assertRaises(StateCorrupt):
+            Lease.from_json(bad, self.store.leases_path)
+
+    def test_start_and_renew_record_gates_in_schema_1(self):
+        lease = self.store.start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1, info=self.info,
+                                 gates=(".oah/tasks/t1/GATES.md",))
+        self.assertEqual(lease.gates, [".oah/tasks/t1/GATES.md"])
+        data = json.loads(self.store.leases_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 1)
+        self.assertEqual(data["leases"][0]["gates"], [".oah/tasks/t1/GATES.md"])
+        renewed = self.store.renew(task="t1", agent="claude", ttl_hours=1, gates=("gates/a.md", "gates/b.md"))
+        self.assertEqual(renewed.gates, ["gates/a.md", "gates/b.md"])
+        self.assertEqual(self.events()[-1]["gates"], ["gates/a.md", "gates/b.md"])
+        kept = self.store.renew(task="t1", agent="claude", ttl_hours=1)
+        self.assertEqual(kept.gates, ["gates/a.md", "gates/b.md"])
+
+    def test_finish_records_the_gate_report(self):
+        lease = self.start()
+        self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
+                          allow_out_of_scope=False, gate_report={"outcome": "met", "verified": True})
+        self.assertEqual(self.events()[-1]["gates"], {"outcome": "met", "verified": True})
+
     def test_fractional_ttl_survives_start_and_renew(self):
         self.clock.advance(microseconds=500000)
         lease = self.start(ttl_hours=0.000001)

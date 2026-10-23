@@ -65,6 +65,7 @@ class Lease:
     head_at_start: str | None
     created_at: str
     expires_at: str
+    gates: list[str] = dataclasses.field(default_factory=list)  # declared ledger paths (optional, schema 1)
 
     def expired(self, now: dt.datetime) -> bool:
         return _parse(self.expires_at) <= now
@@ -80,7 +81,9 @@ class Lease:
                  and all(isinstance(data.get(key), str) for key in strings)
                  and all(data.get(key) is None or isinstance(data.get(key), str) for key in optional)
                  and isinstance(data.get("scope"), list) and data["scope"]
-                 and all(isinstance(entry, str) for entry in data["scope"]))
+                 and all(isinstance(entry, str) for entry in data["scope"])
+                 and (data.get("gates") is None or (isinstance(data["gates"], list)
+                                                    and all(isinstance(entry, str) for entry in data["gates"]))))
         if valid:
             try:
                 _parse(data["created_at"])
@@ -89,7 +92,9 @@ class Lease:
                 valid = False
         if not valid:
             raise StateCorrupt(f"{StateCorrupt.code}: {source} holds a malformed lease record: {data!r}")
-        return cls(**{field.name: data.get(field.name) for field in dataclasses.fields(cls)})
+        values = {field.name: data.get(field.name) for field in dataclasses.fields(cls)}
+        values["gates"] = list(values["gates"] or [])
+        return cls(**values)
 
     def describe(self) -> str:
         return (f"task {self.task} held by {self.agent} (scope {', '.join(self.scope)}; expires {self.expires_at}; "
@@ -180,7 +185,7 @@ class Store:
         return leases
 
     def start(self, *, task: str, agent: str, scope: Sequence[str], note: str, ttl_hours: float,
-              info: RepoInfo) -> Lease:
+              info: RepoInfo, gates: Sequence[str] = ()) -> Lease:
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         if not scope:
@@ -198,13 +203,15 @@ class Store:
             now = self.now()
             lease = Lease(id=secrets.token_hex(8), task=task, agent=agent, scope=list(scope), note=note,
                           worktree=str(info.root), branch=info.branch, head_at_start=info.head,
-                          created_at=_iso(now), expires_at=_expiration(now, ttl_hours))
+                          created_at=_iso(now), expires_at=_expiration(now, ttl_hours), gates=list(gates))
             leases.append(lease)
             self._commit(leases, "lease_started", task, agent, lease.id, scope=lease.scope, note=note,
-                         expires_at=lease.expires_at, worktree=lease.worktree, branch=lease.branch)
+                         expires_at=lease.expires_at, worktree=lease.worktree, branch=lease.branch,
+                         gates=lease.gates)
             return lease
 
-    def renew(self, *, task: str, agent: str, ttl_hours: float, scope: Sequence[str] | None = None) -> Lease:
+    def renew(self, *, task: str, agent: str, ttl_hours: float, scope: Sequence[str] | None = None,
+              gates: Sequence[str] | None = None) -> Lease:
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         with self._lock():
@@ -222,13 +229,15 @@ class Store:
                         raise LeaseError("OAH_LEASE_CONFLICT",
                                          f"scope {', '.join(scope)} overlaps {other.describe()}")
                 lease.scope = list(scope)
+            if gates:
+                lease.gates = list(gates)
             lease.expires_at = _expiration(self.now(), ttl_hours)
             self._commit(leases, "lease_renewed", task, agent, lease.id, scope=lease.scope, old_scope=old_scope,
-                         expires_at=lease.expires_at)
+                         expires_at=lease.expires_at, gates=lease.gates)
             return lease
 
     def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
-               allow_out_of_scope: bool) -> tuple[Lease, list[str]]:
+               allow_out_of_scope: bool, gate_report: dict | None = None) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
         with self._lock():
             leases = self._load()
@@ -245,8 +254,9 @@ class Store:
                                  f"changes outside scope {', '.join(lease.scope)}: {shown}. Widen the scope with "
                                  "oah renew --scope, or pass --allow-out-of-scope (recorded)")
             leases.remove(lease)
+            gate_fields = {"gates": gate_report} if gate_report is not None else {}
             self._commit(leases, "lease_finished", task, agent, lease.id, summary=summary, out_of_scope=beyond,
-                         allowed_out_of_scope=bool(beyond))
+                         allowed_out_of_scope=bool(beyond), **gate_fields)
             return lease, beyond
 
     def release(self, *, task: str, agent: str, reason: str, force: bool) -> Lease:
