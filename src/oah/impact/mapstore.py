@@ -22,6 +22,7 @@ whole tree for new needles only. The result equals a full build byte for byte.
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -65,14 +66,19 @@ class MapInfo:
     manifest_digest: str = ""
     # Not a constructor parameter: keep the public MapInfo signature compatible.
     excluded_paths: tuple[str, ...] = field(default=(), init=False)
+    sql_unparsed: tuple[dict, ...] = field(default=(), init=False)
 
     def warnings(self) -> list[str]:
-        return coverage_warnings(self.excluded_paths)
+        return coverage_warnings(self.excluded_paths) + [
+            f"OAH_IMPACT_SQL_UNPARSED: {region['file']}:{region['line']}: {region['reason']}; "
+            "review this SQL region manually for dependencies before selecting checks"
+            for region in self.sql_unparsed]
 
     def to_json(self) -> dict:
         return {"commit": self.commit, "manifest": self.manifest_digest, "tool": self.tool_digest,
                 "result": self.result_digest, "action": self.action, "changed": self.changed, "reason": self.reason,
-                "excluded_paths": list(self.excluded_paths), "warnings": self.warnings()}
+                "excluded_paths": list(self.excluded_paths), "sql_unparsed": list(self.sql_unparsed),
+                "warnings": self.warnings()}
 
 
 def coverage_warnings(paths: Iterable[str]) -> list[str]:
@@ -82,8 +88,9 @@ def coverage_warnings(paths: Iterable[str]) -> list[str]:
             if excluded else [])
 
 
-def _coverage(info: MapInfo, paths: Iterable[str]) -> MapInfo:
+def _coverage(info: MapInfo, paths: Iterable[str], db: Mapping | None = None) -> MapInfo:
     object.__setattr__(info, "excluded_paths", tuple(sorted(set(paths))))
+    object.__setattr__(info, "sql_unparsed", tuple((db or {}).get("unparsed", [])))
     return info
 
 
@@ -255,7 +262,9 @@ def _ledgers(root: pathlib.Path, settings: Mapping[str, object]) -> dict[str, st
         listing = pattern + "*" if not any(char in terminal for char in "*?[") else pattern
         for path in root.glob(listing):
             relative = path.relative_to(root).as_posix()
-            if not kinds_module.glob_match(pattern, relative):
+            # Parent components have already been matched by pathlib. Recheck only the
+            # expanded terminal component, with pathlib's character classes and OS casing.
+            if not fnmatch.fnmatch(path.name, terminal):
                 continue
             key = ("excluded-symlink" if not _safe_worktree_path(root, relative) else
                    _file_key(path)) if path.is_symlink() or path.is_file() else None
@@ -525,7 +534,8 @@ def _judge(path: pathlib.Path, manifest: Mapping) -> tuple[dict | None, str, boo
 
 def _info(stored: Mapping, path: pathlib.Path, action: str, changed: int = 0, reason: str = "") -> MapInfo:
     return _coverage(MapInfo(stored["manifest"]["head"], stored["tool"], stored["result"], path, action, changed, reason,
-                             stored["manifest_digest"]), stored["data"].get("excluded_paths", []))
+                             stored["manifest_digest"]), stored["data"].get("excluded_paths", []),
+                     stored["data"].get("db"))
 
 
 def status(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
@@ -615,7 +625,7 @@ def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | N
     data = build_data(top, sha, settings)
     info = MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"]),
                    manifest_digest=digest({"head": sha, "tool": tool_digest(settings)}))
-    return _coverage(info, data["excluded_paths"]), data
+    return _coverage(info, data["excluded_paths"], data.get("db")), data
 
 
 def run_hook(name: str) -> int:

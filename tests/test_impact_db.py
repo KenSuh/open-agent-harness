@@ -7,6 +7,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import textwrap
 import unittest
 
 from oah.impact import sqlplugin
@@ -241,6 +242,127 @@ class ExtractTest(unittest.TestCase):
         self.assertEqual(self.links(graph), {
             ("db_grant:app", "db_table:users", 'grant:SELECT ("ODD NAME"),UPDATE(ID)')})
 
+    def test_huge_first_word_and_separators_are_bounded(self):
+        self.bounded_extract('x' * 256000 + ' ' + ',' * 256000 + ';\n')
+
+    def test_quoted_routine_bodies_preserve_locations(self):
+        for prefix in ('', 'E'):
+            with self.subTest(prefix=prefix):
+                graph = sqlplugin.extract({'postgres.sql':
+                    "CREATE TABLE users(id int);\n"
+                    "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS " + prefix +
+                    "'SELECT\n id FROM users';\n"
+                    "SELECT 'FROM ghost';\n"})
+                self.assertIn(['db_routine:f', 'db_table:users', 'uses', 'postgres.sql', 3], graph['links'])
+                self.assertNotIn('db_table:ghost', graph['entities'])
+
+    def test_inline_mysql_hash_comments_do_not_hide_entities(self):
+        for comment in ("a ' quote; CREATE TABLE ghost(id int);", 'a ; semicolon'):
+            with self.subTest(comment=comment):
+                graph = sqlplugin.extract({'mysql.sql':
+                    'SELECT 1 # ' + comment + '\n;\nCREATE TABLE users(id int);'})
+                self.assertEqual(set(graph['entities']), {'db_table:users'})
+                self.assertEqual(graph['entities']['db_table:users']['events'], [['mysql.sql', 3, 'create']])
+
+    def test_routine_expression_literals_stay_opaque(self):
+        graph = sqlplugin.extract({'postgres.sql':
+            'CREATE TABLE users(id int); CREATE TABLE ghost(id int);\n'
+            'CREATE FUNCTION f() RETURNS int AS $body$\n'
+            "BEGIN SELECT 'FROM ghost', $$ SELECT id FROM ghost $$; SELECT id FROM users; END;\n"
+            '$body$ LANGUAGE sql;'})
+        self.assertEqual(self.links(graph), {('db_routine:f', 'db_table:users', 'uses')})
+
+    def test_escaped_routine_body_uses_physical_lines(self):
+        graph = sqlplugin.extract({'postgres.sql':
+            'CREATE TABLE users(id int);\n'
+            "CREATE FUNCTION f() RETURNS int AS E'SELECT\\n id FROM users' LANGUAGE sql;"})
+        self.assertIn(['db_routine:f', 'db_table:users', 'uses', 'postgres.sql', 2], graph['links'])
+
+    def test_compound_body_extracts_nested_ddl(self):
+        text = ('DELIMITER //\nCREATE PROCEDURE p()\nBEGIN\n'
+                '  CREATE TABLE scratch(id int);\n'
+                '  CREATE INDEX scratch_idx ON scratch(id);\n'
+                'END//\nDELIMITER ;\nCREATE TABLE following(id int);\n')
+        graph = sqlplugin.extract({'mysql.sql': text})
+        self.assertEqual(set(graph['entities']), {'db_routine:p', 'db_table:scratch', 'db_table:following'})
+        self.assertEqual(graph['entities']['db_table:scratch']['events'], [['mysql.sql', 4, 'create']])
+        self.assertEqual(graph['entities']['db_table:scratch']['indexes'], [['scratch_idx', 'mysql.sql', 5]])
+
+    def test_unparsed_sql_regions_are_explicit(self):
+        for sql in ("DO 'SELECT 1';", 'CREATE UNRECOGNISED widget;', "SELECT 'unterminated",
+                    '/* unterminated', 'DELIMITER //\nSELECT 1//',
+                    "CREATE FUNCTION f() RETURNS int AS 'SELECT 1' LANGUAGE sql;",
+                    'CREATE PROCEDURE p() BEGIN SELECT 1; END;'):
+            with self.subTest(sql=sql):
+                graph = sqlplugin.extract({'partial.sql': '\n' + sql})
+                self.assertTrue(graph['unparsed'])
+                self.assertTrue(all(region['file'] == 'partial.sql' and region['line'] >= 2
+                                    and region['reason'] for region in graph['unparsed']))
+
+    def test_construct_generators_scale_below_quadratic(self):
+        # Measure inside one process, using medians to reduce scheduler/GC noise. Fixed deadlines
+        # catch hangs; doubled sizes and a 3.3 ratio catch quadratic paths independently of speed.
+        code = textwrap.dedent('''
+            import gc, statistics, time
+            from oah.impact import sqlplugin
+            generators = {
+                'identifiers': lambda n: 'x' * n + ' ' + ',' * n + ';',
+                'separators': lambda n: 'SELECT ' + ',' * n + ';',
+                'quotes': lambda n: "SELECT '" + "x''" * n + "';",
+                'comments': lambda n: '/*' * n + '*/' * n + 'SELECT 1;',
+                'dollar tags': lambda n: '$' + 'a' * n + '$SELECT 1$' + 'a' * n + '$;',
+                'parentheses': lambda n: 'SELECT ' + '(' * n + ')' * n + ';',
+                'GRANT without ON': lambda n: 'GRANT app TO bob' + ' ' * n + ';',
+                'nested routines': lambda n: 'CREATE PROCEDURE p() BEGIN ' * n +
+                                             'SELECT 1;' + 'END;' * n,
+            }
+            for name, generate in generators.items():
+                times = []
+                for size in (16000, 32000):
+                    text = generate(size)
+                    samples = []
+                    for _ in range(3):
+                        gc.collect()
+                        start = time.perf_counter()
+                        graph = sqlplugin.extract({'stress.sql': text})
+                        elapsed = time.perf_counter() - start
+                        assert elapsed < 12, (name, size, elapsed)
+                        samples.append(elapsed)
+                    times.append(statistics.median(samples))
+                assert times[1] / times[0] < 3.3, (name, times)
+                print(name, round(times[1] / times[0], 3), times)
+        ''')
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                                encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_review_regression_fixture_corpus(self):
+        # JSON-in-SQL comments keeps independent snippets and explicit expectations alongside
+        # the dialect fixtures without executing one example in another example's context.
+        cases = [json.loads(line.removeprefix('-- OAH-REGRESSION '))
+                 for path in sorted(FIXTURES.glob('*/*.sql'))
+                 for line in path.read_text(encoding='utf-8').splitlines()
+                 if line.startswith('-- OAH-REGRESSION ')]
+        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3'})
+        code = textwrap.dedent('''
+            import json, sys
+            from oah.impact import sqlplugin
+            for case in json.load(sys.stdin):
+                text = ''.join(part if isinstance(part, str) else part[0] * part[1]
+                               for part in case['parts'])
+                graph = sqlplugin.extract({case['file']: text})
+                assert sorted(graph['entities']) == sorted(case['entities']), (case['id'], graph)
+                links = sorted(link[:3] for link in graph['links'])
+                assert links == sorted(case['links']), (case['id'], graph)
+                for entity, indexes in case.get('indexes', {}).items():
+                    assert graph['entities'][entity]['indexes'] == indexes, (case['id'], graph)
+                for entity, events in case.get('events', {}).items():
+                    assert graph['entities'][entity]['events'] == events, (case['id'], graph)
+        ''')
+        result = subprocess.run([sys.executable, '-c', code], input=json.dumps(cases), capture_output=True,
+                                text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rename_and_drop_events(self):
         graph = sqlplugin.extract(load("postgres"))
         orders = [op for _file, _line, op in graph["entities"]["db_table:orders"]["events"]]
@@ -254,6 +376,24 @@ class ExtractTest(unittest.TestCase):
 
 
 class DbQueryTest(unittest.TestCase):
+    def test_unparsed_sql_reports_survive_all_output_paths(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {'db/001.sql': '\nCREATE UNRECOGNISED widget;\n', 'app.py': 'x = 1\n'})
+        for args in (('app.py',), ('app.py', '--ref', 'HEAD'), ('build',), ('refresh',), ('status',)):
+            with self.subTest(args=args):
+                text = run_impact(repo, *args)
+                self.assertEqual(text.returncode, 0, text.stderr)
+                self.assertIn('OAH_IMPACT_SQL_UNPARSED', text.stderr)
+                self.assertIn('db/001.sql:2', text.stderr)
+                self.assertIn('review', text.stderr)
+                result = run_impact(repo, *args, '--json')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertTrue(any('OAH_IMPACT_SQL_UNPARSED' in warning for warning in report['warnings']))
+                info = report.get('map', report)
+                self.assertEqual(info['sql_unparsed'][0]['file'], 'db/001.sql')
+                self.assertEqual(info['sql_unparsed'][0]['line'], 2)
+
     def test_index_only_migration_returns_table_code_references(self):
         repo = make_git_repo(self)
         git_commit(repo, {"db/001.sql": "CREATE TABLE users (id int);\n",

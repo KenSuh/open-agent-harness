@@ -155,6 +155,34 @@ class MapStoreTest(unittest.TestCase):
         self.assertTrue(info.path.is_relative_to(self.repo / "local-state"))
         self.assertEqual(mapstore.status(self.repo, env=env)[1], "fresh", "storing the map must not stale it")
 
+    def test_character_class_ledgers_invalidate_freshness(self):
+        git_commit(self.repo, {'.gitignore': '.oah/tasks/\n', '.oah/config.toml':
+                              '[impact]\nledger_globs = [".oah/tasks/[AB]*/GATES.md"]\n'})
+        ledger = self.repo / '.oah/tasks/A1/GATES.md'
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text('# Gates\n', encoding='utf-8')
+        info = ensure_fresh(self.repo)
+        self.assertEqual(list(mapstore.load(info.path)['manifest']['ledgers']), ['.oah/tasks/A1/GATES.md'])
+        ledger.write_text('# Gates changed\n', encoding='utf-8')
+        self.assertEqual(mapstore.status(self.repo, env={})[1], 'ledgers changed')
+
+    def test_character_class_ledger_symlinks_warn(self):
+        git_commit(self.repo, {'.gitignore': '.oah/tasks/\n', '.oah/config.toml':
+                              '[impact]\nledger_globs = [".oah/tasks/[AB]*/GATES.md"]\n'})
+        ledger = self.repo / '.oah/tasks/B1/GATES.md'
+        ledger.parent.mkdir(parents=True)
+        try:
+            ledger.symlink_to(make_tmp_dir(self) / 'missing.md')
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f'symlinks unavailable: {exc}')
+        report = json.loads(run_impact(self.repo, 'build', '--json').stdout)
+        self.assertEqual(report['excluded_paths'], ['.oah/tasks/B1/GATES.md'])
+        self.assertIn('.oah/tasks/B1/GATES.md', run_impact(self.repo, 'status').stderr)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows character-class ledger symlinks')
+    def test_windows_character_class_ledger_symlinks_warn(self):
+        self.test_character_class_ledger_symlinks_warn()
+
     def test_inputs_changing_during_build_retry_then_refuse(self):
         real = mapstore.build_data
         calls = []

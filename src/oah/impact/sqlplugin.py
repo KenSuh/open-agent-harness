@@ -8,7 +8,7 @@ extraction never searches SQL text with regular expressions.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping
 
 # Kept for callers that imported the original name pattern; extraction uses tokens exclusively.
@@ -25,12 +25,16 @@ class _Token:
     line: int
     body: tuple[_Token, ...] = ()
     raw: str = ""
+    keyword: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "keyword", self.value.upper() if self.kind == "word" else "")
 
     def is_word(self, *words: str) -> bool:
-        return self.kind == "word" and self.value.upper() in words
+        return self.kind == "word" and self.keyword in words
 
 
-def _tokenize(text: str) -> list[_Token]:
+def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
     """Consume tokens with a forward-only cursor, without backtracking or prefix windows.
 
     Dollar bodies have an opaque outer token and child SQL tokens for routine dependencies. The
@@ -66,10 +70,16 @@ def _tokenize(text: str) -> list[_Token]:
                 tokens.append(_Token("directive", "", start, i, first_line))
                 line_start, expression = False, False
                 continue
-            # #> and #>> are PostgreSQL operators. A bare # after an operand is binary XOR.
-            # At a token boundary without a left operand it starts a MySQL line comment.
-            hash_comment = (char == "#" and not text.startswith("#>", i) and
-                            (line_start or (not expression and (i == 0 or text[i - 1].isspace()))))
+            # MySQL permits # comments after operands; PostgreSQL uses # as an operator.
+            # Unlabelled migrations accept both: retain numeric XOR and #>/#>>, otherwise
+            # prefer the MySQL comment. Ambiguous/unsupported SQL remains in coverage reports.
+            hash_comment = False
+            if char == "#" and dialect != "postgres":
+                right = i + 1
+                while right < limit and text[right] in " \t":
+                    right += 1
+                hash_comment = dialect == "mysql" or (not text.startswith("#>", i) and
+                    (line_start or not expression or right == limit or not text[right].isdigit()))
             if text.startswith("--", i) or hash_comment:
                 while i < limit and text[i] != "\n":
                     i += 1
@@ -87,7 +97,7 @@ def _tokenize(text: str) -> list[_Token]:
                     else:
                         line += text[i] == "\n"
                         i += 1
-                tokens.append(_Token("comment", "", start, i, first_line))
+                tokens.append(_Token("comment" if not depth else "invalid", "", start, i, first_line))
                 continue
             if not body and i == next_delimiter:
                 i += len(delimiter)
@@ -125,7 +135,7 @@ def _tokenize(text: str) -> list[_Token]:
                 expression = True
                 name_context = False
                 continue
-            if char == "$" and not body and delimiter == ";":
+            if char == "$" and delimiter == ";":
                 end = i + 1
                 if end < limit and (text[end].isalpha() or text[end] == "_"):
                     end += 1
@@ -138,6 +148,12 @@ def _tokenize(text: str) -> list[_Token]:
                         line += text.count("\n", i, limit)
                         i = limit
                         tokens.append(_Token("invalid", "", start, i, first_line))
+                    elif body:
+                        # A dollar literal inside a routine is an expression, not another
+                        # routine body. Keep it opaque and do not recurse into arbitrary SQL.
+                        line += text.count("\n", i, closing + len(tag))
+                        i = closing + len(tag)
+                        tokens.append(_Token("string", "", start, i, first_line, raw=text[start:i]))
                     else:
                         i = end + 1
                         children = scan(closing, body=True)
@@ -151,15 +167,16 @@ def _tokenize(text: str) -> list[_Token]:
                     i += 1
                 value = text[start:i]
                 kind = "number" if char.isdigit() else "word"
-                tokens.append(_Token(kind, value, start, i, first_line))
-                word = value.upper()
+                token = _Token(kind, value, start, i, first_line)
+                tokens.append(token)
+                word = token.keyword
                 if word in {"TABLE", "VIEW", "FUNCTION", "PROCEDURE", "TRIGGER", "INDEX", "REFERENCES",
                             "FROM", "JOIN", "INTO", "UPDATE", "ON", "TO", "SCHEMA", "DATABASE"}:
                     name_context, name_list = True, True
                 elif not (name_context and word in {"IF", "NOT", "EXISTS", "ONLY", "CONCURRENTLY"}):
                     name_list = name_context
                     name_context = False
-                expression = kind == "number" or value.upper() not in {
+                expression = kind == "number" or word not in {
                     "SELECT", "AS", "DEFAULT", "VALUES", "WHERE", "AND", "OR", "SET", "THEN", "ELSE",
                     "RETURN", "ON", "TO", "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "VIEW"}
                 continue
@@ -239,6 +256,79 @@ def _statements(tokens: Iterable[_Token]) -> Iterable[list[_Token]]:
         yield current
 
 
+def _dialect(file: str) -> str:
+    name = file.lower()
+    if "postgres" in name or "pgsql" in name:
+        return "postgres"
+    return "mysql" if "mysql" in name else "auto"
+
+
+def _quoted_tokens(token: _Token, dialect: str, escaped: bool) -> list[_Token]:
+    """Decode a routine's AS literal, mapping every decoded offset to its physical source line.
+
+    Ordinary literals never enter here. Each body is decoded/tokenized once; nested quoted
+    definitions remain opaque and are covered by the enclosing unparsed-region report.
+    """
+    raw, chars, offsets, lines = token.raw, [], [], []
+    i, line = 1, token.line
+    while i < len(raw) - 1:
+        start, first_line, char = i, line, raw[i]
+        i += 1
+        if char == "'" and i < len(raw) - 1 and raw[i] == "'":
+            i += 1
+        elif char == "\\" and i < len(raw) - 1:
+            char = raw[i]
+            i += 1
+            if escaped:
+                char = {"n": "\n", "r": "\r", "t": "\t"}.get(char, char)
+        line += raw.count("\n", start, i)
+        chars.append(char)
+        offsets.append(token.start + start)
+        lines.append(first_line)
+    offsets.append(token.end - 1)
+    lines.append(line)
+
+    def locate(child: _Token) -> _Token:
+        return replace(child, start=offsets[child.start], end=offsets[child.end], line=lines[child.start],
+                       body=tuple(locate(part) for part in child.body))
+
+    return [locate(child) for child in _tokenize("".join(chars), dialect=dialect)]
+
+
+def _routine_tokens(tokens: list[_Token], dialect: str) -> tuple[list[_Token], bool]:
+    """Flatten only routine-definition bodies, using an iterative, bounded traversal."""
+    result = []
+    stack = [(iter(tokens), True)]
+    creating, header, awaiting, escaped, routine = False, False, False, False, False
+    while stack:
+        iterator, allow_quote = stack[-1]
+        token = next(iterator, None)
+        if token is None:
+            stack.pop()
+            continue
+        if token.is_word("CREATE"):
+            creating, header, awaiting = True, False, False
+        elif creating and token.is_word("TABLE", "VIEW", "FUNCTION", "PROCEDURE", "TRIGGER", "INDEX"):
+            header = token.is_word("FUNCTION", "PROCEDURE", "TRIGGER")
+            routine = routine or header
+            creating = False
+        if header and token.is_word("AS"):
+            awaiting, escaped = True, False
+        elif awaiting and token.is_word("E"):
+            escaped = True
+        elif awaiting and (token.kind == "dollar" or (allow_quote and token.kind == "string")):
+            children = token.body if token.kind == "dollar" else _quoted_tokens(token, dialect, escaped)
+            header, awaiting = False, False
+            stack.append((iter(children), False))
+            continue
+        elif token.is_word("BEGIN") or token.kind == "end":
+            creating, header, awaiting = False, False, False
+        elif awaiting and token.kind not in ("comment",):
+            awaiting = False
+        result.append(token)
+    return result, routine
+
+
 def _name(tokens: list[_Token], i: int, *, star: bool = False, role: bool = False) -> tuple[list[str], int]:
     parts = []
     while i < len(tokens):
@@ -277,8 +367,6 @@ def _refs(tokens: list[_Token], words: tuple[str, ...]) -> Iterable[tuple[str, _
                 yield names[-1], token
                 i = end
                 continue
-        elif token.kind == "dollar":
-            yield from _refs(list(token.body), words)
         i += 1
 
 
@@ -319,6 +407,7 @@ class _Graph:
         self.entities: dict[str, dict] = {}
         self.links: set[tuple[str, str, str, str, int]] = set()
         self.pending: list[tuple[str, str, str, str, int]] = []
+        self.unparsed: list[dict] = []
 
     def entity(self, entity: str, kind: str | None = None) -> dict:
         record = self.entities.setdefault(entity, {"kind": kind or "table", "name": entity.split(":", 1)[1],
@@ -337,7 +426,8 @@ class _Graph:
         for info in self.entities.values():
             info["events"].sort(key=lambda event: (event[0], event[1]))
             info["indexes"].sort()
-        return {"entities": dict(sorted(self.entities.items())), "links": sorted(list(link) for link in links)}
+        return {"entities": dict(sorted(self.entities.items())), "links": sorted(list(link) for link in links),
+                "unparsed": self.unparsed}
 
 
 def _grant(graph: _Graph, file: str, tokens: list[_Token]) -> None:
@@ -471,9 +561,29 @@ def _statement(graph: _Graph, file: str, tokens: list[_Token]) -> None:
 
 
 def extract(files: Mapping[str, str]) -> dict:
-    """The entity graph of the given SQL files ({path: text}), read in path order."""
+    """The entity graph of the given SQL files ({path: text}), read in path order.
+
+    This is a dependency scanner, not a complete SQL grammar. Conservatively report every SQL
+    statement as a partially parsed region, including statements with extracted dependencies.
+    Delimiter directives and malformed comments get their own reports. Nothing is certified as
+    fully parsed merely because a recognised DDL prefix produced an entity.
+    """
     graph = _Graph()
     for file in sorted(files):
-        for statement in _statements(_tokenize(files[file])):
+        tokens = _tokenize(files[file], dialect=_dialect(file))
+        for token in tokens:
+            if token.kind == "directive":
+                graph.unparsed.append({"file": file, "line": token.line, "reason": "DELIMITER directive"})
+        for statement in _statements(tokens):
+            graph.unparsed.append({"file": file, "line": statement[0].line,
+                                   "reason": "dependency scan only; SQL grammar is not fully parsed"})
+            statement, routine = _routine_tokens(statement, _dialect(file))
             _statement(graph, file, statement)
+            if routine:
+                # The outer routine is scanned once for uses. Nested DDL regions are disjoint:
+                # never recursively rescan a shrinking suffix for every nested routine.
+                starts = [i for i, token in enumerate(statement) if i and
+                          token.is_word("CREATE", "ALTER", "DROP", "RENAME", "GRANT", "REVOKE")]
+                for start, end in zip(starts, starts[1:] + [len(statement)]):
+                    _statement(graph, file, statement[start:end])
     return graph.result()
