@@ -207,6 +207,19 @@ class LeaseCliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("OAH_LEASE_CONFLICT", result.stderr)
 
+    @unittest.skipUnless(os.name == "nt", "native Windows Git junction replacement")
+    def test_finish_refuses_tracked_directory_replaced_by_junction(self):
+        started = self.start("t1", "claude", "src")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        (self.repo / "docs" / "readme.md").unlink()
+        (self.repo / "docs").rmdir()
+        directory_alias(self.repo / "src", self.repo / "docs")
+        refused = oah(self.repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "replaced")
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("docs/readme.md", refused.stderr)
+        self.assertIn("docs/a.py", refused.stderr)
+
     @unittest.skipUnless(os.name == "nt", "native Windows Git junction descendants")
     def test_finish_matches_tracked_junction_descendants_to_canonical_scope(self):
         directory_alias(self.repo / "src", self.repo / "link")

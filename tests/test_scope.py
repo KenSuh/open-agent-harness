@@ -173,8 +173,34 @@ class OverlapTest(unittest.TestCase):
         directory_alias(root / "src", root / "docs" / "link")
         changed = ["link/a.py", "docs/link", "other/b.md", "link/missing/a.py"]
         self.assertEqual(outside(("src/a.py",), changed), changed)
-        self.assertEqual(outside(("src/a.py",), changed, root=root), changed[1:])
-        self.assertEqual(outside(("src",), changed, root=root), changed[1:])
+        for scope in (("src/a.py",), ("src",)):
+            with self.subTest(scope=scope):
+                self.assertEqual(outside(scope, changed, root=root), changed)
+                self.assertEqual(outside(scope, iter(changed + ["src/a.py"]), root=root), changed[1:])
+
+    def test_outside_canonical_twin_comparison_folds_case_and_unicode(self):
+        root = make_tmp_dir(self)
+        (root / "src").mkdir()
+        directory_alias(root / "src", root / "link")
+        decomposed = unicodedata.normalize("NFD", "문서.py")
+        changed = ["link/문서.py", f"SRC/{decomposed}"]
+        self.assertEqual(outside(("src",), changed, root=root), [])
+
+    def test_outside_refuses_changes_under_directory_replaced_by_alias(self):
+        for variant in ("deleted", "modified"):
+            with self.subTest(variant=variant):
+                root = make_tmp_dir(self)
+                (root / "src").mkdir()
+                (root / "src" / "a.py").write_text("unchanged\n", encoding="utf-8")
+                if variant == "modified":
+                    (root / "src" / "readme.md").write_text("unchanged target\n", encoding="utf-8")
+                (root / "docs").mkdir()
+                (root / "docs" / "readme.md").write_text("original\n", encoding="utf-8")
+                (root / "docs" / "readme.md").unlink()
+                (root / "docs").rmdir()
+                directory_alias(root / "src", root / "docs")
+                changed = ["docs/readme.md", "docs/a.py"]
+                self.assertEqual(outside(("src",), changed, root=root), changed)
 
     def test_outside_ignores_parents_resolved_outside_root(self):
         root = make_tmp_dir(self)

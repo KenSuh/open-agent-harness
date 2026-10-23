@@ -157,11 +157,44 @@ class StoreTest(unittest.TestCase):
         (self.root / "src").mkdir()
         directory_alias(self.root / "src", self.root / "link")
         started = self.start(scope=("src/a.py",))
+        error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                 lease_id=started.id, summary="done", changed=["link/a.py"],
+                                 allow_out_of_scope=False)
+        self.assertIn("link/a.py", str(error))
         lease, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id, summary="done",
-                                          changed=["link/a.py"], allow_out_of_scope=False)
+                                          changed=["link/a.py", "src/a.py"], allow_out_of_scope=False)
         self.assertEqual(lease.scope, ["src/a.py"])
         self.assertEqual(beyond, [])
         self.assertEqual(self.store.snapshot(), [])
+
+    def test_finish_refuses_changes_under_directory_replaced_by_alias(self):
+        for variant in ("deleted", "modified"):
+            with self.subTest(variant=variant):
+                root = make_tmp_dir(self)
+                (root / "src").mkdir()
+                (root / "src" / "a.py").write_text("unchanged\n", encoding="utf-8")
+                if variant == "modified":
+                    (root / "src" / "readme.md").write_text("unchanged target\n", encoding="utf-8")
+                (root / "docs").mkdir()
+                (root / "docs" / "readme.md").write_text("original\n", encoding="utf-8")
+                info = RepoInfo(root, root / ".git", "main", "a" * 40)
+                started = self.store.start(task="t1", agent="claude", scope=("src",), note="",
+                                            ttl_hours=4, info=info)
+                (root / "docs" / "readme.md").unlink()
+                (root / "docs").rmdir()
+                directory_alias(root / "src", root / "docs")
+                changed = ["docs/readme.md", "docs/a.py"]
+                error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                         lease_id=started.id, summary="replaced", changed=changed,
+                                         allow_out_of_scope=False)
+                for path in changed:
+                    self.assertIn(path, str(error))
+                self.assertEqual([lease.id for lease, _ in self.store.snapshot()], [started.id])
+                _, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id,
+                                              summary="override", changed=changed, allow_out_of_scope=True)
+                self.assertEqual(beyond, changed)
+                self.assertEqual(self.events()[-1]["out_of_scope"], changed)
+                self.assertTrue(self.events()[-1]["allowed_out_of_scope"])
 
     def test_finish_allows_out_of_scope_when_asked_and_records_it(self):
         started = self.start(task="t1", scope=("src",))
