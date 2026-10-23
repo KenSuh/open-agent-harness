@@ -232,6 +232,140 @@ class ExecutionSnapshotTest(unittest.TestCase):
                 self.invoke("gate-check.mjs")
             run.assert_not_called()
 
+    @unittest.skipUnless(os.name != "nt", "POSIX directory write permissions")
+    def test_writable_state_refuses_snapshot_replacement_after_digest_verification(self):
+        self.state.mkdir(mode=0o700)
+        self.state.chmod(0o777)
+        original = unlazy._run
+        marker = self.tmp / "replacement-ran"
+        def replace(argv, **options):
+            snapshot = pathlib.Path(argv[1]).parent.parent
+            # A separate process can replace the pathname through the writable parent even
+            # though the verified snapshot itself is mode 0700. No digest check runs after this.
+            attack = ("import pathlib,sys\n"
+                      "p=pathlib.Path(sys.argv[1]); p.rename(p.with_name(p.name+'-old'))\n"
+                      "(p/'scripts').mkdir(parents=True)\n"
+                      "(p/'scripts'/sys.argv[2]).write_text(sys.argv[3], encoding='utf-8')\n")
+            subprocess.run([sys.executable, "-c", attack, str(snapshot), pathlib.Path(argv[1]).name,
+                            f"import pathlib; pathlib.Path({str(marker)!r}).touch()\n"], check=True)
+            return original(argv, **options)
+        with patch.object(unlazy, "_run", side_effect=replace) as run:
+            for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                with self.subTest(name=name):
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke(name)
+                    self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                    self.assertIn(str(self.state), str(caught.exception))
+        run.assert_not_called()
+        self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name != "nt", "POSIX directory write permissions")
+    def test_writable_ancestor_above_state_is_refused(self):
+        parent = self.tmp / "shared"
+        parent.mkdir(mode=0o777)
+        parent.chmod(0o777)
+        self.env["OAH_STATE_DIR"] = str(parent / "private" / "state")
+        with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError) as caught:
+            self.invoke("gate-check.mjs")
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+        self.assertIn(str(parent), str(caught.exception))
+        self.assertIn("OAH_STATE_DIR", str(caught.exception))
+        self.assertFalse((parent / "private").exists())
+        run.assert_not_called()
+
+    @unittest.skipUnless(os.name != "nt", "POSIX directory ownership and write permissions")
+    def test_state_requires_current_owner_and_no_group_or_other_write(self):
+        self.state.mkdir(mode=0o700)
+        original = pathlib.Path.lstat
+        for mode, foreign_owner in ((0o720, False), (0o702, False), (0o700, True)):
+            with self.subTest(mode=mode, foreign_owner=foreign_owner):
+                self.state.chmod(mode)
+                def lstat(path):
+                    info = original(path)
+                    if foreign_owner and path == self.state:
+                        fields = list(info)
+                        fields[4] = os.getuid() + 1
+                        return os.stat_result(fields)
+                    return info
+                with patch.object(pathlib.Path, "lstat", lstat), patch.object(unlazy, "_run") as run:
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke("gate-check.mjs")
+                self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                self.assertIn(str(self.state), str(caught.exception))
+                run.assert_not_called()
+
+    @unittest.skipUnless(os.name != "nt", "POSIX sticky directories protect owned children")
+    def test_sticky_ancestor_allows_a_new_private_state_directory(self):
+        parent = self.tmp / "sticky"
+        parent.mkdir(mode=0o700)
+        parent.chmod(0o1777)
+        self.env["OAH_STATE_DIR"] = str(parent / "state")
+        self.assertEqual(self.invoke("gate-check.mjs").stdout.strip(), "verified-closure")
+        self.assertEqual((parent / "state").stat().st_mode & 0o777, 0o700)
+
+    def test_symlinked_state_component_is_refused(self):
+        target = self.tmp / "private"
+        target.mkdir(mode=0o700)
+        alias = self.tmp / "alias"
+        directory_alias(target, alias)
+        for state in (alias, alias / "state"):
+            with self.subTest(state=state):
+                self.env["OAH_STATE_DIR"] = str(state)
+                with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError) as caught:
+                    self.invoke("gate-check.mjs")
+                self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                self.assertIn(str(alias), str(caught.exception))
+                run.assert_not_called()
+        alias.rmdir() if os.name == "nt" else alias.unlink()
+
+    def test_windows_state_parent_grant_refuses_before_copy_or_execution(self):
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
+        good = f"O:{sid}D:P(A;OICI;FA;;;OW)"
+        self.state.mkdir(mode=0o700)
+        verify = unlazy._verify_snapshot_permissions
+        for bad in (good + "(A;;FA;;;WD)", good + "(A;;0x40;;;AU)",
+                    good.replace(sid, "S-1-5-21-999"), good.replace(f"O:{sid}", "O:BA"), "", None):
+            with self.subTest(descriptor=bad):
+                def descriptor(path):
+                    return bad if path == self.state else good
+                def windows_verify(folder):
+                    return verify(folder, platform="win32")
+                with patch.object(unlazy, "_windows_user_sid", return_value=sid), \
+                        patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor), \
+                        patch.object(unlazy, "_verify_snapshot_permissions", side_effect=windows_verify), \
+                        patch.object(unlazy, "_run") as run:
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke("gate-check.mjs")
+                self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                self.assertIn(str(self.state), str(caught.exception))
+                run.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ACLs can permit replacing a child")
+    def test_macos_ancestor_acl_grant_refuses_before_copy_or_execution(self):
+        parent = self.tmp / "parent"
+        parent.mkdir(mode=0o700)
+        self.env["OAH_STATE_DIR"] = str(parent / "state")
+        subprocess.run(["/bin/chmod", "+a", "everyone allow delete_child,add_subdirectory", str(parent)],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-N", str(parent)], capture_output=True)
+        with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError) as caught:
+            self.invoke("gate-check.mjs")
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+        self.assertIn(str(parent), str(caught.exception))
+        self.assertFalse((parent / "state").exists())
+        run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows parent DACL can permit replacing a child")
+    def test_windows_parent_acl_grant_refuses_before_copy_or_execution(self):
+        unlazy._private_directory(self.state)
+        subprocess.run(["icacls.exe", str(self.state), "/grant", "*S-1-1-0:(DC,WD,AD)"],
+                       check=True, capture_output=True)
+        with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError) as caught:
+            self.invoke("gate-check.mjs")
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+        self.assertIn(str(self.state), str(caught.exception))
+        run.assert_not_called()
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS inherited ACLs override mode bits")
     def test_macos_inherited_acl_cannot_grant_effective_snapshot_access(self):
         self.state.mkdir(mode=0o700)
@@ -244,23 +378,15 @@ class ExecutionSnapshotTest(unittest.TestCase):
         witness.chmod(0)
         self.assertTrue(os.access(witness, os.W_OK), "the control must demonstrate effective ACL access")
         witness.unlink()
-        original = unlazy._run
-        seen = []
-        def inspect(argv, **options):
-            folder = pathlib.Path(argv[1]).parent.parent
-            for path in (folder, *folder.rglob("*")):
-                mode = path.stat().st_mode & 0o777
-                try:
-                    path.chmod(0)
-                    self.assertFalse(os.access(path, os.W_OK), f"inherited ACL still grants access to {path}")
-                finally:
-                    path.chmod(mode)
-            seen.append(folder)
-            return original(argv, **options)
-        with patch.object(unlazy, "_run", side_effect=inspect):
+        with patch.object(unlazy, "_run") as run:
             for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
-                self.assertEqual(self.invoke(name).stdout.strip(), "verified-closure")
-        self.assertEqual(len(seen), 3)
+                with self.subTest(name=name):
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke(name)
+                    self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                    self.assertIn(str(self.state), str(caught.exception))
+        run.assert_not_called()
+        self.assertEqual(list(self.state.glob("unlazy-*")), [])
 
     @unittest.skipUnless(os.name != "nt", "macOS permission tools verify POSIX ownership and modes")
     def test_macos_permission_tools_fail_closed_before_copy_or_launch(self):
@@ -312,7 +438,7 @@ class ExecutionSnapshotTest(unittest.TestCase):
                     self.assertTrue(any(path.name == "gates.mjs" for path in queried))
 
     def test_windows_permission_verification_checks_every_copied_object(self):
-        sid = "S-1-5-21-100-200-300-1001"
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
         verified = []
         def descriptor(path):
             verified.append(path)
@@ -326,25 +452,27 @@ class ExecutionSnapshotTest(unittest.TestCase):
                 patch.object(unlazy, "_verify_snapshot_permissions", side_effect=windows_verify):
             result = self.invoke("gate-check.mjs")
         self.assertEqual(result.stdout.strip(), "verified-closure")
-        root = verified[0]
+        root = next(path for path in verified if path.name.startswith("unlazy-"))
         expected = {root, root / "pin.json", *(root / name for name in self.pin.files)}
-        expected.update(parent for path in tuple(expected) for parent in path.parents if parent.is_relative_to(root))
+        expected.update(parent for path in tuple(expected) for parent in path.parents)
         self.assertEqual(set(verified), expected)
 
     def test_windows_unproven_or_foreign_dacl_prevents_execution(self):
-        sid = "S-1-5-21-100-200-300-1001"
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
         good = f"O:{sid}D:P(A;OICI;FA;;;OW)"
         bad = (good + "(A;;FA;;;WD)", good.replace("OW", "AU"), good.replace(sid, "S-1-5-21-999"),
                f"O:{sid}D:NO_ACCESS_CONTROL", f"O:{sid}D:P", good.replace("D:P", "D:"), "", None,
                good.replace("(A;", "(XA;"), good + "unexpected")
         verify = unlazy._verify_snapshot_permissions
-        for value in (*bad, "query-failed", "user-failed", "unknown-user", "copied-file"):
+        for value in (*bad, "query-failed", "user-failed", "unknown-user", "copied-file", "directory-owner"):
             with self.subTest(value=value):
                 def descriptor(path):
                     if value == "query-failed":
                         raise OSError("security descriptor query failed")
                     if value == "copied-file":
                         return good + "(A;;FA;;;WD)" if path.name == "gates.mjs" else good
+                    if value == "directory-owner":
+                        return good.replace(f"O:{sid}", "O:BA") if path.name == "scripts" else good
                     return value
                 def windows_verify(folder):
                     return verify(folder, platform="win32")
@@ -396,6 +524,10 @@ class ExecutionSnapshotTest(unittest.TestCase):
         original = unlazy._run
         def inspect(argv, **options):
             folder = pathlib.Path(argv[1]).parent.parent
+            sid = unlazy._windows_user_sid()
+            for path in (folder, *(path for path in folder.rglob("*") if path.is_dir())):
+                self.assertTrue(unlazy._windows_security_descriptor(path).startswith(f"O:{sid}D:"),
+                                f"{path} must be owned by the current user")
             for path in (folder, folder / "scripts/lib/gates.mjs"):
                 size = wintypes.DWORD()
                 get_security(str(path), 4, None, 0, ctypes.byref(size))

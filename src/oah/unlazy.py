@@ -1,6 +1,7 @@
 # unlazy 연동 — 설치 위치 찾기(OAH_UNLAZY_DIR, 프로젝트, 사용자 스킬 폴더), 고정 커밋·스크립트 다이제스트 검증, gate-check·gate-lint·stop-hook 호출 계약을 맡는다.
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import pathlib
 import re
 import secrets
 import shutil
+import stat
 import sys
 import types
 from contextlib import contextmanager
@@ -265,7 +267,7 @@ def _private_directory(folder: pathlib.Path) -> None:
     kernel.LocalFree.restype = ctypes.c_void_p
     descriptor = ctypes.c_void_p()
     # Protected DACL: only the object's owner has full access; files and subdirectories inherit it.
-    if not convert("D:P(A;OICI;FA;;;OW)", 1, ctypes.byref(descriptor), None):
+    if not convert(f"O:{_windows_user_sid()}D:P(A;OICI;FA;;;OW)", 1, ctypes.byref(descriptor), None):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
@@ -277,8 +279,17 @@ def _private_directory(folder: pathlib.Path) -> None:
 
 def _permission_refused(reason: str) -> UnlazyError:
     return UnlazyError("OAH_UNLAZY_SNAPSHOT_PERMISSIONS", f"cannot prove the unlazy snapshot is private: {reason}; "
-                       "fix the state folder's permissions to allow only your account, or set OAH_STATE_DIR "
-                       "to a private local state folder, then retry")
+                       "fix the reported path's ownership and permissions to allow only your account, "
+                       "or set OAH_STATE_DIR to a private local state folder under trusted parents, then retry")
+
+
+def _private_makedirs(folder: pathlib.Path) -> None:
+    missing = []
+    while not folder.exists():
+        missing.append(folder)
+        folder = folder.parent
+    for directory in reversed(missing):
+        _private_directory(directory)
 
 
 def _strip_snapshot_acls(folder: pathlib.Path) -> None:
@@ -288,7 +299,7 @@ def _strip_snapshot_acls(folder: pathlib.Path) -> None:
             if result.returncode != 0 or result.timed_out:
                 raise OSError("chmod -RN could not remove inherited ACLs")
         except OSError as exc:
-            raise _permission_refused(str(exc)) from exc
+            raise _permission_refused(f"{folder}: {exc}") from exc
 
 
 def _windows_user_sid() -> str:
@@ -365,10 +376,97 @@ def _windows_security_descriptor(path: pathlib.Path) -> str:
         kernel.LocalFree(text)
 
 
+def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None) -> None:
+    """Prove that no other account can replace any component leading to state.
+
+    System-owned ancestors are allowed; the state root must belong to this user. A POSIX
+    sticky ancestor protects its trusted child against rename, but state itself may not be
+    group/other writable. Unknown ACLs fail closed rather than guessing effective access.
+    """
+    platform = sys.platform if platform is None else platform
+    path = folder
+    try:
+        if platform == "win32":
+            sid = _windows_user_sid()
+            if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+                raise OSError("cannot identify the current user's SID")
+            trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544"}
+        chain = (*reversed(folder.parents), folder)
+        for path in chain:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                return  # The remaining suffix will be created privately, then verified again.
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise OSError("a directory component is a symlink or reparse point")
+            if not stat.S_ISDIR(info.st_mode):
+                raise OSError("a directory component is not a directory")
+            if platform == "win32":
+                sddl = _windows_security_descriptor(path)
+                match = re.fullmatch(r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))", sddl or "")
+                if not match or match[1] not in ({sid} if path == folder else trusted):
+                    raise OSError("the directory owner or DACL cannot be trusted")
+                aces = re.findall(r"\(([^()]*)\)", match[3])
+                if "".join(f"({ace})" for ace in aces) != match[3]:
+                    raise OSError("the directory DACL cannot be parsed")
+                for ace in aces:
+                    fields = ace.split(";")
+                    if (len(fields) != 6 or fields[0] not in ("A", "D") or fields[3] or fields[4]
+                            or not re.fullmatch(r"(?:OI|CI|NP|IO|ID|SA|FA)*", fields[1])):
+                        raise OSError("the directory DACL has an unsupported entry")
+                    # Denials and inherit-only entries grant no access to this directory.
+                    if fields[0] == "D" or "IO" in fields[1]:
+                        continue
+                    if fields[5] in trusted or fields[5] == "OW":
+                        continue
+                    rights = fields[2]
+                    # Only documented read/execute rights may be granted to other accounts.
+                    # Everything else (including DELETE_CHILD, DELETE, WRITE_DAC/OWNER) refuses.
+                    readonly = bool(re.fullmatch(r"(?:FR|FX|GR|GX)+", rights))
+                    if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
+                        readonly = not (int(rights, 16) & ~0xA01200A9)
+                    if not readonly:
+                        raise OSError("the directory DACL grants another account write/delete/rename access")
+            else:
+                if info.st_uid not in ({os.getuid()} if path == folder else {0, os.getuid()}):
+                    raise OSError("the directory is not owned by your account or a trusted system ancestor")
+                if info.st_mode & 0o022:
+                    # Sticky ancestors protect the trusted child checked on the next iteration.
+                    # Missing children are created exclusively and checked before any copy/launch.
+                    if not info.st_mode & stat.S_ISVTX or path == folder:
+                        raise OSError("the directory permits group or other accounts to replace its children")
+                if platform == "darwin":
+                    result = run_command(["/bin/ls", "-lde", str(path)], timeout=STATUS_TIMEOUT,
+                                         env=dict(os.environ, LC_ALL="C"))
+                    lines = result.stdout.splitlines()
+                    if (result.returncode != 0 or result.timed_out or result.stderr or not lines
+                            or not lines[0].split()
+                            or not re.fullmatch(r"d[rwxStTs-]{9}[@+]?", lines[0].split()[0])
+                            or ("+" in lines[0].split()[0]) != (len(lines) > 1)
+                            or any(not re.fullmatch(r"\s*\d+: \S+(?: inherited)? deny [a-z_,]+", line)
+                                   for line in lines[1:])):
+                        raise OSError("the directory ACL is unreadable or contains an access grant")
+                elif platform.startswith("linux"):
+                    for name in ("system.posix_acl_access", "system.posix_acl_default"):
+                        try:
+                            os.getxattr(path, name, follow_symlinks=False)
+                        except OSError as exc:
+                            if exc.errno not in (errno.ENODATA, errno.ENOTSUP):
+                                raise
+                        else:
+                            raise OSError("the directory has an unverified POSIX ACL")
+                else:
+                    raise OSError("directory ACL verification is unavailable on this platform")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise _permission_refused(f"{path}: {exc}") from exc
+
+
 def _verify_snapshot_permissions(folder: pathlib.Path, *, platform: str | None = None) -> None:
     platform = sys.platform if platform is None else platform
+    _verify_state_ancestry(folder.parent, platform=platform)
     if platform not in ("darwin", "win32"):
         return
+    path = folder
     try:
         if platform == "win32":
             sid = _windows_user_sid()
@@ -395,10 +493,11 @@ def _verify_snapshot_permissions(folder: pathlib.Path, *, platform: str | None =
             else:
                 flags = r"P(?:AI|AR)*" if path == folder else r"(?:P|AI|AR)*"
                 sddl = _windows_security_descriptor(path)
-                if not isinstance(sddl, str) or not re.fullmatch(rf"O:{trusted}D:{flags}(?:{ace})+", sddl):
+                owner = re.escape(sid) if stat.S_ISDIR(info.st_mode) else trusted
+                if not isinstance(sddl, str) or not re.fullmatch(rf"O:{owner}D:{flags}(?:{ace})+", sddl):
                     raise OSError("a snapshot owner or DACL is not restricted to your account and SYSTEM/Administrators")
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        raise _permission_refused(str(exc)) from exc
+        raise _permission_refused(f"{path}: {exc}") from exc
 
 
 @contextmanager
@@ -422,18 +521,21 @@ def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path
             info = repo_info(folder)
         state = state_dir(info, env)
     try:
-        state = state.resolve()
-        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Do not resolve away links before checking the components actually used by Node.
+        state = state.absolute()
+        _verify_state_ancestry(state)
+        _private_makedirs(state)
+        _verify_state_ancestry(state)
         copy = state / f"unlazy-{secrets.token_hex(16)}"
         _private_directory(copy)
         try:
             _strip_snapshot_acls(copy)
             _verify_snapshot_permissions(copy)
             if any(copy.iterdir()):
-                raise _permission_refused("the fresh snapshot is not empty")
+                raise _permission_refused(f"{copy}: the fresh snapshot is not empty")
             for relative in pin.files:
                 target = copy / relative
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                _private_makedirs(target.parent)
                 # Copy bytes, never symlinks, hard links, git metadata, or unpinned neighboring code.
                 with target.open("xb") as handle:
                     target.chmod(0o600)
@@ -446,6 +548,7 @@ def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path
                     or any(file_digest(copy / relative) != digest for relative, digest in pin.files.items())):
                 raise UnlazyError("OAH_UNLAZY_UNPINNED", "unlazy changed while being copied; install the pinned "
                                   f"copy and retry: {install_hint(folder, pin)}")
+            _verify_snapshot_permissions(copy)
             yield copy
         finally:
             shutil.rmtree(copy)
