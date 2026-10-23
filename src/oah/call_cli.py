@@ -245,7 +245,7 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path, *, 
         data = current
         while data.get("status") not in TERMINAL and time.monotonic() < deadline:
             # Let P3b check completion/liveness; the CLI owns all polling sleeps and the entry deadline.
-            data = call.wait(state, args.run_id, timeout=0)
+            data = call.wait(state, args.run_id, timeout=0, deadline=deadline)
             if data.get("status") not in TERMINAL:
                 time.sleep(min(0.2, max(deadline - time.monotonic(), 0.0)))
     if data.get("status") in TERMINAL:

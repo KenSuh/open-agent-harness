@@ -757,6 +757,144 @@ class WaitTest(unittest.TestCase):
                     self.assertEqual(sleeps, [])
                 self.assertIsNone(run.read()["launcher"])
 
+    def test_process_cli_wait_lost_result_lock_contention_stays_inside_the_deadline(self):
+        project = OrcaProject(self)
+        run = new_run(project.state, "t1", "codex", "review")
+        with subprocess.Popen([sys.executable, "-c", "pass"]) as gone:
+            gone.wait(timeout=10)
+        run.result(status="running", pid=gone.pid)
+        info = call_cli.repo_info(project.repo)
+        clock = StubOrca()
+
+        def locate(cwd, deadline):
+            clock.now += 0.75
+            return info
+
+        def sleep(seconds):
+            clock.now += seconds
+
+        script = '''import pathlib, sys
+from oah.lockfile import StateLock
+with StateLock(pathlib.Path(sys.argv[1])):
+    print("locked", flush=True)
+    sys.stdin.read(1)
+'''
+        child = subprocess.Popen([sys.executable, "-c", script, str(project.state / ".lock")],
+                                 env=dict(project.env, PYTHONPATH=SRC), stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "locked")
+            with mock.patch.object(call_cli, "_wait_repo_info", side_effect=locate), \
+                    mock.patch.object(call.time, "monotonic", lambda: clock.now), \
+                    mock.patch.object(call.time, "sleep", side_effect=sleep):
+                code, out, err = project.cli("wait", run.id, "--timeout-seconds", "1.01", "--json")
+            self.assertEqual(code, 75, err)
+            self.assertEqual(json.loads(out)["status"], "running")
+            self.assertLessEqual(clock.now - 1000, 1.010001)
+            self.assertEqual(run.read()["status"], "running")
+        finally:
+            child.communicate("x", timeout=10)
+        code, out, err = project.cli("wait", run.id, "--timeout-seconds", "10", "--json")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(json.loads(out)["status"], "lost")
+        self.assertTrue(run.read()["error"].startswith("OAH_RUN_LOST"))
+
+    def test_process_cli_wait_storage_retries_stay_inside_the_deadline(self):
+        for target in ("poll-read", "lost-read", "result.json"):
+            with self.subTest(target=target):
+                project = OrcaProject(self)
+                run = new_run(project.state, "t1", "codex", "review")
+                with subprocess.Popen([sys.executable, "-c", "pass"]) as gone:
+                    gone.wait(timeout=10)
+                run.result(status="running", pid=os.getpid() if target == "poll-read" else gone.pid)
+                result_path = run.result_path
+                before = result_path.read_bytes()
+                info = call_cli.repo_info(project.repo)
+                clock = StubOrca()
+                original_read, original_replace = pathlib.Path.read_bytes, os.replace
+                reads = attempts = 0
+
+                def locate(cwd, deadline):
+                    clock.now += 0.75
+                    return info
+
+                def read_bytes(path):
+                    nonlocal reads, attempts
+                    if path == result_path:
+                        reads += 1
+                        if (target == "poll-read" and reads > 1) or (target == "lost-read" and reads > 2):
+                            attempts += 1
+                            raise PermissionError("busy")
+                    return original_read(path)
+
+                def replace(source, destination, *args, **kwargs):
+                    nonlocal attempts
+                    if target == "result.json" and pathlib.Path(destination) == result_path:
+                        attempts += 1
+                        raise PermissionError("busy")
+                    return original_replace(source, destination, *args, **kwargs)
+
+                def sleep(seconds):
+                    clock.now += seconds
+
+                with mock.patch.object(call_cli, "_wait_repo_info", side_effect=locate), \
+                        mock.patch.object(call.time, "monotonic", lambda: clock.now), \
+                        mock.patch.object(call.time, "sleep", side_effect=sleep), \
+                        mock.patch.object(pathlib.Path, "read_bytes", read_bytes), \
+                        mock.patch.object(os, "replace", side_effect=replace):
+                    code, _, err = project.cli("wait", run.id, "--timeout-seconds", "1.01", "--json")
+                self.assertEqual(code, 75, err)
+                self.assertGreater(attempts, 1)
+                self.assertLessEqual(clock.now - 1000, 1.010001)
+                self.assertEqual(result_path.read_bytes(), before)
+
+    def test_process_wait_bounds_polling_by_the_shared_deadline(self):
+        for timeout, budget in ((1.0, 0.1), (0.1, 1.0)):
+            with self.subTest(timeout=timeout, budget=budget):
+                state = make_tmp_dir(self)
+                run = new_run(state, "t1", "codex", "review")
+                before = run.result(status="running", pid=os.getpid())
+                clock = StubOrca()
+                sleeps = []
+
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    clock.now += seconds
+
+                with mock.patch.object(call.time, "monotonic", lambda: clock.now), \
+                        mock.patch.object(call.time, "sleep", side_effect=sleep):
+                    data = call.wait(state, run.id, timeout=timeout, poll=10, deadline=clock.now + budget)
+                self.assertEqual(data, before)
+                self.assertEqual(len(sleeps), 1)
+                self.assertAlmostEqual(sleeps[0], min(timeout, budget))
+                self.assertLessEqual(clock.now - 1000, min(timeout, budget) + 0.000001)
+
+    def test_process_wait_without_a_deadline_keeps_its_storage_retry_budget(self):
+        state = make_tmp_dir(self)
+        run = new_run(state, "t1", "codex", "review")
+        before = run.result(status="running", pid=os.getpid())
+        clock = StubOrca()
+        original_read = pathlib.Path.read_bytes
+        reads = 0
+
+        def read_bytes(path):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                raise PermissionError("busy")
+            return original_read(path)
+
+        def sleep(seconds):
+            clock.now += seconds
+
+        with mock.patch.object(call.time, "monotonic", lambda: clock.now), \
+                mock.patch.object(call.time, "sleep", side_effect=sleep), \
+                mock.patch.object(pathlib.Path, "read_bytes", read_bytes):
+            data = call.wait(state, run.id, timeout=0)
+        self.assertEqual(data, before)
+        self.assertEqual(reads, 2)
+        self.assertGreater(clock.now, 1000)
+
     def test_orca_wait_state_lock_contention_stays_inside_the_deadline(self):
         for mode in ("cursor", "exited", "missing"):
             with self.subTest(mode=mode):

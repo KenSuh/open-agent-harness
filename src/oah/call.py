@@ -32,7 +32,7 @@ import sys
 import time
 from typing import Callable, Mapping, Sequence
 
-from oah import briefs, models, routing, runs
+from oah import briefs, launchers, models, routing, runs
 from oah.engines import claude, codex
 from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_rules, verify_inference
 from oah.engines.proc import run_command
@@ -681,21 +681,34 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def wait(state_dir: pathlib.Path, run_id: str, *, timeout: float = WAIT_LIMIT_S, poll: float = 0.2) -> dict:
-    """The run's record once it ends, or the current record after at most `timeout` (capped at 9 minutes)."""
-    run = runs.find_run(state_dir, run_id)
-    deadline = time.monotonic() + min(max(timeout, 0.0), WAIT_LIMIT_S)
-    while True:
-        data = run.read()
-        if data.get("status") in runs.TERMINAL:
-            return data
-        pid = data.get("pid")
-        if data.get("status") in ("queued", "running") and isinstance(pid, int) and not _alive(pid):
+def wait(state_dir: pathlib.Path, run_id: str, *, timeout: float = WAIT_LIMIT_S, poll: float = 0.2,
+         deadline: float | None = None) -> dict:
+    """The final or current record after `timeout` (capped at 9 minutes).
+
+    An optional entry deadline also bounds storage retries and lost-result publication, even when
+    timeout is zero. Without it, storage keeps its existing retry budgets.
+    """
+    run = runs.find_run(state_dir, run_id, deadline=deadline)
+    stop = time.monotonic() + min(max(timeout, 0.0), WAIT_LIMIT_S)
+    if deadline is not None:
+        stop = min(stop, deadline)
+    data = None
+    try:
+        while True:
             data = run.read()
-            if data.get("status") not in runs.TERMINAL:
-                return run.result(status="lost", error=f"OAH_RUN_LOST: the runner (pid {pid}) exited without "
-                                  "recording a result; read the run's logs and call the engine again")
-            return data
-        if time.monotonic() >= deadline:
-            return data
-        time.sleep(poll)
+            if data.get("status") in runs.TERMINAL:
+                return data
+            pid = data.get("pid")
+            if data.get("status") in ("queued", "running") and isinstance(pid, int) and not _alive(pid):
+                data = run.read()
+                if data.get("status") not in runs.TERMINAL:
+                    return run.result(status="lost", error=f"OAH_RUN_LOST: the runner (pid {pid}) exited without "
+                                      "recording a result; read the run's logs and call the engine again")
+                return data
+            if time.monotonic() >= stop:
+                return data
+            time.sleep(poll if deadline is None else min(poll, max(stop - time.monotonic(), 0.0)))
+    except launchers.DeadlineExpired:
+        if data is None:
+            raise
+        return data  # Leave lost-result publication for the next wait when the budget expires.
