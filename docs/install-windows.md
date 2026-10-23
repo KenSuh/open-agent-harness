@@ -11,7 +11,7 @@ There are two ways. Both run the same installer and ask the same questions.
 `git --version` fails, run `winget install --id Git.Git -e` and open a new PowerShell window. Then:
 
 ```powershell
-git clone <repository URL> open-agent-harness
+git clone https://github.com/KenSuh/open-agent-harness.git
 cd open-agent-harness
 powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 ```
@@ -22,15 +22,18 @@ run `Unblock-File .\install\install.ps1` once and then start it under your norma
 **With one command (once a release is published).** No clone and no Git needed:
 
 ```powershell
-irm <release URL>/install.ps1 | iex
+irm https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.ps1 | iex
 ```
+
+Replace `<version>` with the release you want, as listed on the releases page
+(https://github.com/KenSuh/open-agent-harness/releases).
 
 This form downloads the pinned release archive, checks its SHA-256 fingerprint against the one
 published with the release, and stops before unpacking anything if they differ
 (`OAH_INSTALL_DIGEST_MISMATCH`). Everything it unpacks goes to a temporary folder that is removed at
 the end, and your PowerShell window stays open whatever happens. Until a release is published it
 stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then. To pass options this way, use
-`& ([scriptblock]::Create((irm <release URL>/install.ps1))) -DryRun`.
+`& ([scriptblock]::Create((irm https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.ps1))) -DryRun`.
 
 ## 2. What the installer does
 

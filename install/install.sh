@@ -2,7 +2,8 @@
 # open-agent-harness installer for macOS. Two ways to run it:
 #
 #   bash install/install.sh [--yes] [--dry-run] [--skip-tools]     (from a clone)
-#   curl -fsSL <release URL>/install.sh | bash -s -- [options]      (no clone, no git needed)
+#   curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash -s -- [options]
+#                                                                    (no clone, no git needed)
 #
 # Outside a clone it downloads the pinned release archive below, checks its SHA-256 before
 # unpacking it, and continues from there. It then finds Python 3.11+ (offering uv when it is
@@ -11,9 +12,11 @@
 # It never edits a shell profile without asking first. Written for bash 3.2, the version macOS ships.
 # The whole script is one function, so a piped download runs only once it has fully arrived.
 
-# ---- Release pin: the owner fills these in when a release is published. ----------------------
-RELEASE_URL='__OAH_RELEASE_URL__'        # the release's .tar.gz archive
-RELEASE_SHA256='__OAH_RELEASE_SHA256__'  # its SHA-256, as published with the release
+# ---- Release pin: the owner fills in the version and digest when a release is published. -----
+RELEASE_VERSION='__OAH_RELEASE_VERSION__'  # the release tag
+RELEASE_SHA256='__OAH_RELEASE_SHA256__'    # SHA-256 of the .tar.gz below, as published with the release
+REPOSITORY='https://github.com/KenSuh/open-agent-harness'
+RELEASE_URL="$REPOSITORY/releases/download/$RELEASE_VERSION/open-agent-harness-$RELEASE_VERSION.tar.gz"
 # ------------------------------------------------------------------------------------------------
 
 SCRIPT_PATH="${BASH_SOURCE[0]:-}"
@@ -32,7 +35,7 @@ SKIP_TOOLS=0
 usage() {
   cat <<'EOF'
 Usage: bash install/install.sh [--yes] [--dry-run] [--skip-tools]
-   or: curl -fsSL <release URL>/install.sh | bash -s -- [options]
+   or: curl -fsSL <repository>/releases/download/<version>/install.sh | bash -s -- [options]
 
 Installs oah, after checking the tools it uses.
   --yes         install missing tools without asking about each one
@@ -218,7 +221,10 @@ if [ -z "$REPO" ]; then
   case "$url$digest" in
     *__OAH_RELEASE_*)
       fail "OAH_INSTALL_NOT_PUBLISHED: no release has been published yet, so there is nothing to download.
-Clone the repository instead (it needs git: xcode-select --install), then run: bash install/install.sh" ;;
+Clone the repository instead. It needs git (xcode-select --install installs it):
+    git clone $REPOSITORY.git
+    cd open-agent-harness
+    bash install/install.sh" ;;
   esac
   WORK=$(mktemp -d "${TMPDIR:-/tmp}/oah-install.XXXXXX") || fail "OAH_INSTALL_FAILED: cannot create a temporary folder."
   trap 'rm -rf "$WORK"' EXIT

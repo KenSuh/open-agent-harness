@@ -209,8 +209,11 @@ exit 0''')
         self.assertTrue(source.startswith("#!/bin/bash\n"))
         # Piped downloads run only once complete: everything is inside main(), called on the last line.
         self.assertEqual(source.rstrip().splitlines()[-1], 'main "$@"')
-        self.assertIn("RELEASE_URL='__OAH_RELEASE_URL__'", source)
+        # Only the release version and its digest are placeholders; the repository path is real.
+        self.assertIn("RELEASE_VERSION='__OAH_RELEASE_VERSION__'", source)
         self.assertIn("RELEASE_SHA256='__OAH_RELEASE_SHA256__'", source)
+        self.assertIn('RELEASE_URL="$REPOSITORY/releases/download/$RELEASE_VERSION/'
+                      'open-agent-harness-$RELEASE_VERSION.tar.gz"', source)
         result = subprocess.run([BASH, "-n", str(INSTALL_SH)], capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -371,6 +374,20 @@ class InstallPs1Test(unittest.TestCase):
         self.assertIn(f"'{display(uv.install['macos'][0])}'", INSTALL_SH.read_text(encoding="utf-8"))
         self.assertIn(f"'{display(uv.install['windows'][0])}'", INSTALL_PS1.read_text(encoding="ascii"))
 
+    def test_scripts_and_guides_use_one_repository_url(self):
+        repository = re.search(r"^REPOSITORY='(https://github\.com/[^/']+/open-agent-harness)'$",
+                               INSTALL_SH.read_text(encoding="utf-8"), re.M).group(1)
+        self.assertIn(f"$Repository = '{repository}'", INSTALL_PS1.read_text(encoding="ascii"))
+        guides = {name: (ROOT / "docs" / name).read_text(encoding="utf-8")
+                  for name in ("install-macos.md", "install-windows.md", "ko/install-macos.md", "ko/install-windows.md")}
+        for name, text in guides.items():
+            with self.subTest(guide=name):
+                self.assertIn(f"git clone {repository}.git", text)
+                self.assertNotIn("<repository URL>", text)
+                self.assertNotIn("<저장소 주소>", text)
+                script = "install.ps1" if "windows" in name else "install.sh"
+                self.assertIn(f"{repository}/releases/download/<version>/{script}", text)
+
     def test_install_ps1_has_no_double_quotes_in_native_arguments(self):
         # Windows PowerShell 5.1 mangles embedded double quotes passed to native programs, so the
         # script keeps Python code and one-liners in single-quoted strings.
@@ -385,8 +402,9 @@ class InstallPs1Test(unittest.TestCase):
         exits = [line for line in lines if re.search(r"\bexit\b", line) and not line.startswith("#")]
         self.assertEqual(exits, ["if ($OahScriptRoot) { exit $OahExitCode }"])
         self.assertIn("throw 'OAH_INSTALL_FAILED'", lines)
-        self.assertIn("$ReleaseUrl = '__OAH_RELEASE_URL__'        # the release's .zip archive", lines)
-        self.assertIn("$ReleaseSha256 = '__OAH_RELEASE_SHA256__'  # its SHA-256, as published with the release", lines)
+        self.assertIn("$ReleaseVersion = '__OAH_RELEASE_VERSION__'  # the release tag", lines)
+        self.assertIn('$ReleaseUrl = "$Repository/releases/download/$ReleaseVersion/'
+                      'open-agent-harness-$ReleaseVersion.zip"', lines)
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_piped_dry_run_verifies_the_release(self):

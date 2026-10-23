@@ -11,7 +11,7 @@ There are two ways. Both run the same installer and ask the same questions.
 `git --version` fails, run `xcode-select --install` and finish the window that opens. Then:
 
 ```bash
-git clone <repository URL> open-agent-harness
+git clone https://github.com/KenSuh/open-agent-harness.git
 cd open-agent-harness
 bash install/install.sh
 ```
@@ -19,15 +19,18 @@ bash install/install.sh
 **With one command (once a release is published).** No clone and no `git` needed:
 
 ```bash
-curl -fsSL <release URL>/install.sh | bash
+curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash
 ```
+
+Replace `<version>` with the release you want, as listed on the releases page
+(https://github.com/KenSuh/open-agent-harness/releases).
 
 This form downloads the pinned release archive, checks its SHA-256 fingerprint against the one
 published with the release, and stops before unpacking anything if they differ
 (`OAH_INSTALL_DIGEST_MISMATCH`). Everything it unpacks goes to a temporary folder that is removed at
 the end. Until a release is published it stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then.
 To pass options this way, write them after `bash -s --`, for example
-`curl -fsSL <release URL>/install.sh | bash -s -- --dry-run`.
+`curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash -s -- --dry-run`.
 
 ## 2. What the installer does
 

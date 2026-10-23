@@ -1,8 +1,8 @@
 # open-agent-harness installer for Windows. Two ways to run it:
 #
 #   powershell -ExecutionPolicy Bypass -File .\install\install.ps1 [-Yes] [-DryRun] [-SkipTools]   (from a clone)
-#   irm <release URL>/install.ps1 | iex                                                            (no clone, no git needed)
-#   & ([scriptblock]::Create((irm <release URL>/install.ps1))) -DryRun                              (piped, with options)
+#   irm https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.ps1 | iex                (no clone, no git needed)
+#   & ([scriptblock]::Create((irm <same URL>))) -DryRun                                            (piped, with options)
 #
 # Outside a clone it downloads the pinned release archive below, checks its SHA-256 before
 # unpacking it, and continues from there. It then finds Python 3.11+ (offering uv when it is
@@ -22,9 +22,11 @@ param(
     [switch]$Help
 )
 
-# ---- Release pin: the owner fills these in when a release is published. ----------------------
-$ReleaseUrl = '__OAH_RELEASE_URL__'        # the release's .zip archive
-$ReleaseSha256 = '__OAH_RELEASE_SHA256__'  # its SHA-256, as published with the release
+# ---- Release pin: the owner fills in the version and digest when a release is published. -----
+$ReleaseVersion = '__OAH_RELEASE_VERSION__'  # the release tag
+$ReleaseSha256 = '__OAH_RELEASE_SHA256__'    # SHA-256 of the .zip below, as published with the release
+$Repository = 'https://github.com/KenSuh/open-agent-harness'
+$ReleaseUrl = "$Repository/releases/download/$ReleaseVersion/open-agent-harness-$ReleaseVersion.zip"
 # ------------------------------------------------------------------------------------------------
 
 $OahScriptRoot = $PSScriptRoot  # empty when the script arrives through irm | iex
@@ -43,7 +45,7 @@ function Say([string]$Text) {
 
 function Show-Usage {
     Say 'Usage: powershell -ExecutionPolicy Bypass -File .\install\install.ps1 [-Yes] [-DryRun] [-SkipTools]'
-    Say '   or: & ([scriptblock]::Create((irm <release URL>/install.ps1))) [-Yes] [-DryRun] [-SkipTools]'
+    Say '   or: & ([scriptblock]::Create((irm <repository>/releases/download/<version>/install.ps1))) [-Yes] [-DryRun] [-SkipTools]'
     Say ''
     Say 'Installs oah, after checking the tools it uses.'
     Say '  -Yes        install missing tools without asking about each one'
@@ -223,8 +225,9 @@ function Get-Release {
     $digest = if ($env:OAH_RELEASE_SHA256) { $env:OAH_RELEASE_SHA256 } else { $ReleaseSha256 }
     if (($url + $digest) -like '*__OAH_RELEASE_*') {
         Fail ("OAH_INSTALL_NOT_PUBLISHED: no release has been published yet, so there is nothing to download.`r`n" +
-              'Clone the repository instead (it needs git: winget install --id Git.Git -e), then run: ' +
-              'powershell -ExecutionPolicy Bypass -File .\install\install.ps1')
+              "Clone the repository instead. It needs git (winget install --id Git.Git -e installs it):`r`n" +
+              "    git clone $Repository.git`r`n    cd open-agent-harness`r`n" +
+              '    powershell -ExecutionPolicy Bypass -File .\install\install.ps1')
     }
     $script:OahWork = Join-Path ([IO.Path]::GetTempPath()) ('oah-install-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:OahWork | Out-Null
