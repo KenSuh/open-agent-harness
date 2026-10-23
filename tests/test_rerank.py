@@ -311,7 +311,7 @@ class AdviceTest(unittest.TestCase):
             with self.subTest(config=text), contextlib.chdir(nested), \
                     mock.patch.dict(os.environ, self.env), \
                     mock.patch("oah.secrets.get", side_effect=AssertionError("disabled advice read a key")):
-                advice = rerank.advise_difficulty(axes, "add a flag")
+                advice = rerank.advise_difficulty(axes, "add a flag", root=root)
                 self.assertEqual(advice.status, "unused(not-configured)")
                 self.assertEqual(advice.tier, routing.recommend(axes).tier)
                 self.assertIsNone(advice.advisory_tier)
@@ -327,7 +327,7 @@ class AdviceTest(unittest.TestCase):
         self.provider.advice_answer = ("low", 0.7)
         with contextlib.chdir(nested), mock.patch.dict(os.environ, self.env), \
                 mock.patch.dict(rerank.PROVIDERS, {"fake": self.provider}):
-            advice = rerank.advise_difficulty(axes, "add a flag")
+            advice = rerank.advise_difficulty(axes, "add a flag", root=root)
         self.assertEqual(advice.status, "used")
         self.assertEqual(advice.tier, routing.recommend(axes).tier)
         self.assertEqual((advice.advisory_tier, advice.confidence), ("low", 0.7))
@@ -341,6 +341,32 @@ class AdviceTest(unittest.TestCase):
             advice = rerank.advise_difficulty(axes, "add a flag", config={}, env={}, keychain=NoKeychain())
         self.assertEqual(advice.status, "unused(not-enabled)")
         self.assertEqual(advice.tier, routing.recommend(axes).tier)
+
+    def test_explicit_root_loads_rerank_settings_outside_repository(self) -> None:
+        root = make_git_repo(self)
+        (root / ".oah").mkdir()
+        (root / ".oah" / "config.toml").write_text(
+            '[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        axes = routing.Axes("review", "low", "medium", "normal")
+        with contextlib.chdir(make_tmp_dir(self)):
+            advice = rerank.advise_difficulty(axes, "add a flag", root=root, env=self.env,
+                                            keychain=NoKeychain(), providers={"fake": self.provider})
+        self.assertEqual(advice.status, "used")
+        self.assertEqual(advice.tier, routing.recommend(axes).tier)
+        self.assertEqual(advice.advisory_tier, "high")
+        self.assertEqual(len(self.provider.calls), 1)
+
+    def test_advice_without_config_or_root_ignores_current_repository(self) -> None:
+        root = make_git_repo(self)
+        (root / ".oah").mkdir()
+        (root / ".oah" / "config.toml").write_text(
+            '[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        axes = routing.Axes("review", "low", "medium", "normal")
+        with contextlib.chdir(root), \
+                mock.patch("oah.secrets.get", side_effect=AssertionError("unconfigured advice read a key")):
+            advice = rerank.advise_difficulty(axes, "add a flag", providers={"fake": self.provider})
+        self.assertEqual(advice.status, "unused(not-configured)")
+        self.assertEqual(self.provider.calls, [])
 
 
 class FakeServer:

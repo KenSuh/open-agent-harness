@@ -16,8 +16,8 @@ A provider only scores or advises. `rerank` builds the order itself, so the resu
 permutation of the input: no row is dropped, added or duplicated. Rows beyond `max_candidates` are
 not sent and keep their place after the re-ordered ones. `advise_difficulty` records the provider's
 tier next to the rule tier and never changes it: `Advice.tier` is the rule tier.
-For `oah call`, `advise_difficulty(axes, task)` accepts `routing.Axes` and loads the current
-repository's re-ranker config; a disabled re-ranker reports `unused(not-configured)` at this seam.
+For `oah call`, `advise_difficulty(axes, task, root=root)` accepts `routing.Axes` and loads the launch
+target's re-ranker config; a disabled re-ranker reports `unused(not-configured)` at this seam.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
-from oah import paths, routing, secrets
+from oah import routing, secrets
 from oah.config import load_config
 from oah.rerank.base import (TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
                              _classify_failure, _raise_if_interrupted)
@@ -218,12 +218,12 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
 
 
 def advise_difficulty(axes: Mapping[str, str] | routing.Axes, task: str, *, config: Mapping | None = None,
-                      brief_disabled: bool = False,
+                      root: pathlib.Path | None = None, brief_disabled: bool = False,
                       env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
                       providers: Mapping[str, Provider] | None = None) -> Advice:
     """Record advice beside the rule tier, from routing.Axes or axes["tier"], without changing it.
 
-    Omitted config loads the current repository's [rerank] section for the `oah call` seam.
+    Omitted config loads root's [rerank] section for `oah call`; without root it uses disabled defaults.
     """
     provider = key = answer = confidence = failure = None
     try:
@@ -234,7 +234,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, task: str, *, conf
             raise ValueError(f"advise_difficulty needs axes['tier'] set to one of {', '.join(TIERS)}")
         implicit_config = config is None
         if implicit_config:
-            config = load_config(paths.repo_info(pathlib.Path.cwd()).root).section("rerank", DEFAULTS)
+            config = load_config(root).section("rerank", DEFAULTS) if root is not None else DEFAULTS
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
                                       providers=providers)
         env = keychain = providers = None
@@ -253,7 +253,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, task: str, *, conf
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
         failure = _classify_failure(exc)
     finally:
-        del axes, task, config, brief_disabled, env, keychain, providers, provider, key, answer, confidence
+        del axes, task, config, root, brief_disabled, env, keychain, providers, provider, key, answer, confidence
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None

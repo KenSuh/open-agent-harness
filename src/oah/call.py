@@ -361,18 +361,18 @@ class Prepared:
         return cls(**fields)
 
 
-def _advise(axes: routing.Axes, task: str) -> str:
+def _advise(axes: routing.Axes, task: str, *, root: pathlib.Path) -> str:
     """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
     try:
         rerank = importlib.import_module("oah.rerank")
     except ImportError:
         return "unused(not-configured)"
     try:
-        advice = rerank.advise_difficulty(axes, task)
+        advice = rerank.advise_difficulty(axes, task, root=root)
     except Exception as exc:  # a plugin failure must never block a launch
         return f"unused(error: {type(exc).__name__})"
     status = str(getattr(advice, "status", "unused(no status)"))
-    tier = getattr(advice, "tier", None)
+    tier = getattr(advice, "advisory_tier", None)
     return f"{status} tier={tier}" if status == "used" and tier else status
 
 
@@ -428,7 +428,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
-        advisory = _advise(axes, request.task)
+        advisory = _advise(axes, request.task, root=root)
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
                                 refresh=request.refresh_models, now=now)
     warnings.extend(resolution.warnings)

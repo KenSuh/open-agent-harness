@@ -10,6 +10,7 @@ import io
 import json
 import os
 import pathlib
+import secrets as token_source
 import subprocess
 import sys
 import time
@@ -18,7 +19,7 @@ import unittest
 from collections import namedtuple
 from unittest import mock
 
-from oah import call, call_cli
+from oah import call, call_cli, rerank
 from oah.briefs import VERIFY_FOOTER, VERIFY_MARKER, BriefError, raw_section
 from oah.engines.effort import EngineError
 from oah.lease import Store
@@ -319,21 +320,39 @@ class RoutingTest(unittest.TestCase):
     def test_advice_never_changes_tier(self):
         project = Project(self)
         for status, tier in (("used", "max"), ("used", "low")):
-            advice = types.SimpleNamespace(status=status, tier=tier)
-            module = types.SimpleNamespace(advise_difficulty=lambda axes, task, advice=advice: advice)
+            advice = types.SimpleNamespace(status=status, advisory_tier=tier)
+            module = types.SimpleNamespace(advise_difficulty=lambda axes, task, *, root, advice=advice: advice)
             with mock.patch.dict(sys.modules, {"oah.rerank": module}):
                 data = project.run(stage="review")
             self.assertEqual((data["tier"], data["advisory"]), ("medium", f"used tier={tier}"))
 
-        def broken(axes, task):
+        def broken(axes, task, *, root):
             raise RuntimeError("provider down")
 
         with mock.patch.dict(sys.modules, {"oah.rerank": types.SimpleNamespace(advise_difficulty=broken)}):
             data = project.run(stage="review")
         self.assertEqual((data["tier"], data["advisory"]), ("medium", "unused(error: RuntimeError)"))
-        no_key = types.SimpleNamespace(advise_difficulty=lambda axes, task: types.SimpleNamespace(status="unused(no key)"))
+        no_key = types.SimpleNamespace(
+            advise_difficulty=lambda axes, task, *, root: types.SimpleNamespace(status="unused(no key)"))
         with mock.patch.dict(sys.modules, {"oah.rerank": no_key}):
             self.assertEqual(project.run(stage="review")["advisory"], "unused(no key)")
+
+    def test_real_advice_records_provider_tier_without_changing_launch_tier(self):
+        project = Project(self, '[rerank]\nenabled = true\nprovider = "fake"\n')
+        provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
+                                         advise=mock.Mock())
+        with contextlib.chdir(project.repo), \
+                mock.patch.dict(os.environ, {"FAKE_RERANK_KEY": "fake-" + token_source.token_hex(16)}), \
+                mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
+            for tier in ("max", "low"):
+                with self.subTest(advisory_tier=tier):
+                    provider.advise.reset_mock()
+                    provider.advise.return_value = (tier, 0.8)
+                    data = project.run(stage="review")
+                    self.assertEqual((data["tier"], data["tier_source"], data["advisory"]),
+                                     ("medium", "rules", f"used tier={tier}"))
+                    self.assertEqual(data["launch_effort"], "medium")
+                    provider.advise.assert_called_once()
 
     def test_fresh_install_refuses_before_launch(self):
         project = Project(self)
@@ -485,6 +504,31 @@ class WorktreeSelectorTest(unittest.TestCase):
         self.first, self.second = base / "a" / "wt", base / "b" / "wt"
         add_worktree(self.project.repo, self.first, "lane-x")
         add_worktree(self.project.repo, self.second, "lane-y")
+
+    def test_advice_uses_target_worktree_rerank_settings(self):
+        config = (self.project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
+        self.project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
+        provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
+                                         advise=mock.Mock(return_value=("medium", 0.8)))
+        for invoking_enabled, target_enabled in ((True, False), (False, True)):
+            with self.subTest(invoking_enabled=invoking_enabled, target_enabled=target_enabled):
+                for root, enabled in ((self.project.repo, invoking_enabled), (self.first, target_enabled)):
+                    (root / ".oah" / "config.toml").write_text(
+                        config + f'[rerank]\nenabled = {str(enabled).lower()}\nprovider = "fake"\n',
+                        encoding="utf-8")
+                provider.advise.reset_mock()
+                with mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
+                    code, out, err = run_cli(self.project, "call", "codex", "--stage", "review", "--task", "t1",
+                                             "--worktree", str(self.first), "--json")
+                self.assertEqual(code, 0, err)
+                data = json.loads(out)
+                self.assertEqual((data["tier"], data["advisory"]),
+                                 ("medium", "used tier=medium" if target_enabled else "unused(not-configured)"))
+                self.assertEqual(pathlib.Path(self.project.recorded()["cwd"]).resolve(), self.first.resolve())
+                if target_enabled:
+                    provider.advise.assert_called_once()
+                else:
+                    provider.advise.assert_not_called()
 
     def test_ambiguous_selector_refused_before_launch(self):
         code, _, err = run_cli(self.project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
