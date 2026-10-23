@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20" role="img" aria-label="macOS: 13+">
+  <title>macOS: 13+</title>
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+    <stop offset="1" stop-opacity=".1"/>
+  </linearGradient>
+  <clipPath id="r"><rect width="80" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="50" height="20" fill="#555"/>
+    <rect x="50" width="30" height="20" fill="#333333"/>
+    <rect width="80" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana, Geneva, DejaVu Sans, sans-serif" font-size="11">
+    <text x="25" y="15" fill="#010101" fill-opacity=".3" textLength="38" lengthAdjust="spacingAndGlyphs">macOS</text>
+    <text x="25" y="14" textLength="38" lengthAdjust="spacingAndGlyphs">macOS</text>
+    <text x="65" y="15" fill="#010101" fill-opacity=".3" textLength="18" lengthAdjust="spacingAndGlyphs">13+</text>
+    <text x="65" y="14" textLength="18" lengthAdjust="spacingAndGlyphs">13+</text>
+  </g>
+</svg>
