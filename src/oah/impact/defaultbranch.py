@@ -105,9 +105,10 @@ def _network_git(root: pathlib.Path, *args: str, timeout: float):
 
 def _generation_run(mirror: pathlib.Path, argv, *, timeout: float, env=None, encoding="utf-8", stdin_text=None):
     """A separate owner keeps the generation leased until Git and its descendants have stopped."""
+    cancel = mirror / ("oah-cancel-" + uuid.uuid4().hex)
     code = (f"import sys; sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parents[2])!r}); "
             "from oah.impact.defaultbranch import _generation_worker; _generation_worker()")
-    command = (sys.executable, "-c", code, str(mirror), str(os.getpid()), str(timeout), encoding, *argv)
+    command = (sys.executable, "-c", code, str(mirror), str(os.getpid()), str(timeout), encoding, str(cancel), *argv)
     try:
         result = run_command(command, timeout=timeout + 2 * REAP_SECONDS + 1, env=env, stdin_text=stdin_text,
                              encoding=encoding)
@@ -115,7 +116,7 @@ def _generation_run(mirror: pathlib.Path, argv, *, timeout: float, env=None, enc
         # run_command's POSIX session survives KeyboardInterrupt. Ask its owner to stop and reap Git
         # before releasing our mirror lock; a hard parent exit is detected by the owner itself.
         try:
-            (mirror / "oah-cancel").touch()
+            cancel.touch()
         except OSError:
             pass
         try:
@@ -123,6 +124,7 @@ def _generation_run(mirror: pathlib.Path, argv, *, timeout: float, env=None, enc
                 pass
         except (OSError, LockTimeout):
             pass  # A still-leased generation is retained and blocks allocation on the next query.
+        # Only this command's owner may clear cancellation: it may not have acquired its lease yet.
         raise
     if result.timed_out or result.returncode != 0:
         return RunResult(None, "", "", result.timed_out)
@@ -135,18 +137,24 @@ def _generation_run(mirror: pathlib.Path, argv, *, timeout: float, env=None, enc
 def _generation_worker() -> None:
     """Private subprocess entry point. Never print exceptions or a command containing a remote URL."""
     mirror, parent, timeout, encoding = pathlib.Path(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+    cancel = pathlib.Path(sys.argv[5])
     result = RunResult(None, "", "", False)
     try:
         with StateLock(mirror.with_suffix(".lock"), timeout=REAP_SECONDS) as lease:
             if mirror.is_dir() and not _linked(mirror) and not (mirror / "oah-retired").exists():
-                result = _owned_command(mirror, parent, sys.argv[5:], timeout, encoding, lease._fd)
+                result = _owned_command(mirror, parent, sys.argv[6:], timeout, encoding, lease._fd, cancel)
     except BaseException:
         pass
+    finally:
+        try:
+            cancel.unlink(missing_ok=True)
+        except OSError:
+            pass
     print(json.dumps(result.__dict__))
 
 
 def _owned_command(mirror: pathlib.Path, parent: int, argv: list[str], timeout: float, encoding: str,
-                   lease_fd: int) -> RunResult:
+                   lease_fd: int, cancel: pathlib.Path) -> RunResult:
     data = sys.stdin.buffer.read()
     job = _WindowsJob() if os.name == "nt" else None
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x4} if job else {"start_new_session": True}
@@ -154,7 +162,7 @@ def _owned_command(mirror: pathlib.Path, parent: int, argv: list[str], timeout: 
         options["pass_fds"] = (lease_fd,)  # Keep the lease even if the owner itself is killed.
     proc = None
     try:
-        if os.getppid() != parent or (mirror / "oah-cancel").exists():
+        if os.getppid() != parent or cancel.exists():
             return RunResult(None, "", "", False)
         proc = subprocess.Popen(argv, stdin=subprocess.PIPE if data else subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
@@ -164,7 +172,7 @@ def _owned_command(mirror: pathlib.Path, parent: int, argv: list[str], timeout: 
         first = True
         while True:
             expired = time.monotonic() >= deadline
-            if expired or os.getppid() != parent or (mirror / "oah-cancel").exists():
+            if expired or os.getppid() != parent or cancel.exists():
                 kill_tree(proc)
                 proc.communicate(timeout=REAP_SECONDS)
                 return RunResult(None, "", "", expired)

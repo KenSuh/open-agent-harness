@@ -521,6 +521,74 @@ with StateLock(pathlib.Path(sys.argv[1])):
         self.assertFalse(pending.exists())
         self.assertTrue(current.exists())
 
+    def test_interrupted_published_generation_read_keeps_offline_searches(self):
+        git_commit(self.fx.lane, {"tools/future.py": "print('new in the lane')\n"})
+        expected = self.fx.advance({**RELEASE,
+            ".github/workflows/lane-check.yml": "steps:\n  - run: python tools/future.py\n"})
+        saved = run_impact(self.fx.lane, "tools/check.py", "--json")
+        self.assertEqual(saved.returncode, 0, saved.stderr)
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        pointer = (mirror.parent / "current.json").read_bytes()
+        recorded = self.fx.map_files()[0].read_bytes()
+        absent = subprocess.run(["git", "-C", str(self.fx.lane), "cat-file", "-e", expected],
+                                capture_output=True, env=git_env())
+        self.assertNotEqual(absent.returncode, 0, "only the published generation has the fetched commit")
+        ready, release = self.fx.tmp / "read-ready", self.fx.tmp / "release-read"
+        # Keep the owner delayed beyond the interrupt handler's lease wait. Removing cancellation
+        # merely because that wait expired would allow this interrupted command to run later.
+        code = f'''
+import pathlib, sys, time
+sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parent.parent / "src")!r})
+from oah.impact import defaultbranch
+original = defaultbranch._owned_command
+def delayed(*args, **kwargs):
+    pathlib.Path({str(ready)!r}).touch()
+    deadline = time.monotonic() + 30
+    while not pathlib.Path({str(release)!r}).exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("release the paused read and retry")
+        time.sleep(0.01)
+    return original(*args, **kwargs)
+defaultbranch._owned_command = delayed
+defaultbranch._generation_worker()
+'''
+        owners = []
+
+        def interrupt(argv, **kwargs):
+            command = list(argv)
+            command[2] = code
+            owner = subprocess.Popen(command, env=kwargs.get("env"), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            owners.append(owner)
+            deadline = time.monotonic() + 10
+            while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "the read owner must hold the generation lease")
+            raise KeyboardInterrupt
+
+        try:
+            with patch("oah.impact.defaultbranch.run_command", side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    mapstore.resolve_rev(mirror, expected)
+        finally:
+            release.touch()
+            for owner in owners:
+                out, err = owner.communicate(timeout=15)
+                self.assertEqual(owner.returncode, 0, err)
+                self.assertIsNone(json.loads(out)["returncode"], "the delayed read must remain cancelled")
+        self.assertEqual((mirror.parent / "current.json").read_bytes(), pointer)
+        self.assertEqual(self.fx.map_files()[0].read_bytes(), recorded)
+        result = run_impact(self.fx.lane, "tools/future.py", "--offline", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        branch = report["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["reason"], branch["commit"]), ("stale", "offline", expected))
+        checks = [r for r in report["rows"] if r["source"] == ".github/workflows/lane-check.yml"]
+        self.assertTrue(checks, "the offline retry must search missing paths in the cached objects")
+        self.assertTrue(all(r["found_in"] == "default-branch" for r in checks))
+        self.assertNotIn("OAH_IMPACT_INCOMPLETE", result.stderr)
+        self.assertFalse(any("OAH_IMPACT_INCOMPLETE" in w for w in report["warnings"]))
+
     @unittest.skipIf(os.name == "nt", "POSIX query interruption")
     def test_interrupted_fetch_cannot_affect_the_retry_generation(self):
         self._cancelled_fetch(signal.SIGINT)
