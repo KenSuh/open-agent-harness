@@ -1,0 +1,332 @@
+{
+  "version": 1,
+  "bundled": [
+    {
+      "name": "computer-use",
+      "kind": "skill",
+      "repository": "https://github.com/stablyai/orca",
+      "subpath": "skills/computer-use",
+      "ref": "main",
+      "commit": "a0cd1644f320f1327f7495650a816111b495f3cd",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "."
+      ],
+      "purpose": "Drive the GUI of visible local app windows through the Orca CLI. Needs the Orca app.",
+      "official_install": "npx skills add stablyai/orca"
+    },
+    {
+      "name": "orca-cli",
+      "kind": "skill",
+      "repository": "https://github.com/stablyai/orca",
+      "subpath": "skills/orca-cli",
+      "ref": "main",
+      "commit": "a0cd1644f320f1327f7495650a816111b495f3cd",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "."
+      ],
+      "purpose": "Operate Orca worktrees, terminals and its embedded browser through the orca CLI. Needs the Orca app.",
+      "official_install": "npx skills add stablyai/orca"
+    },
+    {
+      "name": "orchestration",
+      "kind": "skill",
+      "repository": "https://github.com/stablyai/orca",
+      "subpath": "skills/orchestration",
+      "ref": "main",
+      "commit": "a0cd1644f320f1327f7495650a816111b495f3cd",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "."
+      ],
+      "purpose": "Coordinate supervised Orca workers: messages, task dispatch and decision gates. Needs the Orca app.",
+      "official_install": "npx skills add stablyai/orca"
+    },
+    {
+      "name": "typesafe-ai",
+      "kind": "skill",
+      "repository": "https://github.com/typesafe-ai/skills",
+      "subpath": "skills/typesafe-ai",
+      "ref": "main",
+      "commit": "65a39f393687675ce170e6094757de20370365b9",
+      "spdx": "MIT",
+      "license_path": "skills/typesafe-ai/LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "."
+      ],
+      "purpose": "Typed AI judgments (routing, ranking, verification) with TypeSafe. Calling the service needs your own API key.",
+      "official_install": "npx skills add typesafe-ai/skills"
+    },
+    {
+      "name": "skill-creator",
+      "kind": "skill",
+      "repository": "https://github.com/anthropics/skills",
+      "subpath": "skills/skill-creator",
+      "ref": "main",
+      "commit": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "spdx": "Apache-2.0",
+      "license_path": "skills/skill-creator/LICENSE.txt",
+      "notice_paths": [],
+      "skills": [
+        "."
+      ],
+      "purpose": "Create, improve and evaluate skills.",
+      "official_install": "/plugin marketplace add anthropics/skills && /plugin install example-skills@anthropic-agent-skills"
+    },
+    {
+      "name": "mattpocock-skills",
+      "kind": "plugin",
+      "repository": "https://github.com/mattpocock/skills",
+      "subpath": "skills",
+      "ref": "main",
+      "commit": "49dd158d1076134a641b33efb035946536778336",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "engineering/ask-matt",
+        "engineering/diagnosing-bugs",
+        "engineering/grill-with-docs",
+        "engineering/triage",
+        "engineering/improve-codebase-architecture",
+        "engineering/setup-matt-pocock-skills",
+        "engineering/tdd",
+        "engineering/to-spec",
+        "engineering/to-tickets",
+        "engineering/wayfinder",
+        "engineering/implement",
+        "engineering/implement-spec",
+        "engineering/prototype",
+        "engineering/research",
+        "engineering/domain-modeling",
+        "engineering/codebase-design",
+        "engineering/code-review",
+        "engineering/pr",
+        "engineering/retro",
+        "engineering/wizard",
+        "productivity/grill-me",
+        "productivity/grilling",
+        "productivity/handoff",
+        "productivity/teach",
+        "productivity/to-questionnaire",
+        "productivity/wait-what",
+        "productivity/writing-for-agents"
+      ],
+      "purpose": "Engineering skills: grilling, specs and tickets, TDD, code review, domain modelling.",
+      "official_install": "Claude: /plugin install mattpocock-skills@claude-plugins-official ; Codex: codex plugin marketplace add mattpocock/skills"
+    },
+    {
+      "name": "codex-plugin-cc",
+      "kind": "plugin",
+      "repository": "https://github.com/openai/codex-plugin-cc",
+      "subpath": "plugins/codex",
+      "ref": "main",
+      "commit": "db52e28f4d9ded852ab3942cea316258ae4ef346",
+      "spdx": "Apache-2.0",
+      "license_path": "plugins/codex/LICENSE",
+      "notice_paths": [
+        "plugins/codex/NOTICE"
+      ],
+      "skills": [
+        "skills/codex-cli-runtime",
+        "skills/codex-result-handling",
+        "skills/gpt-5-4-prompting"
+      ],
+      "purpose": "Call Codex from Claude Code for reviews and rescue work. Its commands and hooks need the official plugin install.",
+      "official_install": "/plugin marketplace add openai/codex-plugin-cc && /plugin install codex@openai-codex"
+    },
+    {
+      "name": "ponytail",
+      "kind": "plugin",
+      "repository": "https://github.com/DietrichGebert/ponytail",
+      "subpath": "skills",
+      "ref": "main",
+      "commit": "2ed6c52c9d7e5e56942508591085fd45dea277d3",
+      "spdx": "MIT",
+      "license_path": "LICENSE",
+      "notice_paths": [],
+      "skills": [
+        "ponytail",
+        "ponytail-audit",
+        "ponytail-debt",
+        "ponytail-gain",
+        "ponytail-help",
+        "ponytail-review"
+      ],
+      "purpose": "Simplest-solution mode: YAGNI, standard library first, no unrequested abstractions. Its hooks need the official plugin install.",
+      "official_install": "codex plugin marketplace add DietrichGebert/ponytail && codex plugin add ponytail@ponytail"
+    }
+  ],
+  "linked": [
+    {
+      "name": "unlazy",
+      "kind": "skill",
+      "source": "https://github.com/Leonxlnx/unlazy",
+      "version": "2.1.0 (16671491f667)",
+      "license": "MIT",
+      "steps": [
+        {
+          "run": [
+            "npx",
+            "skills",
+            "add",
+            "Leonxlnx/unlazy"
+          ]
+        }
+      ],
+      "reason": "A test file in its repository holds an absolute home folder path, which this kit's privacy scan refuses. Vendored files are never edited, so it is linked.",
+      "purpose": "Completion discipline: acceptance gates, the depth tree and evidence before reporting."
+    },
+    {
+      "name": "superpowers",
+      "kind": "plugin",
+      "source": "https://github.com/obra/superpowers",
+      "version": "7.0.0 (bb92a7774141)",
+      "license": "MIT",
+      "steps": [
+        {
+          "manual": "/plugin install superpowers@claude-plugins-official"
+        }
+      ],
+      "reason": "Two files in its skills (a token variable assignment and an absolute home folder path) fail this kit's privacy scan unchanged, so it is linked.",
+      "purpose": "Core process skills: brainstorming, TDD, debugging, plans and code review."
+    },
+    {
+      "name": "graphify",
+      "kind": "skill",
+      "source": "https://github.com/Graphify-Labs/graphify",
+      "version": "0.9.93 (PyPI graphifyy)",
+      "license": "Apache-2.0",
+      "steps": [
+        {
+          "run": [
+            "pipx",
+            "install",
+            "graphifyy"
+          ]
+        },
+        {
+          "run": [
+            "graphify",
+            "install"
+          ]
+        }
+      ],
+      "reason": "Upstream has no skill folder: its CLI writes the skill from a template, so there is nothing to bundle unchanged.",
+      "purpose": "Turn code and documents into a knowledge graph with query, path and explain tools."
+    },
+    {
+      "name": "vercel-react-best-practices",
+      "kind": "skill",
+      "source": "https://github.com/vercel-labs/agent-skills",
+      "version": "1.0.0 (063bee94c3f4)",
+      "license": "NOASSERTION",
+      "steps": [
+        {
+          "run": [
+            "npx",
+            "skills",
+            "add",
+            "vercel-labs/agent-skills"
+          ]
+        }
+      ],
+      "reason": "Its upstream declares no license, so the kit cannot redistribute it.",
+      "purpose": "React and Next.js performance guidelines."
+    },
+    {
+      "name": "docx",
+      "kind": "skill",
+      "source": "https://github.com/anthropics/skills",
+      "version": "main (dbd4588f9e10)",
+      "license": "LicenseRef-Anthropic-Proprietary",
+      "steps": [
+        {
+          "manual": "/plugin marketplace add anthropics/skills"
+        },
+        {
+          "manual": "/plugin install document-skills@anthropic-agent-skills"
+        }
+      ],
+      "reason": "Its license is proprietary, so the kit cannot redistribute it. Claude Code's plugin marketplace installs it.",
+      "purpose": "Create, read and edit Word documents."
+    },
+    {
+      "name": "pdf",
+      "kind": "skill",
+      "source": "https://github.com/anthropics/skills",
+      "version": "main (dbd4588f9e10)",
+      "license": "LicenseRef-Anthropic-Proprietary",
+      "steps": [
+        {
+          "manual": "/plugin marketplace add anthropics/skills"
+        },
+        {
+          "manual": "/plugin install document-skills@anthropic-agent-skills"
+        }
+      ],
+      "reason": "Its license is proprietary, so the kit cannot redistribute it. Claude Code's plugin marketplace installs it.",
+      "purpose": "Read, create and edit PDF files."
+    },
+    {
+      "name": "pptx",
+      "kind": "skill",
+      "source": "https://github.com/anthropics/skills",
+      "version": "main (dbd4588f9e10)",
+      "license": "LicenseRef-Anthropic-Proprietary",
+      "steps": [
+        {
+          "manual": "/plugin marketplace add anthropics/skills"
+        },
+        {
+          "manual": "/plugin install document-skills@anthropic-agent-skills"
+        }
+      ],
+      "reason": "Its license is proprietary, so the kit cannot redistribute it. Claude Code's plugin marketplace installs it.",
+      "purpose": "Create, read and edit PowerPoint decks."
+    },
+    {
+      "name": "xlsx",
+      "kind": "skill",
+      "source": "https://github.com/anthropics/skills",
+      "version": "main (dbd4588f9e10)",
+      "license": "LicenseRef-Anthropic-Proprietary",
+      "steps": [
+        {
+          "manual": "/plugin marketplace add anthropics/skills"
+        },
+        {
+          "manual": "/plugin install document-skills@anthropic-agent-skills"
+        }
+      ],
+      "reason": "Its license is proprietary, so the kit cannot redistribute it. Claude Code's plugin marketplace installs it.",
+      "purpose": "Create, read and edit spreadsheets."
+    },
+    {
+      "name": "lazycodex",
+      "kind": "plugin",
+      "source": "https://github.com/code-yeongyu/oh-my-openagent",
+      "version": "5.1.40",
+      "license": "LicenseRef-Sustainable-Use-1.0",
+      "steps": [
+        {
+          "run": [
+            "npx",
+            "lazycodex-ai",
+            "install"
+          ]
+        }
+      ],
+      "reason": "Its source-available license (Sustainable Use 1.0) is not an open-source license, so the kit does not redistribute it.",
+      "purpose": "Codex plugin with extra agent roles and workflows."
+    }
+  ]
+}
