@@ -373,6 +373,19 @@ class ShippedToolkitTest(unittest.TestCase):
                 for skill in item_skill_dirs(folder, catalog.find(folder.name)):
                     self.assertEqual(load_problems(skill, item_root=folder), [])
 
+    def test_notices_match_skills_folder_exactly(self):
+        text = (REPO / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        vendored_section = text[text.index("## Vendored skills"):]
+        listed = sorted(re.findall(r"^\| `([a-z0-9._-]+)` \|", vendored_section, re.M))
+        folders = sorted(path.parent.name for path in (REPO / "skills").glob("*/UPSTREAM.json"))
+        self.assertEqual(listed, folders)
+        not_vendored = text[:text.index("Ideas only")]
+        self.assertNotIn("vendors no third-party code", text)
+        for folder in folders:
+            repository = read_upstream(REPO / "skills" / folder).repository
+            with self.subTest(item=folder):
+                self.assertNotIn(f"]({repository})", not_vendored, "a vendored project is listed as not in the repository")
+
     def test_vendored_files_are_upstream_blobs(self):
         tracked = git_blobs("skills/")
         if not tracked:

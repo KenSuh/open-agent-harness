@@ -1,17 +1,17 @@
 # Third-party notices
 
-open-agent-harness vendors no third-party code. This repository contains none of the files of the
-projects below. You install them yourself, and `oah` runs or links to them.
+open-agent-harness vendors third-party code only as the skills listed under "Vendored skills" below,
+unchanged under `skills/`. This repository contains none of the files of the projects in the next table.
+You install them yourself, and `oah` runs or links to them.
 
 | Project | License | How open-agent-harness uses it |
 |---|---|---|
-| [unlazy](https://github.com/Leonxlnx/unlazy) | MIT | Runs gate checks and the Stop hook. You install it. Its gate format is linked, not copied. |
+| [unlazy](https://github.com/Leonxlnx/unlazy) | MIT | Runs gate checks and the Stop hook. Linked, not vendored: it is installed at the commit the gates lane tests, and none of its files are in this repository. Its gate format is linked, not copied. |
 | [graphify](https://github.com/Graphify-Labs/graphify) (PyPI `graphifyy`) | Apache-2.0 (earlier contributions under MIT, per its NOTICE) | Optional. Builds the knowledge graph and is run as a CLI. |
 | [Claude Code](https://code.claude.com/docs/en/setup) | Anthropic's terms | An external tool you install. Does the initial implementation stage. |
 | [Codex CLI](https://github.com/openai/codex) | Apache-2.0 | An external tool you install. Does the review and correction stages. |
 | [uv](https://docs.astral.sh/uv/) | See the project | Recommended installer for `oah` and graphify. |
 | [superpowers](https://github.com/obra/superpowers) | MIT | Optional recommendation, linked. |
-| [mattpocock skills](https://github.com/mattpocock/skills) | MIT | Optional recommendation, linked. |
 
 Ideas only, credited. No text or code is copied from these:
 
