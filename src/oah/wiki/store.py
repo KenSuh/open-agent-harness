@@ -22,11 +22,13 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.wiki import lint as lint_module
 from oah.wiki import log as log_module
 from oah.wiki import notes, tasks
-from oah.wiki.base import EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettings, publish_new, read_bytes
+from oah.wiki.base import (EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettings, fsync_folder, publish_new,
+                           read_bytes)
 
 JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
+RESOLVED = "resolved"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
 
@@ -53,6 +55,11 @@ def _identity(path: pathlib.Path) -> tuple[int, int, int, int] | None:
     except FileNotFoundError:
         return None
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _entry_key(entry: log_module.Entry) -> bytes:
+    """An entry's identity for duplicate and dropped-entry checks: its bytes, CRLF folded, trailing space dropped."""
+    return entry.data.replace(b"\r\n", b"\n").rstrip()
 
 
 def _pending_reason(journal: pathlib.Path) -> str:
@@ -356,7 +363,7 @@ class Wiki:
             seen: dict[bytes, str] = {}
             for name, data in files.items():
                 for entry in log_module.parse_log(data, name).entries:
-                    key = entry.data.replace(b"\r\n", b"\n").rstrip()
+                    key = _entry_key(entry)
                     if key in seen:
                         problems.append(f"'## {entry.date} {entry.title}' is in both {seen[key]} and {name}")
                     seen.setdefault(key, f"{name}:{entry.line}")
@@ -366,13 +373,47 @@ class Wiki:
             raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", "the wiki is not reconciled yet; nothing was changed. "
                             + "; ".join(problems[:10]) + (f" (and {len(problems) - 10} more)" if len(problems) > 10 else "")
                             + ". Fix these by hand, then run `oah wiki recover --resolved` again.", EXIT_ENVIRONMENT)
-        record = {"version": 1, "at": _now(), "wiki_dir": str(folder), "phase": journal.get("phase"),
-                  "reason": journal.get("reason"), "archive": journal["archive"],
-                  "files": {name: _sha(data) for name, data in sorted(files.items())}}
+        missing = self._dropped_entries(journal, set(seen))
+        moment = datetime.datetime.now(datetime.timezone.utc)
+        kept = self.state / RESOLVED / f"rollover-journal-{moment.strftime('%Y%m%dT%H%M%S.%fZ')}.json"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.journal_path, kept)  # the journal bytes are kept, never deleted
+        fsync_folder(kept.parent)
+        fsync_folder(self.journal_path.parent)
+        record = {"version": 1, "at": moment.isoformat(timespec="seconds"), "wiki_dir": str(folder),
+                  "phase": journal.get("phase"), "reason": journal.get("reason"), "archive": journal["archive"],
+                  "files": {name: _sha(data) for name, data in sorted(files.items())},
+                  "resolved_journal": str(kept), "dropped_entries": missing}
         append_jsonl(self.state / RESOLUTIONS, record)
-        unlink_durable(self.journal_path)
-        return (f"OAH_WIKI_RECOVERY_RESOLVED {len(files)} files parse and every entry appears once; the journal "
-                f"is removed and the resolution recorded in {self.state / RESOLUTIONS}")
+        lines = [f"OAH_WIKI_RECOVERY_RESOLVED {len(files)} files parse and every entry appears once; the journal "
+                 f"is kept as {kept}"]
+        if missing:
+            lines.append(f"OAH_WIKI_RECOVERY_DROPPED {len(missing)} entries from the journal are not in the "
+                         f"reconciled files; their bytes stay in {kept}:")
+            lines.extend(f"  {item}" for item in missing)
+        return "\n".join(lines)
+
+    def _dropped_entries(self, journal: dict, present: set[bytes]) -> list[str]:
+        """Entries of the journal's original snapshot or captured live bytes that the reconciled files lack."""
+        sources = [("original_log", "log.md"), ("archive_bytes", journal["archive"]),
+                   ("current_log", "log.md"), ("current_archive", journal["archive"])]
+        missing: list[str] = []
+        listed: set[bytes] = set()
+        for key, name in sources:
+            data = journal.get(key)
+            if data is None:
+                continue
+            try:
+                entries = log_module.parse_log(data, name).entries
+            except WikiError:
+                missing.append(f"{key}: could not be parsed; inspect it in the kept journal")
+                continue
+            for entry in entries:
+                entry_key = _entry_key(entry)
+                if entry_key not in present and entry_key not in listed:
+                    listed.add(entry_key)
+                    missing.append(f"'## {entry.date} {entry.title}' (journal {key}, line {entry.line})")
+        return missing
 
     # ---- task maintenance (oah wiki maintain --task) --------------------------------------------
 

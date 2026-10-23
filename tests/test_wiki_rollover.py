@@ -649,6 +649,29 @@ class HardeningTest(unittest.TestCase):
         self.assertEqual(sorted(record["files"]), ["log.md", "log_archive_01.md"])
         self.assertTrue(self.w.log("works again", today=TODAY).title == "works again")
         self.assertEqual(self.w.recover(resolved=True), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
+        self.assertEqual(len(list((self.w.state / "resolved").glob("*.json"))), 1)
+
+    def test_resolved_lists_a_dropped_entry_and_keeps_it_recoverable(self):
+        self.assert_recorded_not_touched(self.append_after_publication, "log.md")
+        journal_bytes = self.w.journal_path.read_bytes()
+        moved = log.parse_log((self.folder / "log_archive_01.md").read_bytes(), "log_archive_01.md").entries
+        (self.folder / "log_archive_01.md").unlink()  # a careless "fix": the moved entries are gone
+        line = self.w.recover(resolved=True)
+        self.assertTrue(line.startswith("OAH_WIKI_RECOVERY_RESOLVED 1 files parse"), line)
+        self.assertIn(f"OAH_WIKI_RECOVERY_DROPPED {len(moved)} entries", line)
+        for entry in moved:
+            self.assertIn(f"'## {entry.date} {entry.title}'", line)
+        self.assertFalse(self.w.journal_path.exists())
+        [kept] = list((self.w.state / "resolved").glob("rollover-journal-*.json"))
+        self.assertRegex(kept.name, r"^rollover-journal-\d{8}T\d{6}\.\d{6}Z\.json$")
+        self.assertEqual(kept.read_bytes(), journal_bytes)  # moved, never rewritten or deleted
+        original = base64.b64decode(json.loads(kept.read_text(encoding="utf-8"))["original_log"])
+        for entry in moved:
+            self.assertIn(entry.data, original)  # recoverable byte for byte
+        [record] = [json.loads(x) for x in (self.w.state / "recovery-resolutions.jsonl").read_text(
+            encoding="utf-8").splitlines()]
+        self.assertEqual(record["resolved_journal"], str(kept))
+        self.assertEqual(len(record["dropped_entries"]), len(moved))
 
     def test_resolved_refuses_while_an_entry_is_duplicated(self):
         self.assert_recorded_not_touched(self.append_after_publication, "log.md")
