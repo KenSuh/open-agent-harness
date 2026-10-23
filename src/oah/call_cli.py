@@ -56,6 +56,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--timeout-seconds", type=float, help="stop the run after this many seconds (default: the "
                         "tier's timeout_min)")
     parser.add_argument("--refresh-models", action="store_true", help="rebuild the model catalog before launching")
+    parser.add_argument("--no-rerank", action="store_true", help="keep the rule order of the selected skills; the "
+                        "re-ranker is not asked (recorded as rerank=unused(disabled-by-brief))")
     parser.add_argument("--json", action="store_true", help="print the run record as JSON")
 
     wait = commands.add_parser("wait", help="wait up to 9 minutes for a background run; call it again if needed")
@@ -159,6 +161,16 @@ def _report(data: dict, as_json: bool) -> int:
     return EXIT_OK if data.get("status") == "finished" else EXIT_REFUSED
 
 
+def _print_skills(prepared: call.Prepared) -> None:
+    """One line naming the brief's skills and the re-ranker status, from the run folder's skills.json."""
+    from oah.atomic import read_json
+
+    record = read_json(prepared.run.file_path("skills.json"), None)
+    if isinstance(record, dict):
+        names = ",".join(skill.get("id", "?") for skill in record.get("skills", [])) or "none"
+        print(f"OAH_SKILLS selected={names} rerank={record.get('rerank')}", file=sys.stderr)
+
+
 def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
     if args.request_id:
         args = _restore(args, state)
@@ -202,7 +214,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         round_instructions=args.message,
         stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
-        refresh_models=args.refresh_models)
+        refresh_models=args.refresh_models, no_rerank=getattr(args, "no_rerank", False))
     try:
         prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
                                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
@@ -213,6 +225,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         raise
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
+    _print_skills(prepared)
     if orca is not None:
         info = orca_launcher.start(orca, prepared, placement)["launcher"]
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "

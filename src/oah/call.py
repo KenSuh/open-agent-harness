@@ -13,6 +13,11 @@ timeout) and records the exit code, logs, header check and inference normalizati
 hands the same prepared run to a detached Python runner and returns at once; `wait` polls the record
 for at most `WAIT_LIMIT_S` seconds and can be called again.
 
+A task whose lease is bound to an intent (`oah start --packet`) dispatches only while that binding is
+`current` (`OAH_INTENT_NOT_CURRENT` otherwise), and only from the bound source. Every brief carries the
+skills `oah.skillsel.choose` selected for it, with a reason each and the `rerank=` status; the selection is
+also kept as `skills.json` in the run folder.
+
 The first dispatch of a task that has a packet records its intent source in
 `runs/<task>/intent-binding.json`. Later rounds reuse that source; a different source, another Intent-ID,
 an in-place edit or an older revision refuses with `OAH_INTENT_SOURCE_MISMATCH`, and only a raised Revision
@@ -33,7 +38,9 @@ import sys
 import time
 from typing import Callable, Mapping, Sequence
 
-from oah import briefs, launchers, models, routing, runs
+import oah.intent as oah_intent
+import oah.packet as oah_packet
+from oah import briefs, launchers, models, routing, runs, skillsel
 from oah.engines import claude, codex
 from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_rules, verify_inference
 from oah.engines.proc import run_command
@@ -154,6 +161,7 @@ class Packet:
     section: str | None  # the intent section exactly as the source holds it
     scope: tuple[str, ...]
     plan: dict  # stage -> (engine, tier)
+    rerank_disabled: bool = False  # the packet's Constraints turn the re-ranker off
 
 
 def _section_lines(text: str, heading: str) -> list[str]:
@@ -203,7 +211,8 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
     except ValueError:
         source = str(path)
     section = briefs.raw_section(text) if intent is not None else None
-    return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan)
+    return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan,
+                  rerank_disabled=oah_packet.rerank_disabled(text))
 
 
 BINDING_NAME = "intent-binding.json"
@@ -261,6 +270,36 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
             write_json_atomic(_binding_path(state_dir, task),
                               {"source": packet.source, "id": intent.id, "revision": intent.revision,
                                "digest": intent.digest, "history": history})
+
+
+def lease_binding(state_dir: pathlib.Path, task: str) -> tuple[object | None, pathlib.Path | None]:
+    """The intent bound to the task's lease (an `oah.intent.Binding`) and the lease worktree, or (None, None)."""
+    from oah.lease import Store
+
+    for lease, _stale in Store(state_dir).snapshot():
+        if lease.task == task and lease.intent is not None:
+            return lease.binding(), pathlib.Path(lease.worktree)
+    return None, None
+
+
+def check_lease_binding(binding, worktree: pathlib.Path, task: str) -> None:
+    """Refuse to dispatch for a bound task whose intent is not current (PLAN 5.6, A7)."""
+    state, reason = oah_intent.explain_binding(binding, worktree)
+    if state != "current":
+        raise EngineError("OAH_INTENT_NOT_CURRENT",
+                          f"task {task} is bound to {binding.line()} and that intent is {state}: {reason}. Nothing "
+                          f"was launched. Restore {binding.source} as it was bound, or raise its Revision, accept it "
+                          f"and rebind with oah start --task {task} --agent claude --packet {binding.source}; then "
+                          "call again")
+
+
+def _check_lease_source(binding, packet: Packet | None, task: str) -> None:
+    if packet is None or packet.intent is None:
+        return
+    if packet.source != binding.source or getattr(packet.intent, "digest", None) != binding.digest:
+        raise EngineError(SOURCE_MISMATCH, f"task {task}'s lease is bound to {binding.line()} from {binding.source}, "
+                          f"but this dispatch reads {packet.source}. Run the command again without --packet, or "
+                          f"with --packet {binding.source}; a changed goal is a new revision of the bound packet")
 
 
 def _stored_brief_matches(stored: str, packet: Packet | None) -> None:
@@ -326,6 +365,7 @@ class CallRequest:
     ephemeral: bool = False
     refresh_models: bool = False
     skills: tuple[tuple[str, str], ...] = ()
+    no_rerank: bool = False  # the brief turns the re-ranker off (--no-rerank)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -388,8 +428,11 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
             parse_intent: Callable[[str], object] | None = None,
-            read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None) -> Prepared:
-    """Decide engine, tier, model and effort; write the run folder and brief. Raises before any launch."""
+            read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None,
+            keychain=None) -> Prepared:
+    """Decide engine, tier, model and effort; write the run folder and brief. Raises before any launch.
+
+    `keychain` is passed to the re-ranker's key lookup (`oah.secrets`); None means the OS keychain."""
     root = pathlib.Path(root)
     briefs.check_footer(footer, has_footer)
     warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
@@ -397,12 +440,18 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)
+    leased, lease_root = lease_binding(state_dir, request.task)
+    if leased is not None:
+        check_lease_binding(leased, lease_root, request.task)
     bound = dispatch_binding(state_dir, request.task)
-    default_packet = root / (bound["source"] if bound else f".oah/tasks/{request.task}/PACKET.md")
-    packet_path = request.packet or default_packet
+    default_source = (bound["source"] if bound else leased.source if leased is not None
+                      else f".oah/tasks/{request.task}/PACKET.md")
+    packet_path = request.packet or root / default_source
     packet = None
-    if request.packet is not None or bound is not None or packet_path.is_file():
+    if request.packet is not None or bound is not None or leased is not None or packet_path.is_file():
         packet = read_packet(root, packet_path, parse_intent=parse_intent, read_source=read_source)
+        if leased is not None:
+            _check_lease_source(leased, packet, request.task)
         check_dispatch_binding(bound, packet, request.task)
     stored = None
     if request.stored_brief is not None:
@@ -429,6 +478,12 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
         advisory = _advise(axes, request.task, root=root)
+    skill_axes = axes or routing.score_axes(
+        stage=request.stage, kind=request.axes.get("kind"), scope=scope,
+        overrides={axis: value for axis, value in request.axes.items() if axis != "kind" and value is not None}).axes
+    selection = skillsel.choose(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
+                                state_dir=state_dir, env=env, keychain=keychain,
+                                brief_disabled=request.no_rerank or bool(packet and packet.rerank_disabled), now=now)
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
                                 refresh=request.refresh_models, now=now)
     warnings.extend(resolution.warnings)
@@ -437,7 +492,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         return _finish_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
                                stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
                                tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                               warnings=warnings)
+                               warnings=warnings, selection=selection)
     except (EngineError, briefs.BriefError) as exc:
         run.result(status="refused", error=str(exc), warnings=warnings)
         raise
@@ -447,7 +502,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
-                    warnings: list[str]) -> Prepared:
+                    warnings: list[str], selection: tuple | None = None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -461,10 +516,13 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         section = section if section is not None else briefs.raw_section(stored)
         content = briefs.reusable_content(stored, stage=request.stage, footer=footer, has_footer=has_footer)
         instructions = "\n\n".join(part for part in (content, instructions) if part)
+    chosen, skills_rerank = selection if selection is not None else (None, None)
     text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
                         scope=list(scope), intent_section=section, binding=intent,
                         packet_source=packet.source if packet else None,
-                        round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer)
+                        round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer,
+                        skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
+                        skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else ())
     read_only = request.stage == "review"
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
@@ -479,6 +537,10 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if packet is not None:
         record_dispatch_binding(state_dir, packet, request.task, run.id)
     run.write_prompt(text)
+    if chosen is not None:
+        from oah.atomic import write_json_atomic
+
+        write_json_atomic(run.file_path("skills.json"), {"rerank": skills_rerank, **chosen.to_record()})
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
     run.result(status="prepared", command=list(argv), cwd=str(root), read_only=read_only,

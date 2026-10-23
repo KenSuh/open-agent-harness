@@ -2,7 +2,8 @@
 """Worker briefs with one fixed layout (C2):
 
 1. the worker line (A6): the first line says this is a dispatched worker and to skip session entry;
-2. the preamble: task, stage, engine, scope, rules, packet, the lease command, skills, return format;
+2. the preamble: task, stage, engine, scope, rules, packet, the lease command, skills, return format; with a
+   `skills_block` (the selection with a reason per skill and its `rerank=` status) it ends the preamble;
 3. the intent section, verbatim (A7);
 4. the round instructions;
 5. the verify footer (`VERIFY_FOOTER`, the verify-what-changed rule);
@@ -119,8 +120,12 @@ def _check_delivered(text: str, footer: str, marker: str, has_footer: HasFooter)
 
 def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[str], intent_section: str | None,
           binding: object | None, packet_source: str | None, round_instructions: str,
-          skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter) -> str:
-    """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`."""
+          skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter,
+          skills_block: str | None = None, skill_ids: Sequence[str] = ()) -> str:
+    """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`.
+
+    `skills_block` (from `oah.skillsel.Selection.brief_text`) replaces the one-line skills bullet; the
+    bullet then names `skill_ids` and points at the block."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
     scope_text = ", ".join(scope) if scope else (
@@ -143,7 +148,10 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
                          f"{shell_word(engine)} {scopes}`.")
     if stage in LEASE_STAGES:
         lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
-    if skills:
+    if skills_block is not None:
+        lines.append(f"- Skills: {', '.join(skill_ids)} (reasons in ## Skills below)" if skill_ids
+                     else "- Skills: none were selected (see ## Skills below).")
+    elif skills:
         lines.append("- Skills: " + "; ".join(f"{name} ({reason})" for name, reason in skills))
     else:
         lines.append("- Skills: none were selected for this brief.")
@@ -151,7 +159,10 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
                  "the intent rules below describe.")
     section = intent_section if intent_section is not None else (
         "No intent section: this run has no packet, so there are no success conditions to report against.\n")
-    parts = ["\n".join(lines) + "\n", section if section.endswith("\n") else section + "\n",
+    preamble = "\n".join(lines) + "\n"
+    if skills_block is not None:
+        preamble += "\n" + skills_block.rstrip("\n") + "\n"
+    parts = [preamble, section if section.endswith("\n") else section + "\n",
              "## Round instructions\n" + (round_instructions.rstrip("\n") or "(none)") + "\n",
              VERIFY_FOOTER if VERIFY_FOOTER.endswith("\n") else VERIFY_FOOTER + "\n", footer]
     return _check_delivered("\n".join(parts), footer, marker, has_footer)

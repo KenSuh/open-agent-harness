@@ -182,6 +182,31 @@ def process_step(text: str) -> str | None:
     return None
 
 
+_RERANK_OFF = re.compile(
+    r"(?i)\b(?:no|without|disable[sd]?|turn(?:s|ed)?\s+off|switch(?:es|ed)?\s+off)\s+(?:the\s+|any\s+)?re-?ranker\b"
+    r"|\bre-?ranker\s*(?::|=|is)\s*(?:off|disabled|no|none)\b"
+    r"|\bre-?ranker\s+(?:off|disabled)\b")
+
+
+def rerank_disabled(text: str) -> bool:
+    """True when the intent's Constraints turn the re-ranker off (PLAN 5.6), outside HTML comments.
+
+    "no network except the re-ranker …" names the re-ranker without turning it off, so it does not count.
+    """
+    section = intent.normalize_newlines(_COMMENT.sub("", text))
+    lines = section.split("\n")
+    try:
+        start = lines.index("### Constraints") + 1
+    except ValueError:
+        return False
+    for line in lines[start:]:
+        if line.startswith(("### ", "## ")) or line == intent.END:
+            break
+        if _RERANK_OFF.search(line):
+            return True
+    return False
+
+
 def check_gates(text: str) -> list[str]:
     """Structural issues in an unlazy gate ledger; empty when it parses."""
     issues: list[str] = []

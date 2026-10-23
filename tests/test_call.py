@@ -19,13 +19,14 @@ import unittest
 from collections import namedtuple
 from unittest import mock
 
-from oah import call, call_cli, rerank
+from oah import call, call_cli, intent, rerank
 from oah.briefs import VERIFY_FOOTER, VERIFY_MARKER, BriefError, raw_section
 from oah.engines.effort import EngineError
 from oah.lease import Store
 from oah.paths import repo_info
 from oah.routing import RoutingError
 from oah.runs import RESULT_FIELDS, UNVERIFIED, find_run, new_run
+from oah.secrets import NoKeychain
 from tests.helpers import directory_alias, git_commit, make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -73,8 +74,10 @@ class Project:
         (self.repo / ".oah" / "config.toml").write_text(
             f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\n"
             f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n" + config, encoding="utf-8")
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(("FAKE_", "OAH_"))}
-        self.env.update(CODEX_HOME=str(self.home), FAKE_RECORD=str(self.record), OAH_STATE_DIR=str(self.state))
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("FAKE_", "OAH_")) and key != "CLAUDE_CONFIG_DIR"}
+        self.env.update(CODEX_HOME=str(self.home), FAKE_RECORD=str(self.record), OAH_STATE_DIR=str(self.state),
+                        HOME=str(work / "home"), USERPROFILE=str(work / "home"))
 
     def settings(self) -> call.Settings:
         return call_cli.load_settings(self.repo)
@@ -84,7 +87,7 @@ class Project:
         request = call.CallRequest(engine=engine, stage=stage, **fields)
         return call.prepare(request, self.settings(), root=self.repo, state_dir=self.state,
                             env=dict(self.env, **(env or {})), footer=FOOTER, has_footer=has_footer,
-                            parse_intent=parse_intent)
+                            parse_intent=parse_intent, keychain=NoKeychain())
 
     def run(self, engine: str = "codex", stage: str = "review", env: dict | None = None, **fields) -> dict:
         prepared = self.prepare(engine, stage, env=env, **fields)
@@ -162,7 +165,7 @@ class RunFolderTest(unittest.TestCase):
         data = project.run(tier="high", round_instructions="Review the change.")
         run = find_run(project.state, data["run_id"])
         self.assertEqual(sorted(p.name for p in run.path.iterdir()),
-                         ["last-message.md", "prompt.md", "result.json", "stderr.log", "stdout.log"])
+                         ["last-message.md", "prompt.md", "result.json", "skills.json", "stderr.log", "stdout.log"])
         self.assertEqual(set(data), set(RESULT_FIELDS))
         expected = {"status": "finished", "exit_code": 0, "timed_out": False, "engine": "codex", "stage": "review",
                     "cli_version": "0.163.0", "resolved_model": "gpt-test-a", "model_source": "cli_default",
@@ -607,6 +610,135 @@ class WorktreeSelectorTest(unittest.TestCase):
         with self.assertRaises(BriefError) as ctx:
             call_cli.retry_command(args, "safe/path")
         self.assertEqual(ctx.exception.code, "OAH_UNSAFE_ARGUMENT")
+
+
+def real_packet(task: str = "t1", *, revision: int = 1, goal: str = "the report lists every file",
+                scope: str = "src/app.py", constraints: str = "") -> str:
+    """A packet the real oah.intent parser accepts."""
+    lines = [intent.BEGIN, "## Intent", f"Intent-ID: {task}", f"Revision: {revision}", "Status: accepted",
+             "### Problem", "Reports miss files.", "### Desired outcome", "Every file is listed.",
+             "### Success conditions", f"- AC1: {goal}", "### Constraints", *([constraints] if constraints else []),
+             "### Non-goals", "### Open questions", intent.END, "## Scope", f"- {scope}", "## Plan",
+             "## Acceptance", "## Return", ""]
+    return "\n".join(lines)
+
+
+class LeaseBindingTest(unittest.TestCase):
+    """`oah call` and the lease's intent binding (lane P4b): refusal, bound source, skills in the brief."""
+
+    def setUp(self):
+        self.project = Project(self)
+        skills = self.project.home.parent / "home" / ".claude" / "skills"
+        for name, description in (("test-driven-development", "write the test first"),
+                                  ("verification-before-completion", "evidence before claims"),
+                                  ("receiving-code-review", "check each finding")):
+            folder = skills / name
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\nBody.\n",
+                                             encoding="utf-8")
+
+    def prepare(self, **fields):
+        fields.setdefault("task", "t1")
+        fields.setdefault("tier", "low")
+        stage = fields.pop("stage", "correction")
+        request = call.CallRequest(engine="codex", stage=stage, **fields)
+        return call.prepare(request, self.project.settings(), root=self.project.repo, state_dir=self.project.state,
+                            env=self.project.env, footer=intent.FOOTER, has_footer=intent.has_footer,
+                            parse_intent=intent.parse, read_source=intent.read_source, keychain=NoKeychain())
+
+    def bind(self, name: str = ".oah/tasks/t1/PACKET.md", **packet) -> pathlib.Path:
+        path = self.project.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(real_packet(**packet), encoding="utf-8")
+        binding = intent.parse(path.read_text(encoding="utf-8")).bind(name)
+        Store(self.project.state).start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1,
+                                        info=repo_info(self.project.repo), intent=binding)
+        return path
+
+    def prompt(self, prepared) -> str:
+        return pathlib.Path(prepared.run_dir, "prompt.md").read_bytes().decode("utf-8")
+
+    def test_call_refuses_stale_and_missing_binding(self):
+        path = self.bind()
+        self.assertTrue(self.prompt(self.prepare()))
+        path.write_text(real_packet(goal="a different goal"), encoding="utf-8")
+        for case in ("stale", "missing"):
+            with self.subTest(case=case):
+                if case == "missing":
+                    path.unlink()
+                before = self.project.runs()
+                with self.assertRaises(EngineError) as ctx:
+                    self.prepare(stage="review")
+                self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
+                self.assertIn(f"is {case}", str(ctx.exception))
+                self.assertIn("oah start --task t1 --agent claude --packet .oah/tasks/t1/PACKET.md", str(ctx.exception))
+                self.assertEqual(self.project.runs(), before)
+
+    def test_unbound_lease_still_dispatches(self):
+        Store(self.project.state).start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1,
+                                        info=repo_info(self.project.repo))
+        self.assertIn("No intent section", self.prompt(self.prepare()))
+
+    def test_call_uses_lease_binding_source(self):
+        self.bind("plans/T1.md")
+        prompt = self.prompt(self.prepare())
+        self.assertIn("- Packet: plans/T1.md", prompt)
+        self.assertEqual(prompt.count(intent.BEGIN), 1)
+        other = self.project.repo / ".oah" / "tasks" / "t1" / "PACKET.md"
+        other.parent.mkdir(parents=True)
+        other.write_text(real_packet(), encoding="utf-8")
+        with self.assertRaises(EngineError) as ctx:
+            self.prepare(packet=other)
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
+        self.assertIn("plans/T1.md", str(ctx.exception))
+
+    def test_brief_lists_skills_with_reasons_and_rerank(self):
+        self.bind()
+        prepared = self.prepare()
+        prompt = self.prompt(prepared)
+        self.assertIn("- Skills: test-driven-development, receiving-code-review, verification-before-completion "
+                      "(reasons in ## Skills below)", prompt)
+        skills = prompt.split("## Skills\n", 1)[1].split(intent.BEGIN, 1)[0]
+        self.assertIn("Skill order: rerank=unused(not-enabled)", skills)
+        self.assertIn("- `test-driven-development` (user): `~/.claude/skills/test-driven-development/SKILL.md`", skills)
+        self.assertIn("  - why: code changes are written test-first (kind implementation, stage correction)", skills)
+        self.assertIn("  - why: corrections check each review finding before acting on it (stage correction)", skills)
+        record = json.loads(pathlib.Path(prepared.run_dir, "skills.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["rerank"], "unused(not-enabled)")
+        self.assertEqual([skill["id"] for skill in record["skills"]],
+                         ["test-driven-development", "receiving-code-review", "verification-before-completion"])
+
+    def test_brief_keeps_intent_section_and_footer_byte_intact_with_skills(self):
+        path = self.bind()
+        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        Store(self.project.state).release(task="t1", agent="claude", reason="rebind CRLF copy", force=False)
+        binding = intent.parse(path.read_bytes().decode("utf-8")).bind(".oah/tasks/t1/PACKET.md")
+        Store(self.project.state).start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1,
+                                        info=repo_info(self.project.repo), intent=binding)
+        prompt = self.prompt(self.prepare())
+        section = raw_section(path.read_bytes().decode("utf-8"))
+        self.assertEqual(prompt.count(section), 1)
+        self.assertIn("\r\n", section)
+        self.assertTrue(prompt.endswith(intent.FOOTER))
+        self.assertEqual(sum(line == intent.FOOTER_MARKER for line in prompt.replace("\r\n", "\n").split("\n")), 1)
+        self.assertLess(prompt.index("## Skills"), prompt.index(section))
+
+    def test_no_rerank_flag_and_packet_constraint(self):
+        project = self.project
+        (project.repo / ".oah" / "config.toml").write_text(
+            (project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
+            + '[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
+        provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
+                                         score=lambda kind, query, items, *, key, config: list(range(len(items))))
+        with mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
+            used = self.prompt(self.prepare(task="t2"))
+            self.assertIn("Skill order: rerank=used", used)
+            order = used.split("- Skills: ", 1)[1].split(" (reasons", 1)[0]
+            self.assertEqual(order, "verification-before-completion, receiving-code-review, test-driven-development")
+            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(self.prepare(task="t3", no_rerank=True)))
+            self.bind(constraints="No re-ranker for this task.")
+            self.assertIn("rerank=unused(disabled-by-brief)", self.prompt(self.prepare()))
 
 
 class HeaderTest(unittest.TestCase):
