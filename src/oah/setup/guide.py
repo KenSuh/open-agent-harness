@@ -199,7 +199,7 @@ def refresh_path(env: MutableMapping[str, str] | None = None, *, platform: str =
                  home: pathlib.Path | None = None) -> None:
     """Let this process see programs an installer just added.
 
-    Windows: the machine and user Path from the registry, then entries only this process had.
+    Windows: registry Path, process-only entries, then discovered uv directories.
     Elsewhere: ~/.local/bin (where uv and Claude Code install) is appended when it exists.
     Only this process's environment changes; no profile or registry value is written.
     """
@@ -207,12 +207,16 @@ def refresh_path(env: MutableMapping[str, str] | None = None, *, platform: str =
     current = env.get("PATH", "")
     if platform == "win32":
         machine, user = (read_registry or _read_registry_path)()
+        home = pathlib.Path.home() if home is None else home
+        uv_dirs = [str(home / folder / "bin") for folder in (".local", ".cargo")
+                   if (home / folder / "bin" / "uv.exe").is_file()]
         merged: list[str] = []
         seen: set[str] = set()
-        for entry in [*machine.split(";"), *user.split(";"), *current.split(";")]:
+        for entry in [*machine.split(";"), *user.split(";"), *current.split(";"), *uv_dirs]:
             entry = _expand(entry.strip(), env)
-            if entry and entry.lower() not in seen:
-                seen.add(entry.lower())
+            normalized = os.path.normcase(entry).lower()
+            if entry and normalized not in seen:
+                seen.add(normalized)
                 merged.append(entry)
         env["PATH"] = ";".join(merged)
         return
@@ -326,6 +330,8 @@ def guided_setup(*, os_name: str, yes: bool = False, dry_run: bool = False, tool
     prints the plan, and returns 0.
     """
     tools = catalog() if tools is None else list(tools)
+    refresh = refresh_path if refresh is None else refresh
+    refresh()
     out(f"oah setup ({OS_LABELS.get(os_name, os_name)}){' - dry run, nothing will be installed' if dry_run else ''}")
     out("Checking tools:")
     statuses = check_tools(tools, which=which, env=env, home=home, repo_root=repo_root)

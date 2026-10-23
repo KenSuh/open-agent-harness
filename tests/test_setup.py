@@ -282,6 +282,22 @@ class RunInstallsTest(unittest.TestCase):
 
 
 class RefreshPathTest(unittest.TestCase):
+    def test_refresh_path_windows_discovers_uv_without_persistent_path_changes(self):
+        home = make_tmp_dir(self)
+        for relative in (".local/bin", ".cargo/bin"):
+            with self.subTest(relative=relative):
+                folder = home / relative
+                folder.mkdir(parents=True)
+                uv = folder / "uv.exe"
+                uv.write_bytes(b"")
+                env = {"PATH": r"C:\session"}
+                registry = (r"C:\Windows", r"C:\tools")
+                guide.refresh_path(env, platform="win32", home=home, read_registry=lambda: registry)
+                guide.refresh_path(env, platform="win32", home=home, read_registry=lambda: registry)
+                self.assertEqual(env["PATH"].split(";"), [*registry, r"C:\session", str(folder)])
+                self.assertEqual(registry, (r"C:\Windows", r"C:\tools"))
+                uv.unlink()
+
     def test_refresh_path_merges_registry_values(self):
         env = {"PATH": r"C:\py;C:\Windows", "SystemRoot": r"C:\Windows", "USERPROFILE": r"C:\home\someone"}
         guide.refresh_path(env, platform="win32",
@@ -363,9 +379,11 @@ class SignInTest(unittest.TestCase):
                           script_rel="bin/status.js",
                           script_body="process.exit(process.argv.slice(2).join(' ') === 'login status' ? 0 : 1);",
                           shim_body='@echo off\r\necho ran> "%~dp0shim-ran.txt"\r\n')
+        # Discovery may preserve PATHEXT's uppercase suffix even for a lowercase filename.
+        shim.rename(shim.with_suffix(".CMD"))
         with mock.patch.dict(os.environ, PATH=os.pathsep.join((str(prefix), str(pathlib.Path(node).parent)))):
             status = guide.check_tools([self.tools["codex"]])[0]
-            self.assertEqual(status.path, str(shim))
+            self.assertEqual(os.path.normcase(status.path), os.path.normcase(str(shim)))
             self.assertTrue(guide.check_sign_in(status.tool, status.path))
         self.assertFalse((prefix / "shim-ran.txt").exists())
 
@@ -464,6 +482,62 @@ class GuidedSetupTest(unittest.TestCase):
         # The fake runner installs nothing, so the re-check still finds the required tools missing.
         self.assertEqual(code, 1)
         self.assertEqual(self.lines[-1], "SETUP_INCOMPLETE missing=git,claude,codex")
+
+    def test_windows_setup_refreshes_new_uv_before_confirmed_graphify_install(self):
+        tools = [tool for tool in cat.catalog() if tool.name in ("uv", "graphify")]
+        env = {"PATH": str(self.home / "empty-bin")}
+        uv = self.home / ".local" / "bin" / "uv.exe"
+        calls = []
+
+        def which(name):
+            if name == "powershell":
+                return "powershell"
+            if name == "uv" and str(uv.parent) in env["PATH"].split(";") and uv.is_file():
+                return str(uv)
+            return None
+
+        def runner(argv):
+            calls.append(argv)
+            if argv == tools[0].install["windows"][0]:
+                uv.parent.mkdir(parents=True)
+                uv.write_bytes(b"")
+                return 0
+            self.assertEqual(argv, ("uv", "tool", "install", "graphifyy"))
+            # A child process must inherit the directory even though the registry never changed.
+            result = subprocess.run([sys.executable, "-c",
+                                     "import os, pathlib; "
+                                     "assert any((pathlib.Path(p) / 'uv.exe').is_file() "
+                                     "for p in os.environ['PATH'].split(';'))"],
+                                    env=dict(os.environ, PATH=env["PATH"]), capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return 0
+
+        code = self.setup(which, os_name="windows", tools=tools, yes=True, runner=runner, env=env,
+                          refresh=lambda: guide.refresh_path(env, platform="win32", home=self.home,
+                                                             read_registry=lambda: ("", "")))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(which("uv"), str(uv))
+
+    def test_windows_setup_discovers_existing_uv_before_planning(self):
+        uv = self.home / ".local" / "bin" / "uv.exe"
+        uv.parent.mkdir(parents=True)
+        uv.write_bytes(b"")
+        env = {"PATH": ""}
+
+        def which(name):
+            if name == "powershell":
+                return "powershell"
+            if name == "uv" and str(uv.parent) in env["PATH"].split(";"):
+                return str(uv)
+            return None
+
+        code = self.setup(which, os_name="windows", yes=True,
+                          tools=[tool for tool in cat.catalog() if tool.name in ("uv", "graphify")],
+                          refresh=lambda: guide.refresh_path(env, platform="win32", home=self.home,
+                                                             read_registry=lambda: ("", "")))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls, [("uv", "tool", "install", "graphifyy")])
 
     def test_unlazy_manual_pointer_is_shown_without_running_an_installer(self):
         for dry_run in (False, True):

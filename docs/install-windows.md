@@ -46,7 +46,8 @@ The installer goes through five steps.
 1. **Find Python 3.11 or newer.** It tries `py -3`, `python` and `python3`. If there is none, it
    offers **uv**, which can download Python for you. It shows the official command
    (`irm https://astral.sh/uv/install.ps1 | iex`) and asks before running it. The subprocess gets
-   `UV_NO_MODIFY_PATH=1`, so uv leaves profiles and persistent PATH settings alone. To change those,
+   `UV_NO_MODIFY_PATH=1`, so uv leaves profiles and persistent PATH settings alone. Its folder is
+   added to this process's PATH so setup can use it immediately. To change your saved PATH,
    accept the separate prompt in step 4.
 2. **Check the tools `oah` uses.** It prints a table of what is found and what is missing, then a
    plan. For each missing tool it shows the **exact official command**, a short note and the

@@ -101,12 +101,14 @@ function Start-Native([string]$Exe, [string[]]$Arguments) {
     return $process.ExitCode
 }
 
-# Reload PATH from the registry (machine, then user), keeping entries only this window has.
+# Reload registry PATH, keeping this window's entries and the discovered uv directory.
 function Update-SessionPath {
     $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $user = [Environment]::GetEnvironmentVariable('Path', 'User')
     $merged = New-Object 'System.Collections.Generic.List[string]'
-    foreach ($entry in (@($machine, $user, $env:Path) -join ';').Split(';')) {
+    $uv = Find-Uv
+    $uvDir = if ($uv) { [IO.Path]::GetDirectoryName($uv) } else { '' }
+    foreach ($entry in (@($machine, $user, $env:Path, $uvDir) -join ';').Split(';')) {
         $clean = $entry.Trim()
         if ($clean -and -not ($merged -contains $clean)) { $merged.Add($clean) }
     }
@@ -374,6 +376,7 @@ function Invoke-OahInstall {
         }
     }
 
+    Update-SessionPath
     Step 2 'Check the tools oah uses'
     if ($SkipTools) {
         Say "  Skipped (-SkipTools). Run 'oah doctor' later to see what is missing."

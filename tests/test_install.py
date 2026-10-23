@@ -6,12 +6,14 @@ import hashlib
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import unittest
 import zipfile
+from unittest import mock
 
 from oah.setup import catalog, display
 from tests.helpers import make_tmp_dir, make_unlazy, write_posix_tool
@@ -57,17 +59,23 @@ def make_zip_release(test: unittest.TestCase) -> tuple[pathlib.Path, str]:
 
 def powershell_command(shell: str, script: str, env: dict) -> subprocess.CompletedProcess:
     """Run PowerShell code given as -EncodedCommand, so no quoting reaches the command line."""
+    script = "$ProgressPreference = 'SilentlyContinue'; " + script
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return subprocess.run([shutil.which(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+    return subprocess.run([shutil.which(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                           "-EncodedCommand", encoded],
                           env=env, capture_output=True, timeout=300)
 
 
 def powershell_env(test: unittest.TestCase, **extra: str) -> dict[str, str]:
-    """Keep PowerShell's own module/profile caches outside the installer's fake home."""
+    """Redirect every installer write location into disposable, snapshottable folders."""
     cache = make_tmp_dir(test)
-    env = dict(os.environ, APPDATA=str(cache / "Roaming"), LOCALAPPDATA=str(cache / "Local"))
+    env = dict(os.environ, HOME=str(cache / "home"), USERPROFILE=str(cache / "home"),
+               APPDATA=str(cache / "Roaming"), LOCALAPPDATA=str(cache / "Local"),
+               TEMP=str(cache / "Temp"), TMP=str(cache / "Temp"))
     env.pop("PYTHONPATH", None)
     env.update(extra)
+    for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
+        pathlib.Path(env[name]).mkdir(parents=True, exist_ok=True)
     return env
 
 
@@ -100,6 +108,71 @@ def snapshot(folder: pathlib.Path) -> dict[str, tuple[int, str]]:
             data = path.read_bytes()
             found[relative] = (path.stat().st_mtime_ns, hashlib.sha256(data).hexdigest())
     return found
+
+
+def powershell_snapshot(env: dict[str, str]) -> dict[str, dict[str, tuple[int, str]]]:
+    """Ignore only PowerShell's cache subtrees and their directory ancestors, never all AppData."""
+    cache_dirs = ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell")
+    found = {}
+    for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
+        folder = pathlib.Path(env[name])
+        allowed = cache_dirs if name in ("APPDATA", "LOCALAPPDATA") else ()
+        if name in ("HOME", "USERPROFILE"):
+            allowed = tuple(f"AppData/{kind}/{relative}" for kind in ("Local", "Roaming") for relative in cache_dirs)
+        contents = {}
+        for relative, value in snapshot(folder).items():
+            path = folder / relative
+            key = relative.casefold()
+            if not path.is_symlink() and any(
+                    key.startswith(cache.casefold() + "/") or
+                    (path.is_dir() and (key == cache.casefold() or cache.casefold().startswith(key + "/")))
+                    for cache in allowed):
+                continue
+            contents[relative] = value
+        found[name] = contents
+    return found
+
+
+def assert_dry_run_branches(test: unittest.TestCase, source: str, shell: str) -> None:
+    """Fail closed on dry-run statements beyond printing, bookkeeping and the guarded run wrapper."""
+    if shell == "bash":
+        starts = list(re.finditer(r'(?m)^([ \t]*)(?:if|elif) \[ "\$(?:DRY_RUN|RELEASE_DRY_RUN)" = 1 \]; then([^\n]*)',
+                                  source))
+        branches = []
+        for match in starts:
+            if match[2].strip():
+                test.assertTrue(match[2].endswith("; fi"), match[0])
+                branches.append(match[2][:-4])
+            else:
+                end = re.search(r"(?m)^" + re.escape(match[1]) + r"(?:else|elif|fi)\b", source[match.end():])
+                test.assertIsNotNone(end, match[0])
+                branches.append(source[match.end():match.end() + end.start()])
+        allowed = {"return 0", "exit 0", "REPO='<release-folder>'", "RELEASE_DRY_RUN=1",
+                   'set -- "$@" --dry-run', 'run "$OAH" doctor'}
+    else:
+        starts = re.findall(r"\b(?:if|elseif) \(\$(?:DryRun|ReleaseDryRun)\) \{", source)
+        branches = re.findall(r"(?s)\b(?:if|elseif) \(\$(?:DryRun|ReleaseDryRun)\) \{([^{}]*)\}", source)
+        test.assertEqual(len(branches), len(starts), "nested or unrecognized dry-run branch")
+        allowed = {"$script:StepCode = 0", "return", "return $true", "return '<release-folder>'", "return 0",
+                   "$setupArgs += '--dry-run'", "$null", "Invoke-Step @($Oah, 'doctor')",
+                   "Say ('  [dry-run] would run: ' + (Format-Command $Argv))",
+                   "Say ('  [dry-run] would run: ' + $Text)",
+                   "Say ('  [dry-run] would ask: ' + $Question + ' [y/N]')"}
+    test.assertTrue(branches, "no dry-run branches checked")
+    for branch in branches:
+        for line in branch.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line in allowed:
+                continue
+            if shell == "bash":
+                printed = line.replace('$(show "$@")', "<formatted-argv>")
+                test.assertFalse(any(token in printed for token in ("$(", "`", "<(", ">(")), line)
+                lexer = shlex.shlex(printed, posix=True, punctuation_chars=";&|<>")
+                lexer.whitespace_split = True
+                words = list(lexer)
+                test.assertTrue(len(words) == 2 and words[0] == "say", line)
+            else:
+                test.assertIsNotNone(re.fullmatch(r'''Say (?:'(?:[^']|'')*'|"(?:[^"`$]|\$\w+)*")''', line), line)
 
 
 @unittest.skipIf(os.name == "nt" or BASH is None, "install.sh is the macOS installer")
@@ -477,6 +550,76 @@ esac''')
 
 
 class InstallPs1Test(unittest.TestCase):
+    def test_powershell_command_is_noninteractive_and_suppresses_progress(self):
+        with mock.patch.object(shutil, "which", return_value="powershell"), mock.patch.object(
+                subprocess, "run") as run:
+            powershell_command("powershell", "[Console]::Out.WriteLine('ready')", {})
+        argv = run.call_args.args[0]
+        self.assertIn("-NoProfile", argv)
+        self.assertIn("-NonInteractive", argv)
+        script = base64.b64decode(argv[-1]).decode("utf-16-le")
+        self.assertTrue(script.startswith("$ProgressPreference = 'SilentlyContinue'; "))
+        self.assertIn("[Console]::Out.WriteLine('ready')", script)
+
+    def test_powershell_snapshot_catches_writes_in_every_redirected_location(self):
+        env = powershell_env(self)
+        for name in ("HOME", "APPDATA", "LOCALAPPDATA", "TEMP"):
+            with self.subTest(location=name):
+                before = powershell_snapshot(env)
+                folder = pathlib.Path(env[name])
+                folder.mkdir(parents=True, exist_ok=True)
+                target = folder / "unexpected-installer-write.txt"
+                target.write_text("created", encoding="utf-8")
+                after = powershell_snapshot(env)
+                self.assertNotEqual(after[name], before[name])
+                target.write_text("modified", encoding="utf-8")
+                self.assertNotEqual(powershell_snapshot(env)[name], after[name])
+
+    def test_powershell_snapshot_allows_only_exact_cache_directories(self):
+        env = powershell_env(self)
+        before = powershell_snapshot(env)
+        caches = {
+            "HOME": ("AppData/Local/Microsoft/Windows/PowerShell", "AppData/Roaming/Microsoft/PowerShell"),
+            "APPDATA": ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell"),
+            "LOCALAPPDATA": ("Microsoft/Windows/PowerShell", "Microsoft/PowerShell"),
+        }
+        for name, relatives in caches.items():
+            for relative in relatives:
+                folder = pathlib.Path(env[name]) / relative
+                folder.mkdir(parents=True)
+                (folder / "ModuleAnalysisCache").write_bytes(b"PowerShell cache")
+        self.assertEqual(powershell_snapshot(env), before)
+        for name, relative in (("HOME", "AppData/Local/Other/cache"),
+                               ("APPDATA", "Microsoft/Windows/PowerShell-other/cache"),
+                               ("LOCALAPPDATA", "Microsoft/Other/cache"),
+                               ("TEMP", "Microsoft/Windows/PowerShell/cache")):
+            with self.subTest(location=name, relative=relative):
+                previous = powershell_snapshot(env)
+                path = pathlib.Path(env[name]) / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"must be caught")
+                self.assertNotEqual(powershell_snapshot(env)[name], previous[name])
+
+    def test_installers_dry_run_branches_only_print(self):
+        for shell, path in (("bash", INSTALL_SH), ("powershell", INSTALL_PS1)):
+            with self.subTest(shell=shell):
+                assert_dry_run_branches(self, path.read_text(encoding="utf-8"), shell)
+
+    def test_dry_run_static_check_rejects_writes_downloads_and_extraction(self):
+        for shell, path, marker, operations in (
+                ("bash", INSTALL_SH, '    REPO=\'<release-folder>\'',
+                 ('touch "$HOME/changed"', 'curl https://example.invalid/file', 'tar -xf release.tar.gz')),
+                ("powershell", INSTALL_PS1, "        return '<release-folder>'",
+                 ("[IO.File]::WriteAllText('changed', 'data')", "Save-Release $releaseUri 'file'",
+                  "Expand-Archive release.zip"))):
+            source = path.read_text(encoding="utf-8")
+            for operation in operations:
+                with self.subTest(shell=shell, operation=operation):
+                    mutated = source.replace(marker, operation + "\n" + marker)
+                    self.assertNotEqual(mutated, source)
+                    with self.assertRaises(AssertionError):
+                        assert_dry_run_branches(self, mutated, shell)
+
     def test_install_ps1_hashing_does_not_depend_on_modules(self):
         text = INSTALL_PS1.read_text(encoding="ascii")
         self.assertNotIn("Get-FileHash", text)
@@ -536,6 +679,53 @@ class InstallPs1Test(unittest.TestCase):
                       'open-agent-harness-$ReleaseVersion.zip"', lines)
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_refreshes_uv_discovered_outside_persistent_path(self):
+        source = INSTALL_PS1.read_text(encoding="ascii")
+        functions = "\n".join(re.search(r"(?ms)^function " + name + r"\b.*?^}", source).group(0)
+                              for name in ("Update-SessionPath", "Find-Program", "Find-Uv"))
+        # Model a fresh Windows account whose registry PATH has never included uv.
+        for scope in ("Machine", "User"):
+            functions = functions.replace(f"[Environment]::GetEnvironmentVariable('Path', '{scope}')", "''")
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                env = powershell_env(self, PATH=os.path.join(os.environ["SystemRoot"], "System32"))
+                folder = pathlib.Path(env["HOME"]) / ".local" / "bin"
+                folder.mkdir(parents=True)
+                uv = folder / "uv.exe"
+                script = functions + f"""
+if (Find-Uv) {{ throw 'uv must start absent' }}
+[IO.File]::WriteAllBytes({ps_literal(str(uv))}, [byte[]]@())
+$script:Uv = Find-Uv
+if ($script:Uv -ne {ps_literal(str(uv))}) {{ throw 'uv was not discovered' }}
+Update-SessionPath
+if ((Find-Program 'uv') -ne $script:Uv) {{ throw 'uv is missing from the session PATH' }}
+$child = & {ps_literal(sys.executable)} -c 'import shutil; print(shutil.which(''uv''))'
+if ($child.Trim() -ine $script:Uv) {{ throw 'setup does not inherit the uv directory' }}
+[Console]::Out.WriteLine('UV_SESSION_PATH_OK')
+exit 0
+"""
+                result = powershell_command(shell, script, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(b"UV_SESSION_PATH_OK", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_powershell_snapshot_catches_dotnet_writes_despite_command_guards(self):
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                env = powershell_env(self)
+                before = powershell_snapshot(env)
+                script = "function New-Item { throw 'guard must not be called' };\n"
+                for name in ("HOME", "APPDATA", "LOCALAPPDATA", "TEMP"):
+                    target = pathlib.Path(env[name]) / "unexpected-dotnet-write.txt"
+                    script += f"[IO.File]::WriteAllText({ps_literal(str(target))}, 'changed');\n"
+                script += "exit 0"
+                result = powershell_command(shell, script, env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                after = powershell_snapshot(env)
+                for name in ("HOME", "APPDATA", "LOCALAPPDATA", "TEMP"):
+                    self.assertNotEqual(after[name], before[name], name)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_piped_dry_run_never_downloads_or_writes(self):
         for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
             with self.subTest(shell=shell):
@@ -550,7 +740,7 @@ class InstallPs1Test(unittest.TestCase):
                                     "Invoke-WebRequest"))
                 script = ps1_with_overrides(guards) + (
                     "& ([scriptblock]::Create($installer)) -DryRun; exit $LASTEXITCODE")
-                before_scratch = snapshot(scratch)
+                before = powershell_snapshot(env)
                 result = powershell_command(shell, script, env)
                 text = result.stdout.decode("utf-8", "replace")
                 self.assertEqual(result.returncode, 0, text + result.stderr.decode("utf-8", "replace"))
@@ -561,8 +751,7 @@ class InstallPs1Test(unittest.TestCase):
                 self.assertNotIn("SHA-256 verified:", text)
                 self.assertNotIn("FORBIDDEN", text)
                 self.assertEqual(text.rstrip().splitlines()[-1], "OAH_INSTALL_DRY_RUN_OK")
-                self.assertEqual(snapshot(scratch), before_scratch)
-                self.assertEqual(snapshot(home), {})
+                self.assertEqual(powershell_snapshot(env), before)
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_verifies_release_without_get_filehash(self):
@@ -611,23 +800,37 @@ class InstallPs1Test(unittest.TestCase):
                 output = make_tmp_dir(self) / "must-not-exist.zip"
                 script = function + """
 $script:requests = 0
+$script:bodyReads = 0
 function New-TestRequest($Uri) {
     $script:requests++
     $response = [pscustomobject]@{StatusCode=302; Headers=@{Location='http://example.invalid/oah.zip'}}
     $response | Add-Member ScriptMethod Dispose {}
+    $response | Add-Member ScriptMethod GetResponseStream {
+        $script:bodyReads++
+        throw 'FORBIDDEN response body download'
+    }
     $request = [pscustomobject]@{AllowAutoRedirect=$true; Response=$response}
-    $request | Add-Member ScriptMethod GetResponse { return $this.Response }
+    $request | Add-Member ScriptMethod GetResponse {
+        if ($this.AllowAutoRedirect) { throw 'FORBIDDEN automatic redirect' }
+        return $this.Response
+    }
     return $request
 }
 try {
 """ + f"Save-Release ([Uri]'https://example.invalid/oah.zip') {ps_literal(str(output))}\n" + """
     exit 2
 } catch {
-    if ($_.Exception.Message -notmatch 'HTTPS' -or $script:requests -ne 1) { throw }
+    if ($_.Exception.Message -ne 'Use an HTTPS release URL with HTTPS-only redirects, or clone the repository instead.' -or
+        $script:requests -ne 1 -or $script:bodyReads -ne 0) { throw }
+    [Console]::Out.WriteLine($_.Exception.Message)
 }
+# A caught terminating error can leave $? false; success here means the refusal was verified.
+exit 0
 """
                 result = powershell_command(shell, script, powershell_env(self))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(b"Use an HTTPS release URL with HTTPS-only redirects, or clone the repository instead.",
+                              result.stdout)
                 self.assertFalse(output.exists())
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
@@ -673,21 +876,22 @@ try {
                 home = make_tmp_dir(self)
                 before_clone = snapshot(clone)
                 env = powershell_env(self, USERPROFILE=str(home), HOME=str(home))
-                result = subprocess.run([shutil.which(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                                         str(clone / "install" / "install.ps1"), "-DryRun"],
-                                        env=env, capture_output=True, timeout=300, cwd=str(home))
+                before = powershell_snapshot(env)
+                script = (f"Set-Location -LiteralPath {ps_literal(str(home))}; "
+                          f"& {ps_literal(str(clone / 'install' / 'install.ps1'))} -DryRun; exit $LASTEXITCODE")
+                result = powershell_command(shell, script, env)
                 text = result.stdout.decode("utf-8", "replace")
                 self.assertEqual(result.returncode, 0, text + result.stderr.decode("utf-8", "replace"))
                 self.assertEqual(text.rstrip().splitlines()[-1], "OAH_INSTALL_DRY_RUN_OK")
                 for number in range(1, 6):
                     self.assertIn(f"Step {number}/5", text)
                 self.assertEqual(snapshot(clone), before_clone)
-                self.assertEqual(snapshot(home), {})
+                self.assertEqual(powershell_snapshot(env), before)
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_rejects_unknown_option(self):
-        result = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                                 str(INSTALL_PS1), "--bogus"], capture_output=True, timeout=120)
+        script = f"& {ps_literal(str(INSTALL_PS1))} --bogus; exit $LASTEXITCODE"
+        result = powershell_command("powershell", script, powershell_env(self))
         self.assertEqual(result.returncode, 2)
         self.assertIn(b"OAH_INSTALL_USAGE", result.stdout + result.stderr)
 
