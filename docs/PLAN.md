@@ -681,6 +681,10 @@ After the review:
   a failed fetch or unavailable impact refuses with `OAH_LAND_IMPACT_STALE`; pending or failed newly
   affected checks refuse with `OAH_LAND_CHECKS_REQUIRED`. An earlier `--check` does not authorize a
   later landing: `--merge` and the lead's push procedure repeat this check immediately before acting.
+  Landing is a fast-forward push of the exact reviewed task HEAD, with the remote atomically requiring
+  the default branch to equal the fetched SHA. If it moved, the remote refuses and nothing lands
+  (`OAH_LAND_IMPACT_STALE`); fetch the new default-branch SHA, reassess impact and require affected
+  checks again before retrying.
 - **The reviewer binary is recorded, not trusted blindly.** `oah` records its path, version and sha256.
   `[review].codex_sha256` can pin it. There is no macOS code-signature check, because it would not
   apply on Windows.
@@ -814,7 +818,8 @@ After the review:
   Compare the manifest before and after building; changed inputs require a retry or stale refusal.
   **The latest default branch (A23).** Impact is assessed against the latest default branch, because
   work lands there one lane at a time. The landing contract in 5.9 fetches and reassesses impact again
-  immediately before push or merge, requiring newly affected checks. Before a query,
+  immediately before landing, requiring newly affected checks; the remote enforces the assessed SHA
+  during the fast-forward push of the exact reviewed head. Before a query,
   `oah impact` fetches the remote's default branch, read-only, with the user's own git setup, and
   refreshes a second map for that ref in the state folder. Output labels both maps with their commit
   SHAs. `[impact] refresh_default_branch = true` is the default. `--offline`, or a failed fetch, uses the
@@ -1698,7 +1703,7 @@ from that workflow. Sections 4 (row 22), 5.6, 5.9, 5.10, 6.5, 14 and the lane ta
 
 | A22 | **Reviews run until they converge.** No fixed round ceiling. Rounds continue while each round's findings are new and in scope. Findings persist stable identities and classes; each reviewer gets validated prior receipts and correction-attempt outcomes (5.9). Missing or ambiguous recurrence evidence, a finding that repeats an attempted class, or one whose fix needs a design or stored-format change stops the series with `OAH_REVIEW_NEEDS_DECISION` and asks the user. A series ends when a round approves or reports only P2/P3 findings, recorded as follow-ups. Users who want a budget set `[review] max_rounds` (unset by default); reaching it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`, and `--extra-round` continues and is recorded. | 4 (row 22), 5.9 | P6 |
 
-| A23 | **Impact reads the latest default branch; evidence stays pinned.** Impact is assessed against the latest default branch: work lands there one lane at a time, and the landing check fetches and reassesses impact against the fetched SHA immediately before push or merge, requiring newly affected checks (5.9). Stale landing impact refuses with `OAH_LAND_IMPACT_STALE`; pending or failed newly affected checks refuse with `OAH_LAND_CHECKS_REQUIRED`. Before a query, `oah impact` fetches the remote's default branch, read-only, with the user's own git setup (no credential is read or stored, A17), and refreshes a second map for that ref next to the worktree map. Output labels both maps with their commit SHAs. The refresh is on by default (`[impact] refresh_default_branch = true`), and briefs write "no network except the re-ranker and `oah impact`'s automatic default-branch refresh", never a wording that leads a worker to turn the refresh off. `--offline`, or a failed fetch, uses the last fetched ref and labels the result `default-branch=stale(<reason>)`. Review evidence commands stay pinned to the reviewed commit and its working tree. | 5.6, 5.9, 5.10 | P7 (lane P7j, after P7i), P4, P6 |
+| A23 | **Impact reads the latest default branch; evidence stays pinned.** Impact is assessed against the latest default branch: work lands there one lane at a time, and the landing check fetches and reassesses impact against the fetched SHA immediately before push or merge, requiring newly affected checks (5.9). Landing is a fast-forward push of the exact reviewed head, conditional on the remote default branch still equalling the assessed SHA, enforced atomically by the remote. If it moved, nothing lands; fetch the new SHA, reassess impact and require affected checks again before retrying. Stale landing impact refuses with `OAH_LAND_IMPACT_STALE`; pending or failed newly affected checks refuse with `OAH_LAND_CHECKS_REQUIRED`. Before a query, `oah impact` fetches the remote's default branch, read-only, with the user's own git setup (no credential is read or stored, A17), and refreshes a second map for that ref next to the worktree map. Output labels both maps with their commit SHAs. The refresh is on by default (`[impact] refresh_default_branch = true`), and briefs write "no network except the re-ranker and `oah impact`'s automatic default-branch refresh", never a wording that leads a worker to turn the refresh off. `--offline`, or a failed fetch, uses the last fetched ref and labels the result `default-branch=stale(<reason>)`. Review evidence commands stay pinned to the reviewed commit and its working tree. | 5.6, 5.9, 5.10 | P7 (lane P7j, after P7i), P4, P6 |
 
 #### Amendment 5 checklists
 
@@ -1747,3 +1752,5 @@ from that workflow. Sections 4 (row 22), 5.6, 5.9, 5.10, 6.5, 14 and the lane ta
 - [ ] A local bare remote that gains a gate binding after review makes landing require that newly affected check using the fetched definition against the task HEAD; a pending or failed check refuses with `OAH_LAND_CHECKS_REQUIRED`. (A23)
 - [ ] Offline mode, fetch failure or unavailable landing impact refuses with `OAH_LAND_IMPACT_STALE`, even when all earlier exact-head checks passed. (A23)
 - [ ] `--merge` and the lead's push procedure repeat the landing check immediately before acting; an earlier successful `--check` cannot bypass a later default-branch change. (A23)
+- [ ] Landing pushes only the exact reviewed head as a fast-forward, with a remote-enforced atomic condition that the default branch equals the assessed SHA. (A23)
+- [ ] In a local bare remote, a concurrent landing after the check advances the default branch; the conditional push refuses with `OAH_LAND_IMPACT_STALE` and lands nothing, then a retry fetches the new SHA, reassesses impact and requires affected checks again. (A23)
