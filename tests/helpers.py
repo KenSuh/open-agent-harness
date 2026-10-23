@@ -55,3 +55,13 @@ def require_node(test: unittest.TestCase) -> str:
             test.fail("node is required for this test (OAH_REQUIRE_NODE_TESTS=1)")
         test.skipTest("node is not installed")
     return node
+
+
+def make_unlazy(folder: pathlib.Path, version: str | None = "2.1.0") -> pathlib.Path:
+    """A minimal unlazy install: scripts/gate-check.mjs plus an optional package.json version."""
+    (folder / "scripts").mkdir(parents=True)
+    (folder / "scripts" / "gate-check.mjs").write_text("", encoding="utf-8")
+    if version is not None:
+        (folder / "package.json").write_text(json.dumps({"name": "unlazy-skill", "version": version}),
+                                             encoding="utf-8")
+    return folder

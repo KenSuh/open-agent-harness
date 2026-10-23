@@ -1,21 +1,10 @@
 # unlazy 설치 위치 찾기 검사 — 환경변수 우선, 프로젝트 우선 순서, 잘못된 폴더 건너뛰기, 버전 읽기를 본다.
 from __future__ import annotations
 
-import json
-import pathlib
 import unittest
 
 from oah.unlazy import find_unlazy_dir, unlazy_version
-from tests.helpers import make_tmp_dir
-
-
-def make_unlazy(folder: pathlib.Path, version: str | None = "2.1.0") -> pathlib.Path:
-    (folder / "scripts").mkdir(parents=True)
-    (folder / "scripts" / "gate-check.mjs").write_text("", encoding="utf-8")
-    if version is not None:
-        (folder / "package.json").write_text(json.dumps({"name": "unlazy-skill", "version": version}),
-                                             encoding="utf-8")
-    return folder
+from tests.helpers import make_tmp_dir, make_unlazy
 
 
 class FindUnlazyTest(unittest.TestCase):
