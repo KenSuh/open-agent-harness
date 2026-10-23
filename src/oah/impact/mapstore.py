@@ -122,7 +122,7 @@ def list_files(root: pathlib.Path, rev: str, settings: Mapping[str, object]) -> 
     files = {}
     for entry in output.split("\0"):
         meta, _, path = entry.partition("\t")
-        if path and meta.split(" ")[1:2] == ["blob"]:
+        if path and meta.split(" ")[1:2] == ["blob"] and not meta.startswith("120000 "):
             files[path] = kinds_module.classify(path, settings["kinds"])
     return files
 
@@ -146,9 +146,28 @@ def read_blobs(root: pathlib.Path, rev: str, paths: list[str], timeout: float) -
     return contents
 
 
+def _safe_worktree_path(root: pathlib.Path, path: str) -> bool:
+    """Do not follow file or directory symlinks, or leave the repository."""
+    base = root.resolve()
+    candidate = base / path
+    try:
+        parts = candidate.relative_to(base).parts
+        if ".." in parts or not candidate.resolve().is_relative_to(base):
+            return False
+        for part in parts:
+            base /= part
+            if base.is_symlink():
+                return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def read_worktree(root: pathlib.Path, paths: list[str]) -> dict[str, str]:
     contents = {}
     for path in paths:
+        if not _safe_worktree_path(root, path):
+            continue
         try:
             contents[path] = (root / path).read_bytes().decode("utf-8", errors="replace")
         except OSError:
@@ -240,14 +259,14 @@ def take_manifest(root: pathlib.Path, settings: Mapping[str, object],
     dirty_paths, untracked_paths = _status(root, timeout)
     dirty, untracked = {}, {}
     for path in sorted(filter(keep, dirty_paths)):
-        key = _file_key(root / path)
+        key = _file_key(root / path) if _safe_worktree_path(root, path) else "excluded-symlink"
         dirty[path] = key or "deleted"
         if key:
             inputs[path] = key
         else:
             inputs.pop(path, None)
     for path in sorted(filter(keep, untracked_paths)):
-        key = _file_key(root / path)
+        key = _file_key(root / path) if _safe_worktree_path(root, path) else "excluded-symlink"
         if key:
             untracked[path] = inputs[path] = key
     config = _file_key(root.joinpath(*CONFIG_RELATIVE_PATH.parts))
@@ -255,7 +274,7 @@ def take_manifest(root: pathlib.Path, settings: Mapping[str, object],
                 "index": hashlib.sha256(listing.encode("utf-8", "surrogateescape")).hexdigest(),
                 "dirty": dirty, "untracked": untracked, "ledgers": _ledgers(root, settings),
                 "config": config, "tool": tool_digest(settings)}
-    return manifest, dict(sorted(inputs.items()))
+    return manifest, {path: key for path, key in sorted(inputs.items()) if _safe_worktree_path(root, path)}
 
 
 # --- scanning ------------------------------------------------------------------------------------------
@@ -342,7 +361,7 @@ def _db_graph(root: pathlib.Path, rev: str | None, files: Mapping[str, str],
     if not sql:
         return None
     contents = read_worktree(root, sql) if rev is None else read_blobs(root, rev, sql, settings["git_timeout"])
-    return sqlplugin.extract(contents)
+    return sqlplugin.extract(contents) if contents else None
 
 
 def _carry(old: Mapping[str, list], keep: set[str], changed: set[str]) -> dict[str, list[list]]:
@@ -488,22 +507,30 @@ def _write(path: pathlib.Path, manifest: dict, inputs: Mapping[str, str], data: 
     return stored
 
 
-def _update(top: pathlib.Path, path: pathlib.Path, settings: Mapping[str, object], *,
+def _update(top: pathlib.Path, path: pathlib.Path, settings: Mapping[str, object] | None, *,
             force: bool) -> tuple[MapInfo, dict]:
-    with StateLock(path.parent.parent / ".lock", timeout=float(settings["lock_timeout"])):
+    initial_config = _file_key(top.joinpath(*CONFIG_RELATIVE_PATH.parts))
+    with StateLock(path.parent.parent / ".lock", timeout=float(configured(top, settings)["lock_timeout"])):
         for _attempt in range(BUILD_ATTEMPTS):
-            manifest, inputs = take_manifest(top, settings, _state(path))
+            config = _file_key(top.joinpath(*CONFIG_RELATIVE_PATH.parts))
+            if settings is not None and config != initial_config:
+                raise ImpactError("OAH_IMPACT_STALE", "config changed while the impact map was built with "
+                                  "explicit settings; reload settings and run oah impact refresh")
+            current = configured(top, settings)
+            manifest, inputs = take_manifest(top, current, _state(path))
+            if manifest["config"] != config:
+                continue  # config moved while settings were loaded; restart with its new bytes
             stored, reason, incremental = _judge(path, manifest)
             if not force and stored is not None and not reason:
                 return _info(stored, path, "fresh"), stored["data"]
             if not force and stored is not None and incremental:
                 data, changed = refresh_data(top, stored["data"], stored["inputs"], inputs, manifest["head"],
-                                             settings)
+                                             current)
                 action = "refreshed"
             else:
-                data = build_data(top, None, settings, inputs=inputs, head=manifest["head"])
+                data = build_data(top, None, current, inputs=inputs, head=manifest["head"])
                 changed, action = len(data["files"]), "built"
-            if take_manifest(top, settings, _state(path))[0] == manifest:
+            if take_manifest(top, current, _state(path))[0] == manifest:
                 return _info(_write(path, manifest, inputs, data), path, action, changed, reason or "forced"), data
     raise ImpactError("OAH_IMPACT_STALE", f"files kept changing while the impact map was built "
                       f"({BUILD_ATTEMPTS} attempts), so it was not stored; let your edits settle, then run "
@@ -513,7 +540,7 @@ def _update(top: pathlib.Path, path: pathlib.Path, settings: Mapping[str, object
 def build(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
           settings: Mapping[str, object] | None = None) -> MapInfo:
     """A full build of the working tree, replacing any stored map."""
-    top, path, settings = _context(root, env, settings)
+    top, path, _current = _context(root, env, settings)
     return _update(top, path, settings, force=True)[0]
 
 
@@ -521,16 +548,16 @@ def fresh_map(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, str
               settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
     """(info, data) for a map that matches the current inputs. Stale maps are refreshed, or refused when
     refresh is False."""
-    top, path, settings = _context(root, env, settings)
-    manifest, _inputs = take_manifest(top, settings, _state(path))
+    top, path, current = _context(root, env, settings)
+    if refresh:
+        return _update(top, path, settings, force=False)
+    manifest, _inputs = take_manifest(top, current, _state(path))
     stored, reason, _incremental = _judge(path, manifest)
     if stored is not None and not reason:
         return _info(stored, path, "fresh"), stored["data"]
-    if not refresh:
-        hint = "run oah impact build" if stored is None else "run oah impact refresh"
-        raise ImpactError("OAH_IMPACT_STALE", f"the impact map is {reason}; {hint} (or drop --no-refresh) "
-                          "and retry. oah never answers from a stale map.")
-    return _update(top, path, settings, force=False)
+    hint = "run oah impact build" if stored is None else "run oah impact refresh"
+    raise ImpactError("OAH_IMPACT_STALE", f"the impact map is {reason}; {hint} (or drop --no-refresh) "
+                      "and retry. oah never answers from a stale map.")
 
 
 def ensure_fresh(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, str] | None = None,

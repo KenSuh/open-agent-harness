@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
+import subprocess
+import sys
 import unittest
 
 from oah.impact import sqlplugin
 from tests.helpers import git_commit, make_git_repo
-from tests.test_impact_map import run_impact
+from tests.test_impact_map import SRC, run_impact
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "impact" / "sql"
 
@@ -105,6 +108,42 @@ class ExtractTest(unittest.TestCase):
         crlf = {name: body.replace("\n", "\r\n") for name, body in files.items()}
         self.assertEqual(sqlplugin.extract(crlf), graph, "CRLF files give the same graph and line numbers")
 
+    def test_hostile_grants_finish_within_budget(self):
+        code = ("from oah.impact import sqlplugin\n"
+                "graph = sqlplugin.extract({'hostile.sql': 'GRANT x ' * 100000 + ';\\n' "
+                "+ 'GRANT SELECT ON users TO app;\\n'})\n"
+                "assert graph['links'] == [['db_grant:app', 'db_table:users', 'grant:SELECT', "
+                "'hostile.sql', 2]], graph\n")
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8",
+                                env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_mysql_hash_comments_and_double_quoted_strings(self):
+        text = ('#CREATE TABLE ghost_hash (id int);\n'
+                'CREATE TABLE notes (body text DEFAULT "CREATE TABLE ghost_default (id int);");\n'
+                'INSERT INTO notes VALUES ("CREATE TABLE ghost_string (id int);");\n'
+                'INSERT INTO notes VALUES ("escaped \\" quote; CREATE TABLE ghost_escape (id int);");\n'
+                'CREATE TABLE public."Real Table" (id int);\n')
+        graph = sqlplugin.extract({"mysql.sql": text})
+        self.assertEqual(set(graph["entities"]), {"db_table:notes", "db_table:real table"})
+        self.assertEqual(graph["entities"]["db_table:real table"]["events"], [["mysql.sql", 5, "create"]])
+
+    def test_grant_routine_signatures_split_at_top_level(self):
+        for signature in ("integer, text", "numeric(10, 2), text", '"schema"."type", numeric(10, 2)'):
+            with self.subTest(signature=signature):
+                graph = sqlplugin.extract({"grant.sql":
+                    f'GRANT EXECUTE ON FUNCTION public.f({signature}), "g"(integer) TO app;\n'
+                    f'REVOKE EXECUTE ON FUNCTION public.f({signature}) FROM app;\n'})
+                self.assertEqual(self.links(graph), {
+                    ("db_grant:app", "db_routine:f", "grant:EXECUTE"),
+                    ("db_grant:app", "db_routine:g", "grant:EXECUTE"),
+                    ("db_grant:app", "db_routine:f", "revoke:EXECUTE"),
+                })
+
+    def test_quoted_identifier_lists_remain_identifiers(self):
+        graph = sqlplugin.extract({"quoted.sql": 'DROP TABLE "first table", "second table";\n'})
+        self.assertEqual(set(graph["entities"]), {"db_table:first table", "db_table:second table"})
+
     def test_rename_and_drop_events(self):
         graph = sqlplugin.extract(load("postgres"))
         orders = [op for _file, _line, op in graph["entities"]["db_table:orders"]["events"]]
@@ -118,6 +157,18 @@ class ExtractTest(unittest.TestCase):
 
 
 class DbQueryTest(unittest.TestCase):
+    def test_index_only_migration_returns_table_code_references(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {"db/001.sql": "CREATE TABLE users (id int);\n",
+                          "db/002.sql": "CREATE INDEX users_idx ON users(id);\n",
+                          "src/store.py": "query('SELECT * FROM users')\n"})
+        result = run_impact(repo, "db/002.sql", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [row for row in json.loads(result.stdout)["rows"] if row["layer"] == "db"]
+        self.assertIn(("src/store.py", "uses db_table:users"), {(r["source"], r["detail"]) for r in rows})
+        self.assertIn(("db/002.sql", "index users_idx db_table:users"),
+                      {(r["source"], r["detail"]) for r in rows})
+
     def test_entity_query_identity(self):
         repo = make_git_repo(self)
         files = {f"db/migrations/{name.split('/')[-1]}": text for name, text in load("postgres").items()}

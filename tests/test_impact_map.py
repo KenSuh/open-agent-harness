@@ -265,6 +265,91 @@ class MapStoreTest(unittest.TestCase):
         self.assertEqual(configured.tool_digest, explicit.tool_digest)
         self.assertEqual(ensure_fresh(self.repo).action, "fresh", "callers without settings agree on the map")
 
+    def test_sql_symlinks_are_excluded(self):
+        outside = make_tmp_dir(self) / "outside.sql"
+        outside.write_text("CREATE TABLE ghost (id int);\n", encoding="utf-8")
+        sql = self.repo / "linked.sql"
+        try:
+            sql.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        git_commit(self.repo, {})
+        info = mapstore.build(self.repo, env={})
+        self.assertIsNone(mapstore.load(info.path)["data"]["db"])
+        self.assertIsNone(mapstore.snapshot(self.repo, "HEAD")[1]["db"])
+        outside.write_text("CREATE TABLE other_ghost (id int);\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "fresh")
+        self.assertEqual(ensure_fresh(self.repo).result_digest, self.full_build_elsewhere().result_digest)
+        sql.unlink()
+        sql.write_text("CREATE TABLE real_table (id int);\n", encoding="utf-8")
+        updated = ensure_fresh(self.repo)
+        self.assertIn("db_table:real_table", mapstore.load(updated.path)["data"]["db"]["entities"])
+        self.assertEqual(updated.result_digest, self.full_build_elsewhere().result_digest)
+        sql.unlink()
+        sql.symlink_to(outside)
+        updated = ensure_fresh(self.repo)
+        self.assertIsNone(mapstore.load(updated.path)["data"]["db"])
+        self.assertEqual(updated.result_digest, self.full_build_elsewhere().result_digest)
+
+    def test_sql_symlink_directory_is_not_read(self):
+        outside = make_tmp_dir(self)
+        (outside / "001.sql").write_text("CREATE TABLE ghost (id int);\n", encoding="utf-8")
+        link = self.repo / "external"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        self.assertEqual(mapstore.read_worktree(self.repo, ["external/001.sql"]), {})
+
+    @unittest.skipUnless(os.name == "nt", "Windows symlink handling")
+    def test_windows_sql_symlink_is_not_read(self):
+        self.test_sql_symlinks_are_excluded()
+
+    def test_config_change_during_build_reloads_settings(self):
+        config = self.repo / ".oah" / "config.toml"
+        config.parent.mkdir()
+        config.write_text("[impact]\nmin_needle = 3\n", encoding="utf-8")
+        real = mapstore.build_data
+        for operation in (mapstore.build, ensure_fresh):
+            with self.subTest(operation=operation.__name__):
+                config.write_text("[impact]\nmin_needle = 3\n", encoding="utf-8")
+                seen = []
+                env = {"OAH_STATE_DIR": str(make_tmp_dir(self) / "state")}
+
+                def editing(root, rev, settings, **kwargs):
+                    seen.append(settings["min_needle"])
+                    data = real(root, rev, settings, **kwargs)
+                    if len(seen) == 1:
+                        config.write_text("[impact]\nmin_needle = 9\n", encoding="utf-8")
+                    return data
+
+                with patch.object(mapstore, "build_data", editing):
+                    info = operation(self.repo, env=env)
+                self.assertEqual(seen, [3, 9])
+                self.assertEqual(info.result_digest, self.full_build_elsewhere().result_digest)
+                self.assertNotIn("util", mapstore.load(info.path)["data"]["hits"])
+                self.assertEqual(mapstore.status(self.repo, env=env)[1], "fresh")
+
+    def test_config_change_with_explicit_settings_refuses(self):
+        config = self.repo / ".oah" / "config.toml"
+        config.parent.mkdir()
+        config.write_text("[impact]\nmin_needle = 3\n", encoding="utf-8")
+        previous = mapstore.build(self.repo, env={})
+        before = previous.path.read_bytes()
+        real = mapstore.build_data
+
+        def editing(*args, **kwargs):
+            data = real(*args, **kwargs)
+            config.write_text("[impact]\nmin_needle = 9\n", encoding="utf-8")
+            return data
+
+        with patch.object(mapstore, "build_data", editing):
+            with self.assertRaises(ImpactError) as caught:
+                mapstore.build(self.repo, env={}, settings={"min_needle": 3})
+        self.assertEqual(caught.exception.code, "OAH_IMPACT_STALE")
+        self.assertIn("oah impact refresh", str(caught.exception))
+        self.assertEqual(previous.path.read_bytes(), before)
+
     def test_worktrees_keep_separate_maps(self):
         other = make_tmp_dir(self) / "other"
         subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "side", str(other)],

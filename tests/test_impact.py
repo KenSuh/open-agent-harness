@@ -306,6 +306,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual([item["source"] for item in report["changed_since"]["rerun"]],
                          [".github/workflows/ci.yml", "Makefile"])
 
+    def test_cli_preserves_each_strong_command_location(self):
+        workflow = ".github/workflows/ci.yml"
+        base = git_commit(self.repo, {workflow: "steps:\n  - run: python tools/check.py\n\n"
+                                               "  - run: sha256sum tools/check.py\n\n"
+                                               "  - run: python tools/check.py --again\n"})
+        (self.repo / "tools" / "check.py").write_text("print('changed')\n", encoding="utf-8")
+        result = run_impact(self.repo, "--changed-since", base, "--strong-only", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        rows = [(r["line"], r["binding"]) for r in report["rows"] if r["source"] == workflow]
+        self.assertEqual(sorted(rows), [(2, "exec"), (4, "pin"), (6, "exec")])
+        plan = [(r["line"], r["binding"]) for r in report["changed_since"]["rerun"]
+                if r["source"] == workflow]
+        self.assertEqual(sorted(plan), sorted(rows), "alternate needles must not duplicate command locations")
+
     def test_cli_ref(self):
         first = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], check=True, capture_output=True,
                                text=True).stdout.strip()
@@ -328,6 +343,13 @@ class CliTest(unittest.TestCase):
                 result = run_impact(self.repo, *args)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn(code, result.stderr)
+
+    def test_cli_argparse_usage_exit_2(self):
+        for args in (("--bogus",), ("--ref",)):
+            with self.subTest(args=args):
+                result = run_impact(self.repo, *args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("usage:", result.stderr)
 
     def test_cli_outside_repo_exit_69(self):
         outside = make_git_repo(self).parent / "plain"

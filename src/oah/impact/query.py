@@ -91,6 +91,7 @@ def _owners(files: Iterable[str], min_needle: int) -> dict[str, int]:
 
 def _lexical(data: Mapping, target: str, owners: Mapping[str, int], settings: Mapping) -> list[Row]:
     best: dict[tuple[str, str], list] = {}
+    commands: dict[tuple[str, str, int], list] = {}
     for needle, via in lexical.needles_for(target, settings["min_needle"]).items():
         if via != "path" and owners.get(needle, 0) > settings["max_ambiguity"]:
             continue
@@ -104,12 +105,22 @@ def _lexical(data: Mapping, target: str, owners: Mapping[str, int], settings: Ma
             else:
                 bound = "mention"
             key = ("wiki" if _under(source, settings["wiki_dirs"]) else "lexical", source)
+            if bound in STRONG:
+                location = (*key, line)
+                entry = commands.setdefault(location, [bound, via])
+                if BINDINGS.index(bound) < BINDINGS.index(entry[0]):
+                    entry[:] = [bound, via]
+                continue
             entry = best.setdefault(key, [bound, line, via, set()])
             entry[3].add(line)
             if (BINDINGS.index(bound), line) < (BINDINGS.index(entry[0]), entry[1]):
                 entry[0], entry[1], entry[2] = bound, line, via
-    rows = []
+    rows = [Row(bound, layer, data["files"].get(source, "code"), source, line, target, via, 1)
+            for (layer, source, line), (bound, via) in commands.items()]
+    strong_sources = {(layer, source) for layer, source, _line in commands}
     for (layer, source), (bound, line, via, lines) in best.items():
+        if (layer, source) in strong_sources:
+            continue
         detail = via if len(lines) == 1 else f"{via}, {len(lines)} lines"
         rows.append(Row(bound, layer, data["files"].get(source, "code"), source, line, target, detail, len(lines)))
     return rows
@@ -219,6 +230,7 @@ def _db_path(data: Mapping, target: str, settings: Mapping) -> list[Row]:
     for entity, info in graph["entities"].items():
         if target in sql:
             events = [(line, op) for file, line, op in info["events"] if file == target]
+            events += [(line, f"index {name}") for name, file, line in info["indexes"] if file == target]
             if not events:
                 continue
             line, op = min(events)

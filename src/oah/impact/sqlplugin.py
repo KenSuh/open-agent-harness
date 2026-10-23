@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import bisect
 import re
-from typing import Mapping
+from typing import Iterable, Mapping
 
 _PART = r'"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*'
 NAME = rf"(?:{_PART})(?:\s*\.\s*(?:{_PART}))*"
-_OBJ = rf"(?:{_PART}|\*)(?:\s*\.\s*(?:{_PART}|\*))*(?:\s*\([^)]*\))?"
+_OBJ = rf"(?:{_PART}|\*)(?:\s*\.\s*(?:{_PART}|\*))*"
 _WHO = rf"(?:'[^']*'(?:\s*@\s*'[^']*')?|`[^`]*`(?:\s*@\s*`[^`]*`)?|(?:{_PART})(?:\s*@\s*\S+)?)"
 _F = re.I | re.S
 
@@ -43,10 +43,15 @@ _ALTER = _rx(rf"\bALTER\s+(?P<kind>TABLE|(?:MATERIALIZED\s+)?VIEW|FUNCTION|PROCE
 _DROP = _rx(rf"\bDROP\s+(?P<kind>TABLE|(?:MATERIALIZED\s+)?VIEW|FUNCTION|PROCEDURE|TRIGGER)\s+"
             rf"(?:IF\s+EXISTS\s+)?(?P<names>{NAME}(?:\s*,\s*{NAME})*)")
 _RENAME_TABLE = _rx(rf"\bRENAME\s+TABLE\s+(?P<pairs>{NAME}\s+TO\s+{NAME}(?:\s*,\s*{NAME}\s+TO\s+{NAME})*)")
-_GRANT = _rx(rf"\b(?P<op>GRANT|REVOKE)\s+(?:GRANT\s+OPTION\s+FOR\s+)?(?P<privs>[^;]+?)\s+ON\s+"
-             rf"(?:(?P<otype>TABLE|FUNCTION|PROCEDURE|ROUTINE|SEQUENCE|SCHEMA|DATABASE|"
-             rf"ALL\s+(?:TABLES|FUNCTIONS|PROCEDURES|ROUTINES|SEQUENCES)\s+IN\s+SCHEMA)\s+)?"
-             rf"(?P<objs>{_OBJ}(?:\s*,\s*{_OBJ})*)\s+(?:TO|FROM)\s+(?P<who>{_WHO}(?:\s*,\s*{_WHO})*)")
+_GRANT_START = _rx(r"\b(?:GRANT|REVOKE)\b")
+_GRANT = _rx(r"\b(?P<op>GRANT|REVOKE)\s+(?:GRANT\s+OPTION\s+FOR\s+)?(?P<privs>[^;]+?)\s+ON\s+")
+_OBJECT_TYPE = _rx(r"(?:TABLE|FUNCTION|PROCEDURE|ROUTINE|SEQUENCE|SCHEMA|DATABASE|"
+                   r"ALL\s+(?:TABLES|FUNCTIONS|PROCEDURES|ROUTINES|SEQUENCES)\s+IN\s+SCHEMA)\s+")
+_OBJECT_NAME = _rx(_OBJ)
+_ROLES = _rx(rf"\s*{_WHO}(?:\s*,\s*{_WHO})*")
+_QUOTED_NAME_BEFORE = _rx(r"(?:\b(?:TABLE|VIEW|FUNCTION|PROCEDURE|TRIGGER|INDEX|REFERENCES|FROM|JOIN|"
+                          r"INTO|UPDATE|ON|TO|SCHEMA|DATABASE)\s+(?:(?:IF\s+(?:NOT\s+)?EXISTS|ONLY)\s+)?"
+                          rf"(?:{NAME}\s*,\s*)*|\.\s*)\Z")
 _RENAME_TO = _rx(rf"\bRENAME\s+TO\s+(?P<name>{NAME})")
 _REFERENCES = _rx(rf"\bREFERENCES\s+(?P<name>{NAME})")
 _SOURCES = _rx(rf"\b(?:FROM|JOIN)\s+(?P<name>{NAME})")
@@ -58,6 +63,22 @@ _BLOCK = _rx(r"\b(?P<word>BEGIN|CASE|END)\b(?:\s+(?P<after>IF|LOOP|WHILE|REPEAT|
 _DELIMITER = re.compile(r"[ \t]*DELIMITER[ \t]+(?P<delim>\S+)[ \t]*(?=\r?\n|\Z)", re.I)
 _DOLLAR = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 _PARTS = re.compile(_PART + r"|\*")
+
+
+def _quoted_end(text: str, start: int) -> int:
+    quote = "]" if text[start] == "[" else text[start]
+    end = start + 1
+    while end < len(text):
+        if text[end] == "\\":
+            end += 2
+        elif text[end] == quote:
+            if text.startswith(quote * 2, end):
+                end += 2
+            else:
+                return end + 1
+        else:
+            end += 1
+    return len(text)
 
 
 def blank(text: str) -> tuple[str, str]:
@@ -83,7 +104,7 @@ def blank(text: str) -> tuple[str, str]:
                 i = match.end()
                 continue
         char = text[i]
-        if text.startswith("--", i) or (char == "#" and text[i + 1:i + 2] in ("", " ", "\t", "\r", "\n")):
+        if text.startswith("--", i) or char == "#":
             end = text.find("\n", i)
             end = n if end < 0 else end
             wipe(code, i, end)
@@ -101,23 +122,15 @@ def blank(text: str) -> tuple[str, str]:
             wipe(code, i, end)
             wipe(keep, i, end)
             i = end
-        elif char == "'":
-            end = i + 1
-            while end < n:
-                if text[end] == "\\":
-                    end += 2
-                    continue
-                if text[end] == "'":
-                    if text.startswith("''", end):
-                        end += 2
-                        continue
-                    break
-                end += 1
-            wipe(code, i + 1, end)
-            i = end + 1
-        elif char in '"`':
-            end = text.find(char, i + 1)
-            i = n if end < 0 else end + 1
+        elif char in "'\"`[":
+            end = _quoted_end(text, i)
+            # Double quotes name objects after SQL name-introducing keywords or a schema dot.
+            # In expression positions (VALUES, DEFAULT, etc.) MySQL accepts them as strings.
+            identifier = char in "`[" or (char == '"' and
+                _QUOTED_NAME_BEFORE.search("".join(code[max(0, i - 256):i])) is not None)
+            if not identifier:
+                wipe(code, i + 1, end - 1 if text[end - 1:end] == char else end)
+            i = end
         elif delimiter != ";" and text.startswith(delimiter, i):
             code[i] = ";"
             wipe(code, i + 1, i + len(delimiter))
@@ -145,8 +158,73 @@ def _name(raw: str) -> str:
     return _parts(raw)[-1]
 
 
+def _separators(raw: str) -> Iterable[tuple[int, str]]:
+    """Top-level commas and TO/FROM words, skipping quotes and balanced signatures."""
+    depth, i = 0, 0
+    while i < len(raw):
+        char = raw[i]
+        if char in "'\"`[":
+            i = _quoted_end(raw, i)
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("unbalanced SQL signature")
+        elif not depth and char == ",":
+            yield i, char
+        elif char.isalnum() or char in "_$":
+            end = i + 1
+            while end < len(raw) and (raw[end].isalnum() or raw[end] in "_$"):
+                end += 1
+            word = raw[i:end].upper()
+            if not depth and word in ("TO", "FROM"):
+                yield i, word
+            i = end
+            continue
+        i += 1
+    if depth:
+        raise ValueError("unbalanced SQL signature")
+
+
 def _split(raw: str) -> list[str]:
-    return [piece for piece in re.split(r"\s*,\s*", raw.strip()) if piece]
+    pieces, start = [], 0
+    try:
+        for offset, separator in _separators(raw):
+            if separator == ",":
+                pieces.append(raw[start:offset].strip())
+                start = offset + 1
+    except ValueError:
+        return []
+    pieces.append(raw[start:].strip())
+    return [piece for piece in pieces if piece]
+
+
+def _grants(code: str, nocomment: str) -> Iterable[tuple]:
+    """Try one GRANT header per bounded statement; failed headers never rescan its suffix."""
+    for statement in re.finditer(r"[^;]+", code):
+        start = _GRANT_START.search(code, statement.start(), statement.end())
+        if start is None:
+            continue
+        match = _GRANT.match(nocomment, start.start(), statement.end())
+        if match is None:
+            continue
+        objects_start = match.end()
+        kind = _OBJECT_TYPE.match(nocomment, objects_start, statement.end())
+        if kind:
+            objects_start = kind.end()
+        body = nocomment[objects_start:statement.end()]
+        try:
+            boundary = next(((offset, word) for offset, word in _separators(body) if word != ","), None)
+        except ValueError:
+            continue
+        if boundary is None:
+            continue
+        offset, word = boundary
+        roles = _ROLES.match(body, offset + len(word))
+        if roles:
+            yield match, kind.group().strip() if kind else "", body[:offset], roles.group()
 
 
 def _extent(code: str, start: int) -> int:
@@ -267,15 +345,21 @@ def _file(graph: _Graph, file: str, text: str) -> None:
             old, new = "db_table:" + _name(old_raw), "db_table:" + _name(new_raw)
             graph.event(old, None, file, line(match.start()), f"rename-to:{new.split(':', 1)[1]}")
             graph.event(new, graph.entity(old)["kind"], file, line(match.start()), f"rename-from:{old.split(':', 1)[1]}")
-    for match in _GRANT.finditer(nocomment):
+    for match, object_type, object_list, roles in _grants(code, nocomment):
         if not _live(code, nocomment, match.start()):
             continue
         op = match.group("op").lower()
         privileges = ",".join(" ".join(p.split()).upper() for p in _split(match.group("privs")))
-        otype = " ".join((match.group("otype") or "").upper().split())
+        otype = " ".join(object_type.upper().split())
         objects = []
-        for raw in _split(match.group("objs")):
-            parts = _parts(re.sub(r"\([^)]*\)", "", raw))
+        for raw in _split(object_list):
+            name = _OBJECT_NAME.match(raw)
+            if name is None:
+                continue
+            suffix = raw[name.end():].strip()
+            if suffix and not (suffix.startswith("(") and suffix.endswith(")")):
+                continue
+            parts = _parts(name.group())
             if otype in ("SCHEMA", "DATABASE") or otype.startswith("ALL "):
                 objects.append("db_schema:" + parts[-1])
             elif parts[-1] == "*":
@@ -284,7 +368,7 @@ def _file(graph: _Graph, file: str, text: str) -> None:
                 objects.append("db_routine:" + parts[-1])
             else:
                 objects.append("db_table:" + parts[-1])
-        for raw in _split(match.group("who")):
+        for raw in _split(roles):
             role = raw.split("@", 1)[0].strip().strip("'`\"[]").lower()
             grant = "db_grant:" + role
             graph.event(grant, "grant", file, line(match.start()), op)
