@@ -47,6 +47,9 @@ class UpdateFixture(unittest.TestCase):
         self.project = make_git_repo(self)
         self.home = work / "home"
         self.state = work / "state"
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="project",
                             project_root=self.project, home=self.home)
         apply_install(plan, catalog=self.catalog, now=NOW)
@@ -135,10 +138,30 @@ class UpdateTest(UpdateFixture):
     def test_check_only_writes_nothing(self):
         commit(self.upstream, {"skills/demo/ref.md": "changed\n"})
         before = snapshot(self.installed)
-        results = self.update(check_only=True)
+        with mock.patch("oah.toolkit.update.publication_lock", side_effect=AssertionError("check must not lock")):
+            results = self.update(check_only=True)
         self.assertEqual([r.status for r in results], ["available"])
         self.assertEqual(snapshot(self.installed), before)
         self.assertFalse(self.state.exists())
+
+    def test_every_update_destination_waits_for_the_home_publication_lock(self):
+        from oah.lockfile import StateLock
+        from oah.toolkit.update import cache_destinations
+
+        commit(self.upstream, {"skills/demo/ref.md": "candidate\n"})
+        copies = {"project": self.destinations(), "kit": vendored_destinations(self.catalog, self.kit),
+                  "cache": cache_destinations(self.catalog, state_dir=self.state, bundle_dir=self.kit)}
+        before = snapshot(self.installed), snapshot(self.kit)
+        with StateLock(self.home / ".oah" / "skills-publish.lock"), \
+                mock.patch("oah.toolkit.install.StateLock",
+                           side_effect=lambda path: StateLock(path, timeout=.05, poll=.01)):
+            for level, destinations in copies.items():
+                with self.subTest(level=level):
+                    with self.assertRaises(InstallError) as caught:
+                        self.update(destinations=destinations)
+                    self.assertEqual(caught.exception.code, "OAH_SKILLS_PUBLISH_BUSY")
+        self.assertEqual((snapshot(self.installed), snapshot(self.kit)), before)
+        self.assertFalse(cache_dir(self.state).exists())
 
     def test_update_rolls_back_on_license_change(self):
         before = snapshot(self.installed)
@@ -270,14 +293,14 @@ except install.InstallError:
 
 class ScheduledTest(UpdateFixture):
     def test_global_publication_is_serialized_across_repository_processes(self):
-        self._concurrent_global_updates(self.home)
+        self._concurrent_publications(self.home)
 
     def test_global_publication_unifies_case_aliases(self):
-        self.home.mkdir()
+        self.home.mkdir(exist_ok=True)
         alias = self.home.with_name("HOME")
         if not alias.exists() or not alias.samefile(self.home):
             self.skipTest("requires a case-insensitive filesystem")
-        self._concurrent_global_updates(alias)
+        self._concurrent_publications(alias)
 
     def test_global_publication_unifies_unicode_aliases(self):
         self.home = self.home.with_name("caf\u00e9")
@@ -285,23 +308,65 @@ class ScheduledTest(UpdateFixture):
         alias = self.home.with_name("cafe\u0301")
         if not alias.exists() or not alias.samefile(self.home):
             self.skipTest("requires a normalization-insensitive filesystem")
-        self._concurrent_global_updates(alias)
+        self._concurrent_publications(alias)
 
     @unittest.skipUnless(os.name == "nt", "Windows case aliases")
     def test_global_publication_unifies_windows_home_case_aliases(self):
         self.test_global_publication_unifies_case_aliases()
 
     def test_global_publication_unifies_directory_aliases(self):
-        self.home.mkdir()
+        self.home.mkdir(exist_ok=True)
         alias = self.home.with_name("home-alias")
         directory_alias(self.home, alias)
-        self._concurrent_global_updates(alias)
+        self._concurrent_publications(alias)
 
     @unittest.skipUnless(os.name == "nt", "Windows home junctions")
     def test_global_publication_unifies_windows_home_junctions(self):
         self.test_global_publication_unifies_directory_aliases()
 
-    def _concurrent_global_updates(self, alias_home):
+    def test_project_and_global_updates_share_publication_lock(self):
+        self._mixed_publications("project")
+
+    def test_global_and_project_updates_share_publication_lock(self):
+        self._mixed_publications("global")
+
+    def test_project_update_rollback_blocks_global_update(self):
+        self._mixed_publications("project", rollback=True)
+
+    def test_global_update_rollback_blocks_project_update(self):
+        self._mixed_publications("global", rollback=True)
+
+    def test_project_install_waits_for_global_update(self):
+        self._mixed_publications("global", second_operation="install")
+
+    def test_global_install_waits_for_project_update(self):
+        self._mixed_publications("project", second_operation="install")
+
+    def test_global_install_blocks_project_update(self):
+        self._mixed_publications("global", first_operation="install")
+
+    def test_global_install_rollback_blocks_project_update(self):
+        self._mixed_publications("global", first_operation="install", rollback=True)
+
+    def test_project_update_rollback_blocks_global_install(self):
+        self._mixed_publications("project", second_operation="install", rollback=True)
+
+    def test_global_update_rollback_blocks_project_install(self):
+        self._mixed_publications("global", second_operation="install", rollback=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows project/global folder junction")
+    def test_mixed_publication_rollback_through_windows_junction(self):
+        self._mixed_publications("project", rollback=True)
+
+    def _mixed_publications(self, first_level, **kwargs):
+        (self.home / ".claude").mkdir(parents=True)
+        directory_alias(self.installed.parent, self.home / ".claude" / "skills")
+        self.assertTrue((self.home / ".claude" / "skills" / "demo").samefile(self.installed))
+        self._concurrent_publications(self.home, first_level=first_level,
+                                      second_level="global" if first_level == "project" else "project", **kwargs)
+
+    def _concurrent_publications(self, alias_home, *, first_level="global", second_level="global",
+                                 first_operation="update", second_operation="update", rollback=False):
         plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
                             project_root=self.project, home=self.home)
         apply_install(plan, catalog=self.catalog, now=NOW)
@@ -309,17 +374,32 @@ class ScheduledTest(UpdateFixture):
         newer = commit(self.upstream, {"skills/demo/ref.md": "newer candidate\n"})
         other_project = make_git_repo(self)
         sync = make_tmp_dir(self)
-        # Both real processes prepare from the same installed pin. Pause the first after its
-        # publication identity read; the second may enter publication only after that point.
+        newer_kit = self.kit
+        if first_operation == "install":
+            newer_kit = sync / "newer-kit"
+            tree = fetch(str(self.upstream), newer, sync / "fetch", paths=("skills/demo", "LICENSE"))
+            stage_item(self.catalog.bundled[0], tree, newer_kit / "demo", fetched=TODAY)
+        missing_project_install = second_operation == "install" and second_level == "project"
+        if missing_project_install:
+            self.installed.rename(sync / "project-pin")
+        # Both processes prepare before publication; a project install snapshots absence before
+        # the pin is seeded. Pause the first after revalidation, or just before backup restoration.
         script = '''
 import contextlib, datetime as dt, json, os, pathlib, sys, time
+import oah.toolkit.install as install
 import oah.toolkit.update as update
 from oah.toolkit.catalog import load_catalog
 from oah.toolkit.fetch import fetch
-catalog_path, project, home, state, sync, name, candidate = sys.argv[1:]
-project, home, state, sync = map(pathlib.Path, (project, home, state, sync))
+catalog_path, project, home, state, sync, name, candidate, level, operation, kit, rollback = sys.argv[1:]
+project, home, state, sync, kit = map(pathlib.Path, (project, home, state, sync, kit))
 catalog = load_catalog(pathlib.Path(catalog_path))
-destinations = update.installed_destinations(catalog, project_root=project, home=home, level="global")
+if operation == "install":
+    plan = install.plan_install(["demo"], catalog=catalog, source_dirs=[kit], target="claude",
+        level="project" if level == "project" else "user", project_root=project, home=home)
+    destination = plan.copies[0].dest
+else:
+    destinations = update.installed_destinations(catalog, project_root=project, home=home, level=level)
+    destination = destinations[0].path
 publishing = False
 guard_calls = 0
 def wait_for(path):
@@ -337,32 +417,58 @@ def guard():
             (sync / (name + "-ready")).touch()
             wait_for(sync / (name + "-go"))
             publishing = True
+            (sync / (name + "-publishing")).touch()
         yield
 original = update._identity
 def identity(path):
     result = original(path)
-    if publishing and path == destinations[0].path:
+    if publishing and path == destination:
         (sync / (name + "-checked")).touch()
-        if name == "newer":
+        if name == "newer" and rollback != "True":
             wait_for(sync / "release")
     return result
-update._identity = identity
+install._identity = update._identity = identity
+if name == "newer" and rollback == "True":
+    original_move = install.shutil.move
+    def move(src, dest, *args, **kwargs):
+        original_move(src, dest, *args, **kwargs)
+        raise OSError("simulated publication failure; retry the command")
+    install.shutil.move = move
+    original_rename = pathlib.Path.rename
+    def rename(path, target):
+        if path.name.startswith(".demo.oah-old-"):
+            (sync / "newer-rollback").touch()
+            wait_for(sync / "release")
+        return original_rename(path, target)
+    pathlib.Path.rename = rename
 def pinned_fetch(repository, ref, scratch, **kwargs):
     return fetch(repository, candidate, scratch, **kwargs)
-results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
-    settings=update.DEFAULTS, now=dt.datetime.now(dt.timezone.utc), gitleaks=None,
-    fetcher=pinned_fetch, guard=guard, home=home)
-print(json.dumps([r.status for r in results]))
+if operation == "install":
+    try:
+        install.apply_install(plan, catalog=catalog, now=dt.datetime.now(dt.timezone.utc), guard=guard)
+        print(json.dumps(["installed"]))
+    except (install.InstallError, OSError) as exc:
+        print(json.dumps([getattr(exc, "code", "rolled-back")]))
+else:
+    results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
+        settings=update.DEFAULTS, now=dt.datetime.now(dt.timezone.utc), gitleaks=None,
+        fetcher=pinned_fetch, guard=guard, home=home)
+    print(json.dumps([r.status for r in results]))
 '''
         processes = []
         env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
-        for name, candidate, project in (("newer", newer, self.project), ("older", older, other_project)):
+
+        def start(name, candidate, level, operation, kit):
+            in_project = level == "project" or first_level == second_level and name == "newer"
+            project = self.project if in_project else other_project
             home = self.home if name == "newer" else alias_home
             process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(project),
-                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate],
+                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate,
+                                        level, operation, str(kit), str(rollback)],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
             processes.append(process)
             self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
+            return process
 
         def wait_for(name, timeout=20):
             deadline = time.monotonic() + timeout
@@ -371,27 +477,45 @@ print(json.dumps([r.status for r in results]))
             return (sync / name).exists()
 
         try:
+            second = start("older", older, second_level, second_operation, self.kit)
             self.assertTrue(wait_for("older-ready"))
+            if missing_project_install:
+                (sync / "project-pin").rename(self.installed)
+            first = start("newer", newer, first_level, first_operation, newer_kit)
             self.assertTrue(wait_for("newer-ready"))
             (sync / "newer-go").touch()
-            self.assertTrue(wait_for("newer-checked"))
+            self.assertTrue(wait_for("newer-rollback" if rollback else "newer-checked"))
             (sync / "older-go").touch()
+            self.assertTrue(wait_for("older-publishing"))
             # With the shared lock, the second identity read waits until release. Without it,
             # both candidates pass validation against the same installed pin.
-            if wait_for("older-checked", timeout=1):
-                processes[1].wait(timeout=20)
+            checked_while_locked = wait_for("older-checked", timeout=1)
+            finished_while_locked = second.poll() is not None
         finally:
             (sync / "release").touch()
-        statuses = []
+            (sync / "older-go").touch()
+            (sync / "newer-go").touch()
+        outputs = {}
         for process in processes:
             out, err = process.communicate(timeout=25)
             self.assertEqual(process.returncode, 0, err)
-            statuses += json.loads(out)
-        self.assertCountEqual(statuses, ["advanced", "deferred"])
+            outputs["newer" if process is first else "older"] = json.loads(out)
+        self.assertFalse(checked_while_locked, "the other writer must wait through revalidation and rollback")
+        self.assertFalse(finished_while_locked, "the other writer must wait for the home publication lock")
+        self.assertEqual(outputs["newer"], ["rolled-back" if rollback else
+                                          "installed" if first_operation == "install" else "advanced"])
+        second_status = ("installed" if second_operation == "install" else "advanced") if rollback else (
+            "OAH_SKILLS_INSTALL_CONFLICT" if second_operation == "install" else "deferred")
+        if rollback and missing_project_install:
+            second_status = "OAH_SKILLS_INSTALL_CONFLICT"
+        self.assertEqual(outputs["older"], [second_status])
         installed = self.home / ".claude" / "skills" / "demo"
         marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
-        self.assertEqual(marker["commit"], newer)
-        self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
+        expected = (self.first if second_operation == "install" else older) if rollback else newer
+        self.assertEqual(marker["commit"], expected)
+        self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"),
+                         "reference\n" if expected == self.first else
+                         "older candidate\n" if rollback else "newer candidate\n")
         self.assertTrue((self.home / ".oah" / "skills-publish.lock").is_file())
         self.assertEqual(list(installed.parent.iterdir()), [installed])
 
@@ -795,6 +919,16 @@ else:
         self.assertEqual(self.scheduled(NOW + dt.timedelta(days=1))[0], "ran")
         self.assertEqual(self.scheduled(NOW + dt.timedelta(days=30), settings=dict(DEFAULTS, auto_update=False))[0],
                          "disabled")
+
+    def test_scheduled_check_reports_busy_home_publication_lock(self):
+        from oah.lockfile import StateLock
+
+        with StateLock(self.home / ".oah" / "skills-publish.lock"), \
+                mock.patch("oah.toolkit.install.StateLock",
+                           side_effect=lambda path: StateLock(path, timeout=.05, poll=.01)):
+            self.assertEqual(self.scheduled(NOW), ("busy", []))
+        self.assertFalse(cache_dir(self.state).exists())
+        self.assertEqual(read_state(self.state), {})
 
     def test_unlazy_is_never_updated(self):
         work = make_tmp_dir(self)

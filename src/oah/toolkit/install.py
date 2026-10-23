@@ -74,7 +74,7 @@ class InstallPlan:
     copies: tuple[Copy, ...]
     linked: tuple[Linked, ...]
     sources: Mapping[str, pathlib.Path | None]   # item -> folder to copy from; None: fetch the pin
-    publication_home: pathlib.Path | None = None   # user-level writes share this home's publication lock
+    publication_home: pathlib.Path | None = None   # all skill copies share this home's publication lock
 
     @property
     def conflicts(self) -> tuple[Copy, ...]:
@@ -161,8 +161,7 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, source_dirs: Sequenc
                 seen[dest] = entry.name
                 copies.append(Copy(entry.name, relative, installed, engine, dest, action,
                                    not _inside(folder, project_root), reason))
-    publication_home = pathlib.Path(home) if level != "project" or any(c.outside_project for c in copies) else None
-    return InstallPlan(tuple(copies), tuple(linked), sources, publication_home)
+    return InstallPlan(tuple(copies), tuple(linked), sources, pathlib.Path(home))
 
 
 def fetch_item(entry: Bundled, scratch: pathlib.Path, *, today: dt.date) -> pathlib.Path:
@@ -216,7 +215,7 @@ def installed_executables(entry: Bundled, relative: str, record: Upstream) -> li
 
 @contextlib.contextmanager
 def publication_lock(home: pathlib.Path) -> Iterator[None]:
-    """Serialize this user's global skill publications, independent of destination aliases.
+    """Serialize all of this user's skill publications, independent of level or destination aliases.
 
     Acquire any repository state lock first; never acquire another lock while this is held.
     Keep the lock file after release so every process opens the same file.
@@ -226,7 +225,7 @@ def publication_lock(home: pathlib.Path) -> Iterator[None]:
             yield
     except LockTimeout as exc:
         raise InstallError("OAH_SKILLS_PUBLISH_BUSY",
-                           "another global skill install or update is publishing; wait for it to finish, "
+                           "another skill install or update is publishing; wait for it to finish, "
                            "then retry the oah skills command") from exc
 
 
@@ -272,7 +271,7 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime,
     """Copy every planned skill. Refuses the whole plan when any copy conflicts.
 
     guard holds the repository state lock for preparation snapshots and publication.
-    User-level plans additionally take the home's publication lock, always after guard.
+    All copies additionally take the home's publication lock, always after guard.
     """
     if plan.conflicts:
         raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
@@ -281,7 +280,7 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime,
     stamp = now.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
     def user_lock() -> ContextManager[None]:
-        return publication_lock(plan.publication_home) if plan.publication_home is not None else contextlib.nullcontext()
+        return publication_lock(plan.publication_home if plan.publication_home is not None else pathlib.Path.home())
 
     with tempfile.TemporaryDirectory(prefix="oah-skills-") as scratch_text:
         scratch = pathlib.Path(scratch_text)

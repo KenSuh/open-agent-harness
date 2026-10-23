@@ -47,12 +47,13 @@ For the same skill name, `oah` uses the first copy it finds:
   `oah skills update --project`, which takes its own lease on those folders.
   Reinstalling preserves existing pins; if the cache has advanced, run `oah skills update --project`.
 - **Global copies change only with `--global`** and your confirmation, never on a schedule.
-- **One user's global skill installs and updates run one at a time.** They share the persistent
-  `~/.oah/skills-publish.lock` across repositories and destination aliases. They acquire it for
-  preparation-input snapshots and hold it from revalidation through replacement and any rollback;
-  preparation itself runs unlocked.
-  Project and kit-cache writes use the repository state lock; commands needing both take that lock
-  first. Two OS accounts sharing one skill folder are not coordinated; run their commands separately.
+- **One user's skill installs and updates publish one at a time.** Project, global, vendored and
+  kit-cache writes all share the persistent `~/.oah/skills-publish.lock`, using the same home as
+  user-level skill discovery. Commands take the repository state lock first, then this publication
+  lock for preparation-input snapshots and from revalidation through replacement and any rollback;
+  preparation itself runs unlocked. This also protects project and global folders that point to the
+  same physical directory through symlinks or Windows junctions.
+  Two OS accounts sharing one skill folder are not coordinated; run their commands separately.
   A changed input refuses the install or defers the update; run the command again against the current
   copy. If the publication lock times out, wait for the other command to finish, then retry.
 - **Fetches use an allowlisted environment and a temporary home.** Proxy URLs with embedded user

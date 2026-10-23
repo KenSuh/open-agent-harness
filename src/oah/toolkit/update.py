@@ -33,7 +33,7 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Upstream, read_upstream
 from oah.toolkit.checks import DiffSummary, diff_summary, identify_license, privacy_problems, suspicious, text_digest
 from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, manifest_problems, stage_item
-from oah.toolkit.install import (KIT_MARK, _identity, build_copy, installed_executables,
+from oah.toolkit.install import (KIT_MARK, InstallError, _identity, build_copy, installed_executables,
                                  installed_skills, marker_of, publication_lock, swap_in, target_dirs)
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE, load_problems
 
@@ -227,7 +227,7 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
                home: pathlib.Path | None = None) -> list[UpdateResult]:
     """Snapshot preparation inputs and publish passing copies inside guard().
 
-    guard holds the repository state lock, before the per-user lock for global copies.
+    guard holds the repository state lock, before the per-user lock for every copy.
     after_publish runs inside the same guard once publication ends (never for --check).
     """
     results: list[UpdateResult] = []
@@ -235,11 +235,10 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
     inputs = {path for d in destinations for path in (d.path, d.baseline) if path is not None}
     if catalog_path is not None:
         inputs.add(catalog_path)
-    publication_home = (home if home is not None else pathlib.Path.home()) if any(
-        d.level == "global" for d in destinations) else None
+    publication_home = home if home is not None else pathlib.Path.home()
 
     def user_lock() -> ContextManager[None]:
-        return publication_lock(publication_home) if publication_home is not None else no_guard()
+        return publication_lock(publication_home)
 
     with no_guard() if check_only else guard(), no_guard() if check_only else user_lock():
         identities = {path: _identity(path) for path in inputs}
@@ -464,6 +463,10 @@ def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: p
     except LeasesActive as exc:
         return "deferred", [UpdateResult("*", "deferred", reasons=[f"waiting for active leases: {', '.join(exc.holders)}"])]
     except LockTimeout:
+        return "busy", []
+    except InstallError as exc:
+        if exc.code != "OAH_SKILLS_PUBLISH_BUSY":
+            raise
         return "busy", []
     except CheckNotDue:
         return "not-due", []

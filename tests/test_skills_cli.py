@@ -142,13 +142,20 @@ class ListInstallTest(CliFixture):
         self.assertFalse((self.project / ".claude" / "skills").exists())
 
     def test_global_install_uses_one_home_publication_lock(self):
+        self._install_uses_one_home_publication_lock("--global", "--yes")
+
+    def test_project_install_uses_one_home_publication_lock(self):
+        self._install_uses_one_home_publication_lock()
+
+    def _install_uses_one_home_publication_lock(self, *args):
         with mock.patch("oah.toolkit.install.StateLock", side_effect=StateLock) as acquire:
-            code, _, err = self.oah("install", "demo", "--global", "--yes")
+            code, _, err = self.oah("install", "demo", *args)
         self.assertEqual(code, 0, err)
         self.assertEqual({call.args[0] for call in acquire.call_args_list},
                          {self.home / ".oah" / "skills-publish.lock"})
+        base = self.home if args else self.project
         for root in (".claude", ".agents"):
-            self.assertEqual([p.name for p in (self.home / root / "skills").iterdir()], ["demo"])
+            self.assertEqual([p.name for p in (base / root / "skills").iterdir()], ["demo"])
 
     def test_global_install_lock_timeout_says_how_to_retry(self):
         lock = self.home / ".oah" / "skills-publish.lock"
@@ -160,14 +167,15 @@ class ListInstallTest(CliFixture):
         self.assertIn("retry", err.lower())
         self.assertFalse((self.home / ".claude").exists())
 
-    def test_project_install_holds_repository_lock_through_swap_and_rollback(self):
+    def test_project_install_holds_both_locks_through_swap_and_rollback(self):
         import oah.toolkit.install as install
 
         original = install.swap_in
 
         def verify_under_lock(new, dest, **kwargs):
-            with self.assertRaises(LockTimeout), StateLock(Store(self.state).lock_path, timeout=.05, poll=.01):
-                self.fail("project publication must hold the repository lock")
+            for lock in (Store(self.state).lock_path, self.home / ".oah" / "skills-publish.lock"):
+                with self.assertRaises(LockTimeout), StateLock(lock, timeout=.05, poll=.01):
+                    self.fail("project publication must hold both locks")
             return original(new, dest, verify=lambda folder: ["load failed; retry the installation"])
 
         with mock.patch.object(install, "swap_in", verify_under_lock):
@@ -175,7 +183,7 @@ class ListInstallTest(CliFixture):
         self.assertEqual(code, 1, err)
         self.assertIn("OAH_SKILLS_VERIFY_FAILED", err)
         self.assertFalse((self.project / ".claude" / "skills" / "demo").exists())
-        self.assertFalse((self.home / ".oah").exists())
+        self.assertTrue((self.home / ".oah" / "skills-publish.lock").is_file())
 
     def test_install_refuses_foreign_folder(self):
         foreign = self.project / ".claude" / "skills" / "demo"
