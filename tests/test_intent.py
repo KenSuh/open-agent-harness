@@ -1,15 +1,20 @@
 # 의도 모듈 검사 — 마커·필드 파싱, CRLF/LF 다이제스트, 안전한 원본 읽기, 네 가지 결속 상태, 반환 줄 검사, 공용 꼬리말을 본다.
 from __future__ import annotations
 
+import argparse
+import contextlib
 import hashlib
+import io
 import os
 import pathlib
 import unittest
 from unittest.mock import patch
 
-from oah import intent
+from oah import intent, intent_cli
 from oah.intent import Binding, IntentInvalid, SourceError
-from tests.helpers import make_tmp_dir
+from oah.lease import Lease, Store
+from oah.paths import repo_info, state_dir
+from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
 HEADINGS = ("Problem", "Desired outcome", "Success conditions", "Constraints", "Non-goals", "Open questions")
 
@@ -390,6 +395,154 @@ class FooterTest(unittest.TestCase):
         self.assertEqual(intent.with_footer(once), once)
         mentioned = f"the {intent.FOOTER_MARKER} marker\n"
         self.assertEqual(intent.with_footer(mentioned).count(intent.FOOTER_MARKER), 2)
+
+
+def full_packet(*, ident: str = "demo", revision: str = "1", status: str = "accepted",
+                acs: tuple[str, ...] = ("- AC1: the report lists every file", "- AC2: the digest is stable")) -> str:
+    return section(ident=ident, revision=revision, status=status, acs=acs) + \
+        "## Scope\n- src\n## Plan\n## Acceptance\n## Return\n"
+
+
+def run_intent_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
+    parser = argparse.ArgumentParser(prog="oah")
+    intent_cli.register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(list(argv))
+    out, err = io.StringIO(), io.StringIO()
+    previous = pathlib.Path.cwd()
+    os.chdir(cwd)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = intent_cli.run(args)
+    finally:
+        os.chdir(previous)
+    return code, out.getvalue(), err.getvalue()
+
+
+class IntentCliTest(unittest.TestCase):
+    rel = ".oah/tasks/demo/PACKET.md"
+
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/app.py": "x = 1\n"})
+        self.path = self.repo / self.rel
+        self.path.parent.mkdir(parents=True)
+        self.write(full_packet())
+
+    def write(self, text: str) -> None:
+        self.path.write_text(text, encoding="utf-8")
+
+    def test_commands_and_registration(self):
+        self.assertEqual(intent_cli.COMMANDS, ("intent",))
+
+    def test_show_prints_identity_and_unbound(self):
+        code, out, err = run_intent_cli(self.repo, "intent", "show", "demo")
+        self.assertEqual(code, 0, err)
+        parsed = intent.parse(full_packet())
+        self.assertIn("state=unbound", out)
+        self.assertIn("intent=demo revision=1 status=accepted", out)
+        self.assertIn(f"digest={parsed.digest}", out)
+        self.assertIn(f"source={self.rel}", out)
+        self.assertIn("acs=AC1,AC2", out)
+        self.assertIn(parsed.line(), out.splitlines())
+
+    def test_show_invalid_packet_exits_1(self):
+        self.write("no intent here\n")
+        code, out, _ = run_intent_cli(self.repo, "intent", "show", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_MISSING", out)
+        code, out, _ = run_intent_cli(self.repo, "intent", "show", "absent")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_SOURCE_MISSING", out)
+
+    def test_check_accepts_valid_packet(self):
+        code, out, err = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_INTENT_OK", out)
+
+    def test_check_refuses_draft(self):
+        self.write(full_packet(status="draft"))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_NOT_ACCEPTED", out)
+
+    def test_check_reports_id_different_from_task(self):
+        self.write(full_packet(ident="other"))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_ID_CHANGED", out)
+
+    def test_check_reports_changed_id_against_head(self):
+        git_commit(self.repo, {}, "add packet")
+        self.write(full_packet(ident="other"))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "--file", str(self.path))
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_ID_CHANGED", out)
+        self.assertIn("HEAD", out)
+
+    def test_check_requires_new_revision_for_changed_goal(self):
+        git_commit(self.repo, {}, "add packet")
+        self.write(full_packet(acs=("- AC1: a different goal",)))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_REVISION_REQUIRED", out)
+        self.assertIn("Revision: 2", out)
+
+    def test_check_accepts_raised_revision(self):
+        git_commit(self.repo, {}, "add packet")
+        self.write(full_packet(revision="2", acs=("- AC1: a different goal",)))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 0, out)
+
+    def test_check_refuses_lower_revision(self):
+        git_commit(self.repo, {self.rel: full_packet(revision="3")}, "r3")
+        self.write(full_packet(revision="2"))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INTENT_REVISION_INVALID", out)
+
+    def test_editing_a_committed_draft_needs_no_new_revision(self):
+        git_commit(self.repo, {self.rel: full_packet(status="draft")}, "draft")
+        self.write(full_packet(acs=("- AC1: refined while still a draft",)))
+        code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 0, out)
+
+    def bind(self, binding: Binding):
+        info = repo_info(self.repo)
+        Store(state_dir(info, os.environ)).start(task="demo", agent="claude", scope=("src",), note="",
+                                                 ttl_hours=1, info=info)
+        return patch.object(Lease, "intent", binding.to_json(), create=True)
+
+    def test_show_uses_lease_binding_when_present(self):
+        binding = intent.parse(full_packet()).bind(self.rel)
+        with self.bind(binding):
+            code, out, _ = run_intent_cli(self.repo, "intent", "show", "demo")
+            self.assertEqual(code, 0, out)
+            self.assertIn("state=current", out)
+            self.write(full_packet(revision="2", acs=("- AC1: new goal",)))
+            code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+            self.assertEqual(code, 1)
+            self.assertIn("state=stale", out)
+            self.assertIn("OAH_INTENT_NOT_CURRENT", out)
+            self.write(full_packet(ident="other"))
+            code, out, _ = run_intent_cli(self.repo, "intent", "check", "--file", str(self.path))
+            self.assertIn("OAH_INTENT_ID_CHANGED", out)
+            self.assertIn("lease binding", out)
+
+    def test_lease_without_binding_is_unbound(self):
+        info = repo_info(self.repo)
+        Store(state_dir(info, os.environ)).start(task="demo", agent="claude", scope=("src",), note="",
+                                                 ttl_hours=1, info=info)
+        code, out, _ = run_intent_cli(self.repo, "intent", "show", "demo")
+        self.assertEqual(code, 0, out)
+        self.assertIn("state=unbound", out)
+        self.assertIn("oah start --packet", out)
+
+    def test_bound_source_missing(self):
+        binding = intent.parse(full_packet()).bind(".oah/tasks/demo/OLD.md")
+        with self.bind(binding):
+            code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
+        self.assertEqual(code, 1)
+        self.assertIn("state=missing", out)
 
 
 if __name__ == "__main__":
