@@ -164,7 +164,7 @@ def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBran
     if branch.data is None:
         rows = query.query(data, targets, gates=gates, graph=graph, settings=settings)
         return rows, {row: "worktree" for row in rows}
-    source = defaultbranch._mirror_path(root)
+    source = defaultbranch._snapshot_source(root, branch.commit)
     if branch.state == "stale":
         try:
             mapstore.resolve_rev(source, branch.commit, timeout=settings["git_timeout"])
@@ -175,7 +175,7 @@ def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBran
     except ImpactError:
         if branch.state != "stale":
             raise
-        # The disposable mirror may no longer contain this snapshot after a failed replacement.
+        # A missing legacy cache may no longer contain this snapshot.
         # Its persisted rows remain usable, even when additional missing-path searches cannot run.
         theirs = branch.data
         if warnings is not None:

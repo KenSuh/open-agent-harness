@@ -138,8 +138,14 @@ def _git(root: pathlib.Path, *args: str, timeout: float, encoding: str = "utf-8"
          stdin_text: str | None = None, ok: Iterable[int] = (0,)) -> str:
     argv = (*git_argv(), "--literal-pathspecs", "--no-optional-locks", "-c", "core.quotepath=false",
             "-C", str(root), *args)
-    result = run_command(argv, timeout=timeout, encoding=encoding, stdin_text=stdin_text,
-                         env=_isolated_git_env() if _bare(root) else None)
+    options = {"timeout": timeout, "encoding": encoding, "stdin_text": stdin_text,
+               "env": _isolated_git_env() if _bare(root) else None}
+    if _bare(root) and root.parent.name.endswith(".generations") and re.fullmatch(r"mirror-[0-9a-f]{32}", root.name):
+        from oah.impact.defaultbranch import _generation_run
+
+        result = _generation_run(root, argv, **options)
+    else:
+        result = run_command(argv, **options)
     if result.timed_out:
         raise ImpactError("OAH_IMPACT_GIT_TIMEOUT", f"git {args[0]} took longer than {timeout:g}s in {root}; "
                           "raise [impact] git_timeout and retry")
