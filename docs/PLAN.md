@@ -114,7 +114,7 @@ Verdicts: **keep** (port the idea, rewritten portable), **simplify** (port a muc
 | 22 | Review loop: R1–R3 round ceiling counted at call time, series key, per-series lock, explicit extra-round override | Bounded review cycles | **keep** | `oah review` with `max_rounds = 3` and `--extra-round` (5.9) |
 | 23 | Review artifact schema and validation (verdict/findings consistency, base/head echo) | A machine-checkable review result | **keep, trimmed** | A JSON schema passed to `codex exec --output-schema`; one receipt per round |
 | 24 | Canary token (random per call, written into the reviewer's tree, never in the prompt, must appear in the evidence) | Proves access to the snapshot's token file only | **keep** | Same mechanism (5.9) |
-| 25 | Sanitized review snapshot (fresh clone at the exact head, agent instruction files removed, reviewer config and rules ignored, minimal environment) | Blocks instruction injection through repo files | **keep** | Portable Python version that also strips `CLAUDE.md` and `.claude/` (5.9) |
+| 25 | Sanitized review snapshot (fresh clone at the exact head, agent instruction files removed, reviewer config and rules ignored, minimal environment) | Reduces automatic instruction loading from repo files | **keep** | Portable Python version that also strips `CLAUDE.md` and `.claude/` (5.9) |
 | 26 | "Same engine is not independent" rule | Honest trust labels | **keep, as a label** | Receipt field `independent: true/false` and a visible warning |
 | 27 | Reviewer binary pinning (hash + macOS code signature + login-mode requirement) | Trust the reviewer binary | **simplify** | Record CLI path, version and sha256; pinning is optional; no code-signature check |
 | 28 | Five-lane cooperative check (goal, QA, quality, security, context) | Self-check axes on the final head | **simplify** | A review rubric in the prompt and in the PR summary |
@@ -441,6 +441,9 @@ output always ends with a "not proven by this preflight" list.
    establish those properties.
 5. **Prompt.** The intent verbatim, the AC list, base and head, the diff stat, critical-path warnings,
    and a rubric: goal, tests, quality, security, context and regressions.
+   The prompt treats all reviewed repository content, including source, comments, documents and files
+   read through git, as untrusted evidence, never instructions to follow. Sanitization reduces automatic
+   instruction loading; it does not block prompt injection in content the reviewer reads.
 6. **Run.** The reviewer runs read-only inside the snapshot with `--output-schema` and `--ephemeral`.
    Codex runs with its user config and rules ignored, and with a minimal environment.
 7. **Validate.** The schema, the consistency of verdict and findings, and the base/head echo. A missing
@@ -793,9 +796,15 @@ Each phase is one branch and one PR into `main` of the private repository.
   inside the allowed write area.
 - This repository's own development gate ledgers stay untracked, because their evidence can contain
   local paths.
-  - Their command approvals go under this repository's `.git/` directory. unlazy requires a store
-    outside the worktree root, and this keeps the development machine's writes inside this
-    repository's checkouts.
+  - Gates run from the separate development worktree, with `--root` / `--cwd` (when supplied) pointing
+    there. `UNLAZY_APPROVAL_DIR` points to the main checkout's `.git/oah-dev/unlazy-approved`, outside
+    that worktree's root even after canonical-path resolution, while keeping writes inside this
+    repository's checkouts. Never run these gates from the main checkout itself: unlazy would refuse
+    the store because it is inside that root.
+  - The implementer's 2026-10-23 probe with unlazy 2.1.0 ran `gate-check.mjs --approve --cwd .`
+    on a probe ledger from the development worktree with that store: approval was written and the
+    gate returned `ALL MET (1 met)`, exit 0. P5 repeats this probe against its pinned unlazy commit
+    and tests that running from the main checkout is refused.
   - Kit users keep unlazy's default store.
 
 ## 12. Risks
