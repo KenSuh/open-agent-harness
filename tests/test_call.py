@@ -144,6 +144,40 @@ class RunFolderTest(unittest.TestCase):
 
 
 class RoutingTest(unittest.TestCase):
+    def test_settings_defaults(self):
+        repo = make_git_repo(self)
+        settings = call_cli.load_settings(repo)
+        self.assertEqual(settings.stages, {"initial": "claude", "review": "codex", "correction": "codex"})
+        claude, codex = settings.engines["claude"], settings.engines["codex"]
+        self.assertEqual((claude["command"], claude["quality_order"], claude["permission_mode"]),
+                         (["claude"], ["opus", "sonnet", "haiku"], "acceptEdits"))
+        self.assertEqual((codex["command"], codex["quality_order"]), (["codex"], []))
+        self.assertEqual({tier: (row["model"], row["effort"], row["timeout_min"]) for tier, row in claude["tiers"].items()},
+                         {"low": ("", "low", 15), "medium": ("", "medium", 30), "high": ("", "high", 60),
+                          "max": ("", "max", 90)})
+        self.assertEqual({tier: row["effort"] for tier, row in codex["tiers"].items()},
+                         {"low": "low", "medium": "medium", "high": "high", "max": "highest"})
+        self.assertEqual(settings.models, {"ttl_hours": 24.0})
+        self.assertEqual(settings, call.Settings.defaults())
+
+    def test_settings_from_config_and_bad_values(self):
+        project = Project(self, '[stages]\ninitial = "codex"\n[engines.codex.tiers.high]\nmodel = "gpt-pin"\n')
+        settings = project.settings()
+        self.assertEqual(settings.stages["initial"], "codex")
+        self.assertEqual(settings.engines["codex"]["tiers"]["high"], {"model": "gpt-pin", "effort": "high",
+                                                                      "timeout_min": 60})
+        bad = Project(self, '[stages]\nreview = "gemini"\n')
+        with self.assertRaises(EngineError) as ctx:
+            bad.settings()
+        self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")
+
+    def test_single_engine_setup_warns(self):
+        project = Project(self, '[stages]\ninitial = "codex"\nreview = "codex"\ncorrection = "codex"\n')
+        data = project.run(stage="review", tier="low")
+        self.assertTrue(any(w.startswith("OAH_REVIEW_NOT_INDEPENDENT") for w in data["warnings"]))
+        default = Project(self).run(stage="review", tier="low")
+        self.assertFalse(any(w.startswith("OAH_REVIEW_NOT_INDEPENDENT") for w in default["warnings"]))
+
     def test_stage_mismatch_refuses(self):
         project = Project(self)
         with self.assertRaises(RoutingError) as ctx:
