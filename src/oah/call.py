@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import importlib
 import json
 import os
 import pathlib
@@ -363,7 +364,7 @@ class Prepared:
 def _advise(axes: routing.Axes, task: str) -> str:
     """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
     try:
-        from oah import rerank  # type: ignore[attr-defined]
+        rerank = importlib.import_module("oah.rerank")
     except ImportError:
         return "unused(not-configured)"
     try:
