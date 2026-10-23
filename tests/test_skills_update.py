@@ -235,6 +235,83 @@ class SwapTest(unittest.TestCase):
 
 
 class DestinationLocksTest(unittest.TestCase):
+    def _assert_one_acquisition(self, paths):
+        from oah.lockfile import StateLock
+
+        with mock.patch("oah.toolkit.install.StateLock",
+                        side_effect=lambda path: StateLock(path, timeout=.2, poll=.01)) as acquire:
+            with destination_locks(paths):
+                self.assertEqual(acquire.call_count, 1, "acquire each physical lock only once")
+                lock = acquire.call_args.args[0]
+                script = '''
+import pathlib, sys
+from oah.lockfile import LockTimeout, StateLock
+try:
+    with StateLock(pathlib.Path(sys.argv[1]), timeout=.05, poll=.01):
+        print("acquired")
+except LockTimeout:
+    print("blocked")
+'''
+                env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+                def probe():
+                    result = subprocess.run([sys.executable, "-c", script, str(lock)], env=env,
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    return result.stdout.strip()
+
+                self.assertEqual(probe(), "blocked")
+            self.assertEqual(probe(), "acquired")
+
+    def test_one_acquisition_unifies_case_aliased_skill_roots(self):
+        root = make_tmp_dir(self)
+        shared = root / "shared"
+        shared.mkdir()
+        alias = root / "SHARED"
+        if not alias.exists() or not alias.samefile(shared):
+            self.skipTest("requires a case-insensitive filesystem")
+        claude, codex = root / ".claude" / "skills", root / ".agents" / "skills"
+        for folder, target in ((claude, shared), (codex, alias)):
+            folder.parent.mkdir()
+            directory_alias(target, folder)
+        self._assert_one_acquisition([claude / "demo", codex / "demo"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows case aliases")
+    def test_one_acquisition_unifies_windows_case_aliased_skill_roots(self):
+        self.test_one_acquisition_unifies_case_aliased_skill_roots()
+
+    def test_one_acquisition_unifies_hard_linked_lock_files(self):
+        root = make_tmp_dir(self)
+        claude, codex = root / ".claude" / "skills", root / ".agents" / "skills"
+        with destination_locks([claude / "demo"]):
+            lock = next(claude.glob(".oah-publish-*.lock"))
+        codex.mkdir(parents=True)
+        os.link(lock, codex / lock.name)
+        self._assert_one_acquisition([claude / "demo", codex / "demo"])
+
+    def test_distinct_locks_use_identity_order_through_aliases(self):
+        from oah.lockfile import StateLock
+
+        root = make_tmp_dir(self)
+        paths = [root / name / "demo" for name in ("first", "second")]
+        for path in paths:
+            with destination_locks([path]):
+                pass
+        locks = sorted((next(path.parent.glob(".oah-publish-*.lock")) for path in paths),
+                       key=lambda path: (path.stat().st_dev, path.stat().st_ino))
+        aliases = []
+        for name, lock in zip(("z-alias", "a-alias"), locks):
+            folder = root / name
+            folder.mkdir()
+            os.link(lock, folder / lock.name)
+            aliases.append(folder / "demo")
+        expected = [(lock.stat().st_dev, lock.stat().st_ino) for lock in locks]
+        for requests in (paths, aliases, list(reversed(aliases))):
+            with mock.patch("oah.toolkit.install.StateLock", side_effect=StateLock) as acquire:
+                with destination_locks(requests):
+                    actual = [call.args[0].stat() for call in acquire.call_args_list]
+                    self.assertEqual([(info.st_dev, info.st_ino) for info in actual], expected)
+
     def test_lock_stays_in_real_parent_and_folds_destination_name(self):
         root = make_tmp_dir(self)
         parent = root / "skills"

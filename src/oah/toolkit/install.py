@@ -222,8 +222,9 @@ def destination_locks(paths: Iterable[pathlib.Path]) -> Iterator[None]:
     Adjacent lock files are shared even when clients see different mount paths or device IDs.
     Folding names also serializes case/Unicode aliases (and may conservatively serialize
     distinct names on case-sensitive volumes). Keep lock files after releasing them.
+    Deduplicate and order acquisitions by the opened files' identities, not path spelling.
     """
-    locks: set[pathlib.Path] = set()
+    locks: dict[tuple[int, int], pathlib.Path] = {}
     for path in paths:
         parent = path.parent.resolve()
         parent.mkdir(parents=True, exist_ok=True)
@@ -232,10 +233,16 @@ def destination_locks(paths: Iterable[pathlib.Path]) -> Iterator[None]:
                                f"{parent} is not a real directory; restore the parent folder and retry")
         name = unicodedata.normalize("NFD", path.name).casefold()
         digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-        locks.add(parent / f".oah-publish-{digest}.lock")
+        lock = parent / f".oah-publish-{digest}.lock"
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            info = os.fstat(fd)
+            locks.setdefault((info.st_dev, info.st_ino), lock)
+        finally:
+            os.close(fd)
     with contextlib.ExitStack() as stack:
-        for lock in sorted(locks):
-            stack.enter_context(StateLock(lock))
+        for identity in sorted(locks):
+            stack.enter_context(StateLock(locks[identity]))
         yield
 
 
