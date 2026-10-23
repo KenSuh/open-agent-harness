@@ -26,7 +26,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, ContextManager, Iterator, Mapping, Sequence
 
-from oah.atomic import read_json, write_json_atomic, write_text_atomic
+from oah.atomic import append_jsonl, read_json, write_json_atomic, write_text_atomic
 from oah.engines.proc import Resolved, UnsupportedBatchShim, resolve_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
@@ -37,10 +37,11 @@ from oah.toolkit.install import KIT_MARK, build_copy, installed_skills, marker_o
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE, load_problems
 
 DEFAULTS = {"update_interval_days": 1, "auto_update": True, "size_jump_ratio": 2.0,
-            "size_jump_min_bytes": 262144}
+            "size_jump_min_bytes": 262144, "pins": []}
 NEVER_UPDATED = frozenset({"unlazy"})
 STATE_FOLDER = "toolkit"
 STATE_FILE = "updates.json"
+LOG_FILE = "updates.jsonl"
 CACHE_FOLDER = "cache"
 LOCK_TIMEOUT = 10.0
 
@@ -243,6 +244,11 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
                                             ["unlazy is pinned by the gates lane and never updated here"])
                                for d in group)
                 continue
+            if item in settings.get("pins", ()):
+                results.extend(UpdateResult(item, "pinned", str(d.path), d.commit, d.commit, None,
+                                            ["held by [skills] pins in .oah/config.toml; remove it there to update"])
+                               for d in group)
+                continue
             work = scratch / str(number)
             try:
                 tree = fetcher(entry.repository, entry.ref, work / "fetch", paths=_paths(entry))
@@ -350,10 +356,23 @@ def due(state: Mapping, now: dt.datetime, interval_days: float) -> bool:
     return last is None or now - last >= dt.timedelta(days=interval_days) or last > now
 
 
-def record_run(state_dir: pathlib.Path, now: dt.datetime, results: Sequence[UpdateResult]) -> None:
-    write_json_atomic(_state_path(state_dir), {
-        "last_check": now.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-        "results": [result.to_json() for result in results]})
+def _stamp(now: dt.datetime) -> str:
+    return now.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def log_results(state_dir: pathlib.Path, now: dt.datetime, results: Sequence[UpdateResult], why: str) -> None:
+    """Append every result that is not 'current' to the update log: old and new commits, when and why."""
+    path = pathlib.Path(state_dir) / STATE_FOLDER / LOG_FILE
+    for result in results:
+        if result.status != "current":
+            append_jsonl(path, dict(result.to_json(), ts=_stamp(now), why=why))
+
+
+def record_run(state_dir: pathlib.Path, now: dt.datetime, results: Sequence[UpdateResult], why: str = "automatic") -> None:
+    """The cache check's run record (its last_check drives the interval) plus the update log."""
+    write_json_atomic(_state_path(state_dir), {"last_check": _stamp(now), "why": why,
+                                               "results": [result.to_json() for result in results]})
+    log_results(state_dir, now, results, why)
 
 
 def find_gitleaks(search_path: str | None = None) -> Resolved | None:
@@ -365,13 +384,13 @@ def find_gitleaks(search_path: str | None = None) -> Resolved | None:
 
 def refresh_cache(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: pathlib.Path | None,
                   settings: Mapping, now: dt.datetime, check_only: bool = False, gitleaks: Resolved | None = None,
-                  fetcher: Fetcher = fetch) -> list[UpdateResult]:
+                  fetcher: Fetcher = fetch, why: str = "automatic") -> list[UpdateResult]:
     """Bring the kit cache up to date; publication and the run record happen under the state lock with no
     lease active. Raises LeasesActive (nothing written) when a lease is active at publication."""
     destinations = cache_destinations(catalog, state_dir=state_dir, bundle_dir=bundle_dir)
     return run_update(catalog=catalog, destinations=destinations, check_only=check_only, settings=settings,
                       now=now, gitleaks=gitleaks, fetcher=fetcher, guard=lambda: idle_state(state_dir),
-                      after_publish=lambda results: record_run(state_dir, now, results))
+                      after_publish=lambda results: record_run(state_dir, now, results, why))
 
 
 def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: pathlib.Path | None,

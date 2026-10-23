@@ -1,5 +1,4 @@
 # 스킬 명령 — oah skills list/install/update/schedule 의 인자, 동의 확인, 자체 리스, 출력 형식, 종료 코드를 맡는다.
-"""Toolkit: bundled, cached, linked and installed skills."""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +11,7 @@ import sys
 from typing import Iterator, Mapping
 
 from oah.atomic import StateCorrupt, StorageError
+from oah.config import ConfigError, load_config
 from oah.journal import PendingTransaction
 from oah.lease import LeaseError, Store
 from oah.lockfile import LockTimeout
@@ -24,7 +24,7 @@ from oah.toolkit.install import (SKILL_FOLDERS, InstallError, apply_install, lis
 from oah.toolkit.schedule import ScheduleError, entry_installed, install_entry, plan_entry, remove_entry
 from oah.toolkit.skillmeta import SkillError
 from oah.toolkit.update import (DEFAULTS, LeasesActive, cache_dir, find_gitleaks, idle_state, installed_destinations,
-                                refresh_cache, run_update, scheduled_update, vendored_destinations)
+                                log_results, refresh_cache, run_update, scheduled_update, vendored_destinations)
 
 EXIT_OK, EXIT_REFUSED, EXIT_ENVIRONMENT = 0, 1, 69
 COMMANDS = ("skills",)
@@ -93,8 +93,16 @@ def _confirm(what: str, args: argparse.Namespace) -> None:
 
 
 def settings_for(root: pathlib.Path) -> dict:
-    """The [skills] settings; defaults until the config loader is wired in."""
-    return dict(DEFAULTS)
+    """The [skills] section of .oah/config.toml merged over DEFAULTS."""
+    settings = load_config(root).section("skills", DEFAULTS)
+    pins = settings["pins"]
+    if not all(isinstance(name, str) for name in pins):
+        raise ConfigError("OAH_CONFIG_INVALID", "skills.pins must be an array of item names, such as "
+                                                '["ponytail"]; oah skills list shows the names')
+    if settings["update_interval_days"] <= 0:
+        raise ConfigError("OAH_CONFIG_INVALID", "skills.update_interval_days must be above 0; "
+                                                "set auto_update = false to turn the check off")
+    return settings
 
 
 def run(args: argparse.Namespace) -> int:
@@ -103,7 +111,7 @@ def run(args: argparse.Namespace) -> int:
     except (Refused, InstallError, StageError, ScheduleError, LeaseError, ScopeError, LeasesActive) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
-    except (CatalogError, FetchError, SkillError, NotARepo, GitMissing, LockTimeout, StateCorrupt,
+    except (CatalogError, ConfigError, FetchError, SkillError, NotARepo, GitMissing, LockTimeout, StateCorrupt,
             PendingTransaction, StorageError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
@@ -158,7 +166,7 @@ def _after_mutation(info: RepoInfo, state: pathlib.Path) -> None:
         outcome, results = scheduled_update(catalog=load_catalog(), state_dir=state, bundle_dir=kit_skills_dir(),
                                             settings=settings_for(info.root), now=dt.datetime.now(dt.timezone.utc),
                                             gitleaks=find_gitleaks())
-    except (CatalogError, FetchError, StateCorrupt, PendingTransaction, StorageError, OSError) as exc:
+    except (CatalogError, ConfigError, FetchError, StateCorrupt, PendingTransaction, StorageError, OSError) as exc:
         print(f"OAH_SKILLS_AUTO_UPDATE skipped: {exc}", file=sys.stderr)
         return
     _report_scheduled(outcome, results)
@@ -237,8 +245,11 @@ def _update(args: argparse.Namespace) -> int:
         kit = kit_skills_dir()
         if kit is None:
             raise Refused("OAH_SKILLS_NOT_KIT", "--vendored works only inside an open-agent-harness checkout")
-        return _print(run_update(destinations=vendored_destinations(catalog, kit),
-                                 catalog_path=catalog_module.CATALOG_PATH, **common))
+        results = run_update(destinations=vendored_destinations(catalog, kit),
+                             catalog_path=catalog_module.CATALOG_PATH, **common)
+        if not args.check:
+            log_results(state, now, results, "update --vendored")
+        return _print(results)
     if args.project or args.global_:
         level = "project" if args.project else "global"
         destinations = installed_destinations(catalog, project_root=info.root, home=home, level=level)
@@ -254,11 +265,12 @@ def _update(args: argparse.Namespace) -> int:
         else:
             _confirm("This updates your user-level skill folders.", args)
             results = run_update(destinations=destinations, guard=lambda: idle_state(state), **common)
+        log_results(state, now, results, f"update --{level}")
         code = _print(results)
         _after_mutation(info, state)
         return code
     results = refresh_cache(catalog=catalog, state_dir=state, bundle_dir=kit_skills_dir(), settings=settings,
-                            now=now, check_only=args.check, gitleaks=gitleaks)
+                            now=now, check_only=args.check, gitleaks=gitleaks, why="update")
     return _print(results)
 
 

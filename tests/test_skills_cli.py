@@ -23,7 +23,7 @@ from oah.toolkit.fetch import fetch, stage_item
 from oah.toolkit.schedule import TASK_NS, install_entry, plan_entry, remove_entry, task_xml
 from oah.toolkit.catalog import load_catalog, read_upstream
 from oah.toolkit.locate import locate_skill
-from oah.toolkit.update import DEFAULTS, cache_dir
+from oah.toolkit.update import cache_dir
 from tests.fixtures.toolkit.upstream import TODAY, bundled, commit, linked, make_upstream, write_catalog
 from tests.helpers import make_git_repo, make_tmp_dir, write_posix_tool
 
@@ -54,18 +54,23 @@ class CliFixture(unittest.TestCase):
         self.home = work / "home"
         self.home.mkdir()
         self.state = work / "state"
-        self.settings = dict(DEFAULTS, auto_update=False)
         env = {"HOME": str(self.home), "USERPROFILE": str(self.home), "OAH_KIT_DIR": str(self.kit),
                "OAH_STATE_DIR": str(self.state), "PATH": tool_dir + os.pathsep + os.environ.get("PATH", "")}
         for patcher in (mock.patch.dict(os.environ, env),
                         mock.patch("oah.toolkit.catalog.CATALOG_PATH", self.catalog),
-                        mock.patch.object(skills_cli, "_interactive", lambda: False),
-                        mock.patch.object(skills_cli, "settings_for", lambda root: dict(self.settings))):
+                        mock.patch.object(skills_cli, "_interactive", lambda: False)):
             patcher.start()
             self.addCleanup(patcher.stop)
         cwd = os.getcwd()
         os.chdir(self.project)
         self.addCleanup(os.chdir, cwd)
+        self.configure("auto_update = false")
+
+    def configure(self, *lines: str) -> None:
+        """Write the project's .oah/config.toml [skills] section."""
+        path = self.project / ".oah" / "config.toml"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("[skills]\n" + "".join(line + "\n" for line in lines), encoding="utf-8")
 
     def oah(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -218,7 +223,7 @@ class UpdateCommandTest(CliFixture):
         code, _, err = self.oah("update")
         self.assertEqual(code, 1)
         self.assertIn("OAH_SKILLS_LEASES_ACTIVE", err)
-        self.settings["auto_update"] = True
+        self.configure("auto_update = true")
         code, out, _ = self.oah("update", "--scheduled")
         self.assertEqual(code, 0)
         self.assertIn("deferred", out)
@@ -237,7 +242,7 @@ class UpdateCommandTest(CliFixture):
     def test_mutating_command_runs_the_due_check(self):
         self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)
         new = commit(self.upstream, {"skills/demo/ref.md": "reference\nmore\n"})
-        self.settings["auto_update"] = True
+        self.configure("auto_update = true")
         code, out, _ = self.oah("list")
         self.assertNotIn("OAH_SKILLS_AUTO_UPDATE", out, "read-only commands never update")
         self.assertFalse(cache_dir(self.state).exists())
@@ -264,6 +269,38 @@ class UpdateCommandTest(CliFixture):
         self.assertEqual(code, 1)
         self.assertIn("rolled-back", out)
         self.assertEqual(self.installed_version(), self.commit)
+
+
+class ConfigTest(CliFixture):
+    def test_config_errors_exit_69(self):
+        self.configure("auto_updates = true")
+        code, _, err = self.oah("update")
+        self.assertEqual(code, 69)
+        self.assertIn("OAH_CONFIG_UNKNOWN_KEY", err)
+        self.configure("update_interval_days = 0")
+        code, _, err = self.oah("update")
+        self.assertEqual(code, 69)
+        self.assertIn("OAH_CONFIG_INVALID", err)
+        self.configure("pins = [1]")
+        self.assertEqual(self.oah("update")[0], 69)
+
+    def test_pins_hold_an_item_and_the_log_records_why(self):
+        self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)
+        commit(self.upstream, {"skills/demo/ref.md": "changed\n"})
+        self.configure("auto_update = false", 'pins = ["demo"]')
+        code, out, _ = self.oah("update", "--project")
+        self.assertEqual(code, 0, out)
+        self.assertIn("pinned", out)
+        self.assertEqual(read_skill(self.project / ".claude" / "skills" / "demo").version, self.commit)
+        self.configure("auto_update = false")
+        self.assertEqual(self.oah("update", "--project")[0], 0)
+        log = [json.loads(line) for line in
+               (self.state / "toolkit" / "updates.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(entry["status"], entry["why"]) for entry in log],
+                         [("pinned", "update --project"), ("advanced", "update --project")])
+        self.assertEqual(log[1]["old_commit"], self.commit)
+        self.assertTrue(log[1]["ts"].endswith("Z"))
+        self.assertEqual(log[1]["diff"]["files_changed"], 1)
 
 
 class LocateTest(CliFixture):

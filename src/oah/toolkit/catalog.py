@@ -70,9 +70,23 @@ class Linked:
 
 
 @dataclass(frozen=True)
+class Cli:
+    """A recommended command-line tool; `oah doctor` checks these and prints the install command."""
+
+    name: str
+    command: str
+    source: str
+    version: str
+    license: str
+    install_macos: str  # from the inventory; Windows commands come from oah doctor's own table
+    purpose: str
+
+
+@dataclass(frozen=True)
 class Catalog:
     bundled: tuple[Bundled, ...]
     linked: tuple[Linked, ...]
+    clis: tuple[Cli, ...] = ()
 
     def find(self, name: str) -> Bundled | Linked | None:
         for entry in (*self.bundled, *self.linked):
@@ -232,6 +246,16 @@ def _linked(data: object, where: str) -> Linked:
     return entry
 
 
+def _cli(data: object, where: str) -> Cli:
+    if not isinstance(data, dict):
+        raise CatalogError(f"{where}: expected an object")
+    try:
+        return Cli(**{key: _str(data, key, where) for key in
+                      ("name", "command", "source", "version", "license", "install_macos", "purpose")})
+    except KeyError as exc:
+        raise CatalogError(f"{where}: missing {exc}") from None
+
+
 def load_catalog(path: pathlib.Path | None = None) -> Catalog:
     """Read and validate the allowlist; the shipped one when path is None."""
     path = pathlib.Path(path) if path is not None else CATALOG_PATH
@@ -243,11 +267,12 @@ def load_catalog(path: pathlib.Path | None = None) -> Catalog:
         raise CatalogError(f"{path}: expected {{\"version\": 1, ...}}")
     bundled = tuple(_bundled(item, f"{path} bundled[{n}]") for n, item in enumerate(data.get("bundled", [])))
     linked = tuple(_linked(item, f"{path} linked[{n}]") for n, item in enumerate(data.get("linked", [])))
+    clis = tuple(_cli(item, f"{path} clis[{n}]") for n, item in enumerate(data.get("clis", [])))
     names = [entry.name for entry in (*bundled, *linked)]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise CatalogError(f"{path}: duplicate names {', '.join(duplicates)}")
-    return Catalog(bundled=bundled, linked=linked)
+    return Catalog(bundled=bundled, linked=linked, clis=clis)
 
 
 def read_upstream(item_dir: pathlib.Path) -> Upstream:
