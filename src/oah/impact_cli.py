@@ -9,7 +9,8 @@ import sys
 
 from oah.atomic import StateCorrupt, StorageError
 from oah.impact import gatebind, lexical, mapstore, query
-from oah.impact.defaults import effective
+from oah.config import ConfigError
+from oah.impact.defaults import configured
 from oah.impact.errors import EXIT_ENVIRONMENT, EXIT_USAGE, ImpactError
 from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
@@ -38,14 +39,14 @@ def register(commands: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> int:
     try:
         root = repo_info(pathlib.Path.cwd()).root
-        settings = effective(None)
+        settings = configured(root)
         if len(args.targets) == 1 and args.targets[0] in ACTIONS:
             return _action(args, root, settings)
         return _query(args, root, settings)
     except ImpactError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
-    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, PendingTransaction) as exc:
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, PendingTransaction) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
     except OSError as exc:

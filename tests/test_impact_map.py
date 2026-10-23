@@ -13,23 +13,14 @@ from oah.impact import ImpactError, ensure_fresh, mapstore
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
-RUNNER = """
-import argparse, sys
-from oah import impact_cli
-from oah.console import configure_stdio
-configure_stdio()
-parser = argparse.ArgumentParser(prog="oah")
-impact_cli.register(parser.add_subparsers(dest="command"))
-sys.exit(impact_cli.run(parser.parse_args(sys.argv[1:])))
-"""
 
 
 def run_impact(cwd: pathlib.Path, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
-    """Run `oah impact …` in a real process (until command discovery lands, through impact_cli directly)."""
+    """Run `python -m oah impact …` in a real process."""
     env = dict(os.environ, PYTHONPATH=SRC)
     env.pop("OAH_STATE_DIR", None)
     env.update(env_extra or {})
-    return subprocess.run([sys.executable, "-c", RUNNER, "impact", *args], cwd=cwd, capture_output=True,
+    return subprocess.run([sys.executable, "-m", "oah", "impact", *args], cwd=cwd, capture_output=True,
                           text=True, encoding="utf-8", env=env, timeout=120)
 
 
@@ -173,6 +164,15 @@ class MapStoreTest(unittest.TestCase):
         result = run_impact(empty, "build")
         self.assertEqual(result.returncode, 69)
         self.assertIn("OAH_IMPACT_NO_COMMIT", result.stderr)
+
+    def test_ensure_fresh_reads_config(self):
+        (self.repo / ".oah").mkdir()
+        (self.repo / ".oah" / "config.toml").write_text("[impact]\nmin_needle = 5\n", encoding="utf-8")
+        configured = ensure_fresh(self.repo)
+        explicit = mapstore.build(self.repo, env={"OAH_STATE_DIR": str(make_tmp_dir(self) / "s")},
+                                  settings={"min_needle": 5})
+        self.assertEqual(configured.tool_digest, explicit.tool_digest)
+        self.assertEqual(ensure_fresh(self.repo).action, "fresh", "callers without settings agree on the map")
 
     def test_worktrees_keep_separate_maps(self):
         other = make_tmp_dir(self) / "other"

@@ -28,7 +28,7 @@ from oah.atomic import write_text_atomic
 from oah.engines.proc import run_command
 from oah.impact import kinds as kinds_module
 from oah.impact import lexical, sqlplugin
-from oah.impact.defaults import MAP_KEYS, effective
+from oah.impact.defaults import MAP_KEYS, configured
 from oah.impact.errors import EXIT_USAGE, ImpactError
 from oah.lockfile import StateLock
 from oah.paths import git_argv, repo_info, state_dir
@@ -340,8 +340,8 @@ def _info(stored: Mapping, path: pathlib.Path, action: str, changed: int = 0, re
 def status(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
            settings: Mapping[str, object] | None = None) -> tuple[MapInfo | None, str]:
     """Read only: (info with action fresh or stale, reason). Creates nothing."""
-    settings = effective(settings)
-    _root, head, path = _context(root, env)
+    top, head, path = _context(root, env)
+    settings = configured(top, settings)
     stored, reason = _judge(path, head, tool_digest(settings))
     if stored is None:
         return None, reason
@@ -357,9 +357,9 @@ def _write(path: pathlib.Path, commit: str, tool: str, data: dict) -> dict:
 
 def _update(root: pathlib.Path, *, env: Mapping[str, str] | None, settings: Mapping[str, object] | None,
             force: bool) -> tuple[MapInfo, dict]:
-    settings = effective(settings)
-    tool = tool_digest(settings)
     top, head, path = _context(root, env)
+    settings = configured(top, settings)
+    tool = tool_digest(settings)
     with StateLock(path.parent.parent / ".lock", timeout=float(settings["lock_timeout"])):
         stored, reason = _judge(path, head, tool)
         if not force and stored is not None and not reason:
@@ -382,8 +382,8 @@ def build(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
 def fresh_map(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, str] | None = None,
               settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
     """(info, data) for a map that matches HEAD. Stale maps are refreshed, or refused when refresh is False."""
-    settings = effective(settings)
-    _root, head, path = _context(root, env)
+    top, head, path = _context(root, env)
+    settings = configured(top, settings)
     stored, reason = _judge(path, head, tool_digest(settings))
     if stored is not None and not reason:
         return _info(stored, path, "fresh"), stored["data"]
@@ -402,8 +402,8 @@ def ensure_fresh(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, 
 
 def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
     """An in-memory map at any commit (for --ref); nothing is stored."""
-    settings = effective(settings)
     top = repo_info(pathlib.Path(root)).root
+    settings = configured(top, settings)
     sha = resolve_rev(top, rev)
     data = build_data(top, sha, settings)
     return MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"])), data
@@ -412,12 +412,14 @@ def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | N
 def run_hook(name: str) -> int:
     """Refresh the map after a commit or merge; one line out, never a traceback."""
     from oah.atomic import StateCorrupt, StorageError
+    from oah.config import ConfigError
     from oah.lockfile import LockTimeout
     from oah.paths import GitMissing, NotARepo
 
     try:
         info = ensure_fresh(pathlib.Path.cwd())
-    except (ImpactError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, OSError) as exc:
+    except (ImpactError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError,
+            OSError) as exc:
         print(f"{exc}\noah {name}: the impact map was not refreshed; your git operation itself is fine. "
               "Run oah impact refresh to retry.", file=sys.stderr)
         return 69

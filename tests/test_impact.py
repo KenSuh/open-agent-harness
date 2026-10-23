@@ -348,6 +348,24 @@ class CliTest(unittest.TestCase):
         self.assertIn("OAH_SCOPE_NO_MATCH", none.stderr)
         self.assertEqual(none.stdout.splitlines()[-1], "total=0 shown=0 overflow=0")
 
+    def test_cli_reads_impact_config(self):
+        (self.repo / ".oah").mkdir()
+        config = self.repo / ".oah" / "config.toml"
+        config.write_text("[impact]\nlimit = 1\n", encoding="utf-8")
+        result = run_impact(self.repo, "tools/check.py", "src/lib/util.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        last = result.stdout.splitlines()[-1]
+        self.assertRegex(last, r"\Atotal=\d+ shown=5 overflow=[1-9]\d*\Z", "4 exec/pin rows plus 1 weaker row")
+        for text, code in [("[impact]\nlimitt = 1\n", "OAH_CONFIG_UNKNOWN_KEY"),
+                           ('[impact]\nlimit = "many"\n', "OAH_CONFIG_INVALID"),
+                           ("[impact]\nkinds = [[\"doc\"]]\n", "OAH_CONFIG_INVALID"),
+                           ("[impact]\nmin_needle = 0\n", "OAH_CONFIG_INVALID")]:
+            config.write_text(text, encoding="utf-8")
+            with self.subTest(config=text):
+                bad = run_impact(self.repo, "tools/check.py")
+                self.assertEqual(bad.returncode, 69, bad.stderr)
+                self.assertIn(code, bad.stderr)
+
     def test_cli_build_refresh_status(self):
         built = run_impact(self.repo, "build")
         self.assertEqual(built.returncode, 0, built.stderr)
