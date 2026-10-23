@@ -1,3 +1,9 @@
 # Privacy-scan exceptions, one per line: <rule> <path-glob> <value-regex> # reason
 private-term README.md ^KenSuh$ # the owner approved the repository's own URL in the clone commands (2026-10-23)
 private-term tools/privacy-allowlist.txt ^KenSuh$ # this file names the README exception above
+private-term docs/install-macos.md ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term docs/install-windows.md ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term docs/ko/install-macos.md ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term docs/ko/install-windows.md ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term install/install.ps1 ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
+private-term install/install.sh ^KenSuh$ # the owner approved the repository's own URL in the install commands (2026-10-23)
