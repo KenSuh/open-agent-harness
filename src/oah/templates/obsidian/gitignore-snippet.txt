@@ -1,0 +1,3 @@
+# Obsidian editor UI state (open panes, graph zoom); added by oah init.
+**/.obsidian/workspace*.json
+**/.obsidian/workspace

@@ -1,0 +1,120 @@
+# 위키 명령 — oah wiki new/log/lint/rollover/recover/hygiene 의 인자, 저장소·상태 경로 찾기, 출력 형식, 종료 코드를 맡는다.
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import sys
+
+from oah.atomic import StateCorrupt, StorageError
+from oah.lockfile import LockTimeout
+from oah.paths import GitMissing, NotARepo, repo_info, state_dir
+from oah.wiki.base import EXIT_ENVIRONMENT, WikiError, WikiSettings
+from oah.wiki.store import Wiki
+
+EXIT_OK, EXIT_PROBLEMS = 0, 1
+COMMANDS = ("wiki",)
+
+
+def register(commands: argparse._SubParsersAction) -> None:
+    wiki = commands.add_parser("wiki", help="keep the project wiki (docs/wiki) linked, sourced and tidy")
+    sub = wiki.add_subparsers(dest="wiki_command", metavar="<wiki command>", required=True)
+
+    new = sub.add_parser("new", help="create a note from the template and list it in index.md")
+    new.add_argument("title")
+    new.add_argument("--kind", choices=("note", "decision"), default="note")
+    new.add_argument("--source", action="append", default=[],
+                     help="a file path with a commit, a URL or a packet; repeat for more")
+    new.add_argument("--tag", action="append", default=[])
+
+    log = sub.add_parser("log", help="add a dated entry at the top of log.md")
+    log.add_argument("title")
+    log.add_argument("--body", default="", help="the entry text below the heading")
+    log.add_argument("--date", type=_date, default=None, help="YYYY-MM-DD (default: today)")
+
+    lint = sub.add_parser("lint", help="list real wiki problems (reads only; exit 1 when any exist)")
+    lint.add_argument("--index", action="store_true",
+                      help="check index.md for banners, over-long lines and unindexed notes")
+    lint.add_argument("--json", action="store_true")
+
+    sub.add_parser("rollover", help="move the oldest whole log entries into the next numbered archive")
+    sub.add_parser("recover", help="finish or check an interrupted rollover")
+    sub.add_parser("hygiene", help="print one line of problem counts and their change since the last run")
+
+
+def _date(value: str) -> datetime.date:
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a YYYY-MM-DD date") from exc
+
+
+def _settings(root: pathlib.Path) -> WikiSettings:
+    # The [wiki] section of .oah/config.toml is wired in once oah.config lands; until then, defaults.
+    return WikiSettings.from_mapping({})
+
+
+def run(args: argparse.Namespace) -> int:
+    try:
+        info = repo_info(pathlib.Path.cwd())
+        wiki = Wiki(info.root, _settings(info.root), state_dir(info, os.environ))
+        return HANDLERS[args.wiki_command](args, wiki)
+    except WikiError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
+    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError) as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_ENVIRONMENT
+
+
+def _new(args: argparse.Namespace, wiki: Wiki) -> int:
+    path = wiki.new(args.title, kind=args.kind, sources=args.source, tags=args.tag)
+    print(f"OAH_WIKI_NOTE_CREATED {path.relative_to(wiki.root).as_posix()}")
+    if not args.source:
+        print("Next: add a source under sources: in its frontmatter (a file path with a commit, a URL or a "
+              "packet); oah wiki lint reports notes without one.")
+    return EXIT_OK
+
+
+def _log(args: argparse.Namespace, wiki: Wiki) -> int:
+    entry = wiki.log(args.title, body=args.body, today=args.date)
+    print(f"OAH_WIKI_LOGGED {entry.date} {entry.title}")
+    return EXIT_OK
+
+
+def _lint(args: argparse.Namespace, wiki: Wiki) -> int:
+    report = wiki.lint(index=args.index)
+    if args.json:
+        print(json.dumps(report.to_json(), indent=2, ensure_ascii=False))
+    else:
+        from oah.wiki.lint import HINTS
+
+        prefix = pathlib.PurePosixPath(wiki.settings.dir)
+        for problem in report.problems:
+            print(f"{prefix / problem.path}:{problem.line}: {problem.kind}: {problem.detail}; "
+                  f"{HINTS[problem.kind]}")
+        print(report.summary())
+        if args.index:
+            print(f"candidates: {wiki.state / 'index-candidates.json'}")
+    return EXIT_PROBLEMS if report.problems else EXIT_OK
+
+
+def _rollover(args: argparse.Namespace, wiki: Wiki) -> int:
+    print(wiki.rollover().line)
+    return EXIT_OK
+
+
+def _recover(args: argparse.Namespace, wiki: Wiki) -> int:
+    print(wiki.recover())
+    return EXIT_OK
+
+
+def _hygiene(args: argparse.Namespace, wiki: Wiki) -> int:
+    print(wiki.hygiene())
+    return EXIT_OK
+
+
+HANDLERS = {"new": _new, "log": _log, "lint": _lint, "rollover": _rollover, "recover": _recover,
+            "hygiene": _hygiene}
