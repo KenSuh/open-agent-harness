@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import unittest
 
 from oah.setup import catalog, display
@@ -18,6 +19,8 @@ INSTALL_SH = ROOT / "install" / "install.sh"
 INSTALL_PS1 = ROOT / "install" / "install.ps1"
 BASH = "/bin/bash" if os.path.exists("/bin/bash") else shutil.which("bash")  # /bin/bash is 3.2 on macOS
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# A macOS login shell also gets these from path_helper; an oah there would be found by any new terminal.
+SYSTEM_OAH = any(os.path.exists(f"{folder}/oah") for folder in ("/usr/local/bin", "/opt/homebrew/bin"))
 
 
 def make_clone(test: unittest.TestCase) -> pathlib.Path:
@@ -28,6 +31,15 @@ def make_clone(test: unittest.TestCase) -> pathlib.Path:
     shutil.copytree(ROOT / "src", clone / "src", ignore=ignore)
     shutil.copy2(ROOT / "pyproject.toml", clone / "pyproject.toml")
     return clone
+
+
+def make_release(test: unittest.TestCase) -> tuple[pathlib.Path, str]:
+    """A release archive like the published one: the clone's files under one top-level folder."""
+    clone = make_clone(test)
+    archive = make_tmp_dir(test) / "open-agent-harness-1.0.0.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(clone, arcname="open-agent-harness-1.0.0")
+    return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
 
 
 def snapshot(folder: pathlib.Path) -> dict[str, tuple[int, str]]:
@@ -54,6 +66,8 @@ class InstallShTest(unittest.TestCase):
         self.tool_bin = self.work / "uv-tool-bin"
         self.log = self.work / "calls.log"
         self.extra_path: list[str] = []
+        self.scratch = self.work / "tmp"
+        self.scratch.mkdir()
 
     # Fake programs. Each logs its argv to calls.log; none installs anything.
     def fake_python(self, *, pip_creates_oah: bool = True):
@@ -103,11 +117,29 @@ exit 0''')
     def calls(self) -> list[str]:
         return self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
 
-    def run_sh(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess:
+    def env(self, **extra: str) -> dict[str, str]:
         env = {"PATH": os.pathsep.join([str(self.bin), *self.extra_path, SYSTEM_PATH]), "HOME": str(self.home),
-               "LANG": "en_US.UTF-8", "TMPDIR": str(self.work)}
-        return subprocess.run([BASH, str(self.clone / "install" / "install.sh"), *args], env=env,
+               "LANG": "en_US.UTF-8", "TMPDIR": str(self.scratch), "SHELL": "/bin/bash"}
+        env.update(extra)
+        return env
+
+    def run_sh(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess:
+        return subprocess.run([BASH, str(self.clone / "install" / "install.sh"), *args], env=self.env(),
                               input=stdin.encode("utf-8"), capture_output=True, timeout=120, cwd=str(self.work))
+
+    def run_piped(self, *args: str, url: str | None = None, digest: str | None = None) -> subprocess.CompletedProcess:
+        """`curl ... | bash -s -- args`: the script arrives on stdin, outside any clone."""
+        extra = {}
+        if url is not None:
+            extra["OAH_RELEASE_URL"] = url
+        if digest is not None:
+            extra["OAH_RELEASE_SHA256"] = digest
+        return subprocess.run([BASH, "-s", "--", *args], env=self.env(**extra), input=INSTALL_SH.read_bytes(),
+                              capture_output=True, timeout=120, cwd=str(self.work))
+
+    def new_terminal_finds(self, folder: pathlib.Path) -> None:
+        """A login profile that puts `folder` on PATH, as `uv tool update-shell` would."""
+        (self.home / ".profile").write_text(f'export PATH="{folder}:$PATH"\n', encoding="utf-8")
 
     def text(self, result) -> str:
         return result.stdout.decode("utf-8") + result.stderr.decode("utf-8")
@@ -155,6 +187,10 @@ exit 0''')
             self.assertIsNone(re.search(pattern, source), pattern)
         self.assertNotIn("\r", source)
         self.assertTrue(source.startswith("#!/bin/bash\n"))
+        # Piped downloads run only once complete: everything is inside main(), called on the last line.
+        self.assertEqual(source.rstrip().splitlines()[-1], 'main "$@"')
+        self.assertIn("RELEASE_URL='__OAH_RELEASE_URL__'", source)
+        self.assertIn("RELEASE_SHA256='__OAH_RELEASE_SHA256__'", source)
         result = subprocess.run([BASH, "-n", str(INSTALL_SH)], capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -162,7 +198,7 @@ exit 0''')
         self.fake_python()
         self.fake_every_tool()
         self.fake_uv()
-        self.extra_path.append(str(self.tool_bin))
+        self.new_terminal_finds(self.tool_bin)
         result = self.run_sh("--yes")
         text = self.text(result)
         self.assertEqual(result.returncode, 0, text)
@@ -170,9 +206,11 @@ exit 0''')
         self.assertIn("SETUP_OK", text)
         self.assertIn(f"uv tool install --force {self.clone}", self.calls())
         self.assertIn("oah doctor", self.calls())
-        self.assertNotIn("uv tool update-shell", self.calls())  # already on PATH
+        self.assertIn(f"A new terminal finds oah: {self.tool_bin / 'oah'}", text)
+        self.assertNotIn("uv tool update-shell", self.calls())  # a new terminal already finds it
         self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
 
+    @unittest.skipIf(SYSTEM_OAH, "a system-wide oah is found by every new terminal")
     def test_install_sh_offers_update_shell_only_with_consent(self):
         self.fake_python()
         self.fake_uv()
@@ -189,6 +227,7 @@ exit 0''')
         self.assertIn("uv tool update-shell", self.calls())
         self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
 
+    @unittest.skipIf(SYSTEM_OAH, "a system-wide oah is found by every new terminal")
     def test_install_sh_falls_back_to_pipx(self):
         self.fake_python()
         self.fake_pipx()
@@ -198,13 +237,14 @@ exit 0''')
         self.assertIn(f'export PATH="{self.home / ".local" / "bin"}:$PATH"', self.text(result))
         self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
 
+    @unittest.skipIf(SYSTEM_OAH, "a system-wide oah is found by every new terminal")
     def test_install_sh_falls_back_to_pip_user_with_path_note(self):
         self.fake_python()
         result = self.run_sh("--skip-tools")
         text = self.text(result)
         self.assertEqual(result.returncode, 0, text)
         self.assertIn(f"python3 -m pip install --user {self.clone}", self.calls())
-        self.assertIn("is not on your PATH", text)
+        self.assertIn("A new terminal does not find oah yet", text)
         self.assertIn('export PATH="', text)
         self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
 
@@ -219,11 +259,78 @@ exit 0''')
     def test_install_sh_reports_incomplete_when_doctor_fails(self):
         self.fake_python()
         self.fake_uv(doctor_code=1)
-        self.extra_path.append(str(self.tool_bin))
+        self.new_terminal_finds(self.tool_bin)
         result = self.run_sh("--skip-tools")
         self.assertEqual(result.returncode, 1, self.text(result))
         self.assertIn("DOCTOR_RESULT", self.text(result))
         self.assertEqual(self.last_line(result), "OAH_INSTALL_INCOMPLETE")
+
+    def test_piped_dry_run_verifies_the_release_and_changes_nothing(self):
+        self.fake_python()
+        self.fake_uv()
+        archive, digest = make_release(self)
+        before_home = snapshot(self.home)
+        result = self.run_piped("--dry-run", url=str(archive), digest=digest.upper())
+        text = self.text(result)
+        self.assertEqual(result.returncode, 0, text)
+        self.assertIn(f"SHA-256 verified: {digest}", text)
+        for number in range(1, 6):
+            self.assertIn(f"Step {number}/5", text)
+        self.assertIn("SETUP_DRY_RUN planned=", text)
+        self.assertRegex(text, r"\[dry-run\] would run: \S+/uv tool install --force \S+/oah-install\.\w+/release/"
+                               r"open-agent-harness-1\.0\.0")
+        self.assertEqual(self.last_line(result), "OAH_INSTALL_DRY_RUN_OK")
+        self.assertEqual(snapshot(self.home), before_home)
+        self.assertEqual(list(self.scratch.iterdir()), [])  # the temporary download is gone
+        self.assertNotIn("uv tool install", "\n".join(self.calls()))
+
+    def test_piped_install_uses_the_unpacked_release(self):
+        self.fake_python()
+        self.fake_uv()
+        self.new_terminal_finds(self.tool_bin)
+        archive, digest = make_release(self)
+        result = self.run_piped("--skip-tools", url=str(archive), digest=digest)
+        self.assertEqual(result.returncode, 0, self.text(result))
+        installs = [call for call in self.calls() if call.startswith("uv tool install --force ")]
+        self.assertEqual(len(installs), 1)
+        self.assertRegex(installs[0], r"/oah-install\.\w+/release/open-agent-harness-1\.0\.0$")
+        self.assertIn("oah doctor", self.calls())
+        self.assertEqual(self.last_line(result), "OAH_INSTALL_OK")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_piped_refuses_a_digest_mismatch_before_unpacking(self):
+        self.fake_python()
+        archive, digest = make_release(self)
+        result = self.run_piped("--dry-run", url=str(archive), digest="0" * 64)
+        text = self.text(result)
+        self.assertEqual(result.returncode, 1, text)
+        self.assertIn(f"OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is {digest}", text)
+        self.assertNotIn("Step 1/5", text)
+        self.assertEqual(self.last_line(result), "OAH_INSTALL_FAILED")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_piped_refuses_while_the_release_is_unpublished(self):
+        result = self.run_piped("--dry-run")
+        self.assertEqual(result.returncode, 1, self.text(result))
+        self.assertIn("OAH_INSTALL_NOT_PUBLISHED", self.text(result))
+        self.assertIn("xcode-select --install", self.text(result))
+        # A copy of the script outside a clone is treated the same way.
+        alone = self.work / "install.sh"
+        shutil.copy2(INSTALL_SH, alone)
+        result = subprocess.run([BASH, str(alone), "--dry-run"], env=self.env(), capture_output=True, timeout=60)
+        self.assertIn("OAH_INSTALL_NOT_PUBLISHED", self.text(result))
+
+    def test_piped_questions_never_read_the_script_itself(self):
+        # No Python and no uv: the first question is "Install uv now?". With the script on stdin and no
+        # terminal, the answer must read as "no" instead of swallowing the rest of the script.
+        archive, digest = make_release(self)
+        result = self.run_piped(url=str(archive), digest=digest)
+        text = self.text(result)
+        self.assertEqual(result.returncode, 1, text)
+        self.assertIn("Install uv now? [y/N]", text)
+        self.assertIn("curl -LsSf https://astral.sh/uv/install.sh | sh", text)
+        self.assertEqual(self.last_line(result), "OAH_INSTALL_FAILED")
+        self.assertEqual(snapshot(self.home), {})
 
     def test_install_sh_rejects_unknown_option(self):
         result = self.run_sh("--bogus")

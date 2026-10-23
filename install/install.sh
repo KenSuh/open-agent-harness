@@ -1,13 +1,24 @@
 #!/bin/bash
-# open-agent-harness installer for macOS. Run it from a clone of the repository:
+# open-agent-harness installer for macOS. Two ways to run it:
 #
-#   bash install/install.sh [--yes] [--dry-run] [--skip-tools]
+#   bash install/install.sh [--yes] [--dry-run] [--skip-tools]     (from a clone)
+#   curl -fsSL <release URL>/install.sh | bash -s -- [options]      (no clone, no git needed)
 #
-# It finds Python 3.11+ (offering uv when it is missing), runs the guided tool setup
-# (python -m oah.setup, which asks before each install), installs oah, checks PATH and
-# finishes with `oah doctor`. It never edits a shell profile without asking first.
-# Written for bash 3.2, the version macOS ships.
+# Outside a clone it downloads the pinned release archive below, checks its SHA-256 before
+# unpacking it, and continues from there. It then finds Python 3.11+ (offering uv when it is
+# missing), runs the guided tool setup (python -m oah.setup, which asks before each install),
+# installs oah, checks that a new terminal finds it, and finishes with `oah doctor`.
+# It never edits a shell profile without asking first. Written for bash 3.2, the version macOS ships.
+# The whole script is one function, so a piped download runs only once it has fully arrived.
 
+# ---- Release pin: the owner fills these in when a release is published. ----------------------
+RELEASE_URL='__OAH_RELEASE_URL__'        # the release's .tar.gz archive
+RELEASE_SHA256='__OAH_RELEASE_SHA256__'  # its SHA-256, as published with the release
+# ------------------------------------------------------------------------------------------------
+
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+
+main() {
 set -u
 
 UV_INSTALL_TEXT='curl -LsSf https://astral.sh/uv/install.sh | sh'
@@ -21,8 +32,9 @@ SKIP_TOOLS=0
 usage() {
   cat <<'EOF'
 Usage: bash install/install.sh [--yes] [--dry-run] [--skip-tools]
+   or: curl -fsSL <release URL>/install.sh | bash -s -- [options]
 
-Installs oah from this clone, after checking the tools it uses.
+Installs oah, after checking the tools it uses.
   --yes         install missing tools without asking about each one
   --dry-run     print every step and change nothing
   --skip-tools  skip the tool check and only install oah
@@ -71,7 +83,7 @@ run() {
     return 0
   fi
   say "  Running: $(show "$@")"
-  "$@"
+  "$@" <"$ANSWERS"
 }
 
 # Run an official one-liner through /bin/sh, showing its exact text first.
@@ -81,7 +93,7 @@ run_text() {
     return 0
   fi
   say "  Running: $1"
-  /bin/sh -c "$1"
+  /bin/sh -c "$1" <"$ANSWERS"
 }
 
 # Ask a yes/no question. A dry run only prints it and goes on as if the answer were yes,
@@ -93,7 +105,7 @@ ask() {
   fi
   printf '  %s [y/N] ' "$1"
   answer=""
-  read -r answer || answer=""
+  read -r answer <"$ANSWERS" || answer=""
   case "$answer" in
     y|Y|yes|YES|Yes) return 0 ;;
   esac
@@ -150,17 +162,44 @@ find_python() {
   return 1
 }
 
-on_path() {
-  case ":$PATH:" in
-    *":$1:"*) return 0 ;;
+is_clone() {
+  [ -f "$1/pyproject.toml" ] && [ -d "$1/src/oah" ] && [ -f "$1/install/install.sh" ]
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  else
+    sha256sum "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# Is oah found by a new terminal? Runs the user's shell as a fresh login shell with a clean
+# environment, the way a new Terminal window starts.
+fresh_shell_finds_oah() {
+  user_shell="${SHELL:-/bin/zsh}"
+  if [ ! -x "$user_shell" ]; then user_shell=/bin/zsh; fi
+  found=$(env -i HOME="$HOME" USER="${USER:-}" LOGNAME="${LOGNAME:-}" SHELL="$user_shell" TERM=dumb \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin "$user_shell" -i -l -c 'command -v oah' </dev/null 2>/dev/null | tail -n 1)
+  case "$found" in
+    */oah) FRESH_OAH=$found; return 0 ;;
   esac
+  FRESH_OAH=""
   return 1
 }
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P) || fail "OAH_INSTALL_NOT_A_CLONE: cannot find this script's folder."
-REPO=$(cd "$SCRIPT_DIR/.." && pwd -P)
-if [ ! -f "$REPO/pyproject.toml" ] || [ ! -d "$REPO/src/oah" ]; then
-  fail "OAH_INSTALL_NOT_A_CLONE: $REPO is not a clone of open-agent-harness. Run this script from inside the clone: bash install/install.sh"
+# Where answers to questions come from: the terminal itself when this script arrived through a
+# pipe (stdin is then the script), else stdin. Without a terminal, every question reads as "no".
+ANSWERS=/dev/stdin
+REPO=""
+if [ -n "$SCRIPT_PATH" ] && [ -f "$SCRIPT_PATH" ]; then
+  candidate=$(cd "$(dirname "$SCRIPT_PATH")/.." 2>/dev/null && pwd -P) || candidate=""
+  if [ -n "$candidate" ] && is_clone "$candidate"; then
+    REPO=$candidate
+  fi
+fi
+if [ -z "$REPO" ]; then
+  if (: </dev/tty) 2>/dev/null; then ANSWERS=/dev/tty; else ANSWERS=/dev/null; fi
 fi
 
 say "open-agent-harness installer (macOS)"
@@ -169,6 +208,47 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 if [ "$(uname -s)" != Darwin ]; then
   say "Note: this script is written for macOS. Other systems are not supported, but it will try."
+fi
+
+if [ -z "$REPO" ]; then
+  say ""
+  say "== Get the release (not running from a clone)"
+  url="${OAH_RELEASE_URL:-$RELEASE_URL}"
+  digest="${OAH_RELEASE_SHA256:-$RELEASE_SHA256}"
+  case "$url$digest" in
+    *__OAH_RELEASE_*)
+      fail "OAH_INSTALL_NOT_PUBLISHED: no release has been published yet, so there is nothing to download.
+Clone the repository instead (it needs git: xcode-select --install), then run: bash install/install.sh" ;;
+  esac
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/oah-install.XXXXXX") || fail "OAH_INSTALL_FAILED: cannot create a temporary folder."
+  trap 'rm -rf "$WORK"' EXIT
+  if [ "$DRY_RUN" = 1 ]; then
+    say "  Dry run: the release is downloaded to a temporary folder only to check it, and removed at the end."
+  fi
+  say "  Downloading $url"
+  if [ -f "$url" ]; then
+    cp "$url" "$WORK/release.tar.gz" || fail "Could not read $url."
+  else
+    curl -fsSL "$url" -o "$WORK/release.tar.gz" || fail "The download failed. Check your internet connection and run this again."
+  fi
+  actual=$(sha256_of "$WORK/release.tar.gz")
+  wanted=$(printf '%s' "$digest" | tr 'A-F' 'a-f')
+  if [ "$actual" != "$wanted" ]; then
+    fail "OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is $actual, but the release says $wanted.
+Nothing was unpacked or installed. Download again later, or clone the repository instead."
+  fi
+  say "  SHA-256 verified: $actual"
+  mkdir "$WORK/release" && tar -xzf "$WORK/release.tar.gz" -C "$WORK/release" || fail "The release archive could not be unpacked."
+  for candidate in "$WORK/release" "$WORK/release"/*; do
+    if [ -d "$candidate" ] && is_clone "$candidate"; then
+      REPO=$(cd "$candidate" && pwd -P)
+      break
+    fi
+  done
+  if [ -z "$REPO" ]; then
+    fail "The release archive does not contain open-agent-harness. Report this, or clone the repository instead."
+  fi
+  say "  Unpacked to a temporary folder; it is removed when this script ends."
 fi
 
 UV=""
@@ -213,7 +293,7 @@ else
   if [ "$YES" = 1 ]; then set -- "$@" --yes; fi
   if [ "$DRY_RUN" = 1 ]; then set -- "$@" --dry-run; fi
   say "  The guided setup checks each tool and asks before installing anything."
-  if ! PYTHONPATH="$REPO/src" PYTHONDONTWRITEBYTECODE=1 "$PY" -m oah.setup "$@"; then
+  if ! PYTHONPATH="$REPO/src" PYTHONDONTWRITEBYTECODE=1 "$PY" -m oah.setup "$@" <"$ANSWERS"; then
     say "  Some tools are not ready yet. The check at the end lists them again."
   fi
   find_uv || true
@@ -239,7 +319,7 @@ else
   run uv tool install --force "$REPO"
 fi
 
-step 4 "Check that oah is on your PATH"
+step 4 "Check that a new terminal finds oah"
 BIN_DIR=""
 case "$METHOD" in
   uv)
@@ -253,12 +333,13 @@ case "$METHOD" in
   pip)
     BIN_DIR=$(PYTHONDONTWRITEBYTECODE=1 "$PY" -c 'import sysconfig; print(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))' 2>/dev/null) || BIN_DIR="" ;;
 esac
-if [ -z "$BIN_DIR" ]; then
-  say "  [dry-run] would check that the folder holding oah is on your PATH."
-elif on_path "$BIN_DIR"; then
-  say "  oah is on your PATH ($BIN_DIR)."
+if [ "$DRY_RUN" = 1 ]; then
+  # A fresh shell runs your profile, so a dry run does not start one.
+  say "  [dry-run] would start a new login shell (${SHELL:-/bin/zsh}) and check that it finds oah${BIN_DIR:+ in $BIN_DIR}."
+elif fresh_shell_finds_oah; then
+  say "  A new terminal finds oah: $FRESH_OAH"
 else
-  say "  oah is installed in $BIN_DIR, which is not on your PATH yet."
+  say "  A new terminal does not find oah yet. It is installed in ${BIN_DIR:-a folder that is not on PATH}."
   if [ "$METHOD" = uv ]; then
     say "  'uv tool update-shell' adds that folder to your PATH. It edits your shell profile."
     if [ "$YES" = 1 ]; then
@@ -266,10 +347,11 @@ else
       say "    $(show "$UV") tool update-shell"
     elif ask "Run 'uv tool update-shell' now?"; then
       run "$UV" tool update-shell || say "  uv tool update-shell did not finish; you can run it again later."
+      if fresh_shell_finds_oah; then say "  A new terminal now finds oah: $FRESH_OAH"; fi
     else
       say "  Skipped. You can run it later: $(show "$UV") tool update-shell"
     fi
-  else
+  elif [ -n "$BIN_DIR" ]; then
     say "  To fix that, add this line to your shell profile (~/.zprofile for zsh):"
     say "    export PATH=\"$BIN_DIR:\$PATH\""
   fi
@@ -297,6 +379,9 @@ if run "$OAH" doctor; then
 fi
 say ""
 say "oah is installed, but some required tools are not ready (see the list above)."
-say "Install or sign in to them as shown, then run: oah doctor"
+say "Install or sign in to them as shown, run: oah doctor, then in your project folder: oah init"
 say "OAH_INSTALL_INCOMPLETE"
 exit 1
+}
+
+main "$@"
