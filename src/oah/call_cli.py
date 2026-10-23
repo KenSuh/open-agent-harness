@@ -118,6 +118,7 @@ def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespac
     if not isinstance(saved, dict) or saved.get("engine") != args.engine or saved.get("stage") != args.stage:
         raise EngineError("OAH_REQUEST_INVALID", "saved request is missing or has another engine/stage; "
                           "run the original call again to generate a new retry command")
+    saved["require_detach"] = args.require_detach or saved.get("require_detach", False)
     return argparse.Namespace(**saved)
 
 

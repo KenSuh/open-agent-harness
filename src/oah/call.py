@@ -447,8 +447,6 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str]) -> Prepared:
-    if packet is not None:
-        record_dispatch_binding(state_dir, packet, request.task, run.id)
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -466,7 +464,6 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                         scope=list(scope), intent_section=section, binding=intent,
                         packet_source=packet.source if packet else None,
                         round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer)
-    run.write_prompt(text)
     read_only = request.stage == "review"
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
@@ -478,6 +475,9 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=read_only)
+    if packet is not None:
+        record_dispatch_binding(state_dir, packet, request.task, run.id)
+    run.write_prompt(text)
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
     run.result(status="prepared", command=list(argv), cwd=str(root), read_only=read_only,

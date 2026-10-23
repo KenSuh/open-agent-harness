@@ -358,6 +358,22 @@ NON_ASCII = SECTION.replace("Status: accepted\n", "Status: accepted\n### Problem
 
 
 class IntentLineageTest(unittest.TestCase):
+    def test_unsafe_packet_can_be_renamed_and_retried_for_the_same_task(self):
+        project = Project(self)
+        source = project.packet(name="my packets/PACKET.md")
+        with self.assertRaises(BriefError) as ctx:
+            project.prepare(stage="correction", tier="low", packet=source)
+        self.assertEqual(ctx.exception.code, "OAH_UNSAFE_ARGUMENT")
+        self.assertIsNone(call.dispatch_binding(project.state, "t1"))
+        self.assertFalse(project.record.exists())
+
+        renamed = source.parent.with_name("my-packets")
+        source.parent.rename(renamed)
+        data = project.run(stage="correction", tier="low", packet=renamed / source.name)
+        self.assertEqual(data["status"], "finished")
+        self.assertEqual(call.dispatch_binding(project.state, "t1")["source"], "my-packets/PACKET.md")
+        self.assertIn("--packet my-packets/PACKET.md", project.recorded()["stdin"])
+
     def test_stored_brief_delivers_source_intent_bytes_on_stdin(self):
         project = Project(self)
         source = project.packet("## Scope\n- src/a.py\n", section=NON_ASCII, newline="\r\n")
@@ -527,6 +543,20 @@ class WorktreeSelectorTest(unittest.TestCase):
                 self.assertEqual(request.stored_brief, "Reusable spec.\r\n")
                 self.assertEqual((request.task, request.tier, request.timeout_s), ("t1", "low", 19))
                 self.assertIn(text, self.project.recorded()["stdin"])
+
+    def test_saved_request_preserves_saved_or_explicit_require_detach(self):
+        for saved_required, retry_required in ((False, True), (True, False), (False, False)):
+            with self.subTest(saved_required=saved_required, retry_required=retry_required):
+                code, _, err = run_cli(self.project, "call", "codex", "--stage", "review", "--tier", "low",
+                                       "--background", "--worktree", "wt",
+                                       *(["--require-detach"] if saved_required else []))
+                self.assertEqual(code, 1, err)
+                retry = next(line.strip() for line in err.splitlines() if line.strip().startswith("oah call "))
+                with mock.patch.object(call, "start_background", return_value="test-run") as start:
+                    code, _, err = run_cli(self.project, *retry.split()[1:],
+                                           *(["--require-detach"] if retry_required else []))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(start.call_args.kwargs["require_detach"], saved_required or retry_required)
 
     def test_retry_refuses_unsafe_embedded_value(self):
         args = argparse.Namespace(engine="codex’;Write-Output-INJECTED", stage="review")
