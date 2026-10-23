@@ -14,7 +14,8 @@ from oah import unlazy
 from oah.engines.proc import RunResult
 from oah.gates import ledger_status, parse_ledger
 from oah.gates.ledger import definition_digest, gate_state, parse_text
-from tests.fixtures.gates.support import StubNode, automatic_evidence, make_unlazy_dir, met_ledger, stub_pin
+from tests.fixtures.gates.support import (StubNode, automatic_evidence, make_unlazy_dir, met_ledger,
+                                          stub_pin, windows_sid)
 from tests.helpers import directory_alias, git_commit, make_tmp_dir
 
 SIMPLE = """# Gates: demo
@@ -126,6 +127,8 @@ class ContractTest(unittest.TestCase):
 
 class WindowsAclTest(unittest.TestCase):
     def setUp(self):
+        if os.name != "nt":
+            self.enterContext(patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid))
         self.tmp = make_tmp_dir(self)
         self.folder = self.tmp / "snapshot"
         self.folder.mkdir()
@@ -146,10 +149,52 @@ class WindowsAclTest(unittest.TestCase):
                       "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
         for snapshot in (False, True):
             for owner in principals:
-                for principal in (*principals, "OW"):
+                for principal in (*principals, "OW", "S-1-3-4"):
                     with self.subTest(snapshot=snapshot, owner=owner, principal=principal):
                         self.verify(f"O:{owner}D:P(A;OICI;GA;;;{principal})(A;OICIIO;GA;;;CO)"
                                     "(A;OICIIO;FA;;;S-1-3-0)", snapshot=snapshot)
+
+    def test_current_user_aliases_are_canonicalized_for_owners_and_grants(self):
+        with patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid):
+            for alias in ("LA", "DA", "DU", "EA", "LG"):
+                self.sid = windows_sid(alias)
+                for snapshot in (False, True):
+                    for owner in (alias, self.sid):
+                        for principal in (alias, self.sid):
+                            with self.subTest(alias=alias, snapshot=snapshot, owner=owner,
+                                              principal=principal):
+                                self.verify(f"O:{owner}D:P(A;OICI;FA;;;{principal})", snapshot=snapshot)
+
+    def test_foreign_relative_aliases_do_not_gain_trust(self):
+        with patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid):
+            for alias in ("LA", "DA", "DU", "EA", "LG"):
+                for principal in (alias, windows_sid(alias)):
+                    for snapshot in (False, True):
+                        with self.subTest(principal=principal, snapshot=snapshot):
+                            self.verify(f"O:{self.sid}D:P(A;;FRFX;;;{principal})", snapshot=snapshot)
+                            for sddl in (f"O:{self.sid}D:P(A;;FA;;;{principal})",
+                                         f"O:{principal}D:P(A;;FA;;;OW)"):
+                                with self.assertRaises(unlazy.UnlazyError) as caught:
+                                    self.verify(sddl, snapshot=snapshot)
+                                self.assertIn(windows_sid(alias), str(caught.exception))
+                                self.assertIn("OAH_STATE_DIR", str(caught.exception))
+
+    def test_unconvertible_owner_and_all_ace_principals_refuse(self):
+        with patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid):
+            for principal in ("ZZ", "S-invalid", ""):
+                for sddl in (f"O:{principal}D:P(A;;FA;;;OW)",
+                             *(f"O:{self.sid}D:P({kind};{flags};FA;;;{principal})"
+                               for kind, flags in (("A", ""), ("A", "OICIIO"), ("D", "")))):
+                    for snapshot in (False, True):
+                        with self.subTest(sddl=sddl, snapshot=snapshot):
+                            with self.assertRaises(unlazy.UnlazyError):
+                                self.verify(sddl, snapshot=snapshot)
+
+    @unittest.skipUnless(os.name == "nt", "Windows SID aliases require the real conversion APIs")
+    def test_real_local_administrator_alias_converts_to_canonical_sid(self):
+        sid = unlazy._windows_canonical_sid("LA")
+        self.assertRegex(sid, r"^S-1-5-21-\d+-\d+-\d+-500$")
+        self.assertEqual(unlazy._windows_canonical_sid(sid), sid)
 
     def test_foreign_read_traverse_and_create_subfolder_are_allowed(self):
         for snapshot in (False, True):
@@ -227,6 +272,8 @@ class WindowsAclTest(unittest.TestCase):
 
 class ExecutionSnapshotTest(unittest.TestCase):
     def setUp(self):
+        if os.name != "nt":
+            self.enterContext(patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid))
         self.tmp = make_tmp_dir(self)
         self.source = make_unlazy_dir(self.tmp / "unlazy")
         # Python stands in for Node but really opens and executes the script and its sibling dependency.
@@ -505,6 +552,7 @@ class ExecutionSnapshotTest(unittest.TestCase):
 
     def test_windows_default_root_and_profile_dacls_allow_private_snapshots(self):
         sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
+        canonical_sid = unlazy._windows_canonical_sid
         users = self.tmp / "Users"
         home = users / "owner"
         self.state = home / "AppData" / "Local" / "oah" / "state"
@@ -516,7 +564,7 @@ class ExecutionSnapshotTest(unittest.TestCase):
             if path.is_relative_to(self.state) and path != self.state:
                 return f"O:{sid}D:P(A;OICI;FA;;;OW)"
             if path.is_relative_to(home):
-                return f"O:{sid}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+                return "O:LAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)"
             if path == users:
                 return "O:SYD:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FRFX;;;WD)(A;OICIIO;GRGX;;;WD)"
             # Representative system-volume root: AU may create directories here; inherited
@@ -530,6 +578,8 @@ class ExecutionSnapshotTest(unittest.TestCase):
         def windows_verify(folder):
             return verify(folder, platform="win32")
         with patch.object(unlazy, "_windows_user_sid", return_value=sid), \
+                patch.object(unlazy, "_windows_canonical_sid",
+                             side_effect=lambda principal: sid if principal == "LA" else canonical_sid(principal)), \
                 patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor), \
                 patch.object(unlazy, "_verify_state_ancestry", side_effect=windows_ancestry), \
                 patch.object(unlazy, "_verify_snapshot_permissions", side_effect=windows_verify):
@@ -767,8 +817,9 @@ class ExecutionSnapshotTest(unittest.TestCase):
             folder = pathlib.Path(argv[1]).parent.parent
             sid = unlazy._windows_user_sid()
             for path in (folder, *(path for path in folder.rglob("*") if path.is_dir())):
-                self.assertTrue(unlazy._windows_security_descriptor(path).startswith(f"O:{sid}D:"),
-                                f"{path} must be owned by the current user")
+                owner = unlazy._windows_security_descriptor(path).split("D:", 1)[0][2:]
+                self.assertEqual(unlazy._windows_canonical_sid(owner), sid,
+                                 f"{path} must be owned by the current user")
             for path in (folder, folder / "scripts/lib/gates.mjs"):
                 size = wintypes.DWORD()
                 get_security(str(path), 4, None, 0, ctypes.byref(size))
@@ -782,7 +833,8 @@ class ExecutionSnapshotTest(unittest.TestCase):
                 finally:
                     kernel.LocalFree(text)
                 self.assertEqual(sddl.count("("), 1, sddl)
-                self.assertIn(";;;OW)", sddl)
+                principal = sddl.rsplit(";", 1)[1].rstrip(")")
+                self.assertEqual(unlazy._windows_canonical_sid(principal), "S-1-3-4")
                 self.assertIn(";FA;", sddl)
                 if path == folder:
                     self.assertTrue(sddl.startswith("D:P"), sddl)

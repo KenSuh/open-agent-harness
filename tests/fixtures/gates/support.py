@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 from typing import Sequence
@@ -17,6 +18,19 @@ from oah.gates.ledger import definition_digest, parse_text
 HERE = pathlib.Path(__file__).resolve().parent
 STUB = HERE / "stub_node.py"
 SRC = str(HERE.parent.parent.parent / "src")
+
+
+def windows_sid(principal: str) -> str:
+    """Stand in for OS SID conversion in portable descriptor tests, using a synthetic domain."""
+    domain = "S-1-5-21-100-200-300"
+    aliases = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "CO": "S-1-3-0",
+               "OW": "S-1-3-4", "WD": "S-1-1-0", "AU": "S-1-5-11", "BU": "S-1-5-32-545",
+               "LA": f"{domain}-500", "LG": f"{domain}-501", "DA": f"{domain}-512",
+               "DU": f"{domain}-513", "EA": f"{domain}-519"}
+    sid = aliases.get(principal, principal)
+    if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+        raise OSError(f"cannot convert SID {principal!r}; repair the object's owner and ACL")
+    return sid
 
 
 class StubNode:

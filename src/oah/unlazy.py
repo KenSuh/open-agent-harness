@@ -344,6 +344,33 @@ def _windows_user_sid() -> str:
         kernel.CloseHandle(token)
 
 
+def _windows_canonical_sid(principal: str) -> str:
+    """Resolve SDDL aliases through Windows, including machine- and domain-relative SIDs."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    parse = advapi.ConvertStringSidToSidW
+    parse.argtypes, parse.restype = (wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)), wintypes.BOOL
+    convert = advapi.ConvertSidToStringSidW
+    convert.argtypes, convert.restype = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)), wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    sid = ctypes.c_void_p()
+    if not parse(principal, ctypes.byref(sid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        text = ctypes.c_void_p()
+        if not convert(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(text)
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        kernel.LocalFree(sid)
+
+
 def _windows_security_descriptor(path: pathlib.Path) -> str:
     """Return the actual owner and DACL as SDDL; unreadable security descriptors refuse execution."""
     import ctypes
@@ -404,15 +431,14 @@ def _macos_mount_flags(path: pathlib.Path) -> int:
 def _verify_windows_dacl(sddl: str, sid: str, *, snapshot: bool = False,
                          directory: bool = True, protected: bool = False) -> None:
     """Trust standard Windows owners; reject foreign replacement or snapshot-write rights."""
-    trusted = {sid, "SY", "BA", "S-1-5-18", "S-1-5-32-544",
+    trusted = {sid, "S-1-5-18", "S-1-5-32-544",
                "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
-    aliases = {"SY": "S-1-5-18", "BA": "S-1-5-32-544", "CO": "S-1-3-0",
-               "WD": "S-1-1-0", "AU": "S-1-5-11", "BU": "S-1-5-32-545"}
     match = re.fullmatch(r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))", sddl or "")
     if not match:
         raise OSError("the owner or DACL cannot be parsed")
-    if match[1] not in trusted:
-        raise OSError(f"untrusted owner SID {aliases.get(match[1], match[1])} has implicit WRITE_DAC rights")
+    owner = _windows_canonical_sid(match[1])
+    if owner not in trusted:
+        raise OSError(f"untrusted owner SID {owner} has implicit WRITE_DAC rights")
     if protected and "P" not in match[2]:
         raise OSError("the snapshot root DACL is not protected from inheritance")
     aces = re.findall(r"\(([^()]*)\)", match[3])
@@ -428,11 +454,12 @@ def _verify_windows_dacl(sddl: str, sid: str, *, snapshot: bool = False,
         if (len(fields) != 6 or fields[0] not in ("A", "D") or fields[3] or fields[4]
                 or not re.fullmatch(r"(?:OI|CI|NP|IO|ID|SA|FA)*", fields[1])):
             raise OSError("the DACL has an unsupported entry")
-        # Inherit-only CREATOR OWNER (CO / S-1-3-0) is a standard default grant.
+        principal = _windows_canonical_sid(fields[5])
+        # Inherit-only CREATOR OWNER (S-1-3-0) is a standard default grant.
         # No inherit-only entry or denial grants access to the object being checked.
-        if fields[0] == "D" or "IO" in fields[1] or fields[5] in trusted or fields[5] == "OW":
+        if fields[0] == "D" or "IO" in fields[1] or principal in trusted or principal == "S-1-3-4":
             continue
-        rights, principal = fields[2], aliases.get(fields[5], fields[5])
+        rights = fields[2]
         if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
             mask = int(rights, 16)
         else:
