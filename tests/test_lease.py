@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import pathlib
+import secrets
 import subprocess
 import sys
 import time
@@ -421,6 +422,53 @@ class IntentBindingTest(unittest.TestCase):
     def events(self) -> list[dict]:
         return [json.loads(line) for line in (self.state / "events.jsonl").read_text(encoding="utf-8").splitlines()]
 
+    def test_generation_advances_for_every_lease_mutation(self):
+        lease = self.start()
+        self.assertEqual(lease.generation, 1)
+        operations = (
+            lambda: self.store.renew(task="t1", agent="claude", ttl_hours=4),
+            lambda: self.store.renew(task="t1", agent="claude", ttl_hours=4, scope=["src", "tests"]),
+            lambda: self.store.renew(task="t1", agent="claude", ttl_hours=4, gates=["checks/one.md"]),
+            lambda: self.rebind(binding())[0],
+            lambda: self.rebind(binding())[0],
+            lambda: self.rebind(binding(2, digest="2"), gates=["checks/two.md"])[0],
+        )
+        for generation, mutate in enumerate(operations, start=2):
+            with self.subTest(generation=generation):
+                updated = mutate()
+                self.assertEqual(updated.generation, generation)
+                self.assertEqual(updated.id, lease.id)
+                self.assertEqual(self.store.inspect("t1").generation, generation)
+        self.assertEqual(json.loads(self.store.leases_path.read_text(encoding="utf-8"))["version"], 1)
+
+    def test_old_records_default_to_generation_zero_and_invalid_generations_refuse(self):
+        record = self.start().to_json()
+        record.pop("generation", None)
+        self.store.leases_path.write_text(json.dumps({"version": 1, "leases": [record]}), encoding="utf-8")
+        self.assertEqual(self.store.inspect("t1").generation, 0)
+        renewed = self.store.renew(task="t1", agent="claude", ttl_hours=4)
+        self.assertEqual(renewed.generation, 1)
+        for invalid in (None, True, -1, 1.5, "1"):
+            with self.subTest(generation=invalid), self.assertRaises(StateCorrupt):
+                Lease.from_json(dict(record, generation=invalid), self.store.leases_path)
+
+    def test_invalid_generation_does_not_echo_record_contents(self):
+        record = self.start().to_json()
+        private = "fake-" + secrets.token_hex(16)
+        with self.assertRaises(StateCorrupt) as caught:
+            Lease.from_json(dict(record, generation=private), self.store.leases_path)
+        self.assertFalse(private in str(caught.exception), "malformed lease diagnostics must not echo input")
+
+    def test_finish_refuses_a_generation_changed_without_a_binding_change(self):
+        checked = self.start()
+        self.store.renew(task="t1", agent="claude", ttl_hours=4, gates=["checks/late.md"])
+        with self.assertRaises(LeaseError) as caught:
+            self.store.finish(task="t1", agent="claude", lease_id=checked.id, summary="done", changed=[],
+                              allow_out_of_scope=False, checked_generation=checked.generation)
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
+        self.assertEqual(len(self.store.snapshot()), 1)
+        self.assertNotEqual(self.events()[-1]["event"], "lease_finished")
+
     def test_lease_without_intent_keeps_old_record_shape(self):
         lease = self.start()
         self.assertIsNone(lease.intent)
@@ -516,16 +564,17 @@ class IntentBindingTest(unittest.TestCase):
         lease = self.start(bound)
         report = {"line": bound.line(), "acs": {"AC1": "met"}}
         self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
-                          allow_out_of_scope=False, intent_report=report, checked_binding=bound)
+                          allow_out_of_scope=False, intent_report=report, checked_binding=bound,
+                          checked_generation=lease.generation)
         self.assertEqual(self.events()[-1]["intent"], report)
 
-    def test_finish_compares_the_checked_binding_under_the_lock(self):
+    def test_finish_compares_the_checked_generation_under_the_lock(self):
         old = binding()
         lease = self.start(old)
         self.rebind(binding(2, digest="2"))
         with self.assertRaises(LeaseError) as caught:
             self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
-                              allow_out_of_scope=False, checked_binding=old)
+                              allow_out_of_scope=False, checked_binding=old, checked_generation=lease.generation)
         self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
         self.assertEqual(self.store.snapshot()[0][0].binding(), binding(2, digest="2"))
         self.assertNotEqual(self.events()[-1]["event"], "lease_finished")
@@ -535,7 +584,7 @@ class IntentBindingTest(unittest.TestCase):
         self.rebind(binding())
         with self.assertRaises(LeaseError) as caught:
             self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
-                              allow_out_of_scope=False)
+                              allow_out_of_scope=False, checked_generation=lease.generation)
         self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
         self.assertEqual(self.store.snapshot()[0][0].binding(), binding())
 

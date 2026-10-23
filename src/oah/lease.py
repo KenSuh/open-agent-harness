@@ -72,6 +72,7 @@ class Lease:
     expires_at: str
     gates: list[str] = dataclasses.field(default_factory=list)  # declared ledger paths (optional, schema 1)
     intent: dict | None = None  # the bound intent, Binding.to_json() (optional, schema 1)
+    generation: int = 0  # optional in schema 1; every successful mutation advances it
 
     def expired(self, now: dt.datetime) -> bool:
         return _parse(self.expires_at) <= now
@@ -83,6 +84,8 @@ class Lease:
         data = dataclasses.asdict(self)
         if data["intent"] is None:
             del data["intent"]  # an unbound lease keeps the record shape it always had
+        if data["generation"] == 0:
+            del data["generation"]  # records written before generations remain compatible
         return data
 
     @classmethod
@@ -94,6 +97,7 @@ class Lease:
                  and all(data.get(key) is None or isinstance(data.get(key), str) for key in optional)
                  and isinstance(data.get("scope"), list) and data["scope"]
                  and all(isinstance(entry, str) for entry in data["scope"])
+                 and type(data.get("generation", 0)) is int and data.get("generation", 0) >= 0
                  and (data.get("gates") is None or (isinstance(data["gates"], list)
                                                     and all(isinstance(entry, str) for entry in data["gates"]))))
         if valid:
@@ -108,9 +112,11 @@ class Lease:
             except ValueError:
                 valid = False
         if not valid:
-            raise StateCorrupt(f"{StateCorrupt.code}: {source} holds a malformed lease record: {data!r}")
+            raise StateCorrupt(f"{StateCorrupt.code}: {source} holds a malformed lease record; "
+                               "repair the record before running the command again")
         values = {field.name: data.get(field.name) for field in dataclasses.fields(cls)}
         values["gates"] = list(values["gates"] or [])
+        values["generation"] = data.get("generation", 0)
         return cls(**values)
 
     def describe(self) -> str:
@@ -205,6 +211,19 @@ class Store:
         with self._lock():
             return self._find(self._load(), task)
 
+    def _checked(self, leases: list[Lease], task: str, lease_id: str, generation: int) -> Lease:
+        lease = next((entry for entry in leases if entry.task == task), None)
+        if lease is None or lease.id != lease_id or lease.generation != generation:
+            raise LeaseError("OAH_LEASE_CHANGED", f"the lease for {task} changed during the command's checks; "
+                             "inspect it with oah status and run the command again")
+        return lease
+
+    @contextmanager
+    def checked(self, *, task: str, lease_id: str, generation: int) -> Iterator[Lease]:
+        """Keep a checked lease current until a short commit or process launch completes."""
+        with self._lock():
+            yield self._checked(self._load(), task, lease_id, generation)
+
     def _find(self, leases: list[Lease], task: str) -> Lease:
         for lease in leases:
             if lease.task == task:
@@ -240,7 +259,7 @@ class Store:
             lease = Lease(id=secrets.token_hex(8), task=task, agent=agent, scope=list(scope), note=note,
                           worktree=str(info.root), branch=info.branch, head_at_start=info.head,
                           created_at=_iso(now), expires_at=_expiration(now, ttl_hours), gates=list(gates),
-                          intent=intent.to_json() if intent is not None else None)
+                          intent=intent.to_json() if intent is not None else None, generation=1)
             leases.append(lease)
             bound = {"intent": lease.intent} if lease.intent is not None else {}
             self._commit(leases, "lease_started", task, agent, lease.id, scope=lease.scope, note=note,
@@ -270,6 +289,7 @@ class Store:
             if gates:
                 lease.gates = list(gates)
             lease.expires_at = _expiration(self.now(), ttl_hours)
+            lease.generation += 1
             self._commit(leases, "lease_renewed", task, agent, lease.id, scope=lease.scope, old_scope=old_scope,
                          expires_at=lease.expires_at, gates=lease.gates)
             return lease
@@ -304,6 +324,7 @@ class Store:
             if gates is not None:
                 lease.gates = list(gates)
             lease.expires_at = _expiration(self.now(), ttl_hours)
+            lease.generation += 1
             event = {"bound": "intent_bound", "rebound": "intent_rebound", "unchanged": "lease_renewed"}[action]
             self._commit(leases, event, task, agent, lease.id, scope=lease.scope, expires_at=lease.expires_at,
                          gates=lease.gates, intent=lease.intent,
@@ -313,21 +334,27 @@ class Store:
     def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
                allow_out_of_scope: bool, gate_report: dict | None = None,
                wiki_report: dict | None = None, intent_report: dict | None = None,
-               checked_binding: Binding | None = None) -> tuple[Lease, list[str]]:
+               checked_binding: Binding | None = None,
+               checked_generation: int | None = None) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
+        # Direct callers without a prior scan start their decision here. A scanned bound return must
+        # carry the generation captured by inspect(), alongside its checked binding.
+        if checked_generation is None:
+            if checked_binding is not None:
+                raise LeaseError("OAH_LEASE_CHANGED", "the return has no checked lease generation; "
+                                 "run oah finish again to check the current lease and return together")
+            checked_generation = self.inspect(task).generation
         with self._lock():
             leases = self._load()
-            lease = self._find(leases, task)
+            lease = self._checked(leases, task, lease_id, checked_generation)
             if lease.agent != agent:
                 raise LeaseError("OAH_LEASE_NOT_YOURS", f"{lease.describe()}")
-            if lease.id != lease_id:
-                raise LeaseError("OAH_LEASE_CHANGED", f"the lease for {task} was replaced during the change scan; "
-                                                    "inspect the current lease and retry oah finish")
-            if lease.binding() != checked_binding:
-                raise LeaseError("OAH_LEASE_CHANGED", f"the intent binding for {task} changed during the finish "
-                                 "checks; inspect it with oah intent show, update the return and retry oah finish")
-            if checked_binding is not None:
-                state, reason = explain_binding(checked_binding, pathlib.Path(lease.worktree))
+            binding = lease.binding()
+            if binding is not None and checked_binding is None:
+                raise LeaseError("OAH_LEASE_CHANGED", "the lease's intent was not checked with this return; "
+                                 "run oah finish --return FILE again against the current lease")
+            if binding is not None:
+                state, reason = explain_binding(binding, pathlib.Path(lease.worktree))
                 if state != "current":
                     raise LeaseError("OAH_INTENT_NOT_CURRENT", f"the checked intent is {state}: {reason}. Restore "
                                      "the bound source or accept and bind its new revision with oah start --packet, "

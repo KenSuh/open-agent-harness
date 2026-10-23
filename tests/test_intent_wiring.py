@@ -429,6 +429,40 @@ class FinishTest(unittest.TestCase):
                 self.assertIn("t1", self.repo.status())
                 self.assertFalse(any(e["event"] == "lease_finished" for e in self.repo.events()))
 
+    def test_finish_refuses_same_binding_rebind_that_adds_gates_during_evaluation(self):
+        self.bound()
+        checked = self.repo.status()["t1"]
+        script = (
+            "import pathlib, subprocess, sys\n"
+            "from oah import cli\n"
+            "from oah.gates import guard\n"
+            "evaluate = guard.evaluate\n"
+            "def changed(*args, **kwargs):\n"
+            "    report = evaluate(*args, **kwargs)\n"
+            "    ledger = pathlib.Path('checks/late.md')\n"
+            "    ledger.parent.mkdir()\n"
+            "    ledger.write_text('- [ ] G1: the late requirement is met\\n  CHECK: python src/app.py\\n'\n"
+            "                      '  EXPECT: OK\\n  EVIDENCE: pending\\n', encoding='utf-8')\n"
+            "    subprocess.run([sys.executable, '-m', 'oah', 'start', '--task', 't1', '--agent', 'claude',\n"
+            "                    '--packet', '.oah/tasks/t1/PACKET.md', '--gates', str(ledger)], check=True)\n"
+            "    return report\n"
+            "guard.evaluate = changed\n"
+            "raise SystemExit(cli.main(sys.argv[1:]))\n")
+        result = subprocess.run([sys.executable, "-c", script, "finish", "--task", "t1", "--agent", "claude",
+                                 "--summary", "done", "--allow-structural", "--return", "-"], cwd=self.repo.root,
+                                env=self.repo.env, input=self.repo.returned(), capture_output=True,
+                                text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("OAH_LEASE_CHANGED", result.stderr)
+        self.assertIn("again", result.stderr)
+        live = self.repo.status()["t1"]
+        self.assertEqual((live["id"], live["intent"]), (checked["id"], checked["intent"]))
+        self.assertEqual(live["gates"], ["checks/late.md"])
+        self.assertFalse(any(e["event"] == "lease_finished" for e in self.repo.events()))
+        retry = self.finish("--allow-structural", "--return", "-", stdin=self.repo.returned())
+        self.assertEqual(retry.returncode, 1, retry.stdout + retry.stderr)
+        self.assertIn("OAH_GATES_UNMET", retry.stderr)
+
 
 def accept(text: str, *, revision: int = 1, goals: tuple[str, ...] = ("the report lists every file",
                                                                        "the digest is stable")) -> str:

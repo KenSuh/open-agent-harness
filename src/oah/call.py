@@ -8,15 +8,17 @@
   advisory judgement is recorded next to it and never changes the tier;
 - the model through the catalog (`models.map_tier`) and the launch effort through the adapter;
 - the brief (`briefs.build`) and the argv; a review is always read-only.
-`execute` launches through `oah.engines.proc.run_command` (prompt on stdin, the process tree killed on
-timeout) and records the exit code, logs, header check and inference normalization. `start_background`
+`execute` holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
+(prompt on stdin, the process tree killed on timeout), recording the exit code, logs, header check and
+inference normalization. `start_background`
 hands the same prepared run to a detached Python runner and returns at once; `wait` polls the record
 for at most `WAIT_LIMIT_S` seconds and can be called again.
 
 A task must have a lease bound to an intent (`oah start --packet`) and dispatches only while that binding is
 `current` (`OAH_INTENT_NOT_CURRENT` otherwise), and only from the bound source. Every brief carries the
 skills `oah.skillsel.choose` selected for it, with a reason each and the `rerank=` status; the selection is
-also kept as `skills.json` in the run folder.
+also kept as `skills.json` in the run folder. `lease.json` carries the checked lease identity, generation
+and binding, so queued runners refuse any intervening lease change before launching the engine.
 
 The first dispatch of a task that has a packet records its intent source in
 `runs/<task>/intent-binding.json`. Later rounds reuse that source; a different source, another Intent-ID,
@@ -36,6 +38,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from typing import Callable, Mapping, Sequence
 
 import oah.intent as oah_intent
@@ -265,20 +268,32 @@ def check_dispatch_binding(bound: dict | None, packet: Packet, task: str) -> boo
     return intent.revision > bound["revision"]
 
 
-def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, run_id: str) -> None:
+def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, run_id: str, *,
+                            checked_lease=None, root: pathlib.Path | None = None) -> None:
     """Bind (or advance) the task's intent source under the state lock, re-checking against a racing dispatch."""
     from oah.atomic import write_json_atomic
-    from oah.lockfile import StateLock
+    from oah.lease import LeaseError, Store
 
-    with StateLock(runs._contained_path(state_dir, ".lock")):
-        bound = dispatch_binding(state_dir, task)
-        if check_dispatch_binding(bound, packet, task):
-            intent = packet.intent
-            history = list(bound.get("history", [])) if bound else []
-            history.append({"revision": intent.revision, "digest": intent.digest, "run_id": run_id})
-            write_json_atomic(_binding_path(state_dir, task),
-                              {"source": packet.source, "id": intent.id, "revision": intent.revision,
-                               "digest": intent.digest, "history": history})
+    checked_lease = checked_lease or bound_lease(state_dir, task)
+    if checked_lease is None:
+        raise EngineError("OAH_LEASE_CHANGED", "the checked lease was released; inspect oah status and "
+                          "run oah call again")
+    try:
+        with Store(state_dir).checked(task=task, lease_id=checked_lease.id,
+                                      generation=checked_lease.generation) as live:
+            _check_dispatch_lease(live, root or pathlib.Path(live.worktree))
+            bound = dispatch_binding(state_dir, task)
+            if check_dispatch_binding(bound, packet, task):
+                intent = packet.intent
+                history = list(bound.get("history", [])) if bound else []
+                history.append({"revision": intent.revision, "digest": intent.digest, "run_id": run_id})
+                write_json_atomic(_binding_path(state_dir, task),
+                                  {"source": packet.source, "id": intent.id, "revision": intent.revision,
+                                   "digest": intent.digest, "history": history})
+            write_json_atomic(runs._contained_path(state_dir, "runs", task, run_id, "lease.json"),
+                              {"id": live.id, "generation": live.generation, "intent": live.intent})
+    except LeaseError as exc:
+        raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
 
 
 def bound_lease(state_dir: pathlib.Path, task: str):
@@ -301,6 +316,50 @@ def check_lease_binding(lease) -> None:
                           f"Nothing was launched. Restore {binding.source} as it was bound, or raise its Revision, "
                           f"accept it and rebind with oah start --task {lease.task} --agent {lease.agent} --packet "
                           f"{binding.source}; then call again")
+
+
+def _check_dispatch_lease(lease, root: pathlib.Path) -> None:
+    from oah.lease import utc_now
+
+    if lease.expired(utc_now()):
+        raise EngineError("OAH_LEASE_CHANGED", "the checked lease expired; start a new lease with "
+                          "oah start --packet and run oah call again")
+    check_lease_binding(lease)
+    # The execution worktree may differ from the lease's source worktree (Orca placement).
+    check_lease_binding(dataclasses.replace(lease, worktree=str(root)))
+
+
+@contextmanager
+def dispatch_guard(prepared: Prepared):
+    """Revalidate the prepared lease and source under the state lock, through a short launch only."""
+    from oah.lease import LeaseError, Store
+
+    run = prepared.run
+    try:
+        saved = run._read_json("lease.json")
+        if not (isinstance(saved, dict) and isinstance(saved.get("id"), str) and saved["id"]
+                and type(saved.get("generation")) is int and saved["generation"] >= 0):
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked lease snapshot; "
+                              "run oah call again to prepare it from the current lease")
+        try:
+            oah_intent.Binding.from_json(saved.get("intent"))
+        except ValueError:
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked intent binding; "
+                              "run oah call again to prepare it from the current lease") from None
+        with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
+                                               generation=saved["generation"]) as live:
+            _check_dispatch_lease(live, pathlib.Path(prepared.cwd))
+            yield
+    except (LeaseError, EngineError) as exc:
+        error = EngineError(exc.code, str(exc).split(": ", 1)[1])
+        run.result(status="refused", error=str(error))  # the state lock has been released
+        raise error from None
+
+
+def check_prepared(prepared: Prepared) -> None:
+    """Check a queue/launcher handoff; execute checks again at the engine's actual spawn."""
+    with dispatch_guard(prepared):
+        pass
 
 
 def _check_lease_source(binding, packet: Packet | None, task: str) -> None:
@@ -471,7 +530,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     if request.stored_brief is not None:
         stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
         _stored_brief_matches(stored, packet)
-    scope = packet.scope or _lease_scope(state_dir, request.task)
+    scope = packet.scope or tuple(holder.scope)
     disabled = request.no_rerank or packet.rerank_disabled
     recorded = packet.axes.get(request.stage)
     given = recorded.to_json() if recorded is not None else {}
@@ -508,7 +567,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         return _finish_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
                                stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
                                tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                               warnings=warnings, selection=selection)
+                               warnings=warnings, selection=selection, checked_lease=holder)
     except (EngineError, briefs.BriefError) as exc:
         run.result(status="refused", error=str(exc), warnings=warnings)
         raise
@@ -518,7 +577,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
-                    warnings: list[str], selection: tuple | None = None) -> Prepared:
+                    warnings: list[str], selection: tuple | None = None, checked_lease=None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -550,8 +609,6 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=read_only)
-    if packet is not None:
-        record_dispatch_binding(state_dir, packet, request.task, run.id)
     run.write_prompt(text)
     if chosen is not None:
         from oah.atomic import write_json_atomic
@@ -566,6 +623,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                launch_effort=resolution.launch_effort,
                axes=axes.to_json() if axes else None, tier=tier, tier_source=tier_source, tier_reasons=reasons,
                advisory=advisory, override_stage=request.override_stage, warnings=warnings)
+    if packet is not None:
+        record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
     return Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
                     stage=request.stage, argv=tuple(argv), cwd=str(root), timeout_s=timeout_s,
                     env_additions=additions, model=resolution.model, launch_effort=resolution.launch_effort,
@@ -612,8 +671,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
     run.file_path("last-message.md")
     try:
-        result = run_command(list(prepared.argv), timeout=prepared.timeout_s, cwd=prepared.cwd, env=env,
-                             stdin_text=prompt)
+        result = _run_prepared(prepared, env, prompt)
     except (OSError, ValueError) as exc:
         run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
@@ -637,6 +695,44 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                       exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
 
 
+def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
+    """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
+    from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
+                                  is_batch, kill_tree)
+
+    if not prepared.argv:
+        raise ValueError("empty command")
+    if is_batch(prepared.argv[0]):
+        raise UnsupportedBatchShim(prepared.argv[0], "batch files are never launched directly")
+    job = _WindowsJob() if os.name == "nt" else None
+    options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x4} if job is not None else
+               {"start_new_session": True})
+    try:
+        with dispatch_guard(prepared):
+            child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+            if job is not None:
+                try:
+                    job.start(child)
+                except BaseException:
+                    child.kill()
+                    child.communicate(timeout=REAP_SECONDS)
+                    raise
+        try:
+            out, err = child.communicate(input=prompt.encode("utf-8"), timeout=prepared.timeout_s)
+        except subprocess.TimeoutExpired:
+            kill_tree(child)
+            try:
+                out, err = child.communicate(timeout=REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                out, err = b"", b""
+            return RunResult(None, decode_output(out), decode_output(err), True)
+        return RunResult(child.returncode, decode_output(out), decode_output(err), False)
+    finally:
+        if job is not None:
+            job.close()
+
+
 _BOOT = ("import sys; sys.path.insert(0, sys.argv[1]); import oah.call as c; "
          "raise SystemExit(getattr(c, sys.argv[2])(sys.argv[3]))")
 LAUNCH_TIMEOUT = 30.0
@@ -657,6 +753,7 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     run = prepared.run
     from oah.atomic import write_json_atomic
 
+    check_prepared(prepared)
     write_json_atomic(run.launch_path, dict(prepared.to_json(), require_detach=require_detach))
     run.result(status="queued")
     env = dict(os.environ if base_env is None else base_env)
@@ -665,6 +762,9 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     text = launched.stdout.decode("utf-8", errors="replace").strip()
     detail = launched.stderr.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
+        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ")):
+            code, message = detail.split(": ", 1)
+            raise EngineError(code, message)
         if detail.startswith("OAH_RUN_DETACH_FAILED:"):
             run.result(status="failed", error=detail)
             raise EngineError("OAH_RUN_DETACH_FAILED", detail.split(": ", 1)[1])
@@ -687,18 +787,29 @@ def _background_run(run_dir: str) -> runs.Run:
 
 
 def launch_main(run_dir: str) -> int:
+    try:
+        return _launch_main(run_dir)
+    except EngineError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+
+def _launch_main(run_dir: str) -> int:
     """Entry point of the launcher: start the runner detached, print its pid and exit."""
     options: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
                      "close_fds": True}
     from oah.atomic import read_json
 
     run = _background_run(run_dir)
-    require_detach = read_json(run.launch_path, {}).get("require_detach", False)
+    saved = read_json(run.launch_path, {})
+    require_detach = saved.get("require_detach", False)
+    prepared = Prepared.from_json(saved)
     argv = _boot_argv("background_main", run_dir)
     if _windows():
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
-            child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
+            with dispatch_guard(prepared):
+                child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
         except OSError as exc:
             if require_detach:
                 print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); retry without "
@@ -709,11 +820,13 @@ def launch_main(run_dir: str) -> int:
                        "in a terminal whose job permits breakaway")
             run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
             print(warning, file=sys.stderr, flush=True)
-            child = subprocess.Popen(argv, creationflags=flags, **options)
+            with dispatch_guard(prepared):
+                child = subprocess.Popen(argv, creationflags=flags, **options)
         else:
             run.result(detached="verified")
     else:
-        child = subprocess.Popen(argv, start_new_session=True, **options)
+        with dispatch_guard(prepared):
+            child = subprocess.Popen(argv, start_new_session=True, **options)
         run.result(detached="verified")
     print(child.pid, flush=True)
     child.returncode = 0  # the runner outlives this launcher on purpose; nothing waits for it here
@@ -727,6 +840,9 @@ def background_main(run_dir: str) -> int:
     prepared = Prepared.from_json(read_json(_background_run(run_dir).launch_path, None))
     try:
         execute(prepared)
+    except EngineError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except BaseException as exc:
         prepared.run.result(status="failed", error=f"OAH_RUN_RUNNER_FAILED: {type(exc).__name__}: {exc}")
         raise

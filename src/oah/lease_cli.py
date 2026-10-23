@@ -387,7 +387,8 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     lease, beyond = store.finish(task=args.task, agent=args.agent, lease_id=lease.id,
                                  summary=args.summary, changed=changed,
                                  allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(len(ledgers)),
-                                 wiki_report=wiki_report, intent_report=intent_report, checked_binding=lease.binding())
+                                 wiki_report=wiki_report, intent_report=intent_report, checked_binding=lease.binding(),
+                                 checked_generation=lease.generation)
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
     if intent_report is not None:
         extra += f" intent={intent_report['line'].split(' ')[1]}"

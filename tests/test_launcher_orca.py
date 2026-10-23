@@ -338,6 +338,43 @@ class UnavailableTest(unittest.TestCase):
 
 
 class DispatchTest(unittest.TestCase):
+    def test_orca_dispatch_refuses_a_lease_changed_after_prepare(self):
+        project = OrcaProject(self)
+        prepare = call.prepare
+
+        def changed(*args, **kwargs):
+            prepared = prepare(*args, **kwargs)
+            Store(project.state).renew(task="t1", agent="codex", ttl_hours=1)
+            return prepared
+
+        with mock.patch.object(call, "prepare", side_effect=changed):
+            code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+                                         "--launcher", "orca", "--worktree", str(project.repo), "--background")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OAH_LEASE_CHANGED", err)
+        self.assertFalse(any(argv[:2] == ["terminal", "create"] for argv in project.orca_calls()))
+        self.assertFalse(project.record.exists())
+
+    def test_queued_orca_worker_refuses_lease_or_source_changes(self):
+        for change in ("renew", "release", "source"):
+            with self.subTest(change=change):
+                project = OrcaProject(self)
+                prepared = project.queued()
+                store = Store(project.state)
+                if change == "renew":
+                    store.renew(task="t1", agent="codex", ttl_hours=1)
+                elif change == "release":
+                    store.release(task="t1", agent="codex", reason="queued race", force=False)
+                else:
+                    path = project.repo / ".oah/tasks/t1/PACKET.md"
+                    path.write_text(SECTION.replace("Reports miss files.", "The goal changed."), encoding="utf-8")
+                code, out, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+                self.assertEqual(code, 1, out + err)
+                expected = "OAH_INTENT_NOT_CURRENT" if change == "source" else "OAH_LEASE_CHANGED"
+                self.assertIn(expected, err)
+                self.assertEqual(prepared.run.read()["status"], "refused")
+                self.assertFalse(project.record.exists())
+
     def test_coordinated_stage_edits_cannot_give_a_review_write_permissions(self):
         for engine in ("codex", "claude"):
             with self.subTest(engine=engine):

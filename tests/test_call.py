@@ -180,7 +180,8 @@ class RunFolderTest(unittest.TestCase):
         data = project.run(tier="high", round_instructions="Review the change.")
         run = find_run(project.state, data["run_id"])
         self.assertEqual(sorted(p.name for p in run.path.iterdir()),
-                         ["last-message.md", "prompt.md", "result.json", "skills.json", "stderr.log", "stdout.log"])
+                         ["last-message.md", "lease.json", "prompt.md", "result.json", "skills.json", "stderr.log",
+                          "stdout.log"])
         self.assertEqual(set(data), set(RESULT_FIELDS))
         expected = {"status": "finished", "exit_code": 0, "timed_out": False, "engine": "codex", "stage": "review",
                     "cli_version": "0.163.0", "resolved_model": "gpt-test-a", "model_source": "cli_default",
@@ -682,6 +683,118 @@ class LeaseBindingTest(unittest.TestCase):
 
     def prompt(self, prepared) -> str:
         return pathlib.Path(prepared.run_dir, "prompt.md").read_bytes().decode("utf-8")
+
+    def test_prepare_refuses_lease_changes_during_engine_resolution(self):
+        for change in ("release", "replace", "rebind", "renew", "gates", "scope", "source"):
+            with self.subTest(change=change):
+                self.project = Project(self)
+                path = self.bind()
+                store = Store(self.project.state)
+                checked = store.inspect("t1")
+                resolve = call.resolve_engine
+
+                def changed(*args, **kwargs):
+                    resolution = resolve(*args, **kwargs)
+                    if change in ("release", "replace"):
+                        store.release(task="t1", agent="claude", reason="resolution race", force=False)
+                        if change == "replace":
+                            store.start(task="t1", agent="claude", scope=checked.scope, note="replacement",
+                                        ttl_hours=1, info=repo_info(self.project.repo), intent=checked.binding())
+                    elif change == "rebind":
+                        store.rebind(task="t1", agent="claude", binding=checked.binding(), ttl_hours=1)
+                    elif change == "source":
+                        path.write_text(real_packet(goal="changed during resolution"), encoding="utf-8")
+                    else:
+                        extra = {"gates": ["checks/late.md"]} if change == "gates" else (
+                            {"scope": ["src", "tests"]} if change == "scope" else {})
+                        store.renew(task="t1", agent="claude", ttl_hours=1, **extra)
+                    return resolution
+
+                with mock.patch.object(call, "resolve_engine", side_effect=changed):
+                    with self.assertRaises(EngineError) as caught:
+                        self.prepare()
+                self.assertEqual(caught.exception.code,
+                                 "OAH_INTENT_NOT_CURRENT" if change == "source" else "OAH_LEASE_CHANGED")
+                self.assertIn("again", str(caught.exception))
+                self.assertIsNone(call.dispatch_binding(self.project.state, "t1"))
+                self.assertFalse(self.project.record.exists())
+
+    def test_execute_and_background_dispatch_refuse_changed_leases(self):
+        for launch in ("foreground", "background", "runner"):
+            for change in ("renew", "release", "source"):
+                with self.subTest(launch=launch, change=change):
+                    self.project = Project(self)
+                    path = self.bind()
+                    prepared = self.prepare()
+                    store = Store(self.project.state)
+                    if change == "renew":
+                        store.renew(task="t1", agent="claude", ttl_hours=1)
+                    elif change == "release":
+                        store.release(task="t1", agent="claude", reason="queued race", force=False)
+                    else:
+                        path.write_text(real_packet(goal="changed while queued"), encoding="utf-8")
+                    expected = "OAH_INTENT_NOT_CURRENT" if change == "source" else "OAH_LEASE_CHANGED"
+                    if launch == "runner":
+                        prepared.run.launch_path.write_text(json.dumps(prepared.to_json()), encoding="utf-8")
+                        result = subprocess.run(call._boot_argv("background_main", prepared.run_dir),
+                                                cwd=self.project.repo, env=self.project.env, capture_output=True,
+                                                text=True, encoding="utf-8", timeout=30)
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(expected, result.stderr)
+                    else:
+                        function = call.execute if launch == "foreground" else call.start_background
+                        with self.assertRaises(EngineError) as caught:
+                            function(prepared, base_env=self.project.env)
+                        self.assertEqual(caught.exception.code, expected)
+                    self.assertEqual(prepared.run.read()["status"], "refused")
+                    self.assertFalse(self.project.record.exists())
+
+    def test_background_launcher_preserves_a_refusal_after_queuing(self):
+        self.bind()
+        prepared = self.prepare()
+        launch = subprocess.run
+
+        def changed(*args, **kwargs):
+            Store(self.project.state).renew(task="t1", agent="claude", ttl_hours=1)
+            return launch(*args, **kwargs)
+
+        with mock.patch.object(call.subprocess, "run", side_effect=changed):
+            with self.assertRaises(EngineError) as caught:
+                call.start_background(prepared, base_env=self.project.env)
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
+        self.assertEqual(prepared.run.read()["status"], "refused")
+        self.assertFalse(self.project.record.exists())
+
+    def test_spawn_holds_the_state_lock_but_engine_execution_releases_it(self):
+        self.bind()
+        prepared = self.prepare()
+        script = (
+            "import pathlib, sys\n"
+            "from oah.lease import Store\n"
+            "from oah.lockfile import LockTimeout\n"
+            "try:\n"
+            "    Store(pathlib.Path(sys.argv[1]), lock_timeout=0.15).renew(\n"
+            "        task='t1', agent='claude', ttl_hours=1)\n"
+            "except LockTimeout:\n"
+            "    print('locked')\n"
+            "else:\n"
+            "    print('renewed')\n")
+        argv = (sys.executable, "-c", script, str(self.project.state))
+        prepared = call.dataclasses.replace(prepared, argv=argv)
+        popen = subprocess.Popen
+        environment = dict(self.project.env, PYTHONPATH=str(FAKES.parent.parent / "src"))
+
+        def spawning(*args, **kwargs):
+            contender = popen(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = contender.communicate(timeout=10)
+            self.assertEqual(contender.returncode, 0, err.decode("utf-8"))
+            self.assertEqual(out.strip(), b"locked", "the actual spawn must hold the lease's state lock")
+            return popen(*args, **kwargs)
+
+        with mock.patch.object(call.subprocess, "Popen", side_effect=spawning):
+            result = call.execute(prepared, base_env=environment)
+        self.assertEqual(result["status"], "finished", result.get("error"))
+        self.assertIn("renewed", prepared.run.stdout_path.read_text(encoding="utf-8"))
 
     def test_call_refuses_stale_and_missing_binding(self):
         path = self.bind()

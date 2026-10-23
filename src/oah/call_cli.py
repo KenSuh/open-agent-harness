@@ -226,6 +226,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if orca is not None:
+        call.check_prepared(prepared)
         info = orca_launcher.start(orca, prepared, placement)["launcher"]
         _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "
@@ -284,6 +285,7 @@ def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pat
                   "was started; start a new run with oah call", file=sys.stderr)
             return EXIT_REFUSED
         prepared = orca_launcher.worker_prepared(run, root, load_settings(root), args.stage)
+        call.check_prepared(prepared)
         run.claim_queued_orca()
         print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
               f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
