@@ -194,6 +194,39 @@ class UnavailableTest(unittest.TestCase):
                 self.assertIn("native executable", str(ctx.exception))
                 self.assertIn("interpreter", str(ctx.exception))
 
+    def test_connect_rejects_explicit_batch_shims_without_a_probe(self):
+        folder = make_tmp_dir(self)
+        for suffix in (".cmd", ".bat", ".CMD"):
+            with self.subTest(suffix=suffix):
+                shim = folder / ("orca & wrapper" + suffix)
+                shim.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
+                with mock.patch.object(orca, "run_command") as command:
+                    with self.assertRaises(EngineError) as ctx:
+                        orca.connect([str(shim)], os.environ)
+                self.assertEqual(ctx.exception.code, orca.UNAVAILABLE)
+                self.assertIn("native executable", str(ctx.exception))
+                self.assertIn("interpreter", str(ctx.exception))
+                command.assert_not_called()
+
+    def test_wait_rejects_an_explicit_batch_shim_with_native_guidance(self):
+        project = OrcaProject(self)
+        prepared = project.queued()
+        shim = project.bin / "orca & wrapper.cmd"
+        marker = project.bin / "injected"
+        shim.write_text(f'@echo injected > "{marker}"\n', encoding="utf-8")
+        config = project.repo / ".oah" / "config.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace(
+            toml_list(project.orca_command), toml_list([str(shim)])), encoding="utf-8")
+        before = project.orca_calls()
+        code, _, err = project.cli("wait", prepared.run_id, "--timeout-seconds", "1")
+        self.assertEqual(code, 69, err)
+        self.assertTrue(err.startswith(orca.UNAVAILABLE), err)
+        self.assertIn("native executable", err)
+        self.assertIn("interpreter", err)
+        self.assertEqual(project.orca_calls(), before)
+        self.assertEqual(prepared.run.read()["status"], "queued")
+        self.assertFalse(marker.exists())
+
     @unittest.skipUnless(os.name == "nt", "native Windows batch refusal")
     def test_windows_explicit_batch_never_executes(self):
         project = OrcaProject(self)
@@ -286,6 +319,28 @@ class UnavailableTest(unittest.TestCase):
 
 
 class DispatchTest(unittest.TestCase):
+    def test_coordinated_stage_edits_cannot_give_a_review_write_permissions(self):
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                project = OrcaProject(self)
+                prepared = project.queued(engine, "review", override=engine == "claude")
+                prompt = prepared.run.prompt_path.read_bytes()
+                terminal = next(argv for argv in project.orca_calls() if argv[:2] == ["terminal", "create"])
+                command = terminal[terminal.index("--command") + 1]
+                saved = json.loads(prepared.run.launch_path.read_text(encoding="utf-8"))
+                saved["stage"] = "correction"
+                prepared.run.launch_path.write_text(json.dumps(saved), encoding="utf-8")
+                data = prepared.run.read()
+                data["stage"] = "correction"
+                prepared.run.result_path.write_text(json.dumps(data), encoding="utf-8")
+                code, _, err = project.cli(*command.removesuffix("; exit").split()[1:])
+                self.assertEqual(code, 1, err)
+                self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
+                self.assertEqual(prepared.run.read()["status"], "queued")
+                self.assertEqual(prepared.run.prompt_path.read_bytes(), prompt)
+                self.assertFalse((prepared.run.path / "worker.claim").exists())
+                self.assertFalse(project.record.exists())
+
     def test_coordinated_review_command_and_digest_edits_are_refused(self):
         for engine in ("codex", "claude"):
             with self.subTest(engine=engine):
@@ -305,7 +360,7 @@ class DispatchTest(unittest.TestCase):
                 data["launcher"]["launch_digest"] = hashlib.sha256(
                     json.dumps(saved, sort_keys=True).encode("utf-8")).hexdigest()
                 prepared.run.result_path.write_text(json.dumps(data), encoding="utf-8")
-                code, _, err = project.cli("worker-run", prepared.run_id)
+                code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
                 self.assertEqual(code, 1, err)
                 self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
                 self.assertEqual(prepared.run.read()["status"], "queued")
@@ -346,7 +401,7 @@ class DispatchTest(unittest.TestCase):
                     return validated
 
                 with mock.patch.object(orca, "worker_prepared", side_effect=replace_after_validation):
-                    code, _, err = project.cli("worker-run", prepared.run_id)
+                    code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
                 self.assertEqual(code, 1, err)
                 self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
                 self.assertFalse(project.record.exists())
@@ -366,7 +421,7 @@ class DispatchTest(unittest.TestCase):
             return validated
 
         with mock.patch.object(orca, "worker_prepared", side_effect=replace_after_validation):
-            code, _, err = project.cli("worker-run", prepared.run_id)
+            code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 1, err)
         self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
         self.assertFalse(project.record.exists())
@@ -382,7 +437,7 @@ class DispatchTest(unittest.TestCase):
             return original(validated)
 
         with mock.patch.object(call, "execute", side_effect=replace_before_execute):
-            code, _, err = project.cli("worker-run", prepared.run_id)
+            code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 0, err)
         self.assertEqual(project.recorded()["stdin"].encode("utf-8"), prompt)
 
@@ -398,7 +453,7 @@ class DispatchTest(unittest.TestCase):
             return original(validated)
 
         with mock.patch.object(call, "execute", side_effect=replace_before_execute):
-            code, _, err = project.cli("worker-run", prepared.run_id)
+            code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 1, err)
         self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
         self.assertFalse(project.record.exists())
@@ -407,12 +462,12 @@ class DispatchTest(unittest.TestCase):
         project = OrcaProject(self)
         prepared = project.queued("claude", "initial")
         queued = prepared.run.result_path.read_bytes()
-        code, _, err = project.cli("worker-run", prepared.run_id)
+        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 0, err)
         self.assertTrue((prepared.run.path / "worker.claim").is_file())
         project.record.unlink()
         prepared.run.result_path.write_bytes(queued)
-        code, _, err = project.cli("worker-run", prepared.run_id)
+        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 1, err)
         self.assertTrue(err.startswith("OAH_RUN_NOT_QUEUED"), err)
         self.assertFalse(project.record.exists())
@@ -430,7 +485,7 @@ class DispatchTest(unittest.TestCase):
             return validated
 
         with mock.patch.object(orca, "worker_prepared", side_effect=try_replace_after_validation):
-            code, _, err = project.cli("worker-run", prepared.run_id)
+            code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 0, err)
         prepared.run.path.rename(prepared.run.path.with_name("closed"))
 
@@ -450,7 +505,7 @@ class DispatchTest(unittest.TestCase):
                 prepared.run.result_path.write_bytes(record)
                 project.record.unlink(missing_ok=True)
                 prepared.run.launch_path.write_text(json.dumps(dict(original, **{key: value})), encoding="utf-8")
-                code, _, err = project.cli("worker-run", prepared.run_id)
+                code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
                 self.assertEqual(code, 1, err)
                 self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
                 self.assertEqual(prepared.run.read()["status"], "queued")
@@ -461,7 +516,7 @@ class DispatchTest(unittest.TestCase):
         prepared = project.queued()
         config = project.repo / ".oah" / "config.toml"
         config.write_text(config.read_text(encoding="utf-8") + '\n[stages]\nreview = "claude"\n', encoding="utf-8")
-        code, _, err = project.cli("worker-run", prepared.run_id)
+        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("OAH_STAGE_ENGINE_MISMATCH"), err)
         self.assertFalse(project.record.exists())
@@ -469,7 +524,7 @@ class DispatchTest(unittest.TestCase):
         project = OrcaProject(self)
         prepared = project.queued()
         prepared.run.result(read_only=False)
-        code, _, err = project.cli("worker-run", prepared.run_id)
+        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("OAH_RUN_LAUNCH_INVALID"), err)
         self.assertFalse(project.record.exists())
@@ -477,7 +532,7 @@ class DispatchTest(unittest.TestCase):
     def test_worker_preserves_explicit_stage_override_and_rebuilds_worker_variables(self):
         project = OrcaProject(self)
         prepared = project.queued("claude", "review", override=True)
-        code, _, err = project.cli("worker-run", prepared.run_id, env={"OAH_WORKER": "0", "OAH_TASK": "wrong",
+        code, _, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage, env={"OAH_WORKER": "0", "OAH_TASK": "wrong",
                                                                       "OAH_RUN_ID": "wrong"})
         self.assertEqual(code, 0, err)
         record = project.recorded()
@@ -507,7 +562,7 @@ def read(self):
 runs.Run.read = read
 parser = argparse.ArgumentParser()
 call_cli.register(parser.add_subparsers(dest="command"))
-raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1]])))
+raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--stage", "initial"])))
 '''
         children = []
         for index in range(2):
@@ -546,7 +601,7 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1]])))
         self.assertEqual(info["worktree_id"], f"{info['worktree_id'].split('::')[0]}::{worktree}")
         self.assertEqual((info["reported_model"], info["reported_effort"]), (UNVERIFIED, UNVERIFIED))
         self.assertEqual((data["requested_effort"], data["launch_effort"]), ("low", "low"))
-        self.assertEqual(info["command"], f"oah worker-run {run_id}; exit")
+        self.assertEqual(info["command"], f"oah worker-run {run_id} --stage initial; exit")
 
         run = find_run(project.state, run_id)
         prompt = run.prompt_path.read_bytes()
@@ -569,7 +624,7 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1]])))
         self.assertEqual(create[create.index("--name") + 1], worktree.name)
         self.assertIn("--no-parent", create)
         terminal = calls[4]
-        self.assertEqual(terminal[terminal.index("--command") + 1], f"oah worker-run {run_id}; exit")
+        self.assertEqual(terminal[terminal.index("--command") + 1], f"oah worker-run {run_id} --stage initial; exit")
         self.assertEqual(terminal[terminal.index("--worktree") + 1], f"id:{info['worktree_id']}")
         flat = "\n".join(" ".join(argv) for argv in calls)
         self.assertNotIn("Build AC1", flat)
@@ -598,14 +653,14 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1]])))
         self.assertFalse(any(argv[:2] == ["worktree", "create"] for argv in project.orca_calls()))
 
     def test_runner_command_is_safe_and_portable(self):
-        self.assertEqual(orca.runner_command("r20261023T120000Z-1a2b3c4d"),
-                         "oah worker-run r20261023T120000Z-1a2b3c4d; exit")
+        self.assertEqual(orca.runner_command("r20261023T120000Z-1a2b3c4d", "review"),
+                         "oah worker-run r20261023T120000Z-1a2b3c4d --stage review; exit")
         with self.assertRaises(briefs.BriefError) as ctx:
-            orca.runner_command("r1; rm -rf x")
+            orca.runner_command("r1; rm -rf x", "review")
         self.assertEqual(ctx.exception.code, "OAH_UNSAFE_ARGUMENT")
         place = orca.Placement(pathlib.Path("wt"), "repo-1::/x y/wt", False)
-        posix = orca.terminal_args(place, "oah t1 initial", "oah worker-run r1; exit", windows=False)
-        windows = orca.terminal_args(place, "oah t1 initial", "oah worker-run r1; exit", windows=True)
+        posix = orca.terminal_args(place, "oah t1 initial", "oah worker-run r1 --stage initial; exit", windows=False)
+        windows = orca.terminal_args(place, "oah t1 initial", "oah worker-run r1 --stage initial; exit", windows=True)
         self.assertNotIn("--shell", posix)
         self.assertEqual(windows[-2:], ["--shell", "powershell.exe"])
         self.assertEqual(posix[:4], ["terminal", "create", "--worktree", "id:repo-1::/x y/wt"])
@@ -639,11 +694,11 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1]])))
     def test_worker_run_refuses_a_run_that_is_not_queued(self):
         project = OrcaProject(self)
         run = new_run(project.state, "t1", "codex", "review")
-        code, _, err = project.cli("worker-run", run.id)
+        code, _, err = project.cli("worker-run", run.id, "--stage", "review")
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("OAH_RUN_NOT_QUEUED"), err)
         run.result(status="finished", launcher={"name": "orca"})
-        code, _, err = project.cli("worker-run", run.id)
+        code, _, err = project.cli("worker-run", run.id, "--stage", "review")
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("OAH_RUN_NOT_QUEUED"), err)
         self.assertFalse(project.record.exists())
@@ -669,6 +724,128 @@ class StubOrca:
 
 
 class WaitTest(unittest.TestCase):
+    def test_process_cli_wait_includes_repository_lookup_and_bounds_polling(self):
+        for timeout, lookup in ((1.0, 0.75), (1.0, 1.25), (0.1, 0.0), (100_000.0, 0.75)):
+            with self.subTest(timeout=timeout, lookup=lookup):
+                project = OrcaProject(self)
+                run = new_run(project.state, "t1", "codex", "review")
+                run.result(status="running", pid=os.getpid())
+                info = call_cli.repo_info(project.repo)
+                clock = StubOrca()
+                sleeps = []
+
+                def locate(cwd, deadline):
+                    clock.now += lookup
+                    return info
+
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                    clock.now += seconds
+
+                with mock.patch.object(call_cli, "_wait_repo_info", side_effect=locate), \
+                        mock.patch.object(call_cli.time, "monotonic", lambda: clock.now), \
+                        mock.patch.object(call_cli.time, "sleep", side_effect=sleep):
+                    code, out, err = project.cli("wait", run.id, "--timeout-seconds", str(timeout), "--json")
+                self.assertEqual(code, 75, err)
+                if lookup < timeout:
+                    self.assertEqual(json.loads(out)["status"], "running")
+                else:
+                    self.assertIn("OAH_WAIT_TIMEOUT", err)
+                    self.assertIn(f"oah wait {run.id}", err)
+                self.assertLessEqual(clock.now - 1000, max(lookup, min(timeout, call.WAIT_LIMIT_S)) + 0.000001)
+                if lookup >= timeout:
+                    self.assertEqual(sleeps, [])
+                self.assertIsNone(run.read()["launcher"])
+
+    def test_orca_wait_state_lock_contention_stays_inside_the_deadline(self):
+        for mode in ("cursor", "exited", "missing"):
+            with self.subTest(mode=mode):
+                project = OrcaProject(self)
+                prepared = project.queued()
+                if mode == "missing":
+                    data = prepared.run.read()
+                    data["launcher"]["terminal"] = None
+                    prepared.run.result(launcher=data["launcher"])
+                script = '''import pathlib, sys
+from oah.lockfile import StateLock
+with StateLock(pathlib.Path(sys.argv[1])):
+    print("locked", flush=True)
+    sys.stdin.read(1)
+'''
+                child = subprocess.Popen([sys.executable, "-c", script, str(project.state / ".lock")],
+                                         env=dict(project.env, PYTHONPATH=SRC), stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), "locked")
+                    clock = StubOrca()
+
+                    def terminal(*args, timeout=orca.CLI_TIMEOUT):
+                        if args[:2] == ("terminal", "wait"):
+                            clock.now += 0.1
+                            if mode == "exited":
+                                return {"wait": {"status": "exited", "satisfied": True, "condition": "exit"}}
+                            raise orca.OrcaReplyError("timeout", "timeout")
+                        if args[:2] == ("terminal", "read"):
+                            if mode == "exited":
+                                return {"terminal": {"tail": [], "nextCursor": "0", "latestCursor": "0"}}
+                            return {"terminal": {"tail": ["working"], "nextCursor": "1", "latestCursor": "1"}}
+                        if args[:2] == ("terminal", "show"):
+                            return {"terminal": {"preview": "stopped"}}
+                        raise AssertionError(args)
+
+                    def sleep(seconds):
+                        clock.now += seconds
+
+                    clock.json = terminal
+                    with mock.patch.object(orca.time, "monotonic", lambda: clock.now), \
+                            mock.patch.object(orca.time, "sleep", side_effect=sleep):
+                        data = orca.wait(clock, project.state, prepared.run_id, timeout=1.01)
+                    self.assertEqual(data["status"], "queued")
+                    self.assertLessEqual(clock.now - 1000, 1.010001)
+                    self.assertEqual(prepared.run.read()["status"], "queued")
+                finally:
+                    child.communicate("x", timeout=10)
+
+    def test_wait_storage_permission_retries_stay_inside_the_deadline(self):
+        from oah import atomic
+
+        for target in ("read", "result.json", orca.TERMINAL_LOG):
+            with self.subTest(target=target):
+                project = OrcaProject(self)
+                prepared = project.queued()
+                clock = StubOrca()
+                original_read = pathlib.Path.read_bytes
+                original_replace = os.replace
+
+                def read_bytes(path):
+                    if target == "read" and path == prepared.run.result_path:
+                        raise PermissionError("busy")
+                    return original_read(path)
+
+                def replace(source, destination, *args, **kwargs):
+                    if target != "read" and pathlib.Path(destination) == prepared.run.path / target:
+                        raise PermissionError("busy")
+                    return original_replace(source, destination, *args, **kwargs)
+
+                def terminal(*args, timeout=orca.CLI_TIMEOUT):
+                    if args[:2] == ("terminal", "wait"):
+                        clock.now += 0.1
+                        raise orca.OrcaReplyError("timeout", "timeout")
+                    return {"terminal": {"tail": ["working"], "nextCursor": "1", "latestCursor": "1"}}
+
+                def sleep(seconds):
+                    clock.now += seconds
+
+                with mock.patch.object(orca.time, "monotonic", lambda: clock.now), \
+                        mock.patch.object(orca.time, "sleep", side_effect=sleep), \
+                        mock.patch.object(pathlib.Path, "read_bytes", read_bytes), \
+                        mock.patch.object(atomic.os, "replace", side_effect=replace), \
+                        mock.patch.object(orca.Orca, "json", side_effect=terminal):
+                    code, _, err = project.cli("wait", prepared.run_id, "--timeout-seconds", "1.01")
+                self.assertEqual(code, 75, err)
+                self.assertLessEqual(clock.now - 1000, 1.010001)
+                self.assertEqual(prepared.run.read()["status"], "queued")
+
     def test_probe_honors_an_existing_deadline(self):
         project = OrcaProject(self)
         project.orca_state.mkdir()

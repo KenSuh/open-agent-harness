@@ -10,17 +10,23 @@ fields that nothing could observe stay `unverified`, never empty.
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import json
 import os
 import pathlib
 import re
 import secrets
 import stat
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from typing import Callable, TypeVar
 
-from oah.atomic import StorageError, read_json, write_json_atomic, write_text_atomic
+from oah import launchers
+from oah.atomic import RETRY_SECONDS, StateCorrupt, StorageError, read_json, write_json_atomic, write_text_atomic
 from oah.lease import TASK_RE
-from oah.lockfile import StateLock
+from oah.lockfile import LockTimeout, StateLock
+
+T = TypeVar("T")
 
 UNVERIFIED = "unverified"
 RUN_ID_RE = re.compile(r"r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
@@ -49,11 +55,29 @@ def _iso(moment: dt.datetime) -> str:
     return moment.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _retry_until(deadline: float, timeout: float, operation: Callable[[], T]) -> T:
+    """Retry transient storage contention without adding a fresh budget to a caller's wait."""
+    stop = min(deadline, time.monotonic() + timeout)
+    while True:
+        launchers.remaining(deadline, timeout)
+        try:
+            return operation()
+        except (PermissionError, StorageError, LockTimeout) as exc:
+            if isinstance(exc, StorageError) and not isinstance(exc.__cause__, PermissionError):
+                raise
+            delay = stop - time.monotonic()
+            if delay <= 0:
+                launchers.remaining(deadline, timeout)
+                raise
+            time.sleep(min(0.05, delay))
+
+
 @dataclass(frozen=True)
 class Run:
     id: str
     task: str
     path: pathlib.Path
+    deadline: float | None = field(default=None, kw_only=True)
 
     def file_path(self, name: str) -> pathlib.Path:
         """Re-check the run and file immediately before use, including unlink by a caller."""
@@ -88,13 +112,48 @@ class Run:
         self._write_text("stderr.log", stderr)
 
     def _write_text(self, name: str, text: str) -> None:
-        write_text_atomic(self.file_path(name), text)
+        path = self.file_path(name)
+        if self.deadline is None:
+            write_text_atomic(path, text)
+        else:
+            _retry_until(self.deadline, RETRY_SECONDS, lambda: write_text_atomic(path, text, retry_seconds=0))
 
     def _read_json(self, name: str) -> object:
-        return read_json(self.file_path(name), None)
+        path = self.file_path(name)
+        if self.deadline is None:
+            return read_json(path, None)
+        try:
+            raw = _retry_until(self.deadline, RETRY_SECONDS, path.read_bytes)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise StateCorrupt(f"{StateCorrupt.code}: {path} is not valid UTF-8 JSON ({exc}). "
+                               "oah never resets it; repair or remove the file by hand.") from exc
 
     def _write_result(self, data: dict) -> None:
-        write_json_atomic(self.result_path, data)
+        path = self.result_path
+        if self.deadline is None:
+            write_json_atomic(path, data)
+        else:
+            _retry_until(self.deadline, RETRY_SECONDS, lambda: write_json_atomic(path, data, retry_seconds=0))
+
+    @contextlib.contextmanager
+    def _result_lock(self):
+        lock = StateLock(_contained_path(self.path.parents[2], ".lock"))
+        if self.deadline is None:
+            with lock:
+                yield
+        else:
+            timeout, lock.timeout = lock.timeout, 0
+            _retry_until(self.deadline, timeout, lock.__enter__)
+            try:
+                yield
+            finally:
+                lock.__exit__(None, None, None)
 
     def read(self) -> dict:
         data = self._read_json("result.json")
@@ -107,7 +166,7 @@ class Run:
         """Claim only the directory and record already validated by worker-run."""
         if not isinstance(self, WorkerRun) or self._validated is None:
             raise _launch_invalid()
-        with StateLock(_contained_path(self.path.parents[2], ".lock")):
+        with self._result_lock():
             data = self.read()
             launcher = data.get("launcher")
             if (data.get("status") != "queued" or not isinstance(launcher, dict) or
@@ -135,7 +194,7 @@ class Run:
             raise RunError("OAH_RUN_STATUS_INVALID", f"unknown run status {fields['status']!r}; use a lifecycle "
                            "status such as queued, running or finished")
         self.file_path("result.json")
-        with StateLock(_contained_path(self.path.parents[2], ".lock")):
+        with self._result_lock():
             data = self.read()
             current, incoming = data.get("status"), fields.get("status")
             if incoming is not None and ((current in TERMINAL and incoming != current) or
@@ -194,7 +253,11 @@ class _WorkerPrompt:
 
 
 class WorkerRun(Run):
-    """One open directory for validation, the exclusive claim and the validated prompt snapshot."""
+    """Pin directory identity for oah's races; the user's state folder remains trusted.
+
+    On Windows the open directory prevents rename/replacement, but does not pin its children
+    against a local writer's reparse-point races. That adversary is outside the trust boundary.
+    """
 
     def __init__(self, run: Run) -> None:
         super().__init__(run.id, run.task, run.path)
@@ -241,7 +304,7 @@ class WorkerRun(Run):
         self._check_directory()
         path = self.file_path(name)
         if os.name == "nt":
-            fd = os.open(path, flags | os.O_BINARY, 0o600)  # the directory handle prevents replacement
+            fd = os.open(path, flags | os.O_BINARY, 0o600)  # only the directory is pinned; children are trusted
         else:
             fd = os.open(name, flags | os.O_NOFOLLOW, 0o600, dir_fd=self._fd)
         try:
@@ -378,7 +441,7 @@ def new_run(state_dir: pathlib.Path, task: str, engine: str, stage: str, *, now:
     return Run(id=run_id, task=task, path=final)
 
 
-def find_run(state_dir: pathlib.Path, run_id: str) -> Run:
+def find_run(state_dir: pathlib.Path, run_id: str, *, deadline: float | None = None) -> Run:
     if not RUN_ID_RE.fullmatch(run_id or ""):
         raise RunError("OAH_RUN_ID_INVALID", f"{run_id!r} is not a run id; `oah call` prints ids like "
                        "r20261023T120000Z-1a2b3c4d")
@@ -394,4 +457,4 @@ def find_run(state_dir: pathlib.Path, run_id: str) -> Run:
             matches.append(candidate)
     if len(matches) != 1:
         raise RunError("OAH_RUN_NOT_FOUND", f"no run {run_id} in {runs}; check the id `oah call` printed")
-    return Run(id=run_id, task=matches[0].parent.name, path=matches[0])
+    return Run(id=run_id, task=matches[0].parent.name, path=matches[0], deadline=deadline)

@@ -1,12 +1,20 @@
 # Orca 실행기 — 준비된 실행을 Orca 워크트리 터미널에서 oah worker-run 으로 돌리고, 터미널을 9분 상한 안에서 따라가며 출력과 결과를 기록한다.
 """The optional Orca launcher for `oah call` (PLAN section 4 row 8, 5.5, A1, A6, A17).
 
-Orca runs oah's own runner, never the engine: the terminal command is `oah worker-run <run-id>; exit`,
+Orca runs oah's own runner, never the engine: the command is `oah worker-run <run-id> --stage <stage>; exit`,
 and the runner calls `oah.call.execute` on the prepared run, so the brief goes from `prompt.md` to the
 engine's stdin byte for byte, the worker variables are set, a review stays read-only and the effort
-checks run as in P3b. Orca never sees the brief text. The run id is the only value in that command and
-passes P3b's safe-character rule; the runner finds the state folder from the terminal's working
+checks run as in P3b. Orca never sees the brief text. The run id and dispatch stage in that command
+pass P3b's safe-character rule; the runner finds the state folder from the terminal's working
 directory (the worktree) through git, which is why an `OAH_STATE_DIR` override is refused.
+
+The state folder is trusted as much as the user's home. Validation covers accidental corruption and
+races between oah's own processes, including concurrent claims and a run folder replaced during a
+run. It does not defend against a local adversary who can already write the state folder and run
+code as the user. Windows directory checks do not pin individual children against reparse-point
+races. The deliberate exception is review permissions: the dispatching `oah call --stage` decides
+whether the run is a review. The runner receives that stage through Orca's command argv and refuses
+disagreement in either record before claiming; editable records never grant a review write access.
 
 Only commands documented for Orca 1.4.237 are used, always with `--json`: `--version`, `worktree show`,
 `worktree create`, `terminal create`, `terminal wait --for exit`, `terminal read` and `terminal show`.
@@ -27,10 +35,10 @@ import time
 from typing import Mapping, Sequence
 
 from oah import briefs, call, launchers, runs
-from oah.atomic import write_json_atomic, write_text_atomic
+from oah.atomic import write_json_atomic
 from oah.engines import claude, codex
 from oah.engines.effort import EngineError
-from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
+from oah.engines.proc import UnsupportedBatchShim, is_batch, resolve_command, run_command
 from oah.paths import STATE_ENV
 
 INSTALL_URL = "https://www.onorca.dev/docs/install"
@@ -116,6 +124,10 @@ def connect(command: Sequence[str], env: Mapping[str, str], search_path: str | N
                           'strings, such as ["orca"]')
     first = command[0]
     if "/" in first or "\\" in first:
+        if is_batch(first):
+            raise EngineError(UNAVAILABLE, "Orca's configured command is a batch shim. Install a native executable "
+                              "or configure an explicit [interpreter.exe, script] command in [call] orca_command, "
+                              f"then retry. {_WITHOUT}")
         base = list(command)
     else:
         try:
@@ -221,9 +233,11 @@ def new_worktree(orca: Orca, root: pathlib.Path, task: str) -> Placement:
     return Placement(pathlib.Path(worktree["path"]), worktree["id"], True)
 
 
-def runner_command(run_id: str) -> str:
-    """The command typed into the terminal; the run id is its only value (P3b's safe-character rule)."""
-    return f"oah {RUNNER} {briefs.shell_word(run_id)}; exit"
+def runner_command(run_id: str, stage: str) -> str:
+    """Carry the dispatch stage outside the editable records, using only safe command words."""
+    if stage not in call.routing.STAGES:
+        raise runs._launch_invalid()
+    return f"oah {RUNNER} {briefs.shell_word(run_id)} --stage {stage}; exit"
 
 
 def terminal_args(placement: Placement, title: str, command: str, *, windows: bool) -> list[str]:
@@ -242,8 +256,8 @@ class _WorkerPrepared(call.Prepared):
         return self.worker_run
 
 
-def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) -> call.Prepared:
-    """Rebuild argv and permissions from the engine/stage, never from saved execution flags."""
+def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, stage: str) -> call.Prepared:
+    """Rebuild permissions from the dispatch stage carried by argv, checking both saved records."""
     if not isinstance(run, runs.WorkerRun):
         raise runs._launch_invalid()
     data = run.read()
@@ -255,14 +269,15 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) 
                              "start a new run with oah call")
 
     expected = {"run_dir": str(run.path), "run_id": run.id, "task": run.task,
-                "engine": data.get("engine"), "stage": data.get("stage"), "cwd": str(root),
+                "engine": data.get("engine"), "stage": stage, "cwd": str(root),
                 "model": data.get("resolved_model"), "launch_effort": data.get("launch_effort"),
                 "cli_version": data.get("cli_version"), "warnings": data.get("warnings"),
                 "timeout_s": launcher.get("timeout_s")}
     if (not isinstance(saved, dict) or set(saved) != set(expected) or
             any(saved[key] != value for key, value in expected.items()) or
             data.get("run_id") != run.id or data.get("task") != run.task or
-            data.get("engine") not in call.routing.ENGINES or data.get("stage") not in call.routing.STAGES or
+            data.get("engine") not in call.routing.ENGINES or stage not in call.routing.STAGES or
+            data.get("stage") != stage or
             data.get("cwd") != str(root) or launcher.get("worktree") != str(root) or
             "command" in data or "read_only" in data or "launch_digest" in launcher or
             not all(isinstance(saved[key], str) and saved[key] for key in (
@@ -272,7 +287,7 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) 
             type(saved["timeout_s"]) not in (int, float) or not math.isfinite(saved["timeout_s"]) or
             saved["timeout_s"] <= 0):
         raise invalid()
-    engine, stage = data["engine"], data["stage"]
+    engine = data["engine"]
     call.routing.check_stage(engine, stage, settings.stages,
                              override=data.get("override_stage") is True)
     base = call.models.resolve_base(engine, settings.engines[engine]["command"])
@@ -294,7 +309,7 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) 
 def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows: bool | None = None) -> dict:
     """Queue the prepared run with its launcher record and open its Orca terminal; returns the record."""
     run = prepared.run
-    command = runner_command(prepared.run_id)
+    command = runner_command(prepared.run_id, prepared.stage)
     launch = prepared.to_json()
     launch.pop("argv")
     launch.pop("env_additions")
@@ -327,7 +342,7 @@ def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows:
 def _append_log(run: runs.Run, lines: Sequence[str]) -> None:
     path = run.file_path(TERMINAL_LOG)
     before = path.read_bytes().decode("utf-8", errors="replace") if path.exists() else ""
-    write_text_atomic(path, before + "".join(f"{line}\n" for line in lines))
+    run._write_text(TERMINAL_LOG, before + "".join(f"{line}\n" for line in lines))
 
 
 def _failure(exc: OrcaReplyError) -> EngineError:
@@ -399,7 +414,6 @@ def _lost(orca: Orca, run: runs.Run, handle: str, reason: str, deadline: float) 
 def wait(orca: Orca, state_dir: pathlib.Path, run_id: str, *, timeout: float = call.WAIT_LIMIT_S,
          slice_s: float = WAIT_SLICE_S, deadline: float | None = None) -> dict:
     """The run's record once it ends, or the current record after at most `timeout` (capped at 9 minutes)."""
-    run = runs.find_run(state_dir, run_id)
     limit = time.monotonic() + min(max(timeout, 0.0), call.WAIT_LIMIT_S)
     if deadline is None:
         deadline = limit
@@ -407,44 +421,51 @@ def wait(orca: Orca, state_dir: pathlib.Path, run_id: str, *, timeout: float = c
         deadline = min(deadline, limit)
     if getattr(orca, "deadline", None) is not None:
         deadline = min(deadline, orca.deadline)
-    while True:
-        data = run.read()
-        if data.get("status") in runs.TERMINAL:
-            return data
-        handle = (data.get("launcher") or {}).get("terminal")
-        if not handle:
-            return run.result(status="lost", error=f"OAH_RUN_LOST: run {run_id} has no Orca terminal, so it never "
-                              "started; call the engine again")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return data
-        ms = max(1, int(min(remaining, slice_s) * 1000))
-        problem = None
-        try:
-            reply = orca.json("terminal", "wait", "--terminal", handle, "--for", "exit", "--timeout-ms", str(ms),
-                              timeout=min(remaining, ms / 1000 + 1.0))
-            found = reply.get("wait")
-            if (not isinstance(found, dict) or found.get("status") != "exited" or
-                    found.get("satisfied") is not True or found.get("condition") != "exit"):
-                raise OrcaReplyError("unreadable", "the reply has no satisfied exit wait object")
-            exited = True
-        except OrcaReplyError as exc:
-            if exc.code not in (*_MISSING_TERMINAL, "cli-timeout", "timeout"):
-                raise _failure(exc) from exc
-            exited, problem = False, (None if exc.code in ("timeout", "cli-timeout") else exc)
-        _capture(orca, run, handle, deadline)
-        if not exited and problem is None:
-            continue
-        data = run.read()
-        if data.get("status") in runs.TERMINAL:
-            if exited:
-                _preview(orca, run, handle, deadline)
-            return data
-        pid = data.get("pid")
-        if problem is not None and isinstance(pid, int) and call._alive(pid):
-            time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))  # Orca lost the handle; the runner lives
-            continue
-        return _lost(orca, run, handle, "exited" if exited else f"is unknown to Orca ({problem.code})", deadline)
+    run = runs.find_run(state_dir, run_id, deadline=deadline)
+    data = None
+    try:
+        while True:
+            data = run.read()
+            if data.get("status") in runs.TERMINAL:
+                return data
+            handle = (data.get("launcher") or {}).get("terminal")
+            if not handle:
+                return run.result(status="lost", error=f"OAH_RUN_LOST: run {run_id} has no Orca terminal, so it never "
+                                  "started; call the engine again")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return data
+            ms = max(1, int(min(remaining, slice_s) * 1000))
+            problem = None
+            try:
+                reply = orca.json("terminal", "wait", "--terminal", handle, "--for", "exit", "--timeout-ms", str(ms),
+                                  timeout=min(remaining, ms / 1000 + 1.0))
+                found = reply.get("wait")
+                if (not isinstance(found, dict) or found.get("status") != "exited" or
+                        found.get("satisfied") is not True or found.get("condition") != "exit"):
+                    raise OrcaReplyError("unreadable", "the reply has no satisfied exit wait object")
+                exited = True
+            except OrcaReplyError as exc:
+                if exc.code not in (*_MISSING_TERMINAL, "cli-timeout", "timeout"):
+                    raise _failure(exc) from exc
+                exited, problem = False, (None if exc.code in ("timeout", "cli-timeout") else exc)
+            _capture(orca, run, handle, deadline)
+            if not exited and problem is None:
+                continue
+            data = run.read()
+            if data.get("status") in runs.TERMINAL:
+                if exited:
+                    _preview(orca, run, handle, deadline)
+                return data
+            pid = data.get("pid")
+            if problem is not None and isinstance(pid, int) and call._alive(pid):
+                time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))  # Orca lost the handle; the runner lives
+                continue
+            return _lost(orca, run, handle, "exited" if exited else f"is unknown to Orca ({problem.code})", deadline)
+    except launchers.DeadlineExpired:
+        if data is None:
+            raise
+        return data  # Leave optional cursor/lost updates for the next wait when the budget expires.
 
 
 def wait_until_done(orca: Orca, state_dir: pathlib.Path, run_id: str) -> dict:
