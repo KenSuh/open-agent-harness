@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from contextlib import closing
 from itertools import product
 
 from oah.impact import sqlplugin
@@ -330,7 +331,7 @@ class ExtractTest(unittest.TestCase):
     def test_delimiter_column_keeps_standard_semantics(self):
         text = ("CREATE TABLE t (\n delimiter text,\n a text DEFAULT '\\'\n);\n"
                 'CREATE TABLE following(id int);')
-        with sqlite3.connect(':memory:') as connection:
+        with closing(sqlite3.connect(':memory:')) as connection:
             connection.executescript(text)
             self.assertEqual(connection.execute('PRAGMA table_info(t)').fetchall()[0][1], 'delimiter')
         for file in ('postgres.sql', 'db/001_init.sql'):
@@ -451,10 +452,10 @@ class ExtractTest(unittest.TestCase):
                                     and region['reason'] for region in graph['unparsed']))
 
     def test_construct_generators_scale_below_quadratic(self):
-        # Measure inside one process, using medians to reduce scheduler/GC noise. Fixed deadlines
-        # catch hangs; doubled sizes and a 3.3 ratio catch quadratic paths independently of speed.
+        # Minimum timings reduce scheduler/GC noise; sub-50 ms runs are linear-enough.
+        # Fixed deadlines catch hangs; doubled sizes and a 3.3 ratio catch slower quadratic paths.
         code = textwrap.dedent('''
-            import gc, statistics, time
+            import gc, time, unittest
             from oah.impact import sqlplugin
             generators = {
                 'identifiers': lambda n: 'x' * n + ' ' + ',' * n + ';',
@@ -467,21 +468,37 @@ class ExtractTest(unittest.TestCase):
                 'nested routines': lambda n: 'CREATE PROCEDURE p() BEGIN ' * n +
                                              'SELECT 1;' + 'END;' * n,
             }
-            for name, generate in generators.items():
+            def check_scaling(name, generate, extract=sqlplugin.extract, clock=time.perf_counter):
                 times = []
                 for size in (16000, 32000):
                     text = generate(size)
                     samples = []
                     for _ in range(3):
                         gc.collect()
-                        start = time.perf_counter()
-                        graph = sqlplugin.extract({'stress.sql': text})
-                        elapsed = time.perf_counter() - start
+                        start = clock()
+                        graph = extract({'stress.sql': text})
+                        elapsed = clock() - start
                         assert elapsed < 12, (name, size, elapsed)
                         samples.append(elapsed)
-                    times.append(statistics.median(samples))
-                assert times[1] / times[0] < 3.3, (name, times)
+                    times.append(min(samples))
+                if times[1] >= 0.05:
+                    assert times[1] / times[0] < 3.3, (name, times)
                 print(name, round(times[1] / times[0], 3), times)
+
+            for name, generate in generators.items():
+                check_scaling(name, generate)
+
+            # Count quadratic work with a deterministic clock to avoid a flaky negative check.
+            ticks = [0]
+            def quadratic_extract(files):
+                size = len(files['stress.sql']) // 1000
+                for _ in range(size):
+                    for _ in range(size):
+                        ticks[0] += 1
+
+            with unittest.TestCase().assertRaisesRegex(AssertionError, 'quadratic stub'):
+                check_scaling('quadratic stub', lambda n: 'x' * n,
+                              quadratic_extract, lambda: ticks[0] / 10000)
         ''')
         result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
                                 encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=120)
