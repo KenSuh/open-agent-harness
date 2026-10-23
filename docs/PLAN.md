@@ -275,7 +275,7 @@ max    = { model = "opus",   effort = "max",    timeout_min = 90 }
 
 [engines.codex]
 command = ["codex"]
-[engines.codex.tiers]   # model = "" means "use Codex's own default model"
+[engines.codex.tiers]   # model = "" resolves Codex's configured default; see the refusal below
 low    = { model = "", effort = "low",    timeout_min = 15 }
 medium = { model = "", effort = "medium", timeout_min = 30 }
 high   = { model = "", effort = "high",   timeout_min = 60 }
@@ -313,27 +313,47 @@ max    = { model = "", effort = "highest", timeout_min = 90 }  # the highest eff
   - Codex: `codex exec -C <dir> -s read-only|workspace-write [-m M] [-c model_reasoning_effort="E"] [--output-schema F] -o <out> [--ephemeral] -`, with the prompt on stdin.
   - Claude: `claude -p --output-format json [--model M] [--effort E] --permission-mode <mode> [--tools …]`, with the prompt on stdin. `--tools` restricts which tools exist; `--allowedTools` only pre-approves.
 - **Effort comes from what the model supports, with no fixed cap.**
-  - For Codex, `oah` reads the configured model's `supported_reasoning_levels` from
-    `$CODEX_HOME/models_cache.json`.
-  - A literal tier effort must be on that list, otherwise `OAH_EFFORT_UNSUPPORTED`.
+  - For Codex, a non-empty tier model is used directly. An empty model resolves from Codex's
+    effective configuration for the launch directory, including the selected profile. The adapter
+    passes that concrete model with `-m` and records it. If no concrete default can be resolved
+    (including on a fresh installation), it refuses before launch with `OAH_MODEL_UNRESOLVED` and
+    tells the user to set the tier's `model` explicitly in `.oah/config.toml`.
+  - `oah` reads that model's `supported_reasoning_levels` from `$CODEX_HOME/models_cache.json`.
+  - With usable metadata, a literal tier effort must be on that list, otherwise
+    `OAH_EFFORT_UNSUPPORTED`.
   - `highest` resolves to the highest listed reasoning effort. It skips modes that change behaviour,
     such as `ultra`, which adds task delegation. For `gpt-6.1-sol` on 2026-10-23 that is `max`.
   - The source's old "max → xhigh" cap was measured stale: the Codex CLI (and Orca 1.4.237) accept
     `max` for `gpt-6.1-sol`.
-  - When the cache is missing, the literal effort is used and the check below decides.
+  - If the cache is missing or has no usable entry for that model, a literal effort is passed
+    unchanged to the checks below. `highest` refuses before launch with `OAH_EFFORT_METADATA_MISSING`
+    when no ordinary reasoning levels can be read; the message tells the user to refresh Codex's
+    model metadata or set an explicit model and literal tier effort. It never guesses a maximum.
   - When a launcher cannot run the requested effort, `oah` stops with `OAH_SEPARATE_SESSION_REQUIRED`
     and prints the exact command for a separate session.
-- **The effective effort is checked after launch.**
-  - Codex prints the effort it actually uses (`reasoning effort: <e>` in its run header), and `oah`
-    compares it with the request.
-  - A lower effort fails the run with `OAH_EFFORT_DOWNGRADED`, and a review round with a downgraded
-    effort does not count.
-  - A header that cannot be read is recorded as `effective_effort: unverified`, never as a match.
-  - `oah` never lowers an effort silently.
-  - For Claude, P3 verifies whether the effective effort can be observed. Until then it is recorded
+- **Launch configuration is checked separately from inference effort.**
+  - `requested_effort` is the tier value (including `highest`); `launch_effort` is the literal value
+    passed to Codex after resolving `highest`. `header_effort` is the header's `reasoning effort: <e>`,
+    which reports `config.model_reasoning_effort`, not proof of the inference effort actually used.
+  - `oah` compares `header_effort` with `launch_effort`. A lower configuration fails with
+    `OAH_EFFORT_DOWNGRADED`; any other mismatch fails with `OAH_EFFORT_MISMATCH`. A failed review
+    round does not count. An unreadable header is recorded as `unverified`, never as a match.
+  - The adapter uses normalization rules verified for the recorded CLI version and model to map
+    both `launch_effort` and `header_effort` to inference efforts. For example, `ultra` may normalize
+    to another inference effort; the adapter must not compare those labels as an ordinal scale.
+    `resolved_inference_effort` stores the header-derived value and `normalization_basis` identifies
+    the rule used. A value lower than the normalized launch effort fails with
+    `OAH_EFFORT_DOWNGRADED`.
+  - Unknown normalization records `resolved_inference_effort: unverified`. A matching header proves
+    only the launched configuration; a known mapping describes expected inference behavior, not
+    runtime observation. A review counts as effort-verified only with a matching header and known
+    normalization. `oah` never lowers an effort silently.
+  - For Claude, P3 verifies whether the inference effort can be observed. Until then it is recorded
     as unverified.
 - **Runs.** Each call writes `prompt.md`, `stdout.log`, `stderr.log` and `result.json` (exit code,
-  duration, CLI version, model, requested and effective effort). The preamble is a short template:
+  duration, CLI version, resolved model, `requested_effort`, `launch_effort`, `header_effort`,
+  header-check status, `resolved_inference_effort` and `normalization_basis`; unavailable values are
+  `unverified`). The preamble is a short template:
   task, stage, scope, rules (stay in scope, never push, write evidence into the ledger), the packet,
   and the return format.
 - **Dispatched workers are marked.**
@@ -830,8 +850,11 @@ Each phase is one branch and one PR into `main` of the private repository.
 2. **Codex reviews (R1).** It uses `codex exec --ephemeral -s read-only` on a sanitized snapshot of the
    branch head, with a canary and an output schema. The model is the owner's chosen reviewer model
    (currently `gpt-6.1-sol`). Effort is from the table above. "highest" is the top effort the model
-   lists as supported (5.5), so the toughest setting is `max`. The runner checks the effective effort
-   in the Codex header and does not count a round that ran lower. After P6, `oah review` dogfoods this.
+   lists as supported (5.5), so the toughest setting is `max`. The runner resolves the model and
+   metadata before launch, checks the header-reported configuration against `launch_effort`, and
+   records the normalized `resolved_inference_effort` separately (5.5). A mismatch fails the round;
+   an unreadable header or unknown normalization leaves effort unverified. Neither counts as an
+   effort-verified review. After P6, `oah review` dogfoods this.
 3. **Codex fixes** the findings with `codex exec -s workspace-write` in a worktree of this repository.
    Claude commits the result, marked as a Codex correction. Then Codex re-reviews (R2, at most R3).
    Findings left after R3 go to the owner.
@@ -882,7 +905,7 @@ Each phase is one branch and one PR into `main` of the private repository.
 3. **CI.** The workflow lands in P1, and every PR runs one macOS and one Windows job.
 4. **Merging.** Claude merges each PR once Codex review has converged, the privacy scan is clean and CI
    passes, then reports the link.
-5. **This plan.** It still needs the owner's approval before P1 starts.
+5. **This plan.** The owner approved it on 2026-10-23; P1 may start.
 
 **Builder's calls** (change any of them):
 
@@ -940,7 +963,7 @@ request. Each item names the sections it changed and the phases whose checklists
 
 | # | Rule | Sections | Phases |
 |---|---|---|---|
-| A1 | Effort comes from what the model supports, with no fixed cap. `highest` means the top supported reasoning effort, which is `max` for `gpt-6.1-sol`. The effective effort is checked after launch, and a lower one fails the run. Effort is never downgraded silently. | 5.5, 11 | P2 review, P3, P6, this repo's runners |
+| A1 | Effort comes from what the model supports, with no fixed cap. `highest` means the top supported reasoning effort, which is `max` for `gpt-6.1-sol`. The model must resolve before launch; `highest` requires usable model metadata. The header verifies launch configuration; versioned normalization separately records expected inference effort. Lower effort fails the run, and unverified effort is labelled honestly. Effort is never downgraded silently. | 5.5, 11 | P2 review, P3, P6, this repo's runners |
 | A2 | "No network" does not turn off `oah impact` or a configured re-ranker. The re-ranker is off only when the brief names it or no key exists, and every result reports `used` or `unused(reason)`. | 4 (row 17), 5.6, 5.10 | P4, P7 |
 | A3 | A task or review that touches DB tables, routines or GRANTs queries the DB backend plugin, and returns the query plus the graph identity (commit SHA, digest). Without the plugin it says so. | 5.6, 5.10 | P4, P6, P7 |
 | A4 | An empty `## Scope` warns loudly (`OAH_SCOPE_EMPTY`). A selection that depends on Scope's file kinds never silently selects nothing. | 5.6 | P4, P7 |
@@ -950,11 +973,14 @@ request. Each item names the sections it changed and the phases whose checklists
 ### Phase checklists
 
 **P2**
-- [ ] Review at the highest supported effort (`max`). The runner's effective-effort check passes. (A1)
+- [ ] Review at the highest supported effort (`max`). The runner's header configuration check and inference normalization are verified (5.5). (A1)
 
 **P3**
-- [ ] Codex tier efforts resolve from `supported_reasoning_levels`. `highest` skips behaviour-changing modes. A literal effort that is not listed fails with `OAH_EFFORT_UNSUPPORTED`. (A1)
-- [ ] The effective effort is parsed after launch. Lower means `OAH_EFFORT_DOWNGRADED`, unreadable means `unverified`. Tests use a fake engine that reports a lower effort. (A1)
+- [ ] Codex tier efforts resolve from `supported_reasoning_levels`. `highest` skips behaviour-changing modes. With usable metadata, a literal effort that is not listed fails with `OAH_EFFORT_UNSUPPORTED`. (A1)
+- [ ] An empty tier model resolves from effective Codex configuration (including the selected profile), is passed with `-m` and is recorded. A fresh installation without a resolvable default refuses with `OAH_MODEL_UNRESOLVED` and tells the user to set the tier model. (A1)
+- [ ] `highest` with a missing cache, absent model entry or no usable ordinary reasoning levels refuses with `OAH_EFFORT_METADATA_MISSING` and actionable guidance; a literal effort with missing metadata is passed unchanged. (A1)
+- [ ] Fake-engine tests cover matching, lower, other mismatched and unreadable headers: lower means `OAH_EFFORT_DOWNGRADED`, other mismatch means `OAH_EFFORT_MISMATCH`, unreadable means `unverified`. The header verifies configuration only. (A1)
+- [ ] Version/model-specific normalization tests include a behavior-changing alias such as `ultra` and an unknown mapping. Run records keep requested, launch, header-reported and resolved inference effort separately, with header-check status and normalization basis; unknown inference effort stays `unverified`. (A1)
 - [ ] Workers are launched with `OAH_WORKER=1`, `OAH_RUN_ID` and `OAH_TASK`, and with the worker line first in the preamble. (A6)
 
 **P4**
@@ -963,7 +989,7 @@ request. Each item names the sections it changed and the phases whose checklists
 - [ ] The Return section carries `rerank=used|unused(<reason>)` and the DB-impact line. (A2, A3)
 
 **P6**
-- [ ] A review round whose effective effort is lower than requested fails and does not count. (A1)
+- [ ] A review round with lower header configuration or normalized inference effort fails with `OAH_EFFORT_DOWNGRADED`; any other header mismatch fails with `OAH_EFFORT_MISMATCH`. Failed rounds do not count; unreadable headers and unknown normalization never count as effort-verified reviews. (A1)
 - [ ] For DB changes, the review prompt requires the DB-impact query and graph identity. The reviewer checks that they are present. (A3)
 - [ ] Reviewers run as dispatched workers. (A6)
 
