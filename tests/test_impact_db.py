@@ -9,6 +9,7 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from itertools import product
 
 from oah.impact import sqlplugin
 from tests.helpers import git_commit, make_git_repo
@@ -125,7 +126,7 @@ class ExtractTest(unittest.TestCase):
                 'INSERT INTO notes VALUES ("CREATE TABLE ghost_string (id int);");\n'
                 'INSERT INTO notes VALUES ("escaped \\" quote; CREATE TABLE ghost_escape (id int);");\n'
                 'CREATE TABLE public."Real Table" (id int);\n')
-        graph = sqlplugin.extract({"mysql.sql": text})
+        graph = sqlplugin._extract({"mysql.sql": text}, "mysql")
         self.assertEqual(set(graph["entities"]), {"db_table:notes", "db_table:real table"})
         self.assertEqual(graph["entities"]["db_table:real table"]["events"], [["mysql.sql", 5, "create"]])
 
@@ -246,23 +247,23 @@ class ExtractTest(unittest.TestCase):
         self.bounded_extract('x' * 256000 + ' ' + ',' * 256000 + ';\n')
 
     def test_quoted_routine_bodies_preserve_locations(self):
-        for prefix in ('', 'E'):
-            with self.subTest(prefix=prefix):
-                graph = sqlplugin.extract({'postgres.sql':
+        for file, prefix in product(('postgres.sql', 'db/001_init.sql'), ('', 'E')):
+            with self.subTest(file=file, prefix=prefix):
+                graph = sqlplugin.extract({file:
                     "CREATE TABLE users(id int);\n"
                     "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS " + prefix +
                     "'SELECT\n id FROM users';\n"
                     "SELECT 'FROM ghost';\n"})
-                self.assertIn(['db_routine:f', 'db_table:users', 'uses', 'postgres.sql', 3], graph['links'])
+                self.assertIn(['db_routine:f', 'db_table:users', 'uses', file, 3], graph['links'])
                 self.assertNotIn('db_table:ghost', graph['entities'])
 
     def test_inline_mysql_hash_comments_do_not_hide_entities(self):
         for comment in ("a ' quote; CREATE TABLE ghost(id int);", 'a ; semicolon'):
             with self.subTest(comment=comment):
-                graph = sqlplugin.extract({'mysql.sql':
-                    'SELECT 1 # ' + comment + '\n;\nCREATE TABLE users(id int);'})
+                graph = sqlplugin._extract({'db/001_init.sql':
+                    'SELECT 1 # ' + comment + '\n;\nCREATE TABLE users(id int);'}, "mysql")
                 self.assertEqual(set(graph['entities']), {'db_table:users'})
-                self.assertEqual(graph['entities']['db_table:users']['events'], [['mysql.sql', 3, 'create']])
+                self.assertEqual(graph['entities']['db_table:users']['events'], [['db/001_init.sql', 3, 'create']])
 
     def test_routine_expression_literals_stay_opaque(self):
         graph = sqlplugin.extract({'postgres.sql':
@@ -279,37 +280,107 @@ class ExtractTest(unittest.TestCase):
         self.assertIn(['db_routine:f', 'db_table:users', 'uses', 'postgres.sql', 2], graph['links'])
 
     def test_mysql_version_comment_view_is_reported(self):
-        graph = sqlplugin.extract({'mysql.sql':
-            '\n/*!50001 CREATE VIEW v AS SELECT * FROM users */;'})
-        self.assertTrue(any(region['file'] == 'mysql.sql' and region['line'] == 2
+        graph = sqlplugin._extract({'db/001_init.sql':
+            '\n/*!50001 CREATE VIEW v AS SELECT * FROM users */;'}, "mysql")
+        self.assertTrue(any(region['file'] == 'db/001_init.sql' and region['line'] == 2
                             and 'executable comment' in region['reason']
                             for region in graph['unparsed']))
 
     def test_mysql_version_comment_trigger_is_reported(self):
-        graph = sqlplugin.extract({'mysql.sql':
+        graph = sqlplugin._extract({'db/001_init.sql':
             '\n/*!50003 CREATE TRIGGER t AFTER INSERT ON users FOR EACH ROW\n'
-            'BEGIN UPDATE users SET id = 1; END */;'})
-        self.assertTrue(any(region['file'] == 'mysql.sql' and region['line'] == 2
+            'BEGIN UPDATE users SET id = 1; END */;'}, "mysql")
+        self.assertTrue(any(region['file'] == 'db/001_init.sql' and region['line'] == 2
                             and 'executable comment' in region['reason']
                             for region in graph['unparsed']))
 
     def test_postgres_standard_routine_backslashes_do_not_create_ghosts(self):
-        for backslash in ('\\', '\\\\'):
-            with self.subTest(backslash=backslash):
+        for file, backslash in product(('postgres.sql', 'db/001_init.sql'), ('\\', '\\\\')):
+            with self.subTest(file=file, backslash=backslash):
                 body = "SELECT concat(''" + backslash + "'', ''CREATE TABLE ghost(id int);'', ''" + backslash + "'')"
-                graph = sqlplugin.extract({'postgres.sql':
+                graph = sqlplugin.extract({file:
                     "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS '" + body + "';\n"
                     'CREATE TABLE following(id int);'})
                 self.assertEqual(set(graph['entities']), {'db_routine:f', 'db_table:following'})
                 self.assertEqual(graph['links'], [])
                 self.assertEqual(graph['entities']['db_table:following']['events'],
-                                 [['postgres.sql', 2, 'create']])
+                                 [[file, 2, 'create']])
+
+    def test_standard_strings_and_hash_operators_ignore_file_names(self):
+        for file in ('db/001_init.sql', 'mysql.sql', 'postgres.sql', 'sqlite.sql'):
+            with self.subTest(file=file):
+                graph = sqlplugin.extract({file:
+                    "SELECT '\\';\nCREATE TABLE users(id int);\n"
+                    "CREATE VIEW v AS SELECT bits # mask FROM users;\n"
+                    "CREATE TABLE following(id int);"})
+                self.assertEqual(set(graph['entities']),
+                                 {'db_table:users', 'db_table:v', 'db_table:following'})
+                self.assertIn(('db_table:v', 'db_table:users', 'view-source'), self.links(graph))
+
+    def test_mysql_markers_enable_rules_under_neutral_paths(self):
+        for marker in ('DELIMITER ;\n', 'CREATE TABLE marker(id int) ENGINE=InnoDB;\n'):
+            with self.subTest(marker=marker):
+                graph = sqlplugin.extract({'db/001_init.sql': marker +
+                    "SELECT 'escaped \\' quote; CREATE TABLE ghost(id int);';\n"
+                    "SELECT 1 # ' quote; CREATE TABLE ghost_hash(id int);\n;\n"
+                    "/*!50001 CREATE VIEW hidden AS SELECT 1 */;\n"
+                    "CREATE TABLE following(id int);"})
+                expected = {'db_table:following'}
+                if marker.startswith('CREATE'):
+                    expected.add('db_table:marker')
+                self.assertEqual(set(graph['entities']), expected)
+                self.assertTrue(any('executable comment' in row['reason'] for row in graph['unparsed']))
+
+    def test_marker_text_in_literals_and_comments_keeps_standard_rules(self):
+        for marker in ("-- DELIMITER //\n", "/* CREATE TABLE m(id int) ENGINE=InnoDB; */\n",
+                       "SELECT 'DELIMITER //';\n",
+                       "SELECT 'CREATE TABLE m(id int) ENGINE=InnoDB;';\n",
+                       'CREATE TABLE m(engine text DEFAULT \'ENGINE=InnoDB\');\n'):
+            with self.subTest(marker=marker):
+                graph = sqlplugin.extract({'db/001_init.sql': marker +
+                    "SELECT '\\';\nCREATE TABLE following(id int);\n"
+                    "/*!50001 CREATE VIEW hidden AS SELECT 1 */;"})
+                self.assertIn('db_table:following', graph['entities'])
+                self.assertFalse(any('executable comment' in row['reason'] for row in graph['unparsed']))
+
+    def test_backslash_before_quoted_markers_keeps_standard_rules(self):
+        for marker in ('DELIMITER ;', 'CREATE TABLE hidden(id int) ENGINE=InnoDB;'):
+            with self.subTest(marker=marker):
+                graph = sqlplugin.extract({'db/001_init.sql':
+                    "SELECT '\\';\nSELECT '\n" + marker + "\n';\nSELECT '\\';\n"
+                    'CREATE TABLE following(id int);'})
+                self.assertEqual(set(graph['entities']), {'db_table:following'})
+
+    def test_separated_E_prefix_does_not_decode_routine_backslashes(self):
+        body = "SELECT concat(''\\'', ''CREATE TABLE ghost(id int);'', ''\\'')"
+        for prefix in ('E ', 'E/* gap */'):
+            with self.subTest(prefix=prefix):
+                graph = sqlplugin.extract({'db/001_init.sql':
+                    "CREATE FUNCTION f() RETURNS text AS " + prefix + "'" + body + "';\n"
+                    'CREATE TABLE following(id int);'})
+                self.assertEqual(set(graph['entities']), {'db_routine:f', 'db_table:following'})
+
+    def test_dialect_marker_scan_is_bounded(self):
+        code = textwrap.dedent('''
+            import sys
+            from oah.impact import sqlplugin
+            graph = sqlplugin.extract({'db/001_init.sql': sys.stdin.read()})
+            assert set(graph['entities']) == {'db_table:wide', 'db_table:following'}, graph['entities']
+            assert any('executable comment' in row['reason'] for row in graph['unparsed'])
+        ''')
+        text = ('/*' + 'ENGINE=InnoDB DELIMITER // ' * 20000 + '*/\n'
+                'CREATE TABLE wide(' + 'engine int, ' * 40000 + 'id int) ENGINE=InnoDB;\n'
+                "SELECT 'escaped \\' quote; CREATE TABLE ghost(id int);';\n"
+                '/*!50001 CREATE VIEW hidden AS SELECT 1 */;\nCREATE TABLE following(id int);')
+        result = subprocess.run([sys.executable, '-c', code], input=text, capture_output=True,
+                                text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_executable_comments_are_bounded_and_reported(self):
         code = textwrap.dedent('''
             import sys
             from oah.impact import sqlplugin
-            graph = sqlplugin.extract({'mysql.sql': sys.stdin.read()})
+            graph = sqlplugin._extract({'db/001_init.sql': sys.stdin.read()}, 'mysql')
             regions = [region for region in graph['unparsed']
                        if 'executable comment' in region['reason']]
             assert len(regions) == 20001, len(regions)
@@ -388,14 +459,15 @@ class ExtractTest(unittest.TestCase):
                  for path in sorted(FIXTURES.glob('*/*.sql'))
                  for line in path.read_text(encoding='utf-8').splitlines()
                  if line.startswith('-- OAH-REGRESSION ')]
-        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3', 'R4'})
+        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3', 'R4', 'R5'})
         code = textwrap.dedent('''
             import json, sys
             from oah.impact import sqlplugin
             for case in json.load(sys.stdin):
                 text = ''.join(part if isinstance(part, str) else part[0] * part[1]
                                for part in case['parts'])
-                graph = sqlplugin.extract({case['file']: text})
+                graph = (sqlplugin._extract({case['file']: text}, case['dialect']) if 'dialect' in case
+                         else sqlplugin.extract({case['file']: text}))
                 assert sorted(graph['entities']) == sorted(case['entities']), (case['id'], graph)
                 links = sorted(link[:3] for link in graph['links'])
                 assert links == sorted(case['links']), (case['id'], graph)
@@ -407,6 +479,9 @@ class ExtractTest(unittest.TestCase):
                     assert any(region['file'] == case['file'] and region['line'] == line
                                and 'executable comment' in region['reason']
                                for region in graph['unparsed']), (case['id'], graph)
+                if case.get('no_executable'):
+                    assert not any('executable comment' in region['reason']
+                                   for region in graph['unparsed']), (case['id'], graph)
         ''')
         result = subprocess.run([sys.executable, '-c', code], input=json.dumps(cases), capture_output=True,
                                 text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=60)

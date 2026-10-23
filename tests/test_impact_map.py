@@ -293,6 +293,30 @@ class MapStoreTest(unittest.TestCase):
         self.assertEqual(configured.tool_digest, explicit.tool_digest)
         self.assertEqual(ensure_fresh(self.repo).action, "fresh", "callers without settings agree on the map")
 
+    def test_sql_dialect_config_rebuilds_map_and_applies_to_snapshots(self):
+        git_commit(self.repo, {'db/001_init.sql':
+            'CREATE TABLE users(id int);\n'
+            'CREATE VIEW v AS SELECT bits # mask FROM users;\n'})
+        standard = ensure_fresh(self.repo)
+        standard_db = mapstore.load(standard.path)['data']['db']
+        self.assertEqual(len(standard_db['links']), 1)
+        mysql = ensure_fresh(self.repo, settings={'sql_dialect': 'mysql'})
+        self.assertEqual(mysql.action, 'built')
+        self.assertNotEqual(mysql.tool_digest, standard.tool_digest)
+        self.assertEqual(mapstore.load(mysql.path)['data']['db']['links'], [])
+        (self.repo / '.oah').mkdir()
+        config = self.repo / '.oah' / 'config.toml'
+        config.write_text('[impact]\nsql_dialect = "mysql"\n', encoding='utf-8')
+        configured = ensure_fresh(self.repo)
+        self.assertEqual(configured.tool_digest, mysql.tool_digest)
+        self.assertEqual(ensure_fresh(self.repo).action, 'fresh')
+        for args in (('db_table:users', '--json'), ('db_table:users', '--ref', 'HEAD', '--json')):
+            result = run_impact(self.repo, *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(any('view-source' in row['detail'] for row in json.loads(result.stdout)['rows']))
+        config.write_text('[impact]\nsql_dialect = "standard"\n', encoding='utf-8')
+        self.assertEqual(len(mapstore.load(ensure_fresh(self.repo).path)['data']['db']['links']), 1)
+
     def test_sql_symlinks_are_excluded(self):
         outside = make_tmp_dir(self) / "outside.sql"
         outside.write_text("CREATE TABLE ghost (id int);\n", encoding="utf-8")

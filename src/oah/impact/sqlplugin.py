@@ -34,7 +34,7 @@ class _Token:
         return self.kind == "word" and self.keyword in words
 
 
-def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
+def _tokenize(text: str, *, dialect: str = "standard") -> list[_Token]:
     """Consume tokens with a forward-only cursor, without backtracking or prefix windows.
 
     Dollar bodies have an opaque outer token and child SQL tokens for routine dependencies. The
@@ -46,7 +46,7 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
     def scan(limit: int, *, body: bool = False) -> list[_Token]:
         nonlocal i, line, delimiter, next_delimiter
         tokens: list[_Token] = []
-        line_start, expression = True, False
+        line_start = True
         name_context, name_list = False, False
         name_stack: list[bool] = []
         while i < limit:
@@ -68,18 +68,9 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 delimiter = text[begin:i].strip() or ";"
                 next_delimiter = text.find(delimiter, i, limit) if delimiter != ";" else -1
                 tokens.append(_Token("directive", "", start, i, first_line))
-                line_start, expression = False, False
+                line_start = False
                 continue
-            # MySQL permits # comments after operands; PostgreSQL uses # as an operator.
-            # Unlabelled migrations accept both: retain numeric XOR and #>/#>>, otherwise
-            # prefer the MySQL comment. Ambiguous/unsupported SQL remains in coverage reports.
-            hash_comment = False
-            if char == "#" and dialect != "postgres":
-                right = i + 1
-                while right < limit and text[right] in " \t":
-                    right += 1
-                hash_comment = dialect == "mysql" or (not text.startswith("#>", i) and
-                    (line_start or not expression or right == limit or not text[right].isdigit()))
+            hash_comment = char == "#" and dialect == "mysql"
             if text.startswith("--", i) or hash_comment:
                 while i < limit and text[i] != "\n":
                     i += 1
@@ -87,7 +78,7 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 continue
             line_start = False
             if text.startswith("/*", i):
-                executable = text.startswith("/*!", i)
+                executable = dialect == "mysql" and text.startswith("/*!", i)
                 depth = 1
                 i += 2
                 while i < limit and depth:
@@ -104,20 +95,18 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
             if not body and i == next_delimiter:
                 i += len(delimiter)
                 tokens.append(_Token("end", ";", start, i, first_line))
-                expression = False
                 name_context, name_list = False, False
                 continue
             if char in "'\"`[":
                 close = "]" if char == "[" else char
                 i += 1
                 value, closed = [], False
-                # PostgreSQL E'...' and MySQL strings permit backslash escapes. Backticks and
-                # MySQL double-quoted strings also accept them; PostgreSQL standard strings and
-                # double identifiers do not. An E prefix must be adjacent to its opening quote.
-                escapes = char in "'`" or (char == '"' and not name_context)
-                if dialect == "postgres":
-                    escapes = char == "'" and bool(tokens and tokens[-1].is_word("E") and
-                                                   tokens[-1].end == start)
+                # Standard strings preserve backslashes unless an E prefix is adjacent.
+                # Only MySQL also escapes ordinary strings, double strings and backticks.
+                escapes = (dialect == "mysql" and
+                           (char in "'`" or (char == '"' and not name_context))) or \
+                          (char == "'" and bool(tokens and tokens[-1].is_word("E") and
+                                                tokens[-1].end == start))
                 while i < limit:
                     if text[i] == close:
                         if i + 1 < limit and text[i + 1] == close:
@@ -138,7 +127,6 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 identifier = char in "`[" or (char == '"' and name_context)
                 kind = ("identifier" if identifier else "string") if closed else "invalid"
                 tokens.append(_Token(kind, "".join(value), start, i, first_line, raw=text[start:i]))
-                expression = True
                 name_context = False
                 continue
             if char == "$" and delimiter == ";":
@@ -165,7 +153,6 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                         children = scan(closing, body=True)
                         i = closing + len(tag)
                         tokens.append(_Token("dollar", tag, start, i, first_line, tuple(children)))
-                    expression = True
                     continue
             if char.isalpha() or char == "_" or char.isdigit():
                 i += 1
@@ -182,13 +169,9 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 elif not (name_context and word in {"IF", "NOT", "EXISTS", "ONLY", "CONCURRENTLY"}):
                     name_list = name_context
                     name_context = False
-                expression = kind == "number" or word not in {
-                    "SELECT", "AS", "DEFAULT", "VALUES", "WHERE", "AND", "OR", "SET", "THEN", "ELSE",
-                    "RETURN", "ON", "TO", "FROM", "JOIN", "INTO", "UPDATE", "TABLE", "VIEW"}
                 continue
             i += 1
             tokens.append(_Token("end" if char == ";" else "symbol", char, start, i, first_line))
-            expression = char in ")]"
             if char == ".":
                 name_context = True
             elif char == ",":
@@ -218,7 +201,7 @@ def blank(text: str) -> tuple[str, str]:
             if target[i] not in "\r\n":
                 target[i] = " "
 
-    for token in _tokenize(text):
+    for token in _sql_tokens(text, "standard")[0]:
         if token.kind in ("comment", "executable", "directive"):
             wipe(code, token.start, token.end)
             wipe(keep, token.start, token.end)
@@ -262,11 +245,33 @@ def _statements(tokens: Iterable[_Token]) -> Iterable[list[_Token]]:
         yield current
 
 
-def _dialect(file: str) -> str:
-    name = file.lower()
-    if "postgres" in name or "pgsql" in name:
-        return "postgres"
-    return "mysql" if "mysql" in name else "auto"
+def _sql_tokens(text: str, dialect: str) -> tuple[list[_Token], str]:
+    if dialect != "standard":
+        return _tokenize(text, dialect=dialect), dialect
+    # Probe with MySQL quoting so an escaped DEFAULT before ENGINE cannot hide its marker.
+    # Confirm directive/table starts against standard tokens as well: MySQL's backslashes must
+    # not expose a marker inside a standard literal. Two bounded scans remain linear.
+    standard = _tokenize(text)
+    directives = {token.start for token in standard if token.kind == "directive"}
+    creates = {token.start for token in standard if token.is_word("CREATE")}
+    tokens = _tokenize(text, dialect="mysql")
+    if any(token.kind == "directive" and token.start in directives for token in tokens):
+        return tokens, "mysql"
+    for statement in _statements(tokens):
+        if not statement[0].is_word("CREATE") or statement[0].start not in creates:
+            continue
+        kind = next((i for i, token in enumerate(statement) if token.is_word(
+            "TABLE", "VIEW", "FUNCTION", "PROCEDURE", "TRIGGER", "INDEX")), None)
+        if kind is None or not statement[kind].is_word("TABLE"):
+            continue
+        _table, end = _name(statement, _skip_exists(statement, kind + 1))
+        if end >= len(statement) or statement[end].value != "(":
+            continue
+        for i, token in _top(statement):
+            if i > end and token.is_word("ENGINE") and i + 2 < len(statement) and \
+                    statement[i + 1].value == "=" and statement[i + 2].kind in ("word", "identifier"):
+                return tokens, "mysql"
+    return standard, "standard"
 
 
 def _quoted_tokens(token: _Token, dialect: str, escaped: bool) -> list[_Token]:
@@ -304,7 +309,8 @@ def _routine_tokens(tokens: list[_Token], dialect: str) -> tuple[list[_Token], b
     """Flatten only routine-definition bodies, using an iterative, bounded traversal."""
     result = []
     stack = [(iter(tokens), True)]
-    creating, header, awaiting, escaped, routine = False, False, False, False, False
+    creating, header, awaiting, routine = False, False, False, False
+    escape_end = -1
     while stack:
         iterator, allow_quote = stack[-1]
         token = next(iterator, None)
@@ -318,10 +324,11 @@ def _routine_tokens(tokens: list[_Token], dialect: str) -> tuple[list[_Token], b
             routine = routine or header
             creating = False
         if header and token.is_word("AS"):
-            awaiting, escaped = True, dialect == "mysql"
+            awaiting, escape_end = True, -1
         elif awaiting and token.is_word("E"):
-            escaped = True
+            escape_end = token.end
         elif awaiting and (token.kind == "dollar" or (allow_quote and token.kind == "string")):
+            escaped = dialect == "mysql" or escape_end == token.start
             children = token.body if token.kind == "dollar" else _quoted_tokens(token, dialect, escaped)
             header, awaiting = False, False
             stack.append((iter(children), False))
@@ -574,9 +581,14 @@ def extract(files: Mapping[str, str]) -> dict:
     Executable comments stay opaque, including optional version prefixes. Nothing is certified as
     fully parsed merely because a recognised DDL prefix produced an entity.
     """
+    return _extract(files, "standard")
+
+
+def _extract(files: Mapping[str, str], dialect: str) -> dict:
+    """Configured entry point; the public extract(files) keeps standard SQL defaults."""
     graph = _Graph()
     for file in sorted(files):
-        tokens = _tokenize(files[file], dialect=_dialect(file))
+        tokens, selected = _sql_tokens(files[file], dialect)
         for token in tokens:
             if token.kind == "directive":
                 graph.unparsed.append({"file": file, "line": token.line, "reason": "DELIMITER directive"})
@@ -586,7 +598,7 @@ def extract(files: Mapping[str, str]) -> dict:
         for statement in _statements(tokens):
             graph.unparsed.append({"file": file, "line": statement[0].line,
                                    "reason": "dependency scan only; SQL grammar is not fully parsed"})
-            statement, routine = _routine_tokens(statement, _dialect(file))
+            statement, routine = _routine_tokens(statement, selected)
             _statement(graph, file, statement)
             if routine:
                 # The outer routine is scanned once for uses. Nested DDL regions are disjoint:

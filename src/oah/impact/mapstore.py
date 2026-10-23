@@ -406,7 +406,7 @@ def _db_graph(root: pathlib.Path, rev: str | None, files: Mapping[str, str],
     if not sql:
         return None
     contents = read_worktree(root, sql) if rev is None else read_blobs(root, rev, sql, settings["git_timeout"])
-    return sqlplugin.extract(contents) if contents else None
+    return sqlplugin._extract(contents, settings["sql_dialect"]) if contents else None
 
 
 def _carry(old: Mapping[str, list], keep: set[str], changed: set[str]) -> dict[str, list[list]]:

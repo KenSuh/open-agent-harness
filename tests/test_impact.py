@@ -384,7 +384,9 @@ class CliTest(unittest.TestCase):
         for text, code in [("[impact]\nlimitt = 1\n", "OAH_CONFIG_UNKNOWN_KEY"),
                            ('[impact]\nlimit = "many"\n', "OAH_CONFIG_INVALID"),
                            ("[impact]\nkinds = [[\"doc\"]]\n", "OAH_CONFIG_INVALID"),
-                           ("[impact]\nmin_needle = 0\n", "OAH_CONFIG_INVALID")]:
+                           ("[impact]\nmin_needle = 0\n", "OAH_CONFIG_INVALID"),
+                           ('[impact]\nsql_dialect = "auto"\n', "OAH_CONFIG_INVALID"),
+                           ('[impact]\nsql_dialect = []\n', "OAH_CONFIG_INVALID")]:
             config.write_text(text, encoding="utf-8")
             with self.subTest(config=text):
                 bad = run_impact(self.repo, "tools/check.py")
