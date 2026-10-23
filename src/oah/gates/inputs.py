@@ -21,9 +21,20 @@ import sys
 from typing import Mapping, Sequence
 
 from oah.paths import GitMissing, run_git
+from oah import unlazy
+from oah.engines.proc import UnsupportedBatchShim, resolve_command
 
 GENERATED = (".oah/tasks/*/GATES.md", ".oah/tasks/*/GATES.summary.md", ".unlazy/*", ".unlazy-hook-state.json")
 CHUNK = 1024 * 1024
+EXECUTION_ENV = ("PATH", "UNLAZY_SHELL", "OAH_NODE", "ComSpec", "PATHEXT")
+
+
+class InputsUncovered(Exception):
+    code = "OAH_GATES_INPUTS_UNCOVERED"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(f"{self.code}: {message}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,7 +78,8 @@ def _hash_file(path: pathlib.Path) -> str:
 def _entry(root: pathlib.Path, name: str, index_mode: str | None, index_sha: str | None) -> tuple[str, str]:
     path = root / pathlib.PurePosixPath(name)
     if index_mode == "160000":
-        return "160000", index_sha or ""  # a submodule: its recorded commit
+        raise InputsUncovered(f"submodule {name} has live inputs that oah cannot verify; move the task to a "
+                              "worktree without submodules before checking or finishing its gates")
     try:
         info = os.lstat(path)
     except FileNotFoundError:
@@ -85,11 +97,55 @@ def _entry(root: pathlib.Path, name: str, index_mode: str | None, index_sha: str
     return mode, _hash_file(path)
 
 
+def _command_identity(argv: Sequence[str], env: Mapping[str, str]) -> str:
+    """Hash the resolved executable and file arguments, without running unverified tools."""
+    try:
+        resolved = resolve_command(argv[0], search_path=env.get("PATH", ""))
+    except UnsupportedBatchShim as exc:
+        raise InputsUncovered(f"cannot identify runtime {argv[0]}: {exc}; install a native executable "
+                              "and run oah gates check again") from exc
+    parts = [*(resolved.argv if resolved else (argv[0],)), *argv[1:]]
+    identity = []
+    for part in parts:
+        path = pathlib.Path(part)
+        if path.is_file():
+            identity.append([str(path.resolve()), path.stat().st_mode, _hash_file(path)])
+        else:
+            identity.append([part, None, None])
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _shell(env: Mapping[str, str]) -> str:
+    """Mirror unlazy's shell selection, including its PATH and Windows extension search."""
+    default = (env.get("ComSpec") or "cmd.exe") if os.name == "nt" else "/bin/sh"
+    requested = env.get("UNLAZY_SHELL") or default
+    if "/" in requested or "\\" in requested:
+        return str(pathlib.Path(requested).resolve())
+    names = [requested]
+    if os.name == "nt" and not pathlib.Path(requested).suffix:
+        extensions = (env.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+        names += [requested + ext.lower() for ext in extensions if ext]
+        names += [requested + ext.upper() for ext in extensions if ext]
+    for directory in env.get("PATH", "").split(os.pathsep):
+        if directory:
+            for name in names:
+                path = pathlib.Path(directory) / name
+                if path.is_file():
+                    return str(path.resolve())
+    return requested
+
+
 def collect(root: pathlib.Path, *, env_names: Sequence[str] = (), env: Mapping[str, str] | None = None,
-            tools: Mapping[str, str | None] | None = None, extra_excludes: Sequence[str] = ()) -> Manifest:
+            tools: Mapping[str, str | None] | None = None, extra_excludes: Sequence[str] = (),
+            node: Sequence[str] | None = None) -> Manifest:
     """Hash every tracked and non-ignored untracked file under `root` (a worktree root)."""
     root = pathlib.Path(root)
     env = os.environ if env is None else env
+    if os.name == "nt":
+        # Windows environment names are case-insensitive, including for a plain caller-supplied dict.
+        folded = {key.upper(): value for key, value in env.items()}
+        env = {**env, **{key: folded[key.upper()] for key in (*EXECUTION_ENV, *env_names)
+                        if key.upper() in folded}}
     index: dict[str, tuple[str, str]] = {}
     for record in _git_list(root, "ls-files", "-z", "--stage").split("\0"):
         if record:
@@ -108,7 +164,11 @@ def collect(root: pathlib.Path, *, env_names: Sequence[str] = (), env: Mapping[s
     environment: dict[str, str | None] = {"python": platform.python_version(), "platform": sys.platform}
     for key, value in (tools or {}).items():
         environment[f"tool:{key}"] = value
-    for name in env_names:
+    environment["runtime:python"] = _command_identity((sys.executable,), env)
+    environment["runtime:shell"] = _command_identity((_shell(env),), env)
+    node = node if node is not None else unlazy.resolve_node(env)
+    environment["runtime:node"] = _command_identity(node, env) if node else None
+    for name in set((*EXECUTION_ENV, *env_names)):
         value = env.get(name)
         environment[f"env:{name}"] = None if value is None else hashlib.sha256(value.encode("utf-8")).hexdigest()
     return Manifest(files=tuple(files), environment=tuple(sorted(environment.items())))

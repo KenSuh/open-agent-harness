@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import types
 import unittest
@@ -210,6 +211,25 @@ class FinishGuardTest(unittest.TestCase):
         self.assertTrue(refused.stderr.startswith("OAH_GATES_STALE"), refused.stderr)
         self.assertIn("missing", refused.stderr)
 
+    def test_submodule_refusal_blocks_finish_and_stop(self):
+        from oah import hook_stop, unlazy
+
+        self.start()
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", passing(self.ledger, RUNNABLE), ALL_MET)
+        self.assertEqual(self.gates_check().returncode, 0)
+        sub = make_git_repo(self)
+        git_commit(sub, {"module.py": "a = 1\n"})
+        subprocess.run(["git", "-C", str(self.repo), "-c", "protocol.file.allow=always", "submodule", "add",
+                        "--quiet", str(sub), "vendor/sub"], check=True, capture_output=True)
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1)
+        self.assertTrue(refused.stderr.startswith("OAH_GATES_INPUTS_UNCOVERED"), refused.stderr)
+        with patch.object(unlazy, "PIN", stub_pin(self.unlazy)):
+            decision = hook_stop.decide({"cwd": str(self.repo)}, env=self.env(), home=self.tmp)
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("OAH_GATES_INPUTS_UNCOVERED", decision["reason"])
+
     def test_failing_rerun_blocks_finish(self):
         self.start()
         self.write_ledger(RUNNABLE)
@@ -259,6 +279,37 @@ class FinishGuardTest(unittest.TestCase):
         custom.parent.mkdir()
         custom.write_text(met_ledger(RUNNABLE), encoding="utf-8")
         self.assertIn("gates=structural", self.finish("--allow-structural", unlazy=False).stdout)
+
+    def test_multiple_custom_ledgers_keep_bindings_with_varying_output(self):
+        from oah.gates import check as check_mod
+        from oah.gates.bindings import BindingStore
+        from oah import hook_stop, unlazy
+
+        self.start("--gates", "checks/main.md", "--gates", "checks/other.md")
+        ledgers = [self.repo / "checks" / name for name in ("main.md", "other.md")]
+        ledgers[0].parent.mkdir()
+        for path in ledgers:
+            path.write_text(RUNNABLE, encoding="utf-8")
+        store = BindingStore(self.state, "t1")
+        for fingerprint in ("b", "c"):
+            (self.repo / "src" / "a.py").write_text(f"a = '{fingerprint}'\n", encoding="utf-8")
+            for path in ledgers:
+                text = met_ledger(RUNNABLE).replace("output-sha256=" + "a" * 64,
+                                                  "output-sha256=" + fingerprint * 64)
+                reply = passing(path, text)
+                reply["write"][str(path)] = text
+                self.stub.reply("gate-check.mjs", reply)
+                checked = check_mod.run_check(self.repo, path, store, unlazy_dir=self.unlazy,
+                                              node=self.stub.node, env=self.env())
+                self.assertEqual(checked.actions, {"G1": "run"})
+            self.stub.reply("gate-check.mjs", ALL_MET)
+            tools = GateTools(self.unlazy, self.stub.node, "")
+            report = guard.evaluate(self.repo, "t1", ["checks/main.md", "checks/other.md"], self.state,
+                                    tools=tools, allow_structural=False, env=self.env())
+            guard.write_summary(self.repo, "t1", report.summary_text)
+            with patch.object(unlazy, "PIN", stub_pin(self.unlazy)):
+                self.assertIsNone(hook_stop.decide({"cwd": str(self.repo)}, env=self.env(), home=self.tmp))
+        self.assertEqual(self.finish().returncode, 0)
 
     def test_gates_path_outside_repo_is_refused(self):
         refused = self.oah("start", "--task", "t1", "--agent", "claude", "--scope", "src", "--gates", "../x.md")
@@ -358,6 +409,19 @@ class WikiMaintenanceTest(unittest.TestCase):
     def last_event(self):
         lines = (self.state / "events.jsonl").read_text(encoding="utf-8").splitlines()
         return json.loads(lines[-1])
+
+    def test_unavailable_verifier_requires_recorded_override(self):
+        with patch.dict(sys.modules, {"oah.wiki": None}):
+            refused = self.finish()
+            self.assertEqual(refused.returncode, 1)
+            self.assertTrue(refused.stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"), refused.stderr)
+            self.assertIn("--allow-missing-wiki-maintenance", refused.stderr)
+            allowed = self.finish("--allow-missing-wiki-maintenance")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        record = self.last_event()["wiki_maintenance"]
+        self.assertTrue(record["override"])
+        self.assertEqual(record["task"], "t1")
+        self.assertTrue(record["problems"])
 
     def test_verified_outputs_are_exempt_and_recorded(self):
         outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/index.md", "# Index\nnew\n"),

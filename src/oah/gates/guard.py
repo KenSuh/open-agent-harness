@@ -24,7 +24,6 @@ from oah.gates.bindings import BindingStore
 from oah.gates.check import GateRefused
 from oah.atomic import write_text_atomic
 from oah.gates.context import SUMMARY_NAME, GateTools, default_ledger, task_dir
-from oah.gates.inputs import collect
 from oah.gates.ledger import parse_ledger, sha256_text
 from oah.gates.status import LedgerStatus, ledger_status, structural_status
 
@@ -95,8 +94,8 @@ def assess(root: pathlib.Path, task: str, declared: Sequence[str], state_dir: pa
         result.handoff += [_label(gate_id, key, many) for gate_id in status.abandoned]
         if tools.available:
             if manifest is None:
-                manifest = collect(root, env_names=env_names, env=env,
-                                   tools=check_mod.tool_versions(tools.unlazy_dir))
+                manifest = check_mod.collect_inputs(root, ledgers, store, env_names=env_names, env=env,
+                                                    tools=check_mod.tool_versions(tools.unlazy_dir), node=tools.node)
             fresh = check_mod.freshness(root, path, store, unlazy_dir=tools.unlazy_dir, env_names=env_names,
                                         env=env, manifest=manifest)
             result.fresh[key] = fresh

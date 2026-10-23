@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +69,23 @@ class StopHookTest(unittest.TestCase):
         self.assertEqual(self.decide(), block)
         call = self.stub.calls("stop-hook.mjs")[-1]
         self.assertEqual(json.loads(call["stdin"])["session_id"], "s1")
+
+    def test_relative_handover_from_subdirectory_runs_verified_copy(self):
+        subdir = self.repo / "subdir"
+        subdir.mkdir()
+        verified = make_unlazy_dir(subdir / "unlazy")
+        git_commit(verified, {"scripts/stop-hook.mjs":
+                            'print(\'{"systemMessage": "verified copy"}\')\n'})
+        attacker = self.repo / "unlazy" / "scripts"
+        attacker.mkdir(parents=True)
+        (attacker / "gate-check.mjs").write_text("", encoding="utf-8")
+        (attacker / "stop-hook.mjs").write_text(
+            'print(\'{"systemMessage": "unverified copy"}\')\n', encoding="utf-8")
+        env = dict(self.env(), OAH_UNLAZY_DIR="unlazy", OAH_NODE=json.dumps([sys.executable]))
+        result = run_cli(["hook", "stop"], cwd=subdir, env=env, pin=stub_pin(verified),
+                         stdin=json.dumps({"cwd": str(subdir), "session_id": "relative"}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"systemMessage": "verified copy"})
 
     def test_no_lease_skips_handover_when_unlazy_hook_is_installed(self):
         settings = self.repo / ".claude" / "settings.local.json"

@@ -206,7 +206,12 @@ def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> 
     try:
         from oah.wiki import verify_maintenance
     except ImportError:
-        return set(), None
+        problem = "the wiki maintenance verifier is unavailable"
+        if not allow_missing:
+            raise LeaseError("OAH_WIKI_MAINTENANCE_MISSING",
+                             f"{problem}. Install oah with wiki support and run oah wiki maintain --task "
+                             f"{lease.task}, or pass --allow-missing-wiki-maintenance (recorded)") from None
+        return set(), {"task": lease.task, "override": True, "problems": [problem]}
     check = verify_maintenance(root, lease.task)
     if not check.ok:
         if not allow_missing:

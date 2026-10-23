@@ -213,10 +213,10 @@ def git_hook_text(kind: str) -> str:
             f'exec {command_for(kind)} "$@"\n')
 
 
-def _git_state(text: str | None) -> str:
+def _git_state(text: str | None, kind: str) -> str:
     if text is None:
         return "absent"
-    return "installed" if MARKER in text else "foreign"
+    return "installed" if text == git_hook_text(kind) else "foreign"
 
 
 def _git_install(kind: str, root: pathlib.Path, dry_run: bool, force: bool) -> Change:
@@ -226,10 +226,10 @@ def _git_install(kind: str, root: pathlib.Path, dry_run: bool, force: bool) -> C
     if before == after:
         return Change(kind, path, "unchanged", "")
     backup = None
-    if _git_state(before) == "foreign":
+    if before is not None:
         backup = path.with_name(path.name + BACKUP_SUFFIX)
         if not force:
-            raise HookError("OAH_HOOK_FOREIGN", f"{path} already holds a {kind} hook that oah did not write. Pass "
+            raise HookError("OAH_HOOK_FOREIGN", f"{path} holds a foreign or modified {kind} hook. Pass "
                                                 "--force to replace it; oah keeps it as a backup and puts it back "
                                                 f"on oah hooks uninstall {kind}")
         if backup.exists():
@@ -253,7 +253,7 @@ def _make_executable(path: pathlib.Path) -> None:
 def _git_uninstall(kind: str, root: pathlib.Path, dry_run: bool) -> Change:
     path = git_hook_path(root, kind)
     before = _read_text(path)
-    if _git_state(before) != "installed":
+    if before != git_hook_text(kind):
         return Change(kind, path, "unchanged", "")
     backup = path.with_name(path.name + BACKUP_SUFFIX)
     restored = _read_text(backup) if backup.exists() else None
@@ -303,5 +303,5 @@ def status(root: pathlib.Path, *, shared: bool = False) -> list[Row]:
         rows.append(Row(kind, path, "installed" if _claude_installed(data, kind) else "absent"))
     for kind in GIT_KINDS:
         hook = git_hook_path(root, kind)
-        rows.append(Row(kind, hook, _git_state(_read_text(hook))))
+        rows.append(Row(kind, hook, _git_state(_read_text(hook), kind)))
     return rows

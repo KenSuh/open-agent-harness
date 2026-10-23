@@ -161,6 +161,38 @@ class GitHooksTest(unittest.TestCase):
         self.assertEqual(self.hook.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
         self.assertFalse(change.backup.exists())
 
+    def test_edited_managed_hook_requires_force_and_is_restored(self):
+        hooks.install("pre-push", self.repo, dry_run=False)
+        edited = hooks.git_hook_text("pre-push") + "# user addition\necho keep-me\n"
+        self.hook.write_bytes(edited.encode("utf-8"))
+        with self.assertRaises(hooks.HookError):
+            hooks.install("pre-push", self.repo, dry_run=False)
+        self.assertEqual(self.hook.read_bytes(), edited.encode("utf-8"))
+        self.assertEqual(hooks.uninstall("pre-push", self.repo, dry_run=False).action, "unchanged")
+        self.assertEqual(self.hook.read_bytes(), edited.encode("utf-8"))
+        self.assertEqual({row.kind: row.state for row in hooks.status(self.repo)}["pre-push"], "foreign")
+        preview = hooks.install("pre-push", self.repo, dry_run=True, force=True)
+        self.assertEqual(self.hook.read_bytes(), edited.encode("utf-8"))
+        self.assertFalse(preview.backup.exists())
+        change = hooks.install("pre-push", self.repo, dry_run=False, force=True)
+        self.assertEqual(change.backup.read_bytes(), edited.encode("utf-8"))
+        hooks.uninstall("pre-push", self.repo, dry_run=False)
+        self.assertEqual(self.hook.read_bytes(), edited.encode("utf-8"))
+
+    def test_uninstall_preserves_edited_managed_hook_and_existing_backup(self):
+        self.hook.write_text("#!/bin/sh\necho original\n", encoding="utf-8")
+        change = hooks.install("pre-push", self.repo, dry_run=False, force=True)
+        edited = hooks.git_hook_text("pre-push") + "# user addition\n"
+        self.hook.write_bytes(edited.encode("utf-8"))
+        original_backup = change.backup.read_bytes()
+        removed = hooks.uninstall("pre-push", self.repo, dry_run=False)
+        self.assertEqual(removed.action, "unchanged")
+        self.assertEqual(self.hook.read_bytes(), edited.encode("utf-8"))
+        self.assertEqual(change.backup.read_bytes(), original_backup)
+        with self.assertRaises(hooks.HookError) as caught:
+            hooks.install("pre-push", self.repo, dry_run=False, force=True)
+        self.assertEqual(caught.exception.code, "OAH_HOOK_BACKUP_EXISTS")
+
     def test_hooks_path_config_is_respected(self):
         subprocess.run(["git", "-C", str(self.repo), "config", "core.hooksPath", "githooks"], check=True)
         change = hooks.install("pre-push", self.repo, dry_run=False)

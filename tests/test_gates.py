@@ -223,8 +223,24 @@ class PinTest(unittest.TestCase):
 
     def test_crlf_checkout_still_matches(self):
         path = self.folder / "scripts" / "gate-check.mjs"
-        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        lf = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(lf.replace(b"\n", b"\r\n"))
         self.assertEqual(unlazy.verify_pin(self.folder, self.pin), [])
+
+    def test_pin_normalizes_only_crlf(self):
+        path = self.folder / "scripts" / "gate-check.mjs"
+        lf = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(lf.replace(b"\n", b"\r\r\n"))
+        self.assertIn("scripts/gate-check.mjs differs from the pinned copy",
+                      unlazy.verify_pin(self.folder, self.pin))
+
+    @unittest.skipUnless(os.name == "nt", "requires Git for Windows CRLF checkout")
+    def test_git_crlf_checkout_matches(self):
+        checkout = self.tmp / "crlf"
+        subprocess.run(["git", "-c", "core.autocrlf=true", "clone", "--quiet", "--no-local",
+                        str(self.folder), str(checkout)], check=True, capture_output=True)
+        self.assertIn(b"\r\n", (checkout / "scripts" / "gate-check.mjs").read_bytes())
+        self.assertEqual(unlazy.verify_pin(checkout, self.pin), [])
 
     def test_other_commit_is_refused(self):
         from tests.helpers import git_commit
@@ -420,7 +436,7 @@ if __name__ == "__main__":
 from oah import gates_cli  # noqa: E402
 from oah.gates import check as gate_check_mod  # noqa: E402
 from oah.gates.bindings import BindingStore  # noqa: E402
-from oah.gates.inputs import collect  # noqa: E402
+from oah.gates.inputs import InputsUncovered, collect  # noqa: E402
 from oah.lease import TASK_RE  # noqa: E402
 from tests.fixtures.gates.support import run_cli, stub_pin  # noqa: E402
 from tests.helpers import git_commit, make_git_repo  # noqa: E402
@@ -506,6 +522,69 @@ class InputsTest(unittest.TestCase):
         tooled = collect(self.repo, tools={"node": "v1"})
         self.assertNotEqual(tooled.digest_for(None), collect(self.repo, tools={"node": "v2"}).digest_for(None))
 
+    def test_execution_environment_is_mandatory(self):
+        base_env = dict(os.environ)
+        base = collect(self.repo, env=base_env).digest_for(None)
+        for name, value in (("PATH", str(self.repo)), ("UNLAZY_SHELL", str(self.repo / "shell")),
+                            ("OAH_NODE", json.dumps([sys.executable])), ("ComSpec", "other-cmd.exe"),
+                            ("PATHEXT", ".EXE")):
+            with self.subTest(name=name):
+                self.assertNotEqual(base, collect(self.repo, env=dict(base_env, **{name: value})).digest_for(None))
+
+    def test_runtime_bytes_are_inputs_even_at_same_path(self):
+        import shutil
+
+        runtime = self.repo.parent / ("runtime.exe" if os.name == "nt" else "runtime")
+        for name in ("OAH_NODE", "UNLAZY_SHELL"):
+            with self.subTest(name=name):
+                shutil.copyfile(sys.executable, runtime)
+                runtime.chmod(0o755)
+                value = json.dumps([str(runtime)]) if name == "OAH_NODE" else str(runtime)
+                env = dict(os.environ, **{name: value})
+                base = collect(self.repo, env=env).digest_for(None)
+                with runtime.open("ab") as handle:
+                    handle.write(b"changed runtime")
+                self.assertNotEqual(base, collect(self.repo, env=env).digest_for(None))
+
+    def test_default_node_identity_uses_supplied_path(self):
+        import shutil
+
+        runtime = self.repo.parent / ("node.exe" if os.name == "nt" else "node")
+        shutil.copyfile(sys.executable, runtime)
+        runtime.chmod(0o755)
+        env = dict(os.environ, PATH=str(runtime.parent), OAH_NODE="")
+        base = collect(self.repo, env=env).digest_for(None)
+        with runtime.open("ab") as handle:
+            handle.write(b"changed node")
+        self.assertNotEqual(base, collect(self.repo, env=env).digest_for(None))
+
+    @unittest.skipUnless(os.name == "nt", "Windows environment names are case-insensitive")
+    def test_windows_execution_environment_names_are_case_insensitive(self):
+        env = dict(os.environ, OAH_NODE=json.dumps([sys.executable]))
+        folded = {key.lower(): value for key, value in env.items()}
+        self.assertEqual(collect(self.repo, env=env).digest_for(None), collect(self.repo, env=folded).digest_for(None))
+
+    def test_submodule_inputs_are_refused_in_every_worktree_state(self):
+        import shutil
+
+        sub = make_git_repo(self)
+        first = git_commit(sub, {"file.txt": "one\n"})
+        git_commit(sub, {"file.txt": "two\n"})
+        subprocess.run(["git", "-C", str(self.repo), "-c", "protocol.file.allow=always", "submodule", "add",
+                        "--quiet", str(sub), "vendor/sub"], check=True, capture_output=True)
+        live = self.repo / "vendor" / "sub"
+        for state in ("clean", "dirty", "different-head", "missing"):
+            with self.subTest(state=state):
+                if state == "dirty":
+                    (live / "file.txt").write_text("dirty\n", encoding="utf-8")
+                elif state == "different-head":
+                    subprocess.run(["git", "-C", str(live), "checkout", "--quiet", "--force", first], check=True)
+                elif state == "missing":
+                    shutil.rmtree(live)
+                with self.assertRaises(InputsUncovered) as caught:
+                    collect(self.repo)
+                self.assertEqual(caught.exception.code, "OAH_GATES_INPUTS_UNCOVERED")
+
 
 class GateCheckFlowTest(unittest.TestCase):
     def setUp(self):
@@ -533,15 +612,29 @@ class GateCheckFlowTest(unittest.TestCase):
         again = self.check()
         self.assertEqual(again.actions["G1"], "carry")
         self.assertEqual(len(self.stub.calls("gate-check.mjs")), 1)  # nothing affected, nothing run
-        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"],
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                                env=self.stub.env())["G1"],
                          "fresh")
         (self.repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
-        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"], "stale")
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                                env=self.stub.env())["G1"], "stale")
         third = self.check()
         self.assertEqual(len(self.stub.calls("gate-check.mjs")), 2)
         self.assertIn("--reverify", self.stub.calls("gate-check.mjs")[-1]["args"])
         self.assertEqual(third.actions["G1"], "run")
-        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy)["G1"], "fresh")
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                                env=self.stub.env())["G1"], "fresh")
+
+    def test_environment_changes_stale_bindings(self):
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(RUNNABLE)))
+        self.assertTrue(self.check().ok)
+        for name, value in (("PATH", str(self.tmp)), ("UNLAZY_SHELL", str(self.tmp / "other-shell")),
+                            ("OAH_NODE", json.dumps([sys.executable]))):
+            with self.subTest(name=name):
+                env = self.stub.env(**{name: value})
+                self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store,
+                                                        unlazy_dir=self.unlazy, env=env), {"G1": "stale"})
 
     def test_unaffected_gate_gets_carry_record(self):
         self.ledger.write_text(SPLIT, encoding="utf-8")
@@ -578,6 +671,52 @@ class GateCheckFlowTest(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertEqual(report.actions["G1"], "invalidated")
         self.assertNotIn("G1", self.store.load().get(gate_check_mod.ledger_key(self.repo, self.ledger), {}))
+
+    def test_changed_definition_or_input_declaration_is_not_bound(self):
+        for text in (RUNNABLE.replace("src/a.py", "src/b.py"),
+                     RUNNABLE.replace("  EXPECT:", "  OAH-INPUTS: docs\n  EXPECT:"),
+                     RUNNABLE.replace("  EXPECT:", "  CWD: docs\n  EXPECT:"),
+                     RUNNABLE.replace("the module exists", "a different outcome")):
+            with self.subTest(text=text):
+                self.ledger.write_text(RUNNABLE, encoding="utf-8")
+                self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(text)))
+                report = self.check()
+                self.assertEqual(report.actions["G1"], "invalidated")
+                self.assertNotIn("G1", self.store.load().get(gate_check_mod.ledger_key(self.repo, self.ledger), {}))
+
+    def test_stale_result_overrides_pass_and_carry(self):
+        text = SPLIT.replace("- [x] G2", "- [ ] G2").replace(
+            "  OAH-INPUTS: docs\n  EVIDENCE: reviewed against the outline",
+            "  CHECK: oah check exists docs/readme.md\n  OAH-INPUTS: docs\n"
+            "  EXPECT: OAH_CHECK_OK\n  EVIDENCE: pending")
+        for qualifier, emit_pass in (("GATES", False), ("GATES", True), ("my gates", False), ("my gates", True)):
+            with self.subTest(qualifier=qualifier, emit_pass=emit_pass):
+                self.ledger.write_text(text, encoding="utf-8")
+                self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(text), ids=("G1", "G2")))
+                self.assertTrue(self.check().ok)
+                (self.repo / "docs" / "readme.md").write_text(f"{qualifier} {emit_pass}\n", encoding="utf-8")
+                reply = pass_reply(self.ledger, met_ledger(text), ids=("G1", "G2"))
+                prefix = f"  PASS {qualifier}:G1: title\n" if emit_pass else ""
+                reply.update(stdout=prefix + f"  PASS {qualifier}:G2: title\n"
+                             f"  STALE {qualifier}:G1: result not written\nUNMET: 1 (met: 1)\n", code=1)
+                self.stub.reply("gate-check.mjs", reply)
+                self.assertEqual(self.check().actions, {"G1": "invalidated", "G2": "run"})
+
+    def test_custom_ledger_output_does_not_invalidate_itself(self):
+        self.ledger = self.repo / "checks" / "main.md"
+        self.ledger.parent.mkdir()
+        self.ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(RUNNABLE)))
+        self.assertEqual(self.check().actions, {"G1": "run"})
+        (self.repo / "src" / "a.py").write_text("changed\n", encoding="utf-8")
+        changed_output = met_ledger(RUNNABLE).replace("output-sha256=" + "a" * 64, "output-sha256=" + "b" * 64)
+        self.stub.reply("gate-check.mjs", pass_reply(self.ledger, changed_output))
+        self.assertEqual(self.check().actions, {"G1": "run"})
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                                env=self.stub.env()), {"G1": "fresh"})
+        self.ledger.write_text(changed_output.replace("src/a.py", "src/b.py"), encoding="utf-8")
+        self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store, unlazy_dir=self.unlazy,
+                                                env=self.stub.env()), {"G1": "stale"})
 
     def test_unapproved_gate_is_not_bound(self):
         self.ledger.write_text(RUNNABLE, encoding="utf-8")

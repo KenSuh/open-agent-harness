@@ -28,7 +28,7 @@ def find_unlazy_dir(repo_root: pathlib.Path | None, env: Mapping[str, str],
     """Return (folder, reason). An OAH_UNLAZY_DIR value is the only folder checked."""
     override = env.get(ENV_VAR)
     if override:
-        folder = pathlib.Path(override)
+        folder = pathlib.Path(override).resolve()
         if _is_unlazy(folder):
             return folder, f"from {ENV_VAR}"
         return None, f"{ENV_VAR} has no scripts/gate-check.mjs"
@@ -38,7 +38,7 @@ def find_unlazy_dir(repo_root: pathlib.Path | None, env: Mapping[str, str],
     candidates += [home / ".agents" / "skills" / "unlazy", home / ".claude" / "skills" / "unlazy"]
     for folder in candidates:
         if _is_unlazy(folder):
-            return folder, "found"
+            return folder.resolve(), "found"
     return None, f"unlazy not found (install: {INSTALL_HINT})"
 
 
@@ -211,14 +211,14 @@ def resolve_node(env: Mapping[str, str]) -> tuple[str, ...] | None:
                                                   '["C:\\\\Program Files\\\\nodejs\\\\node.exe"]')
         return tuple(value)
     try:
-        found = resolve_command("node")
+        found = resolve_command("node", search_path=env.get("PATH", ""))
     except UnsupportedBatchShim as exc:
         raise UnlazyError("OAH_NODE_INVALID", str(exc)) from exc
     return found.argv if found is not None else None
 
 
 def _script(unlazy_dir: pathlib.Path, name: str) -> pathlib.Path:
-    script = pathlib.Path(unlazy_dir) / "scripts" / name
+    script = pathlib.Path(unlazy_dir).resolve() / "scripts" / name
     if not script.is_file():
         raise UnlazyError("OAH_UNLAZY_INCOMPLETE", f"{unlazy_dir} has no scripts/{name}; install the pinned copy: "
                                                    f"{install_hint(unlazy_dir)}")

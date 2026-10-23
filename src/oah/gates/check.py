@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import glob
 import pathlib
 import re
 from typing import Mapping, Sequence
@@ -24,10 +25,10 @@ from typing import Mapping, Sequence
 from oah import __version__
 from oah import unlazy as unlazy_mod
 from oah.gates.bindings import BindingStore
-from oah.gates.inputs import Manifest, collect
+from oah.gates.inputs import InputsUncovered, Manifest, collect
 from oah.gates.ledger import Gate, Ledger, gate_state, parse_ledger, sha256_text
 
-RESULT_RE = re.compile(r"^  (PASS|FAIL) (\S+?): ")
+RESULT_RE = re.compile(r"^  (PASS|FAIL|STALE) (.+?): ")
 
 
 class GateRefused(Exception):
@@ -63,6 +64,22 @@ def ledger_key(root: pathlib.Path, ledger: pathlib.Path) -> str:
 
 def tool_versions(unlazy_dir: pathlib.Path | None) -> dict[str, str | None]:
     return {"oah": __version__, "unlazy": unlazy_mod.unlazy_version(unlazy_dir) if unlazy_dir else None}
+
+
+def collect_inputs(root: pathlib.Path, ledger_paths: Sequence[pathlib.Path], store: BindingStore, **options) -> Manifest:
+    """Exclude the task's governed ledger outputs; their definitions/evidence are checked separately."""
+    from oah.lease import Store
+
+    root = pathlib.Path(root)
+    paths = list(ledger_paths)
+    for lease, _stale in Store(store.state_dir).snapshot():
+        if lease.task == store.task and pathlib.Path(lease.worktree).resolve() == pathlib.Path(root).resolve():
+            paths += [root / pathlib.PurePosixPath(name) for name in lease.gates]
+    excludes = [glob.escape(ledger_key(root, path)) for path in paths]
+    try:
+        return collect(root, extra_excludes=excludes, **options)
+    except InputsUncovered as exc:
+        raise GateRefused(exc.code, exc.message) from exc
 
 
 def _gate_digests(gate: Gate) -> dict:
@@ -102,7 +119,8 @@ def freshness(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
               env: Mapping[str, str] | None = None, manifest: Manifest | None = None) -> dict[str, str]:
     """Per gate: fresh, stale, missing or abandoned, judged against the current inputs."""
     ledger = _parse(ledger_path)
-    manifest = manifest or collect(root, env_names=env_names, env=env, tools=tool_versions(unlazy_dir))
+    manifest = manifest or collect_inputs(root, [ledger_path], store, env_names=env_names, env=env,
+                                          tools=tool_versions(unlazy_dir))
     bound = store.load().get(ledger_key(root, ledger_path), {})
     result = {}
     for gate in ledger.gates:
@@ -119,7 +137,7 @@ def freshness(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
 
 
 def _results(stdout: str, outcome: str) -> set[str]:
-    """Gate ids that gate-check reported as PASS or FAIL."""
+    """Gate ids that gate-check reported as PASS, FAIL or discarded STALE results."""
     ids = set()
     for line in stdout.splitlines():
         match = RESULT_RE.match(line)
@@ -134,14 +152,15 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
     """Re-verify affected gates through unlazy and record bindings. Never executes a CHECK itself."""
     root = pathlib.Path(root)
     ledger = _parse(ledger_path)
+    original = {gate.id: (gate.definition, gate.title, gate.inputs) for gate in ledger.gates}
     key = ledger_key(root, ledger_path)
     tools = tool_versions(unlazy_dir)
-    before = collect(root, env_names=env_names, env=env, tools=tools)
+    before = collect_inputs(root, [ledger_path], store, env_names=env_names, env=env, tools=tools, node=node)
     bound = store.load().get(key, {})
     affected = {gate.id for gate in ledger.gates if gate.id not in ledger.abandoned
                 and not _matches(bound.get(gate.id), gate, before.digest_for(gate.inputs))}
     report = CheckReport(actions={}, lines=[])
-    after, passed, failed = before, set(), set()
+    after, passed, failed, discarded = before, set(), set(), set()
     if any(gate.runnable for gate in ledger.gates if gate.id in affected):
         result = unlazy_mod.gate_check(unlazy_dir, ledger_path, node=node, mode="reverify", approve=approve,
                                        cwd=root, root=root, timeout=timeout, env=env)
@@ -151,7 +170,9 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
             detail = (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
             raise GateRefused("OAH_UNLAZY_FAILED", f"unlazy gate-check failed: {detail[-600:]}")
         passed, failed = _results(result.stdout, "PASS"), _results(result.stdout, "FAIL")
-        after = collect(root, env_names=env_names, env=env, tools=tools)
+        discarded = _results(result.stdout, "STALE")
+        after = collect_inputs(root, [ledger_path], store, env_names=env_names, env=env, tools=tool_versions(unlazy_dir),
+                               node=node)
         ledger = _parse(ledger_path)
     entries: dict[str, dict] = {}
     for gate in ledger.gates:
@@ -160,12 +181,14 @@ def run_check(root: pathlib.Path, ledger_path: pathlib.Path, store: BindingStore
         inputs_before, inputs_after = before.digest_for(gate.inputs), after.digest_for(gate.inputs)
         if state == "abandoned":
             action = "abandoned"
+        elif original.get(gate.id) != (gate.definition, gate.title, gate.inputs) or gate.id in discarded:
+            action = "invalidated"
         elif inputs_before != inputs_after:
             action = "invalidated"
-        elif gate.runnable and gate.id in passed and state == "met":
-            action = "run"
         elif gate.runnable and gate.id in failed:
             action = "failed"
+        elif gate.runnable and gate.id in passed and state == "met":
+            action = "run"
         elif gate.id not in affected and state == "met" and _matches(old, gate, inputs_after):
             action = "carry"
         elif gate.runnable and gate.id in affected:
