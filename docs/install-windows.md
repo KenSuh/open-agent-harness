@@ -3,26 +3,36 @@
 You need Windows 11 (Windows 10 22H2 works on a best-effort basis) and PowerShell. WSL is not
 needed. One command does the rest, and it asks before it installs anything.
 
-## 1. Get the code
+## 1. Choose how to install
 
-If you have `git`, open PowerShell, clone the repository and go into it:
+There are two ways. Both run the same installer and ask the same questions.
+
+**From a clone (works now, while the repository is private).** You need Git first. If
+`git --version` fails, run `winget install --id Git.Git -e` and open a new PowerShell window. Then:
 
 ```powershell
 git clone <repository URL> open-agent-harness
 cd open-agent-harness
-```
-
-No `git` yet? Download the repository as a ZIP from its page, unzip it, and `cd` into the folder.
-The installer offers to install Git for Windows for you.
-
-## 2. Run the installer
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 ```
 
 `-ExecutionPolicy Bypass` applies to this one run only; no system setting changes. If you prefer,
 run `Unblock-File .\install\install.ps1` once and then start it under your normal policy.
+
+**With one command (once a release is published).** No clone and no Git needed:
+
+```powershell
+irm <release URL>/install.ps1 | iex
+```
+
+This form downloads the pinned release archive, checks its SHA-256 fingerprint against the one
+published with the release, and stops before unpacking anything if they differ
+(`OAH_INSTALL_DIGEST_MISMATCH`). Everything it unpacks goes to a temporary folder that is removed at
+the end, and your PowerShell window stays open whatever happens. Until a release is published it
+stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then. To pass options this way, use
+`& ([scriptblock]::Create((irm <release URL>/install.ps1))) -DryRun`.
+
+## 2. What the installer does
 
 To see every step first without changing anything, add `-DryRun`.
 
@@ -37,13 +47,15 @@ The installer goes through five steps.
    After each install it reloads PATH, so the new tool works in the same window.
 3. **Install `oah`.** With uv: `uv tool install --force <this folder>`. Without uv it uses `pipx`,
    or `python -m pip install --user` as a last resort.
-4. **Check your PATH.** If the folder that holds `oah` is not on your PATH, it offers
-   `uv tool update-shell`, which adds that folder to your user PATH setting. It runs only if you
-   answer `y`. For pipx or pip it prints a PowerShell command you can run yourself.
+4. **Check that a new PowerShell window finds `oah`.** It looks for `oah` on the PATH a new window
+   gets from your settings. If it is not found, it offers `uv tool update-shell`, which adds that
+   folder to your user PATH setting. It runs only if you answer `y`. For pipx or pip it prints a
+   PowerShell command you can run yourself.
 5. **Run `oah doctor`.** It lists every tool, and for each missing one the command that installs it.
 
 The last line is `OAH_INSTALL_OK` when everything is ready, or `OAH_INSTALL_INCOMPLETE` when a
-required tool still needs your attention. The list above it says what to do.
+required tool still needs your attention. The list above it says what to do. Then open a new
+PowerShell window, go to your project folder and run `oah init`.
 
 ### Options
 
@@ -77,7 +89,7 @@ an API key.
 | Claude Code | required | `irm https://claude.ai/install.ps1 \| iex` or `winget install Anthropic.ClaudeCode` |
 | Codex CLI | required | `irm https://chatgpt.com/codex/install.ps1 \| iex` |
 | uv | recommended | `irm https://astral.sh/uv/install.ps1 \| iex` |
-| Node.js | recommended (for unlazy) | `winget install OpenJS.NodeJS.LTS` |
+| Node.js | recommended; required in a project that uses gates | `winget install OpenJS.NodeJS.LTS` |
 | unlazy | recommended (gates) | `npx skills add Leonxlnx/unlazy` |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `winget install --id GitHub.cli --source winget` |
@@ -85,7 +97,11 @@ an API key.
 | jq | recommended | `winget install jqlang.jq` |
 | ripgrep (`rg`) | recommended | `winget install BurntSushi.ripgrep.MSVC` |
 
-The `irm … | iex` one-liners run in a separate Windows PowerShell process. Aside (browser tasks)
+The `irm … | iex` one-liners run in a separate Windows PowerShell process.
+
+`oah doctor` counts Node as required once your project uses gates: when it has
+`.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say
+`enabled = false`. Before that it is only recommended. Aside (browser tasks)
 and Orca (a desktop app) are optional and install from their own download pages.
 
 ## When something goes wrong

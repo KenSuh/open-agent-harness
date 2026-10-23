@@ -3,25 +3,35 @@
 You need macOS 13 or newer and a Terminal window. One command does the rest, and it asks before it
 installs anything.
 
-## 1. Get the code
+## 1. Choose how to install
 
-If you have `git`, clone the repository and go into it:
+There are two ways. Both run the same installer and ask the same questions.
+
+**From a clone (works now, while the repository is private).** You need `git` first. If
+`git --version` fails, run `xcode-select --install` and finish the window that opens. Then:
 
 ```bash
 git clone <repository URL> open-agent-harness
 cd open-agent-harness
-```
-
-No `git` yet? Download the repository as a ZIP from its page, unzip it, and `cd` into the folder.
-The installer offers to install `git` for you.
-
-## 2. Run the installer
-
-```bash
 bash install/install.sh
 ```
 
-To see every step first without changing anything, run `bash install/install.sh --dry-run`.
+**With one command (once a release is published).** No clone and no `git` needed:
+
+```bash
+curl -fsSL <release URL>/install.sh | bash
+```
+
+This form downloads the pinned release archive, checks its SHA-256 fingerprint against the one
+published with the release, and stops before unpacking anything if they differ
+(`OAH_INSTALL_DIGEST_MISMATCH`). Everything it unpacks goes to a temporary folder that is removed at
+the end. Until a release is published it stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then.
+To pass options this way, write them after `bash -s --`, for example
+`curl -fsSL <release URL>/install.sh | bash -s -- --dry-run`.
+
+## 2. What the installer does
+
+To see every step first without changing anything, add `--dry-run`.
 
 The installer goes through five steps.
 
@@ -34,13 +44,15 @@ The installer goes through five steps.
    Installers that need your password ask you for it themselves; `oah` never sees it.
 3. **Install `oah`.** With uv: `uv tool install --force <this folder>`. Without uv it uses `pipx`,
    or `python -m pip install --user` as a last resort.
-4. **Check your PATH.** If the folder that holds `oah` is not on your PATH, it offers
-   `uv tool update-shell`, which edits your shell profile. It runs only if you answer `y`. For pipx
-   or pip it prints the one line to add to `~/.zprofile` instead.
+4. **Check that a new terminal finds `oah`.** It starts your shell the way a new Terminal window
+   does and looks for `oah`. If it is not found, it offers `uv tool update-shell`, which edits your
+   shell profile. It runs only if you answer `y`. For pipx or pip it prints the one line to add to
+   `~/.zprofile` instead.
 5. **Run `oah doctor`.** It lists every tool, and for each missing one the command that installs it.
 
 The last line is `OAH_INSTALL_OK` when everything is ready, or `OAH_INSTALL_INCOMPLETE` when a
-required tool still needs your attention. The list above it says what to do.
+required tool still needs your attention. The list above it says what to do. Then open a new
+Terminal window, go to your project folder and run `oah init`.
 
 ### Options
 
@@ -74,7 +86,7 @@ an API key.
 | Claude Code | required | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | Codex CLI | required | `brew install --cask codex` or `npm install -g @openai/codex` |
 | uv | recommended | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| Node.js | recommended (for unlazy) | `brew install node@24` |
+| Node.js | recommended; required in a project that uses gates | `brew install node` |
 | unlazy | recommended (gates) | `npx skills add Leonxlnx/unlazy` |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `brew install gh` |
@@ -83,8 +95,12 @@ an API key.
 | ripgrep (`rg`) | recommended | `brew install ripgrep` |
 
 Commands that start with `brew` need [Homebrew](https://brew.sh). Without it, the setup shows the
-tool's download page instead. Homebrew keeps `node@24` off your PATH until you follow the hint it
-prints at the end of the install.
+tool's download page instead. `brew install node` installs the current Node.js release and puts it
+on your PATH; unlazy needs Node 16 or newer.
+
+`oah doctor` counts Node as required once your project uses gates: when it has
+`.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say
+`enabled = false`. Before that it is only recommended.
 
 Aside (browser tasks) and Orca (a desktop app) are optional and install from their own download
 pages.
