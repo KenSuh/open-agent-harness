@@ -23,7 +23,8 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # The Windows suite passed 15 minutes once the toolkit lane joined the gates lane; leave headroom.
+    timeout-minutes: 30
     steps:
       # Test the PR head itself; GitHub's temporary merge commit carries an identity we do not control.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
