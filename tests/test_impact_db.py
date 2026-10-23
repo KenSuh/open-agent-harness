@@ -278,6 +278,51 @@ class ExtractTest(unittest.TestCase):
             "CREATE FUNCTION f() RETURNS int AS E'SELECT\\n id FROM users' LANGUAGE sql;"})
         self.assertIn(['db_routine:f', 'db_table:users', 'uses', 'postgres.sql', 2], graph['links'])
 
+    def test_mysql_version_comment_view_is_reported(self):
+        graph = sqlplugin.extract({'mysql.sql':
+            '\n/*!50001 CREATE VIEW v AS SELECT * FROM users */;'})
+        self.assertTrue(any(region['file'] == 'mysql.sql' and region['line'] == 2
+                            and 'executable comment' in region['reason']
+                            for region in graph['unparsed']))
+
+    def test_mysql_version_comment_trigger_is_reported(self):
+        graph = sqlplugin.extract({'mysql.sql':
+            '\n/*!50003 CREATE TRIGGER t AFTER INSERT ON users FOR EACH ROW\n'
+            'BEGIN UPDATE users SET id = 1; END */;'})
+        self.assertTrue(any(region['file'] == 'mysql.sql' and region['line'] == 2
+                            and 'executable comment' in region['reason']
+                            for region in graph['unparsed']))
+
+    def test_postgres_standard_routine_backslashes_do_not_create_ghosts(self):
+        for backslash in ('\\', '\\\\'):
+            with self.subTest(backslash=backslash):
+                body = "SELECT concat(''" + backslash + "'', ''CREATE TABLE ghost(id int);'', ''" + backslash + "'')"
+                graph = sqlplugin.extract({'postgres.sql':
+                    "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS '" + body + "';\n"
+                    'CREATE TABLE following(id int);'})
+                self.assertEqual(set(graph['entities']), {'db_routine:f', 'db_table:following'})
+                self.assertEqual(graph['links'], [])
+                self.assertEqual(graph['entities']['db_table:following']['events'],
+                                 [['postgres.sql', 2, 'create']])
+
+    def test_executable_comments_are_bounded_and_reported(self):
+        code = textwrap.dedent('''
+            import sys
+            from oah.impact import sqlplugin
+            graph = sqlplugin.extract({'mysql.sql': sys.stdin.read()})
+            regions = [region for region in graph['unparsed']
+                       if 'executable comment' in region['reason']]
+            assert len(regions) == 20001, len(regions)
+            assert regions[0]['line'] == 2, regions[0]
+            assert set(graph['entities']) == {'db_table:following'}, graph['entities']
+        ''')
+        text = ('\n/*!' + '5' * 256000 + ' CREATE TABLE hidden(id int); */;\n' +
+                '/*! CREATE VIEW hidden AS SELECT 1 */;\n' * 20000 +
+                'CREATE TABLE following(id int);')
+        result = subprocess.run([sys.executable, '-c', code], input=text, capture_output=True,
+                                text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_compound_body_extracts_nested_ddl(self):
         text = ('DELIMITER //\nCREATE PROCEDURE p()\nBEGIN\n'
                 '  CREATE TABLE scratch(id int);\n'
@@ -343,7 +388,7 @@ class ExtractTest(unittest.TestCase):
                  for path in sorted(FIXTURES.glob('*/*.sql'))
                  for line in path.read_text(encoding='utf-8').splitlines()
                  if line.startswith('-- OAH-REGRESSION ')]
-        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3'})
+        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3', 'R4'})
         code = textwrap.dedent('''
             import json, sys
             from oah.impact import sqlplugin
@@ -358,6 +403,10 @@ class ExtractTest(unittest.TestCase):
                     assert graph['entities'][entity]['indexes'] == indexes, (case['id'], graph)
                 for entity, events in case.get('events', {}).items():
                     assert graph['entities'][entity]['events'] == events, (case['id'], graph)
+                for line in case.get('executable_lines', []):
+                    assert any(region['file'] == case['file'] and region['line'] == line
+                               and 'executable comment' in region['reason']
+                               for region in graph['unparsed']), (case['id'], graph)
         ''')
         result = subprocess.run([sys.executable, '-c', code], input=json.dumps(cases), capture_output=True,
                                 text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=60)

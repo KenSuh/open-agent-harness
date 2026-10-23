@@ -87,6 +87,7 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 continue
             line_start = False
             if text.startswith("/*", i):
+                executable = text.startswith("/*!", i)
                 depth = 1
                 i += 2
                 while i < limit and depth:
@@ -97,7 +98,8 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                     else:
                         line += text[i] == "\n"
                         i += 1
-                tokens.append(_Token("comment" if not depth else "invalid", "", start, i, first_line))
+                kind = "invalid" if depth else "executable" if executable else "comment"
+                tokens.append(_Token(kind, "", start, i, first_line))
                 continue
             if not body and i == next_delimiter:
                 i += len(delimiter)
@@ -110,8 +112,12 @@ def _tokenize(text: str, *, dialect: str = "auto") -> list[_Token]:
                 i += 1
                 value, closed = [], False
                 # PostgreSQL E'...' and MySQL strings permit backslash escapes. Backticks and
-                # MySQL double-quoted strings also accept them; standard double identifiers do not.
+                # MySQL double-quoted strings also accept them; PostgreSQL standard strings and
+                # double identifiers do not. An E prefix must be adjacent to its opening quote.
                 escapes = char in "'`" or (char == '"' and not name_context)
+                if dialect == "postgres":
+                    escapes = char == "'" and bool(tokens and tokens[-1].is_word("E") and
+                                                   tokens[-1].end == start)
                 while i < limit:
                     if text[i] == close:
                         if i + 1 < limit and text[i + 1] == close:
@@ -213,7 +219,7 @@ def blank(text: str) -> tuple[str, str]:
                 target[i] = " "
 
     for token in _tokenize(text):
-        if token.kind in ("comment", "directive"):
+        if token.kind in ("comment", "executable", "directive"):
             wipe(code, token.start, token.end)
             wipe(keep, token.start, token.end)
         elif token.kind in ("string", "dollar", "invalid"):
@@ -228,7 +234,7 @@ def blank(text: str) -> tuple[str, str]:
 def _statements(tokens: Iterable[_Token]) -> Iterable[list[_Token]]:
     current, depth, after_end = [], 0, False
     header, compound = False, False
-    live = [token for token in tokens if token.kind not in ("comment", "directive")]
+    live = [token for token in tokens if token.kind not in ("comment", "executable", "directive")]
     for i, token in enumerate(live):
         if after_end:
             after_end = False
@@ -276,11 +282,10 @@ def _quoted_tokens(token: _Token, dialect: str, escaped: bool) -> list[_Token]:
         i += 1
         if char == "'" and i < len(raw) - 1 and raw[i] == "'":
             i += 1
-        elif char == "\\" and i < len(raw) - 1:
+        elif escaped and char == "\\" and i < len(raw) - 1:
             char = raw[i]
             i += 1
-            if escaped:
-                char = {"n": "\n", "r": "\r", "t": "\t"}.get(char, char)
+            char = {"n": "\n", "r": "\r", "t": "\t"}.get(char, char)
         line += raw.count("\n", start, i)
         chars.append(char)
         offsets.append(token.start + start)
@@ -313,7 +318,7 @@ def _routine_tokens(tokens: list[_Token], dialect: str) -> tuple[list[_Token], b
             routine = routine or header
             creating = False
         if header and token.is_word("AS"):
-            awaiting, escaped = True, False
+            awaiting, escaped = True, dialect == "mysql"
         elif awaiting and token.is_word("E"):
             escaped = True
         elif awaiting and (token.kind == "dollar" or (allow_quote and token.kind == "string")):
@@ -565,7 +570,8 @@ def extract(files: Mapping[str, str]) -> dict:
 
     This is a dependency scanner, not a complete SQL grammar. Conservatively report every SQL
     statement as a partially parsed region, including statements with extracted dependencies.
-    Delimiter directives and malformed comments get their own reports. Nothing is certified as
+    Delimiter directives, MySQL executable comments and malformed comments get their own reports.
+    Executable comments stay opaque, including optional version prefixes. Nothing is certified as
     fully parsed merely because a recognised DDL prefix produced an entity.
     """
     graph = _Graph()
@@ -574,6 +580,9 @@ def extract(files: Mapping[str, str]) -> dict:
         for token in tokens:
             if token.kind == "directive":
                 graph.unparsed.append({"file": file, "line": token.line, "reason": "DELIMITER directive"})
+            elif token.kind == "executable":
+                graph.unparsed.append({"file": file, "line": token.line,
+                                       "reason": "MySQL executable comment; review its SQL dependencies"})
         for statement in _statements(tokens):
             graph.unparsed.append({"file": file, "line": statement[0].line,
                                    "reason": "dependency scan only; SQL grammar is not fully parsed"})
