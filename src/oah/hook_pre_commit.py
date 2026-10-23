@@ -84,7 +84,7 @@ def _broken(blobs: dict[str, bytes], prefix: str, names: Names, naming) -> colle
             continue
         for link in wikilinks(data.decode("utf-8", errors="replace")):
             if not names.resolve(link.target):
-                found[(rel, link.raw)] += 1
+                found[(rel, link.raw, link.certain)] += 1
     return found
 
 
@@ -150,15 +150,17 @@ def check(root: pathlib.Path, settings: WikiSettings, state: pathlib.Path) -> Ve
     names_staged = _names([path[len(prefix) + 1:] for path in staged_files], root, settings)
     new = (_broken(staged_blobs, prefix, names_staged, settings.naming)
            - _broken(head_blobs, prefix, names_head, settings.naming))
-    if new:
-        lines = [f"{prefix}/{rel}: {link} does not resolve" for (rel, link) in sorted(new)]
-        if settings.new_broken_links == "block":
-            verdict.blocked.extend(f"OAH_WIKI_COMMIT_BLOCKED: new broken link {line}; create the note or fix "
-                                   "the link" for line in lines)
+    for rel, link, certain in sorted(new):
+        line = f"{prefix}/{rel}: {link} does not resolve"
+        if not certain:
+            verdict.warnings.append(f"OAH_WIKI_UNCERTAIN_LINK: {line}; code-or-prose status is uncertain; "
+                                    "inspect the candidate and, if prose, create the note or fix the link")
+        elif settings.new_broken_links == "block":
+            verdict.blocked.append(f"OAH_WIKI_COMMIT_BLOCKED: new broken link {line}; create the note or fix "
+                                  "the link")
         else:
-            verdict.warnings.extend(f"OAH_WIKI_NEW_BROKEN_LINKS: {line}; create the note or fix the link "
-                                    '(set [wiki] new_broken_links = "block" to refuse such commits)'
-                                    for line in lines)
+            verdict.warnings.append(f"OAH_WIKI_NEW_BROKEN_LINKS: {line}; create the note or fix the link "
+                                    '(set [wiki] new_broken_links = "block" to refuse such commits)')
     return verdict
 
 

@@ -28,6 +28,8 @@ _NOT_NOTES = ("templates", "raw")
 
 HINTS = {
     "broken_link": "create the note, fix the link, or add the target's folder to [wiki] link_roots",
+    "uncertain_link": "inspect whether this is code or prose; if prose, create the note, fix the link, "
+                      "or add the target's folder to [wiki] link_roots",
     "unindexed": 'add a line for it to index.md (oah wiki new does this for new notes)',
     "missing_sources": "list a file path with a commit, a URL or a packet under sources:",
     "missing_frontmatter": "start the note with --- title/date/sources/tags --- frontmatter",
@@ -51,18 +53,23 @@ class Problem:
 class Report:
     problems: list[Problem] = field(default_factory=list)
     notes: int = 0
+    warnings: list[Problem] = field(default_factory=list)
 
     def counts(self) -> dict[str, int]:
         return {counter: sum(1 for p in self.problems if p.kind == kind) for counter, kind in COUNTERS.items()}
 
     def summary(self) -> str:
-        if not self.problems:
+        if not self.problems and not self.warnings:
             return f"OAH_WIKI_LINT_CLEAN notes={self.notes}"
         counts = " ".join(f"{name}={count}" for name, count in self.counts().items() if count)
-        return f"OAH_WIKI_LINT problems={len(self.problems)} {counts}"
+        summary = f"OAH_WIKI_LINT problems={len(self.problems)} {counts}".rstrip()
+        if self.warnings:
+            summary += f" warnings={len(self.warnings)}; inspect uncertain link candidates"
+        return summary
 
     def to_json(self) -> dict:
-        return {"notes": self.notes, "counts": self.counts(), "problems": [asdict(p) for p in self.problems]}
+        return {"notes": self.notes, "counts": self.counts(), "problems": [asdict(p) for p in self.problems],
+                "warnings": [asdict(p) for p in self.warnings]}
 
 
 def markdown_files(folder: pathlib.Path) -> list[pathlib.Path]:
@@ -197,6 +204,7 @@ def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now:
     pages = _pages(wiki, settings.naming)
     names = Names([wiki, *link_root_paths(root, settings)])
     problems: list[Problem] = []
+    warnings: list[Problem] = []
     inbound: dict[str, set[str]] = {}
     for page in pages:
         if settings.naming.number(page.rel) is not None:
@@ -204,7 +212,11 @@ def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now:
         for link in page.links:
             resolved = names.resolve(link.target)
             if not resolved:
-                problems.append(Problem("broken_link", page.rel, link.line, f"{link.raw} does not resolve"))
+                if link.certain:
+                    problems.append(Problem("broken_link", page.rel, link.line, f"{link.raw} does not resolve"))
+                else:
+                    warnings.append(Problem("uncertain_link", page.rel, link.line,
+                                            f"{link.raw} does not resolve (code-or-prose status is uncertain)"))
             for tag in resolved:
                 if tag != page.rel:
                     inbound.setdefault(tag, set()).add(page.rel)
@@ -240,7 +252,8 @@ def scan(root: pathlib.Path, wiki: pathlib.Path, settings: WikiSettings, *, now:
                 others = ", ".join(other for other in paths if other != rel)
                 problems.append(Problem("duplicate_title", rel, 1, f"same title as {others}"))
     problems.sort(key=lambda p: (p.path, p.line, KINDS.index(p.kind), p.detail))
-    return Report(problems, len(notes))
+    warnings.sort(key=lambda p: (p.path, p.line, p.detail))
+    return Report(problems, len(notes), warnings)
 
 
 def _indexed(pages: list[_Page], names: Names) -> set[str]:

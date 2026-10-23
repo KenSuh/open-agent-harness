@@ -39,6 +39,40 @@ def make_wiki(test: unittest.TestCase, repo: pathlib.Path, **settings) -> Wiki:
 
 
 class MarkdownTest(unittest.TestCase):
+    def test_fences_after_checkboxes_and_inline_links_hide_code(self):
+        for eol in ("\n", "\r\n"):
+            for prefix in ("- [x] done", "- [ ] pending", "[manual](README.md)",
+                           "[manual](README.md \"Manual\")", "[ref] prose"):
+                with self.subTest(eol=eol, prefix=prefix):
+                    text = eol.join((prefix, "", "```md", "[[example]]", "```", "[[real]]", ""))
+                    self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                                     [("real", 6)])
+
+    def test_closed_code_spans_own_tags_and_comparisons(self):
+        for eol in ("\n", "\r\n"):
+            for span in ("`<span> [[example]]`", "`a < b [[example]]`",
+                         '``<span title="`"> [[example]]``', "`<!-- [[example]] -->`"):
+                with self.subTest(eol=eol, span=span):
+                    text = eol.join((span + " [[real]]", "`[[hidden span]]`", "", "```md",
+                                     "[[hidden fence]]", "```", ""))
+                    self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                                     [("real", 1)])
+
+    def test_link_candidates_carry_code_or_prose_certainty(self):
+        cases = [("plain [[real]]\n", True), ("`<span> code` [[real]]\n", True),
+                 ("- [x] [[real]]\n", True), ("```\ncode\n  ```\n[[real]]\n", True),
+                 ("```\n[[real]]\n", False),
+                 ("`open\n[[real]]\nclose`\n", False), ("    [[real]]\n", False),
+                 ("- ```\n  [[real]]\n  ```\n", False),
+                 ("[ref]: /url\n\n```\n[[real]]\n```\n", False),
+                 ('<span title="`"> [[real]] <span title="`">\n', False)]
+        for eol in ("\n", "\r\n"):
+            for text, certain in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.assertEqual([(link.target, link.certain)
+                                      for link in markdown.wikilinks(text.replace("\n", eol))],
+                                     [("real", certain)])
+
     def test_mixed_indentation_fences_leave_following_link_visible(self):
         for eol in ("\n", "\r\n"):
             for opening, closing in (("```", "  ```"), ("  ```", "```")):
@@ -442,6 +476,26 @@ class WikiCliTest(unittest.TestCase):
         self.assertIn("list or blockquote", help_text)
         self.assertIn("candidates", help_text)
         self.assertIn("Inspect", help_text)
+
+    def test_uncertain_link_warning_does_not_fail_lint(self):
+        repo = scaffold(self)
+        path = repo / "docs" / "wiki" / "index.md"
+        path.write_bytes(b"Notes:\n- [[wiki-guide]]\n\n```md\n[[example]]\n")
+        code, out, err = run_cli(repo, "wiki", "lint", state=self.state)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("warning", out)
+        self.assertIn("[[example]]", out)
+        self.assertIn("inspect", out.lower())
+        code, out, err = run_cli(repo, "wiki", "lint", "--json", state=self.state)
+        self.assertEqual(code, 0, out + err)
+        report = json.loads(out)
+        self.assertEqual(report["problems"], [])
+        self.assertEqual(len(report["warnings"]), 1)
+        self.assertIn("[[example]]", report["warnings"][0]["detail"])
+        path.write_bytes(b"Notes:\n- [[wiki-guide]]\n[[certain]]\n```md\n[[example]]\n")
+        code, out, err = run_cli(repo, "wiki", "lint", state=self.state)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("broken_link: [[certain]]", out)
 
     def test_cli_reads_wiki_config(self):
         repo = scaffold(self)

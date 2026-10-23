@@ -85,6 +85,7 @@ _HTML_ENDS = {
 _CONTAINER = re.compile(r"^ {0,3}(?:> ?|(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$))")
 _HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _RULE = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|[=-]+[ \t]*)$")
+_REFERENCE_START = re.compile(r"^\[(?:\\.|[^\[\]\\])*(?:\]:|$)")
 
 
 @dataclass(frozen=True)
@@ -161,7 +162,7 @@ def _lint_steps(state: _LintState, line: str, number: int) -> list[tuple[_LintSt
 
     if not line.strip(" \t") or _HEADING.match(line) or _RULE.match(line):
         paragraphs = (False,)
-    elif len(views) > 1 or indent >= 4 or line.lstrip(" ").startswith("[") or state.paragraph is None:
+    elif len(views) > 1 or indent >= 4 or _REFERENCE_START.match(line.lstrip(" ")) or state.paragraph is None:
         # Containers and possible multiline reference definitions need not leave a paragraph open.
         paragraphs = (None,)
     else:
@@ -173,9 +174,10 @@ def _lint_steps(state: _LintState, line: str, number: int) -> list[tuple[_LintSt
 
 def _unparsed_block(line: str, paragraph: bool | None) -> bool:
     """Reference definitions and other HTML may span lines; their block boundaries are unknown."""
+    line = _mask_spans(line)[0]
     while True:
         body = line.lstrip(" ")
-        if ((body.startswith("[") and not body.startswith("[["))
+        if (_REFERENCE_START.match(body)
                 or ("<" in line and not _html_start(line, paragraph) and not _HTML_TAG.match(line))):
             return True
         match = _CONTAINER.match(line)
@@ -184,24 +186,32 @@ def _unparsed_block(line: str, paragraph: bool | None) -> bool:
         line, paragraph = line[match.end():], False
 
 
-def _fenced_lines(lines: list[str]) -> tuple[int, list[bool]]:
+def _fenced_lines(lines: list[str]) -> tuple[int, list[bool], int]:
     """Intersect closed-fence masks over all readings, merging equal states after every line.
 
     A state's integer mask contains only fences already closed on every path reaching that state.
     Pending fences add no bits, so an unclosed or implicitly ended fence masks nothing, even at EOF.
+    The separate possible-code mask includes every uncertain block reading, for warning-only links.
     """
     states = {_LintState(): 0}
     inline = []
     uncertain_from = len(lines)
+    possible_code = 0
     for number, line in enumerate(lines):
         body = strip_eol(line).expandtabs(4)
+        if len(body) - len(body.lstrip(" ")) >= 4:
+            possible_code |= 1 << number
         following: dict[_LintState, int] = {}
         certain_inline = True
         for state, masked in states.items():
+            if state.fence or state.html or state.frontmatter:
+                possible_code |= 1 << number
             if not (state.fence or state.html or state.frontmatter) and _unparsed_block(body, state.paragraph):
                 # Do not guess later fence pairings after syntax this parser cannot fully resolve.
                 uncertain_from = min(uncertain_from, number)
             for after, start, allow_inline in _lint_steps(state, body, number):
+                if after.fence or after.html or after.frontmatter:
+                    possible_code |= 1 << number
                 closed = 0 if start is None else (1 << (number + 1)) - (1 << start)
                 mask = masked | closed
                 following[after] = following[after] & mask if after in following else mask
@@ -211,23 +221,28 @@ def _fenced_lines(lines: list[str]) -> tuple[int, list[bool]]:
     certain = (1 << len(lines)) - 1
     for masked in states.values():
         certain &= masked
-    return certain & ((1 << uncertain_from) - 1), inline
+    before_uncertain = (1 << uncertain_from) - 1
+    possible_code |= ((1 << len(lines)) - 1) ^ before_uncertain
+    return certain & before_uncertain, inline, possible_code
 
 
 def _blank_code(text: str) -> str:
     return "".join(char if char in "\r\n" else " " for char in text)
 
 
-def _mask_spans(line: str) -> tuple[str, bool]:
-    """Mask same-line spans unless HTML or escaped/unpaired ticks make their ownership uncertain."""
-    if "<" in line or any(match.start() and line[match.start() - 1] == "\\" for match in _TICKS.finditer(line)):
-        return line, True
+def _mask_spans(line: str) -> tuple[str, int | None]:
+    """Mask owned spans; return the first position where HTML or ticks make prose uncertain."""
     out = list(line)
     position = 0
     while True:
         opening = _TICKS.search(line, position)
+        html = line.find("<", position)
+        if html >= 0 and (opening is None or html < opening.start()):
+            return "".join(out), html
         if opening is None:
             break
+        if opening.start() and line[opening.start() - 1] == "\\":
+            return "".join(out), opening.start()
         size = len(opening.group())
         closing = opening.end()
         while True:
@@ -236,33 +251,45 @@ def _mask_spans(line: str) -> tuple[str, bool]:
                 break
             closing = candidate.end()
         if candidate is None:
-            return line, True
+            return "".join(out), opening.start()
         for index in range(opening.start(), candidate.end()):
             if out[index] != "\n":
                 out[index] = " "
         position = candidate.end()
-    return "".join(out), False
+    return "".join(out), None
 
 
-def mask_code(text: str) -> str:
-    """Hide a lint candidate only when every possible reading puts it inside code."""
+def _masked_code(text: str) -> tuple[str, list[int]]:
+    """The code mask and each line's certainly-prose prefix, for the candidates left visible."""
     lines = text.split("\n")
-    fenced, inline = _fenced_lines(lines)
+    fenced, inline, possible_code = _fenced_lines(lines)
     out = []
+    prose = []
     uncertain = False
     for number, line in enumerate(lines):
         blank = not strip_eol(line).strip(" \t")
         if blank:
             uncertain = False
+        prefix = 0 if uncertain or possible_code & (1 << number) else len(line)
         if fenced & (1 << number):
             out.append(_blank_code(line))
         elif blank:
             out.append(line)
         else:
-            masked, ambiguous = _mask_spans(line)
+            masked, uncertain_at = _mask_spans(line)
             out.append(masked if inline[number] and not uncertain else line)
-            uncertain = uncertain or ambiguous
-    return "\n".join(out)
+            if not inline[number] and masked != line:
+                prefix = 0
+            if uncertain_at is not None:
+                prefix = min(prefix, uncertain_at)
+                uncertain = True
+        prose.append(prefix)
+    return "\n".join(out), prose
+
+
+def mask_code(text: str) -> str:
+    """Hide a lint candidate only when every possible reading puts it inside code."""
+    return _masked_code(text)[0]
 
 
 @dataclass(frozen=True)
@@ -271,11 +298,12 @@ class Link:
     target: str
     raw: str
     embed: bool
+    certain: bool = True
 
 
 def wikilinks(text: str) -> list[Link]:
-    """Lint link candidates with 1-based lines; same-note links ([[#x]]) are skipped."""
-    masked = mask_code(text)
+    """Candidates with 1-based lines and prose certainty; same-note links ([[#x]]) are skipped."""
+    masked, prose = _masked_code(text)
     links = []
     for number, line in enumerate(masked.split("\n"), start=1):
         for match in _WIKILINK.finditer(line):
@@ -285,5 +313,6 @@ def wikilinks(text: str) -> list[Link]:
                 target = target[:-1]
             target = target.split("#", 1)[0].strip()
             if target:
-                links.append(Link(number, target, match.group(0), bool(match.group(1))))
+                links.append(Link(number, target, match.group(0), bool(match.group(1)),
+                                  match.end() <= prose[number - 1]))
     return links

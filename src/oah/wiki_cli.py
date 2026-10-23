@@ -36,12 +36,12 @@ def register(commands: argparse._SubParsersAction) -> None:
     log.add_argument("--body", default="", help="the entry text below the heading")
     log.add_argument("--date", type=_date, default=None, help="YYYY-MM-DD (default: today)")
 
-    lint = sub.add_parser("lint", help="list wiki problem candidates (reads only; exit 1 when any exist)",
+    lint = sub.add_parser("lint", help="list wiki problems and warnings (reads only; exit 1 for problems)",
                           description="Links are ignored only in certainly closed top-level fences at column 0 "
                           "or unambiguous code spans that open and close on the same line. Indented code, "
                           "multiline spans and fences in a list or blockquote may leave candidates, as may "
-                          "uncertain HTML/front matter or escaped backticks. Inspect each candidate before "
-                          "editing notes.")
+                          "uncertain HTML/front matter or escaped backticks. Uncertain candidates warn and "
+                          "never block. Inspect each candidate before editing notes.")
     lint.add_argument("--index", action="store_true",
                       help="check index.md for banners, over-long lines and unindexed notes")
     lint.add_argument("--json", action="store_true")
@@ -111,6 +111,9 @@ def _lint(args: argparse.Namespace, wiki: Wiki) -> int:
         from oah.wiki.lint import HINTS
 
         prefix = pathlib.PurePosixPath(wiki.settings.dir)
+        for warning in report.warnings:
+            print(f"{prefix / warning.path}:{warning.line}: warning: {warning.kind}: {warning.detail}; "
+                  f"{HINTS[warning.kind]}")
         for problem in report.problems:
             print(f"{prefix / problem.path}:{problem.line}: {problem.kind}: {problem.detail}; "
                   f"{HINTS[problem.kind]}")

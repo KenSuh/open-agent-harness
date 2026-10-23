@@ -55,14 +55,41 @@ class LintCase(unittest.TestCase):
 
 
 class LintTest(LintCase):
+    def test_code_after_common_constructs_is_not_a_lint_candidate(self):
+        cases = ["- [x] done\n\n```md\n[[example]]\n```\n",
+                 "- [ ] pending\n\n```md\n[[example]]\n```\n",
+                 "[manual](README.md)\n\n```md\n[[example]]\n```\n",
+                 "`<span> [[example]]`\n", "``a < b [[example]]``\n"]
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.write("index.md", "- [[wiki-guide]]" + eol + text.replace("\n", eol))
+                    report = self.wiki().lint(now=NOW)
+                    self.assertEqual(report.problems, [])
+                    self.assertEqual(report.warnings, [])
+
+    def test_uncertain_candidates_warn_without_counting_as_broken_prose(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                self.write("index.md", eol.join(("- [[wiki-guide]]", "[[certain]]", "```md",
+                                                 "[[example]]", "")))
+                report = self.wiki(new_broken_links="block").lint(now=NOW)
+                self.assertEqual([(p.kind, p.line, p.detail) for p in report.problems],
+                                 [("broken_link", 2, "[[certain]] does not resolve")])
+                self.assertEqual([(p.kind, p.path, p.line) for p in report.warnings],
+                                 [("uncertain_link", "index.md", 4)])
+                self.assertIn("[[example]]", report.warnings[0].detail)
+                self.assertEqual(report.counts()["broken_links"], 1)
+                self.assertEqual(len(report.to_json()["warnings"]), 1)
+
     def test_write_keeps_exact_utf8_and_line_endings(self):
         for text in ("가나다\n", "가나다\r\n", "a\r\nb\nc\r"):
             with self.subTest(text=text):
                 self.write("fixture.md", text)
                 self.assertEqual((self.wiki_dir / "fixture.md").read_bytes(), text.encode("utf-8"))
 
-    def test_uncertain_code_links_are_reported(self):
-        for text in ("```\ncode\n  ```\n[[real]]\n", "  ```\ncode\n```\n[[real]]\n",
+    def test_uncertain_code_links_are_warnings(self):
+        for text in ("  ```\ncode\n```\n[[real]]\n",
                      "`open\n` [[real]] `\nclose`\n", "<div>\n```\n\n[[real]]\n```\n",
                      "---\n```\n---\n[[real]]\n```\n", "\\` [[real]] `\n", "```\n[[real]]\n",
                      "<!doctype html\n```\n>\n\n[[real]]\n```\n",
@@ -77,10 +104,11 @@ class LintTest(LintCase):
                 with self.subTest(eol=eol, text=text):
                     self.write("index.md", text.replace("\n", eol))
                     report = self.wiki().lint(now=NOW)
-                    self.assertEqual([(p.line, p.detail) for p in report.problems
-                                      if p.path == "index.md" and p.kind == "broken_link"],
-                                     [(text[:text.index("[[real]]")].count("\n") + 1,
-                                       "[[real]] does not resolve")])
+                    self.assertFalse(any(p.kind == "broken_link" for p in report.problems))
+                    self.assertEqual([(p.kind, p.path, p.line) for p in report.warnings],
+                                     [("uncertain_link", "index.md",
+                                       text[:text.index("[[real]]")].count("\n") + 1)])
+                    self.assertIn("[[real]]", report.warnings[0].detail)
 
     def test_plain_column_zero_fence_still_hides_link(self):
         for eol in ("\n", "\r\n"):
@@ -123,7 +151,9 @@ class LintTest(LintCase):
         self.index("a")
         report = self.wiki().lint(now=NOW)
         self.assertEqual([(p.kind, p.detail) for p in report.problems],
-                         [("broken_link", f"[[{target}]] does not resolve") for target in ("nope5", "gone")])
+                         [("broken_link", "[[gone]] does not resolve")])
+        self.assertEqual(len(report.warnings), 1)
+        self.assertIn("[[nope5]]", report.warnings[0].detail)
 
     def test_links_in_container_fences_are_candidates(self):
         body = ("> ~~~md\n> [[hidden quote]]\n> ~~~\n\n"
@@ -132,9 +162,10 @@ class LintTest(LintCase):
         self.write("a.md", note("A", body))
         self.index("a")
         report = self.wiki().lint(now=NOW)
-        self.assertEqual([(p.kind, p.detail) for p in report.problems],
-                         [("broken_link", f"[[{target}]] does not resolve") for target in
-                          ("hidden quote", "hidden list", "hidden after blank", "gone")])
+        self.assertEqual(report.problems, [])
+        self.assertEqual([p.kind for p in report.warnings], ["uncertain_link"] * 4)
+        for problem, target in zip(report.warnings, ("hidden quote", "hidden list", "hidden after blank", "gone")):
+            self.assertIn(f"[[{target}]]", problem.detail)
 
     def test_archive_index_counts_as_index(self):
         self.write("from-log-index.md", note("From log index"))

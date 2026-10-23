@@ -122,9 +122,42 @@ class PreCommitTest(unittest.TestCase):
         self.assertFalse(any("in code" in line for line in verdict.warnings))
         self.assert_blocked(self.check(new_broken_links="block"), "[[nowhere]]")
 
-    def test_uncertain_code_links_warn_then_block_from_staged_bytes(self):
+    def test_certain_code_after_common_constructs_never_warns_or_blocks(self):
+        cases = ["- [x] done\n\n```md\n[[example]]\n```\n",
+                 "- [ ] pending\n\n```md\n[[example]]\n```\n",
+                 "[manual](README.md)\n\n```md\n[[example]]\n```\n",
+                 "`<span> [[example]]`\n", "``a < b [[example]]``\n"]
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.stage({"docs/wiki/a.md": text.replace("\n", eol)})
+                    verdict = self.check(new_broken_links="block")
+                    self.assertEqual((verdict.blocked, verdict.warnings), ([], []))
+
+    def test_uncertain_candidates_never_block_certain_prose_still_blocks(self):
+        for eol in ("\n", "\r\n"):
+            for mode in ("warn", "block"):
+                with self.subTest(eol=eol, mode=mode):
+                    self.stage({"docs/wiki/a.md": eol.join(("[[certain]]", "```md", "[[example]]", ""))})
+                    verdict = self.check(new_broken_links=mode)
+                    self.assertTrue(any("[[example]]" in line and "uncertain" in line
+                                        for line in verdict.warnings), verdict.warnings)
+                    self.assertFalse(any("[[example]]" in line for line in verdict.blocked), verdict.blocked)
+                    if mode == "block":
+                        self.assert_blocked(verdict, "[[certain]]")
+                    else:
+                        self.assertEqual(verdict.blocked, [])
+                        self.assertTrue(any("[[certain]]" in line for line in verdict.warnings))
+
+    def test_uncertain_baseline_does_not_hide_new_certain_occurrence(self):
+        git_commit(self.repo, {"docs/wiki/a.md": b"```md\n[[same]]\n"}, "uncertain candidate")
+        for text in ("[[same]]\n", "[[same]]\n```md\n[[same]]\n"):
+            with self.subTest(text=text):
+                self.stage({"docs/wiki/a.md": text})
+                self.assert_blocked(self.check(new_broken_links="block"), "[[same]]")
+
+    def test_uncertain_code_links_warn_without_blocking_from_staged_bytes(self):
         cases = [
-            "```\ncode\n  ```\n[[real]]\n",
             "  ```\ncode\n```\n[[real]]\n",
             "`open\n` [[real]] `\nclose`\n",
             "<div>\n```\n</div>\n\n[[real]]\n```\n",
@@ -154,7 +187,10 @@ class PreCommitTest(unittest.TestCase):
                     verdict = self.check()
                     self.assertEqual(verdict.blocked, [])
                     self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
-                    self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+                    verdict = self.check(new_broken_links="block")
+                    self.assertEqual(verdict.blocked, [])
+                    self.assertTrue(any("[[real]]" in line and "uncertain" in line
+                                        for line in verdict.warnings), verdict.warnings)
 
     def test_plain_column_zero_fence_still_hides_staged_link(self):
         for eol in ("\n", "\r\n"):
@@ -163,14 +199,16 @@ class PreCommitTest(unittest.TestCase):
                 verdict = self.check(new_broken_links="block")
                 self.assertEqual((verdict.blocked, verdict.warnings), ([], []))
 
-    def test_link_between_skipped_container_delimiters_warns_then_blocks(self):
+    def test_link_between_skipped_container_delimiters_only_warns(self):
         self.stage({"docs/wiki/a.md": "- ```\n  code\n[[real]]\n  ```\n  ```\n"})
         # The staged bytes, rather than a subsequent editor change, govern the check.
         (self.wiki_dir / "a.md").write_text("[[wiki-guide]]\n", encoding="utf-8")
         verdict = self.check()
         self.assertEqual(verdict.blocked, [])
         self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
-        self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+        verdict = self.check(new_broken_links="block")
+        self.assertEqual(verdict.blocked, [])
+        self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
 
     def test_existing_broken_link_is_not_new(self):
         self.stage({"docs/wiki/a.md": "[[nowhere]]\n"})
