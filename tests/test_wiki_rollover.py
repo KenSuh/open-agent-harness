@@ -627,6 +627,20 @@ class HardeningTest(unittest.TestCase):
         self.assertFalse((self.folder / "log_archive_01.md").exists())
         self.assertEqual(self.leftovers(), [])
 
+    def test_crash_before_exchange_with_append_rolls_back_on_recover(self):
+        def fault(step: str) -> None:
+            self.append_to_old_log(step)
+            if step == "stashed":
+                raise Crash(step)
+
+        with self.assertRaises(Crash):
+            self.w.rollover(today=TODAY, fault=fault)
+        self.assertTrue(self.w.recover().startswith("OAH_WIKI_RECOVERED rolled back"))
+        self.assertEqual(self.log_path.read_bytes(), self.original + b"## 2025-01-01 late append\n\nlate\n")
+        self.assertFalse((self.folder / "log_archive_01.md").exists())
+        self.assertFalse(self.w.journal_path.exists())
+        self.assertEqual(self.leftovers(), [])
+
     def test_dry_run_writes_nothing(self):
         before = snapshot(self.folder, self.w.state)
         result = self.w.rollover(today=TODAY, apply=False)

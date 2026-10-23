@@ -387,6 +387,15 @@ class Wiki:
                     self._roll_back(log_path, stash, stash_now, archive_path, archive)
                     unlink_durable(self.journal_path)
                     return "OAH_WIKI_RECOVERED rolled back: the old log.md changed during rollover; it is restored"
+                if (stash_now not in (None, original) and log_now == stash_now
+                        and archive_now in (None, archive)):
+                    # Crashed before the exchange while the log took an append: log.md is still the
+                    # old file, so dropping the new archive undoes the rollover without loss.
+                    unlink_durable(stash)
+                    if archive_now is not None:
+                        unlink_durable(archive_path)
+                    unlink_durable(self.journal_path)
+                    return "OAH_WIKI_RECOVERED rolled back: log.md changed before the exchange; it was kept"
                 if stash_now not in (None, original) and log_now != replacement:
                     raise self._conflict(log_path, archive_path)
                 if log_now == replacement and archive_now == archive:
