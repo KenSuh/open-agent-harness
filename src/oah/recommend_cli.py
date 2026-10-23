@@ -1,5 +1,5 @@
 # recommend 명령 모듈 — oah recommend 의 네 축 인자를 받아 점수표로 고른 단과 그 근거를 출력한다.
-"""Difficulty routing: recommend."""
+"""routing"""
 from __future__ import annotations
 
 import argparse
