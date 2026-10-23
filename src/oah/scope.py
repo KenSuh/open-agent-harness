@@ -7,7 +7,8 @@ conflict rather than missing one. `src` covers `src/a.py`; it does not cover `sr
 
 User scopes resolve as the host OS opens them: Windows collapses `link/..` lexically before following
 an alias; POSIX follows the link first. Acquired canonical scopes stay fixed until explicitly renewed.
-Git's changed entries are compared literally, with only case and Unicode normalization folded.
+Git's changed entries match literally or through resolved in-root parents, keeping the final component
+literal. Comparison folds only case and Unicode normalization.
 """
 from __future__ import annotations
 
@@ -52,10 +53,10 @@ def _normalize_one(raw: str, root: pathlib.Path) -> str:
     windows = pathlib.PureWindowsPath(text)
     if windows.drive and not windows.root:
         raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r}: drive-relative paths are not allowed in a scope")
-    if ":" in text[len(windows.drive):]:
+    path = pathlib.Path(text)
+    if not path.is_absolute() and ":" in text[len(windows.drive):]:
         raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r}: ':' is not allowed in a scope path")
     _check_components(text, raw)
-    path = pathlib.Path(text)
     text = _relative_to_root(path if path.is_absolute() else root / path, root, raw)
     _check_components(text, raw)
     if ":" in text:
@@ -93,8 +94,23 @@ def overlaps(a: Sequence[str], b: Sequence[str]) -> bool:
     return any(_covers(x, y) or _covers(y, x) for x in a for y in b)
 
 
-def outside(scope: Sequence[str], changed: Iterable[str]) -> list[str]:
-    """Compare fixed canonical scopes with literal Git entries, preserving their spelling and order."""
+def outside(scope: Sequence[str], changed: Iterable[str], *, root: pathlib.Path | None = None) -> list[str]:
+    """Match literal entries or their resolved in-root parents against fixed canonical scopes."""
     if REPO in scope:
         return []
-    return [path for path in changed if not any(_covers(entry, path) for entry in scope)]
+    beyond: list[str] = []
+    for path in changed:
+        if any(_covers(entry, path) for entry in scope):
+            continue
+        if root is not None:
+            item = pathlib.Path(path)
+            try:
+                parent = (root / item.parent).resolve(strict=True)
+                resolved = (parent.relative_to(root.resolve(strict=True)) / item.name).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                pass
+            else:
+                if any(_covers(entry, resolved) for entry in scope):
+                    continue
+        beyond.append(path)
+    return beyond

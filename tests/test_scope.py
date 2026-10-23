@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from oah.scope import ScopeError, normalize_scope, outside, overlaps
-from tests.helpers import directory_alias, make_tmp_dir
+from tests.helpers import directory_alias, make_git_repo, make_tmp_dir
 
 
 class NormalizeTest(unittest.TestCase):
@@ -39,14 +39,32 @@ class NormalizeTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "OAH_SCOPE_INVALID")
 
     def test_windows_drive_relative_and_stream_scopes_are_refused_before_resolution(self):
-        paths = ("c:x", "C:", "c:src/a.py", "src/a.py:zone", "C:/repo/src/a.py:zone",
-                 "//server/share/src/a.py:zone")
+        paths = ("c:x", "C:", "c:src/a.py", "src/a.py:zone")
         with patch("oah.scope._relative_to_root", side_effect=AssertionError("resolved invalid raw scope")):
             for path in paths:
                 with self.subTest(path=path):
                     with self.assertRaises(ScopeError) as caught:
                         normalize_scope([path], self.root)
                     self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
+
+    def test_absolute_stream_scopes_are_refused_after_resolution(self):
+        for path in (str(self.root / "src" / "a.py:zone"), "//server/share/src/a.py:zone"):
+            with self.subTest(path=path), patch("oah.scope._relative_to_root", return_value="src/a.py:zone") as resolve:
+                with self.assertRaises(ScopeError) as caught:
+                    normalize_scope([path], self.root)
+                self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
+                resolve.assert_called_once()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX repository paths containing colons")
+    def test_absolute_scope_under_repository_with_colon(self):
+        repo = make_git_repo(self)
+        root = repo.rename(repo.with_name("my:repo"))
+        (root / "src").mkdir()
+        self.assertEqual(normalize_scope([str(root / "src")], root), ("src",))
+        (root / "src" / "a:b").write_text("colon filename", encoding="utf-8")
+        with self.assertRaises(ScopeError) as caught:
+            normalize_scope([str(root / "src" / "a:b")], root)
+        self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
 
     def test_windows_absolute_and_unc_scopes_reach_resolution(self):
         for path in (pathlib.PureWindowsPath("C:/repo/src"), pathlib.PureWindowsPath("//server/share/src")):
@@ -58,7 +76,8 @@ class NormalizeTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "native Windows drive-relative paths")
     def test_native_windows_drive_relative_scopes_are_refused(self):
-        for path in (self.root.drive + "x", self.root.drive, self.root.drive + "src/a.py", "src/a.py:zone"):
+        for path in (self.root.drive + "x", self.root.drive, self.root.drive + "src/a.py", "src/a.py:zone",
+                     str(self.root / "src" / "a.py:zone")):
             with self.subTest(path=path), self.assertRaises(ScopeError):
                 normalize_scope([path], self.root)
         self.assertEqual(normalize_scope([str(self.root / "src")], self.root), ("src",))
@@ -142,6 +161,38 @@ class OverlapTest(unittest.TestCase):
             yield
 
         self.assertEqual(outside(("repo",), changed()), [])
+        with patch("pathlib.Path.resolve", side_effect=AssertionError("repo scope must not resolve paths")):
+            self.assertEqual(outside(("repo",), changed(), root=pathlib.Path("missing")), [])
+
+    def test_outside_resolves_parent_aliases_and_keeps_final_entries_literal(self):
+        root = make_tmp_dir(self)
+        (root / "src").mkdir()
+        (root / "docs").mkdir()
+        directory_alias(root / "src", root / "link")
+        directory_alias(root / "docs", root / "other")
+        directory_alias(root / "src", root / "docs" / "link")
+        changed = ["link/a.py", "docs/link", "other/b.md", "link/missing/a.py"]
+        self.assertEqual(outside(("src/a.py",), changed), changed)
+        self.assertEqual(outside(("src/a.py",), changed, root=root), changed[1:])
+        self.assertEqual(outside(("src",), changed, root=root), changed[1:])
+
+    def test_outside_ignores_parents_resolved_outside_root(self):
+        root = make_tmp_dir(self)
+        target = make_tmp_dir(self)
+        (target / "src").mkdir()
+        directory_alias(target / "src", root / "link")
+        self.assertEqual(outside(("src",), ["link/a.py"], root=root), ["link/a.py"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX parent symlink loop")
+    def test_outside_parent_symlink_loop_does_not_raise(self):
+        root = make_tmp_dir(self)
+        (root / "loop").symlink_to("loop", target_is_directory=True)
+        self.assertEqual(outside(("src",), ["loop/a.py"], root=root), ["loop/a.py"])
+
+    def test_outside_parent_os_error_does_not_raise(self):
+        root = make_tmp_dir(self)
+        with patch("pathlib.Path.resolve", side_effect=OSError("unavailable parent")):
+            self.assertEqual(outside(("src",), ["src/a.py", "link/a.py"], root=root), ["link/a.py"])
 
     def test_overlap_table(self):
         cases = [

@@ -13,7 +13,7 @@ from unittest.mock import patch
 from oah.atomic import StateCorrupt
 from oah.lease import Lease, LeaseError, Store
 from oah.paths import RepoInfo
-from tests.helpers import make_tmp_dir
+from tests.helpers import directory_alias, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 T0 = dt.datetime(2026, 10, 23, 9, 0, tzinfo=dt.timezone.utc)
@@ -152,6 +152,16 @@ class StoreTest(unittest.TestCase):
                                  summary="done", changed=["src/a.py", "docs/b.md"], allow_out_of_scope=False)
         self.assertIn("docs/b.md", str(error))
         self.assertEqual(len(self.store.snapshot()), 1)
+
+    def test_finish_resolves_changed_parents_in_recorded_worktree(self):
+        (self.root / "src").mkdir()
+        directory_alias(self.root / "src", self.root / "link")
+        started = self.start(scope=("src/a.py",))
+        lease, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id, summary="done",
+                                          changed=["link/a.py"], allow_out_of_scope=False)
+        self.assertEqual(lease.scope, ["src/a.py"])
+        self.assertEqual(beyond, [])
+        self.assertEqual(self.store.snapshot(), [])
 
     def test_finish_allows_out_of_scope_when_asked_and_records_it(self):
         started = self.start(task="t1", scope=("src",))

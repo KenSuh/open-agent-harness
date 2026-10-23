@@ -207,6 +207,31 @@ class LeaseCliTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("OAH_LEASE_CONFLICT", result.stderr)
 
+    @unittest.skipUnless(os.name == "nt", "native Windows Git junction descendants")
+    def test_finish_matches_tracked_junction_descendants_to_canonical_scope(self):
+        directory_alias(self.repo / "src", self.repo / "link")
+        directory_alias(self.repo / "docs", self.repo / "other")
+        git_commit(self.repo, {"src/a.py": "a = 1\n"})
+        tracked = subprocess.run(["git", "-C", str(self.repo), "ls-files", "-z"], check=True,
+                                 capture_output=True).stdout.split(b"\0")
+        self.assertIn(b"link/a.py", tracked)
+        self.assertIn(b"other/readme.md", tracked)
+        started = self.start("t1", "claude", "link/a.py", extra=("--json",))
+        self.assertEqual(started.returncode, 0, started.stderr)
+        self.assertEqual(json.loads(started.stdout)["scope"], ["src/a.py"])
+        (self.repo / "link" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        args = ("finish", "--task", "t1", "--agent", "claude", "--summary", "junction")
+        finished = oah(self.repo, *args)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+
+        started = self.start("t1", "claude", "link/a.py")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        (self.repo / "other" / "readme.md").write_text("outside scope\n", encoding="utf-8")
+        refused = oah(self.repo, *args)
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("other/readme.md", refused.stderr)
+
     @unittest.skipUnless(os.name == "nt", "native Windows path aliases")
     def test_windows_alias_scope_is_refused(self):
         self.assertEqual(self.start("t1", "claude", "src/a.py").returncode, 0)
