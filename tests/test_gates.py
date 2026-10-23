@@ -157,6 +157,32 @@ class PinnedUnlazyProbeTest(unittest.TestCase):
         self.assertEqual(result.verdict, "error")
         self.assertIn("outside the repository root", result.stderr)
 
+    def test_gates_check_binds_with_real_unlazy(self):
+        from oah.gates import check as check_mod
+        from oah.gates.bindings import BindingStore
+        from tests.helpers import git_commit, make_git_repo
+
+        repo = make_git_repo(self)
+        git_commit(repo, {"src/a.txt": "one\n"})
+        ledger = repo / ".oah" / "tasks" / "t1" / "GATES.md"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("# Gates: t1\n\n- [ ] G1: the source file exists\n"
+                          "  CHECK: node -e \"require('fs').statSync('src/a.txt'); console.log('present-' + 'ok')\"\n"
+                          "  EXPECT: present-ok\n  EVIDENCE: pending\n", encoding="utf-8")
+        store_dir = self.tmp / "approved-real"
+        store_dir.mkdir(mode=0o700)
+        env = dict(os.environ, UNLAZY_APPROVAL_DIR=str(store_dir))
+        bindings = BindingStore(self.tmp / "state", "t1")
+        report = check_mod.run_check(repo, ledger, bindings, unlazy_dir=self.unlazy, node=self.node, approve=True,
+                                     env=env)
+        self.assertEqual(report.actions, {"G1": "run"}, report.unlazy.stdout if report.unlazy else "")
+        fresh = check_mod.freshness(repo, ledger, bindings, unlazy_dir=self.unlazy)
+        self.assertEqual(fresh, {"G1": "fresh"})
+        status = ledger_status(ledger, unlazy=self.unlazy, node=self.node, root=repo)
+        self.assertEqual((status.verdict, status.source), ("met", "unlazy"))
+        (repo / "src" / "a.txt").write_text("two\n", encoding="utf-8")
+        self.assertEqual(check_mod.freshness(repo, ledger, bindings, unlazy_dir=self.unlazy), {"G1": "stale"})
+
 
 class LedgerParserTest(unittest.TestCase):
     def test_parses_gates_attributes_and_abandon(self):
