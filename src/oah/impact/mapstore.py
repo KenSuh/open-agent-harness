@@ -18,6 +18,10 @@ stale when they keep moving.
 Incremental refresh compares per-path input keys (index blob for clean files, byte digest otherwise). It
 keeps hits from unchanged files, re-reads changed files for the needles both maps share, and searches the
 whole tree for new needles only. The result equals a full build byte for byte.
+
+A second map, `<key>.default-branch.json` beside it, describes one fetched commit of the remote's default
+branch (A23). Its manifest is `worktree`, `ref`, `head` (the fetched SHA) and `tool`; its inputs are the
+blob ids at that commit, and it is refreshed incrementally the same way.
 """
 from __future__ import annotations
 
@@ -52,6 +56,8 @@ MANIFEST_ORDER = (("worktree", "worktree changed"), ("head", "HEAD moved"), ("in
                   ("ledgers", "ledgers changed"), ("config", "config changed"), ("dirty", "working tree changed"),
                   ("untracked", "working tree changed"), ("excluded_paths", "excluded inputs changed"),
                   ("tool", "tool changed"))
+REF_ORDER = (("worktree", "worktree changed"), ("ref", "default branch changed"), ("head", "default branch moved"),
+             ("tool", "tool changed"))
 
 
 @dataclass(frozen=True)
@@ -454,25 +460,25 @@ def build_data(root: pathlib.Path, rev: str | None, settings: Mapping[str, objec
 
 
 def refresh_data(root: pathlib.Path, old: Mapping, old_inputs: Mapping[str, str], inputs: Mapping[str, str],
-                 head: str, settings: Mapping[str, object]) -> tuple[dict, int]:
-    """The working-tree map for inputs, from the map built for old_inputs."""
+                 head: str, settings: Mapping[str, object], *, rev: str | None = None) -> tuple[dict, int]:
+    """The map for inputs, from the map built for old_inputs: the working tree's, or (rev given) commit rev's."""
     timeout, minimum = settings["git_timeout"], settings["min_needle"]
     changed = {path for path in set(old_inputs) | set(inputs) if old_inputs.get(path) != inputs.get(path)}
     files = _classified(inputs, settings)
     existing = sorted(path for path in changed if path in files)
     before, after = needle_set(old["files"], minimum), needle_set(files, minimum)
     hits = _carry(old["hits"], before & after, changed)
-    _merge(hits, scan_lexical(root, None, before & after, files, existing, timeout))
-    _merge(hits, scan_lexical(root, None, after - before, files, None, timeout))
+    _merge(hits, scan_lexical(root, rev, before & after, files, existing, timeout))
+    _merge(hits, scan_lexical(root, rev, after - before, files, None, timeout))
     graph = old["db"]
     if any(path in changed for path in db_files(set(old["files"]) | set(files), settings)):
-        graph = _db_graph(root, None, files, settings)
+        graph = _db_graph(root, rev, files, settings)
     old_names, new_names = db_names(old["db"], minimum), db_names(graph, minimum)
     db_hits = _carry(old["db_hits"], old_names & new_names, changed)
-    _merge(db_hits, scan_db(root, None, old_names & new_names, files, existing, timeout))
-    _merge(db_hits, scan_db(root, None, new_names - old_names, files, None, timeout))
+    _merge(db_hits, scan_db(root, rev, old_names & new_names, files, existing, timeout))
+    _merge(db_hits, scan_db(root, rev, new_names - old_names, files, None, timeout))
     data = _finish({"files": files, "hits": hits, "db": graph, "db_hits": db_hits,
-                    "history": read_history(root, head, settings["history_limit"], timeout)})
+                    "history": read_history(root, rev or head, settings["history_limit"], timeout)})
     return data, len(changed)
 
 
@@ -481,6 +487,12 @@ def refresh_data(root: pathlib.Path, old: Mapping, old_inputs: Mapping[str, str]
 def map_path(state: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
     key = hashlib.sha256(str(pathlib.Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
     return state / "impact" / "maps" / f"{key}.json"
+
+
+def ref_map_path(state: pathlib.Path, root: pathlib.Path) -> pathlib.Path:
+    """The default-branch map of this worktree, next to its worktree map."""
+    worktree = map_path(state, root)
+    return worktree.with_name(worktree.stem + ".default-branch.json")
 
 
 def load(path: pathlib.Path) -> dict:
@@ -509,7 +521,7 @@ def _state(path: pathlib.Path) -> pathlib.Path:
     return path.parent.parent.parent
 
 
-def _judge(path: pathlib.Path, manifest: Mapping) -> tuple[dict | None, str, bool]:
+def _judge(path: pathlib.Path, manifest: Mapping, order: tuple = MANIFEST_ORDER) -> tuple[dict | None, str, bool]:
     """(stored map, reason it is stale or "", whether it can be refreshed incrementally)."""
     try:
         stored = load(path)
@@ -524,10 +536,11 @@ def _judge(path: pathlib.Path, manifest: Mapping) -> tuple[dict | None, str, boo
         return stored, "tool changed", False
     if stored.get("result") != digest(stored["data"]) or stored.get("manifest_digest") != digest(stored["manifest"]):
         return stored, "result digest mismatch", False
-    for key, reason in MANIFEST_ORDER:
+    for key, reason in order:
         if stored["manifest"].get(key) != manifest[key]:
             if key == "head":
-                reason = f"HEAD moved (map {str(stored['manifest'].get('head'))[:12]}, HEAD {manifest['head'][:12]})"
+                now = "HEAD" if order is MANIFEST_ORDER else "fetched"
+                reason = f"{reason} (map {str(stored['manifest'].get('head'))[:12]}, {now} {manifest['head'][:12]})"
             return stored, reason, key != "worktree"
     return stored, "", True
 
@@ -615,6 +628,61 @@ def ensure_fresh(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, 
                  settings: Mapping[str, object] | None = None) -> MapInfo:
     """Make sure the map matches the working tree: the call preflight, packet new, review and finish make first."""
     return fresh_map(root, refresh=refresh, env=env, settings=settings)[0]
+
+
+def tree_inputs(root: pathlib.Path, sha: str, settings: Mapping[str, object]) -> tuple[dict[str, str], list[str]]:
+    """({path: "blob:<oid>"}, excluded symlinks) for the tracked blobs at commit sha."""
+    output = _git(root, "ls-tree", "-r", "-z", "--full-tree", sha, timeout=settings["git_timeout"])
+    inputs, excluded = {}, []
+    for entry in output.split("\0"):
+        meta, _, path = entry.partition("\t")
+        fields = meta.split(" ")
+        if path and fields[1:2] == ["blob"]:
+            if fields[0] == "120000":
+                excluded.append(path)
+            else:
+                inputs[path] = "blob:" + fields[2]
+    return dict(sorted(inputs.items())), sorted(excluded)
+
+
+def _ref_manifest(top: pathlib.Path, ref: str, settings: Mapping[str, object]) -> tuple[dict, dict[str, str], list[str]]:
+    sha = resolve_rev(top, ref, timeout=settings["git_timeout"])
+    inputs, excluded = tree_inputs(top, sha, settings)
+    manifest = {"worktree": hashlib.sha256(str(top.resolve()).encode("utf-8")).hexdigest(), "ref": ref, "head": sha,
+                "tool": tool_digest(settings)}
+    return manifest, inputs, excluded
+
+
+def ref_map(root: pathlib.Path, ref: str, *, refresh: bool = True, env: Mapping[str, str] | None = None,
+            settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
+    """(info, data) for the map of a fetched ref (the default branch), stored beside the worktree map.
+
+    A commit never changes, so the map is keyed by the SHA the ref names now. A map for an older SHA is
+    refreshed incrementally, or refused with OAH_IMPACT_STALE when refresh is False. Nothing is fetched here.
+    """
+    top, worktree_path, current = _context(root, env, settings)
+    path = ref_map_path(_state(worktree_path), top)
+    if not refresh:
+        manifest, _inputs, _excluded = _ref_manifest(top, ref, current)
+        stored, reason, _incremental = _judge(path, manifest, REF_ORDER)
+        if stored is not None and not reason:
+            return _info(stored, path, "fresh"), stored["data"]
+        raise ImpactError("OAH_IMPACT_STALE", f"the default-branch map is {reason}; run oah impact without "
+                          "--no-refresh to refresh it")
+    with StateLock(path.parent.parent / ".lock", timeout=float(current["lock_timeout"])):
+        manifest, inputs, excluded = _ref_manifest(top, ref, current)
+        stored, reason, incremental = _judge(path, manifest, REF_ORDER)
+        if stored is not None and not reason:
+            return _info(stored, path, "fresh"), stored["data"]
+        if stored is not None and incremental:
+            data, changed = refresh_data(top, stored["data"], stored["inputs"], inputs, manifest["head"], current,
+                                         rev=manifest["head"])
+            action = "refreshed"
+        else:
+            data = build_data(top, manifest["head"], current)
+            changed, action = len(data["files"]), "built"
+        data["excluded_paths"] = excluded
+        return _info(_write(path, manifest, inputs, data), path, action, changed, reason), data
 
 
 def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:

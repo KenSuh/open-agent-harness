@@ -19,6 +19,7 @@ DEFAULTS: dict[str, object] = {
     "sql_dialect": "standard",  # MySQL rules require explicit sql_dialect = "mysql"
     "ledger_globs": [".oah/tasks/*/GATES.md"],  # gate ledgers bind the map's identity, ignored or not
     "rerank": False,              # a re-ranker runs only when enabled here explicitly and its key is present
+    "refresh_default_branch": True,  # fetch the remote's default branch before a query and map it too (A23)
     "git_timeout": 300.0,
     "lock_timeout": 120.0,
     "kinds": [[kind, list(globs)] for kind, globs in DEFAULT_KINDS],
@@ -55,8 +56,9 @@ def _check(settings: Mapping[str, object]) -> None:
             fail(key, "an array of strings")
     if not isinstance(settings["graph_file"], str):
         fail("graph_file", "a string")
-    if not isinstance(settings["rerank"], bool):
-        fail("rerank", "true or false")
+    for key in ("rerank", "refresh_default_branch"):
+        if not isinstance(settings[key], bool):
+            fail(key, "true or false")
     if settings["sql_dialect"] not in ("standard", "postgres", "mysql", "sqlite"):
         fail("sql_dialect", 'one of "standard", "postgres", "mysql", "sqlite"')
     kinds = settings["kinds"]
