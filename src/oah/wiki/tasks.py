@@ -24,11 +24,12 @@ def marker(task: str) -> str:
 
 
 def entry_has_marker(entry: log_module.Entry, task: str) -> bool:
+    """Only a column-zero marker outside structural fences identifies maintenance."""
     wanted = marker(task)
     fences = FenceTracker()
     for line in split_lines(entry.data):
         text = line.decode("utf-8")
-        if not fences.feed(text) and strip_eol(text).strip() == wanted:
+        if not fences.feed(text) and strip_eol(text).rstrip() == wanted:
             return True
     return False
 

@@ -121,6 +121,15 @@ class PreCommitTest(unittest.TestCase):
         self.assertFalse(any("in code" in line for line in verdict.warnings))
         self.assert_blocked(self.check(new_broken_links="block"), "[[nowhere]]")
 
+    def test_link_between_skipped_container_delimiters_warns_then_blocks(self):
+        self.stage({"docs/wiki/a.md": "- ```\n  code\n[[real]]\n  ```\n  ```\n"})
+        # The staged bytes, rather than a subsequent editor change, govern the check.
+        (self.wiki_dir / "a.md").write_text("[[wiki-guide]]\n", encoding="utf-8")
+        verdict = self.check()
+        self.assertEqual(verdict.blocked, [])
+        self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
+        self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+
     def test_existing_broken_link_is_not_new(self):
         self.stage({"docs/wiki/a.md": "[[nowhere]]\n"})
         subprocess.run(["git", "-C", str(self.repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m", "a"],

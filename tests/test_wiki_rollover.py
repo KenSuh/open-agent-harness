@@ -61,6 +61,30 @@ def snapshot(*folders: pathlib.Path) -> dict[str, bytes]:
 
 
 class ParseTest(unittest.TestCase):
+    def test_list_terminating_blocks_before_fence_keep_log_parseable(self):
+        for ending in (b"> quote", b"  ## Heading", b"  - - -", b"  * * *", b"  _ _ _"):
+            with self.subTest(ending=ending):
+                body = (b"## 2026-01-02 real\n\n- item\n" + ending +
+                        b"\n  ~~~\n## 2026-13-99 example\n  ~~~\n[[real]]\n")
+                entries = [body, b"## 2026-01-01 old\n"]
+                self.assertEqual([e.data for e in log.parse_log(make_log(entries), "log.md").entries], entries)
+
+    def test_nested_date_examples_parse_in_logs_and_archives(self):
+        for eol in (b"\n", b"\r\n"):
+            for name in ("log.md", "log_archive_01.md"):
+                with self.subTest(eol=eol, name=name):
+                    body = (b"## 2026-01-02 real\n\n- item\n  ~~~\n"
+                            b"## 2026-13-99 example\n  ~~~\n\n").replace(b"\n", eol)
+                    entries = [body, b"## 2026-01-01 old\n".replace(b"\n", eol)]
+                    data = make_log(entries, eol=eol)
+                    self.assertEqual([e.data for e in log.parse_log(data, name).entries], entries)
+
+    def test_only_column_zero_headings_define_entries(self):
+        body = (b"## 2026-01-02 real\n\n- item\n  ## 2026-13-99 example\n  ## 2026-01-03 indented\n"
+                b"> ## 2026-01-03 quote\n- ## 2026-01-03 list\n")
+        entries = [body, b"## 2026-01-01 old\n"]
+        self.assertEqual([e.data for e in log.parse_log(make_log(entries), "log.md").entries], entries)
+
     def test_entry_parsing_includes_blank_lines(self):
         data = make_log([b"## 2026-01-03 c\n\nbody\n\n\n", b"## 2026-01-02 b\nno blank\n", b"## 2026-01-01 a"])
         parsed = log.parse_log(data, "log.md")
@@ -82,9 +106,13 @@ class ParseTest(unittest.TestCase):
         parsed = log.parse_log(make_log(entries), "log.md")
         self.assertEqual([e.data for e in parsed.entries], entries)
 
-    def test_lazy_list_continuation_never_swallows_log_entry(self):
+    def test_lazy_list_continuation_does_not_change_structural_fences(self):
         body = b"## 2026-01-02 real\n\n- item\nlazy continuation\n  ~~~\n  [[hidden]]\n"
-        entries = [body, b"## 2026-01-01 old\n"]
+        # The indented delimiter opens a structural fence regardless of earlier list text.
+        with self.assertRaises(WikiError) as ctx:
+            log.parse_log(make_log([body, b"## 2026-01-01 old\n"]), "log.md")
+        self.assertIn("unclosed code fence", str(ctx.exception))
+        entries = [body + b"  ~~~\n", b"## 2026-01-01 old\n"]
         parsed = log.parse_log(make_log(entries), "log.md")
         self.assertEqual([e.data for e in parsed.entries], entries)
 
@@ -103,7 +131,6 @@ class ParseTest(unittest.TestCase):
             "first heading no title": (HEADER + b"## 2026-01-01\n", "undated first entry heading"),
             "first heading short date": (HEADER + b"## 2026-1-1 a\n", "undated first entry heading"),
             "later bad date": (HEADER + b"## 2026-01-02 a\n## 2026-13-01 b\n", "OAH_WIKI_LOG_INVALID"),
-            "indented": (HEADER + b"## 2026-01-02 a\n  ## 2026-01-01 b\n", "OAH_WIKI_LOG_INVALID"),
             "unclosed fence": (HEADER + b"## 2026-01-01 a\n```\n## 2026-01-01 b\n", "unclosed code fence"),
             "unclosed fence above marker": (b"```\n" + HEADER, "unclosed code fence"),
             "nonempty prefix": (HEADER + b"stray text\n## 2026-01-01 a\n", "OAH_WIKI_LOG_INVALID"),

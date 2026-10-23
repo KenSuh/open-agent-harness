@@ -83,14 +83,14 @@ class LintTest(LintCase):
         self.index("a", "deep note")
         self.assertEqual(self.wiki().lint(now=NOW).problems, [])
 
-    def test_links_in_code_ignored(self):
+    def test_top_level_fences_and_same_line_code_spans_ignored(self):
         body = ("Inline `[[nope1]]` and ``[[nope2]]``.\n\n```\n[[nope3]]\n```\n\n~~~md\n[[nope4]]\n~~~\n\n"
                 "    [[nope5]]\n\nReal [[gone]].\n")
         self.write("a.md", note("A", body))
         self.index("a")
         report = self.wiki().lint(now=NOW)
         self.assertEqual([(p.kind, p.detail) for p in report.problems],
-                         [("broken_link", "[[gone]] does not resolve")])
+                         [("broken_link", f"[[{target}]] does not resolve") for target in ("nope5", "gone")])
 
     def test_links_in_container_fences_are_candidates(self):
         body = ("> ~~~md\n> [[hidden quote]]\n> ~~~\n\n"

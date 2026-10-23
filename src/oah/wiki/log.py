@@ -22,8 +22,8 @@ INDEX_END = "<!-- OAH:ARCHIVE_INDEX:END -->"
 ARCHIVE_PREFIX = "log_archive_"  # fixed: the 5.4 scope exemption, lint and recovery rely on this name
 
 _ENTRY = re.compile(r"^## ([0-9]{4}-[0-9]{2}-[0-9]{2}) +(\S.*)$")
-_CANDIDATE = re.compile(r"^ {0,3}##[ \t]+[0-9]")
-_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
+_CANDIDATE = re.compile(r"^##[ \t]+[0-9]")
+_HEADING = re.compile(r"^##(?:[ \t]|$)")
 
 
 class ArchiveNaming:

@@ -15,7 +15,7 @@ import unittest
 
 from oah import wiki, wiki_cli
 from oah.cli import _command_table, command_modules, main
-from oah.wiki import markdown, notes
+from oah.wiki import log, markdown, notes, tasks
 from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.store import Wiki
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
@@ -39,6 +39,33 @@ def make_wiki(test: unittest.TestCase, repo: pathlib.Path, **settings) -> Wiki:
 
 
 class MarkdownTest(unittest.TestCase):
+    def test_skipped_delimiters_cannot_span_real_link(self):
+        text = "- ```\n  code\n[[real]]\n  ```\n  ```\n"
+        self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)], [("real", 3)])
+
+    def test_list_terminating_blocks_cannot_hide_real_link(self):
+        for ending in ("> quote", "  ## Heading", "  - - -", "  * * *", "  _ _ _"):
+            with self.subTest(ending=ending):
+                text = "- item\n" + ending + "\n  ~~~\n## 2026-13-99 example\n  ~~~\n[[real]]\n"
+                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+
+    def test_lint_masks_only_column_zero_fences_and_same_line_spans(self):
+        text = ("```\n[[fenced]]\n```\n`[[span]]` [[visible]]\n"
+                "`opening\n[[multiline]]\nclosing`\n\n    [[indented]]\n"
+                "  ~~~\n[[ambiguous]]\n  ~~~\n")
+        self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                         [("visible", 4), ("multiline", 6), ("indented", 9), ("ambiguous", 11)])
+
+    def test_task_markers_count_only_at_column_zero_outside_structural_fences(self):
+        for body in ("- ~~~\n  <!-- oah-task: T -->\n  ~~~\n",
+                     "- item\n  ~~~\n<!-- oah-task: T -->\n  ~~~\n",
+                     "    <!-- oah-task: T -->\n", "> <!-- oah-task: T -->\n",
+                     "- <!-- oah-task: T -->\n"):
+            with self.subTest(body=body):
+                entry = log.Entry("2026-10-23", "Example", 1,
+                                  ("## 2026-10-23 Example\n" + body).encode("utf-8"))
+                self.assertFalse(tasks.entry_has_marker(entry, "T"))
+
     def test_split_lines_keeps_crlf_and_lone_cr(self):
         self.assertEqual(markdown.split_lines(b"a\r\nb\rc\nd"), [b"a\r\n", b"b\rc\n", b"d"])
         self.assertEqual(markdown.split_lines(b""), [])
@@ -58,14 +85,14 @@ class MarkdownTest(unittest.TestCase):
                 tracker = markdown.FenceTracker()
                 self.assertEqual([tracker.feed(line) for line in lines], expected)
 
-    def test_mask_code_spans_blocks_and_indented_code(self):
+    def test_mask_code_spans_blocks_and_indented_candidates(self):
         text = ("a [[keep]] `[[span]]` b\n"
                 "```\n[[fenced]]\n```\n"
                 "\n    [[indented]]\n"
                 "- item\n\n    [[list continuation]]\n"
                 "``x\n[[multi]] y``\n")
         targets = [link.target for link in markdown.wikilinks(text)]
-        self.assertEqual(targets, ["keep", "list continuation"])
+        self.assertEqual(targets, ["keep", "indented", "list continuation", "multi"])
 
     def test_wikilink_forms(self):
         text = "[[a]] ![[b.png]] [[c|alias]] [[d#head]] [[e#^block|x]] [[#local]] [[f\\|g]]\n\n[[h]]"
@@ -100,7 +127,7 @@ class MarkdownTest(unittest.TestCase):
         for rule in ("- - -", "* * *", "_ _ _"):
             with self.subTest(rule=rule):
                 text = rule + "\n  ~~~md\n[[hidden]]\n  ~~~\n\n[[real]]"
-                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["hidden", "real"])
 
     def test_lazy_list_continuation_never_hides_real_link(self):
         for prefix in ("- item\nlazy continuation\n", "1. item\nlazy continuation\n",
@@ -111,9 +138,12 @@ class MarkdownTest(unittest.TestCase):
 
     def test_top_level_fence_after_list_termination(self):
         for ending in ("\nparagraph\n", "# Heading\n", "- - -\n"):
-            with self.subTest(ending=ending):
-                text = "- item\nlazy continuation\n" + ending + "  ~~~\n[[hidden]]\n  ~~~\n[[real]]"
-                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+            for indent in ("", "  "):
+                with self.subTest(ending=ending, indent=indent):
+                    text = ("- item\nlazy continuation\n" + ending + indent + "~~~\n[[hidden]]\n" +
+                            indent + "~~~\n[[real]]")
+                    expected = ["hidden", "real"] if indent else ["real"]
+                    self.assertEqual([link.target for link in markdown.wikilinks(text)], expected)
 
     def test_container_fences_are_candidates_only(self):
         for text in ("> ~~~\n> [[candidate]]\n> ~~~\n",
@@ -288,6 +318,8 @@ class WikiCliTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         help_text = " ".join(out.getvalue().split())
         self.assertIn("top-level fences", help_text)
+        self.assertIn("column 0", help_text)
+        self.assertIn("same line", help_text)
         self.assertIn("list or blockquote", help_text)
         self.assertIn("candidates", help_text)
         self.assertIn("Inspect", help_text)
@@ -430,6 +462,25 @@ class MaintainTaskTest(unittest.TestCase):
     def task_entries(self, task: str) -> int:
         marker = f"<!-- oah-task: {task} -->".encode()
         return sum(path.read_bytes().count(marker) for path in self.wiki_dir.glob("log*.md"))
+
+    def test_nested_marker_examples_do_not_replace_actual_maintenance(self):
+        example = (b"## 2026-10-22 Example\n\n- item\n  ~~~\n"
+                   b"<!-- oah-task: t1 -->\n  ~~~\n\n")
+        log_path = self.wiki_dir / "log.md"
+        log_path.write_bytes(log_path.read_bytes() + example)
+        archive = self.wiki_dir / "log_archive_01.md"
+        archive_bytes = (b"<!-- OAH:LOG_INSERT_BELOW -->\n"
+                         b"## 2026-10-21 Archived example\n\n- item\n  ~~~\n"
+                         b"  <!-- oah-task: t1 -->\n  ## 2026-13-99 example\n  ~~~\n")
+        archive.write_bytes(archive_bytes)
+        for _ in range(2):
+            result = self.maintain(log_title="Actual task")
+            self.assertEqual(result.errors, [])
+            found = tasks.task_entries("t1", log_path.read_bytes(), {archive.name: archive.read_bytes()})
+            self.assertEqual([(name, item.title) for name, item in found], [("log.md", "Actual task")])
+            self.assertTrue(self.verify().ok)
+            self.assertTrue(log_path.read_bytes().endswith(example))
+            self.assertEqual(archive.read_bytes(), archive_bytes)
 
     def test_cli_maintain_adds_entry_index_and_record(self):
         code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t1", "--title", "Retry policy",
