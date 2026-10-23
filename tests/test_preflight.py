@@ -1,10 +1,10 @@
 # 사전 점검 검사 — 임시 bare 원격을 두고 기준 최신성·작업 트리·리스 겹침·최근 커밋·패킷·영향·프로젝트 검사와 판정·종료 코드를 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import datetime as dt
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from oah import intent, preflight, preflight_cli
+from oah import cli, intent, preflight, preflight_cli
 from oah.lease import Store
 from oah.paths import repo_info, state_dir
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
@@ -297,15 +297,12 @@ class PreflightTest(unittest.TestCase):
 
 
 def run_cli(cwd: pathlib.Path, *argv: str, env: dict | None = None) -> tuple[int, str, str]:
-    parser = argparse.ArgumentParser(prog="oah")
-    preflight_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     previous = pathlib.Path.cwd()
     os.chdir(cwd)
     try:
         with patch.dict(os.environ, env or {}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = preflight_cli.run(args)
+            code = cli.main(list(argv))
     finally:
         os.chdir(previous)
     return code, out.getvalue(), err.getvalue()
@@ -332,6 +329,52 @@ class PreflightCliTest(unittest.TestCase):
         git(self.repo, "remote", "set-url", "origin", str(self.repo.parent / "gone.git"))
         self.assertEqual(run_cli(self.repo, "preflight", "--touch", "src")[0], 2)
         self.assertEqual(run_cli(self.repo, "preflight", "--offline", "--touch", "src")[0], 0)
+
+    def write_config(self, text: str) -> None:
+        (self.repo / ".oah").mkdir(exist_ok=True)
+        (self.repo / ".oah" / "config.toml").write_text(text, encoding="utf-8")
+        (self.repo / ".git" / "info" / "exclude").write_text(".oah/\n", encoding="utf-8")
+
+    def test_commands_are_discovered(self):
+        commands = cli.build_parser()._subparsers._group_actions[0].choices
+        for name in ("packet", "intent", "preflight"):
+            self.assertIn(name, commands)
+
+    def test_cli_runs_configured_project_checks(self):
+        script = self.repo.parent / "check_numbers.py"
+        script.write_text("import sys\nprint('migration 7 is taken')\nsys.exit(5)\n", encoding="utf-8")
+        # A JSON array of strings is also a valid TOML array, with the same backslash escapes.
+        self.write_config(f"[preflight]\nchecks = [{json.dumps([sys.executable, str(script)])}]\n")
+        code, out, err = run_cli(self.repo, "preflight", "--touch", "src")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("[abort] project:", out)
+        self.assertIn("migration 7 is taken", out)
+        self.write_config('[preflight]\ncheck_timeout = 30\nchecks = []\n')
+        code, out, _ = run_cli(self.repo, "preflight", "--touch", "src")
+        self.assertEqual(code, 0, out)
+        self.assertIn("no project checks configured", out)
+
+    def test_cli_configured_remote_and_branch(self):
+        git(self.repo, "remote", "rename", "origin", "upstream")
+        git(self.repo, "remote", "add", "mirror", str(self.remote))
+        self.write_config('[preflight]\nremote = "upstream"\ndefault_branch = "main"\n')
+        code, out, _ = run_cli(self.repo, "preflight", "--touch", "src")
+        self.assertEqual(code, 0, out)
+        self.assertIn("up to date with upstream/main", out)
+
+    def test_cli_config_errors_exit_69(self):
+        cases = {
+            "unknown key": ('[preflight]\nremotes = "x"\n', "OAH_CONFIG_UNKNOWN_KEY"),
+            "wrong type": ("[preflight]\nfetch_timeout = \"soon\"\n", "OAH_CONFIG_INVALID"),
+            "bad check entry": ('[preflight]\nchecks = ["python check.py"]\n', "OAH_CONFIG_INVALID"),
+            "empty check entry": ("[preflight]\nchecks = [[]]\n", "OAH_CONFIG_INVALID"),
+        }
+        for name, (text, code_name) in cases.items():
+            with self.subTest(name):
+                self.write_config(text)
+                code, _, err = run_cli(self.repo, "preflight", "--touch", "src")
+                self.assertEqual(code, 69)
+                self.assertTrue(err.startswith(code_name), err)
 
     def test_cli_outside_repository(self):
         outside = make_tmp_dir(self)

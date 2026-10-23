@@ -1,7 +1,6 @@
 # 패킷 검사 — 템플릿 배치, 초안 생성·덮어쓰기 거부, 필수 구획·AC 중복·수락 상태, 빈 Scope·과정 단계 경고, GATES.md 구조, CLI 종료 코드를 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import os
@@ -10,7 +9,7 @@ import re
 import unittest
 from unittest.mock import patch
 
-from oah import intent, packet, packet_cli
+from oah import cli, intent, packet, packet_cli
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
 LAYOUT = [
@@ -231,15 +230,12 @@ class CheckTest(unittest.TestCase):
 
 
 def run_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
-    parser = argparse.ArgumentParser(prog="oah")
-    packet_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     previous = pathlib.Path.cwd()
     os.chdir(cwd)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = packet_cli.run(args)
+            code = cli.main(list(argv))
     finally:
         os.chdir(previous)
     return code, out.getvalue(), err.getvalue()

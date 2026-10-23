@@ -18,8 +18,8 @@
 6. `packet`: with a task, its packet must check clean, be accepted and have success conditions.
 7. `project`: each configured argv must exit 0.
 
-Settings are parameters (`DEFAULTS`); lane P4b injects `oah.impact.ensure_fresh` as `impact` and the
-`[preflight].checks` argv lists as `project_checks`. The verdict is PROCEED (0),
+Settings are parameters (`DEFAULTS`, the `[preflight]` section of `.oah/config.toml`). The CLI passes
+`[preflight].checks` as `project_checks`; lane P4b injects `oah.impact.ensure_fresh` as `impact`. The verdict is PROCEED (0),
 PROCEED_WITH_WARNINGS (0) or ABORT (2), and the rendered report ends with what it did not prove.
 """
 from __future__ import annotations
@@ -43,6 +43,7 @@ DEFAULTS: dict[str, object] = {
     "default_branch": "",    # empty: the remote's HEAD branch
     "fetch_timeout": 60.0,
     "check_timeout": 300.0,
+    "checks": [],            # project checks: argv lists that must exit 0
 }
 LEVELS = ("ok", "info", "warn", "abort")
 MAX_LISTED = 20

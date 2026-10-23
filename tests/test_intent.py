@@ -1,7 +1,6 @@
 # 의도 모듈 검사 — 마커·필드 파싱, CRLF/LF 다이제스트, 안전한 원본 읽기, 네 가지 결속 상태, 반환 줄 검사, 공용 꼬리말을 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import hashlib
 import io
@@ -10,7 +9,7 @@ import pathlib
 import unittest
 from unittest.mock import patch
 
-from oah import intent, intent_cli
+from oah import cli, intent, intent_cli
 from oah.intent import Binding, IntentInvalid, SourceError
 from oah.lease import Lease, Store
 from oah.paths import repo_info, state_dir
@@ -404,15 +403,12 @@ def full_packet(*, ident: str = "demo", revision: str = "1", status: str = "acce
 
 
 def run_intent_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
-    parser = argparse.ArgumentParser(prog="oah")
-    intent_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     previous = pathlib.Path.cwd()
     os.chdir(cwd)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = intent_cli.run(args)
+            code = cli.main(list(argv))
     finally:
         os.chdir(previous)
     return code, out.getvalue(), err.getvalue()

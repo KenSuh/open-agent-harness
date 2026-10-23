@@ -1,15 +1,4 @@
 # 의도 명령 — oah intent show/check 로 패킷 의도의 신원·다이제스트·결속 상태를 보이고, ID 변경과 개정 없는 목표 변경을 잡는다.
-"""`oah intent show|check (<task> | --file PATH)`.
-
-Both print the binding state and the intent's identity. The binding comes from the task's lease when
-the lease record carries an `intent` field (lane P4b adds it); otherwise the state is `unbound`.
-
-`check` also compares the packet with earlier statements of the same goal: the lease binding, and
-the packet's version at `HEAD` when git tracks it. A different `Intent-ID` is `OAH_INTENT_ID_CHANGED`.
-A changed section of an accepted intent with the same `Revision` is `OAH_INTENT_REVISION_REQUIRED`,
-and a lower `Revision` is `OAH_INTENT_REVISION_INVALID`. A draft, or a `missing` or `stale` binding,
-also fails the check.
-"""
 from __future__ import annotations
 
 import argparse
@@ -51,6 +40,17 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    """`oah intent show|check (<task> | --file PATH)`.
+
+    Both print the binding state and the intent's identity. The binding comes from the task's lease when
+    the lease record carries an `intent` field (lane P4b adds it); otherwise the state is `unbound`.
+
+    `check` also compares the packet with earlier statements of the same goal: the lease binding, and
+    the packet's version at `HEAD` when git tracks it. A different `Intent-ID` is `OAH_INTENT_ID_CHANGED`.
+    A changed section of an accepted intent with the same `Revision` is `OAH_INTENT_REVISION_REQUIRED`,
+    and a lower `Revision` is `OAH_INTENT_REVISION_INVALID`. A draft, or a `missing` or `stale` binding,
+    also fails the check.
+    """
     try:
         return _run(args)
     except packet.PacketError as exc:
