@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
+import sys
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -273,6 +275,132 @@ def _private_directory(folder: pathlib.Path) -> None:
         kernel.LocalFree(descriptor)
 
 
+def _permission_refused(reason: str) -> UnlazyError:
+    return UnlazyError("OAH_UNLAZY_SNAPSHOT_PERMISSIONS", f"cannot prove the unlazy snapshot is private: {reason}; "
+                       "fix the state folder's permissions to allow only your account, or set OAH_STATE_DIR "
+                       "to a private local state folder, then retry")
+
+
+def _strip_snapshot_acls(folder: pathlib.Path) -> None:
+    if sys.platform == "darwin":
+        try:
+            result = run_command(["/bin/chmod", "-RN", str(folder)], timeout=STATUS_TIMEOUT)
+            if result.returncode != 0 or result.timed_out:
+                raise OSError("chmod -RN could not remove inherited ACLs")
+        except OSError as exc:
+            raise _permission_refused(str(exc)) from exc
+
+
+def _windows_user_sid() -> str:
+    """Read the process token's user SID, without localized account names or shell commands."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = (), wintypes.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = (wintypes.HANDLE,), wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    open_token = advapi.OpenProcessToken
+    open_token.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    open_token.restype = wintypes.BOOL
+    get_token = advapi.GetTokenInformation
+    get_token.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                          ctypes.POINTER(wintypes.DWORD))
+    get_token.restype = wintypes.BOOL
+    convert = advapi.ConvertSidToStringSidW
+    convert.argtypes, convert.restype = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)), wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not open_token(kernel.GetCurrentProcess(), 0x8, ctypes.byref(token)):  # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        size = wintypes.DWORD()
+        get_token(token, 1, None, 0, ctypes.byref(size))  # TokenUser
+        if ctypes.get_last_error() != 122 or size.value < ctypes.sizeof(ctypes.c_void_p):
+            raise OSError("cannot size the current user's token")
+        data = ctypes.create_string_buffer(size.value)
+        if not get_token(token, 1, data, size, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        sid = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p)).contents
+        text = ctypes.c_void_p()
+        if not convert(sid, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(text)
+        finally:
+            kernel.LocalFree(text)
+    finally:
+        kernel.CloseHandle(token)
+
+
+def _windows_security_descriptor(path: pathlib.Path) -> str:
+    """Return the actual owner and DACL as SDDL; unreadable security descriptors refuse execution."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_security = advapi.GetFileSecurityW
+    get_security.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(wintypes.DWORD))
+    get_security.restype = wintypes.BOOL
+    convert = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    convert.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD))
+    convert.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    size = wintypes.DWORD()
+    get_security(str(path), 5, None, 0, ctypes.byref(size))  # OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+    if ctypes.get_last_error() != 122 or not size.value:
+        raise OSError("cannot size the snapshot's security descriptor")
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not get_security(str(path), 5, descriptor, size, ctypes.byref(size)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    text = ctypes.c_void_p()
+    if not convert(descriptor, 1, 5, ctypes.byref(text), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(text)
+    finally:
+        kernel.LocalFree(text)
+
+
+def _verify_snapshot_permissions(folder: pathlib.Path, *, platform: str | None = None) -> None:
+    platform = sys.platform if platform is None else platform
+    if platform not in ("darwin", "win32"):
+        return
+    try:
+        if platform == "win32":
+            sid = _windows_user_sid()
+            if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+                raise OSError("cannot identify the current user's SID")
+            trusted = rf"(?:{re.escape(sid)}|SY|BA|S-1-5-18|S-1-5-32-544)"
+            # Accept only the simple full-access grants we create (plus SYSTEM/Administrators).
+            # OW means the actual owner, which must itself be trusted. Unknown ACEs fail closed.
+            ace = rf"\(A;(?:OI|CI|ID)*;FA;;;(?:OW|{trusted})\)"
+        for path in (folder, *folder.rglob("*")):
+            info = path.lstat()
+            if path.is_symlink() or getattr(info, "st_file_attributes", 0) & 0x400:  # reparse point
+                raise OSError("a snapshot object is a link")
+            if platform == "darwin":
+                if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise OSError("a snapshot object is not owner-only")
+                result = run_command(["/bin/ls", "-lde", str(path)], timeout=STATUS_TIMEOUT,
+                                     env=dict(os.environ, LC_ALL="C"))
+                lines = result.stdout.splitlines()
+                # -e lists every ACL entry. A '+' mode marker or any extra/unknown output refuses.
+                if (result.returncode != 0 or result.timed_out or result.stderr or len(lines) != 1
+                        or not lines[0].split() or not re.fullmatch(r"[d-][rwxStTs-]{9}@?", lines[0].split()[0])):
+                    raise OSError("cannot confirm that every snapshot ACL was removed")
+            else:
+                flags = r"P(?:AI|AR)*" if path == folder else r"(?:P|AI|AR)*"
+                sddl = _windows_security_descriptor(path)
+                if not isinstance(sddl, str) or not re.fullmatch(rf"O:{trusted}D:{flags}(?:{ace})+", sddl):
+                    raise OSError("a snapshot owner or DACL is not restricted to your account and SYSTEM/Administrators")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise _permission_refused(str(exc)) from exc
+
+
 @contextmanager
 def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path):
     """Copy the entire pinned closure into private state, verify the copy, keep it through execution.
@@ -299,6 +427,10 @@ def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path
         copy = state / f"unlazy-{secrets.token_hex(16)}"
         _private_directory(copy)
         try:
+            _strip_snapshot_acls(copy)
+            _verify_snapshot_permissions(copy)
+            if any(copy.iterdir()):
+                raise _permission_refused("the fresh snapshot is not empty")
             for relative in pin.files:
                 target = copy / relative
                 target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -309,6 +441,7 @@ def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path
             record = copy / "pin.json"
             record.write_text(json.dumps({"commit": commit}), encoding="utf-8")
             record.chmod(0o600)
+            _verify_snapshot_permissions(copy)
             if (json.loads(record.read_text(encoding="utf-8")) != {"commit": pin.commit}
                     or any(file_digest(copy / relative) != digest for relative, digest in pin.files.items())):
                 raise UnlazyError("OAH_UNLAZY_UNPINNED", "unlazy changed while being copied; install the pinned "
