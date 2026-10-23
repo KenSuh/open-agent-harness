@@ -73,8 +73,8 @@ It is also careful about what it can do:
 | Your project has | oah suggests |
 |---|---|
 | `pyproject.toml`, `setup.cfg`, or a `tests/` folder with Python files, and pytest is configured | `python -m pip install pytest`, then `python -m pytest` |
-| the same, without pytest, with `test*.py` files directly in `tests/` | `python -m unittest discover -s tests` |
-| `pyproject.toml` or `setup.cfg`, without pytest, with `test*.py` files at the project root | `python -m unittest discover` |
+| the same, without pytest, with `test*.py` files directly in a packaged `tests/` or at the project root | `python -m unittest discover`, with a zero-tests guard |
+| the same, without pytest, with `test*.py` files directly in `tests/`, no `tests/__init__.py` and no root tests | `python -m unittest discover -s tests`, with a zero-tests guard |
 | `package.json` with a `test` script | `npm ci`, then `npm test` |
 | `go.mod` | `go test ./...` |
 | `Cargo.toml` | `cargo test` |
@@ -84,9 +84,13 @@ installed with `python -m pip install -e .`. pytest counts as configured when th
 `pytest.ini`, a `conftest.py`, a `[tool.pytest.ini_options]` table, a `[tool:pytest]` section in
 `setup.cfg`, or pytest among its dependencies.
 
-The unittest fallback requires one of those test file layouts. `tests/__init__.py` is optional.
-Test filenames must be valid Python module names. Other layouts get the failing placeholder; replace
-it with your test command before pushing.
+The unittest fallback requires one of those test file layouts. Root discovery keeps relative imports
+working in a packaged `tests/` and finds root tests alongside it. If you have root tests too, add
+`tests/__init__.py` to include the tests in that folder. Test filenames must be valid Python module
+names. The generated step wraps unittest in a standard-library Python check of its `Ran N tests`
+summary: zero tests or a missing summary fails the step, as does any test failure. pytest's no-tests
+exit code also fails the step. Add tests or edit the workflow's test command before pushing again.
+Other layouts get the failing placeholder; replace it with your test command before pushing.
 
 `npm ci` needs a `package-lock.json`. Run `npm install` once and commit the lock file.
 

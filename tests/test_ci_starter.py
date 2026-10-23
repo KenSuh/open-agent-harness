@@ -59,6 +59,114 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         return found[0]
 
+    def run_test_step(self, root: pathlib.Path):
+        step = ci.plan(root, ["linux"]).steps[-1]
+        return subprocess.run([sys.executable, *shlex.split(step.run)[1:]], cwd=root,
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+
+    def test_unittest_mixed_layout_runs_failing_root_test(self):
+        root = make_project(self, {
+            "tests/__init__.py": "",
+            "tests/test_inside.py": "import unittest\n"
+                                    "class InsideTest(unittest.TestCase):\n"
+                                    "    def test_inside(self):\n"
+                                    "        self.assertTrue(True)\n",
+            "test_root.py": "import unittest\n"
+                            "class RootTest(unittest.TestCase):\n"
+                            "    def test_root(self):\n"
+                            "        self.fail('root test was reached')\n",
+        })
+        result = self.run_test_step(root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Ran 2 tests", result.stderr)
+        self.assertIn("root test was reached", result.stderr)
+
+    def test_unittest_package_keeps_relative_imports(self):
+        root = make_project(self, {
+            "tests/__init__.py": "",
+            "tests/helpers.py": "ANSWER = 42\n",
+            "tests/test_math.py": "import unittest\nfrom .helpers import ANSWER\n"
+                                  "class MathTest(unittest.TestCase):\n"
+                                  "    def test_math(self):\n"
+                                  "        self.assertEqual(ANSWER, 42)\n",
+        })
+        result = self.run_test_step(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+
+    def test_unittest_zero_tests_fails_for_each_layout(self):
+        for files in ({"tests/test_empty.py": "import unittest\n"},
+                      {"tests/__init__.py": "", "tests/test_empty.py": "import unittest\n"},
+                      {"pyproject.toml": "", "test_empty.py": "import unittest\n"},
+                      {"tests/__init__.py": "", "tests/test_empty.py": "import unittest\n",
+                       "test_empty.py": "import unittest\n"}):
+            with self.subTest(files=sorted(files)):
+                result = self.run_test_step(make_project(self, files))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 0 tests", result.stderr)
+                self.assertIn("add tests or edit", result.stderr)
+
+    def test_unittest_guard_handles_runner_output_and_exit_codes(self):
+        for code, summary, guidance in (
+            (0, "", True),
+            (1, "", True),
+            (5, "NO TESTS RAN\n", True),
+            (0, "Ran 0 tests in 0.000s\n", True),
+            (5, "Ran 0 tests in 0.000s\n\nNO TESTS RAN\n", True),
+            (5, "Ran 1 test in 0.001s\n", True),
+            (0, "Ran 1 test in 0.001s\n", False),
+            (1, "Ran 2 tests in 0.001s\n", False),
+        ):
+            with self.subTest(code=code, summary=summary):
+                root = make_project(self, {"tests/test_runner.py":
+                                          "import sys\n"
+                                          "def load_tests(loader, tests, pattern):\n"
+                                          f"    sys.stderr.write({summary!r})\n"
+                                          f"    raise SystemExit({code})\n"})
+                result = self.run_test_step(root)
+                self.assertEqual(result.returncode, code or int(guidance), result.stdout + result.stderr)
+                self.assertIn(summary, result.stderr)
+                self.assertEqual("add tests or edit" in result.stderr, guidance, result.stderr)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is needed to run the generated shell command")
+    def test_unittest_zero_tests_guidance_under_bash_errexit(self):
+        root = make_project(self, {"tests/test_runner.py":
+                                  "def load_tests(loader, tests, pattern):\n"
+                                  "    raise SystemExit(5)\n"})
+        command = ci.plan(root, ["linux"]).steps[-1].run
+        command = shlex.quote(pathlib.Path(sys.executable).as_posix()) + command[len("python"):]
+        result = subprocess.run([shutil.which("bash"), "--noprofile", "--norc", "-e", "-o", "pipefail",
+                                 "-c", command], cwd=root, capture_output=True, text=True,
+                                encoding="utf-8", timeout=30)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("add tests or edit", result.stderr)
+
+    def test_unittest_root_layout_wins_over_nonpackage_tests_folder(self):
+        root = make_project(self, {
+            "tests/test_inside.py": "import unittest\n"
+                                    "class InsideTest(unittest.TestCase):\n"
+                                    "    def test_inside(self):\n"
+                                    "        self.fail('nonpackage folder was used')\n",
+            "test_root.py": "import unittest\n"
+                            "class RootTest(unittest.TestCase):\n"
+                            "    def test_root(self):\n"
+                            "        self.assertTrue(True)\n",
+        })
+        result = self.run_test_step(root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+
+    def test_unittest_each_layout_passes_with_tests(self):
+        body = ("import unittest\nclass MathTest(unittest.TestCase):\n"
+                "    def test_math(self):\n        self.assertEqual(2 + 2, 4)\n")
+        for files in ({"tests/test_math.py": body},
+                      {"tests/__init__.py": "", "tests/test_math.py": body},
+                      {"pyproject.toml": "", "test_math.py": body}):
+            with self.subTest(files=sorted(files)):
+                result = self.run_test_step(make_project(self, files))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 1 test", result.stderr)
+
     def test_python_pytest_from_pyproject(self):
         found = self.detect_one({"pyproject.toml": "[tool.pytest.ini_options]\naddopts = \"-q\"\n"})
         self.assertEqual(found.ecosystem, "python")
@@ -86,12 +194,14 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(runs(found)[-1], "python -m pytest")
         found = self.detect_one({"pyproject.toml": "[dependency-groups]\ndev = [\"pytestish\"]\n",
                                  "tests/test_math.py": "import unittest\n"})
-        self.assertEqual(runs(found), ["python -m unittest discover -s tests"])
+        self.assertEqual(found.label, "Python (unittest)")
+        self.assertTrue(runs(found)[-1].endswith(" -m unittest discover -s tests"))
 
     def test_python_unittest_from_tests_folder(self):
         found = self.detect_one({"tests/test_math.py": "import unittest\n"})
         self.assertEqual(found.ecosystem, "python")
-        self.assertEqual(runs(found), ["python -m unittest discover -s tests"])
+        self.assertEqual(len(found.steps), 1)
+        self.assertTrue(runs(found)[0].endswith(" -m unittest discover -s tests"))
         self.assertIn("tests", found.reason)
 
     def test_unittest_command_runs_failing_test_without_package(self):
@@ -133,8 +243,9 @@ class DetectTest(unittest.TestCase):
     def test_python_installs_requirements_and_project(self):
         found = self.detect_one({"pyproject.toml": "[project]\nname = \"x\"\n", "requirements.txt": "requests\n",
                                  "tests/test_math.py": "import unittest\n"})
-        self.assertEqual(runs(found), ["python -m pip install -r requirements.txt",
-                                       "python -m pip install -e .", "python -m unittest discover -s tests"])
+        self.assertEqual(runs(found)[:-1], ["python -m pip install -r requirements.txt",
+                                            "python -m pip install -e ."])
+        self.assertTrue(runs(found)[-1].endswith(" -m unittest discover -s tests"))
 
     def test_node_test_script(self):
         found = self.detect_one({"package.json": json.dumps({"scripts": {"test": "node --test"}})})

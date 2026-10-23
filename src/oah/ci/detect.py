@@ -4,12 +4,22 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import shlex
 import tomllib
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 ECOSYSTEMS = ("python", "node", "go", "rust")
 _REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+_UNITTEST_GUARD = (
+    "import re, subprocess, sys; "
+    "result = subprocess.run([sys.executable, *sys.argv[1:]], stderr=subprocess.PIPE, text=True); "
+    "sys.stderr.write(result.stderr); "
+    "ran_tests = result.returncode != 5 and re.search(r'^Ran [1-9][0-9]* tests? in ', result.stderr, re.MULTILINE); "
+    "sys.stderr.write('No tests ran; add tests or edit the Run tests step in "
+    ".github/workflows/oah-ci.yml, then push again.\\n' if not ran_tests else ''); "
+    "sys.exit(result.returncode or (0 if ran_tests else 1))"
+)
 
 
 @dataclass(frozen=True)
@@ -115,12 +125,14 @@ def _python(root: pathlib.Path) -> Detection | None:
         steps += [Step("Install pytest", "python -m pip install pytest"), Step("Run tests", "python -m pytest")]
         return Detection("python", "Python (pytest)", f"found {found}; pytest is configured in {pytest_from}",
                          tuple(steps))
-    if any(path.is_file() and path.stem.isidentifier() for path in (root / "tests").glob("test*.py")):
-        command = "python -m unittest discover -s tests"
-    elif any(path.is_file() and path.stem.isidentifier() for path in root.glob("test*.py")):
-        command = "python -m unittest discover"
-    else:
+    tests_folder = any(path.is_file() and path.stem.isidentifier()
+                       for path in (root / "tests").glob("test*.py"))
+    root_tests = any(path.is_file() and path.stem.isidentifier() for path in root.glob("test*.py"))
+    if not tests_folder and not root_tests:
         return None
+    command = f"python -c {shlex.quote(_UNITTEST_GUARD)} -m unittest discover"
+    if tests_folder and not (root / "tests" / "__init__.py").is_file() and not root_tests:
+        command += " -s tests"
     steps.append(Step("Run tests", command))
     return Detection("python", "Python (unittest)", f"found {found}; no pytest configuration, so unittest",
                      tuple(steps))

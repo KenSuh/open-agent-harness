@@ -72,8 +72,8 @@ oah 는 워크플로 파일을 몰래 덮어쓰지 않습니다. `.github/workfl
 | 프로젝트에 있는 것 | oah 가 제안하는 명령 |
 |---|---|
 | `pyproject.toml`, `setup.cfg`, 또는 Python 파일이 든 `tests/` 폴더가 있고 pytest 가 설정되어 있음 | `python -m pip install pytest` 다음 `python -m pytest` |
-| 위와 같지만 pytest 가 없고 `tests/` 바로 아래에 `test*.py` 파일이 있음 | `python -m unittest discover -s tests` |
-| `pyproject.toml` 또는 `setup.cfg` 가 있고 pytest 없이 프로젝트 루트에 `test*.py` 파일이 있음 | `python -m unittest discover` |
+| 위와 같지만 pytest 가 없고 패키지인 `tests/` 바로 아래 또는 프로젝트 루트에 `test*.py` 파일이 있음 | 테스트 0개 검사를 포함한 `python -m unittest discover` |
+| 위와 같지만 pytest 가 없고 `tests/` 바로 아래에 `test*.py` 파일이 있으며 `tests/__init__.py` 와 루트 테스트가 없음 | 테스트 0개 검사를 포함한 `python -m unittest discover -s tests` |
 | `test` 스크립트가 있는 `package.json` | `npm ci` 다음 `npm test` |
 | `go.mod` | `go test ./...` |
 | `Cargo.toml` | `cargo test` |
@@ -83,9 +83,13 @@ Python 은 `requirements.txt` 가 있으면 먼저 설치하고, `[project]` 표
 `[tool.pytest.ini_options]` 표, `setup.cfg` 의 `[tool:pytest]` 절이 있거나 의존성에 pytest 가 있으면
 pytest 가 설정된 것으로 봅니다.
 
-unittest 는 위 두 테스트 파일 배치 중 하나가 있을 때만 제안합니다. `tests/__init__.py` 는 없어도 됩니다.
-테스트 파일 이름은 유효한 Python 모듈 이름이어야 합니다. 다른 배치에는 일부러 실패하는 단계를 넣으니,
-push 하기 전에 테스트 명령으로 바꾸세요.
+unittest 는 위 두 테스트 파일 배치 중 하나가 있을 때만 제안합니다. 루트에서 탐색하면 패키지인 `tests/` 의
+상대 import 를 유지하면서 루트 테스트도 함께 찾습니다. 루트 테스트가 함께 있다면 `tests/` 안의 테스트도
+포함되도록 `tests/__init__.py` 를 추가하세요. 테스트 파일 이름은 유효한 Python 모듈 이름이어야 합니다.
+생성된 단계는 Python 표준 라이브러리로 unittest 의 `Ran N tests` 요약을 확인합니다. 테스트가 0개이거나
+요약이 없으면 실패하며, 테스트 실패도 그대로 실패로 처리합니다. pytest 의 테스트 없음 종료 코드도 단계를
+실패시킵니다. 테스트를 추가하거나 워크플로의 테스트 명령을 고친 뒤 다시 push 하세요.
+다른 배치에는 일부러 실패하는 단계를 넣으니, push 하기 전에 테스트 명령으로 바꾸세요.
 
 `npm ci` 에는 `package-lock.json` 이 필요합니다. `npm install` 을 한 번 실행하고 lock 파일을 커밋하세요.
 
