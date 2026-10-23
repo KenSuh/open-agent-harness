@@ -18,6 +18,7 @@ import os
 import pathlib
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import unicodedata
@@ -215,28 +216,26 @@ def installed_executables(entry: Bundled, relative: str, record: Upstream) -> li
 
 @contextlib.contextmanager
 def destination_locks(paths: Iterable[pathlib.Path]) -> Iterator[None]:
-    """Lock directory entries by filesystem identity, for every install/update writer.
+    """Lock destination slots beside their entries, for every install/update writer.
 
-    The parent is made first and never replaced by publication. Its device/inode plus the
-    remaining name identify the slot even during a rename gap or after replacement. Folding
-    names conservatively also serializes case/Unicode aliases on macOS and Windows (and may
-    serialize distinct names on case-sensitive volumes). No ancestor spelling enters the key.
+    Resolve only the parent: the destination may be a link or absent during replacement.
+    Adjacent lock files are shared even when clients see different mount paths or device IDs.
+    Folding names also serializes case/Unicode aliases (and may conservatively serialize
+    distinct names on case-sensitive volumes). Keep lock files after releasing them.
     """
-    locks: dict[str, pathlib.Path] = {}
+    locks: set[pathlib.Path] = set()
     for path in paths:
-        path = path.resolve()
-        parent = path.parent
+        parent = path.parent.resolve()
         parent.mkdir(parents=True, exist_ok=True)
-        info = parent.stat()
+        if not stat.S_ISDIR(parent.lstat().st_mode):
+            raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
+                               f"{parent} is not a real directory; restore the parent folder and retry")
         name = unicodedata.normalize("NFD", path.name).casefold()
-        key = f"{info.st_dev}:{info.st_ino}:{name}"
-        digest = hashlib.sha256(os.fsencode(key)).hexdigest()
-        installed = parent.name.casefold() == "skills" and parent.parent.name.casefold() in (".claude", ".agents")
-        root = parent.parent.parent if installed else parent.parent
-        locks[key] = root / ".oah" / "toolkit" / "locks" / (digest + ".lock")
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        locks.add(parent / f".oah-publish-{digest}.lock")
     with contextlib.ExitStack() as stack:
-        for key in sorted(locks):
-            stack.enter_context(StateLock(locks[key]))
+        for lock in sorted(locks):
+            stack.enter_context(StateLock(lock))
         yield
 
 

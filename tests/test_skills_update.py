@@ -18,7 +18,7 @@ from oah.lease import Store
 from oah.paths import repo_info
 from oah.toolkit.catalog import Catalog, load_catalog, read_upstream
 from oah.toolkit.fetch import fetch, stage_item
-from oah.toolkit.install import InstallError, apply_install, plan_install, swap_in
+from oah.toolkit.install import InstallError, apply_install, destination_locks, plan_install, swap_in
 from oah.toolkit.update import (DEFAULTS, LeasesActive, active_leases, cache_dir, idle_state,
                                 installed_destinations, read_state, refresh_cache, run_update, scheduled_update,
                                 vendored_destinations)
@@ -130,7 +130,9 @@ class UpdateTest(UpdateFixture):
         self.assertEqual(marker["commit"], new)
         self.assertEqual((self.installed / "ref.md").read_text(encoding="utf-8"), "reference\nmore\n")
         self.assertEqual((self.installed / "LICENSE").read_text(encoding="utf-8"), MIT_TEXT)
-        self.assertEqual([p.name for p in self.installed.parent.iterdir()], ["demo"])
+        locks = set(self.installed.parent.glob(".oah-publish-*.lock"))
+        self.assertEqual(len(locks), 1)
+        self.assertEqual(set(self.installed.parent.iterdir()), {self.installed, *locks})
 
     def test_check_only_writes_nothing(self):
         commit(self.upstream, {"skills/demo/ref.md": "changed\n"})
@@ -232,6 +234,19 @@ class SwapTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in root.iterdir()), ["dest"])
 
 
+class DestinationLocksTest(unittest.TestCase):
+    def test_lock_stays_in_real_parent_and_folds_destination_name(self):
+        root = make_tmp_dir(self)
+        parent = root / "skills"
+        with destination_locks([parent / "Caf\u00e9"]):
+            locks = list(parent.glob(".oah-publish-*.lock"))
+            self.assertEqual(len(locks), 1, "publication locks must live beside the destination")
+        with destination_locks([parent / "CAFE\u0301"]):
+            self.assertEqual(list(parent.glob(".oah-publish-*.lock")), locks)
+        self.assertTrue(locks[0].is_file(), "keep the lock entry after releasing it")
+        self.assertFalse((root / ".oah").exists())
+
+
 class ScheduledTest(UpdateFixture):
     def test_global_publication_is_serialized_across_repository_processes(self):
         self._concurrent_global_updates(self.home)
@@ -261,7 +276,14 @@ class ScheduledTest(UpdateFixture):
         directory_alias(self.home, alias)
         self._concurrent_global_updates(alias)
 
-    def _concurrent_global_updates(self, alias_home):
+    def test_global_publication_unifies_mount_aliases_with_different_device_ids(self):
+        self.home.mkdir()
+        alias = self.home.with_name("other-mount")
+        directory_alias(self.home, alias)
+        self.assertTrue(alias.samefile(self.home))
+        self._concurrent_global_updates(alias, different_device=True)
+
+    def _concurrent_global_updates(self, alias_home, *, different_device=False):
         plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
                             project_root=self.project, home=self.home)
         apply_install(plan, catalog=self.catalog, now=NOW)
@@ -272,14 +294,27 @@ class ScheduledTest(UpdateFixture):
         # Both real processes prepare from the same installed pin. Pause the first after its
         # publication identity read; the second may enter publication only after that point.
         script = '''
-import contextlib, datetime as dt, json, pathlib, sys, time
+import contextlib, datetime as dt, json, os, pathlib, sys, time
 import oah.toolkit.update as update
 from oah.toolkit.catalog import load_catalog
 from oah.toolkit.fetch import fetch
-catalog_path, project, home, state, sync, name, candidate = sys.argv[1:]
+catalog_path, project, home, state, sync, name, candidate, different_device = sys.argv[1:]
 project, home, state, sync = map(pathlib.Path, (project, home, state, sync))
 catalog = load_catalog(pathlib.Path(catalog_path))
 destinations = update.installed_destinations(catalog, project_root=project, home=home, level="global")
+# A portable mount simulation: both paths reach the same real files, but the second
+# client's stat reports a different device ID for their parent, as separate mounts can.
+parent = destinations[0].path.parent.resolve()
+original_stat = pathlib.Path.stat
+def stat(path, *args, **kwargs):
+    info = original_stat(path, *args, **kwargs)
+    if different_device == "True" and name == "older" and path == parent:
+        fields = list(info)
+        fields[2] += 1
+        return os.stat_result(fields)
+    return info
+pathlib.Path.stat = stat
+(sync / (name + "-device")).write_text(str(parent.stat().st_dev), encoding="utf-8")
 publishing = False
 def wait_for(path):
     deadline = time.monotonic() + 20
@@ -316,7 +351,8 @@ print(json.dumps([r.status for r in results]))
         for name, candidate, project in (("newer", newer, self.project), ("older", older, other_project)):
             home = self.home if name == "newer" else alias_home
             process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(project),
-                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate],
+                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate,
+                                        str(different_device)],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
             processes.append(process)
             self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
@@ -330,6 +366,9 @@ print(json.dumps([r.status for r in results]))
         try:
             self.assertTrue(wait_for("older-ready"))
             self.assertTrue(wait_for("newer-ready"))
+            if different_device:
+                self.assertNotEqual((sync / "older-device").read_text(encoding="utf-8"),
+                                    (sync / "newer-device").read_text(encoding="utf-8"))
             (sync / "newer-go").touch()
             self.assertTrue(wait_for("newer-checked"))
             (sync / "older-go").touch()
@@ -349,8 +388,8 @@ print(json.dumps([r.status for r in results]))
         marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["commit"], newer)
         self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
-        locks = list((self.home / ".oah").rglob("*.lock"))
-        self.assertEqual(len(locks), 1, "the destination lock belongs in the user's oah folder")
+        locks = list(installed.parent.glob(".oah-publish-*.lock"))
+        self.assertEqual(len(locks), 1, "the destination lock belongs beside the destination")
 
     def test_install_and_update_share_global_publication_lock(self):
         self._install_during_update("global")
@@ -358,14 +397,26 @@ print(json.dumps([r.status for r in results]))
     def test_install_and_update_share_project_publication_lock(self):
         self._install_during_update("project")
 
-    def _install_during_update(self, level):
+    @unittest.skipIf(os.name == "nt", "POSIX directory symlink; Windows junction tested separately")
+    def test_install_started_during_symlink_publication_gap_waits(self):
+        self._install_during_update("project", linked=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory junction")
+    def test_install_started_during_junction_publication_gap_waits(self):
+        self._install_during_update("project", linked=True)
+
+    def _install_during_update(self, level, *, linked=False):
         if level == "global":
             plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
                                 project_root=self.project, home=self.home)
             apply_install(plan, catalog=self.catalog, now=NOW)
         newer = commit(self.upstream, {"skills/demo/ref.md": "newer candidate\n"})
         sync = make_tmp_dir(self)
-        if level == "project":
+        if linked:
+            target = self.project / "linked-pin"
+            self.installed.rename(target)
+            directory_alias(target, self.installed)
+        elif level == "project":
             # The install prepares a missing project copy; another writer seeds the pin
             # before the update starts, so the install must later lose its absence CAS.
             self.installed.rename(sync / "project-pin")
@@ -385,6 +436,7 @@ def wait_for(name):
             raise RuntimeError("publication synchronization timed out: " + name)
         time.sleep(.01)
 if operation == "install":
+    (sync / "install-started").touch()
     plan = install.plan_install(["demo"], catalog=catalog, source_dirs=[kit], target="claude",
         level="user" if level == "global" else "project", project_root=project, home=home)
     original_build = install.build_copy
@@ -434,16 +486,23 @@ else:
                 time.sleep(.01)
             return (sync / name).exists()
 
-        installer = start("install")
         try:
-            self.assertTrue(wait_for("install-prepared"))
-            if level == "project":
-                (sync / "project-pin").rename(self.installed)
-            start("update")
-            self.assertTrue(wait_for("update-gap"))
+            if linked:
+                start("update")
+                self.assertTrue(wait_for("update-gap"))
+                installer = start("install")
+                self.assertTrue(wait_for("install-started"))
+            else:
+                installer = start("install")
+                self.assertTrue(wait_for("install-prepared"))
+                if level == "project":
+                    (sync / "project-pin").rename(self.installed)
+                start("update")
+                self.assertTrue(wait_for("update-gap"))
             (sync / "install-go").touch()
             entered_gap = wait_for("install-publishing", timeout=1)
             finished_in_gap = installer.poll() is not None
+            prepared_in_gap = linked and (sync / "install-prepared").exists()
         finally:
             (sync / "release").touch()
             (sync / "install-go").touch()
@@ -452,10 +511,13 @@ else:
             out, err = process.communicate(timeout=25)
             self.assertEqual(process.returncode, 0, err)
             outputs.append(json.loads(out))
+        if linked:
+            outputs.reverse()  # The updater starts first in the linked-destination scenario.
+        self.assertFalse(prepared_in_gap, "install must lock before reading a linked slot's absence")
         self.assertFalse(entered_gap, "install must wait through the update's rename gap")
         self.assertFalse(finished_in_gap, "install must revalidate after the update releases its lock")
         self.assertEqual(outputs[0][0], "OAH_SKILLS_INSTALL_CONFLICT")
-        self.assertIn("again", outputs[0][1])
+        self.assertIn("oah skills update --project" if linked else "again", outputs[0][1])
         self.assertEqual(outputs[1], ["advanced"])
         installed = (self.home if level == "global" else self.project) / ".claude" / "skills" / "demo"
         marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
