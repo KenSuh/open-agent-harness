@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from oah import cli, intent, intent_cli
 from oah.intent import Binding, IntentInvalid, SourceError
-from oah.lease import Lease, Store
+from oah.lease import Store
 from oah.paths import repo_info, state_dir
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
@@ -648,8 +648,8 @@ class IntentCliTest(unittest.TestCase):
     def bind(self, binding: Binding):
         info = repo_info(self.repo)
         Store(state_dir(info, os.environ)).start(task="demo", agent="claude", scope=("src",), note="",
-                                                 ttl_hours=1, info=info)
-        return patch.object(Lease, "intent", binding.to_json(), create=True)
+                                                 ttl_hours=1, info=info, intent=binding)
+        return contextlib.nullcontext()
 
     def test_show_uses_lease_binding_when_present(self):
         binding = intent.parse(full_packet()).bind(self.rel)

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from oah.atomic import StateCorrupt
+from oah.intent import Binding
 from oah.lease import Lease, LeaseError, Store
 from oah.paths import RepoInfo
 from oah.scope import normalize_scope
@@ -393,6 +394,109 @@ class ConcurrentStartTest(unittest.TestCase):
         outputs = self.race(["a", "b", "c", "d", "e", "f"])
         self.assertEqual(outputs, ["OK"] * 6)
         self.assertEqual(sorted(lease["task"] for lease in self.leases), [f"task{n}" for n in range(6)])
+
+
+def binding(revision: int = 1, *, ident: str = "t1", digest: str = "1", acs=("AC1",),
+            source: str = ".oah/tasks/t1/PACKET.md") -> Binding:
+    return Binding(source=source, id=ident, revision=revision, digest="sha256:" + digest * 64, acs=tuple(acs))
+
+
+class IntentBindingTest(unittest.TestCase):
+    """The optional `intent` field (schema 1) and the forward-only rebind rules (A7)."""
+
+    def setUp(self):
+        self.root = make_tmp_dir(self)
+        self.state = self.root / "state"
+        self.clock = Clock(T0)
+        self.store = Store(self.state, now=self.clock)
+        self.info = RepoInfo(self.root, self.root / ".git", "main", "a" * 40)
+
+    def start(self, intent=None, scope=("src",)):
+        return self.store.start(task="t1", agent="claude", scope=scope, note="", ttl_hours=4.0, info=self.info,
+                                intent=intent)
+
+    def records(self) -> list[dict]:
+        return json.loads((self.state / "leases.json").read_text(encoding="utf-8"))["leases"]
+
+    def events(self) -> list[dict]:
+        return [json.loads(line) for line in (self.state / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def test_lease_without_intent_keeps_old_record_shape(self):
+        lease = self.start()
+        self.assertIsNone(lease.intent)
+        self.assertIsNone(lease.binding())
+        self.assertNotIn("intent", self.records()[0])
+        old = dict(self.records()[0])
+        loaded = Lease.from_json(old, self.state / "leases.json")
+        self.assertIsNone(loaded.intent)
+
+    def test_start_records_intent_binding(self):
+        lease = self.start(binding())
+        self.assertEqual(lease.binding(), binding())
+        self.assertEqual(self.records()[0]["intent"], binding().to_json())
+        self.assertEqual(json.loads((self.state / "leases.json").read_text(encoding="utf-8"))["version"], 1)
+        self.assertEqual(self.store.snapshot()[0][0].binding(), binding())
+        self.assertEqual(self.events()[-1]["intent"], binding().to_json())
+
+    def test_malformed_intent_is_state_corrupt(self):
+        self.start(binding())
+        data = json.loads((self.state / "leases.json").read_text(encoding="utf-8"))
+        for bad in ({"source": "x"}, "text", {**binding().to_json(), "revision": 0}):
+            with self.subTest(bad=bad):
+                data["leases"][0]["intent"] = bad
+                (self.state / "leases.json").write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaises(StateCorrupt):
+                    self.store.snapshot()
+
+    def rebind(self, new: Binding, **extra):
+        return self.store.rebind(task="t1", agent="claude", binding=new, ttl_hours=4.0, **extra)
+
+    def test_rebind_rules(self):
+        self.start()
+        lease, action = self.rebind(binding())
+        self.assertEqual((action, lease.binding()), ("bound", binding()))
+        lease, action = self.rebind(binding())
+        self.assertEqual(action, "unchanged")
+        self.clock.advance(hours=1)
+        lease, action = self.rebind(binding(2, digest="2"))
+        self.assertEqual((action, lease.binding().revision), ("rebound", 2))
+        self.assertEqual(lease.expires_at, "2026-10-23T14:00:00Z")
+        refusals = {
+            "OAH_INTENT_ID_CHANGED": binding(3, ident="other", digest="3"),
+            "OAH_INTENT_REVISION_REQUIRED": binding(2, digest="4"),
+            "OAH_INTENT_REVISION_INVALID": binding(1, digest="1"),
+        }
+        for code, new in refusals.items():
+            with self.subTest(code=code), self.assertRaises(LeaseError) as caught:
+                self.rebind(new)
+            self.assertEqual(caught.exception.code, code)
+        self.assertEqual(self.records()[0]["intent"]["revision"], 2)
+        names = [e["event"] for e in self.events()]
+        self.assertEqual(names.count("intent_bound"), 1)
+        self.assertEqual(names.count("intent_rebound"), 1)
+
+    def test_rebind_refuses_other_agent_expired_and_overlap(self):
+        self.start(binding())
+        with self.assertRaises(LeaseError) as caught:
+            self.store.rebind(task="t1", agent="codex", binding=binding(2, digest="2"), ttl_hours=1)
+        self.assertEqual(caught.exception.code, "OAH_LEASE_NOT_YOURS")
+        self.store.start(task="t2", agent="codex", scope=("docs",), note="", ttl_hours=4.0, info=self.info)
+        with self.assertRaises(LeaseError) as caught:
+            self.rebind(binding(2, digest="2"), scope=["docs/a.md"])
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CONFLICT")
+        lease, _ = self.rebind(binding(2, digest="2"), scope=["src", "tests"])
+        self.assertEqual(lease.scope, ["src", "tests"])
+        self.clock.advance(hours=5)
+        with self.assertRaises(LeaseError) as caught:
+            self.rebind(binding(3, digest="3"))
+        self.assertEqual(caught.exception.code, "OAH_LEASE_EXPIRED")
+
+    def test_finish_records_intent_report(self):
+        lease = self.start(binding())
+        report = {"line": binding().line(), "acs": {"AC1": "met"}}
+        self.store.finish(task="t1", agent="claude", lease_id=lease.id, summary="done", changed=[],
+                          allow_out_of_scope=False, intent_report=report)
+        self.assertEqual(self.events()[-1]["intent"], report)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,10 @@
 
 Every change happens under the single state lock and is written atomically; every change is also
 appended to events.jsonl. `snapshot()` only reads: it takes no lock and creates nothing.
+
+A lease may carry the intent it is bound to (`intent`, an `oah.intent.Binding` as JSON). The field is
+optional in schema 1: a record without it is unbound, and an unbound lease writes no `intent` key.
+`rebind` only moves a binding forward: the same Intent-ID at a higher Revision.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from contextlib import contextmanager
 from typing import Callable, Iterator, Sequence
 
 from oah.atomic import StateCorrupt, StorageError, read_json
+from oah.intent import Binding
 from oah.journal import Journal
 from oah.lockfile import StateLock
 from oah.paths import RepoInfo
@@ -66,12 +71,19 @@ class Lease:
     created_at: str
     expires_at: str
     gates: list[str] = dataclasses.field(default_factory=list)  # declared ledger paths (optional, schema 1)
+    intent: dict | None = None  # the bound intent, Binding.to_json() (optional, schema 1)
 
     def expired(self, now: dt.datetime) -> bool:
         return _parse(self.expires_at) <= now
 
+    def binding(self) -> Binding | None:
+        return Binding.from_json(self.intent) if self.intent is not None else None
+
     def to_json(self) -> dict:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if data["intent"] is None:
+            del data["intent"]  # an unbound lease keeps the record shape it always had
+        return data
 
     @classmethod
     def from_json(cls, data: object, source: pathlib.Path) -> "Lease":
@@ -88,6 +100,11 @@ class Lease:
             try:
                 _parse(data["created_at"])
                 _parse(data["expires_at"])
+            except ValueError:
+                valid = False
+        if valid and data.get("intent") is not None:
+            try:
+                Binding.from_json(data["intent"])
             except ValueError:
                 valid = False
         if not valid:
@@ -112,6 +129,25 @@ def _check_ttl(ttl_hours: float) -> None:
     if not (0 < ttl_hours <= MAX_TTL_HOURS):
         raise LeaseError("OAH_TTL_INVALID", f"{ttl_hours!r}: the TTL must be above 0 and at most "
                                             f"{MAX_TTL_HOURS:g} hours")
+
+
+def _forward(old: Binding, new: Binding) -> str:
+    """`rebound` for a raised Revision of the same Intent-ID, `unchanged` for the same binding; else refuse."""
+    if new.id != old.id:
+        raise LeaseError("OAH_INTENT_ID_CHANGED",
+                         f"this lease is bound to Intent-ID {old.id}, and the packet says {new.id}. Keep the ID: a "
+                         f"changed goal raises Revision of {old.id}")
+    if new.revision < old.revision:
+        raise LeaseError("OAH_INTENT_REVISION_INVALID",
+                         f"the packet is revision {new.revision}, lower than the bound revision {old.revision}; "
+                         "revisions only go up")
+    if new.revision == old.revision:
+        if new == old:
+            return "unchanged"
+        raise LeaseError("OAH_INTENT_REVISION_REQUIRED",
+                         f"the intent changed but is still revision {old.revision}. Set Revision: "
+                         f"{old.revision + 1}, then Status: accepted again once you approve it")
+    return "rebound"
 
 
 class Store:
@@ -185,7 +221,7 @@ class Store:
         return leases
 
     def start(self, *, task: str, agent: str, scope: Sequence[str], note: str, ttl_hours: float,
-              info: RepoInfo, gates: Sequence[str] = ()) -> Lease:
+              info: RepoInfo, gates: Sequence[str] = (), intent: Binding | None = None) -> Lease:
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         if not scope:
@@ -203,11 +239,13 @@ class Store:
             now = self.now()
             lease = Lease(id=secrets.token_hex(8), task=task, agent=agent, scope=list(scope), note=note,
                           worktree=str(info.root), branch=info.branch, head_at_start=info.head,
-                          created_at=_iso(now), expires_at=_expiration(now, ttl_hours), gates=list(gates))
+                          created_at=_iso(now), expires_at=_expiration(now, ttl_hours), gates=list(gates),
+                          intent=intent.to_json() if intent is not None else None)
             leases.append(lease)
+            bound = {"intent": lease.intent} if lease.intent is not None else {}
             self._commit(leases, "lease_started", task, agent, lease.id, scope=lease.scope, note=note,
                          expires_at=lease.expires_at, worktree=lease.worktree, branch=lease.branch,
-                         gates=lease.gates)
+                         gates=lease.gates, **bound)
             return lease
 
     def renew(self, *, task: str, agent: str, ttl_hours: float, scope: Sequence[str] | None = None,
@@ -236,9 +274,41 @@ class Store:
                          expires_at=lease.expires_at, gates=lease.gates)
             return lease
 
+    def rebind(self, *, task: str, agent: str, binding: Binding, ttl_hours: float,
+               scope: Sequence[str] | None = None) -> tuple[Lease, str]:
+        """Bind your lease to `binding`, or move it to a raised Revision of the same Intent-ID.
+
+        Returns the lease and `bound`, `rebound` or `unchanged`. The TTL is renewed; `scope`, when given,
+        replaces the lease scope after the same overlap check as renew.
+        """
+        _check_names(task, agent)
+        _check_ttl(ttl_hours)
+        with self._lock():
+            leases = self._load()
+            lease = self._find(leases, task)
+            if lease.agent != agent:
+                raise LeaseError("OAH_LEASE_NOT_YOURS", f"{lease.describe()}")
+            if lease.expired(self.now()):
+                raise LeaseError("OAH_LEASE_EXPIRED", f"the lease for {task} expired at {lease.expires_at}; "
+                                                      "start a new one")
+            old = lease.binding()
+            action = "bound" if old is None else _forward(old, binding)
+            if scope:
+                for other in leases:
+                    if other is not lease and not other.expired(self.now()) and overlaps(other.scope, scope):
+                        raise LeaseError("OAH_LEASE_CONFLICT",
+                                         f"scope {', '.join(scope)} overlaps {other.describe()}")
+                lease.scope = list(scope)
+            lease.intent = binding.to_json()
+            lease.expires_at = _expiration(self.now(), ttl_hours)
+            event = {"bound": "intent_bound", "rebound": "intent_rebound", "unchanged": "lease_renewed"}[action]
+            self._commit(leases, event, task, agent, lease.id, scope=lease.scope, expires_at=lease.expires_at,
+                         intent=lease.intent, **({"old_intent": old.to_json()} if old and action == "rebound" else {}))
+            return lease, action
+
     def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
                allow_out_of_scope: bool, gate_report: dict | None = None,
-               wiki_report: dict | None = None) -> tuple[Lease, list[str]]:
+               wiki_report: dict | None = None, intent_report: dict | None = None) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
         with self._lock():
             leases = self._load()
@@ -258,6 +328,8 @@ class Store:
             gate_fields = {"gates": gate_report} if gate_report is not None else {}
             if wiki_report is not None:
                 gate_fields["wiki_maintenance"] = wiki_report
+            if intent_report is not None:
+                gate_fields["intent"] = intent_report
             self._commit(leases, "lease_finished", task, agent, lease.id, summary=summary, out_of_scope=beyond,
                          allowed_out_of_scope=bool(beyond), **gate_fields)
             return lease, beyond
