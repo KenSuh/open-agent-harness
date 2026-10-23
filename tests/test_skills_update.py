@@ -24,7 +24,7 @@ from oah.toolkit.update import (DEFAULTS, LeasesActive, active_leases, cache_dir
                                 vendored_destinations)
 from tests.fixtures.toolkit.upstream import (APACHE_TEXT, MIT_TEXT, TODAY, bundled, commit, make_executable,
                                              make_upstream, skill_text, write_catalog)
-from tests.helpers import make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, make_git_repo, make_tmp_dir
 
 NOW = dt.datetime(2026, 10, 23, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -234,6 +234,34 @@ class SwapTest(unittest.TestCase):
 
 class ScheduledTest(UpdateFixture):
     def test_global_publication_is_serialized_across_repository_processes(self):
+        self._concurrent_global_updates(self.home)
+
+    def test_global_publication_unifies_case_aliases(self):
+        self.home.mkdir()
+        alias = self.home.with_name("HOME")
+        if not alias.exists() or not alias.samefile(self.home):
+            self.skipTest("requires a case-insensitive filesystem")
+        self._concurrent_global_updates(alias)
+
+    def test_global_publication_unifies_unicode_aliases(self):
+        self.home = self.home.with_name("caf\u00e9")
+        self.home.mkdir()
+        alias = self.home.with_name("cafe\u0301")
+        if not alias.exists() or not alias.samefile(self.home):
+            self.skipTest("requires a normalization-insensitive filesystem")
+        self._concurrent_global_updates(alias)
+
+    @unittest.skipUnless(os.name == "nt", "Windows case aliases")
+    def test_global_publication_unifies_windows_home_case_aliases(self):
+        self.test_global_publication_unifies_case_aliases()
+
+    def test_global_publication_unifies_directory_aliases(self):
+        self.home.mkdir()
+        alias = self.home.with_name("home-alias")
+        directory_alias(self.home, alias)
+        self._concurrent_global_updates(alias)
+
+    def _concurrent_global_updates(self, alias_home):
         plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
                             project_root=self.project, home=self.home)
         apply_install(plan, catalog=self.catalog, now=NOW)
@@ -286,8 +314,9 @@ print(json.dumps([r.status for r in results]))
         processes = []
         env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
         for name, candidate, project in (("newer", newer, self.project), ("older", older, other_project)):
+            home = self.home if name == "newer" else alias_home
             process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(project),
-                                        str(self.home), str(sync / (name + "-state")), str(sync), name, candidate],
+                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
             processes.append(process)
             self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
@@ -322,6 +351,159 @@ print(json.dumps([r.status for r in results]))
         self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
         locks = list((self.home / ".oah").rglob("*.lock"))
         self.assertEqual(len(locks), 1, "the destination lock belongs in the user's oah folder")
+
+    def test_install_and_update_share_global_publication_lock(self):
+        self._install_during_update("global")
+
+    def test_install_and_update_share_project_publication_lock(self):
+        self._install_during_update("project")
+
+    def _install_during_update(self, level):
+        if level == "global":
+            plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
+                                project_root=self.project, home=self.home)
+            apply_install(plan, catalog=self.catalog, now=NOW)
+        newer = commit(self.upstream, {"skills/demo/ref.md": "newer candidate\n"})
+        sync = make_tmp_dir(self)
+        if level == "project":
+            # The install prepares a missing project copy; another writer seeds the pin
+            # before the update starts, so the install must later lose its absence CAS.
+            self.installed.rename(sync / "project-pin")
+        script = '''
+import contextlib, datetime as dt, json, pathlib, sys, time
+import oah.toolkit.install as install
+import oah.toolkit.update as update
+from oah.toolkit.catalog import load_catalog
+catalog_path, kit, project, home, sync, level, operation = sys.argv[1:]
+kit, project, home, sync = map(pathlib.Path, (kit, project, home, sync))
+catalog = load_catalog(pathlib.Path(catalog_path))
+now = dt.datetime.now(dt.timezone.utc)
+def wait_for(name):
+    deadline = time.monotonic() + 20
+    while not (sync / name).exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("publication synchronization timed out: " + name)
+        time.sleep(.01)
+if operation == "install":
+    plan = install.plan_install(["demo"], catalog=catalog, source_dirs=[kit], target="claude",
+        level="user" if level == "global" else "project", project_root=project, home=home)
+    original_build = install.build_copy
+    def build(*args, **kwargs):
+        result = original_build(*args, **kwargs)
+        (sync / "install-prepared").touch()
+        wait_for("install-go")
+        return result
+    install.build_copy = build
+    original_swap = install.swap_in
+    def swap(*args, **kwargs):
+        (sync / "install-publishing").touch()
+        return original_swap(*args, **kwargs)
+    install.swap_in = swap
+    try:
+        install.apply_install(plan, catalog=catalog, now=now)
+        print(json.dumps(["installed"]))
+    except install.InstallError as exc:
+        print(json.dumps([exc.code, str(exc)]))
+else:
+    destinations = update.installed_destinations(catalog, project_root=project, home=home, level=level)
+    original_move = install.shutil.move
+    def move(src, dest, *args, **kwargs):
+        # swap_in has already renamed the old destination to its backup.
+        (sync / "update-gap").touch()
+        wait_for("release")
+        return original_move(src, dest, *args, **kwargs)
+    install.shutil.move = move
+    results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
+        settings=update.DEFAULTS, now=now, gitleaks=None)
+    print(json.dumps([r.status for r in results]))
+'''
+        env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+        processes = []
+
+        def start(operation):
+            process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(self.kit),
+                                        str(self.project), str(self.home), str(sync), level, operation],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            processes.append(process)
+            self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
+            return process
+
+        def wait_for(name, timeout=20):
+            deadline = time.monotonic() + timeout
+            while not (sync / name).exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            return (sync / name).exists()
+
+        installer = start("install")
+        try:
+            self.assertTrue(wait_for("install-prepared"))
+            if level == "project":
+                (sync / "project-pin").rename(self.installed)
+            start("update")
+            self.assertTrue(wait_for("update-gap"))
+            (sync / "install-go").touch()
+            entered_gap = wait_for("install-publishing", timeout=1)
+            finished_in_gap = installer.poll() is not None
+        finally:
+            (sync / "release").touch()
+            (sync / "install-go").touch()
+        outputs = []
+        for process in processes:
+            out, err = process.communicate(timeout=25)
+            self.assertEqual(process.returncode, 0, err)
+            outputs.append(json.loads(out))
+        self.assertFalse(entered_gap, "install must wait through the update's rename gap")
+        self.assertFalse(finished_in_gap, "install must revalidate after the update releases its lock")
+        self.assertEqual(outputs[0][0], "OAH_SKILLS_INSTALL_CONFLICT")
+        self.assertIn("again", outputs[0][1])
+        self.assertEqual(outputs[1], ["advanced"])
+        installed = (self.home if level == "global" else self.project) / ".claude" / "skills" / "demo"
+        marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker["commit"], newer)
+        self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
+        self.assertEqual(sorted(p.name for p in installed.iterdir()),
+                         [".oah-skill.json", "LICENSE", "SKILL.md", "ref.md"])
+
+    def test_install_revalidates_absence_after_staging(self):
+        import oah.toolkit.install as install
+
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="codex", level="project",
+                            project_root=self.project, home=self.home)
+        dest = plan.copies[0].dest
+        original = install.build_copy
+
+        def stage_then_create(*args, **kwargs):
+            result = original(*args, **kwargs)
+            dest.mkdir(parents=True)
+            (dest / "mine.md").write_text("preserve me\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(install, "build_copy", stage_then_create):
+            with self.assertRaises(InstallError) as caught:
+                apply_install(plan, catalog=self.catalog, now=NOW)
+        self.assertEqual(caught.exception.code, "OAH_SKILLS_INSTALL_CONFLICT")
+        self.assertEqual(snapshot(dest), {"mine.md": b"preserve me\n"})
+
+    def test_install_revalidates_changes_during_fetch(self):
+        import oah.toolkit.install as install
+
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
+                            project_root=self.project, home=self.home)
+        apply_install(plan, catalog=self.catalog, now=NOW)
+        dest = plan.copies[0].dest
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[], target="claude", level="user",
+                            project_root=self.project, home=self.home)
+        original = install.fetch_item
+
+        def fetch_then_edit(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (dest / "ref.md").write_text("concurrent edit\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(install, "fetch_item", fetch_then_edit):
+            with self.assertRaises(InstallError):
+                apply_install(plan, catalog=self.catalog, now=NOW)
+        self.assertEqual((dest / "ref.md").read_text(encoding="utf-8"), "concurrent edit\n")
 
     def test_destination_metadata_changed_before_preparation_is_deferred(self):
         destinations = self.destinations()

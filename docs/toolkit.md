@@ -47,8 +47,10 @@ For the same skill name, `oah` uses the first copy it finds:
   `oah skills update --project`, which takes its own lease on those folders.
   Reinstalling preserves existing pins; if the cache has advanced, run `oah skills update --project`.
 - **Global copies change only with `--global`** and your confirmation, never on a schedule.
-  A destination lock in `~/.oah/toolkit/locks/` serializes publication across repositories; a changed
-  baseline defers the update. Run the update again to prepare against the current copy.
+- **Installs and updates share destination locks**, including project and global copies. Global
+  locks live in `~/.oah/toolkit/locks/` and work across repositories and case/Unicode aliases of HOME.
+  The lock covers revalidation through replacement; a changed destination refuses the install or
+  defers the update. Run the command again to prepare against the current copy.
 - **Fetches use an allowlisted environment and a temporary home.** Proxy URLs with embedded user
   information are refused; configure a proxy without embedded credentials and retry.
 - **Hold an item** with `pins = ["<name>"]` under `[skills]`. unlazy is never updated by this mechanism;

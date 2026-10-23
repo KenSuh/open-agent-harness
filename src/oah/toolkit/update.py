@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
-import hashlib
 import json
-import os
 import pathlib
 import tempfile
 from dataclasses import dataclass, field
@@ -35,7 +33,8 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Upstream, read_upstream
 from oah.toolkit.checks import DiffSummary, diff_summary, identify_license, privacy_problems, suspicious, text_digest
 from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, manifest_problems, stage_item
-from oah.toolkit.install import KIT_MARK, build_copy, installed_executables, installed_skills, marker_of, swap_in, target_dirs
+from oah.toolkit.install import (KIT_MARK, _identity, build_copy, destination_locks, installed_executables,
+                                 installed_skills, marker_of, swap_in, target_dirs)
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE, load_problems
 
 DEFAULTS = {"update_interval_days": 1, "auto_update": True, "size_jump_ratio": 2.0,
@@ -221,39 +220,6 @@ def no_guard() -> Iterator[None]:
     yield
 
 
-@contextlib.contextmanager
-def _global_locks(destinations: Sequence[Destination]) -> Iterator[None]:
-    """Serialize each user destination across repositories, in a stable lock order."""
-    locks = set()
-    for destination in destinations:
-        if destination.level != "global":
-            continue
-        path = destination.path.absolute()
-        home = path.parents[2].resolve()
-        key = os.path.normcase(str(path.resolve()))
-        digest = hashlib.sha256(os.fsencode(key)).hexdigest()
-        locks.add(home / ".oah" / "toolkit" / "locks" / (digest + ".lock"))
-    with contextlib.ExitStack() as stack:
-        for lock in sorted(locks):
-            stack.enter_context(StateLock(lock, timeout=LOCK_TIMEOUT))
-        yield
-
-
-def _identity(path: pathlib.Path) -> tuple:
-    """Bytes, modes and link/directory identity of a preparation input, including absence."""
-    if not path.exists() and not path.is_symlink():
-        return ("absent",)
-    paths = [path, *sorted(path.rglob("*"))] if path.is_dir() and not path.is_symlink() else [path]
-    found = []
-    for child in paths:
-        info = child.lstat()
-        kind = "link" if child.is_symlink() else "directory" if child.is_dir() else "file"
-        data = os.readlink(child).encode("utf-8") if kind == "link" else child.read_bytes() if kind == "file" else b""
-        found.append((child.relative_to(path).as_posix(), kind, info.st_dev, info.st_ino,
-                      info.st_mode, hashlib.sha256(data).hexdigest()))
-    return tuple(found)
-
-
 def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_only: bool, settings: Mapping,
                now: dt.datetime, gitleaks: Resolved | None, fetcher: Fetcher = fetch,
                catalog_path: pathlib.Path | None = None, guard: Guard = no_guard,
@@ -267,7 +233,7 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
     inputs = {path for d in destinations for path in (d.path, d.baseline) if path is not None}
     if catalog_path is not None:
         inputs.add(catalog_path)
-    with no_guard() if check_only else _global_locks(destinations):
+    with no_guard() if check_only else destination_locks(d.path for d in destinations):
         identities = {path: _identity(path) for path in inputs}
         by_item: dict[str, list[Destination]] = {}
         for destination in destinations:
@@ -352,7 +318,7 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
         if check_only:
             return results
         try:
-            with guard(), _global_locks(destinations):
+            with guard(), destination_locks(d.path for d in destinations):
                 if any(_identity(path) != identity for path, identity in identities.items()):
                     for result in results:
                         if result.status not in ("", "current"):

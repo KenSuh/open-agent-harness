@@ -11,16 +11,21 @@ pin. A folder oah did not install is never replaced.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import hashlib
+import os
 import pathlib
 import secrets
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from oah.engines.proc import UnsupportedBatchShim, resolve_command
+from oah.lockfile import StateLock
 from oah.toolkit.catalog import (Bundled, Catalog, CatalogError, Linked, Upstream, item_skill_dirs, read_upstream,
                                  skill_name)
 from oah.toolkit.fetch import copy_tree, fetch, read_json_file, stage_item, write_marker
@@ -208,6 +213,48 @@ def installed_executables(entry: Bundled, relative: str, record: Upstream) -> li
     return sorted(found)
 
 
+@contextlib.contextmanager
+def destination_locks(paths: Iterable[pathlib.Path]) -> Iterator[None]:
+    """Lock directory entries by filesystem identity, for every install/update writer.
+
+    The parent is made first and never replaced by publication. Its device/inode plus the
+    remaining name identify the slot even during a rename gap or after replacement. Folding
+    names conservatively also serializes case/Unicode aliases on macOS and Windows (and may
+    serialize distinct names on case-sensitive volumes). No ancestor spelling enters the key.
+    """
+    locks: dict[str, pathlib.Path] = {}
+    for path in paths:
+        path = path.resolve()
+        parent = path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        info = parent.stat()
+        name = unicodedata.normalize("NFD", path.name).casefold()
+        key = f"{info.st_dev}:{info.st_ino}:{name}"
+        digest = hashlib.sha256(os.fsencode(key)).hexdigest()
+        installed = parent.name.casefold() == "skills" and parent.parent.name.casefold() in (".claude", ".agents")
+        root = parent.parent.parent if installed else parent.parent
+        locks[key] = root / ".oah" / "toolkit" / "locks" / (digest + ".lock")
+    with contextlib.ExitStack() as stack:
+        for key in sorted(locks):
+            stack.enter_context(StateLock(locks[key]))
+        yield
+
+
+def _identity(path: pathlib.Path) -> tuple:
+    """Bytes, modes and link/directory identity of a preparation input, including absence."""
+    if not path.exists() and not path.is_symlink():
+        return ("absent",)
+    paths = [path, *sorted(path.rglob("*"))] if path.is_dir() and not path.is_symlink() else [path]
+    found = []
+    for child in paths:
+        info = child.lstat()
+        kind = "link" if child.is_symlink() else "directory" if child.is_dir() else "file"
+        data = os.readlink(child).encode("utf-8") if kind == "link" else child.read_bytes() if kind == "file" else b""
+        found.append((child.relative_to(path).as_posix(), kind, info.st_dev, info.st_ino,
+                      info.st_mode, hashlib.sha256(data).hexdigest()))
+    return tuple(found)
+
+
 def swap_in(new: pathlib.Path, dest: pathlib.Path, *, verify: Callable[[pathlib.Path], list[str]] | None = None) -> None:
     """Replace dest with new; the old folder comes back if the move or the verification fails."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -245,19 +292,25 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime) -> l
                 continue
             entry = catalog.find(copy.item)
             assert isinstance(entry, Bundled)
+            with destination_locks([copy.dest]):
+                identity = _identity(copy.dest)
             if copy.item not in items:
                 item_dir = plan.sources.get(copy.item) or fetch_item(entry, scratch / copy.item, today=now.date())
                 items[copy.item] = (item_dir, read_upstream(item_dir))
             item_dir, record = items[copy.item]
-            action, reason = _classify(copy.dest, copy.item, project=not copy.outside_project, commit=record.commit)
-            if action == "conflict":
-                raise InstallError("OAH_SKILLS_INSTALL_CONFLICT", reason)
-            if action == "keep":
-                continue
             staged = scratch / "copies" / f"{copy.engine}-{copy.item}-{copy.name}"
             staged.parent.mkdir(parents=True, exist_ok=True)
             build_copy(item_dir, entry, copy.skill, record, staged, installed_at=stamp)
-            swap_in(staged, copy.dest, verify=lambda folder: load_problems(folder))
+            with destination_locks([copy.dest]):
+                if _identity(copy.dest) != identity:
+                    raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
+                                       f"{copy.dest} changed during preparation; run oah skills install again")
+                action, reason = _classify(copy.dest, copy.item, project=not copy.outside_project, commit=record.commit)
+                if action == "conflict":
+                    raise InstallError("OAH_SKILLS_INSTALL_CONFLICT", reason)
+                if action == "keep":
+                    continue
+                swap_in(staged, copy.dest, verify=lambda folder: load_problems(folder))
             done.append(copy.dest)
     return done
 
