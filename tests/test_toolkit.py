@@ -5,16 +5,18 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import threading
+import tomllib
 import unittest
 
 from oah.toolkit import SkillInfo, read_skill
 from oah.toolkit.skillmeta import SkillError, load_problems, parse_frontmatter
 from oah.engines.proc import Resolved, RunResult, run_command
 from oah.paths import git_argv
-from oah.toolkit.catalog import CatalogError, load_catalog, read_upstream, validate_repository
-from oah.toolkit.checks import (blob_id, diff_summary, identify_license, privacy_problems, suspicious,
-                                text_digest)
+from oah.toolkit.catalog import CatalogError, item_skill_dirs, load_catalog, read_upstream, validate_repository
+from oah.toolkit.checks import (blob_id, builtin_privacy_problems, diff_summary, identify_license, privacy_problems,
+                                suspicious, text_digest)
 from oah.toolkit.fetch import GIT_SAFE_CONFIG, StageError, fetch, git_env, stage_item
 from tests.fixtures.toolkit.upstream import (APACHE_TEXT, MIT_TEXT, TODAY, bundled, commit, make_executable,
                                              make_upstream, write_catalog)
@@ -284,6 +286,149 @@ class ChecksTest(unittest.TestCase):
                         .startswith("license changed"))
         self.assertIn("license text changed",
                       suspicious(new_spdx="MIT", new_license="d2", new_executables=["a.md"], **common))
+
+
+# Plan inventory names that differ from the toolkit's item names.
+INVENTORY_NAMES = {"skill-creator (Anthropic)": "skill-creator", "superpowers@claude-plugins-official": "superpowers",
+                   "codex@openai-codex": "codex-plugin-cc", "ponytail@ponytail": "ponytail",
+                   "omo@sisyphuslabs (LazyCodex)": "lazycodex", "openai (mcp-openai)": "mcp-openai"}
+PLACEHOLDER = re.compile(r"\$\{[A-Z_][A-Z0-9_]*(?::-)?\}")
+
+
+def inventory_rows() -> list[tuple[str, str, str]]:
+    """(kind, toolkit name, verdict) for every row of the A13 inventory in docs/PLAN.md."""
+    text = (REPO / "docs" / "PLAN.md").read_text(encoding="utf-8")
+    section = text[text.index("#### A13 toolkit inventory"):]
+    rows = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) > 8 and cells[1] in ("skill", "plugin", "mcp", "cli"):
+            rows.append((cells[1], INVENTORY_NAMES.get(cells[2], cells[2]), cells[-2]))
+    return rows
+
+
+def git_blobs(prefix: str) -> dict[str, str]:
+    result = run_command((*git_argv(), "-C", str(REPO), "ls-files", "-s", "-z", "--", prefix), timeout=60)
+    blobs = {}
+    for record in result.stdout.split("\0"):
+        if record:
+            meta, path = record.split("\t", 1)
+            blobs[path] = meta.split()[1]
+    return blobs
+
+
+class ShippedToolkitTest(unittest.TestCase):
+    def test_shipped_catalog_is_valid(self):
+        catalog = load_catalog()
+        self.assertEqual(len(catalog.bundled), 8)
+        for entry in catalog.bundled:
+            with self.subTest(item=entry.name):
+                record = read_upstream(REPO / "skills" / entry.name)
+                self.assertEqual((record.repository, record.subpath, record.commit, record.spdx, record.license_path),
+                                 (entry.repository, entry.subpath, entry.commit, entry.spdx, entry.license_path))
+                self.assertTrue(entry.repository.startswith("https://github.com/"))
+        self.assertTrue(all(step.run is None for step in catalog.find("unlazy").steps),
+                        "unlazy installs only at the gates lane's pin, never through an unpinned installer")
+        self.assertGreater(len(catalog.clis), 10)
+
+    def test_vendored_items_have_provenance(self):
+        catalog = load_catalog()
+        folders = sorted(path.parent for path in (REPO / "skills").glob("*/UPSTREAM.json"))
+        self.assertEqual([folder.name for folder in folders], sorted(entry.name for entry in catalog.bundled))
+        notices = (REPO / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        for folder in folders:
+            with self.subTest(item=folder.name):
+                record = read_upstream(folder)
+                self.assertRegex(record.commit, r"^[0-9a-f]{40}$")
+                license_file = folder / record.license_file
+                self.assertTrue(license_file.is_file(), f"{license_file} is missing")
+                self.assertEqual(identify_license(license_file.read_text(encoding="utf-8")), record.spdx)
+                self.assertEqual(text_digest(license_file.read_bytes()), record.license_sha256)
+                for notice in record.notice_files:
+                    self.assertTrue((folder / notice).is_file())
+                self.assertRegex(record.fetched, r"^\d{4}-\d{2}-\d{2}$")
+                self.assertIn(f"`{record.name}`", notices)
+                self.assertIn(record.commit, notices)
+                for skill in item_skill_dirs(folder, catalog.find(folder.name)):
+                    self.assertEqual(load_problems(skill, item_root=folder), [])
+
+    def test_vendored_files_are_upstream_blobs(self):
+        tracked = git_blobs("skills/")
+        if not tracked:
+            self.skipTest("skills/ is not committed in this checkout")
+        for folder in sorted(path.parent for path in (REPO / "skills").glob("*/UPSTREAM.json")):
+            record = read_upstream(folder)
+            with self.subTest(item=folder.name):
+                prefix = f"skills/{folder.name}/"
+                committed = {path[len(prefix):]: blob for path, blob in tracked.items() if path.startswith(prefix)}
+                self.assertEqual(set(committed), set(record.files) | {"UPSTREAM.json"}, "added or missing files")
+                for name, blob in record.files.items():
+                    self.assertEqual(committed[name], blob, f"{prefix}{name} differs from upstream")
+
+    def test_every_inventory_row_is_covered(self):
+        catalog = load_catalog()
+        bundled = {entry.name for entry in catalog.bundled}
+        linked = {entry.name: entry for entry in catalog.linked}
+        clis = {entry.name for entry in catalog.clis}
+        rows = inventory_rows()
+        self.assertGreater(len(rows), 50)
+        for kind, name, verdict in rows:
+            with self.subTest(name=name, verdict=verdict):
+                if verdict == "vendor":
+                    self.assertTrue(name in bundled or (name in linked and linked[name].reason), name)
+                elif verdict == "link" and kind in ("skill", "plugin"):
+                    self.assertIn(name, linked)
+                elif verdict == "template":
+                    self.assertTrue((REPO / "mcp" / "claude" / f"{name}.json").is_file())
+                    self.assertTrue((REPO / "mcp" / "codex" / f"{name}.toml").is_file())
+                elif kind == "cli":
+                    self.assertIn(name, clis)
+
+    def test_toolkit_pages_list_every_item_and_no_excluded_name(self):
+        catalog = load_catalog()
+        names = [entry.name for entry in (*catalog.bundled, *catalog.linked, *catalog.clis)]
+        names += [name for kind, name, verdict in inventory_rows() if verdict in ("template", "link")]
+        excluded = [name for _, name, verdict in inventory_rows()
+                    if verdict == "exclude" and re.fullmatch(r"[a-z]+(?:[-_][a-z]+)+", name)]
+        self.assertGreater(len(excluded), 3)
+        for page in ("docs/toolkit.md", "docs/ko/toolkit.md"):
+            text = (REPO / page).read_text(encoding="utf-8")
+            for name in names:
+                with self.subTest(page=page, name=name):
+                    self.assertIn(f"`{name}`", text)
+            for name in excluded:
+                with self.subTest(page=page, excluded=name):
+                    self.assertNotIn(name, text)
+
+
+class McpTemplateTest(unittest.TestCase):
+    def test_mcp_templates_use_placeholders_only(self):
+        claude = sorted((REPO / "mcp" / "claude").glob("*.json"))
+        codex = sorted((REPO / "mcp" / "codex").glob("*.toml"))
+        self.assertEqual([p.stem for p in claude], [p.stem for p in codex])
+        self.assertEqual(len(claude), 3)
+        for path in claude:
+            with self.subTest(path=path.name):
+                servers = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]
+                self.assertEqual(list(servers), [path.stem])
+                server = servers[path.stem]
+                for key, value in server.get("env", {}).items():
+                    self.assertRegex(key, r"^[A-Z_][A-Z0-9_]*$")
+                    self.assertRegex(value, rf"^\$\{{{key}(?::-)?\}}$", "env values must be ${NAME} placeholders")
+                for arg in server["args"]:
+                    self.assertNotRegex(arg, r"[A-Za-z0-9_-]{24,}", "an argument looks like a credential")
+                self.assertRegex(server["args"][-1], r"@\d+\.\d+\.\d+$", "pin the npm version")
+        for path in codex:
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                data = tomllib.loads(text)["mcp_servers"][path.stem]
+                self.assertNotIn("env", data, "Codex takes keys through env_vars names, never values")
+                self.assertTrue(all(re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) for name in data["env_vars"]))
+        for path in (*claude, *codex, REPO / "mcp" / "README.md"):
+            text = path.read_text(encoding="utf-8")
+            for value in re.findall(r"\$\{[^}]*\}", text):
+                self.assertRegex(value, PLACEHOLDER)
+        self.assertEqual(builtin_privacy_problems(REPO / "mcp"), [])
 
 
 if __name__ == "__main__":
