@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from oah.ci.detect import ECOSYSTEMS, Detection, Step, detect
-from oah.ci.workflow import (DEFAULTS, PLACEHOLDER, RUNNERS, WORKFLOW_PATH, CiError, CiPlan, check_test_command, current_os,
-                             parse_oses, plan, render, write)
+from oah.ci.workflow import (DEFAULTS, PLACEHOLDER, RUNNERS, WORKFLOW_PATH, CiError, CiPlan, check_test_command,
+                             current_os, parse_oses, plan, render, write)
 
-__all__ = ["DEFAULTS", "ECOSYSTEMS", "PLACEHOLDER", "RUNNERS", "WORKFLOW_PATH", "CiError", "CiPlan", "Detection", "Step",
-           "check_test_command", "current_os", "detect", "parse_oses", "plan", "render", "write"]
+__all__ = ["DEFAULTS", "ECOSYSTEMS", "PLACEHOLDER", "RUNNERS", "WORKFLOW_PATH", "CiError", "CiPlan", "Detection",
+           "Step", "check_test_command", "current_os", "detect", "parse_oses", "plan", "render", "write"]
