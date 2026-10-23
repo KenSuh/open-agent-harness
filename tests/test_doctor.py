@@ -27,6 +27,8 @@ OK_VERSIONS = {
     "gitleaks": "gitleaks version 8.30.1",
     "jq": "jq-1.8.1",
     "rg": "ripgrep 14.1.1",
+    "orca": "1.4.237",
+    "aside": "1.26.1010.1739",
 }
 
 
@@ -77,7 +79,7 @@ class DoctorTest(unittest.TestCase):
         statuses = self.check()
         self.assertEqual([s.name for s in statuses],
                          ["git", "python", "uv", "node", "claude", "codex", "unlazy", "graphify", "gh",
-                          "gitleaks", "jq", "rg"])
+                          "gitleaks", "jq", "rg", "orca", "aside"])
         self.assertTrue(all(s.status == "ok" for s in statuses), [(s.name, s.status) for s in statuses])
         self.assertEqual(exit_code(statuses), 0)
         self.assertEqual(render_text(statuses, "darwin").splitlines()[-1], "DOCTOR_OK")
@@ -213,7 +215,10 @@ class DoctorTest(unittest.TestCase):
                 if tool.detect != "path":
                     continue
                 with self.subTest(platform=platform, tool=tool.name):
-                    self.assertIn(display(tool.install[os_name][0]), text)
+                    if tool.install[os_name]:
+                        self.assertIn(display(tool.install[os_name][0]), text)
+                    else:  # a link-only entry (Aside on Windows) shows its note instead
+                        self.assertIn(tool.note[os_name], text)
                     self.assertIn(tool.url_for(os_name), text)
 
     def test_json_lists_every_catalog_tool_with_install(self):
