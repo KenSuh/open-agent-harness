@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-agent-harness"
+dynamic = ["version"]
+description = "Run Claude Code and Codex CLI as a disciplined team on your own repository, on macOS and Windows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development",
+]
+
+[project.scripts]
+oah = "oah.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "oah.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
