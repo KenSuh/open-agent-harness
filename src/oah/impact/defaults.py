@@ -16,7 +16,7 @@ DEFAULTS: dict[str, object] = {
     "wiki_dirs": ["docs/wiki"],
     "graph_file": "graphify-out/graph.json",
     "db_globs": ["**/*.sql"],
-    "sql_dialect": "standard",  # MySQL rules require this setting or a clear content marker
+    "sql_dialect": "standard",  # MySQL rules require explicit sql_dialect = "mysql"
     "ledger_globs": [".oah/tasks/*/GATES.md"],  # gate ledgers bind the map's identity, ignored or not
     "rerank": False,              # a re-ranker runs only when enabled here explicitly and its key is present
     "git_timeout": 300.0,

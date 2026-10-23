@@ -295,7 +295,7 @@ class MapStoreTest(unittest.TestCase):
 
     def test_sql_dialect_config_rebuilds_map_and_applies_to_snapshots(self):
         git_commit(self.repo, {'db/001_init.sql':
-            'CREATE TABLE users(id int);\n'
+            'CREATE TABLE users(id int) ENGINE=InnoDB;\n'
             'CREATE VIEW v AS SELECT bits # mask FROM users;\n'})
         standard = ensure_fresh(self.repo)
         standard_db = mapstore.load(standard.path)['data']['db']

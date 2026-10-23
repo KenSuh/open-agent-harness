@@ -59,7 +59,7 @@ def _tokenize(text: str, *, dialect: str = "standard") -> list[_Token]:
                     line_start = True
                 i += 1
                 continue
-            if not body and line_start and text[i:i + 9].upper() == "DELIMITER" and \
+            if dialect == "mysql" and not body and line_start and text[i:i + 9].upper() == "DELIMITER" and \
                     (i + 9 == limit or text[i + 9].isspace()):
                 i += 9
                 begin = i
@@ -189,7 +189,7 @@ def _tokenize(text: str, *, dialect: str = "standard") -> list[_Token]:
 
 
 def blank(text: str) -> tuple[str, str]:
-    """(code, nocomment), with offsets/newlines preserved and MySQL delimiters normalized.
+    """(code, nocomment), using standard SQL rules with offsets/newlines preserved.
 
     Quoted identifiers stay intact. Extraction consumes their tokens only in identifier positions,
     so expression strings in double quotes cannot introduce SQL commands.
@@ -246,32 +246,8 @@ def _statements(tokens: Iterable[_Token]) -> Iterable[list[_Token]]:
 
 
 def _sql_tokens(text: str, dialect: str) -> tuple[list[_Token], str]:
-    if dialect != "standard":
-        return _tokenize(text, dialect=dialect), dialect
-    # Probe with MySQL quoting so an escaped DEFAULT before ENGINE cannot hide its marker.
-    # Confirm directive/table starts against standard tokens as well: MySQL's backslashes must
-    # not expose a marker inside a standard literal. Two bounded scans remain linear.
-    standard = _tokenize(text)
-    directives = {token.start for token in standard if token.kind == "directive"}
-    creates = {token.start for token in standard if token.is_word("CREATE")}
-    tokens = _tokenize(text, dialect="mysql")
-    if any(token.kind == "directive" and token.start in directives for token in tokens):
-        return tokens, "mysql"
-    for statement in _statements(tokens):
-        if not statement[0].is_word("CREATE") or statement[0].start not in creates:
-            continue
-        kind = next((i for i, token in enumerate(statement) if token.is_word(
-            "TABLE", "VIEW", "FUNCTION", "PROCEDURE", "TRIGGER", "INDEX")), None)
-        if kind is None or not statement[kind].is_word("TABLE"):
-            continue
-        _table, end = _name(statement, _skip_exists(statement, kind + 1))
-        if end >= len(statement) or statement[end].value != "(":
-            continue
-        for i, token in _top(statement):
-            if i > end and token.is_word("ENGINE") and i + 2 < len(statement) and \
-                    statement[i + 1].value == "=" and statement[i + 2].kind in ("word", "identifier"):
-                return tokens, "mysql"
-    return standard, "standard"
+    # Only configuration selects quoting/comment rules; content markers are ambiguous SQL.
+    return _tokenize(text, dialect=dialect), dialect
 
 
 def _quoted_tokens(token: _Token, dialect: str, escaped: bool) -> list[_Token]:
@@ -587,6 +563,10 @@ def extract(files: Mapping[str, str]) -> dict:
 def _extract(files: Mapping[str, str], dialect: str) -> dict:
     """Configured entry point; the public extract(files) keeps standard SQL defaults."""
     graph = _Graph()
+    reason = "dependency scan only; SQL grammar is not fully parsed"
+    if dialect == "standard":
+        reason += ('; for MySQL SQL, set [impact] sql_dialect = "mysql" in .oah/config.toml '
+                   'and run oah impact refresh')
     for file in sorted(files):
         tokens, selected = _sql_tokens(files[file], dialect)
         for token in tokens:
@@ -596,8 +576,7 @@ def _extract(files: Mapping[str, str], dialect: str) -> dict:
                 graph.unparsed.append({"file": file, "line": token.line,
                                        "reason": "MySQL executable comment; review its SQL dependencies"})
         for statement in _statements(tokens):
-            graph.unparsed.append({"file": file, "line": statement[0].line,
-                                   "reason": "dependency scan only; SQL grammar is not fully parsed"})
+            graph.unparsed.append({"file": file, "line": statement[0].line, "reason": reason})
             statement, routine = _routine_tokens(statement, selected)
             _statement(graph, file, statement)
             if routine:

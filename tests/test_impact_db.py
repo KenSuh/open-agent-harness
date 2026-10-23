@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -58,7 +59,7 @@ class ExtractTest(unittest.TestCase):
                          [["orders_user_idx", "db/001_init.sql", 11]])
 
     def test_mysql_entities(self):
-        graph = sqlplugin.extract(load("mysql"))
+        graph = sqlplugin._extract(load("mysql"), "mysql")
         self.assertEqual(self.kinds(graph), {
             "db_table:customers": "table", "db_table:invoices": "table", "db_table:bills": "table",
             "db_table:invoice_view": "view", "db_routine:close_invoice": "procedure",
@@ -92,7 +93,7 @@ class ExtractTest(unittest.TestCase):
 
     def test_comments_and_strings_ignored(self):
         for dialect in ("postgres", "mysql", "sqlite"):
-            graph = sqlplugin.extract(load(dialect))
+            graph = sqlplugin._extract(load(dialect), dialect)
             with self.subTest(dialect=dialect):
                 self.assertFalse([entity for entity in graph["entities"] if "ghost" in entity])
         text = "CREATE TABLE a (x text DEFAULT '--'); CREATE TABLE b (y int);"
@@ -221,7 +222,7 @@ class ExtractTest(unittest.TestCase):
 
     def test_custom_delimiter_with_long_common_prefix_is_bounded(self):
         code = ("import sys\nfrom oah.impact import sqlplugin\n"
-                "graph = sqlplugin.extract({'delimiter.sql': sys.stdin.read()})\n"
+                "graph = sqlplugin._extract({'delimiter.sql': sys.stdin.read()}, 'mysql')\n"
                 "assert 'db_table:users' in graph['entities'], graph\n")
         delimiter = "a" * 30000 + "b"
         text = "DELIMITER " + delimiter + "\nSELECT " + "a" * 300000 + delimiter + \
@@ -317,14 +318,48 @@ class ExtractTest(unittest.TestCase):
                                  {'db_table:users', 'db_table:v', 'db_table:following'})
                 self.assertIn(('db_table:v', 'db_table:users', 'view-source'), self.links(graph))
 
-    def test_mysql_markers_enable_rules_under_neutral_paths(self):
+    def test_engine_inside_standard_literal_keeps_following_table(self):
+        text = ("CREATE TABLE t(a text DEFAULT '\\', b text DEFAULT ') ENGINE=InnoDB; SELECT ');\n"
+                "SELECT '\\';\nCREATE TABLE following(id int);")
+        for file in ('postgres.sql', 'db/001_init.sql'):
+            with self.subTest(file=file):
+                graph = sqlplugin.extract({file: text})
+                self.assertEqual(set(graph['entities']), {'db_table:t', 'db_table:following'})
+                self.assertEqual(graph['entities']['db_table:following']['events'], [[file, 3, 'create']])
+
+    def test_delimiter_column_keeps_standard_semantics(self):
+        text = ("CREATE TABLE t (\n delimiter text,\n a text DEFAULT '\\'\n);\n"
+                'CREATE TABLE following(id int);')
+        with sqlite3.connect(':memory:') as connection:
+            connection.executescript(text)
+            self.assertEqual(connection.execute('PRAGMA table_info(t)').fetchall()[0][1], 'delimiter')
+        for file in ('postgres.sql', 'db/001_init.sql'):
+            with self.subTest(file=file):
+                graph = sqlplugin.extract({file: text})
+                self.assertEqual(set(graph['entities']), {'db_table:t', 'db_table:following'})
+                self.assertFalse(any('directive' in row['reason'] for row in graph['unparsed']))
+                self.assertEqual(graph['entities']['db_table:following']['events'], [[file, 5, 'create']])
+
+    def test_content_markers_never_select_mysql(self):
         for marker in ('DELIMITER ;\n', 'CREATE TABLE marker(id int) ENGINE=InnoDB;\n'):
             with self.subTest(marker=marker):
-                graph = sqlplugin.extract({'db/001_init.sql': marker +
+                text = marker + "SELECT '\\';\nCREATE TABLE following(id int);\n/*! SELECT 1 */;"
+                graph = sqlplugin.extract({'db/001_init.sql': text})
+                expected = {'db_table:following'}
+                if marker.startswith('CREATE'):
+                    expected.add('db_table:marker')
+                self.assertEqual(set(graph['entities']), expected)
+                self.assertFalse(any('executable comment' in row['reason'] for row in graph['unparsed']))
+                self.assertFalse(any(token.kind == 'directive' for token in sqlplugin._tokenize(text)))
+
+    def test_configured_mysql_markers_under_neutral_paths(self):
+        for marker in ('DELIMITER ;\n', 'CREATE TABLE marker(id int) ENGINE=InnoDB;\n'):
+            with self.subTest(marker=marker):
+                graph = sqlplugin._extract({'db/001_init.sql': marker +
                     "SELECT 'escaped \\' quote; CREATE TABLE ghost(id int);';\n"
                     "SELECT 1 # ' quote; CREATE TABLE ghost_hash(id int);\n;\n"
                     "/*!50001 CREATE VIEW hidden AS SELECT 1 */;\n"
-                    "CREATE TABLE following(id int);"})
+                    "CREATE TABLE following(id int);"}, 'mysql')
                 expected = {'db_table:following'}
                 if marker.startswith('CREATE'):
                     expected.add('db_table:marker')
@@ -360,17 +395,17 @@ class ExtractTest(unittest.TestCase):
                     'CREATE TABLE following(id int);'})
                 self.assertEqual(set(graph['entities']), {'db_routine:f', 'db_table:following'})
 
-    def test_dialect_marker_scan_is_bounded(self):
+    def test_standard_marker_text_is_bounded(self):
         code = textwrap.dedent('''
             import sys
             from oah.impact import sqlplugin
             graph = sqlplugin.extract({'db/001_init.sql': sys.stdin.read()})
             assert set(graph['entities']) == {'db_table:wide', 'db_table:following'}, graph['entities']
-            assert any('executable comment' in row['reason'] for row in graph['unparsed'])
+            assert not any('executable comment' in row['reason'] for row in graph['unparsed'])
         ''')
         text = ('/*' + 'ENGINE=InnoDB DELIMITER // ' * 20000 + '*/\n'
                 'CREATE TABLE wide(' + 'engine int, ' * 40000 + 'id int) ENGINE=InnoDB;\n'
-                "SELECT 'escaped \\' quote; CREATE TABLE ghost(id int);';\n"
+                "SELECT '\\';\n"
                 '/*!50001 CREATE VIEW hidden AS SELECT 1 */;\nCREATE TABLE following(id int);')
         result = subprocess.run([sys.executable, '-c', code], input=text, capture_output=True,
                                 text=True, encoding='utf-8', env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
@@ -399,7 +434,7 @@ class ExtractTest(unittest.TestCase):
                 '  CREATE TABLE scratch(id int);\n'
                 '  CREATE INDEX scratch_idx ON scratch(id);\n'
                 'END//\nDELIMITER ;\nCREATE TABLE following(id int);\n')
-        graph = sqlplugin.extract({'mysql.sql': text})
+        graph = sqlplugin._extract({'mysql.sql': text}, 'mysql')
         self.assertEqual(set(graph['entities']), {'db_routine:p', 'db_table:scratch', 'db_table:following'})
         self.assertEqual(graph['entities']['db_table:scratch']['events'], [['mysql.sql', 4, 'create']])
         self.assertEqual(graph['entities']['db_table:scratch']['indexes'], [['scratch_idx', 'mysql.sql', 5]])
@@ -459,7 +494,7 @@ class ExtractTest(unittest.TestCase):
                  for path in sorted(FIXTURES.glob('*/*.sql'))
                  for line in path.read_text(encoding='utf-8').splitlines()
                  if line.startswith('-- OAH-REGRESSION ')]
-        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3', 'R4', 'R5'})
+        self.assertEqual({case['round'] for case in cases}, {'R1', 'R2', 'R3', 'R4', 'R5', 'R6'})
         code = textwrap.dedent('''
             import json, sys
             from oah.impact import sqlplugin
@@ -495,7 +530,7 @@ class ExtractTest(unittest.TestCase):
                          [["db/002_change.sql", 3, "rename-from:orders"]])
         self.assertEqual(graph["entities"]["db_table:legacy_view"]["events"],
                          [["db/002_change.sql", 4, "drop"]])
-        mysql = sqlplugin.extract(load("mysql"))
+        mysql = sqlplugin._extract(load("mysql"), "mysql")
         self.assertEqual(mysql["entities"]["db_table:bills"]["events"][0][2], "rename-from:invoices")
 
 
@@ -510,10 +545,12 @@ class DbQueryTest(unittest.TestCase):
                 self.assertIn('OAH_IMPACT_SQL_UNPARSED', text.stderr)
                 self.assertIn('db/001.sql:2', text.stderr)
                 self.assertIn('review', text.stderr)
+                self.assertIn('sql_dialect = "mysql"', text.stderr)
                 result = run_impact(repo, *args, '--json')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 report = json.loads(result.stdout)
                 self.assertTrue(any('OAH_IMPACT_SQL_UNPARSED' in warning for warning in report['warnings']))
+                self.assertTrue(any('sql_dialect = "mysql"' in warning for warning in report['warnings']))
                 info = report.get('map', report)
                 self.assertEqual(info['sql_unparsed'][0]['file'], 'db/001.sql')
                 self.assertEqual(info['sql_unparsed'][0]['line'], 2)
