@@ -176,7 +176,9 @@ your-project/
   docs/wiki/
     index.md             # catalog by category
     log.md               # newest first, under <!-- OAH:LOG_INSERT_BELOW -->
+    log_archive_NN.md    # older whole log entries, moved by `oah wiki rollover`, never edited
     decisions/           # decision records (ADR style)
+    raw/                 # optional: imported source documents, append-only
   .claude/agents/        # optional: oah-low/medium/high/max.md (model + effort per tier)
   .graphifyignore        # optional: sensible defaults when graphify is used
 ```
@@ -390,8 +392,36 @@ Status: draft            # becomes "accepted" when you approve it
   `start --packet`, and that the ledger parses.
 - **Digest.** sha256 over the bytes from BEGIN to END, after CRLF→LF and with one trailing LF. Changing
   the intent means a new revision, never an in-place edit.
-- **Binding.** The lease records `{id, revision, digest}`. Review prompts carry the intent verbatim, and
-  receipts record the digest. A mismatch is reported.
+- **Binding.** The lease records `{source, id, revision, digest}`. Review prompts carry the intent
+  verbatim, and receipts record the digest. A mismatch is reported.
+- **Intent lineage (A7).** One section carries the goal through every stage.
+  - **One source.** The packet's `OAH_INTENT` section is the only statement of the goal for every stage:
+    packet authoring, implementation, review and correction. That holds for the lead, workers and
+    subagents alike.
+    - Review and correction briefs carry the same section byte for byte.
+    - Round instructions live outside the section.
+  - **Revisions, not new IDs.** A changed goal raises `Revision` of the same `Intent-ID`, and needs
+    `Status: accepted` again. A round never mints a new ID.
+  - **Outcomes only.** Success conditions describe outcomes. Process steps (lease, commit, review
+    rounds, return format) live outside the section. `oah packet check` warns
+    (`OAH_INTENT_PROCESS_STEP`) when a condition reads like one.
+  - **Bound in the same start command.**
+    - `oah start --packet <PACKET.md>` binds the lease to `{source, id, revision, digest}`.
+    - `oah status` and `oah intent show` report each lease's intent as one of:
+      - `current`;
+      - `stale`: the section changed after binding;
+      - `missing`: the source is gone;
+      - `unbound`.
+    - `oah call`, `oah review` and `oah fix` refuse to dispatch for a task whose intent is not
+      `current` (`OAH_INTENT_NOT_CURRENT`).
+  - **Returns.** Every return, from the lead, a worker or a subagent, carries `INTENT <id>@r<n> <digest>`
+    and one `AC<n>: met|unmet|deferred — <evidence>` line per criterion. `oah finish` and `oah review`
+    check those lines structurally and report missing or invented ACs.
+  - **One shared footer.** A single canonical intent footer states these rules.
+    - `oah call`, `oah review` and `oah fix` append it to every worker brief.
+    - The tier agent files carry it inside their managed block, replaced on every sync (A5).
+  - **A draft cannot bind.** `oah packet new` scaffolds `Status: draft`, and `oah start --packet` refuses
+    with `OAH_INTENT_NOT_ACCEPTED` until the status says `accepted`.
 - **Not ported.** The source's POSIX owner and link-count checks on the packet file. The kit checks:
   regular file, not a symlink, under 1 MiB, unchanged between stat and read.
 - **An empty Scope is never silent.**
@@ -536,6 +566,33 @@ After the review:
     `oah wiki log "<title>"` inserts a dated entry.
   - `oah wiki lint` is read-only. It reports broken wikilinks, unindexed notes, missing sources, missing
     frontmatter, orphans, duplicate titles and stale notes, as text or JSON.
+  - **Auto-clean (A8): candidates only.** No wiki command deletes, merges or moves a note on its own.
+    - **`oah wiki lint` counts only real problems.**
+      - It resolves links whose targets exist outside the wiki, under the configured `[wiki] link_roots`,
+        such as agent memory folders.
+      - It ignores links inside code spans and code blocks.
+      - It counts archive indexes as index sources.
+      - It judges staleness by the note's last commit date (`git log -1`), not by file mtime.
+    - **`oah wiki lint --index`** reports banners, over-long lines and truly unindexed notes. It writes
+      the candidate lists outside the wiki, under the state folder, so the wiki stays clean.
+    - **`oah wiki rollover`** moves the oldest whole entries of `log.md` into the next numbered
+      `log_archive_NN.md`. It starts when the log passes about 500 KiB and stops when it is down to
+      about 400 KiB.
+      - The entry stream across the archives and the log stays byte-identical.
+      - The run refuses when `log.md` changes during it.
+      - Every write is atomic.
+      - The archive index table in `log.md` is generated.
+    - **`oah wiki hygiene`** prints one line of counts, with the delta since its last run.
+    - **An opt-in commit check, `oah hook pre-commit`,** blocks a commit that:
+      - shortens `log.md` without adding the archive files;
+      - edits or deletes an existing archive;
+      - edits or deletes a file under `raw/`;
+      - adds non-UTF-8 or surrogate bytes to a wiki file.
+
+      A commit that adds NEW broken links is warned first, and blocked once
+      `[wiki] new_broken_links = "block"` is set.
+    - **`oah init`** git-ignores editor UI state such as graph zoom, for example
+      `.obsidian/workspace*.json`.
 - **Graph (optional).** `oah graph update|query|path|explain|report` is a thin pass-through to
   graphify, run when it is installed (`uv tool install graphifyy`). `oah init --with-graph` writes
   `.graphifyignore` (wiki log, build outputs, `.oah/tasks/*/GATES.md` evidence).
@@ -592,6 +649,7 @@ After the review:
   the body (`<!-- OAH:TIER-RULES:BEGIN v1 -->` … `<!-- OAH:TIER-RULES:END -->`).
   - Sync **replaces** the block with the canonical text every time, so a wording change reaches
     existing files.
+  - The block holds the rules and the shared intent footer (A7).
   - It inserts the block when it is missing and refuses broken markers.
   - `check` reports drift when either the frontmatter or the block differs from canonical.
 
@@ -603,6 +661,7 @@ After the review:
 | Claude Code SessionStart: active leases, last log entries, latest handoff; prints nothing when `OAH_WORKER=1` | `oah hook session-start` | later |
 | git pre-push: refuse while an unfinished lease exists on this worktree | `oah hook pre-push` | later |
 | Claude Code PreToolUse: impact hint before editing gates, workflows, migrations | `oah hook impact-hint` | later |
+| git pre-commit: wiki commit check (archives, raw sources, encoding, new broken links) | `oah hook pre-commit` | P7 |
 
 `oah hooks install|uninstall|status` shows the exact change before it writes. It writes atomically and
 leaves a backup.
@@ -956,10 +1015,11 @@ All commands are run from the source root, read-only.
 | 681 home-path lines in one fixture | `grep -c '<home path>' test/fixtures/<fixture>.jsonl` |
 | round ceiling 3; stage table | `grep -nE '^REVIEW_ROUND_CEILING' bin/mah` · `config/routing.json` lines 5–9 |
 
-## 15. Amendment 1 (2026-10-23)
+## 15. Amendments 1 and 2 (2026-10-23)
 
 These are fixes the owner made to their own harness on 2026-10-23, carried into this plan at the owner's
-request. Each item names the sections it changed and the phases whose checklists carry it.
+request in two batches: A1–A6, then A7–A8. Each item names the sections it changed and the phases
+whose checklists carry it.
 
 | # | Rule | Sections | Phases |
 |---|---|---|---|
@@ -969,6 +1029,8 @@ request. Each item names the sections it changed and the phases whose checklists
 | A4 | An empty `## Scope` warns loudly (`OAH_SCOPE_EMPTY`). A selection that depends on Scope's file kinds never silently selects nothing. | 5.6 | P4, P7 |
 | A5 | `oah tiers sync` replaces the managed rules block with the canonical text, not only when it is missing. | 5.11 | P7 |
 | A6 | Dispatched workers carry `OAH_WORKER=1`. Generated hooks and the rules block tell them to skip any session-entry procedure. | 5.5, 5.11, 5.12 | P3, P7, session-start hook (later) |
+| A7 | Intent lineage. One intent section for every stage, worker and subagent. A changed goal raises the revision, never a new ID. Conditions are outcomes. The lease binds the section in the same start command, and status says `current`. Returns carry `INTENT` and per-AC lines. One shared footer goes to every brief and every tier agent file. A draft cannot bind. | 5.6, 5.11 | P3, P4, P6, P7 |
+| A8 | Wiki auto-clean, candidates only. Lint counts real problems only. Size-based log rollover. An opt-in commit check. Editor UI state is not tracked. An index lint writes outside the wiki. A hygiene delta line. | 5.1, 5.10, 5.12 | P7 |
 
 ### Phase checklists
 
@@ -982,16 +1044,23 @@ request. Each item names the sections it changed and the phases whose checklists
 - [ ] Fake-engine tests cover matching, lower, other mismatched and unreadable headers: lower means `OAH_EFFORT_DOWNGRADED`, other mismatch means `OAH_EFFORT_MISMATCH`, unreadable means `unverified`. The header verifies configuration only. (A1)
 - [ ] Version/model-specific normalization tests include a behavior-changing alias such as `ultra` and an unknown mapping. Run records keep requested, launch, header-reported and resolved inference effort separately, with header-check status and normalization basis; unknown inference effort stays `unverified`. (A1)
 - [ ] Workers are launched with `OAH_WORKER=1`, `OAH_RUN_ID` and `OAH_TASK`, and with the worker line first in the preamble. (A6)
+- [ ] `oah call` refuses to dispatch when the task's intent is not `current` (`OAH_INTENT_NOT_CURRENT`). It appends the shared intent footer to every worker brief. (A7)
 
 **P4**
 - [ ] `oah packet check` warns with `OAH_SCOPE_EMPTY`, and `oah start --packet` refuses an empty Scope unless `--scope repo` is given. (A4)
 - [ ] The packet template says what "no network" forbids and what it does not. (A2)
 - [ ] The Return section carries `rerank=used|unused(<reason>)` and the DB-impact line. (A2, A3)
+- [ ] `oah packet new` scaffolds a draft intent. `oah start --packet` binds `{source, id, revision, digest}` in the same command and refuses a draft with `OAH_INTENT_NOT_ACCEPTED`. The lease record gains an optional `intent` field, so the schema stays at version 1. (A7)
+- [ ] `oah status` and `oah intent show` report `current`, `stale`, `missing` or `unbound` for each lease. (A7)
+- [ ] A changed goal raises the `Revision` of the same ID. A different `Intent-ID` for the same task is refused with `OAH_INTENT_ID_CHANGED`. (A7)
+- [ ] `oah packet check` warns with `OAH_INTENT_PROCESS_STEP` when a success condition reads like a process step. (A7)
+- [ ] `oah finish` checks the return's `INTENT` and `AC<n>` lines structurally, and reports missing or invented ACs. (A7)
 
 **P6**
 - [ ] A review round with lower header configuration or normalized inference effort fails with `OAH_EFFORT_DOWNGRADED`; any other header mismatch fails with `OAH_EFFORT_MISMATCH`. Failed rounds do not count; unreadable headers and unknown normalization never count as effort-verified reviews. (A1)
 - [ ] For DB changes, the review prompt requires the DB-impact query and graph identity. The reviewer checks that they are present. (A3)
 - [ ] Reviewers run as dispatched workers. (A6)
+- [ ] Review and correction briefs carry the same intent section byte for byte, with round instructions outside it, plus the shared footer. Receipts record the digest. (A7)
 
 **P7**
 - [ ] `oah impact` always prints `rerank=...`. The re-ranker plugin interface is off only when named or when no key exists. (A2)
@@ -999,6 +1068,14 @@ request. Each item names the sections it changed and the phases whose checklists
 - [ ] Every selection by Scope file kinds warns on an empty Scope and never selects nothing silently. (A4)
 - [ ] `oah tiers sync` replaces the managed block. A test changes the canonical wording and sees it reach an existing file. (A5)
 - [ ] The rules block tells dispatched workers to skip session entry. (A6)
+- [ ] The tier agent files carry the shared intent footer inside their managed block, replaced on every sync. (A5, A7)
+- [ ] `oah wiki lint` counts only real problems. It resolves out-of-wiki link roots, ignores links in code spans and blocks, counts archive indexes as index sources, and judges staleness by last commit date. (A8a)
+- [ ] `oah wiki rollover` triggers at about 500 KiB and targets about 400 KiB. It moves whole entries only, keeps the entry stream byte-identical, refuses on a concurrent edit, writes atomically and generates the archive index. (A8b)
+- [ ] `oah hook pre-commit` is opt-in. It blocks missing archives, archive edits, raw-source edits and non-UTF-8 or surrogate bytes. New broken links are warned first, then blocked. (A8c)
+- [ ] `oah init` git-ignores editor UI state. (A8d)
+- [ ] `oah wiki lint --index` reports banners, over-long lines and unindexed notes, and writes its candidates outside the wiki. (A8e)
+- [ ] `oah wiki hygiene` prints one line with the delta since its last run. (A8f)
+- [ ] No wiki command deletes, merges or moves notes on its own; they produce candidates only. (A8)
 
 **Later: session-start hook**
 - [ ] `oah hook session-start` prints nothing when `OAH_WORKER=1`. (A6)
