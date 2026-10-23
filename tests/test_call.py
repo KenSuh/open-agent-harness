@@ -327,7 +327,7 @@ class IntentLineageTest(unittest.TestCase):
         other = project.packet(name="elsewhere/PACKET.md")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low", packet=other)
-        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
         self.assertIn("raise Revision of Intent-ID t1", str(ctx.exception))
         self.assertIn("--packet .oah/tasks/t1/PACKET.md", str(ctx.exception))
         self.assertEqual(project.runs(), [first["run_id"]])
@@ -339,7 +339,7 @@ class IntentLineageTest(unittest.TestCase):
         path.write_text(SECTION.replace("Status: accepted", "Status: accepted\n### Problem\nedited"), encoding="utf-8")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
-        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
         self.assertIn("same revision with edited content", str(ctx.exception))
         path.write_text(SECTION.replace("Revision: 2", "Revision: 3"), encoding="utf-8")
         data = project.run(stage="correction", tier="low")
@@ -369,7 +369,7 @@ class IntentLineageTest(unittest.TestCase):
         project.packet()
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="review", tier="low", stored_brief=SECTION.replace("Revision: 2", "Revision: 1"))
-        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
         with self.assertRaises(EngineError):
             project.prepare(stage="review", tier="low", stored_brief="no intent here\n")
         data = project.run(stage="review", tier="low", stored_brief="Reused.\n\n" + SECTION.replace("\n", "\r\n"))
@@ -395,7 +395,7 @@ class WorktreeSelectorTest(unittest.TestCase):
         code, _, err = run_cli(self.project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
                                "--worktree", "wt")
         self.assertEqual(code, 1)
-        self.assertTrue(err.startswith("OAH_WORKTREE_AMBIGUOUS"))
+        self.assertTrue(err.startswith("OAH_WORKTREE_UNRESOLVED"))
         self.assertIn("nothing was launched", err)
         for path in (self.first, self.second):
             self.assertIn(f"oah call codex --stage review --task t1 --tier low --worktree {path.resolve()}", err)

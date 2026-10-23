@@ -15,7 +15,7 @@ for at most `WAIT_LIMIT_S` seconds and can be called again.
 
 The first dispatch of a task that has a packet records its intent source in
 `runs/<task>/intent-binding.json`. Later rounds reuse that source; a different source, another Intent-ID,
-an in-place edit or an older revision refuses with `OAH_INTENT_SOURCE_CHANGED`, and only a raised Revision
+an in-place edit or an older revision refuses with `OAH_INTENT_SOURCE_MISMATCH`, and only a raised Revision
 of the same Intent-ID in the same source moves the binding forward. `resolve_worktree` turns a path,
 branch or worktree name into exactly one worktree before any intent is read.
 """
@@ -206,7 +206,7 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
 
 
 BINDING_NAME = "intent-binding.json"
-SOURCE_CHANGED = "OAH_INTENT_SOURCE_CHANGED"
+SOURCE_MISMATCH = "OAH_INTENT_SOURCE_MISMATCH"
 
 
 def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
@@ -232,15 +232,15 @@ def check_dispatch_binding(bound: dict | None, packet: Packet, task: str) -> boo
            "never point a task at a different intent source")
     line = f"INTENT {bound['id']}@r{bound['revision']} {bound['digest']}"
     if packet.source != bound["source"]:
-        raise EngineError(SOURCE_CHANGED, f"task {task} was first dispatched with intent source {bound['source']} "
+        raise EngineError(SOURCE_MISMATCH, f"task {task} was first dispatched with intent source {bound['source']} "
                           f"({line}); this dispatch reads {packet.source}. {fix}. To continue, run the command again "
                           f"with --packet {briefs.shell_word(bound['source'])} or without --packet")
     if intent.id != bound["id"]:
-        raise EngineError(SOURCE_CHANGED, f"{packet.source} now holds Intent-ID {intent.id}, but task {task} is bound "
+        raise EngineError(SOURCE_MISMATCH, f"{packet.source} now holds Intent-ID {intent.id}, but task {task} is bound "
                           f"to {line}. {fix}")
     if intent.revision < bound["revision"] or (intent.revision == bound["revision"] and intent.digest != bound["digest"]):
         what = "an older revision" if intent.revision < bound["revision"] else "the same revision with edited content"
-        raise EngineError(SOURCE_CHANGED, f"{packet.source} holds {what} (INTENT {intent.id}@r{intent.revision} "
+        raise EngineError(SOURCE_MISMATCH, f"{packet.source} holds {what} (INTENT {intent.id}@r{intent.revision} "
                           f"{intent.digest}) than the binding {line}. {fix}")
     return intent.revision > bound["revision"]
 
@@ -268,7 +268,7 @@ def _stored_brief_matches(stored: str, packet: Packet | None) -> None:
     normalized = section.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n" if section else None
     if normalized != packet.intent.section:
         found = "no intent section" if section is None else "a different intent section"
-        raise EngineError(SOURCE_CHANGED, f"the stored brief carries {found}, not INTENT {packet.intent.id}@r"
+        raise EngineError(SOURCE_MISMATCH, f"the stored brief carries {found}, not INTENT {packet.intent.id}@r"
                           f"{packet.intent.revision} {packet.intent.digest} from {packet.source}; rebuild the brief "
                           "from the bound packet instead of reusing it. A changed goal needs a new revision of the "
                           "same Intent-ID, not a different source")
@@ -303,7 +303,7 @@ def resolve_worktree(selector: str, root: pathlib.Path, *, retry: Callable[[str]
     candidates = matches or [path for path, _ in worktrees]
     commands = "\n".join(f"  {retry(str(path))}" for path in candidates)
     if matches:
-        raise EngineError("OAH_WORKTREE_AMBIGUOUS", f"--worktree {selector!r} matches {len(matches)} worktrees; "
+        raise EngineError("OAH_WORKTREE_UNRESOLVED", f"--worktree {selector!r} matches {len(matches)} worktrees; "
                           f"nothing was launched. Retry with the exact path:\n{commands}")
     raise EngineError("OAH_WORKTREE_UNRESOLVED", f"--worktree {selector!r} names no worktree of this repository; "
                       f"nothing was launched. Retry with one of:\n{commands}")
