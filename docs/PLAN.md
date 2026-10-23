@@ -1,6 +1,6 @@
 # open-agent-harness — Phase 0 plan
 
-Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendments 1–3 (2026-10-23) in section 15 · intent revision 3 in section 1.
+Status: **approved by the owner on 2026-10-23** · owner decisions in section 13 · amendments 1–4 (2026-10-23) in section 15 · intent revision 3 in section 1.
 
 This plan turns a private, single-owner multi-agent harness (called "the source" below) into a
 general-purpose kit that one person can install on macOS or Windows and use on their own repository.
@@ -470,6 +470,9 @@ Status: draft            # becomes "accepted" when you approve it
     subagents alike.
     - Review and correction briefs carry the same section byte for byte.
     - Round instructions live outside the section.
+    - Later rounds reuse the intent source bound at the first dispatch. A brief whose source differs
+      from the binding refuses with `OAH_INTENT_SOURCE_MISMATCH`; changing the goal means a new
+      revision (A19).
   - **Revisions, not new IDs.** A changed goal raises `Revision` of the same `Intent-ID`, and needs
     `Status: accepted` again. A round never mints a new ID.
   - **Outcomes only.** Success conditions describe outcomes. Process steps (lease, commit, review
@@ -488,6 +491,9 @@ Status: draft            # becomes "accepted" when you approve it
         status, or a changed identity or digest. Invalid content can never be `current`.
     - `oah call`, `oah review` and `oah fix` refuse to dispatch for a task whose intent is not
       `current` (`OAH_INTENT_NOT_CURRENT`).
+    - A worktree selector resolves to exactly one repository before that check. An ambiguous or
+      unresolvable selector refuses before launch with `OAH_WORKTREE_UNRESOLVED` and a runnable retry
+      command (A19).
   - **Returns.** Every return, from the lead, a worker or a subagent, carries `INTENT <id>@r<n> <digest>`
     and one `AC<n>: met|unmet|deferred — <evidence>` line per criterion. `oah finish` and `oah review`
     check those lines structurally against the binding: exactly one matching `INTENT` line and one
@@ -680,13 +686,21 @@ After the review:
         target maximum for the retained entry bytes. The trigger counts the whole file, including
         metadata. Headers and the generated archive index are excluded from the target and entry
         stream; a metadata-only excess with entry bytes already at target is a no-op.
+      - The trigger, the target and the archive name prefix (`log_archive_`) are `[wiki]` config
+        values with these defaults (A18).
+      - `oah wiki rollover` prints its plan and writes nothing unless `--apply` is given. `--apply`
+        needs a lease whose scope covers `log.md` and the new archive, or refuses with
+        `OAH_WIKI_LEASE_REQUIRED`. `oah wiki maintain` applies rollover under the wiki lock without a
+        lease, because every task appends to the log (A18).
       - Entries begin at unindented `## YYYY-MM-DD <title>` lines outside fenced code, below the
         single `<!-- OAH:LOG_INSERT_BELOW -->` marker in each log or archive. Headers and the
         generated table between `<!-- OAH:ARCHIVE_INDEX:BEGIN -->` and
         `<!-- OAH:ARCHIVE_INDEX:END -->` stay above that marker. Each entry includes every byte up
         to the next entry or EOF, including blank lines. `wiki log` emits this format. Nonempty
         content between the marker and first entry, invalid dates or ambiguous boundaries refuse
-        with `OAH_WIKI_LOG_INVALID`; blank prefix bytes there remain with their file.
+        with `OAH_WIKI_LOG_INVALID`; blank prefix bytes there remain with their file. The refusal
+        happens before any write, and its message names the case, such as a missing marker, an
+        undated first entry heading or an unclosed fence (A18).
       - Entries stay newest first within each file. Move the smallest oldest suffix that leaves
         retained entry bytes at or below target, keeping at least the newest entry. A newest entry
         larger than target stays whole and is reported as oversized; an oversized older entry moves
@@ -705,6 +719,10 @@ After the review:
       - Publish the archive first without replacing an existing path, then atomically replace the
         log (including its generated archive index). Flush files and directories at each step;
         remove the journal only after both are durable. Individual writes use atomic replacement.
+      - Before removing the journal, re-read both files. The preservation stream must be unchanged,
+        and the log must hold exactly the published bytes, or the change rolls back from the journal.
+        If the rollback fails, the journal stays with a named reason, and commands refuse with
+        `OAH_WIKI_RECOVERY_PENDING` until `oah wiki recover` (A18).
       - Before any wiki read or write, check for a pending journal under the lock. Commands other
         than `oah wiki recover` refuse with `OAH_WIKI_RECOVERY_PENDING`, leave wiki files and the
         journal unchanged, and direct the user to run `oah wiki recover` explicitly. That command
@@ -1267,10 +1285,11 @@ All commands are run from the source root, read-only.
 | 681 home-path lines in one fixture | `grep -c '<home path>' test/fixtures/<fixture>.jsonl` |
 | round ceiling 3; stage table | `grep -nE '^REVIEW_ROUND_CEILING' bin/mah` · `config/routing.json` lines 5–9 |
 
-## 15. Amendments 1–3 (2026-10-23)
+## 15. Amendments 1–4 (2026-10-23)
 
 These are fixes the owner made to their own harness on 2026-10-23, carried into this plan at the owner's
-request in three batches: A1–A6, A7–A8, then amendment 3 (A9–A17 and the onboarding flow). Each item names the sections it changed and the phases
+request in four batches: A1–A6, A7–A8, amendment 3 (A9–A17 and the onboarding flow), then amendment 4
+(A18–A19). Each item names the sections it changed and the phases
 whose checklists carry it.
 
 | # | Rule | Sections | Phases |
@@ -1573,3 +1592,24 @@ Open questions from the inventory. None of them blocks: every affected item is l
 - `typesafe-ai`: its local lock records no commit, so the lane pins the upstream commit it vendors.
 - Aside is closed source: it is linked as optional, and the engines' built-in web tools remain the default
   (row 34).
+
+### Amendment 4 (2026-10-23)
+
+Two changes the owner made to their harness after amendment 3, ported under A16 (the `82492ea30` rows of
+`docs/UPSTREAM_SYNC.md`). Sections 5.6 and 5.10 were updated with them.
+
+| # | Rule | Sections | Phases |
+|---|---|---|---|
+| A18 | **Safer log rollover.** `oah wiki rollover` is a dry run that prints its plan. `--apply` writes and needs a lease whose scope covers the log and the new archive. `oah wiki maintain` applies rollover under the wiki lock without a lease. Before the journal is removed, both files are re-read: the preservation stream must be unchanged and the log must hold exactly the published bytes, or the change rolls back from the journal. A failed rollback keeps the journal with a named reason. Every `OAH_WIKI_LOG_INVALID` refusal names its case and happens before any write. The trigger, the target and the archive name prefix are `[wiki]` config values. | 5.10 | P7 (lane P7a) |
+| A19 | **The bound intent cannot be swapped.** Later rounds reuse the intent source bound at the first dispatch, and a brief with a different source refuses with `OAH_INTENT_SOURCE_MISMATCH`. Worktree selectors resolve to exactly one repository before the intent check. An ambiguous or unresolvable selector refuses before launch with `OAH_WORKTREE_UNRESOLVED` and a runnable retry command. | 5.6 | P3 (lane P3b) |
+
+#### Amendment 4 checklists
+
+**P3** (lane P3b)
+- [ ] A later round reuses the bound intent source, and a brief with a different source refuses with `OAH_INTENT_SOURCE_MISMATCH`. (A19)
+- [ ] An ambiguous or unresolvable worktree selector refuses before launch with `OAH_WORKTREE_UNRESOLVED` and a runnable retry command. (A19)
+
+**P7** (lane P7a)
+- [ ] `oah wiki rollover` writes nothing without `--apply`, and `--apply` without a covering lease refuses with `OAH_WIKI_LEASE_REQUIRED`. (A18)
+- [ ] Tests inject a late write after publication and a failed rollback. The first rolls back from the journal; the second keeps the journal with a named reason, and commands refuse with `OAH_WIKI_RECOVERY_PENDING`. (A18)
+- [ ] Each invalid-log refusal names its case before any write, and the trigger, target and archive prefix come from `[wiki]`. (A18)
