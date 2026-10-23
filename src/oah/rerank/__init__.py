@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from oah import secrets
-from oah.rerank.base import TIERS, Candidate, Provider, ProviderError
+from oah.rerank.base import TIERS, Candidate, Provider, ProviderError, _sanitize_interruption
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, TypeSafeProvider
 
 __all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "Provider", "ProviderError",
@@ -88,35 +88,46 @@ class Advice:
 
 def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | None,
           keychain: secrets.Keychain | None,
-          providers: Mapping[str, Provider] | None) -> tuple[Provider | None, str | None, str]:
+          providers: Mapping[str, Provider] | None) -> tuple[Provider | None, secrets.Secret | None, str]:
     """(provider, key, status): provider and key are set only when every gate passed."""
-    if brief_disabled:
-        return None, None, unused("disabled-by-brief")
-    if config.get("enabled") is not True:
-        return None, None, unused("not-enabled")
-    name = config.get("provider")
-    if not isinstance(name, str) or not name.strip():
-        return None, None, unused("not-configured")
-    provider = (PROVIDERS if providers is None else providers).get(name.strip())
-    if provider is None:
-        return None, None, unused("unknown-provider")
+    provider = key = None
     try:
-        key = secrets.get(provider.key_name(config), env=env, keychain=keychain)
-    except ValueError:
-        return None, None, unused("error:key-name")
-    if not key:
-        return None, None, unused("no key")
-    return provider, key, USED
+        if brief_disabled:
+            return None, None, unused("disabled-by-brief")
+        if config.get("enabled") is not True:
+            return None, None, unused("not-enabled")
+        name = config.get("provider")
+        if not isinstance(name, str) or not name.strip():
+            return None, None, unused("not-configured")
+        provider = (PROVIDERS if providers is None else providers).get(name.strip())
+        if provider is None:
+            return None, None, unused("unknown-provider")
+        try:
+            key = secrets.get(provider.key_name(config), env=env, keychain=keychain)
+        except ValueError:
+            return None, None, unused("error:key-name")
+        if not key:
+            return None, None, unused("no key")
+        return provider, key, USED
+    finally:
+        del config, brief_disabled, env, keychain, providers, provider, key
 
 
 def _call(action: Callable[[], object]) -> tuple[object, str]:
     """Run a provider call; failures become a status code and never carry exception text."""
+    failure = None
     try:
-        return action(), USED
-    except ProviderError as exc:
-        return None, unused(f"error:{exc.code}")
-    except Exception:  # noqa: BLE001 - an optional plugin must never break the command that asked.
-        return None, unused("error:internal")
+        try:
+            return action(), USED
+        except ProviderError as exc:
+            return None, unused(f"error:{exc.code}")
+        except Exception:  # noqa: BLE001 - optional plugins must not break the caller.
+            return None, unused("error:internal")
+        except BaseException as exc:
+            failure = _sanitize_interruption(exc)
+        raise failure.with_traceback(None) from None
+    finally:
+        del action, failure
 
 
 def _valid_scores(scores: object, count: int) -> list[float] | None:
@@ -141,50 +152,60 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
            keychain: secrets.Keychain | None = None,
            providers: Mapping[str, Provider] | None = None) -> RerankResult:
     """Re-order candidates when the user enabled a provider and its key exists; else keep the order."""
-    items = tuple(candidates)
-    if len({item.name for item in items}) != len(items):
-        raise ValueError("rerank candidates need unique names")
-    provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                  providers=providers)
-    if provider is None:
-        return RerankResult(items, status)
-    if not items:
-        return RerankResult(items, unused("no-candidates"), provider.name)
-    limit = config.get("max_candidates")
-    limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(items)
-    sent, rest = items[:limit], items[limit:]
-    raw, status = _call(lambda: provider.score(kind, query, sent, key=key, config=config))
-    if status != USED:
-        return RerankResult(items, status, provider.name)
-    scores = _valid_scores(raw, len(sent))
-    if scores is None:
-        return RerankResult(items, unused("error:bad-response"), provider.name)
-    ranked = sorted(range(len(sent)), key=lambda index: -scores[index])
-    order = tuple(sent[index] for index in ranked) + rest
-    return RerankResult(order, USED, provider.name,
-                        tuple((item.name, score) for item, score in zip(sent, scores)))
+    provider = key = None
+    try:
+        items = tuple(candidates)
+        if len({item.name for item in items}) != len(items):
+            raise ValueError("rerank candidates need unique names")
+        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
+                                      providers=providers)
+        env = keychain = providers = None
+        if provider is None:
+            return RerankResult(items, status)
+        if not items:
+            return RerankResult(items, unused("no-candidates"), provider.name)
+        limit = config.get("max_candidates")
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(items)
+        sent, rest = items[:limit], items[limit:]
+        raw, status = _call(lambda: provider.score(kind, query, sent, key=key, config=config))
+        if status != USED:
+            return RerankResult(items, status, provider.name)
+        scores = _valid_scores(raw, len(sent))
+        if scores is None:
+            return RerankResult(items, unused("error:bad-response"), provider.name)
+        ranked = sorted(range(len(sent)), key=lambda index: -scores[index])
+        order = tuple(sent[index] for index in ranked) + rest
+        return RerankResult(order, USED, provider.name,
+                            tuple((item.name, score) for item, score in zip(sent, scores)))
+    finally:
+        del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key
 
 
 def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, brief_disabled: bool = False,
                       env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
                       providers: Mapping[str, Provider] | None = None) -> Advice:
     """An advisory AI tier recorded next to the rule tier in `axes["tier"]`, which it never changes."""
-    rule_tier = axes.get("tier")
-    if rule_tier not in TIERS:
-        raise ValueError(f"advise_difficulty needs axes['tier'] set to one of {', '.join(TIERS)}")
-    provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                  providers=providers)
-    if provider is None:
-        return Advice(rule_tier, None, None, status)
-    answer, status = _call(lambda: provider.advise(axes, task, key=key, config=config))
-    if status != USED:
-        return Advice(rule_tier, None, None, status, provider.name)
-    if not isinstance(answer, tuple) or len(answer) != 2 or answer[0] not in TIERS:
-        return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
-    tier, confidence = answer
-    if confidence is not None:
-        validated = _valid_scores([confidence], 1)
-        if validated is None:
+    provider = key = None
+    try:
+        rule_tier = axes.get("tier")
+        if rule_tier not in TIERS:
+            raise ValueError(f"advise_difficulty needs axes['tier'] set to one of {', '.join(TIERS)}")
+        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
+                                      providers=providers)
+        env = keychain = providers = None
+        if provider is None:
+            return Advice(rule_tier, None, None, status)
+        answer, status = _call(lambda: provider.advise(axes, task, key=key, config=config))
+        if status != USED:
+            return Advice(rule_tier, None, None, status, provider.name)
+        if not isinstance(answer, tuple) or len(answer) != 2 or answer[0] not in TIERS:
             return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
-        confidence = validated[0]
-    return Advice(rule_tier, tier, confidence, USED, provider.name)
+        tier, confidence = answer
+        if confidence is not None:
+            validated = _valid_scores([confidence], 1)
+            if validated is None:
+                return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
+            confidence = validated[0]
+        return Advice(rule_tier, tier, confidence, USED, provider.name)
+    finally:
+        del axes, task, config, brief_disabled, env, keychain, providers, provider, key

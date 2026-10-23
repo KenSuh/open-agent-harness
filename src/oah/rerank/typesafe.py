@@ -26,7 +26,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import TIERS, Candidate, ProviderError
+from oah.rerank.base import TIERS, Candidate, ProviderError, _sanitize_interruption
+from oah.secrets import Secret
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
@@ -45,7 +46,7 @@ TIER_CRITERIA = {
 }
 
 _T = TypeVar("_T")
-_Failure = str | type[BaseException] | None
+_Failure = str | BaseException | None
 
 
 def _outcome(action: Callable[..., tuple[_T | None, str | None]],
@@ -61,7 +62,7 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
                 if isinstance(exc, Exception):
                     return None, "internal"
                 # Preserve interruption semantics, but never its arguments, attributes or traceback.
-                return None, type(exc)
+                return None, _sanitize_interruption(exc)
             finally:
                 traceback.clear_frames(exc.__traceback__)
     finally:
@@ -71,8 +72,8 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
 def _finish(result: _T | None, code: _Failure) -> _T:
     """Raise only after sensitive helpers returned and their callers dropped every input."""
     try:
-        if isinstance(code, type):
-            raise code().with_traceback(None) from None
+        if isinstance(code, BaseException):
+            raise code.with_traceback(None) from None
         if code is not None:
             raise ProviderError(code).with_traceback(None) from None
         return cast(_T, result)
@@ -224,7 +225,7 @@ def _check_url(url: str) -> str | None:
         del url, parts, host
 
 
-def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object:
+def post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> object:
     """POST payload as JSON and return the parsed reply; any failure raises ProviderError(code)."""
     result = code = None
     try:
@@ -237,15 +238,18 @@ def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object
         del result, code
 
 
-def _post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> tuple[object, str | None]:
-    data = raw = request = opener = response = None
+def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tuple[object, str | None]:
+    credential = data = raw = request = opener = response = None
     try:
         code = _check_url(url)
         if code is not None:
             return None, code
         # Bearer credentials must be visible ASCII, with no whitespace or control characters.
         # Reject them before http.client can include a rejected header value in an exception.
-        if not isinstance(key, str) or not key or any(not 0x21 <= ord(char) <= 0x7e for char in key):
+        if not isinstance(key, Secret):
+            return None, "invalid-header"
+        credential = key.reveal()
+        if not credential or any(not 0x21 <= ord(char) <= 0x7e for char in credential):
             return None, "invalid-header"
         data = None
         try:
@@ -262,7 +266,7 @@ def _post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> tuple
             request = urllib.request.Request(url, data=data, method="POST", headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {credential}",
                 "User-Agent": f"open-agent-harness/{__version__}",
             })
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
@@ -287,7 +291,7 @@ def _post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> tuple
             pass
         return None, "bad-response"
     finally:
-        del url, payload, key, timeout, data, raw, request, opener, response
+        del url, payload, key, timeout, credential, data, raw, request, opener, response
 
 
 class TypeSafeProvider:
@@ -308,7 +312,7 @@ class TypeSafeProvider:
         finally:
             del self, config
 
-    def _post(self, payload: dict, key: str, config: Mapping) -> object:
+    def _post(self, payload: dict, key: Secret, config: Mapping) -> object:
         result = code = None
         try:
             try:
@@ -319,7 +323,7 @@ class TypeSafeProvider:
         finally:
             del result, code
 
-    def _post_result(self, payload: dict, key: str, config: Mapping) -> tuple[object, str | None]:
+    def _post_result(self, payload: dict, key: Secret, config: Mapping) -> tuple[object, str | None]:
         settings = timeout = None
         try:
             settings = self._settings(config)
@@ -328,7 +332,7 @@ class TypeSafeProvider:
         finally:
             del self, payload, key, config, settings, timeout
 
-    def score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: str,
+    def score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: Secret,
               config: Mapping) -> list[float]:
         result = code = None
         try:
@@ -340,7 +344,7 @@ class TypeSafeProvider:
         finally:
             del result, code
 
-    def _score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: str,
+    def _score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: Secret,
                config: Mapping) -> tuple[list[float] | None, str | None]:
         model = body = None
         try:
@@ -352,7 +356,7 @@ class TypeSafeProvider:
         finally:
             del self, kind, query, candidates, key, config, model, body
 
-    def advise(self, axes: Mapping[str, str], task: str, *, key: str,
+    def advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
                config: Mapping) -> tuple[str, float | None]:
         result = code = None
         try:
@@ -364,7 +368,7 @@ class TypeSafeProvider:
         finally:
             del result, code
 
-    def _advise(self, axes: Mapping[str, str], task: str, *, key: str,
+    def _advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
                 config: Mapping) -> tuple[tuple[str, float | None] | None, str | None]:
         model = body = None
         try:

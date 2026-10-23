@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import re
+import traceback
 from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
+
+from oah.secrets import Secret
 
 TIERS = ("low", "medium", "high", "max")
 _CODE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
@@ -25,6 +28,23 @@ class ProviderError(Exception):
         super().__init__(f"OAH_RERANK_PROVIDER_ERROR: {self.code}")
 
 
+def _sanitize_interruption(error: BaseException) -> BaseException:
+    """Preserve interruption types and group structure without retaining private exception data."""
+    try:
+        if isinstance(error, BaseExceptionGroup):
+            return BaseExceptionGroup("OAH_RERANK_INTERRUPTED: retry the request when ready",
+                                      [_sanitize_interruption(child) for child in error.exceptions])
+        if isinstance(error, Exception):
+            return ProviderError("internal")
+        # Bypass subclass constructors: interruptions may require arguments containing private data.
+        clean = BaseException.__new__(type(error))
+        BaseException.__init__(clean)
+        return clean
+    finally:
+        traceback.clear_frames(error.__traceback__)
+        del error
+
+
 class Provider(Protocol):
     """A re-ranker backend. It returns scores or advice; oah.rerank builds every order itself."""
 
@@ -32,8 +52,8 @@ class Provider(Protocol):
 
     def key_name(self, config: Mapping) -> str: ...
 
-    def score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: str,
+    def score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: Secret,
               config: Mapping) -> Sequence[float]: ...
 
-    def advise(self, axes: Mapping[str, str], task: str, *, key: str,
+    def advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
                config: Mapping) -> tuple[str, float | None]: ...

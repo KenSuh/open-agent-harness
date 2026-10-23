@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 import secrets as token_source
 import sys
 import unittest
@@ -26,16 +27,35 @@ class FakeKeychain:
 
 
 class GetTest(unittest.TestCase):
+    def test_lookup_returns_an_opaque_secret(self) -> None:
+        value = fake_key()
+        for env, chain in (({"DEMO_KEY": value}, FakeKeychain({})),
+                           ({}, FakeKeychain({"DEMO_KEY": value}))):
+            with self.subTest(source="environment" if env else "keychain"):
+                secret = secrets.get("DEMO_KEY", env=env, keychain=chain)
+                self.assertIsInstance(secret, secrets.Secret)
+                self.assertEqual(secret.reveal(), value)
+                self.assertNotIn(value, repr(secret))
+                self.assertNotIn(value, str(secret))
+                for spec in ("", "s", ">100"):
+                    with self.assertRaises(TypeError) as caught:
+                        format(secret, spec)
+                    self.assertNotIn(value, str(caught.exception))
+                for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+                    with self.assertRaises(TypeError) as caught:
+                        pickle.dumps(secret, protocol=protocol)
+                    self.assertNotIn(value, str(caught.exception))
+
     def test_env_wins_over_keychain(self) -> None:
         env_key, chain_key = fake_key(), fake_key()
         chain = FakeKeychain({"DEMO_KEY": chain_key})
-        self.assertEqual(secrets.get("DEMO_KEY", env={"DEMO_KEY": env_key}, keychain=chain), env_key)
+        self.assertEqual(secrets.get("DEMO_KEY", env={"DEMO_KEY": env_key}, keychain=chain).reveal(), env_key)
         self.assertEqual(chain.asked, [])
 
     def test_empty_env_falls_back(self) -> None:
         chain_key = fake_key()
         chain = FakeKeychain({"DEMO_KEY": chain_key})
-        self.assertEqual(secrets.get("DEMO_KEY", env={"DEMO_KEY": ""}, keychain=chain), chain_key)
+        self.assertEqual(secrets.get("DEMO_KEY", env={"DEMO_KEY": ""}, keychain=chain).reveal(), chain_key)
         self.assertEqual(chain.asked, ["DEMO_KEY"])
 
     def test_missing_everywhere_is_none(self) -> None:
@@ -56,7 +76,7 @@ class GetTest(unittest.TestCase):
         name = "OAH_TEST_SECRET_" + token_source.token_hex(4).upper()
         os.environ[name] = value
         self.addCleanup(os.environ.pop, name, None)
-        self.assertEqual(secrets.get(name, keychain=FakeKeychain({})), value)
+        self.assertEqual(secrets.get(name, keychain=FakeKeychain({})).reveal(), value)
 
     def test_system_keychain_matches_platform(self) -> None:
         chain = secrets.system_keychain()
@@ -93,7 +113,7 @@ class MacKeychainTest(unittest.TestCase):
         (self.store / "DEMO_KEY").write_text(value, encoding="utf-8")
         chain = secrets.MacKeychain(search_path=str(self.bin))
         self.assertEqual(chain.lookup("DEMO_KEY"), value)
-        self.assertEqual(secrets.get("DEMO_KEY", env={}, keychain=chain), value)
+        self.assertEqual(secrets.get("DEMO_KEY", env={}, keychain=chain).reveal(), value)
 
     def test_mac_keychain_not_found_is_none(self) -> None:
         self.assertIsNone(secrets.MacKeychain(search_path=str(self.bin)).lookup("DEMO_KEY"))
@@ -166,7 +186,7 @@ class WindowsCredentialsTest(unittest.TestCase):
         value = fake_key()
         self._write(f"oah:{name}", value.encode("utf-16-le"))
         self.assertEqual(secrets.WindowsCredentials().lookup(name), value)
-        self.assertEqual(secrets.get(name, env={}), value)
+        self.assertEqual(secrets.get(name, env={}).reveal(), value)
 
     def test_windows_credential_invalid_utf16le_blob(self) -> None:
         name = "OAH_TEST_" + token_source.token_hex(6).upper()
@@ -181,7 +201,7 @@ class WindowsCredentialsTest(unittest.TestCase):
                 value = fake_key() + suffix
                 self._write(f"oah:{name}", value.encode("utf-16-le"))
                 self.assertEqual(secrets.WindowsCredentials().lookup(name), value)
-                self.assertEqual(secrets.get(name, env={}), value)
+                self.assertEqual(secrets.get(name, env={}).reveal(), value)
 
     def test_windows_missing_credential_is_none(self) -> None:
         name = "OAH_TEST_" + token_source.token_hex(6).upper()

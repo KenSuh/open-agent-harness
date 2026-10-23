@@ -24,6 +24,7 @@ from unittest import mock
 from oah import rerank
 from oah.config import ConfigError, load_config
 from oah.rerank import typesafe
+from oah.secrets import Secret
 from tests.helpers import make_tmp_dir
 
 
@@ -135,7 +136,19 @@ class GatingTest(unittest.TestCase):
         self.assertTrue(result.used)
         self.assertEqual(names(result), ["b", "c", "a"])
         self.assertEqual(dict(result.scores), {"a": 0.1, "b": 0.9, "c": 0.5})
-        self.assertEqual(self.provider.calls[0][4], self.key)
+        self.assertEqual(self.provider.calls[0][4].reveal(), self.key)
+
+    def test_public_apis_pass_only_opaque_keys_to_providers(self) -> None:
+        with mock.patch.object(Secret, "reveal", side_effect=AssertionError("transport only")):
+            result = self.run_rerank(enabled(), env={"FAKE_RERANK_KEY": self.key})
+            advice = rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                                            env={"FAKE_RERANK_KEY": self.key},
+                                            keychain=NoKeychain(), providers=self.providers)
+        self.assertTrue(result.used)
+        self.assertEqual(advice.status, "used")
+        for call in self.provider.calls:
+            self.assertIsInstance(call[-1], Secret)
+            self.assertNotIn(self.key, repr(call))
 
     def test_ties_keep_input_order(self) -> None:
         self.provider.scores = {"a": 0.5, "b": 0.5, "c": 0.9}
@@ -419,7 +432,7 @@ class TypeSafeHttpTest(unittest.TestCase):
         environment.update(no_proxy="", NO_PROXY="")
         with mock.patch.dict(os.environ, environment), \
                 mock.patch("urllib.request.proxy_bypass", return_value=False):
-            typesafe.post_json(endpoint.url(), {}, key=self.key, timeout=5)
+            typesafe.post_json(endpoint.url(), {}, key=Secret(self.key), timeout=5)
         self.assertEqual(proxy.requests, [])
         self.assertEqual(len(endpoint.requests), 1)
         self.assertEqual(endpoint.requests[0]["headers"]["Authorization"], f"Bearer {self.key}")
@@ -437,7 +450,7 @@ class TypeSafeHttpTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"http_proxy": "http://proxy.invalid:8080", "no_proxy": ""}), \
                 mock.patch("urllib.request.proxy_bypass", return_value=False), \
                 mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
-            typesafe.post_json("http://127.0.0.1:9876/v1/systemone", {}, key=self.key, timeout=5)
+            typesafe.post_json("http://127.0.0.1:9876/v1/systemone", {}, key=Secret(self.key), timeout=5)
         self.assertEqual(destinations, ["127.0.0.1:9876"])
 
     def test_typesafe_success_preserves_public_return_values(self) -> None:
@@ -454,10 +467,10 @@ class TypeSafeHttpTest(unittest.TestCase):
             return response
 
         with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
-            self.assertEqual(typesafe.post_json(url, {}, key=self.key, timeout=5), body)
-            self.assertEqual(provider._post({}, self.key, cfg), body)
-            self.assertEqual(provider.score("impact", "q", candidates("a"), key=self.key, config=cfg), [0.7])
-            self.assertEqual(provider.advise(AdviceTest.AXES, "task", key=self.key, config=cfg), ("max", 0.8))
+            self.assertEqual(typesafe.post_json(url, {}, key=Secret(self.key), timeout=5), body)
+            self.assertEqual(provider._post({}, Secret(self.key), cfg), body)
+            self.assertEqual(provider.score("impact", "q", candidates("a"), key=Secret(self.key), config=cfg), [0.7])
+            self.assertEqual(provider.advise(AdviceTest.AXES, "task", key=Secret(self.key), config=cfg), ("max", 0.8))
         self.assertEqual(typesafe.parse_rerank_response(body, 1), [0.7])
         self.assertEqual(typesafe.parse_advice_response(body), ("max", 0.8))
 
@@ -547,6 +560,9 @@ class KeyLeakTest(unittest.TestCase):
                 pending.extend(value.values())
             elif isinstance(value, (tuple, list, set, frozenset)):
                 pending.extend(value)
+            elif isinstance(value, types.FunctionType):
+                pending.extend(cell.cell_contents for cell in (value.__closure__ or ()))
+                pending.extend((value.__defaults__, value.__kwdefaults__))
             elif not callable(value) and not isinstance(value, types.ModuleType) and hasattr(value, "__dict__"):
                 pending.append(vars(value))
 
@@ -567,12 +583,12 @@ class KeyLeakTest(unittest.TestCase):
             seen.add(id(error))
             attributes = {name: getattr(error, name) for name in dir(error)
                           if name != "__traceback__" and not callable(getattr(error, name))}
-            # Only provider-owned frames are in scope: fixtures and callers deliberately hold keys.
+            # Every package frame is in scope; fixtures and callers deliberately hold keys.
             frames = []
             current = error.__traceback__
-            provider_root = pathlib.Path(typesafe.__file__).parent
+            provider_root = pathlib.Path(rerank.__file__).parent.parent
             while current is not None:
-                if pathlib.Path(current.tb_frame.f_code.co_filename).parent == provider_root:
+                if pathlib.Path(current.tb_frame.f_code.co_filename).is_relative_to(provider_root):
                     frames.append(current)
                     self.assert_private_values_absent(current.tb_frame.f_locals.values(), key, response_text)
                 current = current.tb_next
@@ -588,10 +604,12 @@ class KeyLeakTest(unittest.TestCase):
                 for private in (key, response_text):
                     self.assertFalse(private in text, "exception exposes credential or response data")
             pending.extend(item for item in attributes.values() if isinstance(item, BaseException))
+            if isinstance(error, BaseExceptionGroup):
+                pending.extend(error.exceptions)
         self.assertIs(type(failure), exception_type)
         if exception_type is rerank.ProviderError:
             self.assertEqual(failure.code, code)
-        else:
+        elif not isinstance(failure, BaseExceptionGroup):
             self.assertEqual(failure.args, ())
         self.assertTrue(failure.__context__ is None, "provider errors must have no exception context")
         self.assertTrue(failure.__cause__ is None, "provider errors must have no exception cause")
@@ -635,11 +653,16 @@ class KeyLeakTest(unittest.TestCase):
                         raise exception_type(echo)
                     return InterruptedBody(body) if phase == "answers" else loads(raw)
 
-                actions = [lambda: provider.score("impact", "q", candidates("a"), key=key, config=cfg),
-                           lambda: provider.advise(AdviceTest.AXES, "task", key=key, config=cfg)]
+                actions = [lambda: provider.score("impact", "q", candidates("a"), key=Secret(key), config=cfg),
+                           lambda: provider.advise(AdviceTest.AXES, "task", key=Secret(key), config=cfg),
+                           lambda: rerank.rerank("impact", candidates("a"), config=cfg,
+                                                env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain()),
+                           lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=cfg,
+                                                           env={"TYPESAFE_API_KEY": key},
+                                                           keychain=NoKeychain())]
                 if phase != "answers":
-                    actions.extend((lambda: typesafe.post_json(endpoint, {}, key=key, timeout=5),
-                                    lambda: provider._post({}, key, cfg)))
+                    actions.extend((lambda: typesafe.post_json(endpoint, {}, key=Secret(key), timeout=5),
+                                    lambda: provider._post({}, Secret(key), cfg)))
                 else:
                     actions.extend((lambda: typesafe.parse_rerank_response(InterruptedBody(body), 1),
                                     lambda: typesafe.parse_advice_response(InterruptedBody(body))))
@@ -655,6 +678,66 @@ class KeyLeakTest(unittest.TestCase):
         for exception_type in (SystemExit, GeneratorExit, BaseException):
             with self.subTest(exception_type=exception_type.__name__):
                 self.check_interrupted_request(exception_type)
+
+    def test_interruption_groups_propagate_through_public_apis(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = key + response_text
+        cfg = typesafe_config("http://127.0.0.1:9876/v1/systemone")
+
+        def http_open(handler, request):
+            error = BaseExceptionGroup(echo, [KeyboardInterrupt(echo),
+                BaseExceptionGroup(echo, [SystemExit(echo), ValueError(echo)])])
+            error.add_note(echo)
+            error.private = echo
+            raise error
+
+        for action in (
+            lambda: rerank.rerank("impact", candidates("a"), config=cfg,
+                                 env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain()),
+            lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=cfg,
+                                            env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain()),
+        ):
+            with self.subTest(api=action.__code__.co_firstlineno), \
+                    mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+                self.assert_sanitized_failure(action, None, key, response_text, BaseExceptionGroup)
+                with self.assertRaises(BaseExceptionGroup) as caught:
+                    action()
+                self.assertIs(type(caught.exception.exceptions[0]), KeyboardInterrupt)
+                self.assertIs(type(caught.exception.exceptions[1].exceptions[0]), SystemExit)
+
+    def test_interruption_subclass_needing_arguments_is_not_swallowed(self) -> None:
+        class NeedsArgument(KeyboardInterrupt):
+            def __init__(self, message):
+                super().__init__(message)
+
+        self.check_interrupted_request(NeedsArgument)
+
+    def test_public_frames_keep_keys_opaque_during_transport(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        cfg = typesafe_config("http://127.0.0.1:9876/v1/systemone")
+        public_frames = []
+
+        def http_open(handler, request):
+            frame = sys._getframe(1)
+            while frame is not None:
+                if frame.f_globals.get("__name__") == rerank.__name__:
+                    public_frames.append(frame.f_code.co_name)
+                    self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+                frame = frame.f_back
+            raise KeyboardInterrupt(key + response_text)
+
+        with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+            for action in (
+                lambda: rerank.rerank("impact", candidates("a"), config=cfg,
+                                     env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain()),
+                lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=cfg,
+                                                env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain()),
+            ):
+                self.assert_sanitized_failure(action, None, key, response_text, KeyboardInterrupt)
+        self.assertIn("rerank", public_frames)
+        self.assertIn("advise_difficulty", public_frames)
 
     def test_sensitive_frames_clear_inputs_on_every_exit(self) -> None:
         key = fake_key()
@@ -686,10 +769,10 @@ class KeyLeakTest(unittest.TestCase):
                     sys.setprofile(capture)
                     with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
                         for action in (
-                            lambda: typesafe.post_json(endpoint, {}, key=key, timeout=5),
-                            lambda: provider._post({}, key, cfg),
-                            lambda: provider.score("impact", "q", candidates("a"), key=key, config=cfg),
-                            lambda: provider.advise(AdviceTest.AXES, "task", key=key, config=cfg),
+                            lambda: typesafe.post_json(endpoint, {}, key=Secret(key), timeout=5),
+                            lambda: provider._post({}, Secret(key), cfg),
+                            lambda: provider.score("impact", "q", candidates("a"), key=Secret(key), config=cfg),
+                            lambda: provider.advise(AdviceTest.AXES, "task", key=Secret(key), config=cfg),
                             lambda: typesafe.parse_rerank_response(body, 1),
                             lambda: typesafe.parse_advice_response(body),
                         ):
@@ -712,7 +795,7 @@ class KeyLeakTest(unittest.TestCase):
             with self.subTest(case=label):
                 server = FakeServer(self, lambda path, body, p=payload: (200, p, 0, {}))
                 self.assert_sanitized_failure(
-                    lambda: typesafe.post_json(server.url(), {}, key=key, timeout=5),
+                    lambda: typesafe.post_json(server.url(), {}, key=Secret(key), timeout=5),
                     "bad-response", key, response_text)
 
     def test_response_parser_failures_have_no_private_frames(self) -> None:
@@ -796,16 +879,16 @@ class KeyLeakTest(unittest.TestCase):
                     if label not in ("bad-shape", "number-overflow"):
                         cfg = typesafe_config(endpoint, timeout_seconds=timeout)
                         for action in (
-                            lambda: typesafe.post_json(endpoint, payload, key=credential, timeout=timeout),
-                            lambda: provider._post(payload, credential, cfg),
+                            lambda: typesafe.post_json(endpoint, payload, key=Secret(credential), timeout=timeout),
+                            lambda: provider._post(payload, Secret(credential), cfg),
                         ):
                             self.assert_sanitized_failure(action, code, key, response_text)
                     # Shape and score validation happen in the provider after transport succeeds.
                     if label not in ("bad-request", "bad-request-encoding", "transport-overflow"):
                         cfg = typesafe_config(endpoint, timeout_seconds=timeout)
                         for action in (
-                            lambda: provider.score("impact", "q", candidates("a"), key=credential, config=cfg),
-                            lambda: provider.advise(axes, "task", key=credential, config=cfg),
+                            lambda: provider.score("impact", "q", candidates("a"), key=Secret(credential), config=cfg),
+                            lambda: provider.advise(axes, "task", key=Secret(credential), config=cfg),
                         ):
                             self.assert_sanitized_failure(action, code, key, response_text)
 
@@ -814,7 +897,7 @@ class KeyLeakTest(unittest.TestCase):
         for suffix in ("\n", "\r\nInjected: value", "\n value", "\x00", "\x7f", "Ł"):
             with self.subTest(suffix=suffix):
                 with self.assertRaises(rerank.ProviderError) as caught:
-                    typesafe.post_json("http://127.0.0.1:1", {}, key=key + suffix, timeout=0.1)
+                    typesafe.post_json("http://127.0.0.1:1", {}, key=Secret(key + suffix), timeout=0.1)
                 self.assertEqual(caught.exception.code, "invalid-header")
                 self.assertNotIn(key, str(caught.exception))
                 self.assertNotIn(key, repr(caught.exception))
@@ -845,7 +928,7 @@ class KeyLeakTest(unittest.TestCase):
         key = fake_key()
         server = FakeServer(self, lambda path, body: (401, {"detail": key}, 0, {}))
         with self.assertRaises(rerank.ProviderError) as caught:
-            typesafe.post_json(server.url(), {"model": "m", "state": "s", "questions": {}}, key=key, timeout=5)
+            typesafe.post_json(server.url(), {"model": "m", "state": "s", "questions": {}}, key=Secret(key), timeout=5)
         self.assertEqual(caught.exception.code, "unauthorized")
         self.assertNotIn(key, str(caught.exception))
         self.assertNotIn(key, repr(caught.exception))

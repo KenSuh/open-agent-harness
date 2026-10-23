@@ -1,7 +1,7 @@
 # 키 조회의 유일한 경로 — 환경 변수를 먼저 보고, 없으면 macOS 키체인 또는 Windows 자격 증명 관리자에서 실행 시점에만 읽는다.
 """The one documented key lookup (A17).
 
-    oah.secrets.get("TYPESAFE_API_KEY") -> str | None
+    oah.secrets.get("TYPESAFE_API_KEY") -> Secret | None
 
 1. The environment variable of that name, when it is set and not empty.
 2. The OS keychain, under service `oah` and account `<name>`:
@@ -37,6 +37,35 @@ class Keychain(Protocol):
     def lookup(self, name: str) -> str | None: ...
 
 
+class Secret:
+    """An opaque runtime credential. Only the transport should explicitly reveal its value."""
+
+    __slots__ = ("__value",)
+
+    def __init__(self, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError("OAH_SECRET_INVALID: supply a non-empty runtime credential")
+        self.__value = value
+
+    def reveal(self) -> str:
+        return self.__value
+
+    def __repr__(self) -> str:
+        return "Secret(<redacted>)"
+
+    def __str__(self) -> str:
+        return "<redacted>"
+
+    def __format__(self, spec: str) -> str:
+        raise TypeError("OAH_SECRET_FORMAT: keep the credential opaque; reveal only in the transport")
+
+    def __reduce_ex__(self, protocol: int):
+        raise TypeError("OAH_SECRET_PICKLE: keep credentials in the environment or OS keychain")
+
+    def __reduce__(self):
+        raise TypeError("OAH_SECRET_PICKLE: keep credentials in the environment or OS keychain")
+
+
 def check_name(name: str) -> None:
     """Key names look like environment variable names; anything else is a programming error."""
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
@@ -44,16 +73,20 @@ def check_name(name: str) -> None:
                          f"(at most 64), like TYPESAFE_API_KEY; got {name!r}")
 
 
-def get(name: str, *, env: Mapping[str, str] | None = None, keychain: Keychain | None = None) -> str | None:
+def get(name: str, *, env: Mapping[str, str] | None = None, keychain: Keychain | None = None) -> Secret | None:
     """The key called `name` from the environment, then the OS keychain; None when neither has it."""
-    check_name(name)
-    environment = os.environ if env is None else env
-    value = environment.get(name)
-    if value:
-        return value
-    chain = system_keychain() if keychain is None else keychain
-    found = chain.lookup(name)
-    return found or None
+    environment = value = chain = None
+    try:
+        check_name(name)
+        environment = os.environ if env is None else env
+        value = environment.get(name)
+        if value:
+            return Secret(value)
+        chain = system_keychain() if keychain is None else keychain
+        value = chain.lookup(name)
+        return Secret(value) if value else None
+    finally:
+        del name, env, keychain, environment, value, chain
 
 
 def system_keychain() -> Keychain:
