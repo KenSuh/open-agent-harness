@@ -117,8 +117,9 @@ class Binding:
                  and isinstance(ident, str) and ID_RE.fullmatch(ident)
                  and isinstance(revision, int) and not isinstance(revision, bool) and revision >= 1
                  and isinstance(digest, str) and DIGEST_RE.fullmatch(digest)
-                 and isinstance(acs, list) and acs and len(set(acs)) == len(acs)
-                 and all(isinstance(ac, str) and AC_ID_RE.fullmatch(ac) for ac in acs))
+                 and isinstance(acs, list) and acs
+                 and all(isinstance(ac, str) and AC_ID_RE.fullmatch(ac) for ac in acs)
+                 and len(set(acs)) == len(acs))
         if not valid:
             raise ValueError(f"malformed intent binding: {data!r}")
         return cls(source=source, id=ident, revision=revision, digest=digest, acs=tuple(acs))

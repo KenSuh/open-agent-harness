@@ -121,11 +121,13 @@ class PreflightTest(unittest.TestCase):
                 self.assertEqual(report.exit_code, 0)
 
     def test_unknown_configured_remote_aborts(self):
-        report = self.run_checks(settings={"remote": "typo"})
-        self.assertEqual(self.check(report, "base").level, "abort", report.render())
-        self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
-        self.assertIn("typo", self.check(report, "base").message)
-        self.assertIn("[preflight] remote", self.check(report, "base").message)
+        for offline in (False, True):
+            with self.subTest(offline=offline):
+                report = self.run_checks(settings={"remote": "typo"}, offline=offline)
+                self.assertEqual(self.check(report, "base").level, "abort", report.render())
+                self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
+                self.assertIn("typo", self.check(report, "base").message)
+                self.assertIn("[preflight] remote", self.check(report, "base").message)
 
     def test_remote_inspection_failure_aborts(self):
         real_git = preflight._git
@@ -133,10 +135,11 @@ class PreflightTest(unittest.TestCase):
         def fail_remote(ctx, *args):
             return (1, "", "cannot inspect remotes") if args == ("remote",) else real_git(ctx, *args)
 
-        with patch("oah.preflight._git", side_effect=fail_remote):
-            report = self.run_checks()
-        self.assertEqual(self.check(report, "base").level, "abort", report.render())
-        self.assertEqual(report.exit_code, 2)
+        for offline in (False, True):
+            with self.subTest(offline=offline), patch("oah.preflight._git", side_effect=fail_remote):
+                report = self.run_checks(offline=offline)
+                self.assertEqual(self.check(report, "base").level, "abort", report.render())
+                self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
 
     def test_empty_remote_warns(self):
         empty = self.repo.parent / "empty.git"
@@ -149,10 +152,12 @@ class PreflightTest(unittest.TestCase):
     def test_configured_branch_and_remote(self):
         git(self.repo, "remote", "rename", "origin", "upstream")
         git(self.repo, "remote", "add", "mirror", str(self.remote))
-        report = self.run_checks()
-        self.assertEqual(self.check(report, "base").level, "abort", report.render())
-        self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
-        self.assertIn("[preflight] remote", self.check(report, "base").message)
+        for offline in (False, True):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline)
+                self.assertEqual(self.check(report, "base").level, "abort", report.render())
+                self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
+                self.assertIn("[preflight] remote", self.check(report, "base").message)
         report = self.run_checks(settings={"remote": "upstream", "default_branch": "main"})
         self.assertEqual(self.check(report, "base").level, "ok", report.render())
         self.assertIn("upstream/main", self.check(report, "base").message)

@@ -176,7 +176,7 @@ def _check_base(ctx: _Context) -> Check:
             return Check("base", "warn", "there is no remote, so base freshness does not apply; that is fine "
                                          "for a local-only repository")
         ctx.not_proven.append("that the base is fresh: no remote was compared")
-        return Check("base", "warn" if ctx.offline else "abort", why or "no remote to compare with; configure "
+        return Check("base", "abort", why or "no remote to compare with; configure "
                      "[preflight] remote in .oah/config.toml and run oah preflight again")
     ctx.remote = remote
     branch, problem = _default_branch(ctx, remote)

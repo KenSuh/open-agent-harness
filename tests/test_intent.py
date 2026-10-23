@@ -171,7 +171,7 @@ class ReadSourceTest(unittest.TestCase):
     def setUp(self):
         self.dir = make_tmp_dir(self)
         self.path = self.dir / "PACKET.md"
-        self.path.write_text(packet(), encoding="utf-8")
+        self.path.write_bytes(packet().encode("utf-8"))
 
     def assert_source_error(self, code: str, path: pathlib.Path | None = None):
         with self.assertRaises(SourceError) as caught:
@@ -181,6 +181,15 @@ class ReadSourceTest(unittest.TestCase):
 
     def test_reads_utf8_text(self):
         self.assertEqual(intent.read_source(self.path), packet())
+
+    def test_read_source_preserves_crlf(self):
+        lf = intent.read_source(self.path)
+        crlf = packet().replace("\n", "\r\n")
+        self.path.write_bytes(crlf.encode("utf-8"))
+        text = intent.read_source(self.path)
+        self.assertEqual(text, crlf)
+        self.assertEqual(intent.parse(text), intent.parse(lf))
+        self.assertEqual(intent.digest_of(text), intent.digest_of(lf))
 
     def test_read_source_bom(self):
         self.path.write_bytes(b"\xef\xbb\xbf" + packet().encode("utf-8"))
@@ -248,17 +257,34 @@ class ReadSourceTest(unittest.TestCase):
                     nonlocal replaced
                     data = real_read(fd, size)
                     if not replaced:
-                        os.replace(replacement, self.path)
+                        # Windows can rename a delete-shared open file, but cannot overwrite it.
+                        self.path.rename(self.dir / "original.md")
+                        replacement.rename(self.path)
                         replaced = True
                     return data
 
                 with patch("oah.intent.os.read", side_effect=read_then_replace):
                     self.assert_source_error("OAH_INTENT_SOURCE_INVALID")
+                self.assertTrue(replaced)
                 self.path.unlink()
+                (self.dir / "original.md").unlink()
 
     @unittest.skipUnless(os.name != "nt", "Windows needs a delete-sharing handle for replacement during read")
     def test_read_source_refuses_replacement_during_read(self):
         self.assert_replacement_during_read_is_refused()
+
+    @unittest.skipUnless(os.name != "nt", "Windows needs a delete-sharing handle for replacement during read")
+    def test_replacement_during_read_without_overwriting_open_destination(self):
+        real_rename = os.rename
+
+        def rename_to_absent(source, destination):
+            if os.path.lexists(destination):
+                raise PermissionError("cannot overwrite an open destination")
+            return real_rename(source, destination)
+
+        with patch("oah.intent.os.replace", side_effect=rename_to_absent), \
+                patch("oah.intent.os.rename", side_effect=rename_to_absent):
+            self.assert_replacement_during_read_is_refused()
 
     @unittest.skipUnless(os.name == "nt", "Windows delete-sharing handles only")
     def test_read_source_refuses_replacement_during_read_windows(self):
@@ -407,6 +433,11 @@ class BindingStateTest(unittest.TestCase):
                        dict(data, acs=["AC1", "AC1"]), dict(data, id=""), "text"):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
                 Binding.from_json(broken)
+
+    def test_binding_json_rejects_non_string_acs(self):
+        for ac in ([], {}, ["AC1"], {"id": "AC1"}, 1, None):
+            with self.subTest(ac=ac), self.assertRaises(ValueError):
+                Binding.from_json(dict(self.binding.to_json(), acs=[ac]))
 
 
 class CheckReturnTest(unittest.TestCase):
