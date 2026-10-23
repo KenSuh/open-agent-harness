@@ -121,6 +121,26 @@ class PreCommitTest(unittest.TestCase):
         self.assertFalse(any("in code" in line for line in verdict.warnings))
         self.assert_blocked(self.check(new_broken_links="block"), "[[nowhere]]")
 
+    def test_uncertain_code_links_warn_then_block_from_staged_bytes(self):
+        cases = [
+            "```\ncode\n  ```\n[[real]]\n",
+            "  ```\ncode\n```\n[[real]]\n",
+            "`open\n` [[real]] `\nclose`\n",
+            "<div>\n```\n</div>\n\n[[real]]\n```\n",
+            "- item\n  ```\n  code\n```\n[[real]]\n```\n",
+            "\\` [[real]] `\n",
+            "---\n```\n---\n[[real]]\n```\n",
+            "```\n[[real]]\n",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.stage({"docs/wiki/a.md": text})
+                (self.wiki_dir / "a.md").write_bytes(b"[[wiki-guide]]\n")
+                verdict = self.check()
+                self.assertEqual(verdict.blocked, [])
+                self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
+                self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+
     def test_link_between_skipped_container_delimiters_warns_then_blocks(self):
         self.stage({"docs/wiki/a.md": "- ```\n  code\n[[real]]\n  ```\n  ```\n"})
         # The staged bytes, rather than a subsequent editor change, govern the check.

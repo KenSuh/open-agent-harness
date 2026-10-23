@@ -39,6 +39,86 @@ def make_wiki(test: unittest.TestCase, repo: pathlib.Path, **settings) -> Wiki:
 
 
 class MarkdownTest(unittest.TestCase):
+    def test_mixed_indentation_fences_leave_following_link_visible(self):
+        for eol in ("\n", "\r\n"):
+            for opening, closing in (("```", "  ```"), ("  ```", "```")):
+                with self.subTest(eol=eol, opening=opening):
+                    text = eol.join((opening, "code", closing, "[[real]]", ""))
+                    self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                                     [("real", 4)])
+
+    def test_link_between_multiline_spans_is_visible(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                text = eol.join(("`open", "` [[real]] `", "close`", ""))
+                self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                                 [("real", 2)])
+
+    def test_html_blocks_cannot_invert_fence_pairing(self):
+        blocks = [("<script>", "</script>"), ("<PRE>", "</PRE>"), ("<style>", "</style>"),
+                  ("<textarea>", "</textarea>"), ("<!--", "-->"), ("<?php", "?>"),
+                  ("<!DOCTYPE html", ">"), ("<![CDATA[", "]]>"), ("<div>", ""),
+                  ('<widget class="x">', ""), ("</widget>", "")]
+        for eol in ("\n", "\r\n"):
+            for opening, closing in blocks:
+                with self.subTest(eol=eol, opening=opening):
+                    lines = [opening, "```", closing, "", "[[real]]", "```", ""]
+                    self.assertIn(("real", 5), [(link.target, link.line)
+                                               for link in markdown.wikilinks(eol.join(lines))])
+
+    def test_uncertain_code_keeps_real_links_as_candidates(self):
+        cases = [
+            "- item\n  ```\n  code\n```\n[[real]]\n```\n",
+            "\\` [[real]] `\n",
+            "---\ntitle: Example\n```\n---\n[[real]]\n```\n",
+            "---\n```\n...\n[[real]]\n```\n",
+            "```\n[[real]]\n",
+            "~~~md\n[[real]]\n",
+            "  ~~~\n  code\n[[real]]\n~~~\n",
+            "\t```\n[[real]]\n```\n",
+        ]
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    full = text.replace("\n", eol)
+                    self.assertIn(("real", text[:text.index("[[real]]")].count("\n") + 1),
+                                  [(link.target, link.line) for link in markdown.wikilinks(full)])
+
+    def test_certain_code_still_hides_links_with_lf_and_crlf(self):
+        text = ("```py\n[[fenced]]\n  ```\n~~~\n[[tilde]]\n~~~~\n"
+                "`[[span]]` ``a ` [[long span]]`` [[real]]\n")
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                self.assertEqual([(link.target, link.line)
+                                  for link in markdown.wikilinks(text.replace("\n", eol))], [("real", 7)])
+
+    def test_inline_uncertainty_lasts_until_blank_line(self):
+        for opening in ("`unpaired", "\\`escaped", "`unpaired ``[[same line]]``"):
+            with self.subTest(opening=opening):
+                text = opening + "\n``[[real]]``\n\n`[[hidden]]` [[after]]\n"
+                self.assertEqual([link.target for link in markdown.wikilinks(text)],
+                                 (["same line"] if "[[same line]]" in opening else []) + ["real", "after"])
+
+    def test_inline_uncertainty_survives_intervening_fence(self):
+        text = "`open\n~~~\ncode\n~~~\n`[[real]]`\n"
+        self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+        text = text.replace("code\n", "code\n\n")
+        self.assertEqual(markdown.wikilinks(text), [])
+
+    def test_uncertain_fence_readings_do_not_choose_later_pairings(self):
+        text = "  ```\ncode\n```\n[[real]]\n```\n[[tail]]\n```\n"
+        self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real", "tail"])
+
+    def test_generic_html_tag_cannot_interrupt_paragraph(self):
+        text = "paragraph\n<widget>\n```\n[[hidden]]\n```\n[[real]]\n"
+        self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+
+    def test_possible_paragraph_end_keeps_html_reading(self):
+        for prefix in ("+\n", "1.\n", "[ref]: /url\n", '[ref]:\n/url\n"a\ntitle"\n'):
+            with self.subTest(prefix=prefix):
+                text = prefix + "<widget>\n```\n\n[[real]]\n```\n"
+                self.assertEqual([link.target for link in markdown.wikilinks(text)], ["real"])
+
     def test_skipped_delimiters_cannot_span_real_link(self):
         text = "- ```\n  code\n[[real]]\n  ```\n  ```\n"
         self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)], [("real", 3)])

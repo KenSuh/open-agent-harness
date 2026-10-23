@@ -108,9 +108,14 @@ class GraphTest(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("oah graph update", err)
         (self.repo / "graphify-out").mkdir()
-        (self.repo / "graphify-out" / "GRAPH_REPORT.md").write_text("# Report\n가나다\n", encoding="utf-8")
+        report = self.repo / "graphify-out" / "GRAPH_REPORT.md"
+        report.write_bytes("# Report\n가나다\n".encode("utf-8"))
+        self.assertEqual(report.read_bytes(), "# Report\n가나다\n".encode("utf-8"))
         code, out, _ = run_cli(self.repo, tools, "graph", "report")
         self.assertEqual((code, out), (0, "# Report\n가나다\n"))
+        report.write_bytes("# Report\r\n가나다\r\n".encode("utf-8"))
+        code, out, _ = run_cli(self.repo, tools, "graph", "report")
+        self.assertEqual((code, out), (0, "# Report\r\n가나다\r\n"))
 
     def test_nothing_runs_without_an_explicit_command(self):
         self.assertEqual(graph.SUBCOMMANDS, ("update", "query", "path", "explain", "report"))

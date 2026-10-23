@@ -38,7 +38,7 @@ class LintCase(unittest.TestCase):
     def write(self, rel: str, text: str) -> None:
         path = self.wiki_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text.encode("utf-8"))
 
     def index(self, *names: str) -> None:
         self.write("index.md", "Notes:\n- [[wiki-guide]]\n" + "".join(f"- [[{n}]]\n" for n in names))
@@ -55,6 +55,24 @@ class LintCase(unittest.TestCase):
 
 
 class LintTest(LintCase):
+    def test_write_keeps_exact_utf8_and_line_endings(self):
+        for text in ("가나다\n", "가나다\r\n", "a\r\nb\nc\r"):
+            with self.subTest(text=text):
+                self.write("fixture.md", text)
+                self.assertEqual((self.wiki_dir / "fixture.md").read_bytes(), text.encode("utf-8"))
+
+    def test_uncertain_code_links_are_reported(self):
+        for text in ("```\ncode\n  ```\n[[real]]\n", "  ```\ncode\n```\n[[real]]\n",
+                     "`open\n` [[real]] `\nclose`\n", "<div>\n```\n\n[[real]]\n```\n",
+                     "---\n```\n---\n[[real]]\n```\n", "\\` [[real]] `\n", "```\n[[real]]\n"):
+            with self.subTest(text=text):
+                self.write("index.md", text)
+                report = self.wiki().lint(now=NOW)
+                self.assertEqual([(p.line, p.detail) for p in report.problems
+                                  if p.path == "index.md" and p.kind == "broken_link"],
+                                 [(text[:text.index("[[real]]")].count("\n") + 1,
+                                   "[[real]] does not resolve")])
+
     def test_scaffold_passes_lint(self):
         report = self.wiki().lint(now=NOW)
         self.assertEqual(report.problems, [])
