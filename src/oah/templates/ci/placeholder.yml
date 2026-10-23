@@ -1,0 +1,7 @@
+      # EDIT ME: oah ci init could not find your test command. Replace the three run lines below with
+      # the command that runs your tests, for example `make test`. Until then this step fails on purpose.
+      - name: Run tests (edit me)
+        run: |
+          echo "oah ci init could not find a test command for this project."
+          echo "Edit .github/workflows/oah-ci.yml: replace this step's run lines with your test command."
+          exit 1
