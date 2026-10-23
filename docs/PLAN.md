@@ -113,7 +113,7 @@ Verdicts: **keep** (port the idea, rewritten portable), **simplify** (port a muc
 | 21 | Wiki conventions: catalog index, newest-first log with an insertion marker, a source line on every note, wikilinks | Long-term project memory agents can trust | **keep** | `oah init` scaffolds `docs/wiki/`; `oah wiki new/log` |
 | 22 | Review loop: R1–R3 round ceiling counted at call time, series key, per-series lock, explicit extra-round override | Bounded review cycles | **keep** | `oah review` with `max_rounds = 3` and `--extra-round` (5.9) |
 | 23 | Review artifact schema and validation (verdict/findings consistency, base/head echo) | A machine-checkable review result | **keep, trimmed** | A JSON schema passed to `codex exec --output-schema`; one receipt per round |
-| 24 | Canary token (random per call, written into the reviewer's tree, never in the prompt, must appear in the evidence) | Proves the reviewer read the tree it was given | **keep** | Same mechanism (5.9) |
+| 24 | Canary token (random per call, written into the reviewer's tree, never in the prompt, must appear in the evidence) | Proves access to the snapshot's token file only | **keep** | Same mechanism (5.9) |
 | 25 | Sanitized review snapshot (fresh clone at the exact head, agent instruction files removed, reviewer config and rules ignored, minimal environment) | Blocks instruction injection through repo files | **keep** | Portable Python version that also strips `CLAUDE.md` and `.claude/` (5.9) |
 | 26 | "Same engine is not independent" rule | Honest trust labels | **keep, as a label** | Receipt field `independent: true/false` and a visible warning |
 | 27 | Reviewer binary pinning (hash + macOS code signature + login-mode requirement) | Trust the reviewer binary | **simplify** | Record CLI path, version and sha256; pinning is optional; no code-signature check |
@@ -219,9 +219,13 @@ open-agent-harness/
   the git URL, and later from PyPI. The name `open-agent-harness` is free on PyPI. `oah` is taken there
   by an unrelated project, so only the command is called `oah` (section 13).
 - **Portability rules for all code.**
-  - Never use `shell=True`, and never put user text in argv. Prompts go on stdin. This avoids the
-    Windows 32K command-line limit and batch-file argument injection.
-  - Resolve executables with `shutil.which` and prefer `.exe` over `.cmd` shims.
+  - Never use `shell=True`; prompts go on stdin, avoiding the Windows 32K command-line limit.
+    `shell=False` alone does not prevent Windows batch-file argument injection.
+  - Resolve executables with `shutil.which` and prefer `.exe`. Never launch `.cmd` or `.bat` directly.
+    For recognized npm shims, resolve the installed package's declared bin script and invoke it with
+    `node.exe` and an argv list, without evaluating shim text. Otherwise refuse with
+    `OAH_UNSUPPORTED_BATCH_SHIM` and tell the user to install a native executable or configure an
+    explicit `[interpreter.exe, script, ...]` command. Paths and configured arguments remain literal.
   - Every file read and write states UTF-8 explicitly (Korean Windows defaults to cp949). Parsers accept
     CRLF; writers keep the target file's line endings.
   - No `fcntl`-only, `O_NOFOLLOW`-only or signal-only code paths without a Windows branch.
@@ -389,11 +393,24 @@ output always ends with a "not proven by this preflight" list.
   `--allow-structural`, and that is recorded in the events as unverified.
 - **The lead runs the gates.** It runs `oah gates check` after implementing and after every `oah fix`.
   Workers may run tests to iterate, but they never approve CHECK commands or record gate evidence.
+  - `oah` stores a per-gate input manifest and digest in runtime state alongside the evidence digest
+    and gate-definition digest. Hash input paths, bytes and execution modes, including additions and
+    deletions. Inputs include source, tests, config, tool versions and relevant env; default to all
+    tracked and non-ignored untracked files, excluding generated gate outputs. Narrower
+    input sets must be declared explicitly; unknown dependencies invalidate evidence conservatively.
+  - Changed definitions or inputs invalidate evidence even if unlazy still marks the gate met.
+    `gates check` runs affected gates through unlazy with `--reverify`; it never relies on the default
+    skip-met behaviour. Compare inputs before and after the check; changes during it invalidate the run.
+  - Unaffected gates need an explicit input-identical carry record with old/new input digests and the
+    original evidence digest. `finish` and the lease-aware Stop hook reject stale or missing bindings
+    against the final inputs, including working-tree changes; unlazy's green status alone is insufficient.
 - **Ledger privacy.** unlazy's automatic evidence records the resolved working directory, which is an
   absolute path that contains the user name.
   - `oah init` therefore adds `.oah/tasks/*/GATES.md` to `.gitignore`.
-  - `oah finish` writes a committed, path-free `GATES.summary.md`: gate ids, titles, CHECK, EXPECT,
-    status and evidence digests.
+  - `oah finish` writes a committed, path-free `GATES.summary.md`: only validated `G<n>` ids,
+    fixed status enums and sha256 digests of titles, CHECK, EXPECT, evidence and input/carry records.
+    No raw titles, commands, expectations, paths, task labels or other free text are exported; the
+    writer rejects fields outside this allowlist. Full text stays in the ignored ledger or runtime state.
   - `[gates] commit_ledgers = true` commits the full ledger instead.
 - **Pinned contract.** P5 pins an unlazy commit and writes down its CLI contract: arguments, output and
   exit codes. Contract tests against a stub keep `oah` honest when unlazy changes.
@@ -419,8 +436,9 @@ output always ends with a "not proven by this preflight" list.
    read them only through `git show` or `git diff`.
 4. **Canary.** A random token is written to `<snapshot>/.oah-review-canary` (exclusive create). The
    prompt asks for `REVIEWED-TREE-CANARY: <token>` in the evidence. The token never appears in the
-   prompt. Its limit is stated: it proves the reviewer read the tree it was given, not that the tree
-   was right.
+   prompt. Its limit is stated: verification proves access to the snapshot's token file only.
+   It proves neither source or diff coverage, review quality, nor tree identity; echoed SHAs do not
+   establish those properties.
 5. **Prompt.** The intent verbatim, the AC list, base and head, the diff stat, critical-path warnings,
    and a rubric: goal, tests, quality, security, context and regressions.
 6. **Run.** The reviewer runs read-only inside the snapshot with `--output-schema` and `--ephemeral`.
@@ -603,9 +621,13 @@ reviewed file under `RemoteSigned`.
 - After each install it refreshes `$env:Path` from the registry, so new tools work in the same window.
 
 **Encoding.**
-- `oah` writes all files as UTF-8 and decodes subprocess output with replacement, so a Korean (cp949)
-  console does not crash it.
-- Paths with spaces or Korean user names are covered by tests.
+- `oah` writes all files and run logs as UTF-8. Capture subprocess stdout/stderr as bytes, then decode
+  with an explicit encoding (UTF-8 by default, configurable to cp949 per tool) and `errors="replace"`.
+- Before any printing, configure `oah`'s stdout and stderr with their existing encoding and
+  `errors="backslashreplace"`, including redirected streams; use an equivalent encoding-safe writer
+  for streams without `reconfigure`. Unencodable emoji and U+FFFD are escaped, never fatal.
+- Native Windows CI covers paths with spaces or Korean user names and redirected cp949 stdout/stderr
+  carrying Korean, emoji and malformed subprocess bytes, with no `UnicodeEncodeError`.
 
 ### 6.4 Why native Windows and not WSL-only
 
@@ -646,13 +668,22 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - lease overlap, TTL and the `finish` guard;
 - config defaults and validation;
 - routing scores;
-- engine command lines;
+- engine command lines; native Windows CI checks npm-shim resolution and unsupported batch-shim
+  refusal with spaces and Windows-valid metacharacters (`& ^ % ! ( )`) in paths, plus
+  `& | < > ^ % ! ( )` in configured arguments, verifying literal argv and no injected command execution;
 - packet and intent parsing, including the digest being equal for CRLF and LF files;
-- the gate status parser and unlazy delegation, using a stub `node` script;
+- the gate status parser and unlazy delegation, using a stub `node` script; an unchanged CHECK with
+  changed source must trigger `--reverify`, a failing rerun must block finish, and input-identical carry
+  must pass while input changes during a check must fail;
+- summary export with paths and personal-identifier fixtures in every free-text field: only validated
+  ids, fixed statuses and digests survive;
+- subprocess decoding and encoding-safe stdout/stderr, including the redirected cp949 cases in 6.3;
 - impact bindings in a temp repo;
 - rules-block sync: idempotence, refusal on broken markers, line endings kept, the 32 KiB budget;
 - `init`: idempotence, no overwrite, dry run;
 - review: snapshot stripping, canary, schema validation and round budget, using a **fake codex**;
+  a fake reviewer reading only the token file can pass canary verification, which must not be labelled
+  as source coverage or tree-identity verification;
 - preflight verdicts against a temp bare remote;
 - the Stop-hook decision JSON;
 - installer dry runs.
