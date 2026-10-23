@@ -1,0 +1,23 @@
+{
+  "commit": "2ed6c52c9d7e5e56942508591085fd45dea277d3",
+  "executables": [],
+  "fetched": "2026-10-23",
+  "files": {
+    "LICENSE": "715d483338cea4365f0d91a27799cf61226d6bcf",
+    "ponytail-audit/SKILL.md": "5582d10335daff5b5947f9b77927fbc97f2047f3",
+    "ponytail-debt/SKILL.md": "ecbc0ca8161b25ced3b4f728398c2ec33988a777",
+    "ponytail-gain/SKILL.md": "012e37b6bf31da1ed4bf936ec8aff53974d5291e",
+    "ponytail-help/SKILL.md": "ba145c0ebb7c7e5682bb2f36047af3bf2030d470",
+    "ponytail-review/SKILL.md": "e137a855bd87119a4517895a1000a59b0999e1b8",
+    "ponytail/SKILL.md": "02c0712c86277d49d18a77da3a2b825657bf02d1"
+  },
+  "license_file": "LICENSE",
+  "license_path": "LICENSE",
+  "license_sha256": "fb1bc6909ac3ef82d5c22106e32ef682b0cff66788fa915fb9b53b15c9d2f3ab",
+  "name": "ponytail",
+  "notice_files": [],
+  "ref": "main",
+  "repository": "https://github.com/DietrichGebert/ponytail",
+  "spdx": "MIT",
+  "subpath": "skills"
+}

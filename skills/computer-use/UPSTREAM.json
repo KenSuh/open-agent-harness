@@ -1,0 +1,18 @@
+{
+  "commit": "a0cd1644f320f1327f7495650a816111b495f3cd",
+  "executables": [],
+  "fetched": "2026-10-23",
+  "files": {
+    "LICENSE": "fbf46fc17dacb1f65e03e2b6290eb53ba94b149d",
+    "SKILL.md": "8c89c613921e128af2c73b17c9b8816caab38afa"
+  },
+  "license_file": "LICENSE",
+  "license_path": "LICENSE",
+  "license_sha256": "ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3",
+  "name": "computer-use",
+  "notice_files": [],
+  "ref": "main",
+  "repository": "https://github.com/stablyai/orca",
+  "spdx": "MIT",
+  "subpath": "skills/computer-use"
+}

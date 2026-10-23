@@ -1,0 +1,42 @@
+{
+  "commit": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+  "executables": [
+    "scripts/aggregate_benchmark.py",
+    "scripts/generate_report.py",
+    "scripts/improve_description.py",
+    "scripts/package_skill.py",
+    "scripts/quick_validate.py",
+    "scripts/run_eval.py",
+    "scripts/run_loop.py"
+  ],
+  "fetched": "2026-10-23",
+  "files": {
+    "LICENSE.txt": "4f881c52d1f72f4cfb720e339e2d35c3058d01a9",
+    "SKILL.md": "65b3a402dbd09b8e83f9d637c6b553875189085c",
+    "agents/analyzer.md": "14e41d6068635f4dd3fb878fd1626312395dda63",
+    "agents/comparator.md": "80e00eb45db3ee53a132fc2ba97fd59a7339e563",
+    "agents/grader.md": "558ab05c0a9a8bb062ef4c51823d4d76c3acf7c4",
+    "assets/eval_review.html": "938ff32aed9bffabf723bd5492d720f4736c8e4d",
+    "eval-viewer/generate_review.py": "7fa5978631fed1ed545591dbb2b0eb21ce3f3d08",
+    "eval-viewer/viewer.html": "6d8e96348a02e66c3363d2ff3b3ae58ac11e6382",
+    "references/schemas.md": "b6eeaa2d4a34c1653069585c6c5603da39a5bdbe",
+    "scripts/__init__.py": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "scripts/aggregate_benchmark.py": "3e66e8c105be9bab9f0e9c61f0d1482619401580",
+    "scripts/generate_report.py": "959e30a0014ec165c41a2bb7420b7dfe1416bbac",
+    "scripts/improve_description.py": "06bcec76122446986e3610c20a39c466de36f495",
+    "scripts/package_skill.py": "f48eac444656ddc41204aac1760a217951ce609e",
+    "scripts/quick_validate.py": "ed8e1dddce77b16af13c6f36b3fe86c4ac7c590c",
+    "scripts/run_eval.py": "e58c70bea39d5b252a1e819f242bbdcdf20e8b87",
+    "scripts/run_loop.py": "30a263d674ef19de11c756d6f7537f91a421909e",
+    "scripts/utils.py": "51b6a07dd57174197a937034b7eecebd5768ff8a"
+  },
+  "license_file": "LICENSE.txt",
+  "license_path": "skills/skill-creator/LICENSE.txt",
+  "license_sha256": "bc6b3af2f331cbc7fb0da1344efb2cbe5877a31498b4d70dbc7000f3405a1362",
+  "name": "skill-creator",
+  "notice_files": [],
+  "ref": "main",
+  "repository": "https://github.com/anthropics/skills",
+  "spdx": "Apache-2.0",
+  "subpath": "skills/skill-creator"
+}

@@ -1,0 +1,18 @@
+{
+  "commit": "65a39f393687675ce170e6094757de20370365b9",
+  "executables": [],
+  "fetched": "2026-10-23",
+  "files": {
+    "LICENSE": "8c73b41b89d9a76ddf0fdb0edfaafdda800d36e8",
+    "SKILL.md": "0109513f9656917dc93cbc5ecddfca465a53ce66"
+  },
+  "license_file": "LICENSE",
+  "license_path": "skills/typesafe-ai/LICENSE",
+  "license_sha256": "835f233f1d6ed84a9b9a351aba0689b47644a4137d6316911fc7957bde523b02",
+  "name": "typesafe-ai",
+  "notice_files": [],
+  "ref": "main",
+  "repository": "https://github.com/typesafe-ai/skills",
+  "spdx": "MIT",
+  "subpath": "skills/typesafe-ai"
+}
