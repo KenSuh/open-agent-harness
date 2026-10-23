@@ -1,13 +1,4 @@
 {
   "version": 1,
-  "rules": [
-    {
-      "id": "codex-0.163-ordinary",
-      "engine": "codex",
-      "cli_versions": ["0.163."],
-      "models": ["*"],
-      "map": {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"},
-      "note": "Ordinary reasoning levels are sent to the model unchanged (codex-cli 0.163, kit table of 2026-10-23). This describes expected inference behaviour, not a runtime observation. ultra changes behaviour (task delegation) and has no known mapping, so it stays unverified."
-    }
-  ]
+  "rules": []
 }

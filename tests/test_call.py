@@ -19,13 +19,13 @@ from collections import namedtuple
 from unittest import mock
 
 from oah import call, call_cli
-from oah.briefs import BriefError
+from oah.briefs import VERIFY_FOOTER, VERIFY_MARKER, BriefError, raw_section
 from oah.engines.effort import EngineError
 from oah.lease import Store
 from oah.paths import repo_info
 from oah.routing import RoutingError
 from oah.runs import RESULT_FIELDS, UNVERIFIED, find_run, new_run
-from tests.helpers import git_commit, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
 FAKE_CODEX = [sys.executable, str(FAKES / "fake_codex.py")]
@@ -105,6 +105,57 @@ class Project:
 
 
 class RunFolderTest(unittest.TestCase):
+    def test_stored_spec_gets_the_current_worker_envelope(self):
+        project = Project(self)
+        data = project.run(tier="low", stored_brief="Review this reusable spec.\n")
+        prompt = project.recorded()["stdin"]
+        self.assertTrue(prompt.startswith("You are a dispatched oah worker (OAH_WORKER=1, run " + data["run_id"]))
+        self.assertIn("Stage: review · Engine: codex", prompt)
+        self.assertIn("## Round instructions\nReview this reusable spec.", prompt)
+        self.assertEqual(prompt.count(VERIFY_MARKER), 1)
+        self.assertTrue(prompt.endswith(VERIFY_FOOTER + "\n" + FOOTER))
+        self.assertNotIn("oah start", prompt)
+
+    def test_reused_implementation_brief_refreshes_review_envelope(self):
+        project = Project(self)
+        project.packet("## Scope\n- src/a.py\n")
+        initial = project.prepare(engine="claude", stage="initial", tier="low", round_instructions="Inspect AC1.")
+        stored = initial.run.prompt_path.read_bytes().decode("utf-8")
+        data = project.run(tier="low", stored_brief=stored, round_instructions="Review the current diff.")
+        prompt = project.recorded()["stdin"]
+        self.assertTrue(prompt.startswith("You are a dispatched oah worker (OAH_WORKER=1, run " + data["run_id"]))
+        self.assertNotIn(initial.run_id, prompt)
+        self.assertNotIn("Stage: initial", prompt)
+        self.assertNotIn("Agent-Engine", prompt)
+        self.assertNotIn("oah start", prompt)
+        self.assertEqual(prompt.count(SECTION), 1)
+        self.assertIn("Inspect AC1.", prompt)
+        self.assertIn("Review the current diff.", prompt)
+        self.assertEqual(prompt.count(VERIFY_MARKER), 1)
+
+    def test_stored_review_spec_with_lease_instruction_refuses(self):
+        project = Project(self)
+        with self.assertRaises(BriefError):
+            project.prepare(tier="low", stored_brief="Run oah start --task old --agent claude before reviewing.\n")
+        self.assertFalse(project.record.exists())
+
+    def test_refresh_failure_keeps_launch_version_separate_from_catalog(self):
+        project = Project(self)
+        project.prepare(tier="low")
+        (project.home / "models_cache.json").unlink()
+        measured_old_rule = [{"id": "old-version-only", "engine": "codex", "cli_versions": ["0.163."],
+                              "models": ["gpt-test-a"], "map": {"low": "low"}}]
+        for version, expected in (("0.170.0", "0.170.0"), ("unknown", None)):
+            with self.subTest(version=version):
+                prepared = project.prepare(tier="low", env={"FAKE_CODEX_VERSION": version})
+                self.assertEqual(prepared.cli_version, expected)
+                data = call.execute(prepared, base_env=project.env, rules=measured_old_rule)
+                self.assertEqual(data["cli_version"], expected or UNVERIFIED)
+                self.assertEqual(data["resolved_model"], "gpt-test-a")
+                self.assertFalse(data["effort_verified"])
+                self.assertEqual(data["resolved_inference_effort"], UNVERIFIED)
+        self.assertEqual(call.models.Catalog(project.state).load("codex").cli_version, "0.163.0")
+
     def test_call_writes_complete_run_folder(self):
         project = Project(self)
         data = project.run(tier="high", round_instructions="Review the change.")
@@ -115,8 +166,9 @@ class RunFolderTest(unittest.TestCase):
         expected = {"status": "finished", "exit_code": 0, "timed_out": False, "engine": "codex", "stage": "review",
                     "cli_version": "0.163.0", "resolved_model": "gpt-test-a", "model_source": "cli_default",
                     "requested_effort": "high", "launch_effort": "high", "header_effort": "high",
-                    "header_check": "match", "resolved_inference_effort": "high",
-                    "normalization_basis": "codex-0.163-ordinary", "effort_verified": True, "tier": "high",
+                    "header_check": "match", "resolved_inference_effort": UNVERIFIED,
+                    "normalization_basis": "unverified: no normalization rule for codex 0.163.0 gpt-test-a effort high",
+                    "effort_verified": False, "tier": "high",
                     "tier_source": "flag", "read_only": True, "error": None, "advisory": "unused(tier-given)"}
         self.assertEqual({key: data[key] for key in expected}, expected)
         self.assertIsInstance(data["duration_s"], float)
@@ -151,7 +203,7 @@ class RunFolderTest(unittest.TestCase):
         project = Project(self)
         data = project.run(tier="low", stored_brief="An old spec that mentions " + MARKER + " inline.\n")
         prompt = find_run(project.state, data["run_id"]).prompt_path.read_text(encoding="utf-8")
-        self.assertTrue(prompt.startswith("An old spec"))
+        self.assertIn("## Round instructions\nAn old spec", prompt)
         self.assertTrue(prompt.endswith(FOOTER))
 
 
@@ -306,6 +358,33 @@ NON_ASCII = SECTION.replace("Status: accepted\n", "Status: accepted\n### Problem
 
 
 class IntentLineageTest(unittest.TestCase):
+    def test_stored_brief_delivers_source_intent_bytes_on_stdin(self):
+        project = Project(self)
+        source = project.packet("## Scope\n- src/a.py\n", section=NON_ASCII, newline="\r\n")
+        section = raw_section(source.read_bytes().decode("utf-8"))
+        stored = "Reusable spec\r\n" + section + FOOTER.replace("\n", "\r\n")
+        data = project.run(tier="low", stored_brief=stored)
+        delivered = project.recorded()["stdin"].encode("utf-8")
+        self.assertEqual(raw_section(delivered.decode("utf-8")).encode("utf-8"), section.encode("utf-8"))
+        self.assertEqual(find_run(project.state, data["run_id"]).prompt_path.read_bytes(), delivered)
+
+    def test_stored_brief_with_changed_intent_line_endings_refuses(self):
+        project = Project(self)
+        project.packet(newline="\r\n")
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(tier="low", stored_brief=SECTION)
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
+
+    def test_linked_task_directory_cannot_redirect_intent_binding(self):
+        project = Project(self)
+        project.packet()
+        outside = make_tmp_dir(self)
+        (project.state / "runs").mkdir(parents=True)
+        directory_alias(outside, project.state / "runs" / "t1")
+        with self.assertRaises(call.runs.RunError):
+            project.prepare(tier="low")
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_section_stays_byte_intact_with_non_ascii_and_crlf(self):
         project = Project(self)
         project.packet("## Scope\n- src/a.py\n", section=NON_ASCII, newline="\r\n")
@@ -372,7 +451,7 @@ class IntentLineageTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
         with self.assertRaises(EngineError):
             project.prepare(stage="review", tier="low", stored_brief="no intent here\n")
-        data = project.run(stage="review", tier="low", stored_brief="Reused.\n\n" + SECTION.replace("\n", "\r\n"))
+        data = project.run(stage="review", tier="low", stored_brief="Reused.\n\n" + SECTION)
         self.assertEqual(data["status"], "finished")
         self.assertEqual(project.runs(), [data["run_id"]])
 
@@ -456,6 +535,88 @@ def wait_until_gone(pid: int, seconds: float = 10.0) -> bool:
 
 
 class TimeoutAndBackgroundTest(unittest.TestCase):
+    def test_runner_can_finish_before_launcher_returns(self):
+        project = Project(self)
+        prepared = project.prepare(tier="low")
+        launch = subprocess.run
+
+        def complete_before_return(*args, **kwargs):
+            result = launch(*args, **kwargs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(call.wait(project.state, prepared.run_id, timeout=20)["status"], "finished")
+            return result
+
+        with mock.patch.object(call.subprocess, "run", side_effect=complete_before_return):
+            call.start_background(prepared, base_env=project.env)
+        data = call.wait(project.state, prepared.run_id, timeout=0)
+        self.assertEqual((data["status"], data["exit_code"]), ("finished", 0))
+        self.assertIsNotNone(data["finished_at"])
+
+    def test_windows_detachment_denial_never_retries_inside_job(self):
+        with mock.patch.object(call.os, "name", "nt"), \
+                mock.patch.object(call, "_boot_argv", return_value=[sys.executable, "-c", "pass"]), \
+                mock.patch.object(call.subprocess, "Popen", side_effect=OSError("breakaway denied")) as popen, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = call.launch_main("unused")
+        self.assertEqual(code, call_cli.EXIT_ENVIRONMENT)
+        self.assertEqual(popen.call_count, 1)
+        self.assertTrue(popen.call_args.kwargs["creationflags"] & 0x01000000)
+        self.assertIn("OAH_RUN_DETACH_FAILED", err.getvalue())
+        self.assertIn("without --background", err.getvalue())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows kill-on-close jobs")
+    def test_background_survives_originating_job_close(self):
+        import ctypes
+        from ctypes import wintypes
+        from oah.atomic import write_json_atomic
+        from oah.engines.proc import _WindowsJob
+
+        project = Project(self)
+        prepared = project.prepare(tier="low", timeout_s=30)
+        write_json_atomic(prepared.run.launch_path, prepared.to_json())
+        ready = make_tmp_dir(self) / "origin-ready"
+        # Give the originating process a kill-on-close job that explicitly permits breakaway.
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                        ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                        ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                        ("scheduling", wintypes.DWORD)]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [("basic", BasicLimits), ("io", ctypes.c_uint64 * 6),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+        job = _WindowsJob()
+        self.addCleanup(job.close)
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000 | 0x800  # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
+        self.assertTrue(job.api.SetInformationJobObject(job.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)))
+        script = ("import pathlib,sys,time; sys.path.insert(0,sys.argv[3]); "
+                  "from oah import call; from oah.atomic import read_json; "
+                  "p=call.Prepared.from_json(read_json(pathlib.Path(sys.argv[1]),None)); "
+                  "call.start_background(p); pathlib.Path(sys.argv[2]).touch(); time.sleep(60)")
+        origin = subprocess.Popen([sys.executable, "-c", script, str(prepared.run.launch_path), str(ready),
+                                   str(pathlib.Path(call.__file__).resolve().parent.parent)],
+                                  env=dict(project.env, FAKE_SLEEP="3"), creationflags=0x4,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: origin.kill() if origin.poll() is None else None)
+        self.addCleanup(origin.stderr.close)
+        try:
+            job.start(origin)
+            deadline = time.monotonic() + 20
+            while not ready.exists() and origin.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if not ready.exists():
+                origin.kill()
+                self.fail(origin.communicate(timeout=10)[1].decode("utf-8", errors="replace"))
+            self.assertNotIn(prepared.run.read()["status"], ("finished", "failed"))
+        finally:
+            job.close()  # kills the origin; the detached runner must outlive it
+        origin.wait(timeout=10)
+        self.assertEqual(call.wait(project.state, prepared.run_id, timeout=30)["status"], "finished")
+
     def test_timeout_kills_process_tree(self):
         project = Project(self)
         pidfile = make_tmp_dir(self) / "child.pid"
@@ -528,6 +689,16 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
 
 
 class CallCliTest(unittest.TestCase):
+    def test_detachment_refusal_is_an_environment_error(self):
+        project = Project(self)
+        with mock.patch.object(call, "start_background", side_effect=EngineError(
+                "OAH_RUN_DETACH_FAILED", "job breakaway denied; retry without --background")):
+            code, out, err = run_cli(project, "call", "codex", "--stage", "review", "--tier", "low",
+                                     "--background")
+        self.assertEqual(code, call_cli.EXIT_ENVIRONMENT)
+        self.assertIn("without --background", err)
+        self.assertNotIn("OAH_RUN_STARTED", out)
+
     def test_cli_call_json(self):
         project = Project(self)
         code, out, err = run_cli(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",

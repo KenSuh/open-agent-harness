@@ -23,7 +23,9 @@ each generated role definition. `raw_section(text)` cuts the intent section out 
 """
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from importlib import resources
 from typing import Callable, Sequence
 
@@ -34,7 +36,7 @@ VERIFY_FOOTER = resources.files("oah").joinpath("templates/engines/verify_footer
 LEASE_STAGES = ("initial", "correction")
 WORKER_LINE = ("You are a dispatched oah worker (OAH_WORKER=1, run {run_id}, task {task}). Skip any session-entry "
                "procedure and do only the task in this brief.")
-_SAFE = re.compile(r"[A-Za-z0-9._/\\:@%+=-]+")
+_POWERSHELL_SAFE = re.compile(r"[A-Za-z0-9._/\\:+=-]+")
 
 HasFooter = Callable[[str], bool]
 
@@ -74,7 +76,7 @@ def raw_section(text: str) -> str | None:
 
 
 def shell_word(word: str) -> str:
-    """A command-line word, double-quoted when it holds anything but plain path characters."""
+    """One literal word for the native shell: POSIX sh, or PowerShell on Windows."""
     return _quote(word)
 
 
@@ -83,7 +85,9 @@ def _lf(text: str) -> str:
 
 
 def _quote(word: str) -> str:
-    return word if _SAFE.fullmatch(word) else '"' + word.replace('"', '\\"') + '"'
+    if os.name == "nt":
+        return word if _POWERSHELL_SAFE.fullmatch(word) else "'" + word.replace("'", "''") + "'"
+    return shlex.quote(word)
 
 
 def lease_command(task: str, engine: str, packet_source: str) -> str:
@@ -130,6 +134,8 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
              "- Rules: stay inside the scope; never push, merge or open pull requests; write the evidence for "
              "every gate into the task's ledger; if you are blocked, stop and say so honestly.",
              f"- Packet: {packet_source or 'none'}"]
+    if os.name == "nt":
+        lines.append("- Shell: run the commands in this brief in PowerShell.")
     if stage in LEASE_STAGES:
         if packet_source and binding is not None:
             lines.append(f"- Lease: before editing, run exactly `{lease_command(task, engine, packet_source)}`. "
@@ -158,29 +164,68 @@ def deliver(stored: str, *, footer: str, has_footer: HasFooter) -> str:
     """A stored brief or spec, delivered with exactly one canonical intent footer at the end."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
-    text = _lf(stored)
+    text = stored
     count = _count(text, marker)
     if count == 0:
-        return _check_delivered(text.rstrip("\n") + "\n\n" + footer, footer, marker, has_footer)
-    body, tail = text.rstrip("\n"), footer.rstrip("\n")
-    if count == 1 and (body == tail or body.endswith("\n" + tail)):
-        return _check_delivered(body + "\n", footer, marker, has_footer)
+        separator = "\n" if text.endswith(("\n", "\r")) else "\n\n"
+        return _check_delivered(text + separator + footer, footer, marker, has_footer)
+    offset = _line_offset(text, marker)
+    if count == 1 and _lf(text[offset:]).rstrip("\n") == footer.rstrip("\n"):
+        return _check_delivered(text[:offset] + footer, footer, marker, has_footer)
     problem = ("carries the intent footer more than once" if count > 1 else
                "carries an intent footer that is not the canonical one or is not at the end")
     raise BriefError("OAH_FOOTER_NOT_APPENDED", f"the stored brief {problem}; rebuild the brief instead of "
                      "reusing it. Nothing was dispatched")
 
 
+def _line_offset(text: str, marker: str) -> int:
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\r\n") == marker:
+            return offset
+        offset += len(line)
+    return -1
+
+
+def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFooter) -> str:
+    """Keep reusable instructions, discarding the previous dispatch's managed envelope."""
+    text = deliver(stored, footer=footer, has_footer=has_footer)
+    body = text[:_line_offset(text, _marker(footer, has_footer))]
+    verify = _line_offset(body, VERIFY_MARKER)
+    generated = body.startswith("You are a dispatched oah worker (")
+    if verify >= 0:
+        if _count(body, VERIFY_MARKER) != 1 or _lf(body[verify:]).rstrip("\n") != VERIFY_FOOTER.rstrip("\n"):
+            raise BriefError("OAH_FOOTER_NOT_APPENDED", "the stored verify footer is not canonical or is "
+                             "duplicated; rebuild the spec before dispatching")
+        body = body[:verify]
+    if generated:
+        heading = "## Round instructions"
+        offset = _line_offset(body, heading)
+        if offset < 0 or _count(body, heading) != 1 or verify < 0:
+            raise BriefError("OAH_BRIEF_STALE", "the stored worker envelope cannot be refreshed safely; "
+                             "provide a plain spec or rebuild the brief from its packet")
+        body = body[offset + len(heading):].lstrip("\r\n")
+    else:
+        section = raw_section(body)
+        if section is not None:
+            body = body.replace(section, "", 1)
+    if stage == "review" and re.search(r"\boah\s+start\b", body):
+        raise BriefError("OAH_BRIEF_STALE", "the reusable review instructions carry a lease command; "
+                         "remove that command from the spec and retry the review")
+    return body.strip("\r\n")
+
+
 def strip_intent_footer(brief: str, *, footer: str, has_footer: HasFooter) -> str:
     """The brief without its one intent footer, for comparing with a baseline built without it."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
-    text = _lf(brief)
+    text = brief
     count = _count(text, marker)
     if count == 0:
         raise BriefError("OAH_FOOTER_MISSING", "the brief has no intent footer")
     if count > 1:
         raise BriefError("OAH_FOOTER_DUPLICATED", f"the brief has {count} intent footers; it must have exactly one")
-    if not text.endswith("\n" + footer):
+    offset = _line_offset(text, marker)
+    if offset <= 0 or _lf(text[offset:]) != footer:
         raise BriefError("OAH_FOOTER_MISPLACED", "the intent footer is not the last part of the brief")
-    return text[:-len(footer)].rstrip("\n")
+    return text[:offset].rstrip("\r\n")

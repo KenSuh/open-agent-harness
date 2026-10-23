@@ -83,6 +83,7 @@ class Freshness:
     entry: Entry
     refreshed: str | None  # why the entry was rebuilt now, or None
     warnings: tuple[str, ...]
+    launch_version: str | None = None  # the current probe, independent of a retained catalog entry
 
 
 def utc_now() -> dt.datetime:
@@ -171,18 +172,18 @@ class Catalog:
                 stored.checked_at.replace("Z", "+00:00")) >= dt.timedelta(hours=ttl_hours):
             reason = f"catalog older than {ttl_hours:g} h"
         if reason is None:
-            return Freshness(stored, None, tuple(warnings))
+            return Freshness(stored, None, tuple(warnings), version)
         models, source = probe_models(engine, base, env)
         if not models:
             kept = f"keeping the catalog checked at {stored.checked_at}" if stored else "no earlier catalog exists"
             warnings.append(f"OAH_MODELS_REFRESH_FAILED: {engine} reported no models ({source}); {kept}. Run the "
                             f"{engine} CLI once so it refreshes its model list, then `oah models --refresh`")
             if stored is not None:
-                return Freshness(stored, None, tuple(warnings))
-            return Freshness(Entry(engine, version, None, (), source), None, tuple(warnings))
+                return Freshness(stored, None, tuple(warnings), version)
+            return Freshness(Entry(engine, version, None, (), source), None, tuple(warnings), version)
         entry = Entry(engine, version, _iso(now), models, source)
         self._save(entry)
-        return Freshness(entry, reason, tuple(warnings))
+        return Freshness(entry, reason, tuple(warnings), version)
 
     def resolved(self) -> dict:
         data = read_json(self.resolved_path, {})

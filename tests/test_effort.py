@@ -72,6 +72,14 @@ def header(effort: str | None, launch: str) -> HeaderCheck:
 
 
 class NormalizationTest(unittest.TestCase):
+    def test_unmeasured_models_cannot_be_verified_by_shipped_rules(self):
+        for model in ("gpt-test-a", "gpt-6.1-sol", "unmeasured-model"):
+            for label in ("low", "medium", "high", "xhigh", "max"):
+                with self.subTest(model=model, label=label):
+                    check = verify_inference("codex", "0.163.0", model, label, header(label, label), load_rules())
+                    self.assertFalse(check.effort_verified)
+                    self.assertEqual(check.resolved_inference_effort, UNVERIFIED)
+
     def test_known_mapping(self):
         self.assertEqual(normalize("codex", "1.2.7", "gpt-test-a", "high", RULES), ("high", "test-codex-1.2"))
         self.assertEqual(normalize("codex", "1.2.7", "gpt-test-a", "ultra", RULES), ("xhigh", "test-codex-1.2"))
@@ -110,7 +118,7 @@ class NormalizationTest(unittest.TestCase):
 
     def test_shipped_rules_load_and_leave_ultra_unknown(self):
         rules = load_rules()
-        self.assertTrue(rules)
+        self.assertEqual(rules, [])  # no version/model mapping has recorded evidence yet
         for rule in rules:
             self.assertEqual(set(rule) - {"id", "engine", "cli_versions", "models", "map", "note"}, set())
             self.assertNotIn("ultra", rule["map"])

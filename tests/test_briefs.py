@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
 import unittest
 from collections import namedtuple
+from unittest import mock
 
 from oah.briefs import (VERIFY_FOOTER, VERIFY_MARKER, BriefError, build, deliver, has_intent_footer, intent_footer,
                         lease_command, raw_section, strip_intent_footer)
+from oah.briefs import shell_word
+from tests.helpers import make_tmp_dir
 
 MARKER = "<!-- OAH_INTENT_FOOTER -->"
 FOOTER = f"{MARKER}\n## Intent rules\n- Keep the intent section exactly as it is.\n- End with INTENT and AC lines.\n"
@@ -64,6 +72,40 @@ class LayoutTest(unittest.TestCase):
 
 
 class LeaseCommandTest(unittest.TestCase):
+    def test_powershell_words_quote_expansion_and_splatting_characters(self):
+        with mock.patch("oah.briefs.os.name", "nt"):
+            for word in ("%PATH%", "!PATH!", "$(Write-Output EXPANDED)", "`echo x`", "@args"):
+                with self.subTest(word=word):
+                    self.assertEqual(shell_word(word), "'" + word + "'")
+            self.assertEqual(shell_word("a'b"), "'a''b'")
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell quoting")
+    def test_lease_arguments_round_trip_in_posix_shell(self):
+        folder = make_tmp_dir(self)
+        words = ["packets/$(printf EXPANDED).md", "`printf EXPANDED`", "a'b\"c", r"a\b", "%PATH%!x!", "a b"]
+        for word in words:
+            with self.subTest(word=word):
+                # A real shell function captures the exact arguments of the delivered command.
+                command = ("oah() { " + shell_word(sys.executable) + " -c "
+                           + shell_word("import json,sys; print(json.dumps(sys.argv[1:]))") + ' "$@"; }; '
+                           + lease_command("task", "codex", word))
+                result = subprocess.run(["/bin/sh", "-c", command], cwd=folder, capture_output=True, text=True,
+                                        check=True)
+                self.assertEqual(json.loads(result.stdout), ["start", "--task", "task", "--agent", "codex",
+                                                            "--packet", word])
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell quoting")
+    def test_arguments_round_trip_in_powershell(self):
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        self.assertIsNotNone(shell, "Install PowerShell to check native Windows command quoting")
+        words = ["$(Write-Output EXPANDED)", "`echo x`", "%PATH%", "!PATH!", "a'b\"c", r"a\b", "a b", "@args"]
+        # PowerShell serializes the parsed arguments itself, avoiding legacy native-argv quote handling.
+        command = "function oah { ConvertTo-Json -Compress -InputObject @($args) }; " + " ".join(
+            ["oah", *(shell_word(word) for word in words)])
+        result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), words)
+
     def test_lease_command_only_for_implementation_and_correction(self):
         command = lease_command("p3b", "claude", ".oah/tasks/p3b/PACKET.md")
         self.assertEqual(command, "oah start --task p3b --agent claude --packet .oah/tasks/p3b/PACKET.md")
@@ -80,7 +122,7 @@ class LeaseCommandTest(unittest.TestCase):
 
     def test_lease_command_quotes_spaces(self):
         self.assertEqual(lease_command("t", "codex", "my tasks/PACKET.md"),
-                         'oah start --task t --agent codex --packet "my tasks/PACKET.md"')
+                         "oah start --task t --agent codex --packet 'my tasks/PACKET.md'")
 
     def test_without_packet_implementation_still_gets_a_scope_lease(self):
         text = brief(intent_section=None, binding=None, packet_source=None)
@@ -88,6 +130,13 @@ class LeaseCommandTest(unittest.TestCase):
 
 
 class FooterTest(unittest.TestCase):
+    def test_stored_intent_bytes_survive_footer_delivery(self):
+        section = SECTION.replace("\n", "\r\n")
+        for stored in (section, "Spec\r\n" + section + FOOTER.replace("\n", "\r\n")):
+            with self.subTest(stored=stored):
+                delivered = deliver(stored, footer=FOOTER, has_footer=has_footer)
+                self.assertEqual(raw_section(delivered).encode("utf-8"), section.encode("utf-8"))
+
     def test_mention_of_marker_still_gets_footer(self):
         # The intent section mentions the marker inline; the footer is still appended exactly once.
         text = brief()

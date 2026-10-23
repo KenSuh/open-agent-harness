@@ -134,12 +134,12 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
         effort = codex.resolve_effort(model, tier_settings["effort"], cache=cache)
     else:
         effort = claude.resolve_effort(tier_settings["effort"], efforts=levels, model=model)
-    why = f"{source} mapping for tier {tier} with {engine} CLI {entry.cli_version if entry else 'unknown'}"
+    why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
     changes = catalog.record_resolution(engine, tier, model=model, effort=effort.launch, source=source, why=why,
                                         now=now)
-    return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.entry.cli_version,
+    return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.launch_version,
                       requested_model=tier_settings["model"], model=model, model_source=source,
                       requested_effort=effort.requested, launch_effort=effort.launch,
                       timeout_s=float(tier_settings["timeout_min"]) * 60, warnings=freshness.warnings,
@@ -210,7 +210,7 @@ SOURCE_MISMATCH = "OAH_INTENT_SOURCE_MISMATCH"
 
 
 def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
-    return pathlib.Path(state_dir) / "runs" / task / BINDING_NAME
+    return runs.task_directory(state_dir, task) / BINDING_NAME
 
 
 def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
@@ -265,8 +265,7 @@ def _stored_brief_matches(stored: str, packet: Packet | None) -> None:
     if packet is None or packet.intent is None:
         return
     section = briefs.raw_section(stored)
-    normalized = section.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n" if section else None
-    if normalized != packet.intent.section:
+    if section != (packet.section or packet.intent.section):
         found = "no intent section" if section is None else "a different intent section"
         raise EngineError(SOURCE_MISMATCH, f"the stored brief carries {found}, not INTENT {packet.intent.id}@r"
                           f"{packet.intent.revision} {packet.intent.digest} from {packet.source}; rebuild the brief "
@@ -454,15 +453,16 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                              message=f"stage override: run {run.id} runs {request.engine} for stage {request.stage} "
                                      f"(configured: {settings.stages[request.stage]})")
     intent = packet.intent if packet else None
+    section = (packet.section or getattr(intent, "section", None)) if packet else None
+    instructions = request.round_instructions
     if stored is not None:
-        text = stored
-    else:
-        text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
-                            scope=list(scope), intent_section=(packet.section or getattr(intent, "section", None)) if packet else None,
-                            binding=intent,
-                            packet_source=packet.source if packet else None,
-                            round_instructions=request.round_instructions, skills=request.skills, footer=footer,
-                            has_footer=has_footer)
+        section = section if section is not None else briefs.raw_section(stored)
+        content = briefs.reusable_content(stored, stage=request.stage, footer=footer, has_footer=has_footer)
+        instructions = "\n\n".join(part for part in (content, instructions) if part)
+    text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
+                        scope=list(scope), intent_section=section, binding=intent,
+                        packet_source=packet.source if packet else None,
+                        round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer)
     run.write_prompt(text)
     read_only = request.stage == "review"
     if request.engine == "codex":
@@ -574,12 +574,16 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     from oah.atomic import write_json_atomic
 
     write_json_atomic(run.launch_path, prepared.to_json())
+    run.result(status="queued")
     env = dict(os.environ if base_env is None else base_env)
     launched = subprocess.run(_boot_argv("launch_main", prepared.run_dir), stdin=subprocess.DEVNULL,
                               capture_output=True, cwd=prepared.cwd, env=env, timeout=LAUNCH_TIMEOUT)
     text = launched.stdout.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
         detail = launched.stderr.decode("utf-8", errors="replace").strip()
+        if detail.startswith("OAH_RUN_DETACH_FAILED:"):
+            run.result(status="failed", error=detail)
+            raise EngineError("OAH_RUN_DETACH_FAILED", detail.split(": ", 1)[1])
         run.result(status="failed", error=f"OAH_RUN_LAUNCH_FAILED: {detail or 'no runner pid'}")
         raise EngineError("OAH_RUN_LAUNCH_FAILED", f"the background runner did not start ({detail or 'no pid'}); "
                           "run the same command without --background")
@@ -596,8 +600,11 @@ def launch_main(run_dir: str) -> int:
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
             child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
-        except OSError:
-            child = subprocess.Popen(argv, creationflags=flags, **options)
+        except OSError as exc:
+            print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); detachment cannot be "
+                  "guaranteed. Run the same command without --background, or use a terminal whose job "
+                  "permits breakaway and retry", file=sys.stderr)
+            return 69
     else:
         child = subprocess.Popen(argv, start_new_session=True, **options)
     print(child.pid, flush=True)

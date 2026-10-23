@@ -22,7 +22,8 @@ from oah.runs import TERMINAL, RunError
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT, EXIT_AGAIN = 0, 1, 2, 69, 75
 COMMANDS = ("call", "wait")
 ENVIRONMENT_CODES = ("OAH_ENGINE_MISSING", "OAH_CONFIG_INVALID", "OAH_CODEX_CONFIG_INVALID",
-                     "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE")
+                     "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE",
+                     "OAH_RUN_DETACH_FAILED")
 
 
 def register(commands: argparse._SubParsersAction) -> None:
@@ -34,8 +35,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     add_axis_arguments(parser, required=False)
     parser.add_argument("--message", default="", help="round instructions for the worker")
     parser.add_argument("--prompt-file", help="read the round instructions from this file ('-' reads stdin)")
-    parser.add_argument("--brief-file", help="deliver this stored brief instead of building one (the canonical "
-                        "intent footer is added)")
+    parser.add_argument("--brief-file", help="reuse this brief or spec inside a fresh dispatch envelope "
+                        "with the current stage, run and canonical footers")
     parser.add_argument("--packet", help="the task packet (default: the source bound at the task's first dispatch, "
                         "else .oah/tasks/<task>/PACKET.md when it exists)")
     parser.add_argument("--worktree", help="run in this worktree of the repository: a path, a branch or a worktree "

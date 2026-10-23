@@ -171,6 +171,7 @@ class CodexMappingTest(unittest.TestCase):
         self.assertEqual(map_tier("codex", "high", pin="", quality_order=[], entry=freshness.entry, effective=None),
                          ("gpt-a", "cli_default"))
         self.assertEqual(freshness.entry.model("gpt-a").efforts, ("low", "high"))
+        self.assertEqual(freshness.launch_version, "0.164.0")
         self.assertEqual(fixture.catalog.load("codex").cli_version, "0.163.0")
 
 
