@@ -11,74 +11,367 @@
 
 # open-agent-harness (`oah`)
 
-`oah` is a small command-line tool designed to make **Claude Code** and **Codex CLI** work as one disciplined
-team on your own repository. It is written for people who are starting to program with AI. The target is
-one install command and `oah init` to set up a complete, working harness without assembling it yourself.
-Today, leases and `oah doctor` work; the installer, `oah init` and agent orchestration are planned.
-The problem it solves is simple to state. When two AI coding sessions share one repository, nothing stops
-them from editing the same files, "done" means whatever the agent says, and reviews have no budget and
-no proof. The planned workflow gives them a shared rulebook: Claude implements, Codex reviews and
-corrects in bounded rounds, every claim of "done" is backed by evidence, and work lands only after the
-review converges.
+`oah` is a small command-line tool that makes **Claude Code** and **Codex CLI** work as one disciplined
+team on your own repository. It is written for people who are starting to program with AI.
+
+Two AI coding sessions on one repository will happily edit the same files. "Done" means whatever the
+agent says, and a review has no rule for when it is finished and no proof. `oah` gives both engines one rulebook:
+
+- **Claude implements first. Codex reviews, corrects and re-reviews** until the review converges.
+- **The task's difficulty picks the model, the effort and the skills.** Fixed rules decide first. An AI
+  judge is optional, and every result says whether it was used.
+- **An impact map** tells you what a change affects and which checks to run again.
+- **A project wiki** remembers why things were done.
+- **"Done" is a ledger of evidence**, and work lands only after the review converges and CI is green.
+
+`oah` is Python 3.11+ with the standard library only. It runs natively on macOS and Windows (no WSL).
+It does not replace Claude Code or Codex: it drives them and keeps the records that make their work
+trustworthy.
 
 > [!WARNING]
 > **Developer preview. Not ready for general use yet.**
-> Phases P0 to P2 are done: the plan, the project skeleton (`oah --version`, `oah doctor`, the privacy
-> scan, CI on macOS and Windows) and leases. Phases P3 to P9 are in progress. Commands, file formats and
-> this README will change. The one-command installer and `oah init` do not exist yet.
+> On `main` today: the project skeleton (`oah --version`, `oah doctor`, the privacy scan, CI on macOS and
+> Windows), leases, the config loader, packets, intent and preflight. Routing, skills, gates, hooks, the
+> impact map, the toolkit and the installers are built and in review. The Codex review loop and the
+> guided `oah init` are planned. Commands, file formats and this README will change.
 
 ## Contents
 
+- [At a glance](#at-a-glance)
+- [Strengths](#strengths)
+- [Beginner mistakes oah guards against](#beginner-mistakes-oah-guards-against)
 - [How it works](#how-it-works)
 - [What works today](#what-works-today)
 - [Requirements and supported platforms](#requirements-and-supported-platforms)
-- [Concepts](#concepts)
 - [Roadmap](#roadmap)
 - [Development](#development)
 - [Security](#security)
 - [License and third-party notices](#license-and-third-party-notices)
 - [한국어 소개](#한국어-소개)
 
+**Status labels used in this README**
+
+| Label | Meaning |
+|---|---|
+| **available** | On `main`. You can run it today. |
+| **in review (#n)** | Built in open pull request #n. Not on `main` yet. |
+| **in progress** | Being built. No pull request yet. |
+| **planned** | Designed in [`docs/PLAN.md`](docs/PLAN.md). Not built yet. |
+
+## At a glance
+
+```mermaid
+flowchart LR
+    you(["You, or your Claude Code session as the lead"])
+
+    subgraph engines["AI engines you install and sign in to"]
+        claude["Claude Code<br/>initial implementation"]
+        codex["Codex CLI<br/>review and correction"]
+    end
+
+    subgraph core["oah"]
+        lease["Leases and preflight"]
+        intent["Packets and intent"]
+        route["Difficulty, models, skills"]
+        gates["Evidence gates"]
+        impact["Impact map"]
+        wiki["Project wiki"]
+        rloop["Review loop until convergence"]
+    end
+
+    subgraph git["git and GitHub"]
+        hooks["Local git hooks"]
+        remote["Pull request and CI"]
+    end
+
+    you --> intent
+    intent --> lease
+    lease --> route
+    route -->|"brief, tier, skills"| claude
+    claude --> gates
+    gates --> rloop
+    rloop -->|"snapshot, receipt"| codex
+    impact -.->|"what to re-check"| gates
+    gates -.-> wiki
+    rloop --> hooks
+    hooks --> remote
+
+    classDef ext fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef review fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef progress fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    classDef planned fill:#eef1f4,stroke:#6e7781,color:#24292f,stroke-dasharray: 5 5
+    class you,claude,codex,remote ext
+    class lease,intent avail
+    class route,gates,impact,hooks review
+    class wiki progress
+    class rloop planned
+```
+
+Green is available, blue is in review, amber is in progress, grey dashed is planned, and purple is outside
+`oah`.
+
+## Strengths
+
+| Strength | What you get | Status |
+|---|---|---|
+| **Engines by stage** | Claude does the initial implementation. Codex reviews, corrects and re-reviews. `oah call <engine> --stage <s>` refuses the wrong engine for a stage (`OAH_STAGE_ENGINE_MISMATCH`). | in review (#17) |
+| **Difficulty picks model and effort** | Four axes (kind, intensity, reasoning, risk) are scored by fixed rules into a tier: low, medium, high or max. Each tier maps to a model and an effort that the CLI really supports. An effort that cannot be verified is recorded as `unverified`, never assumed. | in review (#17) |
+| **Skills chosen for the task** | Skills are selected by kind, stage, risk and the file kinds in Scope, each with a reason. TypeSafe Jev can re-rank them, but only when you enable it and a key is present. Every result says `used` or `unused(<reason>)`. | in review (#18) |
+| **Impact map** | "If I change this file, what must I re-check?" Results are ranked pin > exec > link > mention, and name the exact gates to run again. A SQL plugin maps tables, routines and GRANTs. A stale map is refreshed or refused, never used silently. | in review (#13) |
+| **Project wiki** | An Obsidian-compatible `docs/wiki/` with an index and a newest-first log, kept current by `oah wiki maintain` before every commit and review. | in progress (P7a) |
+| **Evidence gates** | "Done" is an [unlazy](https://github.com/Leonxlnx/unlazy) ledger of checks with evidence. `oah finish` refuses unmet gates, and an opt-in Stop hook keeps a Claude Code session from ending with them. | in review (#15) |
+| **Intent that travels** | One intent section (problem, outcome, success conditions) goes to every stage, worker and reviewer, byte for byte. A changed goal raises its revision. | packets and checks: available · in worker briefs: in review (#17) · bound to leases: planned (P4b) |
+| **Leases and preflight** | Two sessions cannot claim overlapping paths. Preflight refuses a stale branch or a contested scope before work starts. | available |
+| **Reviews that converge, labelled honestly** | Codex reviews a sanitized snapshot, shows with a canary that it could read that snapshot, and leaves a receipt per round. Rounds continue until the review converges, and the loop stops to ask you when a decision is needed. A review is called independent only when the mechanism proves it. | planned (P6; A22 in PR #20) |
+| **No secrets in the repository** | Keys are read only at runtime from the environment or the OS keychain. gitleaks runs before push and in CI. | this repository's CI: available · key lookup: in review (#18) · pre-push scan: in review (#15) |
+| **Toolkit with provenance** | Bundled skills and MCP templates with their source, pinned commit and license. Updates are checked, validated and rolled back on failure. | in review (#19) |
+| **Easy setup** | One install command per OS, then `oah init` checks tools, installs only what you confirm and walks you through the sign-ins. | installers: in review (#16) · guided `oah init`: planned (P7b) |
+
+## Beginner mistakes oah guards against
+
+These are the slips that most often hurt people who build something with AI and push it to git.
+
+| Common mistake | What `oah` does about it | Status |
+|---|---|---|
+| Committing an API key or token | The opt-in `pre-push` hook runs gitleaks over exactly the commits being pushed and refuses on a finding. Keys come only from the environment or the OS keychain (`oah.secrets`); a missing key turns the feature off with `unused(no key)`. `oah init` adds `.env`, `.env.*`, `*.pem` and `*.key` to `.gitignore`. | pre-push: in review (#15) · key lookup: in review (#18) · `.gitignore` entries: planned (P7b) |
+| Starting on a stale branch | `oah preflight` fetches the default branch. If HEAD is behind, the verdict is ABORT with the exact rebase command. It also lists new commits that touch your scope. | available |
+| Starting on top of uncommitted changes | `oah preflight` warns about a dirty working tree and names the files. | available |
+| Two AI sessions editing the same files | `oah start` refuses a scope that overlaps another lease and names the holder. Preflight aborts on the same overlap. `oah finish` compares the real changes with the scope. | available |
+| Pushing in the middle of a task | The `pre-push` hook refuses while an unfinished lease exists on this worktree. | in review (#15) |
+| Letting an AI agent push, force-push or rewrite history | The rules block that `oah rules sync` writes into `AGENTS.md` (and `CLAUDE.md` imports) says workers never push, merge, force-push, rewrite shared history or delete branches. You push after `oah finish`. | in progress (P7a) |
+| An AI saying "done" with no evidence | Gates hold a command, an expected result and recorded evidence. `oah finish` refuses unmet gates, and the Stop hook keeps a Claude Code session from ending with them. | in review (#15) |
+| Not knowing what a change breaks | `oah impact` names the gates, tests, workflows, migrations and wiki pages tied to a file. `--changed-since REV` turns a diff into the list of gates to re-run. | in review (#13) |
+| Merging without review | Codex reviews in rounds until the review converges, with a receipt per round. `oah land --check` needs a converged review receipt, the CI runs, the scan and the gates, all bound to the exact head. `--merge` lands only after you confirm. | planned (P6) |
+| Losing track of why a change was made | Each task has a packet with its intent and success conditions. The wiki log gets an entry for each task. Commits record the engine that wrote them (`Agent-Engine:` trailer). | packets: available · wiki log: in progress (P7a) · engine trailer: planned (P6) |
+| Pushing with no CI, or testing on one OS only | `oah ci init` shows a starter GitHub Actions workflow for your project and writes it only with your consent. It runs your tests on the OSes you pick and a pinned gitleaks secret scan, with actions pinned to full SHAs and no secrets in the file. `oah land --check` reads the CI runs through `gh`. This repository's own CI already tests on macOS and Windows. | `oah ci init`: planned (P7c; A21 in PR #20) · this repository: available |
+
 ## How it works
 
-`oah` is a Python 3.11+ program that uses only the standard library. It runs natively on macOS and
-Windows (no WSL). It does not replace Claude Code or Codex. The planned workflow will drive them and
-keep the records that make their work trustworthy.
+### The workflow, end to end
 
-| Piece | What it does | Status |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You as You (lead)
+    participant O as oah
+    participant C as Claude Code
+    participant X as Codex CLI
+    participant G as git and GitHub
+
+    You->>O: oah packet new T, write the intent and Scope
+    O-->>You: tier, model, effort and skills for the task
+    You->>O: oah preflight --task T, then oah start
+    You->>C: implement inside the lease
+    C-->>O: changes, plus INTENT and AC lines
+    O->>O: oah gates check, oah wiki maintain
+    loop Review rounds until the review converges
+        O->>X: oah review on a sanitized, read-only snapshot
+        X-->>O: receipt with verdict and findings
+        O->>X: oah fix for the findings
+        X-->>You: diff for you to commit
+    end
+    You->>O: oah finish checks scope, gates and wiki
+    You->>G: git push through the pre-push hook, open a pull request
+    O->>G: oah land --check, then merge after you confirm
+```
+
+| Step | Command | Status |
 |---|---|---|
-| Workflow by stage | Claude does the initial implementation. Codex reviews, corrects and re-reviews. Landing happens only after convergence. | planned (P3, P6) |
-| Leases | Prevent overlapping declared scopes across sessions and worktrees. Write-time scope is advisory; actual changes are checked at finish. | **works today** (P2) |
-| Evidence gates | "Done" is a ledger of checks with evidence, not a sentence. | planned (P5) |
-| Project wiki and impact map | An Obsidian-compatible wiki for project knowledge, and an impact map that is refreshed automatically. | planned (P7) |
-| Tier agents | Difficulty picks the model and the effort, and the model list follows engine updates. | planned (P3, P7) |
-| Skills | Skills are selected, updated and used automatically. | planned (P3, P7) |
+| Packet with an intent section | `oah packet new`, `oah packet check`, `oah intent show/check` | available |
+| Tier, model, effort and skills in the packet | `oah recommend`, skill selection, then recorded by `oah packet new` | scoring: in review (#17) · skills: in review (#18) · in `packet new`: planned (P4b) |
+| Preflight and lease | `oah preflight`, `oah start` | available · binding the intent with `oah start --packet`: planned (P4b) |
+| Claude implements | your interactive Claude Code session, or `oah call claude` for a second lane | `oah call`: in review (#17) |
+| Gates and wiki maintenance | `oah gates check`, `oah wiki maintain --task T` | gates: in review (#15) · wiki: in progress (P7a) |
+| Codex review, correction and re-review | `oah review`, `oah fix`, `oah review summary` | planned (P6) |
+| Finish | `oah finish`: scope check | available · gate and wiki-maintenance guards: in review (#15) · intent return check: planned (P4b) |
+| Push and land | `pre-push` hook, then `oah land --check` / `--merge` | hook: in review (#15) · landing: planned (P6) |
 
-### The workflow loop
+**The intent cannot drift.** The packet's intent section is the only statement of the goal. Review and
+correction briefs carry it byte for byte, and a later round must reuse the source bound at the first
+dispatch (`OAH_INTENT_SOURCE_MISMATCH`). A changed goal raises the `Revision` of the same `Intent-ID`
+and must be accepted again. Every return ends with `INTENT <id>@r<n> <digest>` and one
+`AC<n>: met|unmet|deferred — <evidence>` line per success condition. The digest and `oah intent check` are
+available now. Briefs and the source-mismatch refusal are in review (#17). Binding at `oah start` and the
+return checks are planned (P4b, P6).
 
-This is the target design from [`docs/PLAN.md`](docs/PLAN.md) (sections 5.9 and 11). It is not built yet.
+**Long runs.** `oah call --background` returns a run id at once, and `oah wait <run-id>` blocks for at most
+nine minutes per call, so agent shell tools with a ten-minute limit can keep waiting. Every call writes
+its prompt, output and a `result.json` with the model and effort it used. (in review, #17)
+
+### Difficulty, models and skills
 
 ```mermaid
 flowchart TD
-    T["Task: intent, scope and acceptance conditions"] --> I["Claude: initial implementation (under a lease)"]
-    I --> G["Evidence gates"]
-    G --> R["Codex: review round"]
-    R -->|"no findings"| L{"Landing check"}
-    R -->|"findings"| C["Codex: correction"]
-    C --> RR["Codex: re-review"]
-    RR -->|"findings, rounds left"| C
-    RR -->|"converged"| L
-    RR -->|"round budget used up (after R3)"| O["Leftover findings go to the owner"]
-    L -->|"converged review, clean privacy scan, green CI"| M["Land"]
-    L -->|"a check fails"| C
+    task["Task: kind, stage, risk and Scope paths"]
+    score["Fixed rules score four axes<br/>kind, intensity, reasoning, risk"]
+    tier["Tier: low, medium, high or max"]
+    model["Model and effort the CLI supports<br/>unverifiable effort is labelled unverified"]
+    skills["Deterministic skill list<br/>with a reason for each skill"]
+    ask{"Re-ranker enabled by you<br/>AND key present?"}
+    jev["TypeSafe Jev re-orders the skills<br/>and adds an advisory difficulty"]
+    used["rerank=used<br/>advice never lowers the tier"]
+    unused["rerank=unused(reason)<br/>not-enabled, no key, disabled-by-brief, error"]
+    brief["Brief for the engine"]
+
+    task --> score --> tier --> model --> brief
+    task --> skills --> ask
+    ask -->|"yes"| jev --> used --> brief
+    ask -->|"no"| unused --> brief
+
+    classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef note fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    class score,tier,model,skills rule
+    class jev,used ai
+    class unused note
 ```
 
-- **Rounds are bounded.** A review series stops at its round budget (three rounds by default). Extra
-  rounds are possible only on request, and they are recorded.
-- **Leftover findings go to the owner**, the person who runs `oah`. Nothing is silently dropped.
-- **Landing needs three things:** a converged review, a clean privacy scan and green CI.
+**Deterministic first, AI-assisted second, always honest about which.**
 
-### The lease lifecycle
+- **Rules decide the tier.** `oah recommend --kind --intensity --reasoning --risk` adds up a score per axis,
+  then applies lifts and floors. Risk `critical` means `max`, and a migration or security task is at least
+  `high`. `--tier` overrides, and the override is recorded. (in review, #17; [`docs/PLAN.md`](docs/PLAN.md)
+  5.5, A10)
+- **Models follow updates.** Each engine has an editable strongest-first list. Claude defaults to the CLI
+  aliases `opus`, `sonnet` and `haiku`, which Claude Code resolves to its newest models. Codex starts from
+  its effective configured model. A model you pin always wins, and every change is logged with old, new,
+  when and why. (in review, #17; A14)
+- **Effort is what the model supports, with no fixed cap.** `highest` resolves to the top reasoning level
+  that Codex lists for the model. A launch whose header reports a lower effort fails
+  (`OAH_EFFORT_DOWNGRADED`). An effort that cannot be read is recorded as `unverified`. Claude's inference
+  effort is recorded as unverified until it can be observed. (in review, #17; A1)
+- **Skills are chosen by rules, too.** The selector reads the installed Claude and Codex skill folders and
+  the kit cache, and picks by kind, stage, risk and the file kinds in Scope, with a reason for each
+  skill. An empty Scope warns instead of silently selecting nothing. (in review, #18; A9)
+- **Jev is optional and off by default.** The TypeSafe Jev provider runs only when you enable it AND its key
+  is present; a key alone never enables it. It re-orders candidates and gives an advisory difficulty that
+  is recorded next to the rule result and never lowers the tier. Selection telemetry stays in a local file.
+  (in review, #18; A9, A10)
+
+### The impact map
+
+```mermaid
+flowchart LR
+    change["You change a file<br/>for example a SQL migration"]
+    fresh{"Map fresh for<br/>this worktree?"}
+    refresh["Refresh the map"]
+    stale["OAH_IMPACT_STALE<br/>never used silently"]
+
+    subgraph ranked["Ranked results"]
+        pinR["pin: a gate hashes, greps or pins it"]
+        execR["exec: a gate runs it"]
+        linkR["link: code, tests or wiki name its path"]
+        mentionR["mention: name match, co-change, graph"]
+    end
+
+    rerun["Gates to re-run<br/>gate G3 in GATES.md, binding=exec"]
+
+    change --> fresh
+    fresh -->|"yes"| pinR
+    fresh -->|"no"| refresh --> pinR
+    refresh -.->|"cannot refresh"| stale
+    pinR --> execR --> linkR --> mentionR
+    pinR --> rerun
+    execR --> rerun
+
+    classDef strong fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef weak fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
+    class pinR,execR,rerun strong
+    class linkR,mentionR weak
+    class stale stop
+```
+
+- `oah impact <path>… [--changed-since REV] [--strong-only] [--json]` uses deterministic layers only: gate
+  bindings, `git grep` references, wiki pages, files that changed together and, when graphify is
+  installed, graph neighbours.
+- **Freshness has an identity.** The map is stored per worktree and bound to HEAD, the staged index, the
+  dirty and untracked files it reads, every gate ledger, the config bytes and the tool version. Any change
+  makes it stale.
+- **It knows your database.** The default SQL plugin reads migrations for tables, views, routines,
+  triggers, indexes and GRANTs, and links them to code as `db_table:`, `db_routine:` and `db_grant:`
+  entities. A task that touches the database must report that query. A project without the plugin says
+  `db-impact: unavailable` instead of skipping it.
+- An optional re-ranker may re-order results but never removes a pin or exec row, and every output says
+  `rerank=used` or `rerank=unused(<reason>)`.
+
+Status: in review (#13). Automatic refresh in `preflight`, `packet new` and `review` is planned (P4b,
+P6); the `post-commit` and `post-merge` refresh hooks are in review (#13, #15).
+
+### The project wiki
+
+```text
+docs/wiki/
+  index.md             catalog by category
+  log.md               newest first, below <!-- OAH:LOG_INSERT_BELOW -->
+  log_archive_NN.md    older whole entries, moved by rollover, never edited
+  decisions/           decision records
+```
+
+- Obsidian opens it as a vault: notes link with `[[wikilinks]]`, and every note names its sources.
+- `oah wiki maintain --task T` writes the task's log entry and index line before the final commit, the
+  gates and the review, and again after corrections. Running it twice adds nothing twice. `oah finish`
+  only checks that it was done.
+- **The log never grows without limit.** Above 512,000 bytes, the oldest whole entries move to the next
+  `log_archive_NN.md`. Each move is journalled. If a file changes during the move, wiki commands stop
+  until you reconcile it and run `oah wiki recover`; nothing is restored or deleted behind your back.
+- `oah wiki lint` and `oah wiki hygiene` report broken links, unindexed notes, missing sources and other
+  real problems. They only list candidates; no wiki command deletes or moves a note on its own.
+
+Status: in progress (lane P7a). The design is [`docs/PLAN.md`](docs/PLAN.md) 5.10, A8, A12 and A18.
+
+### The review loop
+
+```mermaid
+flowchart TD
+    T["Packet: intent, scope, success conditions"] --> I["Claude: initial implementation under a lease"]
+    I --> G["Evidence gates and wiki maintenance"]
+    G --> R["Codex: review round on a read-only snapshot"]
+    R -->|"approved, or only P2/P3 findings"| L{"Landing check"}
+    R -->|"new findings in scope"| C["Codex: correction"]
+    C --> RR["Codex: re-review"]
+    RR -->|"new findings in scope"| C
+    RR -->|"converged"| L
+    RR -->|"repeats an earlier kind, or needs a design or format change"| O["Stops and asks you<br/>OAH_REVIEW_NEEDS_DECISION"]
+    L -->|"converged review, clean scan, green CI, gates met"| M["Land, after you confirm"]
+    L -->|"a check fails"| C
+
+    classDef claude fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef codex fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef check fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    classDef land fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef owner fill:#eef1f4,stroke:#6e7781,color:#24292f
+    class T,I claude
+    class R,C,RR codex
+    class G,L check
+    class M land
+    class O owner
+```
+
+Status: planned (P6). The design is [`docs/PLAN.md`](docs/PLAN.md) 5.9, changed by plan amendment 5 (A22, in
+review in PR #20).
+
+- **Rounds continue until the review converges.** There is no fixed number of rounds. Codex reviews,
+  corrects and re-reviews while each round brings new findings inside the task's scope.
+- **Convergence ends the series.** A round that approves, or reports only P2/P3 findings, ends it. Those
+  findings are recorded as follow-ups.
+- **The loop asks you only when it must.** It stops with `OAH_REVIEW_NEEDS_DECISION` when a finding
+  repeats a kind an earlier round already tried to fix, or when the fix needs a design or stored-format
+  change.
+- **A budget is your choice.** Set `[review] max_rounds` in `.oah/config.toml` if you want one; it is unset
+  by default. Reaching it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`, and `--extra-round` continues and is
+  recorded.
+- **The reviewer sees a clean tree.** Codex reviews a fresh clone of the exact head with the agent
+  instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `.codex/` and others) removed, and must echo a
+  canary token from that tree.
+  The canary proves only that it could read the snapshot, and the receipt says no more than that.
+- **Labels are honest.** A receipt says `independent: true` only when every commit in base..head has a
+  known author engine different from the reviewer. Unknown authorship gives `unknown`, and a Codex
+  re-review of a Codex correction is `false`.
+- **Nothing is dropped silently.** Follow-ups and open decisions go to you, the person who runs `oah`.
+
+### Leases
 
 This diagram matches the code in [`src/oah/lease.py`](src/oah/lease.py) today.
 
@@ -124,6 +417,89 @@ stateDiagram-v2
 - An expired lease shows as `STALE` in `oah status`. It is not deleted until the next `oah start` prunes it.
   Until then it cannot be renewed (`OAH_LEASE_EXPIRED`), but it can still be released, or finished with
   the same scope check.
+- Scope is advisory while writing: a lease cannot stop an editor from writing outside it. That is why
+  `finish` checks the real changes.
+
+### Git, CI/CD and hooks
+
+```mermaid
+flowchart LR
+    subgraph local["On your machine"]
+        gcommit["git commit"]
+        pc["pre-commit<br/>wiki commit check"]
+        post["post-commit, post-merge<br/>refresh the impact map"]
+        gpush["git push"]
+        pp["pre-push<br/>unfinished lease? gitleaks"]
+    end
+
+    subgraph actions["GitHub Actions in this repository"]
+        tests["ci: tests on macOS and Windows<br/>every pull request"]
+        secrets["secrets: gitleaks and privacy scan<br/>every pull request and push"]
+    end
+
+    land{"oah land --check<br/>receipt, CI, scan, gates at one head"}
+    landed["Merge after you confirm"]
+
+    gcommit --> pc
+    gcommit --> post
+    gpush --> pp
+    pp --> tests
+    pp --> secrets
+    tests --> land
+    secrets --> land
+    land --> landed
+
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef review fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef progress fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    classDef planned fill:#eef1f4,stroke:#6e7781,color:#24292f,stroke-dasharray: 5 5
+    class tests,secrets avail
+    class post,pp review
+    class pc progress
+    class land,landed planned
+```
+
+**Local hooks for your project** (all opt-in and project-local). `oah hooks install` shows the exact change
+before it writes, and replaces a hook it did not write only with `--force`, keeping that hook as a backup. Status: the installer,
+`pre-push` and the Claude Code Stop hook are in review (#15); the `post-commit` and `post-merge` refresh
+commands are in review (#13); the wiki `pre-commit` check is in progress (P7a).
+
+| Hook | What it does |
+|---|---|
+| `pre-push` | Refuses while an unfinished lease exists on this worktree. When gitleaks is installed, scans exactly the commits being pushed and refuses on a finding; otherwise it reports `unused(no gitleaks)`. |
+| `post-commit`, `post-merge` | Refresh the impact map incrementally. |
+| `pre-commit` | Blocks a commit that shortens `log.md` without its archive, edits an archive or a raw source, or adds non-UTF-8 bytes to the wiki. |
+| Claude Code Stop | Blocks the session from ending while the governing lease's gates are unmet, with a progress guard so it cannot wedge. |
+
+**Before you start, and before you land.** `oah preflight` checks that your branch is not behind the
+default branch and that no other lease claims your paths (available). `oah land --check` checks the
+converged review receipt, the CI runs (through `gh`, when present), the scan and the gates against the
+exact head, and `--merge` lands only after you confirm (planned, P6).
+
+**This repository's own CI/CD** (available):
+
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the unit tests, the package install,
+  `oah --version` and the privacy scan on `macos-latest` and `windows-latest` for every pull request to
+  `main`. Pull requests that change only documentation skip it. Actions are pinned to full commit SHAs.
+- [`.github/workflows/secrets.yml`](.github/workflows/secrets.yml) runs on every pull request and every
+  push, documentation included. It installs gitleaks 8.30.1, verified by SHA-256, and runs
+  `tools/privacy_scan.py --gitleaks require` over the tree, the commit identities and the full history.
+  Any finding fails it.
+- The release checklist repeats the full-history scan before the `v0.1.0` tag.
+
+**CI for your own project** (planned, lane P7c; A21 in PR #20). `oah ci init`, or guided `oah init` with your
+consent, shows `.github/workflows/oah-ci.yml` in full before writing it. A test job runs on the OSes you
+pick (the current OS by default) with the test command you confirm. A secret-scan job runs gitleaks,
+pinned by version and SHA-256, on every push and pull request. Every action is pinned to a full commit
+SHA, `permissions` is `contents: read`, and the file holds no secret. An existing workflow is never
+overwritten without showing the difference and asking. `oah` does not change repository settings; the
+docs explain how to make the checks required.
+
+### Companion apps
+
+Optional companion apps are planned (lane P8c; A20 in PR #20): Orca (Stably AI) runs coding agents side by
+side in separate git worktrees, and Aside (aside.com) is a web agent that Claude Code and Codex use through
+MCP. Guided setup installs either one only with your consent, from the vendor's official source.
 
 ## What works today
 
@@ -267,6 +643,121 @@ Useful facts about leases:
 | Exit codes | `0` done, `1` refused (for example a conflict), `69` environment problem (for example not a git repository) |
 | Task and agent names | Letters, digits, `.`, `_` and `-`. Up to 64 characters for a task and 32 for an agent. |
 
+### Packets, intent and preflight
+
+This example needs a remote, so that preflight can check whether your branch is fresh. A local bare
+repository plays the remote:
+
+```sh
+mkdir demo && cd demo
+git init --bare remote.git
+git clone remote.git hello
+cd hello
+echo "# hello" > README.md
+git add README.md
+git commit -m "first commit"
+git push origin HEAD
+```
+
+Create a packet for the task. A new packet is a draft, and the check says what is still missing:
+
+```console
+$ oah packet new hello
+OAH_PACKET_CREATED .oah/tasks/hello/PACKET.md
+Next: describe the problem, the outcome and checkable success conditions, list the Scope paths, then change 'Status: draft' to 'Status: accepted' and run: oah packet check hello
+
+$ oah packet check hello
+error OAH_INTENT_NOT_ACCEPTED: Status is draft. Read the intent; when it says what you want, change Status to accepted (a draft cannot be bound to a lease)
+warning OAH_PACKET_PLACEHOLDER: template text is still in the intent: <what is wrong or missing today>, <what is true when this task is done>, <checkable condition>; replace it
+warning OAH_SCOPE_EMPTY: ## Scope lists no paths. Add one bullet per path this task may write, or '- repo' for the whole repository; oah start --packet refuses an empty Scope
+OAH_PACKET_INVALID .oah/tasks/hello/PACKET.md errors=1 warnings=2
+```
+
+Open `.oah/tasks/hello/PACKET.md` and replace the placeholders. In this example the changed lines are:
+
+```markdown
+Status: accepted
+The project has no greeting.
+`python src/app.py` prints a greeting.
+- AC1: `python src/app.py` prints `hello`.
+- src
+```
+
+(`Status: accepted` replaces the whole `Status: draft …` line, and `- src` goes under `## Scope`.) Commit
+and push the packet, then check it again:
+
+```console
+$ git add .oah
+$ git commit -m "packet for hello"
+$ git push origin HEAD
+
+$ oah packet check hello
+OAH_PACKET_OK .oah/tasks/hello/PACKET.md intent=hello@r1 status=accepted acs=1 scope=1 warnings=0
+
+$ oah intent show hello
+state=unbound (no lease for task hello)
+intent=hello revision=1 status=accepted
+digest=sha256:f03535d83958914f008092dca3fe928a299a5510509d8eae120542f818cee0f1
+source=.oah/tasks/hello/PACKET.md
+acs=AC1
+INTENT hello@r1 sha256:f03535d83958914f008092dca3fe928a299a5510509d8eae120542f818cee0f1
+```
+
+(git's own output is left out. The default branch is `main` here; yours may be `master`. The digest
+changes with any byte of the intent section.) `state=unbound`
+is expected: binding the intent to a lease with `oah start --packet` is planned (P4b).
+
+Now a teammate pushes a commit to `src`, from another clone. Preflight refuses to start on the old base and
+prints the command that fixes it (excerpt; your commit ids will differ):
+
+```console
+$ oah preflight --task hello
+[abort] base: HEAD is 1 commit behind origin/main. Update first: git rebase origin/main
+[ok]    dirty: the working tree is clean
+[ok]    leases: no other lease overlaps src
+[warn]  recent: 1 commit on origin/main since the packet was last committed (0528c8638aac) touch your scope; read them before you start
+          4822a2c add util
+…
+OAH_PREFLIGHT verdict=ABORT aborts=1 warnings=1
+Fix the [abort] lines above, then run oah preflight again.
+Not proven by this preflight:
+- that the code builds, the tests pass or the success conditions are met
+…
+
+$ git rebase origin/main
+Successfully rebased and updated refs/heads/main.
+
+$ oah preflight --task hello
+[ok]    base: HEAD is up to date with origin/main
+…
+OAH_PREFLIGHT verdict=PROCEED_WITH_WARNINGS aborts=0 warnings=1
+Read the [warn] lines above before you start.
+```
+
+Preflight also aborts when another lease holds part of your scope (path shortened):
+
+```console
+$ oah start --task other --agent codex --scope src/app.py
+OAH_LEASE_STARTED task=other agent=codex scope=src/app.py expires=2026-10-23T11:57:41.357868Z
+
+$ oah preflight --task hello
+…
+[abort] leases: other already holds overlapping paths. Wait for it to finish, pick other paths, or ask its holder to release it
+          task other held by codex (scope src/app.py; expires 2026-10-23T11:57:41.357868Z; worktree …/hello)
+…
+OAH_PREFLIGHT verdict=ABORT aborts=1 warnings=1
+```
+
+| Verdict | Exit code | Meaning |
+|---|---|---|
+| `PROCEED` | 0 | Every check passed. |
+| `PROCEED_WITH_WARNINGS` | 0 | Read the `[warn]` lines first. |
+| `ABORT` | 2 | Fix the `[abort]` lines, then run preflight again. |
+
+Every report ends with a "Not proven by this preflight" list, so a green verdict never claims more than it
+checked. `--offline` skips the fetch, and `--touch PATH…` checks paths without a packet. Project-specific
+checks go in `[preflight].checks` in `.oah/config.toml`, as argv lists that must exit 0.
+
 ## Requirements and supported platforms
 
 | | Requirement | Needed for |
@@ -281,72 +772,93 @@ Useful facts about leases:
 `oah doctor` already checks all of these. It counts Claude Code, Codex CLI, Node.js and unlazy as
 required, because the planned workflow needs them.
 
-## Concepts
-
-**Leases** (works today). A lease says who is working on which paths of the repository, and until when.
-`oah start` prevents overlapping declared scopes by refusing a scope that overlaps another lease.
-Scope is advisory while writing; leases cannot prevent writes outside it. At `finish`, actual changes
-are checked against the scope, and finishing is refused for files outside it unless you widen the scope
-or record an exception.
-
-**Intent** (planned, P4). Every task carries one intent section: the problem, the desired outcome and
-success conditions written as results. The same section goes to every stage, worker and reviewer, and a
-changed goal raises its revision instead of starting a new one. Workers report each success condition as
-met, unmet or deferred, with evidence.
-
-**Gates** (planned, P5). A gate is a check with a command, an expected result and recorded evidence, in
-the [unlazy](https://github.com/Leonxlnx/unlazy) ledger format. `oah finish` will refuse while the
-task's gates are unmet. An optional Stop hook keeps a Claude Code session from ending with unmet gates.
-
-**Review loop** (planned, P6). Codex reviews a clean snapshot of the branch head with the agent
-instruction files removed, and a canary token shows that it read the snapshot. Every round leaves a
-receipt, and the series stops at its round budget. Each receipt labels the review honestly: it is only
-called independent when every commit in base..head has a known author engine different from the
-reviewer engine. Unknown authorship cannot establish independence. A separate Codex session reviewing
-a Codex correction is still not independent.
-
 ## Roadmap
 
-The full design is in [`docs/PLAN.md`](docs/PLAN.md). Section 11 lists the phases.
+The full design is in [`docs/PLAN.md`](docs/PLAN.md). Section 11 lists the phases, and section 15 lists
+the lanes they are built in.
 
 ```mermaid
 flowchart LR
-    P0["P0 Plan"] --> P1["P1 Skeleton"] --> P2["P2 Leases"]
-    P2 --> P3["P3 Config, routing, engines"]
-    P2 --> P4["P4 Packets, intent, preflight"]
-    P2 --> P5["P5 Gates and hooks"]
-    P2 --> P6["P6 Codex review loop"]
-    P2 --> P7["P7 Wiki, rules, impact map, init"]
-    P2 --> P8["P8 Installers"]
-    P2 --> P9["P9 Docs and example"]
-    P3 --> V1["v1"]
-    P4 --> V1
-    P5 --> V1
-    P6 --> V1
-    P7 --> V1
-    P8 --> V1
-    P9 --> V1
+    subgraph onmain["On main"]
+        A["P0 plan, P1 skeleton, P2 leases"]
+        B["P3a config, P4a packets, intent, preflight"]
+    end
 
-    classDef done fill:#1a7f37,stroke:#116329,color:#ffffff
-    classDef planned fill:#f6f8fa,stroke:#8c959f,color:#24292f,stroke-dasharray: 5 5
-    class P0,P1,P2 done
-    class P3,P4,P5,P6,P7,P8,P9,V1 planned
+    subgraph inreview["In review"]
+        C["P3b routing and engines, PR 17"]
+        D["P3s keys, re-ranker, skills, PR 18"]
+        E["P5 gates and hooks, PR 15"]
+        F["P7i impact map, PR 13"]
+        G["P7t toolkit, PR 19"]
+        H["P8 installers, PR 16"]
+    end
+
+    subgraph building["In progress"]
+        I["P7a wiki"]
+    end
+
+    subgraph later["Planned"]
+        J["P4b intent wiring"]
+        K["P6 Codex review loop"]
+        L["P7b guided oah init"]
+        N["P8c companion apps, P3o Orca adapter"]
+        Q["P7c CI starter"]
+        M["P9 docs and example"]
+    end
+
+    V1(["v0.1.0"])
+
+    A --> B
+    C --> J
+    E --> J
+    F --> J
+    J --> K
+    J --> L
+    I --> L
+    G --> L
+    H --> L
+    C --> N
+    H --> N
+    Q --> L
+    K --> M
+    L --> M
+    M --> V1
+
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef review fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef progress fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    classDef planned fill:#eef1f4,stroke:#6e7781,color:#24292f,stroke-dasharray: 5 5
+    class A,B avail
+    class C,D,E,F,G,H review
+    class I progress
+    class J,K,L,M,N,Q,V1 planned
 ```
 
-Green phases are done. Dashed phases are planned and being built in parallel now.
+Arrows show the main dependencies; the full table is in [`docs/PLAN.md`](docs/PLAN.md) section 15.
 
-| Phase | Contents | Status |
+| Phase or lane | Contents | Status |
 |---|---|---|
-| P0 | The plan ([`docs/PLAN.md`](docs/PLAN.md)) | done |
-| P1 | Skeleton: `oah --version`, `oah doctor`, privacy scan, CI on macOS and Windows | done |
-| P2 | Leases: `oah start`, `renew`, `status`, `finish`, `release`, `log` | done |
-| P3 | Config, routing, engines and `oah call`; automatic model and effort by difficulty; a model catalog that follows engine updates; skill selection with an optional re-ranker | in progress |
-| P4 | Packets, intent, preflight | in progress |
-| P5 | Gates (unlazy), Stop hook, git hooks | in progress |
-| P6 | Codex review loop with canary, receipts and a landing check | in progress |
-| P7 | Wiki (Obsidian-compatible), rules block, impact map with a default SQL plugin, a toolkit of bundled skills and MCP templates with automatic skill updates, guided `oah init` onboarding | in progress |
-| P8 | One-command installers, a guided tool installer that asks for consent, `oah doctor` tool checks | in progress |
-| P9 | Full docs, the worked example `examples/hello-oah`, troubleshooting | in progress |
+| P0 | The plan ([`docs/PLAN.md`](docs/PLAN.md)) | available |
+| P1 | Skeleton: `oah --version`, `oah doctor`, privacy scan, CI on macOS and Windows | available |
+| A17 | The secret-scan workflow: gitleaks and the privacy scan on every pull request and push | available |
+| P2 | Leases: `oah start`, `renew`, `status`, `finish`, `release`, `log` | available |
+| P3a | `oah.config` loader, command discovery, `oah doctor` | available |
+| P4a | `oah packet new/check`, `oah intent show/check`, `oah preflight` | available |
+| P3b | Routing, difficulty scoring and `oah recommend`, engine adapters, `oah call` and `oah wait`, run records, the model catalog (`oah models`) | in review (#17) |
+| P3s | `oah.secrets` key lookup, the consent- and key-gated re-ranker with the TypeSafe Jev provider, skill selection | in review (#18) |
+| P5 | Gates (unlazy) and `oah check` helpers, the `finish` guard, git hooks and the Claude Code Stop hook | in review (#15) |
+| P7i | The impact map with a freshness identity and the default SQL plugin | in review (#13) |
+| P7t | The toolkit: bundled skills with provenance, safe skill updates, MCP templates | in review (#19) |
+| P8 | One-command installers, guided tool setup with consent, install guides | in review (#16) |
+| P7a | The Obsidian wiki: maintenance, lint, hygiene, log rollover and recovery | in progress |
+| P4b | Intent wiring into leases and `oah call`; skills and difficulty in `packet new` | planned |
+| P6 | Automated Codex review and correction until convergence: `oah review`, `oah fix`, receipts, `oah land` | planned |
+| P7c | CI starter for your project: `oah ci init` (A21) | planned |
+| P8c | Optional companion apps Orca and Aside, installed with consent (A20) | planned |
+| P7b | Guided `oah init`, tier agents, hook wiring, `oah handoff` | planned |
+| P9 | Full docs, the worked example `examples/hello-oah`, troubleshooting | planned |
+| P3o | Optional Orca adapter | planned |
+| Amendment 5 | The plan text for A20, A21 and A22 | in review (#20) |
 
 ## Development
 
@@ -406,22 +918,149 @@ are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 ### oah는 무엇인가
 
 `oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 규율 있게 한 팀으로 일하도록 돕는 작은 명령줄
-도구다. AI로 프로그래밍을 막 시작한 사람을 가장 먼저 염두에 두고 만든다. 설치 명령 하나와 `oah init`만
-실행하면 완성된 하네스가 자동으로 갖춰지게 하는 것이 목표다. 지금 동작하는 것은 리스와 `oah doctor`다. 설치
-프로그램과 `oah init`, 에이전트 오케스트레이션은 아직 계획 단계에 있다.
+도구다. AI로 프로그래밍을 막 시작한 사람을 가장 먼저 염두에 두고 만든다.
 
-AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치는 일을 막을 장치가 없다. "끝났다"는 에이전트의
-말뿐이고 리뷰에는 횟수 제한도 증거도 없다. 계획한 워크플로는 두 세션에 같은 규칙을 적용한다. Claude가 1차
-구현을 하면 Codex가 정해진 라운드 안에서 리뷰하고 고친 뒤 다시 리뷰한다. "끝났다"는 주장을 증거로 뒷받침하고
-리뷰가 수렴한 뒤에만 작업을 반영하려 한다.
+AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치기 쉽다. "끝났다"는 에이전트의 말뿐이고
+리뷰는 언제 끝나는지 정한 규칙도 증거도 없다. `oah`는 두 엔진에 같은 규칙을 적용한다.
+
+- **Claude가 먼저 구현하고 Codex가 리뷰하고 고친 뒤 다시 리뷰한다.** 리뷰가 수렴할 때까지 이어 간다.
+- **작업 난이도에 따라 모델과 추론 강도, 스킬을 고른다.** 먼저 정해진 규칙으로 판단한다. AI 판정은
+  선택 사항이며 결과마다 AI를 썼는지 밝힌다.
+- **영향 지도**는 변경이 무엇에 닿는지, 어떤 검사를 다시 돌려야 하는지 알려 준다.
+- **프로젝트 위키**는 왜 그렇게 했는지를 기억한다.
+- **"끝났다"는 증거 원장으로 보인다.** 리뷰가 수렴하고 CI가 통과한 뒤에만 작업을 반영한다.
+
+`oah`는 Python 3.11 이상과 표준 라이브러리만으로 동작한다. macOS와 Windows에서 WSL 없이 바로 돈다.
+Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을 수 있게 하는 기록을 남긴다.
 
 ### 현재 상태
 
 > [!WARNING]
-> **개발자 미리보기다. 아직 누구나 쓸 수 있는 상태는 아니다.**
-> P0~P2에서 계획과 프로젝트 뼈대(`oah --version`, `oah doctor`, 개인정보 스캔, macOS·Windows CI), 리스를
-> 마쳤다. P3~P9는 지금 진행 중이라 명령과 파일 형식, 이 문서는 바뀔 수 있다. 원클릭 설치 프로그램과
-> `oah init`은 아직 없다.
+> **개발자 미리보기다. 아직 누구나 쓸 수 있는 단계가 아니다.**
+> 지금 `main`에 있는 것은 프로젝트 뼈대(`oah --version`, `oah doctor`, 개인정보 스캔, macOS·Windows CI)와
+> 리스, 설정 로더, 패킷, 의도, 사전 점검이다. 라우팅, 스킬, 게이트, 훅, 영향 지도, 툴킷, 설치 프로그램은
+> 만들어 두었고 리뷰 중이다. Codex 리뷰 루프와 안내형 `oah init`은 계획 단계다. 명령과 파일 형식, 이 문서는
+> 바뀔 수 있다.
+
+이 문서에서 쓰는 상태 표시는 다음과 같다.
+
+| 표시 | 뜻 |
+|---|---|
+| **available** | `main`에 있다. 지금 실행할 수 있다. |
+| **in review (#n)** | 열린 pull request #n에 만들어 두었다. 아직 `main`에는 없다. |
+| **in progress** | 만드는 중이고 pull request는 아직 없다. |
+| **planned** | [`docs/PLAN.md`](docs/PLAN.md)에 설계만 있다. |
+
+### 강점
+
+| 강점 | 내용 | 상태 |
+|---|---|---|
+| 단계별 엔진 | Claude가 1차 구현을 하고 Codex가 리뷰와 수정, 재리뷰를 맡는다. 단계에 맞지 않는 엔진은 `OAH_STAGE_ENGINE_MISMATCH`로 거절한다. | in review (#17) |
+| 난이도에 맞춘 모델과 강도 | 종류, 강도, 추론, 위험의 네 축을 정해진 규칙으로 점수 매겨 low, medium, high, max 중 하나로 정한다. 모델과 추론 강도는 CLI가 실제로 지원하는 값만 쓴다. 확인할 수 없는 강도는 `unverified`로 기록하고 짐작하지 않는다. | in review (#17) |
+| 작업에 맞춘 스킬 | 작업 종류, 단계, 위험, Scope의 파일 종류로 스킬을 고르고 스킬마다 이유를 붙인다. TypeSafe Jev가 순서를 다시 매길 수 있다. 다만 사용자가 켜고 키도 있을 때만 돈다. 결과에는 늘 `used`나 `unused(<이유>)`가 붙는다. | in review (#18) |
+| 영향 지도 | "이 파일을 바꾸면 무엇을 다시 확인해야 하나?"에 답한다. 결과는 pin > exec > link > mention 순으로 매기고 다시 돌릴 게이트를 정확히 짚는다. SQL 플러그인이 테이블과 루틴, GRANT를 이어 준다. 낡은 지도는 새로 만들거나 거절하며 몰래 쓰지 않는다. | in review (#13) |
+| 프로젝트 위키 | Obsidian에서 열리는 `docs/wiki/`다. 색인과 최신순 로그가 있다. 커밋과 리뷰 전마다 `oah wiki maintain`이 최신으로 유지한다. | in progress (P7a) |
+| 증거 게이트 | "끝났다"를 [unlazy](https://github.com/Leonxlnx/unlazy) 원장의 증거로 보인다. 게이트가 비어 있으면 `oah finish`가 거절한다. 선택형 Stop 훅은 Claude Code 세션이 그 상태로 끝나지 못하게 한다. | in review (#15) |
+| 따라다니는 의도 | 문제, 바라는 결과, 성공 조건을 담은 의도 절 하나가 모든 단계와 워커, 리뷰어에게 바이트 그대로 간다. 목표가 바뀌면 개정 번호를 올린다. | 패킷과 검사는 available · 워커 지시문에 싣는 일은 in review (#17) · 리스와의 결속은 planned (P4b) |
+| 리스와 사전 점검 | 두 세션이 겹치는 경로를 동시에 잡지 못한다. 사전 점검은 낡은 브랜치나 남이 잡은 범위에서 작업을 시작하지 못하게 한다. | available |
+| 수렴하는 정직한 리뷰 | Codex는 정리된 스냅샷을 리뷰하고 카나리로 그 스냅샷을 읽을 수 있었음을 보인다. 라운드마다 영수증을 남긴다. 리뷰가 수렴할 때까지 라운드를 이어 가고 결정이 필요할 때만 멈춰 사용자에게 묻는다. 독립 리뷰라는 표시는 장치가 입증할 때만 붙는다. | planned (P6, PR #20의 A22) |
+| 저장소에 비밀 없음 | 키는 실행할 때만 환경 변수나 OS 키체인에서 읽는다. push 전과 CI에서 gitleaks를 돌린다. | 이 저장소의 CI는 available · 키 조회는 in review (#18) · push 전 스캔은 in review (#15) |
+| 출처가 분명한 툴킷 | 함께 싣는 스킬과 MCP 템플릿마다 출처와 고정 커밋, 라이선스를 적는다. 업데이트는 검증을 거치고 실패하면 되돌린다. | in review (#19) |
+| 쉬운 설치 | OS마다 설치 명령 하나를 실행한 다음 `oah init`이 도구를 확인한다. 사용자가 허락한 것만 설치하고 로그인 과정을 안내한다. | 설치 프로그램은 in review (#16) · 안내형 `oah init`은 planned (P7b) |
+
+### 초보자가 자주 하는 실수와 oah
+
+무언가를 만들어 git에 push할 때 초보자가 자주 놓치는 것들이다.
+
+| 흔한 실수 | `oah`가 하는 일 | 상태 |
+|---|---|---|
+| API 키나 토큰을 커밋한다 | 선택형 `pre-push` 훅이 push할 커밋만 gitleaks로 검사하고 걸리면 막는다. 키는 환경 변수나 OS 키체인에서만 읽는다(`oah.secrets`). 키가 없으면 기능을 끄고 `unused(no key)`라고 알린다. `oah init`은 `.env`, `.env.*`, `*.pem`, `*.key`를 `.gitignore`에 넣는다. | pre-push는 in review (#15) · 키 조회는 in review (#18) · `.gitignore` 항목은 planned (P7b) |
+| 낡은 브랜치에서 작업을 시작한다 | `oah preflight`가 기본 브랜치를 가져와 비교한다. HEAD가 뒤처져 있으면 ABORT로 판정하고 rebase 명령을 알려 준다. 내 범위를 건드린 새 커밋도 보여 준다. | available |
+| 커밋하지 않은 변경 위에서 시작한다 | `oah preflight`가 작업 트리가 깨끗하지 않다고 경고하고 파일을 짚는다. | available |
+| AI 세션 둘이 같은 파일을 고친다 | `oah start`는 다른 리스와 겹치는 범위를 거절하고 누가 잡고 있는지 알려 준다. 사전 점검도 같은 겹침에서 멈춘다. `oah finish`는 실제 변경을 범위와 대조한다. | available |
+| 작업 도중에 push한다 | 이 워크트리에 끝나지 않은 리스가 있으면 `pre-push` 훅이 거절한다. | in review (#15) |
+| AI 에이전트가 push나 force-push를 하거나 이력을 고쳐 쓴다 | `oah rules sync`가 `AGENTS.md`에 규칙 블록을 쓰고 `CLAUDE.md`는 그 파일을 불러온다. 이 블록은 워커가 push, merge, force-push, 공유 이력 고쳐 쓰기, 브랜치 삭제를 하지 못한다고 정한다. push는 `oah finish` 뒤에 사용자가 한다. | in progress (P7a) |
+| AI가 증거 없이 "끝났다"고 한다 | 게이트에는 명령과 기대 결과, 기록된 증거가 있다. 게이트가 비어 있으면 `oah finish`가 거절하고 Stop 훅은 Claude Code 세션이 끝나지 못하게 한다. | in review (#15) |
+| 변경이 무엇을 깨뜨릴지 모른다 | `oah impact`가 파일에 묶인 게이트와 테스트, 워크플로, 마이그레이션, 위키 문서를 짚는다. `--changed-since REV`는 diff를 다시 돌릴 게이트 목록으로 바꾼다. | in review (#13) |
+| 리뷰 없이 병합한다 | Codex가 라운드마다 영수증을 남기며 리뷰한다. 리뷰가 수렴할 때까지 라운드를 이어 간다. `oah land --check`는 수렴한 리뷰 영수증과 CI 실행, 스캔, 게이트가 모두 같은 head에 묶여 있어야 통과한다. `--merge`는 사용자가 확인한 뒤에만 반영한다. | planned (P6) |
+| 왜 바꿨는지 잊어버린다 | 작업마다 의도와 성공 조건을 담은 패킷이 있다. 위키 로그에는 작업마다 항목이 남는다. 커밋에는 쓴 엔진이 `Agent-Engine:` 트레일러로 남는다. | 패킷은 available · 위키 로그는 in progress (P7a) · 엔진 트레일러는 planned (P6) |
+| CI 없이 push하거나 한 OS에서만 테스트한다 | `oah ci init`이 내 프로젝트용 GitHub Actions 시작 워크플로를 먼저 보여 주고 사용자가 동의할 때만 쓴다. 이 워크플로는 사용자가 고른 OS에서 테스트를 돌리고 버전을 고정한 gitleaks로 비밀을 검사한다. action은 전체 SHA로 고정하고 파일에는 비밀을 넣지 않는다. `oah land --check`는 CI 실행 결과를 `gh`로 읽는다. 이 저장소의 CI는 이미 macOS와 Windows에서 테스트한다. | `oah ci init`은 planned (P7c, PR #20의 A21) · 이 저장소는 available |
+
+### 작업 흐름
+
+위 영어 절의 [The workflow, end to end](#the-workflow-end-to-end) 도표가 전체 흐름을 보여 준다.
+
+1. `oah packet new`로 패킷을 만들고 의도와 Scope를 적는다(available).
+2. 난이도 점수로 tier와 모델, 추론 강도를 정하고 스킬을 고른다(in review #17, #18). 이 결과를
+   `packet new`가 패킷에 적는 일은 planned (P4b)다.
+3. `oah preflight`와 `oah start`로 사전 점검을 하고 리스를 잡는다(available).
+4. Claude가 리스 안에서 구현한다. 두 번째 작업 줄은 `oah call claude`로 띄운다(in review #17).
+5. `oah gates check`로 게이트를 확인하고(in review #15) `oah wiki maintain`으로 위키를 정리한다(in progress P7a).
+6. Codex가 리뷰하고 고친 뒤 다시 리뷰한다. 라운드 수는 정해져 있지 않고 리뷰가 수렴할 때까지 이어 간다
+   (planned P6). 승인이 나오거나 P2/P3 지적만 남은 라운드에서 끝나고 남은 지적은 후속 작업으로 기록한다.
+   앞선 라운드에서 이미 고치려 한 종류의 지적이 다시 나오면 멈추고 사용자에게 묻는다. 고치는 데 설계나
+   저장 형식 변경이 필요할 때도 마찬가지다. 상한을 두고 싶으면 `[review] max_rounds`를 설정한다. 기본값은
+   비어 있다.
+7. `oah finish`가 범위와 게이트, 위키를 확인한다. 범위 검사는 available이고 게이트와 위키 정리 확인은
+   in review (#15)다.
+8. `pre-push` 훅을 거쳐 push하고 `oah land --check`로 반영 조건을 확인한다(훅은 in review #15, 반영은 planned P6).
+
+의도 절은 바뀌지 않고 모든 단계로 간다. 이후 라운드는 처음 결속한 출처를 그대로 써야 한다. 다른 출처를
+주면 `OAH_INTENT_SOURCE_MISMATCH`로 거절한다(in review #17). 모든 보고는 `INTENT <id>@r<n> <digest>` 한 줄과 성공 조건마다
+`AC<n>: met|unmet|deferred — <근거>` 한 줄로 끝난다.
+
+### 난이도, 모델, 스킬
+
+- **tier는 규칙이 정한다.** `oah recommend --kind --intensity --reasoning --risk`가 축마다 점수를 더하고
+  올림 규칙과 하한을 적용한다. 위험이 `critical`이면 `max`다. 마이그레이션과 보안 작업은 최소 `high`다.
+  `--tier`로 바꿀 수 있고 그 사실은 기록된다(in review #17).
+- **모델은 업데이트를 따라간다.** Claude는 CLI 별칭 `opus`, `sonnet`, `haiku`를 기본으로 쓴다. Claude
+  Code가 이 별칭을 최신 모델로 풀어 준다. Codex는 실제 설정된 모델에서 출발한다. 사용자가 고정한 모델이
+  늘 이긴다. 모델이 바뀔 때마다 이전 값과 새 값, 시각, 이유를 기록한다(in review #17).
+- **추론 강도에는 고정 상한이 없다.** `highest`는 Codex가 그 모델에 대해 밝힌 가장 높은 추론 단계로
+  풀린다. 실행 헤더가 더 낮은 강도를 보고하면 `OAH_EFFORT_DOWNGRADED`로 실패한다. 읽을 수 없는 강도는
+  `unverified`로 남긴다(in review #17).
+- **Jev는 선택 사항이고 기본으로 꺼져 있다.** TypeSafe Jev 제공자는 사용자가 켜고 키도 있을 때만 돈다.
+  키만 있다고 켜지지 않는다. 후보 순서를 다시 매기고 난이도 의견을 기록한다. 그 의견은 tier를 낮추지 않는다.
+  스킬 선택 기록은 로컬 파일에만 남는다(in review #18).
+
+### 영향 지도
+
+- `oah impact <path>…`는 결정적인 근거만 쓴다. 게이트 결속, `git grep` 참조, 위키 문서, 함께 바뀐 파일,
+  graphify가 있을 때의 그래프 이웃이 그 근거다.
+- 지도는 워크트리마다 저장된다. HEAD와 스테이징된 색인, 지도가 읽는 변경 파일, 모든 게이트 원장, 설정,
+  도구 버전에 묶인다. 하나라도 바뀌면 낡은 지도가 되고 새로 만들거나 `OAH_IMPACT_STALE`로 거절한다.
+- 기본 SQL 플러그인은 마이그레이션에서 테이블과 뷰, 루틴, 트리거, 인덱스, GRANT를 읽는다. 그리고 이를
+  코드와 이어 `db_table:`, `db_routine:`, `db_grant:` 항목으로 만든다. 플러그인이 없는 프로젝트는 건너뛰지
+  않고 `db-impact: unavailable`이라고 밝힌다.
+- 상태는 in review (#13)다. `post-commit`과 `post-merge` 훅에서 지도를 새로 만드는 일도 in review (#13, #15)다.
+
+### 프로젝트 위키
+
+- `docs/wiki/`는 Obsidian 볼트로 열린다. 노트는 `[[wikilinks]]`로 잇고 노트마다 출처를 적는다.
+- `oah wiki maintain --task T`는 마지막 커밋과 게이트, 리뷰 전에 작업 로그 항목과 색인 줄을 쓴다. 두 번
+  실행해도 같은 내용이 두 번 들어가지 않는다.
+- `log.md`가 512,000바이트를 넘으면 가장 오래된 항목부터 통째로 다음 `log_archive_NN.md`로 옮긴다. 옮기는
+  과정은 저널에 남는다. 옮기는 도중에 파일이 바뀌면 위키 명령이 모두 멈춘다. 사용자가 파일을 맞춘 뒤
+  `oah wiki recover`를 실행해야 다시 움직인다. 몰래 되돌리거나 지우는 일은 없다.
+- 상태는 in progress (P7a)다.
+
+### Git, CI/CD, 훅
+
+- **내 프로젝트의 로컬 훅**은 모두 선택형이고 프로젝트 안에만 설치된다. `oah hooks install`은 쓰기 전에
+  바뀔 내용을 보여 준다. `oah`가 쓰지 않은 훅은 `--force`를 줄 때만 바꾸고 원래 훅은 백업으로 남긴다. `pre-push`와 Claude Code Stop 훅, 설치 명령은 in review (#15)다.
+  영향 지도를 새로 만드는 `post-commit`·`post-merge`는 in review (#13)다. 위키용 `pre-commit` 검사는
+  in progress (P7a)다.
+- **이 저장소의 CI/CD**는 지금 동작한다. `ci.yml`은 `main`으로 가는 pull request마다 macOS와 Windows에서
+  테스트를 돌린다. `secrets.yml`은 pull request와 push마다 gitleaks와 개인정보 스캔으로 전체 이력을 검사한다.
+  gitleaks는 버전과 SHA-256으로 고정했다. 릴리스 태그 전에도 전체 이력을 한 번 더 검사한다.
+- **내 프로젝트의 CI**는 계획 단계다(P7c, PR #20의 A21). `oah ci init`은 `.github/workflows/oah-ci.yml`을
+  먼저 전부 보여 주고 사용자가 동의할 때만 쓴다. 테스트는 사용자가 고른 OS에서 돌고 비밀 검사는
+  gitleaks가 push와 pull request마다 맡는다. 기존 워크플로는 차이를 보여 주고 묻기 전에는 덮어쓰지 않는다.
+  저장소 설정은 `oah`가 바꾸지 않는다.
+- **선택형 동반 앱**도 계획 단계다(P8c, PR #20의 A20). Orca(Stably AI)는 코딩 에이전트를 git 워크트리마다
+  나란히 돌린다. Aside(aside.com)는 Claude Code와 Codex가 MCP로 쓰는 웹 에이전트다. 둘 다 사용자가 동의할
+  때만 공식 배포처에서 설치한다.
 
 ### 지금 되는 것
 
@@ -430,8 +1069,9 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시�
   `.venv\Scripts\Activate.ps1`로 켠 다음 `python -m pip install -e .`를 실행한다.
 - **`oah --version`**은 버전을 출력한다.
 - **`oah doctor`**는 필요한 도구가 설치됐는지 확인한다. 빠진 도구가 있으면 공식 설치 명령을 알려 준다.
-- **리스 명령.** `oah start`, `renew`, `status`, `finish`, `release`, `log`가 동작한다. 실행 예시는 위
-  영어 절에 있다.
+- **리스 명령.** `oah start`, `renew`, `status`, `finish`, `release`, `log`가 동작한다.
+- **패킷, 의도, 사전 점검.** `oah packet new/check`, `oah intent show/check`, `oah preflight`가 동작한다.
+  실행 예시는 위 영어 절에 있다.
 
 | 명령 | 하는 일 |
 |---|---|
@@ -441,9 +1081,17 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시�
 | `oah finish` | 바뀐 파일을 범위와 비교한다. 범위 밖 파일이 있으면 `--allow-out-of-scope` 없이는 `OAH_SCOPE_EXCEEDED`로 거절한다. |
 | `oah release` | 리스를 끝내지 않고 내려놓는다. `--reason`이 필요하며 다른 에이전트의 리스라면 `--force`도 붙여야 한다. |
 | `oah log` | 이벤트 로그에 메모를 남긴다. |
+| `oah packet new` | `.oah/tasks/<task>/PACKET.md`에 초안 패킷을 만든다. |
+| `oah packet check` | 의도와 필수 절, Scope, 게이트 원장을 검사한다. 초안이면 `OAH_INTENT_NOT_ACCEPTED`로, 빈 Scope면 `OAH_SCOPE_EMPTY`로 알린다. |
+| `oah intent show` | 의도의 ID와 개정 번호, 다이제스트, `INTENT` 줄, 결속 상태를 보여 준다. |
+| `oah intent check` | 의도가 승인됐고 ID가 그대로인지 확인한다. 개정 번호를 올리지 않고 목표를 바꿨으면 거절한다. |
+| `oah preflight` | 브랜치가 최신인지, 작업 트리가 깨끗한지, 다른 리스와 겹치지 않는지, 패킷이 승인됐는지 본다. 판정은 PROCEED(0), PROCEED_WITH_WARNINGS(0), ABORT(2)다. |
 
 만료된 리스는 `oah status`에 STALE로 표시되고 다음 `oah start`가 정리한다. 정리되기 전에는 `oah finish`로
 끝낼 수도 있는데 이때도 범위 검사는 똑같이 한다. 범위 밖 변경 때문에 거절되면 리스는 STALE로 남는다.
+
+사전 점검 보고서는 늘 "Not proven by this preflight" 목록으로 끝난다. 통과 판정이 실제로 확인한 것보다 더
+많이 주장하지 않게 하려는 장치다.
 
 ### 요구 사항
 
@@ -455,23 +1103,6 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시�
 | 엔진 | Claude Code, Codex CLI. 이후 단계(라우팅, `oah call`, 리뷰 루프)에 필요하다. |
 | 게이트 | unlazy와 Node.js. 이후 단계(게이트, Stop 훅)에 필요하다. |
 | 선택 | uv, graphify, gh, gitleaks |
-
-### 핵심 개념
-
-- **리스(지금 동작).** 누가 저장소의 어느 경로를 언제까지 작업하는지 기록한다. 시작할 때 선언한 범위가 다른
-  리스와 겹치면 거절한다. 작업하는 동안 범위는 권고일 뿐이어서 범위 밖 파일을 쓰는 것까지 막지는 못한다. 대신
-  `finish`할 때 실제로 바뀐 파일을 범위와 대조한다. 범위 밖 변경이 있으면 범위를 넓히거나 예외를 기록해야 끝낼
-  수 있다.
-- **의도(계획, P4).** 작업마다 의도 절이 하나씩 있다. 의도 절에는 문제와 바라는 결과, 결과로 확인할 수 있는
-  성공 조건이 담긴다. 이 절은 모든 단계와 워커, 리뷰어에게 그대로 전달된다. 목표가 바뀌어도 새 의도를 만들지
-  않고 개정 번호만 올린다.
-- **게이트(계획, P5).** 명령과 기대 결과, 기록된 증거로 이루어진 확인 항목이다. 형식은 unlazy 원장을 따른다.
-  게이트를 채우지 못하면 `oah finish`가 거절한다.
-- **리뷰 루프(계획, P6).** Codex는 에이전트 지시 파일을 뺀 깨끗한 스냅샷을 리뷰하고 카나리 토큰으로 그 스냅샷을
-  읽었음을 보인다. 라운드마다 영수증을 남기며 정해진 라운드 수에 이르면 멈춘다. 남은 지적은 소유자에게 넘긴다.
-  독립 리뷰로 표시하려면 base..head의 모든 커밋마다 작성 엔진을 알 수 있어야 하며 그 엔진이 리뷰어 엔진과 달라야
-  한다. 작성 엔진을 모르는 커밋이 하나라도 있으면 독립성을 입증할 수 없다. Codex 수정본을 별도 Codex 세션이
-  리뷰해도 독립 리뷰가 아니다.
 
 ### 보안
 
