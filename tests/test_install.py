@@ -1,6 +1,7 @@
 # 설치 스크립트 검사 — 임시 클론과 가짜 도구로 install.sh 의 단계·대체 경로·드라이런 무변경을, install.ps1 의 ASCII·CRLF·드라이런을 확인한다.
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import pathlib
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import unittest
+import zipfile
 
 from oah.setup import catalog, display
 from tests.helpers import make_tmp_dir, make_unlazy, write_posix_tool
@@ -40,6 +42,24 @@ def make_release(test: unittest.TestCase) -> tuple[pathlib.Path, str]:
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(clone, arcname="open-agent-harness-1.0.0")
     return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def make_zip_release(test: unittest.TestCase) -> tuple[pathlib.Path, str]:
+    """The Windows form of the release archive: a .zip with one top-level folder."""
+    clone = make_clone(test)
+    archive = make_tmp_dir(test) / "open-agent-harness-1.0.0.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path in sorted(clone.rglob("*")):
+            if path.is_file():
+                bundle.write(path, "open-agent-harness-1.0.0/" + path.relative_to(clone).as_posix())
+    return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def powershell_command(shell: str, script: str, env: dict) -> subprocess.CompletedProcess:
+    """Run PowerShell code given as -EncodedCommand, so no quoting reaches the command line."""
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return subprocess.run([shutil.which(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+                          env=env, capture_output=True, timeout=300)
 
 
 def snapshot(folder: pathlib.Path) -> dict[str, tuple[int, str]]:
@@ -358,6 +378,48 @@ class InstallPs1Test(unittest.TestCase):
         self.assertNotIn('-c "', text)
         self.assertIn("Update-SessionPath", text)
         self.assertIn("[Environment]::GetEnvironmentVariable('Path', 'Machine')", text)
+
+    def test_install_ps1_never_exits_when_piped(self):
+        # `irm | iex` runs in the user's own session: an exit there would close the window.
+        lines = [line.strip() for line in INSTALL_PS1.read_text(encoding="ascii").splitlines()]
+        exits = [line for line in lines if re.search(r"\bexit\b", line) and not line.startswith("#")]
+        self.assertEqual(exits, ["if ($OahScriptRoot) { exit $OahExitCode }"])
+        self.assertIn("throw 'OAH_INSTALL_FAILED'", lines)
+        self.assertIn("$ReleaseUrl = '__OAH_RELEASE_URL__'        # the release's .zip archive", lines)
+        self.assertIn("$ReleaseSha256 = '__OAH_RELEASE_SHA256__'  # its SHA-256, as published with the release", lines)
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_piped_dry_run_verifies_the_release(self):
+        archive, digest = make_zip_release(self)
+        for shell in [shell for shell in ("powershell", "pwsh") if shutil.which(shell)]:
+            with self.subTest(shell=shell):
+                scratch = make_tmp_dir(self)
+                env = dict(os.environ, OAH_RELEASE_URL=str(archive), OAH_RELEASE_SHA256=digest.upper(),
+                           TEMP=str(scratch), TMP=str(scratch))
+                env.pop("PYTHONPATH", None)
+                script = (f"& ([scriptblock]::Create([IO.File]::ReadAllText('{INSTALL_PS1}'))) -DryRun; "
+                          "exit $LASTEXITCODE")
+                result = powershell_command(shell, script, env)
+                text = result.stdout.decode("utf-8", "replace")
+                self.assertEqual(result.returncode, 0, text + result.stderr.decode("utf-8", "replace"))
+                self.assertIn(f"SHA-256 verified: {digest}", text)
+                self.assertIn("SETUP_DRY_RUN planned=", text)
+                self.assertEqual(text.rstrip().splitlines()[-1], "OAH_INSTALL_DRY_RUN_OK")
+                self.assertEqual([p.name for p in scratch.iterdir() if p.name.startswith("oah-install-")], [])
+
+    @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
+    def test_install_ps1_piped_iex_keeps_the_session_open(self):
+        archive, digest = make_zip_release(self)
+        scratch = make_tmp_dir(self)
+        env = dict(os.environ, OAH_RELEASE_URL=str(archive), OAH_RELEASE_SHA256="0" * 64, TEMP=str(scratch),
+                   TMP=str(scratch))
+        script = (f"[IO.File]::ReadAllText('{INSTALL_PS1}') | Invoke-Expression; "
+                  "[Console]::Out.WriteLine('SESSION_ALIVE ' + $LASTEXITCODE)")
+        result = powershell_command("powershell", script, env)
+        text = result.stdout.decode("utf-8", "replace")
+        self.assertIn(f"OAH_INSTALL_DIGEST_MISMATCH: the download's SHA-256 is {digest}", text)
+        self.assertEqual(text.rstrip().splitlines()[-1], "SESSION_ALIVE 1")
+        self.assertEqual([p.name for p in scratch.iterdir() if p.name.startswith("oah-install-")], [])
 
     @unittest.skipUnless(os.name == "nt", "runs Windows PowerShell")
     def test_install_ps1_dry_run_changes_nothing(self):
