@@ -230,7 +230,11 @@ def default_status_runner(argv: Argv) -> tuple[int | None, str]:
 def check_sign_in(tool: Tool, path: str, *, status_runner: StatusRunner = default_status_runner) -> bool:
     """True when the tool's own status command says it is signed in. Reads only a `loggedIn` flag."""
     assert tool.sign_in is not None
-    code, stdout = status_runner((path,) + tool.sign_in.status_args)
+    return signed_in(*status_runner((path,) + tool.sign_in.status_args))
+
+
+def signed_in(code: int | None, stdout: str) -> bool:
+    """Exit code 0, and a JSON `loggedIn` flag (Claude Code's status) that is not false."""
     if code != 0:
         return False
     try:

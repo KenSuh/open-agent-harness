@@ -2,6 +2,10 @@
 """The tool catalog and the guided, consent-based tool setup."""
 from __future__ import annotations
 
+from oah.setup.guide import (Step, StepResult, ToolStatus, check_sign_in, check_tools, guided_setup, plan_installs,
+                             refresh_path, run_installs, run_interactive, signed_in, walk_sign_ins)
 from oah.setup.tools import SignIn, Tool, catalog, display, needs, os_name_for
 
-__all__ = ["SignIn", "Tool", "catalog", "display", "needs", "os_name_for"]
+__all__ = ["SignIn", "Step", "StepResult", "Tool", "ToolStatus", "catalog", "check_sign_in", "check_tools", "display",
+           "guided_setup", "needs", "os_name_for", "plan_installs", "refresh_path", "run_installs", "run_interactive",
+           "signed_in", "walk_sign_ins"]

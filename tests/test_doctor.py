@@ -12,6 +12,7 @@ import unittest
 from oah.console import make_safe
 from oah.doctor import check_tools, exit_code, python_status, render_json, render_text
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
+from oah.setup import catalog, display
 from tests.helpers import make_tmp_dir, make_unlazy
 
 OK_VERSIONS = {
@@ -23,6 +24,8 @@ OK_VERSIONS = {
     "graphify": "graphify 0.9.93",
     "gh": "gh version 2.91.0 (2026-04-22)",
     "gitleaks": "gitleaks version 8.30.1",
+    "jq": "jq-1.8.1",
+    "rg": "ripgrep 14.1.1",
 }
 
 
@@ -39,6 +42,7 @@ class FakeTools:
         self.results = {(f"/fake/bin/{name}", "--version"): ok(version + "\n")
                         for name, version in OK_VERSIONS.items()}
         self.results[("/fake/bin/codex", "login", "status")] = ok("Logged in using ChatGPT\n")
+        self.results[("/fake/bin/claude", "auth", "status")] = ok('{"loggedIn": true}\n')
         self.calls = []
 
     def resolve(self, name, search_path=None):
@@ -72,7 +76,7 @@ class DoctorTest(unittest.TestCase):
         statuses = self.check()
         self.assertEqual([s.name for s in statuses],
                          ["git", "python", "uv", "node", "claude", "codex", "unlazy", "graphify", "gh",
-                          "gitleaks"])
+                          "gitleaks", "jq", "rg"])
         self.assertTrue(all(s.status == "ok" for s in statuses), [(s.name, s.status) for s in statuses])
         self.assertEqual(exit_code(statuses), 0)
         self.assertEqual(render_text(statuses, "darwin").splitlines()[-1], "DOCTOR_OK")
@@ -84,21 +88,22 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(self.by_name(statuses)["codex"].status, "missing")
         self.assertEqual(exit_code(statuses), 1)
         text = render_text(statuses, "win32")
-        self.assertIn('powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"', text)
+        self.assertIn("codex: irm https://chatgpt.com/codex/install.ps1 | iex", text)
         self.assertIn("https://github.com/openai/codex", text)
         self.assertEqual(text.splitlines()[-1], "DOCTOR_MISSING required=1")
 
     def test_macos_hint_differs_from_windows_hint(self):
         self.tools.resolved["codex"] = None
         text = render_text(self.check(platform="darwin"), "darwin")
-        self.assertIn("brew install --cask codex", text)
+        self.assertIn("codex: brew install --cask codex   (or: npm install -g @openai/codex)", text)
         self.assertNotIn("install.ps1", text)
 
     def test_node_too_old(self):
         self.tools.results[("/fake/bin/node", "--version")] = ok("v14.21.3\n")
         statuses = self.check()
         self.assertEqual(self.by_name(statuses)["node"].status, "too-old")
-        self.assertEqual(exit_code(statuses), 1)
+        self.assertIn("node (recommended): brew install node@24", render_text(statuses, "darwin"))
+        self.assertEqual(exit_code(statuses), 0)  # node is recommended, not required
 
     def test_codex_not_signed_in(self):
         self.tools.results[("/fake/bin/codex", "login", "status")] = ok("Not logged in\n", code=1)
@@ -108,14 +113,49 @@ class DoctorTest(unittest.TestCase):
         self.assertIn("codex login", codex.note)
         self.assertEqual(exit_code(statuses), 1)
 
-    def test_optional_missing_still_ok(self):
-        for name in ("graphify", "gh", "gitleaks"):
-            self.tools.resolved[name] = None
+    def test_claude_not_signed_in(self):
+        self.tools.results[("/fake/bin/claude", "auth", "status")] = ok('{"loggedIn": false}\n')
         statuses = self.check()
+        claude = self.by_name(statuses)["claude"]
+        self.assertEqual(claude.status, "not-signed-in")
+        self.assertIn("claude auth login", claude.note)
+        self.assertEqual(exit_code(statuses), 1)
+
+    def test_recommended_missing_still_ok(self):
+        for name in ("uv", "node", "graphify", "gh", "gitleaks", "jq", "rg"):
+            self.tools.resolved[name] = None
+        empty_home = make_tmp_dir(self) / "empty-home"
+        empty_home.mkdir()
+        statuses = check_tools(search_path=None, env={}, home=empty_home, repo_root=None, platform="darwin",
+                               resolver=self.tools.resolve, runner=self.tools.run)
         self.assertEqual(exit_code(statuses), 0)
+        self.assertEqual({s.name for s in statuses if s.status == "missing"},
+                         {"uv", "node", "unlazy", "graphify", "gh", "gitleaks", "jq", "rg"})
         text = render_text(statuses, "darwin")
-        self.assertIn("brew install gitleaks", text)
+        for hint in ("brew install gitleaks", "brew install jq", "brew install ripgrep",
+                     "npx skills add Leonxlnx/unlazy", "curl -LsSf https://astral.sh/uv/install.sh | sh"):
+            self.assertIn(hint, text)
         self.assertEqual(text.splitlines()[-1], "DOCTOR_OK")
+
+    def test_missing_tool_hint_comes_from_catalog(self):
+        for name in OK_VERSIONS:
+            self.tools.resolved[name] = None
+        for platform, os_name in (("darwin", "macos"), ("win32", "windows")):
+            text = render_text(self.check(platform=platform), platform)
+            for tool in catalog():
+                if tool.detect != "path":
+                    continue
+                with self.subTest(platform=platform, tool=tool.name):
+                    self.assertIn(display(tool.install[os_name][0]), text)
+                    self.assertIn(tool.url_for(os_name), text)
+
+    def test_json_lists_every_catalog_tool_with_install(self):
+        self.tools.resolved["jq"] = None
+        data = json.loads(render_json(self.check(platform="win32"), "win32"))
+        self.assertEqual([row["name"] for row in data["tools"]], [tool.name for tool in catalog()])
+        jq = next(row for row in data["tools"] if row["name"] == "jq")
+        self.assertEqual((jq["status"], jq["requirement"], jq["install"], jq["url"]),
+                         ("missing", "recommended", ["winget install jqlang.jq"], "https://jqlang.org/download/"))
 
     def test_version_from_stderr_with_ansi(self):
         self.tools.results[("/fake/bin/gh", "--version")] = ok("", "\x1b[32mgh version 2.91.0\x1b[0m\n")
@@ -208,7 +248,7 @@ class DoctorTest(unittest.TestCase):
                                resolver=self.tools.resolve, runner=self.tools.run)
         self.assertEqual(self.by_name(statuses)["unlazy"].status, "missing")
         self.assertIn("npx skills add Leonxlnx/unlazy", render_text(statuses, "darwin"))
-        self.assertEqual(exit_code(statuses), 1)
+        self.assertEqual(exit_code(statuses), 0)  # unlazy is recommended, not required
 
     def test_python_status(self):
         self.assertEqual(python_status((3, 11, 0)).status, "ok")
@@ -218,7 +258,8 @@ class DoctorTest(unittest.TestCase):
         data = json.loads(render_json(self.check(), "darwin"))
         self.assertEqual(data["ok"], True)
         self.assertEqual(data["platform"], "darwin")
-        self.assertEqual(set(data["tools"][0]), {"name", "requirement", "status", "version", "source", "note"})
+        self.assertEqual(set(data["tools"][0]),
+                         {"name", "requirement", "status", "version", "source", "note", "install", "url"})
 
     def test_render_survives_cp949_with_replacement_chars(self):
         self.tools.results[("/fake/bin/gh", "--version")] = ok("gh \ufffd 버전 \U0001f600\n")
