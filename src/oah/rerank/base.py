@@ -10,9 +10,7 @@ from oah.secrets import Secret
 
 TIERS = ("low", "medium", "high", "max")
 _CODE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-_GROUP_DEPTH_LIMIT = 64
-_GROUP_COUNT_LIMIT = 1024
-_INTERRUPTED = "OAH_RERANK_INTERRUPTED: retry the request when ready"
+_INTERRUPTIONS = (KeyboardInterrupt, SystemExit, GeneratorExit)
 
 
 @dataclass(frozen=True)
@@ -31,11 +29,11 @@ class ProviderError(Exception):
         super().__init__(f"OAH_RERANK_PROVIDER_ERROR: {self.code}")
 
 
-def _interruption_fallback(error: BaseException) -> BaseException:
-    """Find control flow even beyond the rebuild bounds, without copying or formatting the group."""
+def _interruption_type(error: BaseException) -> type[BaseException] | None:
+    """Find the first interruption in depth-first order without rebuilding or formatting groups."""
     pending = [iter((error,))]
     seen = set()
-    current = clean = None
+    current = None
     try:
         while pending:
             current = next(pending[-1], None)
@@ -43,68 +41,48 @@ def _interruption_fallback(error: BaseException) -> BaseException:
                 pending.pop()
             elif id(current) in seen:
                 continue
-            elif isinstance(current, (KeyboardInterrupt, SystemExit)):
-                clean = BaseException.__new__(type(current))
-                BaseException.__init__(clean)
-                return clean
+            elif isinstance(current, _INTERRUPTIONS):
+                return type(current)
             elif isinstance(current, BaseExceptionGroup):
                 seen.add(id(current))
                 pending.append(iter(BaseExceptionGroup.exceptions.__get__(current)))
-        return ProviderError("internal")
+        return None
     finally:
-        del error, pending, seen, current, clean
+        del error, pending, seen, current
 
 
-def _rebuild_interruption(error: BaseException) -> BaseException:
-    """Rebuild in postorder with bounded depth and node count, using only base-class descriptors."""
-    pending = [(error, 0, False)]
-    rebuilt = []
-    current = children = clean = None
-    count = 1
-    try:
-        while pending:
-            current, depth, expanded = pending.pop()
-            if expanded:
-                size = len(BaseExceptionGroup.exceptions.__get__(current))
-                children = rebuilt[-size:]
-                del rebuilt[-size:]
-                rebuilt.append(BaseExceptionGroup(_INTERRUPTED, children))
-                continue
-            if depth > _GROUP_DEPTH_LIMIT:
-                raise ProviderError("internal")
-            traceback.clear_frames(BaseException.__traceback__.__get__(current))
-            if isinstance(current, BaseExceptionGroup):
-                children = BaseExceptionGroup.exceptions.__get__(current)
-                count += len(children)
-                if count > _GROUP_COUNT_LIMIT:
-                    raise ProviderError("internal")
-                pending.append((current, depth, True))
-                for index in range(len(children) - 1, -1, -1):
-                    pending.append((children[index], depth + 1, False))
-            elif isinstance(current, Exception):
-                rebuilt.append(ProviderError("internal"))
-            else:
-                # Bypass subclass constructors, which may require private arguments.
-                clean = BaseException.__new__(type(current))
-                BaseException.__init__(clean)
-                rebuilt.append(clean)
-        return rebuilt[0]
-    finally:
-        del error, pending, rebuilt, current, children, clean
+def _interruption_fallback(exception_type: type[BaseException]) -> BaseException:
+    """Allocate only a built-in base, even when a subclass needs an incompatible allocator."""
+    for base in _INTERRUPTIONS:
+        if issubclass(exception_type, base):
+            return base()
+    return ProviderError("internal")
 
 
 def _sanitize_interruption(error: BaseException) -> BaseException:
-    """Return only fresh exceptions, including when rebuilding or clearing frames fails."""
+    """Propagate one fresh interruption, never a group or an original exception's private state."""
+    exception_type = clean = None
     fallback = ProviderError("internal")
     try:
+        exception_type = _interruption_type(error)
+        if exception_type is None:
+            if isinstance(error, (Exception, BaseExceptionGroup)):
+                return fallback
+            exception_type = type(error)
+        fallback = _interruption_fallback(exception_type)
         try:
-            fallback = _interruption_fallback(error)
-            return _rebuild_interruption(error)
+            # Bypass subclass constructors and copy no arguments, notes or attributes.
+            clean = BaseException.__new__(exception_type)
+            BaseException.__init__(clean)
         except BaseException:
-            pass  # Discard the failed sanitizer and its original exception context entirely.
-        return fallback
+            clean = fallback
+        try:
+            traceback.clear_frames(BaseException.__traceback__.__get__(error))
+        except BaseException:
+            pass  # Cleanup failure must not replace the selected interruption.
+        return clean
     finally:
-        del error, fallback
+        del error, exception_type, clean, fallback
 
 
 class Provider(Protocol):

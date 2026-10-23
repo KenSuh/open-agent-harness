@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from oah import secrets
-from oah.rerank.base import TIERS, Candidate, Provider, ProviderError, _sanitize_interruption
+from oah.rerank.base import TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS, _sanitize_interruption
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, TypeSafeProvider
 
 __all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "Provider", "ProviderError",
@@ -104,6 +104,8 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
             return None, None, unused("unknown-provider")
         try:
             key = secrets.get(provider.key_name(config), env=env, keychain=keychain)
+        except _INTERRUPTIONS:
+            raise
         except ValueError:
             return None, None, unused("error:key-name")
         if not key:
@@ -119,6 +121,8 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
     try:
         try:
             return action(), USED
+        except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
+            failure = _sanitize_interruption(exc)
         except ProviderError as exc:
             return None, unused(f"error:{exc.code}")
         except Exception:  # noqa: BLE001 - optional plugins must not break the caller.
@@ -141,6 +145,8 @@ def _valid_scores(scores: object, count: int) -> list[float] | None:
             return None
         try:
             number = float(value)
+        except _INTERRUPTIONS:
+            raise
         except (OverflowError, TypeError, ValueError):
             return None
         if not math.isfinite(number):
@@ -154,7 +160,7 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
            keychain: secrets.Keychain | None = None,
            providers: Mapping[str, Provider] | None = None) -> RerankResult:
     """Re-order candidates when the user enabled a provider and its key exists; else keep the order."""
-    provider = key = None
+    provider = key = raw = failure = None
     try:
         items = tuple(candidates)
         if len({item.name for item in items}) != len(items):
@@ -179,15 +185,18 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         order = tuple(sent[index] for index in ranked) + rest
         return RerankResult(order, USED, provider.name,
                             tuple((item.name, score) for item, score in zip(sent, scores)))
+    except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
+        failure = _sanitize_interruption(exc)
     finally:
-        del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key
+        del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key, raw
+    raise failure.with_traceback(None) from None
 
 
 def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, brief_disabled: bool = False,
                       env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
                       providers: Mapping[str, Provider] | None = None) -> Advice:
     """An advisory AI tier recorded next to the rule tier in `axes["tier"]`, which it never changes."""
-    provider = key = None
+    provider = key = answer = confidence = failure = None
     try:
         rule_tier = axes.get("tier")
         if rule_tier not in TIERS:
@@ -209,5 +218,8 @@ def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, br
                 return Advice(rule_tier, None, None, unused("error:bad-response"), provider.name)
             confidence = validated[0]
         return Advice(rule_tier, tier, confidence, USED, provider.name)
+    except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
+        failure = _sanitize_interruption(exc)
     finally:
-        del axes, task, config, brief_disabled, env, keychain, providers, provider, key
+        del axes, task, config, brief_disabled, env, keychain, providers, provider, key, answer, confidence
+    raise failure.with_traceback(None) from None

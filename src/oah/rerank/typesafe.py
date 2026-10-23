@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import TIERS, Candidate, ProviderError, _sanitize_interruption
+from oah.rerank.base import TIERS, Candidate, ProviderError, _INTERRUPTIONS, _sanitize_interruption
 from oah.secrets import Secret
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
@@ -56,7 +56,7 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
         try:
             return action(*args, **kwargs)
         except BaseException as exc:
-            if not isinstance(exc, Exception):
+            if isinstance(exc, _INTERRUPTIONS + (BaseExceptionGroup,)) or not isinstance(exc, Exception):
                 # The sanitizer also contains cleanup failures; do not clear its input a second time.
                 return None, _sanitize_interruption(exc)
             try:
@@ -112,6 +112,8 @@ def _number(value: object) -> float | None:
             return None
         try:
             number = float(value)
+        except _INTERRUPTIONS:
+            raise
         except (OverflowError, TypeError, ValueError):
             return None
         return number if math.isfinite(number) else None
@@ -215,6 +217,8 @@ def _check_url(url: str) -> str | None:
         try:
             parts = urllib.parse.urlsplit(url)
             host = parts.hostname
+        except _INTERRUPTIONS:
+            raise
         except ValueError:
             parts = None
         if parts is None:
@@ -257,6 +261,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         data = None
         try:
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except _INTERRUPTIONS:
+            raise
         except (TypeError, ValueError):
             pass
         if data is None:
@@ -275,6 +281,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
             with opener.open(request, timeout=timeout) as response:
                 raw = response.read(RESPONSE_LIMIT + 1)
+        except _INTERRUPTIONS:
+            raise
         except urllib.error.HTTPError as exc:
             code = STATUS_CODES.get(exc.code, f"http-{exc.code}")
             exc.close()
@@ -290,6 +298,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             return None, "bad-response"
         try:
             return json.loads(raw.decode("utf-8")), None
+        except _INTERRUPTIONS:
+            raise
         except ValueError:  # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.
             pass
         return None, "bad-response"

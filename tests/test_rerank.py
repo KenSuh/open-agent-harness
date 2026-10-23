@@ -615,7 +615,7 @@ class KeyLeakTest(unittest.TestCase):
         self.assertTrue(failure.__cause__ is None, "provider errors must have no exception cause")
         return failure
 
-    def check_interrupted_request(self, exception_type) -> None:
+    def check_interrupted_request(self, exception_type, expected_type=None) -> None:
         key = fake_key()
         response_text = "private-response-" + token_source.token_hex(16)
         echo = response_text + key
@@ -670,7 +670,8 @@ class KeyLeakTest(unittest.TestCase):
                 with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open), \
                         mock.patch.object(json, "loads", parse_json):
                     for action in actions:
-                        self.assert_sanitized_failure(action, None, key, response_text, exception_type)
+                        self.assert_sanitized_failure(action, None, key, response_text,
+                                                      expected_type or exception_type)
 
     def test_keyboard_interrupt_has_no_private_traceback(self) -> None:
         self.check_interrupted_request(KeyboardInterrupt)
@@ -701,14 +702,10 @@ class KeyLeakTest(unittest.TestCase):
         ):
             with self.subTest(api=action.__code__.co_firstlineno), \
                     mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
-                self.assert_sanitized_failure(action, None, key, response_text, BaseExceptionGroup)
-                with self.assertRaises(BaseExceptionGroup) as caught:
-                    action()
-                self.assertIs(type(caught.exception.exceptions[0]), KeyboardInterrupt)
-                self.assertIs(type(caught.exception.exceptions[1].exceptions[0]), SystemExit)
+                self.assert_sanitized_failure(action, None, key, response_text, KeyboardInterrupt)
 
     def check_group_failure(self, depth, exception_type, *, width=1, sanitizer_failure=False,
-                           collapsed=True) -> None:
+                           sibling_type=None, expected_type=None) -> None:
         key = fake_key()
         response_text = "private-response-" + token_source.token_hex(16)
         echo = key + response_text
@@ -717,6 +714,8 @@ class KeyLeakTest(unittest.TestCase):
 
         def fail(*args, **kwargs):
             error = exception_type(echo)
+            if sibling_type is not None:
+                error = BaseExceptionGroup(echo, [error, sibling_type(echo)])
             for _ in range(depth):
                 error = BaseExceptionGroup(echo, [error] * width)
                 error.add_note(echo)
@@ -748,8 +747,10 @@ class KeyLeakTest(unittest.TestCase):
             actions[source + "-advice"] = lambda settings=settings, env=env, providers=providers: \
                 rerank.advise_difficulty(AdviceTest.AXES, "task", config=settings, env=env,
                                         keychain=NoKeychain(), providers=providers)
-        expected = (exception_type if exception_type in (KeyboardInterrupt, SystemExit)
-                    else rerank.ProviderError) if collapsed else BaseExceptionGroup
+        expected = (exception_type if issubclass(exception_type, (KeyboardInterrupt, SystemExit, GeneratorExit))
+                    else rerank.ProviderError)
+        if expected_type is not None:
+            expected = expected_type
         for api, action in actions.items():
             with self.subTest(api=api):
                 frames = []
@@ -779,13 +780,7 @@ class KeyLeakTest(unittest.TestCase):
                             self.assertIsNotNone(result, "ordinary provider failures must return a status")
                             self.assertEqual(result.status, "unused(error:internal)")
                         else:
-                            failure = self.assert_sanitized_failure(
-                                action, "internal", key, response_text, expected)
-                            if not collapsed:
-                                for _ in range(depth):
-                                    self.assertIs(type(failure), BaseExceptionGroup)
-                                    failure = failure.exceptions[0]
-                                self.assertIs(type(failure), exception_type)
+                            self.assert_sanitized_failure(action, "internal", key, response_text, expected)
                 finally:
                     sys.setprofile(previous_profile)
                 self.assertTrue(frames)
@@ -795,11 +790,75 @@ class KeyLeakTest(unittest.TestCase):
 
     def test_deep_interruption_groups_do_not_leak_or_get_swallowed(self) -> None:
         for depth in (600, 5000):
-            for exception_type in (KeyboardInterrupt, SystemExit):
+            for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
                 with self.subTest(depth=depth, interruption=exception_type.__name__):
                     self.check_group_failure(depth, exception_type)
 
-    def test_group_sanitization_has_a_count_bound(self) -> None:
+    def test_mixed_group_allocation_failure_preserves_keyboard_interrupt(self) -> None:
+        class StopNow(KeyboardInterrupt, OSError):
+            pass
+
+        self.check_group_failure(0, StopNow, sibling_type=KeyboardInterrupt,
+                                 expected_type=KeyboardInterrupt)
+
+    def test_multiple_inheritance_interruptions_are_never_ordinary_errors(self) -> None:
+        for base in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            for ordinary in (ValueError, OSError):
+                # SystemExit and OSError have incompatible built-in instance layouts.
+                if base is SystemExit and ordinary is OSError:
+                    continue
+                interruption = type("MixedInterruption", (base, ordinary), {})
+                with self.subTest(base=base.__name__, ordinary=ordinary.__name__):
+                    expected = base if ordinary is OSError else interruption
+                    self.check_interrupted_request(interruption, expected)
+                    self.check_group_failure(0, interruption, expected_type=expected)
+                    self.check_group_failure(3, interruption, expected_type=expected)
+                    self.check_group_failure(600, interruption, expected_type=expected)
+
+    def test_gate_and_score_validation_interruptions_are_fresh(self) -> None:
+        class Interrupted(KeyboardInterrupt, ValueError):
+            pass
+
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = key + response_text
+
+        class InterruptedNumber(float):
+            def __new__(cls, value):
+                number = super().__new__(cls, value)
+                number.private = echo
+                return number
+
+            def __float__(self):
+                raise Interrupted(echo)
+
+        class InterruptedProvider:
+            name = "fake"
+
+            def key_name(self, config):
+                if phase == "gate":
+                    raise Interrupted(echo)
+                return "FAKE_RERANK_KEY"
+
+            def score(self, *args, **kwargs):
+                return [InterruptedNumber(0.5)]
+
+            def advise(self, *args, **kwargs):
+                return "high", InterruptedNumber(0.5)
+
+        for phase in ("gate", "validation"):
+            for action in (
+                lambda: rerank.rerank("impact", candidates("a"), config=enabled(),
+                                     env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                                     providers={"fake": InterruptedProvider()}),
+                lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                                                env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                                                providers={"fake": InterruptedProvider()}),
+            ):
+                with self.subTest(phase=phase, api=action.__code__.co_firstlineno):
+                    self.assert_sanitized_failure(action, None, key, response_text, Interrupted)
+
+    def test_wide_and_shared_groups_preserve_interruptions(self) -> None:
         for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
             with self.subTest(interruption=exception_type.__name__):
                 self.check_group_failure(1, exception_type, width=5000)
@@ -809,7 +868,7 @@ class KeyLeakTest(unittest.TestCase):
     def test_deep_groups_without_control_flow_use_fixed_provider_error(self) -> None:
         for depth in (600, 5000):
             with self.subTest(depth=depth):
-                self.check_group_failure(depth, GeneratorExit)
+                self.check_group_failure(depth, RuntimeError)
 
     def test_sanitizer_failure_discards_original_exception_and_context(self) -> None:
         for depth in (0, 3, 600, 5000):
@@ -817,8 +876,10 @@ class KeyLeakTest(unittest.TestCase):
                 with self.subTest(depth=depth, interruption=exception_type.__name__):
                     self.check_group_failure(depth, exception_type, sanitizer_failure=True)
 
-    def test_groups_within_bounds_preserve_structure(self) -> None:
-        self.check_group_failure(32, KeyboardInterrupt, collapsed=False)
+    def test_nested_groups_raise_the_first_interruption(self) -> None:
+        for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            with self.subTest(interruption=exception_type.__name__):
+                self.check_group_failure(32, exception_type)
 
     def test_interruption_subclass_needing_arguments_is_not_swallowed(self) -> None:
         class NeedsArgument(KeyboardInterrupt):
