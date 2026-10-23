@@ -60,6 +60,11 @@ def _marker(footer: str, has_footer: HasFooter) -> str:
     return marker
 
 
+def check_footer(footer: str, has_footer: HasFooter) -> None:
+    """Refuse with OAH_FOOTER_NOT_APPENDED before anything is written when no canonical footer is available."""
+    _marker(footer, has_footer)
+
+
 def _count(text: str, marker: str) -> int:
     return sum(1 for line in _lf(text).split("\n") if line == marker)
 
