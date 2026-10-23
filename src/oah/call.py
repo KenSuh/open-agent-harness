@@ -272,25 +272,26 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
                                "digest": intent.digest, "history": history})
 
 
-def lease_binding(state_dir: pathlib.Path, task: str) -> tuple[object | None, pathlib.Path | None]:
-    """The intent bound to the task's lease (an `oah.intent.Binding`) and the lease worktree, or (None, None)."""
+def bound_lease(state_dir: pathlib.Path, task: str):
+    """The task's lease when it is bound to an intent (`oah start --packet`), else None."""
     from oah.lease import Store
 
     for lease, _stale in Store(state_dir).snapshot():
         if lease.task == task and lease.intent is not None:
-            return lease.binding(), pathlib.Path(lease.worktree)
-    return None, None
+            return lease
+    return None
 
 
-def check_lease_binding(binding, worktree: pathlib.Path, task: str) -> None:
+def check_lease_binding(lease) -> None:
     """Refuse to dispatch for a bound task whose intent is not current (PLAN 5.6, A7)."""
-    state, reason = oah_intent.explain_binding(binding, worktree)
+    binding = lease.binding()
+    state, reason = oah_intent.explain_binding(binding, pathlib.Path(lease.worktree))
     if state != "current":
         raise EngineError("OAH_INTENT_NOT_CURRENT",
-                          f"task {task} is bound to {binding.line()} and that intent is {state}: {reason}. Nothing "
-                          f"was launched. Restore {binding.source} as it was bound, or raise its Revision, accept it "
-                          f"and rebind with oah start --task {task} --agent claude --packet {binding.source}; then "
-                          "call again")
+                          f"task {lease.task} is bound to {binding.line()} and that intent is {state}: {reason}. "
+                          f"Nothing was launched. Restore {binding.source} as it was bound, or raise its Revision, "
+                          f"accept it and rebind with oah start --task {lease.task} --agent {lease.agent} --packet "
+                          f"{binding.source}; then call again")
 
 
 def _check_lease_source(binding, packet: Packet | None, task: str) -> None:
@@ -440,9 +441,10 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)
-    leased, lease_root = lease_binding(state_dir, request.task)
-    if leased is not None:
-        check_lease_binding(leased, lease_root, request.task)
+    holder = bound_lease(state_dir, request.task)
+    if holder is not None:
+        check_lease_binding(holder)
+    leased = holder.binding() if holder is not None else None
     bound = dispatch_binding(state_dir, request.task)
     default_source = (bound["source"] if bound else leased.source if leased is not None
                       else f".oah/tasks/{request.task}/PACKET.md")
