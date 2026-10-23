@@ -40,7 +40,13 @@ class Journal:
         """The caller holds the lock, including throughout validation and publication."""
         transaction = self._load()
         if transaction is not None:
+            missing = object()
+            live = read_json(self.state_path, missing)
+            if live is not missing:
+                validate(live)
             validate(transaction["state"])
+            # A prior replace may be visible even though its directory sync never completed.
+            write_json_atomic(self.path, transaction)
             self._publish(transaction)
         else:
             read_jsonl(self.events_path)

@@ -12,7 +12,7 @@ import unittest
 
 def make_tmp_dir(test: unittest.TestCase) -> pathlib.Path:
     """A fresh temporary folder that is removed when the test ends."""
-    path = pathlib.Path(tempfile.mkdtemp(prefix="oah-test-"))
+    path = pathlib.Path(tempfile.mkdtemp(prefix="oah-test-")).resolve()
     test.addCleanup(shutil.rmtree, path, True)
     return path
 

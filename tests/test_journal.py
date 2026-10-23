@@ -10,7 +10,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from oah.atomic import StateCorrupt, append_jsonl
+from oah.atomic import StateCorrupt, StorageError, append_jsonl, write_json_atomic
 from oah.lease import Store
 from oah.paths import RepoInfo
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
@@ -21,6 +21,136 @@ T0 = dt.datetime(2026, 10, 23, 9, tzinfo=dt.timezone.utc)
 
 
 class JournalTest(unittest.TestCase):
+    def test_recovery_syncs_visible_journal_before_publishing_state(self):
+        for boundary in ("file_sync", "directory_sync"):
+            for interruption in (OSError, KeyboardInterrupt):
+                with self.subTest(boundary=boundary, interruption=interruption.__name__):
+                    root = make_tmp_dir(self)
+                    store = Store(root / "state", now=lambda: T0)
+                    info = RepoInfo(root, root / ".git", "main", None)
+                    store.start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1, info=info)
+                    before_state = store.leases_path.read_bytes()
+                    before_events = store.events_path.read_bytes()
+
+                    def interrupted_journal(path, data):
+                        if path == store.journal.path:
+                            with patch("oah.atomic._fsync_folder", side_effect=OSError("journal directory sync")):
+                                return write_json_atomic(path, data)
+                        return write_json_atomic(path, data)
+
+                    with patch("oah.journal.write_json_atomic", side_effect=interrupted_journal):
+                        with self.assertRaises(StorageError) as caught:
+                            store.renew(task="t1", agent="claude", ttl_hours=3)
+                    self.assertEqual(caught.exception.path, store.journal.path)
+                    self.assertEqual(store.leases_path.read_bytes(), before_state)
+                    self.assertEqual(store.events_path.read_bytes(), before_events)
+                    pending = store.journal.path.read_bytes()
+
+                    def interrupted_recovery(path, data):
+                        if path == store.journal.path:
+                            step = "os.fsync" if boundary == "file_sync" else "_fsync_folder"
+                            with patch("oah.atomic." + step, side_effect=interruption("recovery sync")):
+                                return write_json_atomic(path, data)
+                        return write_json_atomic(path, data)
+
+                    with patch("oah.journal.write_json_atomic", side_effect=interrupted_recovery):
+                        with self.assertRaises(StorageError if interruption is OSError else KeyboardInterrupt) as caught:
+                            with store._lock():
+                                pass
+                    if interruption is OSError:
+                        self.assertEqual(caught.exception.path, store.journal.path)
+                    self.assertEqual(store.leases_path.read_bytes(), before_state)
+                    self.assertEqual(store.events_path.read_bytes(), before_events)
+                    self.assertEqual(store.journal.path.read_bytes(), pending)
+
+                    Store(store.dir, now=lambda: T0).log(task="t1", agent="claude", message="recovered")
+                    self.assertEqual(store.snapshot()[0][0].expires_at, "2026-10-23T12:00:00Z")
+                    events = [json.loads(line)["event"] for line in store.events_path.read_text(
+                        encoding="utf-8").splitlines()]
+                    self.assertEqual(events, ["lease_started", "lease_renewed", "note"])
+                    self.assertFalse(store.journal.path.exists())
+
+    def test_crashes_during_journal_directory_sync_and_recovery_keep_replayable_journal(self):
+        root = make_tmp_dir(self)
+        store = Store(root / "state")
+        info = RepoInfo(root, root / ".git", "main", None)
+        store.start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1, info=info)
+        before_state = store.leases_path.read_bytes()
+        before_events = store.events_path.read_bytes()
+        script = (
+            "import os, pathlib, sys\n"
+            "from unittest.mock import patch\n"
+            "from oah.atomic import write_json_atomic\n"
+            "from oah.lease import Store\n"
+            "store = Store(pathlib.Path(sys.argv[1]))\n"
+            "phase = sys.argv[2]\n"
+            "synced = False\n"
+            "real_replace = os.replace\n"
+            "def write(path, data):\n"
+            "    global synced\n"
+            "    if path == store.journal.path:\n"
+            "        if phase == 'journal':\n"
+            "            with patch('oah.atomic._fsync_folder', side_effect=lambda folder: os._exit(23)):\n"
+            "                write_json_atomic(path, data)\n"
+            "        else:\n"
+            "            write_json_atomic(path, data)\n"
+            "            synced = True\n"
+            "            return\n"
+            "    if phase == 'recovery' and path == store.leases_path:\n"
+            "        if not synced:\n"
+            "            os._exit(25)\n"
+            "        def replace(src, dst):\n"
+            "            real_replace(src, dst)\n"
+            "            if pathlib.Path(dst) == store.leases_path:\n"
+            "                os._exit(24)\n"
+            "        with patch('oah.atomic.os.replace', side_effect=replace):\n"
+            "            return write_json_atomic(path, data)\n"
+            "    return write_json_atomic(path, data)\n"
+            "with patch('oah.journal.write_json_atomic', side_effect=write):\n"
+            "    if phase == 'journal':\n"
+            "        store.renew(task='t1', agent='claude', ttl_hours=3)\n"
+            "    else:\n"
+            "        store.log(task='t1', agent='claude', message='interrupted recovery')\n"
+        )
+        for phase, code in (("journal", 23), ("recovery", 24)):
+            result = subprocess.run([sys.executable, "-c", script, str(store.dir), phase],
+                                    env=dict(os.environ, PYTHONPATH=SRC), capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, code, result.stderr)
+            self.assertTrue(store.journal.path.exists())
+            self.assertEqual(store.events_path.read_bytes(), before_events)
+            if phase == "journal":
+                self.assertEqual(store.leases_path.read_bytes(), before_state)
+        store.log(task="t1", agent="claude", message="recovered")
+        events = [json.loads(line) for line in store.events_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["event"] for event in events], ["lease_started", "lease_renewed", "note"])
+        self.assertEqual(len({event["transaction_id"] for event in events}), len(events))
+        self.assertEqual(len(store.snapshot()), 1)
+        self.assertFalse(store.journal.path.exists())
+
+    def test_pending_recovery_preserves_corrupt_live_state_and_journal(self):
+        for corrupt in (b"{broken", b'\xff', b'{"version": 2, "leases": []}',
+                        b'{"version": 1, "leases": [{"task": 3}]}'):
+            with self.subTest(corrupt=corrupt):
+                root = make_tmp_dir(self)
+                store = Store(root / "state")
+                info = RepoInfo(root, root / ".git", "main", None)
+                store.start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1, info=info)
+                real_replace = os.replace
+
+                def replace(src, dst):
+                    if pathlib.Path(dst) == store.leases_path:
+                        raise OSError("interrupted state publication")
+                    return real_replace(src, dst)
+
+                with patch("oah.atomic.os.replace", side_effect=replace), self.assertRaises(StorageError):
+                    store.renew(task="t1", agent="claude", ttl_hours=3)
+                store.leases_path.write_bytes(corrupt)
+                before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in store.dir.iterdir()}
+                with self.assertRaises(StateCorrupt) as caught:
+                    store.log(task="t1", agent="claude", message="must preserve corrupt live state")
+                self.assertIn(str(store.leases_path), str(caught.exception))
+                self.assertEqual(before, {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in store.dir.iterdir()})
+
     def test_every_mutation_recovers_at_each_publication_boundary(self):
         from oah.journal import PendingTransaction
 

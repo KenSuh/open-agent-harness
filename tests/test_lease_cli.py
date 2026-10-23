@@ -83,6 +83,88 @@ class LeaseCliTest(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn("out_of_scope=docs/new.md", allowed.stdout)
 
+    def test_finish_keeps_acquired_scope_when_directory_is_retargeted(self):
+        self.assertEqual(self.start("t1", "claude", "src").returncode, 0)
+        self.assertEqual(self.start("t2", "codex", "docs").returncode, 0)
+        (self.repo / "src" / "a.py").unlink()
+        (self.repo / "src").rmdir()
+        directory_alias(self.repo / "docs", self.repo / "src")
+        (self.repo / "docs" / "readme.md").write_text("another lease holds this\n", encoding="utf-8")
+
+        refused = oah(self.repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "retargeted")
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("docs/readme.md", refused.stderr)
+        renewed = oah(self.repo, "renew", "--task", "t1", "--agent", "claude")
+        self.assertEqual(renewed.returncode, 0, renewed.stderr)
+        conflict = oah(self.repo, "renew", "--task", "t1", "--agent", "claude", "--scope", "src")
+        self.assertEqual(conflict.returncode, 1, conflict.stderr)
+        self.assertTrue(conflict.stderr.startswith("OAH_LEASE_CONFLICT"), conflict.stderr)
+        leases = json.loads(oah(self.repo, "status", "--json").stdout)["leases"]
+        self.assertEqual([(lease["task"], lease["scope"]) for lease in leases],
+                         [("t1", ["src"]), ("t2", ["docs"])])
+
+        allowed = oah(self.repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "override",
+                      "--allow-out-of-scope")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        event = json.loads((self.repo / ".git" / "oah" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(event["out_of_scope"], ["docs/readme.md"])
+        self.assertTrue(event["allowed_out_of_scope"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX Git symlink entries")
+    def test_finish_compares_inward_outward_and_dangling_symlink_entries_literally(self):
+        outside_file = make_tmp_dir(self) / "outside.py"
+        outside_file.write_text("outside\n", encoding="utf-8")
+        for target in ("../src/a.py", str(outside_file), "missing.py"):
+            for scope in ("src", "docs", "repo"):
+                with self.subTest(target=target, scope=scope):
+                    repo = make_git_repo(self)
+                    git_commit(repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n"})
+                    started = oah(repo, "start", "--task", "t1", "--agent", "claude", "--scope", scope)
+                    self.assertEqual(started.returncode, 0, started.stderr)
+                    (repo / "docs" / "link").symlink_to(target)
+                    args = ("finish", "--task", "t1", "--agent", "claude", "--summary", "symlink")
+                    result = oah(repo, *args)
+                    if scope == "src":
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertTrue(result.stderr.startswith("OAH_SCOPE_EXCEEDED"), result.stderr)
+                        self.assertIn("docs/link", result.stderr)
+                        result = oah(repo, *args, "--allow-out-of-scope")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    event = json.loads((repo / ".git" / "oah" / "events.jsonl").read_text(
+                        encoding="utf-8").splitlines()[-1])
+                    self.assertEqual(event["out_of_scope"], ["docs/link"] if scope == "src" else [])
+                    self.assertEqual(event["allowed_out_of_scope"], scope == "src")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX directory symlink entries")
+    def test_finish_keeps_deleted_paths_in_scope_after_directory_becomes_symlink(self):
+        for target in ("docs", str(make_tmp_dir(self)), "missing"):
+            with self.subTest(target=target):
+                repo = make_git_repo(self)
+                git_commit(repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n"})
+                started = oah(repo, "start", "--task", "t1", "--agent", "claude", "--scope", "src")
+                self.assertEqual(started.returncode, 0, started.stderr)
+                (repo / "src" / "a.py").unlink()
+                (repo / "src").rmdir()
+                (repo / "src").symlink_to(target, target_is_directory=True)
+                result = oah(repo, "finish", "--task", "t1", "--agent", "claude", "--summary", "replaced")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("changed=2", result.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX literal backslash filenames")
+    def test_finish_refuses_literal_backslash_filename_outside_src(self):
+        self.assertEqual(self.start().returncode, 0)
+        (self.repo / "src\\a.py").write_text("root file\n", encoding="utf-8")
+        args = ("finish", "--task", "t1", "--agent", "claude", "--summary", "literal filename")
+        refused = oah(self.repo, *args)
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn("src\\a.py", refused.stderr)
+        allowed = oah(self.repo, *args, "--allow-out-of-scope")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        event = json.loads((self.repo / ".git" / "oah" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(event["out_of_scope"], ["src\\a.py"])
+
     def test_finish_counts_committed_changes(self):
         self.assertEqual(self.start("t1", "claude", "src").returncode, 0)
         git_commit(self.repo, {"docs/readme.md": "changed\n"})
@@ -245,8 +327,10 @@ class LeaseCliTest(unittest.TestCase):
         state.mkdir()
         real_open = open
         real_replace = os.replace
+        real_read = pathlib.Path.read_bytes
         commands = {
             "read": ["status"],
+            "read_journal": ["status"],
             "replace": ["start", "--task", "t1", "--agent", "claude", "--scope", "src"],
             "append": ["log", "--task", "t1", "--agent", "claude", "--message", "note"],
         }
@@ -258,9 +342,14 @@ class LeaseCliTest(unittest.TestCase):
                     OSError(errno.ENOSPC, "disk full", str(target))
 
                 def replace(src, dst):
-                    if boundary == "replace":
+                    if boundary == "replace" and pathlib.Path(dst) == target:
                         raise error
                     return real_replace(src, dst)
+
+                def read(path):
+                    if boundary in ("read", "read_journal") and path == target:
+                        raise error
+                    return real_read(path)
 
                 def open_file(path, mode="r", *args, **kwargs):
                     if boundary == "append" and pathlib.Path(path) == target and "a" in mode:
@@ -273,16 +362,13 @@ class LeaseCliTest(unittest.TestCase):
                         patch.dict(os.environ, {"OAH_STATE_DIR": str(state)}), \
                         patch("oah.atomic.RETRY_SECONDS", 0), \
                         patch("oah.atomic.os.replace", side_effect=replace), \
+                        patch("pathlib.Path.read_bytes", autospec=True, side_effect=read), \
                         patch("builtins.open", side_effect=open_file), \
                         contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
-                    if boundary == "read":
-                        with patch("pathlib.Path.read_bytes", side_effect=error):
-                            result = lease_cli.run(args)
-                    else:
-                        result = lease_cli.run(args)
+                    result = lease_cli.run(args)
                 self.assertEqual(result, 69, stderr.getvalue())
-                self.assertTrue(stderr.getvalue().startswith("OAH_STATE_IO"), stderr.getvalue())
-                self.assertIn(str(target), stderr.getvalue())
+                self.assertTrue(stderr.getvalue().startswith(f"OAH_STATE_IO: cannot access {target}:"),
+                                stderr.getvalue())
 
     def test_renew_release_and_log(self):
         self.assertEqual(self.start("t1", "claude", "src").returncode, 0)
@@ -328,6 +414,36 @@ class LeaseCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 69)
         self.assertTrue(result.stderr.startswith("OAH_STATE_CORRUPT"), result.stderr)
         self.assertEqual((state / "leases.json").read_text(encoding="utf-8"), "{broken")
+
+
+class TemporaryDirectoryTest(unittest.TestCase):
+    def test_make_tmp_dir_returns_canonical_path(self):
+        root = make_tmp_dir(self)
+        actual = root / "actual"
+        actual.mkdir()
+        directory_alias(actual, root / "alias")
+        folder = actual / "temp"
+        folder.mkdir()
+        with patch("tests.helpers.tempfile.mkdtemp", return_value=str(root / "alias" / "temp")):
+            self.assertEqual(make_tmp_dir(self), folder.resolve())
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 short paths")
+    def test_make_tmp_dir_expands_windows_short_path(self):
+        import ctypes
+        from ctypes import wintypes
+
+        folder = make_tmp_dir(self)
+        short_path = ctypes.windll.kernel32.GetShortPathNameW
+        short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+        short_path.restype = wintypes.DWORD
+        size = short_path(str(folder), None, 0)
+        self.assertGreater(size, 0)
+        buffer = ctypes.create_unicode_buffer(size)
+        self.assertGreater(short_path(str(folder), buffer, size), 0)
+        if buffer.value == str(folder.resolve()):
+            self.skipTest("8.3 short names are not enabled on this volume")
+        with patch("tests.helpers.tempfile.mkdtemp", return_value=buffer.value):
+            self.assertEqual(make_tmp_dir(self), folder.resolve())
 
 
 if __name__ == "__main__":

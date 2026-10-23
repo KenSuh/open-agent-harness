@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import unicodedata
 import unittest
+from unittest.mock import patch
 
 from oah.scope import ScopeError, normalize_scope, outside, overlaps
 from tests.helpers import directory_alias, make_tmp_dir
@@ -36,6 +38,31 @@ class NormalizeTest(unittest.TestCase):
                     normalize_scope(raw, self.root)
                 self.assertEqual(ctx.exception.code, "OAH_SCOPE_INVALID")
 
+    def test_windows_drive_relative_and_stream_scopes_are_refused_before_resolution(self):
+        paths = ("c:x", "C:", "c:src/a.py", "src/a.py:zone", "C:/repo/src/a.py:zone",
+                 "//server/share/src/a.py:zone")
+        with patch("oah.scope._relative_to_root", side_effect=AssertionError("resolved invalid raw scope")):
+            for path in paths:
+                with self.subTest(path=path):
+                    with self.assertRaises(ScopeError) as caught:
+                        normalize_scope([path], self.root)
+                    self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
+
+    def test_windows_absolute_and_unc_scopes_reach_resolution(self):
+        for path in (pathlib.PureWindowsPath("C:/repo/src"), pathlib.PureWindowsPath("//server/share/src")):
+            with self.subTest(path=path), patch("oah.scope._relative_to_root", return_value="src") as resolve:
+                self.assertTrue(path.drive)
+                self.assertTrue(path.root)
+                self.assertEqual(normalize_scope([str(path)], self.root), ("src",))
+                resolve.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows drive-relative paths")
+    def test_native_windows_drive_relative_scopes_are_refused(self):
+        for path in (self.root.drive + "x", self.root.drive, self.root.drive + "src/a.py", "src/a.py:zone"):
+            with self.subTest(path=path), self.assertRaises(ScopeError):
+                normalize_scope([path], self.root)
+        self.assertEqual(normalize_scope([str(self.root / "src")], self.root), ("src",))
+
     def test_empty_scope_is_refused(self):
         with self.assertRaises(ScopeError) as ctx:
             normalize_scope([], self.root)
@@ -55,17 +82,34 @@ class NormalizeTest(unittest.TestCase):
         other = self.root.parent / "other"
         other.mkdir()
         directory_alias(other, self.root / "link")
-        for path in ("link/a.py", str(self.root / "link" / "a.py"), "link/../a.py"):
+        for path in ("link/a.py", str(self.root / "link" / "a.py")):
             with self.subTest(path=path):
                 with self.assertRaises(ScopeError) as caught:
                     normalize_scope([path], self.root)
                 self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
+        if os.name == "nt":
+            self.assertEqual(normalize_scope(["link/../a.py"], self.root), ("a.py",))
+        else:
+            with self.assertRaises(ScopeError) as caught:
+                normalize_scope(["link/../a.py"], self.root)
+            self.assertEqual(caught.exception.code, "OAH_SCOPE_INVALID")
 
-    def test_changed_paths_resolve_aliases_too(self):
-        (self.root / "src").mkdir()
-        directory_alias(self.root / "src", self.root / "link")
-        self.assertEqual(outside(("src",), ["link/a.py"], root=self.root), [])
-        self.assertEqual(outside(("link",), ["src/a.py"], root=self.root), [])
+    def test_parent_after_inward_alias_follows_native_open_semantics(self):
+        (self.root / "deep" / "dir").mkdir(parents=True)
+        directory_alias(self.root / "deep" / "dir", self.root / "link")
+        expected = ("a.py",) if os.name == "nt" else ("deep/a.py",)
+        actual = normalize_scope(["link/../a.py"], self.root)
+        self.assertEqual(actual, expected)
+        self.assertEqual(overlaps(actual, ("deep",)), os.name != "nt")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows junction parent semantics")
+    def test_windows_junction_parent_opens_lexical_path(self):
+        other = self.root.parent / "other"
+        other.mkdir()
+        directory_alias(other, self.root / "link")
+        (self.root / "a.py").write_text("inside", encoding="utf-8")
+        self.assertEqual((self.root / "link" / ".." / "a.py").read_text(encoding="utf-8"), "inside")
+        self.assertEqual(normalize_scope(["link/../a.py"], self.root), ("a.py",))
 
     def test_windows_ambiguous_components_are_refused_portably(self):
         for path in ("src/a.py.", "src/a.py ", "src./a.py", "src /a.py", "src/.. /a.py"):
@@ -87,6 +131,18 @@ class NormalizeTest(unittest.TestCase):
 
 
 class OverlapTest(unittest.TestCase):
+    def test_git_paths_are_literal_except_for_case_and_unicode_comparison(self):
+        decomposed = unicodedata.normalize("NFD", "문서/a.md")
+        changed = ["SRC/a.py", "src\\a.py", "src/a.py:zone", "src/link", "docs/link", decomposed]
+        self.assertEqual(outside(("src", "문서"), changed), ["src\\a.py", "docs/link"])
+
+    def test_repo_scope_does_not_inspect_changed_entries(self):
+        def changed():
+            raise AssertionError("repo scope must be checked before reading changed entries")
+            yield
+
+        self.assertEqual(outside(("repo",), changed()), [])
+
     def test_overlap_table(self):
         cases = [
             (("src",), ("src/a.py",), True),
