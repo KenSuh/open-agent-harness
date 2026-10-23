@@ -1,0 +1,32 @@
+# Skill selection and the optional AI re-ranker. `oah init` may copy this into .oah/config.toml.
+
+[skills]
+# "reference" names each selected skill and its path in the brief; "attach" also pastes its text.
+mode = "reference"
+# A local log of each selection in oah's state folder. Nothing is sent anywhere.
+telemetry = true
+# Skills never to select, by name (for example "unlazy") or plugin:name.
+exclude = []
+# Rules added to the built-in ones. An empty list means "any".
+extra_rules = []
+# [[skills.extra_rules]]
+# skill = "systematic-debugging"
+# kinds = ["docs"]          # task kinds, such as implementation, review, docs
+# stages = []               # initial, review, correction
+# risks = []                # low, normal, high, critical
+# file_kinds = []           # python, react, markdown, sql, ...
+# reason = "why this skill fits"
+
+[rerank]
+# Off until you turn it on. A key alone never turns it on.
+# When on, oah sends the task kind, the query, and each candidate's name and short description
+# to the provider, which may charge for each request.
+enabled = false
+provider = ""               # "typesafe" for TypeSafe Jev
+timeout_seconds = 10.0
+
+[rerank.typesafe]
+model = "jev-latest"
+# The key is read at runtime from ${TYPESAFE_API_KEY}, or from the OS keychain under service "oah"
+# and this name. Never write the key itself in this file.
+key_name = "TYPESAFE_API_KEY"
