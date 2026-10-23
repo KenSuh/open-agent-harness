@@ -8,7 +8,8 @@
 5. the verify footer (`VERIFY_FOOTER`, the verify-what-changed rule);
 6. the intent footer, last.
 
-Only implementation and correction briefs carry a lease command; with a packet it is the exact
+Only implementation and correction briefs carry a lease command and the `Agent-Engine: <engine>` commit
+trailer (5.9); with a packet the lease command is the exact
 `oah start --packet <source>` command and names the binding it will create (C1). Review briefs never
 carry one. A footer counts only when its marker is a whole line at line start (C4); the intent
 footer and its `has_footer` test come from `oah.intent` and are passed in. `deliver` reuses a stored
@@ -98,6 +99,8 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
             scopes = " ".join(f"--scope {_quote(path)}" for path in scope)
             lines.append(f"- Lease: before editing, run exactly `oah start --task {_quote(task)} --agent "
                          f"{_quote(engine)} {scopes}`.")
+    if stage in LEASE_STAGES:
+        lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
     if skills:
         lines.append("- Skills: " + "; ".join(f"{name} ({reason})" for name, reason in skills))
     else:

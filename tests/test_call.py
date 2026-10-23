@@ -330,6 +330,13 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
         final = call.wait(project.state, run_id, timeout=60)
         self.assertEqual(final["status"], "finished", final.get("error"))
 
+    @unittest.skipUnless(os.name == "nt", "Windows process query")
+    def test_alive_reports_windows_processes(self):
+        self.assertTrue(call._alive(os.getpid()))
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        self.assertFalse(call._alive(gone.pid))
+
     def test_lost_runner(self):
         state = make_tmp_dir(self)
         run = new_run(state, "t1", "codex", "review")

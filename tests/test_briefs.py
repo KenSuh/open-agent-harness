@@ -69,9 +69,12 @@ class LeaseCommandTest(unittest.TestCase):
         self.assertEqual(command, "oah start --task p3b --agent claude --packet .oah/tasks/p3b/PACKET.md")
         for stage in ("initial", "correction"):
             text = brief(stage)
-            self.assertIn(command.replace("claude", "claude"), text)
+            self.assertIn(command, text)
             self.assertIn("binds INTENT p3b@r1 " + BINDING.digest, text)
+            self.assertIn("`Agent-Engine: claude`", text)
+        self.assertIn("`Agent-Engine: codex`", brief("correction", engine="codex"))
         review = brief("review", engine="codex")
+        self.assertNotIn("Agent-Engine", review)
         self.assertNotIn("oah start", review)
         self.assertNotIn("--packet", review)
 
