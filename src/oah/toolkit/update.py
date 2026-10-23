@@ -211,10 +211,6 @@ def _write_catalog_commit(catalog_path: pathlib.Path, item: str, commit: str) ->
     write_text_atomic(catalog_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
-def _paths(entry: Bundled) -> tuple[str, ...]:
-    return tuple(p for p in (entry.subpath, entry.license_path, *entry.notice_paths) if p)
-
-
 @contextlib.contextmanager
 def no_guard() -> Iterator[None]:
     yield
@@ -251,9 +247,9 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
                 continue
             work = scratch / str(number)
             try:
-                tree = fetcher(entry.repository, entry.ref, work / "fetch", paths=_paths(entry))
+                tree = fetcher(entry.repository, entry.ref, work / "fetch", paths=entry.fetch_paths())
                 if any(d.baseline is None for d in group):
-                    pin = fetcher(entry.repository, entry.commit, work / "pin-fetch", paths=_paths(entry))
+                    pin = fetcher(entry.repository, entry.commit, work / "pin-fetch", paths=entry.fetch_paths())
                     stage_item(entry, pin, work / "pin", fetched=now.date())
                     group = [d if d.baseline is not None else _item_destination(entry, d.path, work / "pin", d.level)
                              for d in group]

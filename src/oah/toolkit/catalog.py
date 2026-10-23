@@ -46,6 +46,16 @@ class Bundled:
     skills: tuple[str, ...]
     purpose: str
     official_install: str
+    include: tuple[str, ...] = ()        # folders or files under subpath to vendor; empty = all of it
+    default: bool = True                 # False: --all skips it, and the selector never picks it by default
+    select_for: tuple[str, ...] = ()     # task tags the selector may pick it for, e.g. "korean-prose"
+    support: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # skill -> item folders copied into it
+
+    def fetch_paths(self) -> tuple[str, ...]:
+        """Upstream paths a fetch needs: the vendored part, the license and the notices."""
+        prefix = self.subpath.rstrip("/") + "/" if self.subpath else ""
+        vendored = tuple(prefix + path for path in self.include) if self.include else (self.subpath,)
+        return tuple(p for p in (*vendored, self.license_path, *self.notice_paths) if p)
 
 
 @dataclass(frozen=True)
@@ -112,13 +122,14 @@ class Upstream:
     executables: tuple[str, ...]
     files: Mapping[str, str] = field(default_factory=dict)
     fetched: str = ""
+    include: tuple[str, ...] = ()
 
     def to_json(self) -> dict:
         return {"name": self.name, "repository": self.repository, "subpath": self.subpath, "ref": self.ref,
                 "commit": self.commit, "spdx": self.spdx, "license_path": self.license_path,
                 "license_file": self.license_file, "license_sha256": self.license_sha256,
                 "notice_files": list(self.notice_files), "executables": list(self.executables),
-                "files": dict(sorted(self.files.items())), "fetched": self.fetched}
+                "files": dict(sorted(self.files.items())), "fetched": self.fetched, "include": list(self.include)}
 
     @classmethod
     def from_json(cls, data: object, where: str) -> "Upstream":
@@ -133,7 +144,8 @@ class Upstream:
                          license_sha256=_str(data, "license_sha256", where),
                          notice_files=_strings(data, "notice_files", where),
                          executables=_strings(data, "executables", where),
-                         files=_file_map(data.get("files"), where), fetched=_str(data, "fetched", where))
+                         files=_file_map(data.get("files"), where), fetched=_str(data, "fetched", where),
+                         include=_strings(data, "include", where))
         except KeyError as exc:
             raise CatalogError(f"{where}: missing {exc}") from None
         if not COMMIT_RE.fullmatch(record.commit):
@@ -205,9 +217,17 @@ def _bundled(data: object, where: str) -> Bundled:
                         notice_paths=tuple(_relative(p, where) for p in _strings(data, "notice_paths", where)),
                         skills=tuple(_relative(p, where, allow_dot=True) for p in _strings(data, "skills", where)),
                         purpose=_str(data, "purpose", where),
-                        official_install=_str(data, "official_install", where))
+                        official_install=_str(data, "official_install", where),
+                        include=tuple(_relative(p, where) for p in _strings(data, "include", where)),
+                        default=data.get("default", True),
+                        select_for=_strings(data, "select_for", where),
+                        support=_support(data.get("support", {}), where))
     except KeyError as exc:
         raise CatalogError(f"{where}: missing {exc}") from None
+    if not isinstance(entry.default, bool):
+        raise CatalogError(f"{where}: default must be true or false")
+    if not set(entry.support) <= set(entry.skills):
+        raise CatalogError(f"{where}: support names a skill folder that is not in skills")
     if entry.subpath:
         _relative(entry.subpath, where)
     if not NAME_RE.fullmatch(entry.name) or entry.kind not in KINDS:
@@ -216,6 +236,13 @@ def _bundled(data: object, where: str) -> Bundled:
     if not COMMIT_RE.fullmatch(entry.commit) or not entry.skills:
         raise CatalogError(f"{where}: needs a full commit id and at least one skill folder")
     return entry
+
+
+def _support(data: object, where: str) -> dict[str, tuple[str, ...]]:
+    if not isinstance(data, dict) or not all(isinstance(value, list) for value in data.values()):
+        raise CatalogError(f"{where}: support maps a skill folder to a list of item folders")
+    return {_relative(key, where, allow_dot=True): tuple(_relative(path, where) for path in value)
+            for key, value in data.items()}
 
 
 def _step(data: object, where: str) -> Step:

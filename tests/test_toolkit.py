@@ -1,6 +1,7 @@
 # 툴킷 검사 — 스킬 메타데이터 파서, 허용 목록, 번들 출처, 받기·스테이징, 검사, MCP 템플릿을 확인한다.
 from __future__ import annotations
 
+import dataclasses
 import http.server
 import json
 import os
@@ -152,6 +153,22 @@ class FetchStageTest(unittest.TestCase):
         self.assertEqual(record.license_sha256, text_digest(MIT_TEXT.encode("utf-8")))
         self.assertEqual(read_upstream(work / "item"), record)
         self.assertFalse((work / "item" / "README.md").exists())
+
+    def test_stage_include_vendors_only_the_named_parts(self):
+        upstream = make_upstream(self, {"scripts/check.py": "print('ok')\n", "CONTRIBUTORS.md": "people\n"})
+        entry = dataclasses.replace(bundled(upstream, subpath="", skills=("skills/demo",)),
+                                    include=("skills", "scripts", "LICENSE"))
+        self.assertEqual(entry.fetch_paths(), ("skills", "scripts", "LICENSE", "LICENSE"))
+        work = make_tmp_dir(self)
+        record = stage_item(entry, fetch(str(upstream), "main", work / "s", paths=entry.fetch_paths()),
+                            work / "item", fetched=TODAY)
+        self.assertEqual(sorted(record.files), ["LICENSE", "scripts/check.py", "skills/demo/SKILL.md",
+                                                "skills/demo/ref.md"])
+        self.assertEqual(record.include, ("skills", "scripts", "LICENSE"))
+        self.assertFalse((work / "item" / "CONTRIBUTORS.md").exists())
+        missing = dataclasses.replace(entry, include=("skills", "nope"))
+        with self.assertRaises(StageError):
+            stage_item(missing, fetch(str(upstream), "main", work / "s2"), work / "item2", fetched=TODAY)
 
     def test_fetch_by_commit_id(self):
         upstream = make_upstream(self)
@@ -320,7 +337,11 @@ def git_blobs(prefix: str) -> dict[str, str]:
 class ShippedToolkitTest(unittest.TestCase):
     def test_shipped_catalog_is_valid(self):
         catalog = load_catalog()
-        self.assertEqual(len(catalog.bundled), 8)
+        self.assertEqual(len(catalog.bundled), 9)
+        korean = catalog.find("humanize-korean")
+        self.assertEqual((korean.default, korean.select_for), (False, ("korean-prose",)),
+                         "humanize-korean is opt-in and chosen only for Korean prose tasks")
+        self.assertEqual([entry.name for entry in catalog.bundled if not entry.default], ["humanize-korean"])
         for entry in catalog.bundled:
             with self.subTest(item=entry.name):
                 record = read_upstream(REPO / "skills" / entry.name)

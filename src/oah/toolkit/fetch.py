@@ -136,6 +136,12 @@ def stage_item(entry: Bundled, tree: Tree, dest: pathlib.Path, *, fetched: dt.da
     entries = tree.entries(entry.subpath)
     if not entries:
         raise StageError(f"{entry.repository} has no {entry.subpath or 'files'} at {tree.commit}")
+    if entry.include:
+        wanted = [prefix + path for path in entry.include]
+        for path in wanted:
+            if not any(name == path or name.startswith(path + "/") for _, _, name in entries):
+                raise StageError(f"{entry.repository} has no {path} at {tree.commit}")
+        entries = [e for e in entries if any(e[2] == path or e[2].startswith(path + "/") for path in wanted)]
     files: dict[str, str] = {}
     executables: list[str] = []
     contents: dict[str, bytes] = {}
@@ -183,7 +189,8 @@ def stage_item(entry: Bundled, tree: Tree, dest: pathlib.Path, *, fetched: dt.da
     record = Upstream(name=entry.name, repository=entry.repository, subpath=entry.subpath, ref=entry.ref,
                       commit=tree.commit, spdx=spdx, license_path=entry.license_path, license_file=license_file,
                       license_sha256=text_digest(contents[license_file]), notice_files=notice_files,
-                      executables=tuple(sorted(set(executables))), files=files, fetched=fetched.isoformat())
+                      executables=tuple(sorted(set(executables))), files=files, fetched=fetched.isoformat(),
+                      include=entry.include)
     write_json_atomic(dest / UPSTREAM_FILE, record.to_json())
     return record
 

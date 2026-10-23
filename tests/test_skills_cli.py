@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -150,6 +151,27 @@ class ListInstallTest(CliFixture):
         self.assertFalse((self.project / ".agents").exists())
         self.assertEqual(self.oah("install", "demo", "--target", "codex")[0], 0)
         self.assertEqual(self.oah("install", "demo", "--target", "codex")[0], 0, "reinstalling replaces oah's copy")
+
+    def test_opt_in_item_installs_only_by_name_with_its_support_folders(self):
+        korean = make_upstream(self, {"skills/ko/SKILL.md": "---\nname: ko\ndescription: Korean prose.\n---\n",
+                                      "scripts/check.py": "print('ok')\n", "CONTRIBUTORS.md": "people\n"})
+        entry = dataclasses.replace(bundled(korean, name="korean", subpath="", skills=("skills/ko",)),
+                                    include=("skills", "scripts", "LICENSE"), default=False,
+                                    select_for=("korean-prose",), support={"skills/ko": ("scripts",)})
+        main = load_catalog(self.catalog).bundled[0]
+        write_catalog(self.work, [main, entry], [])
+        catalog = load_catalog(self.catalog)
+        self.assertEqual((catalog.find("korean").default, catalog.find("korean").select_for),
+                         (False, ("korean-prose",)))
+        code, out, _ = self.oah("install", "--all", "--target", "claude")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("korean", out)
+        self.assertFalse((self.project / ".claude" / "skills" / "ko").exists())
+        code, out, _ = self.oah("install", "korean", "--target", "claude")
+        self.assertEqual(code, 0, out)
+        skill = self.project / ".claude" / "skills" / "ko"
+        self.assertEqual(sorted(p.name for p in skill.iterdir()), [".oah-skill.json", "LICENSE", "SKILL.md", "scripts"])
+        self.assertEqual((skill / "scripts" / "check.py").read_text(encoding="utf-8"), "print('ok')\n")
 
     def test_install_unknown_name(self):
         code, _, err = self.oah("install", "nope")

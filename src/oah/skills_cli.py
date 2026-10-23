@@ -48,7 +48,8 @@ def register(commands: argparse._SubParsersAction) -> None:
 
     install = sub.add_parser("install", help="copy a bundled skill into skill folders, or run a linked installer")
     install.add_argument("names", nargs="*", metavar="name")
-    install.add_argument("--all", action="store_true", help="every bundled item (linked items must be named)")
+    install.add_argument("--all", action="store_true",
+                         help="every default bundled item (opt-in and linked items must be named)")
     install.add_argument("--target", choices=("claude", "codex", "both"), default="both")
     level = install.add_mutually_exclusive_group()
     level.add_argument("--global", "--user", dest="level", action="store_const", const="user",
@@ -181,7 +182,7 @@ def _install(args: argparse.Namespace) -> int:
     catalog = load_catalog()
     if args.all and args.names:
         raise Refused("OAH_SKILLS_USAGE", "give names or --all, not both")
-    names = [entry.name for entry in catalog.bundled] if args.all else list(args.names)
+    names = [entry.name for entry in catalog.bundled if entry.default] if args.all else list(args.names)
     if not names:
         raise Refused("OAH_SKILLS_USAGE", "name a skill to install, or use --all; oah skills list shows them")
     plan = plan_install(names, catalog=catalog, source_dirs=[cache_dir(state), kit_skills_dir()], target=args.target,

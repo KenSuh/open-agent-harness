@@ -156,7 +156,7 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, source_dirs: Sequenc
 def fetch_item(entry: Bundled, scratch: pathlib.Path, *, today: dt.date) -> pathlib.Path:
     """Stage a bundled item from its upstream at the pinned commit (for installs without skills/)."""
     tree = fetch(entry.repository, entry.commit, scratch / "fetch",
-                 paths=tuple(p for p in (entry.subpath, entry.license_path, *entry.notice_paths) if p))
+                 paths=entry.fetch_paths())
     stage_item(entry, tree, scratch / "item", fetched=today)
     return scratch / "item"
 
@@ -175,6 +175,11 @@ def build_copy(item_dir: pathlib.Path, entry: Bundled, relative: str, record: Up
         target = out / name.rsplit("/", 1)[-1]
         if not target.exists():
             shutil.copyfile(item_dir.joinpath(*name.split("/")), target)
+    for folder in entry.support.get(relative, ()):
+        # Upstream's own copy install puts these runtime folders inside the skill; files stay unchanged.
+        target = out / folder.rsplit("/", 1)[-1]
+        if not target.exists():
+            copy_tree(item_dir.joinpath(*folder.split("/")), target)
     prefix = "" if relative == "." else relative + "/"
     executables = sorted(e[len(prefix):] for e in record.executables if e.startswith(prefix))
     upstream_path = "/".join(p for p in (record.subpath, "" if relative == "." else relative) if p)
