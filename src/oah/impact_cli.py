@@ -63,10 +63,13 @@ def _action(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int
     action = args.targets[0]
     if action == "status":
         info, reason = mapstore.status(root, settings=settings)
+        warnings = info.warnings() if info else []
+        for warning in warnings:
+            print(warning, file=sys.stderr)
         if args.json:
             print(json.dumps({"state": "missing" if info is None and reason == "missing" else
                               (reason if info is None else info.action), "reason": reason,
-                              "map": info.to_json() if info else None}, indent=2))
+                              "map": info.to_json() if info else None, "warnings": warnings}, indent=2))
         elif info is None:
             print(f"map: {reason}; run oah impact build")
         elif info.action == "stale":
@@ -75,6 +78,8 @@ def _action(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int
             print(f"map: fresh {_identity(info)}")
         return EXIT_OK
     info = mapstore.build(root, settings=settings) if action == "build" else mapstore.ensure_fresh(root, settings=settings)
+    for warning in info.warnings():
+        print(warning, file=sys.stderr)
     if args.json:
         print(json.dumps(info.to_json(), indent=2))
     elif info.action == "built":
@@ -154,7 +159,9 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     else:
         info, data = mapstore.fresh_map(root, refresh=not args.no_refresh, settings=settings)
     targets: list[str] = []
-    warnings: list[str] = []
+    warnings: list[str] = info.warnings()
+    for warning in warnings:
+        print(warning, file=sys.stderr)
 
     def add(items: list[str]) -> None:
         targets.extend(item for item in items if item not in targets)
@@ -175,7 +182,7 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
     identity = query.db_identity(data, info.commit, shown)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []
-    for warning in warnings:
+    for warning in warnings[len(info.warnings()):]:
         print(warning, file=sys.stderr)
     if args.json:
         report = {"targets": targets, "map": info.to_json(), "rerank": rerank, "gates": gate_status,

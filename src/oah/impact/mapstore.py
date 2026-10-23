@@ -28,7 +28,7 @@ import os
 import pathlib
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 import oah
@@ -49,7 +49,8 @@ BUILD_ATTEMPTS = 3
 # Most specific first: an untracked config file is also a working-tree input, but "config changed" says more.
 MANIFEST_ORDER = (("worktree", "worktree changed"), ("head", "HEAD moved"), ("index", "index changed"),
                   ("ledgers", "ledgers changed"), ("config", "config changed"), ("dirty", "working tree changed"),
-                  ("untracked", "working tree changed"), ("tool", "tool changed"))
+                  ("untracked", "working tree changed"), ("excluded_paths", "excluded inputs changed"),
+                  ("tool", "tool changed"))
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,28 @@ class MapInfo:
     changed: int = 0
     reason: str = ""
     manifest_digest: str = ""
+    # Not a constructor parameter: keep the public MapInfo signature compatible.
+    excluded_paths: tuple[str, ...] = field(default=(), init=False)
+
+    def warnings(self) -> list[str]:
+        return coverage_warnings(self.excluded_paths)
 
     def to_json(self) -> dict:
         return {"commit": self.commit, "manifest": self.manifest_digest, "tool": self.tool_digest,
-                "result": self.result_digest, "action": self.action, "changed": self.changed, "reason": self.reason}
+                "result": self.result_digest, "action": self.action, "changed": self.changed, "reason": self.reason,
+                "excluded_paths": list(self.excluded_paths), "warnings": self.warnings()}
+
+
+def coverage_warnings(paths: Iterable[str]) -> list[str]:
+    excluded = sorted(set(paths))
+    return (["OAH_IMPACT_INCOMPLETE: incomplete coverage; excluded symlink inputs: " +
+             ", ".join(excluded) + "; replace these symlinks with regular repository files and run oah impact refresh"]
+            if excluded else [])
+
+
+def _coverage(info: MapInfo, paths: Iterable[str]) -> MapInfo:
+    object.__setattr__(info, "excluded_paths", tuple(sorted(set(paths))))
+    return info
 
 
 def canonical(data: object) -> str:
@@ -118,13 +137,20 @@ def _head(root: pathlib.Path, timeout: float) -> str:
 
 def list_files(root: pathlib.Path, rev: str, settings: Mapping[str, object]) -> dict[str, str]:
     """Tracked blobs at rev with their kinds (submodules are skipped)."""
+    return _tree_files(root, rev, settings)[0]
+
+
+def _tree_files(root: pathlib.Path, rev: str, settings: Mapping[str, object]) -> tuple[dict[str, str], list[str]]:
     output = _git(root, "ls-tree", "-r", "-z", "--full-tree", rev, timeout=settings["git_timeout"])
-    files = {}
+    files, excluded = {}, []
     for entry in output.split("\0"):
         meta, _, path = entry.partition("\t")
-        if path and meta.split(" ")[1:2] == ["blob"] and not meta.startswith("120000 "):
-            files[path] = kinds_module.classify(path, settings["kinds"])
-    return files
+        if path and meta.split(" ")[1:2] == ["blob"]:
+            if meta.startswith("120000 "):
+                excluded.append(path)
+            else:
+                files[path] = kinds_module.classify(path, settings["kinds"])
+    return files, sorted(excluded)
 
 
 def read_blobs(root: pathlib.Path, rev: str, paths: list[str], timeout: float) -> dict[str, str]:
@@ -223,10 +249,18 @@ def _status(root: pathlib.Path, timeout: float) -> tuple[set[str], set[str]]:
 def _ledgers(root: pathlib.Path, settings: Mapping[str, object]) -> dict[str, str]:
     found = {}
     for pattern in settings["ledger_globs"]:
-        for path in root.glob(pattern):
-            key = _file_key(path) if path.is_file() else None
+        # pathlib's literal final-component selector omits dangling symlinks. Force a directory
+        # listing for that component, then apply the original pattern to its entries.
+        terminal = pathlib.PurePosixPath(pattern).name
+        listing = pattern + "*" if not any(char in terminal for char in "*?[") else pattern
+        for path in root.glob(listing):
+            relative = path.relative_to(root).as_posix()
+            if not kinds_module.glob_match(pattern, relative):
+                continue
+            key = ("excluded-symlink" if not _safe_worktree_path(root, relative) else
+                   _file_key(path)) if path.is_symlink() or path.is_file() else None
             if key:
-                found[path.relative_to(root).as_posix()] = key
+                found[relative] = key
     return dict(sorted(found.items()))
 
 
@@ -270,9 +304,11 @@ def take_manifest(root: pathlib.Path, settings: Mapping[str, object],
         if key:
             untracked[path] = inputs[path] = key
     config = _file_key(root.joinpath(*CONFIG_RELATIVE_PATH.parts))
+    ledgers = _ledgers(root, settings)
+    excluded = sorted(path for path in set(inputs) | set(ledgers) if not _safe_worktree_path(root, path))
     manifest = {"worktree": hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest(), "head": head,
                 "index": hashlib.sha256(listing.encode("utf-8", "surrogateescape")).hexdigest(),
-                "dirty": dirty, "untracked": untracked, "ledgers": _ledgers(root, settings),
+                "dirty": dirty, "untracked": untracked, "ledgers": ledgers, "excluded_paths": excluded,
                 "config": config, "tool": tool_digest(settings)}
     return manifest, {path: key for path, key in sorted(inputs.items()) if _safe_worktree_path(root, path)}
 
@@ -393,10 +429,14 @@ def build_data(root: pathlib.Path, rev: str | None, settings: Mapping[str, objec
                inputs: Mapping[str, str] | None = None, head: str | None = None) -> dict:
     """The map's data: at commit rev, or (rev None) over the working tree's inputs with history from head."""
     timeout, minimum = settings["git_timeout"], settings["min_needle"]
-    files = list_files(root, rev, settings) if rev is not None else _classified(inputs or {}, settings)
+    if rev is not None:
+        files, excluded = _tree_files(root, rev, settings)
+    else:
+        files, excluded = _classified(inputs or {}, settings), []
     graph = _db_graph(root, rev, files, settings)
     return _finish({
         "files": files,
+        "excluded_paths": excluded,
         "hits": scan_lexical(root, rev, needle_set(files, minimum), files, None, timeout),
         "db": graph,
         "db_hits": scan_db(root, rev, db_names(graph, minimum), files, None, timeout),
@@ -484,8 +524,8 @@ def _judge(path: pathlib.Path, manifest: Mapping) -> tuple[dict | None, str, boo
 
 
 def _info(stored: Mapping, path: pathlib.Path, action: str, changed: int = 0, reason: str = "") -> MapInfo:
-    return MapInfo(stored["manifest"]["head"], stored["tool"], stored["result"], path, action, changed, reason,
-                   stored["manifest_digest"])
+    return _coverage(MapInfo(stored["manifest"]["head"], stored["tool"], stored["result"], path, action, changed, reason,
+                             stored["manifest_digest"]), stored["data"].get("excluded_paths", []))
 
 
 def status(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
@@ -530,6 +570,7 @@ def _update(top: pathlib.Path, path: pathlib.Path, settings: Mapping[str, object
             else:
                 data = build_data(top, None, current, inputs=inputs, head=manifest["head"])
                 changed, action = len(data["files"]), "built"
+            data["excluded_paths"] = manifest["excluded_paths"]
             if take_manifest(top, current, _state(path))[0] == manifest:
                 return _info(_write(path, manifest, inputs, data), path, action, changed, reason or "forced"), data
     raise ImpactError("OAH_IMPACT_STALE", f"files kept changing while the impact map was built "
@@ -572,8 +613,9 @@ def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | N
     settings = configured(top, settings)
     sha = resolve_rev(top, rev)
     data = build_data(top, sha, settings)
-    return MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"]),
-                   manifest_digest=digest({"head": sha, "tool": tool_digest(settings)})), data
+    info = MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"]),
+                   manifest_digest=digest({"head": sha, "tool": tool_digest(settings)}))
+    return _coverage(info, data["excluded_paths"]), data
 
 
 def run_hook(name: str) -> int:
@@ -591,4 +633,6 @@ def run_hook(name: str) -> int:
               "Run oah impact refresh to retry.", file=sys.stderr)
         return 69
     print(f"oah {name}: map {info.action} at {info.commit[:12]} ({info.changed} changed files)")
+    for warning in info.warnings():
+        print(warning, file=sys.stderr)
     return 0

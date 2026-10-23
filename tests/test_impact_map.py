@@ -67,7 +67,7 @@ class MapStoreTest(unittest.TestCase):
         self.assertTrue(info.path.is_relative_to(self.repo / ".git" / "oah" / "impact"))
         manifest = stored["manifest"]
         self.assertEqual(set(manifest), {"worktree", "head", "index", "dirty", "untracked", "ledgers", "config",
-                                         "tool"})
+                                         "tool", "excluded_paths"})
         self.assertEqual((manifest["head"], manifest["tool"], manifest["config"]), (info.commit, info.tool_digest, None))
         self.assertEqual(stored["manifest_digest"], canonical_digest(manifest))
         self.assertEqual(info.manifest_digest, stored["manifest_digest"])
@@ -300,6 +300,73 @@ class MapStoreTest(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"symlinks unavailable: {exc}")
         self.assertEqual(mapstore.read_worktree(self.repo, ["external/001.sql"]), {})
+
+    def test_symlink_exclusions_warn_in_maps_and_cli(self):
+        outside = make_tmp_dir(self)
+        (outside / "migration.sql").write_text("CREATE TABLE hidden (id int);\n", encoding="utf-8")
+        (outside / "ci.yml").write_text("run: python tools/check.py\n", encoding="utf-8")
+        paths = ["linked.sql", ".github/workflows/linked.yml"]
+        try:
+            for path, target in zip(paths, ("migration.sql", "ci.yml")):
+                (self.repo / path).symlink_to(outside / target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        git_commit(self.repo, {})
+        for ref in ((), ("--ref", "HEAD")):
+            with self.subTest(ref=ref):
+                result = run_impact(self.repo, "tools/check.py", "--json", *ref)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["map"]["excluded_paths"], sorted(paths))
+                self.assertTrue(any("OAH_IMPACT_INCOMPLETE" in warning and
+                                    all(path in warning for path in paths) for warning in report["warnings"]))
+                result = run_impact(self.repo, "tools/check.py", *ref)
+                self.assertIn("OAH_IMPACT_INCOMPLETE", result.stderr)
+                for path in paths:
+                    self.assertIn(path, result.stderr)
+        info = ensure_fresh(self.repo)
+        self.assertEqual(mapstore.load(info.path)["data"]["excluded_paths"], sorted(paths))
+        for action in ("build", "refresh", "status"):
+            with self.subTest(action=action):
+                report = json.loads(run_impact(self.repo, action, "--json").stdout)
+                self.assertTrue(report["warnings"])
+                self.assertIn("OAH_IMPACT_INCOMPLETE", run_impact(self.repo, action).stderr)
+        (self.repo / paths[0]).unlink()
+        (self.repo / paths[0]).write_text("CREATE TABLE visible (id int);\n", encoding="utf-8")
+        updated = ensure_fresh(self.repo)
+        self.assertEqual(mapstore.load(updated.path)["data"]["excluded_paths"], [paths[1]])
+        self.assertEqual(updated.result_digest, self.full_build_elsewhere().result_digest)
+
+    @unittest.skipUnless(os.name == "nt", "Windows symlink coverage warnings")
+    def test_windows_symlink_exclusions_warn(self):
+        self.test_symlink_exclusions_warn_in_maps_and_cli()
+
+    def test_ignored_broken_ledger_symlink_is_reported(self):
+        git_commit(self.repo, {".gitignore": ".oah/tasks/\n"})
+        ledger = self.repo / ".oah/tasks/T/GATES.md"
+        ledger.parent.mkdir(parents=True)
+        try:
+            ledger.symlink_to(make_tmp_dir(self) / "missing.md")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        info = ensure_fresh(self.repo)
+        self.assertEqual(info.to_json()["excluded_paths"], [".oah/tasks/T/GATES.md"])
+
+    def test_snapshot_exclusions_use_commit_modes(self):
+        # Portable even when the OS refuses symlink creation: commit a real git symlink blob.
+        blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                              input="outside.sql", check=True, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "update-index", "--add", "--cacheinfo",
+                        f"120000,{blob},linked.sql"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m",
+                        "symlink input"], check=True, env=git_env())
+        (self.repo / "linked.sql").write_text("CREATE TABLE current_only (id int);\n", encoding="utf-8")
+        info, data = mapstore.snapshot(self.repo, "HEAD")
+        self.assertEqual(data["excluded_paths"], ["linked.sql"])
+        self.assertEqual(info.to_json()["excluded_paths"], ["linked.sql"])
+        self.assertNotIn("linked.sql", data["files"])
+        report = json.loads(run_impact(self.repo, "tools/check.py", "--ref", "HEAD", "--json").stdout)
+        self.assertTrue(any("linked.sql" in warning for warning in report["warnings"]))
 
     @unittest.skipUnless(os.name == "nt", "Windows symlink handling")
     def test_windows_sql_symlink_is_not_read(self):

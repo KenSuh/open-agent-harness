@@ -144,6 +144,103 @@ class ExtractTest(unittest.TestCase):
         graph = sqlplugin.extract({"quoted.sql": 'DROP TABLE "first table", "second table";\n'})
         self.assertEqual(set(graph["entities"]), {"db_table:first table", "db_table:second table"})
 
+    def test_long_quoted_identifier_lists_and_whitespace(self):
+        names = [f'table {number}' for number in range(80)]
+        for gap in (" ", " " * 20000):
+            with self.subTest(gap=len(gap)):
+                text = "DROP TABLE" + gap + ("," + gap).join(f'"{name}"' for name in names) + ";"
+                graph = sqlplugin.extract({"quoted.sql": text})
+                self.assertEqual(set(graph["entities"]), {"db_table:" + name for name in names})
+
+    def test_postgres_hash_operators_preserve_view_sources(self):
+        for expression in ("data #> '{key}'", "data #>> '{key}'", "bits # 7", "bits#7"):
+            with self.subTest(expression=expression):
+                graph = sqlplugin.extract({"operators.sql": "CREATE TABLE users (data jsonb, bits int);\n"
+                    f"CREATE VIEW v AS SELECT {expression} AS foo FROM users;\n"})
+                self.assertIn(("db_table:v", "db_table:users", "view-source"), self.links(graph))
+
+    def test_grant_quoted_semicolons(self):
+        for quote in ('"', '`', '['):
+            close = ']' if quote == '[' else quote
+            with self.subTest(quote=quote):
+                graph = sqlplugin.extract({"grant.sql":
+                    f'GRANT SELECT ON {quote}a; b{close} TO app;\n'})
+                self.assertEqual(self.links(graph), {("db_grant:app", "db_table:a; b", "grant:SELECT")})
+
+    def test_grant_long_whitespace_without_on_is_bounded(self):
+        self.bounded_extract("GRANT app TO bob" + " " * 200000 + ";\n")
+
+    def bounded_extract(self, hostile: str):
+        # A child process enforces a generous deadline even if extraction never returns.
+        code = ("import json, sys\nfrom oah.impact import sqlplugin\n"
+                "graph = sqlplugin.extract({'hostile.sql': sys.stdin.read()})\n"
+                "assert ['db_grant:app', 'db_table:users', 'grant:SELECT', 'hostile.sql', 2] "
+                "in graph['links'], graph\n")
+        result = subprocess.run([sys.executable, "-c", code], input=hostile +
+                                'GRANT SELECT ON users TO app;\n', capture_output=True, text=True,
+                                encoding="utf-8", env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_tokenizer_hostile_inputs_are_bounded(self):
+        for hostile in ('GRANT x ' * 100000 + ';\n',
+                        'GRANT EXECUTE ON FUNCTION f(' + '(' * 50000 + ')' * 50000 + ') TO bob;\n',
+                        'SELECT ' + '(' * 50000 + ')' * 50000 + ';\n'):
+            with self.subTest(prefix=hostile[:30]):
+                self.bounded_extract(hostile)
+        code = ("import sys\nfrom oah.impact import sqlplugin\n"
+                "assert sqlplugin.extract({'bad.sql': sys.stdin.read()})['entities'] == {}\n")
+        for quote in ("'", '"', '`', '$tag$'):
+            with self.subTest(quote=quote):
+                result = subprocess.run([sys.executable, "-c", code],
+                    input='SELECT ' + quote + 'x; CREATE TABLE ghost (id int); ' * 20000,
+                    capture_output=True, text=True, encoding="utf-8",
+                    env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_tokenizer_quotes_comments_and_boundaries(self):
+        text = ("# CREATE TABLE ghost_hash (id int);\n"
+                "CREATE TABLE users (body text DEFAULT 'it''s; CREATE TABLE ghost_single (id int);');\n"
+                'CREATE TABLE "a""; b" (id int);\n'
+                'CREATE TABLE `c``; d` (id int);\n'
+                "SELECT $tag$ CREATE TABLE ghost_dollar (id int); $tag$;\n"
+                "/* outer; /* nested; */ CREATE TABLE ghost_comment (id int); */\n"
+                "GRANT SELECT /* ; ON ghost TO bad */ ON users TO app;\n")
+        graph = sqlplugin.extract({"quotes.sql": text})
+        self.assertEqual(set(graph["entities"]),
+                         {'db_table:users', 'db_table:a"; b', 'db_table:c`; d', 'db_grant:app'})
+        self.assertEqual(graph["links"],
+                         [["db_grant:app", "db_table:users", "grant:SELECT", "quotes.sql", 7]])
+
+    def test_double_identifier_backslash_and_multiline_hash_comment(self):
+        graph = sqlplugin.extract({"quotes.sql":
+            'CREATE TABLE "trailing\\" (id int);\n'
+            'SELECT 1\n# CREATE TABLE ghost (id int);\n;\n'})
+        self.assertEqual(set(graph["entities"]), {'db_table:trailing\\'})
+
+    def test_custom_delimiter_with_long_common_prefix_is_bounded(self):
+        code = ("import sys\nfrom oah.impact import sqlplugin\n"
+                "graph = sqlplugin.extract({'delimiter.sql': sys.stdin.read()})\n"
+                "assert 'db_table:users' in graph['entities'], graph\n")
+        delimiter = "a" * 30000 + "b"
+        text = "DELIMITER " + delimiter + "\nSELECT " + "a" * 300000 + delimiter + \
+               "\nCREATE TABLE users (id int)" + delimiter + "\n"
+        result = subprocess.run([sys.executable, "-c", code], input=text, capture_output=True,
+                                text=True, encoding="utf-8", env=dict(os.environ, PYTHONPATH=SRC), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_transaction_boundaries_do_not_hide_entities(self):
+        graph = sqlplugin.extract({"transaction.sql":
+            'BEGIN TRANSACTION;\nCREATE TABLE "users" (id int);\n'
+            'CREATE VIEW v AS SELECT * FROM users;\nCOMMIT;\n'})
+        self.assertEqual(set(graph["entities"]), {"db_table:users", "db_table:v"})
+        self.assertEqual(graph["entities"]["db_table:users"]["events"], [["transaction.sql", 2, "create"]])
+        self.assertIn(("db_table:v", "db_table:users", "view-source"), self.links(graph))
+
+    def test_grant_column_privileges_keep_original_spelling(self):
+        graph = sqlplugin.extract({"grant.sql": 'GRANT SELECT ("odd name"), UPDATE(id) ON users TO app;'})
+        self.assertEqual(self.links(graph), {
+            ("db_grant:app", "db_table:users", 'grant:SELECT ("ODD NAME"),UPDATE(ID)')})
+
     def test_rename_and_drop_events(self):
         graph = sqlplugin.extract(load("postgres"))
         orders = [op for _file, _line, op in graph["entities"]["db_table:orders"]["events"]]
