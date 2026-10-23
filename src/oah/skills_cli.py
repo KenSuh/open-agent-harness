@@ -188,7 +188,8 @@ def _leased_publication(state: pathlib.Path, lease: Lease) -> Iterator[None]:
     with StateLock(Store(state).lock_path):
         if not any(current.id == lease.id and current.scope == lease.scope and current.worktree == lease.worktree
                    for current, stale in Store(state).snapshot() if not stale):
-            raise Refused("OAH_SKILLS_LEASE_REQUIRED", "the kit update lease expired or changed; retry --vendored")
+            raise Refused("OAH_SKILLS_LEASE_REQUIRED", "the skill publication lease expired or changed; "
+                                                     "rerun the skills command")
         yield
 
 
@@ -218,10 +219,12 @@ def _install(args: argparse.Namespace) -> int:
         _confirm("This writes outside the project (user-level skill folders or a linked installer).", args)
     now = dt.datetime.now(dt.timezone.utc)
     if plan.copies and args.level == "project":
-        with own_lease(info, state, _engines(args.target), "oah skills install"):
-            done = apply_install(plan, catalog=catalog, now=now)
+        with own_lease(info, state, _engines(args.target), "oah skills install") as lease:
+            done = apply_install(plan, catalog=catalog, now=now,
+                                 guard=lambda: _leased_publication(state, lease))
     else:
-        done = apply_install(plan, catalog=catalog, now=now)
+        done = apply_install(plan, catalog=catalog, now=now,
+                             guard=lambda: StateLock(Store(state).lock_path))
     for path in done:
         print(f"OAH_SKILL_INSTALLED {path}")
     for entry in plan.linked:
@@ -262,7 +265,7 @@ def _update(args: argparse.Namespace) -> int:
         if outcome in ("not-due", "disabled", "busy"):
             print(f"OAH_SKILLS_AUTO_UPDATE {outcome}")
         return _exit_code(results) if outcome == "ran" else EXIT_OK
-    common = dict(catalog=catalog, check_only=args.check, settings=settings, now=now, gitleaks=gitleaks)
+    common = dict(catalog=catalog, check_only=args.check, settings=settings, now=now, gitleaks=gitleaks, home=home)
     if args.vendored:
         kit = kit_skills_dir()
         catalog_path = info.root / "src" / "oah" / "templates" / "toolkit" / "upstreams.json"
@@ -295,8 +298,9 @@ def _update(args: argparse.Namespace) -> int:
         if args.check:
             return _print(run_update(destinations=destinations, **common))
         if args.project:
-            with own_lease(info, state, ("claude", "codex"), "oah skills update --project"):
-                results = run_update(destinations=destinations, **common)
+            with own_lease(info, state, ("claude", "codex"), "oah skills update --project") as lease:
+                results = run_update(destinations=destinations,
+                                     guard=lambda: _leased_publication(state, lease), **common)
         else:
             _confirm("This updates your user-level skill folders.", args)
             results = run_update(destinations=destinations, guard=lambda: idle_state(state), **common)

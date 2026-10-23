@@ -17,6 +17,7 @@ from unittest import mock
 from oah import skills_cli
 from oah.engines.proc import RunResult
 from oah.lease import Store
+from oah.lockfile import LockTimeout, StateLock
 from oah.paths import repo_info
 from oah.toolkit import read_skill
 from oah.toolkit.catalog import Step
@@ -139,6 +140,42 @@ class ListInstallTest(CliFixture):
         self.assertEqual(code, 1)
         self.assertIn("OAH_LEASE_CONFLICT", err)
         self.assertFalse((self.project / ".claude" / "skills").exists())
+
+    def test_global_install_uses_one_home_publication_lock(self):
+        with mock.patch("oah.toolkit.install.StateLock", side_effect=StateLock) as acquire:
+            code, _, err = self.oah("install", "demo", "--global", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual({call.args[0] for call in acquire.call_args_list},
+                         {self.home / ".oah" / "skills-publish.lock"})
+        for root in (".claude", ".agents"):
+            self.assertEqual([p.name for p in (self.home / root / "skills").iterdir()], ["demo"])
+
+    def test_global_install_lock_timeout_says_how_to_retry(self):
+        lock = self.home / ".oah" / "skills-publish.lock"
+        with StateLock(lock), mock.patch("oah.toolkit.install.StateLock",
+                                        side_effect=lambda path: StateLock(path, timeout=.05, poll=.01)):
+            code, _, err = self.oah("install", "demo", "--global", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("wait", err.lower())
+        self.assertIn("retry", err.lower())
+        self.assertFalse((self.home / ".claude").exists())
+
+    def test_project_install_holds_repository_lock_through_swap_and_rollback(self):
+        import oah.toolkit.install as install
+
+        original = install.swap_in
+
+        def verify_under_lock(new, dest, **kwargs):
+            with self.assertRaises(LockTimeout), StateLock(Store(self.state).lock_path, timeout=.05, poll=.01):
+                self.fail("project publication must hold the repository lock")
+            return original(new, dest, verify=lambda folder: ["load failed; retry the installation"])
+
+        with mock.patch.object(install, "swap_in", verify_under_lock):
+            code, _, err = self.oah("install", "demo", "--target", "claude")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_SKILLS_VERIFY_FAILED", err)
+        self.assertFalse((self.project / ".claude" / "skills" / "demo").exists())
+        self.assertFalse((self.home / ".oah").exists())
 
     def test_install_refuses_foreign_folder(self):
         foreign = self.project / ".claude" / "skills" / "demo"
@@ -347,6 +384,64 @@ class UpdateCommandTest(CliFixture):
         code, out, _ = self.oah("update", "--global", "--yes")
         self.assertEqual(code, 0, out)
         self.assertIn("advanced", out)
+
+    def test_global_update_takes_repository_lock_before_home_lock(self):
+        self.assertEqual(self.oah("install", "demo", "--global", "--target", "claude", "--yes")[0], 0)
+        commit(self.upstream, {"skills/demo/ref.md": "new candidate\n"})
+        held = []
+
+        @contextlib.contextmanager
+        def state_lock(path, **kwargs):
+            self.assertEqual(held, [], "never wait for the state lock while holding the publication lock")
+            with StateLock(path, **kwargs):
+                self.assertEqual(path, Store(self.state).lock_path)
+                held.append("state")
+                try:
+                    yield
+                finally:
+                    held.pop()
+
+        @contextlib.contextmanager
+        def home_lock(path):
+            self.assertEqual(held, ["state"])
+            self.assertEqual(path, self.home / ".oah" / "skills-publish.lock")
+            with StateLock(path):
+                held.append("publication")
+                try:
+                    yield
+                finally:
+                    held.pop()
+
+        with mock.patch("oah.toolkit.update.StateLock", state_lock), \
+                mock.patch("oah.toolkit.install.StateLock", home_lock):
+            code, out, err = self.oah("update", "--global", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertIn("advanced", out)
+        self.assertEqual(held, [])
+
+    def test_global_update_holds_both_locks_during_rollback(self):
+        self.assertEqual(self.oah("install", "demo", "--global", "--target", "claude", "--yes")[0], 0)
+        folder = self.home / ".claude" / "skills" / "demo"
+        before = {p.name: p.read_bytes() for p in folder.iterdir()}
+        commit(self.upstream, {"skills/demo/ref.md": "new candidate\n"})
+        original = pathlib.Path.rename
+        restored = []
+
+        def rename(path, target):
+            if path.name.startswith(".demo.oah-old-"):
+                for lock in (Store(self.state).lock_path, self.home / ".oah" / "skills-publish.lock"):
+                    with self.assertRaises(LockTimeout), StateLock(lock, timeout=.05, poll=.01):
+                        self.fail("rollback must retain both publication locks")
+                restored.append(path)
+            return original(path, target)
+
+        with mock.patch("oah.toolkit.install.shutil.move", side_effect=OSError("simulated move failure")), \
+                mock.patch.object(pathlib.Path, "rename", rename):
+            code, out, err = self.oah("update", "--global", "--yes")
+        self.assertEqual(code, 1, err)
+        self.assertIn("rolled-back", out)
+        self.assertEqual(len(restored), 1)
+        self.assertEqual({p.name: p.read_bytes() for p in folder.iterdir()}, before)
 
     def test_mutating_command_runs_the_due_check(self):
         self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)

@@ -18,15 +18,13 @@ import os
 import pathlib
 import secrets
 import shutil
-import stat
 import subprocess
 import tempfile
-import unicodedata
 from dataclasses import dataclass
-from typing import Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Callable, ContextManager, Iterable, Iterator, Mapping, Sequence
 
 from oah.engines.proc import UnsupportedBatchShim, resolve_command
-from oah.lockfile import StateLock
+from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import (Bundled, Catalog, CatalogError, Linked, Upstream, item_skill_dirs, read_upstream,
                                  skill_name)
 from oah.toolkit.fetch import copy_tree, fetch, read_json_file, stage_item, write_marker
@@ -76,6 +74,7 @@ class InstallPlan:
     copies: tuple[Copy, ...]
     linked: tuple[Linked, ...]
     sources: Mapping[str, pathlib.Path | None]   # item -> folder to copy from; None: fetch the pin
+    publication_home: pathlib.Path | None = None   # user-level writes share this home's publication lock
 
     @property
     def conflicts(self) -> tuple[Copy, ...]:
@@ -162,7 +161,8 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, source_dirs: Sequenc
                 seen[dest] = entry.name
                 copies.append(Copy(entry.name, relative, installed, engine, dest, action,
                                    not _inside(folder, project_root), reason))
-    return InstallPlan(tuple(copies), tuple(linked), sources)
+    publication_home = pathlib.Path(home) if level != "project" or any(c.outside_project for c in copies) else None
+    return InstallPlan(tuple(copies), tuple(linked), sources, publication_home)
 
 
 def fetch_item(entry: Bundled, scratch: pathlib.Path, *, today: dt.date) -> pathlib.Path:
@@ -215,35 +215,19 @@ def installed_executables(entry: Bundled, relative: str, record: Upstream) -> li
 
 
 @contextlib.contextmanager
-def destination_locks(paths: Iterable[pathlib.Path]) -> Iterator[None]:
-    """Lock destination slots beside their entries, for every install/update writer.
+def publication_lock(home: pathlib.Path) -> Iterator[None]:
+    """Serialize this user's global skill publications, independent of destination aliases.
 
-    Resolve only the parent: the destination may be a link or absent during replacement.
-    Adjacent lock files are shared even when clients see different mount paths or device IDs.
-    Folding names also serializes case/Unicode aliases (and may conservatively serialize
-    distinct names on case-sensitive volumes). Keep lock files after releasing them.
-    Deduplicate and order acquisitions by the opened files' identities, not path spelling.
+    Acquire any repository state lock first; never acquire another lock while this is held.
+    Keep the lock file after release so every process opens the same file.
     """
-    locks: dict[tuple[int, int], pathlib.Path] = {}
-    for path in paths:
-        parent = path.parent.resolve()
-        parent.mkdir(parents=True, exist_ok=True)
-        if not stat.S_ISDIR(parent.lstat().st_mode):
-            raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
-                               f"{parent} is not a real directory; restore the parent folder and retry")
-        name = unicodedata.normalize("NFD", path.name).casefold()
-        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-        lock = parent / f".oah-publish-{digest}.lock"
-        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            info = os.fstat(fd)
-            locks.setdefault((info.st_dev, info.st_ino), lock)
-        finally:
-            os.close(fd)
-    with contextlib.ExitStack() as stack:
-        for identity in sorted(locks):
-            stack.enter_context(StateLock(locks[identity]))
-        yield
+    try:
+        with StateLock(pathlib.Path(home) / ".oah" / "skills-publish.lock"):
+            yield
+    except LockTimeout as exc:
+        raise InstallError("OAH_SKILLS_PUBLISH_BUSY",
+                           "another global skill install or update is publishing; wait for it to finish, "
+                           "then retry the oah skills command") from exc
 
 
 def _identity(path: pathlib.Path) -> tuple:
@@ -283,34 +267,47 @@ def swap_in(new: pathlib.Path, dest: pathlib.Path, *, verify: Callable[[pathlib.
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime) -> list[pathlib.Path]:
-    """Copy every planned skill. Refuses the whole plan when any copy conflicts."""
+def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime,
+                  guard: Callable[[], ContextManager[None]] = contextlib.nullcontext) -> list[pathlib.Path]:
+    """Copy every planned skill. Refuses the whole plan when any copy conflicts.
+
+    guard holds the repository state lock for preparation snapshots and publication.
+    User-level plans additionally take the home's publication lock, always after guard.
+    """
     if plan.conflicts:
         raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
                            "; ".join(f"{c.dest}: {c.reason}" for c in plan.conflicts))
     done: list[pathlib.Path] = []
     stamp = now.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def user_lock() -> ContextManager[None]:
+        return publication_lock(plan.publication_home) if plan.publication_home is not None else contextlib.nullcontext()
+
     with tempfile.TemporaryDirectory(prefix="oah-skills-") as scratch_text:
         scratch = pathlib.Path(scratch_text)
-        items: dict[str, tuple[pathlib.Path, Upstream]] = {}
+        items: dict[str, tuple[pathlib.Path, Upstream, tuple | None]] = {}
         for copy in plan.copies:
             if copy.action == "keep":
                 continue
             entry = catalog.find(copy.item)
             assert isinstance(entry, Bundled)
-            with destination_locks([copy.dest]):
+            source = plan.sources.get(copy.item)
+            with guard(), user_lock():
                 identity = _identity(copy.dest)
+                source_identity = (items[copy.item][2] if copy.item in items
+                                   else _identity(source) if source is not None else None)
             if copy.item not in items:
                 item_dir = plan.sources.get(copy.item) or fetch_item(entry, scratch / copy.item, today=now.date())
-                items[copy.item] = (item_dir, read_upstream(item_dir))
-            item_dir, record = items[copy.item]
+                items[copy.item] = (item_dir, read_upstream(item_dir), source_identity)
+            item_dir, record, _ = items[copy.item]
             staged = scratch / "copies" / f"{copy.engine}-{copy.item}-{copy.name}"
             staged.parent.mkdir(parents=True, exist_ok=True)
             build_copy(item_dir, entry, copy.skill, record, staged, installed_at=stamp)
-            with destination_locks([copy.dest]):
-                if _identity(copy.dest) != identity:
+            with guard(), user_lock():
+                if (_identity(copy.dest) != identity
+                        or source is not None and _identity(source) != source_identity):
                     raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
-                                       f"{copy.dest} changed during preparation; run oah skills install again")
+                                       f"{copy.dest} or its source changed during preparation; run oah skills install again")
                 action, reason = _classify(copy.dest, copy.item, project=not copy.outside_project, commit=record.commit)
                 if action == "conflict":
                     raise InstallError("OAH_SKILLS_INSTALL_CONFLICT", reason)

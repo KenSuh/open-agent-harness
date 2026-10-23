@@ -47,12 +47,14 @@ For the same skill name, `oah` uses the first copy it finds:
   `oah skills update --project`, which takes its own lease on those folders.
   Reinstalling preserves existing pins; if the cache has advanced, run `oah skills update --project`.
 - **Global copies change only with `--global`** and your confirmation, never on a schedule.
-- **Installs and updates share destination locks**, including project and global copies. A persistent
-  `.oah-publish-<digest>.lock` lives in each destination's real parent folder; the digest uses only the
-  normalized, case-folded destination name. Links, rename gaps, mount aliases and client-local device
-  IDs cannot change which shared lock file writers open.
-  The lock covers revalidation through replacement; a changed destination refuses the install or
-  defers the update. Run the command again to prepare against the current copy.
+- **One user's global skill installs and updates run one at a time.** They share the persistent
+  `~/.oah/skills-publish.lock` across repositories and destination aliases. They acquire it for
+  preparation-input snapshots and hold it from revalidation through replacement and any rollback;
+  preparation itself runs unlocked.
+  Project and kit-cache writes use the repository state lock; commands needing both take that lock
+  first. Two OS accounts sharing one skill folder are not coordinated; run their commands separately.
+  A changed input refuses the install or defers the update; run the command again against the current
+  copy. If the publication lock times out, wait for the other command to finish, then retry.
 - **Fetches use an allowlisted environment and a temporary home.** Proxy URLs with embedded user
   information are refused; configure a proxy without embedded credentials and retry.
 - **Hold an item** with `pins = ["<name>"]` under `[skills]`. unlazy is never updated by this mechanism;

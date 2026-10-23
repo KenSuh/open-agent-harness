@@ -338,7 +338,7 @@ class FetchStageTest(unittest.TestCase):
         work = make_tmp_dir(self)
         tree = fetch(str(upstream), "main", work / "scratch")
         blob = subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD:skills/demo/ref.md"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+                              capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         license_blob = tree.entries("LICENSE")[0][1]
         devices = ("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
                    *(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(10)),
@@ -365,7 +365,8 @@ class FetchStageTest(unittest.TestCase):
                     for name, children in groups.items():
                         rows.append(f"040000 tree {make_tree(children)}\t{name}\0")
                     return subprocess.run(["git", "-C", str(tree.repo), "mktree", "-z", "--missing"],
-                                          input="".join(rows), text=True, capture_output=True, check=True).stdout.strip()
+                                          input="".join(rows), text=True, encoding="utf-8",
+                                          capture_output=True, check=True).stdout.strip()
                 # Copy objects from the fetched repository: the blob is already available there.
                 bad = dataclasses.replace(tree, commit=make_tree(paths, root=True))
                 entry = bundled(upstream, subpath="", skills=(".",))
@@ -373,6 +374,10 @@ class FetchStageTest(unittest.TestCase):
                     stage_item(entry, bad, work / f"item-{index}", fetched=TODAY)
                 write.assert_not_called()
                 self.assertFalse((work / f"item-{index}").exists())
+
+    def test_stage_checks_portable_paths_with_cp1252_process_default(self):
+        with mock.patch("subprocess._text_encoding", return_value="cp1252"):
+            self.test_stage_rejects_portable_path_collisions_and_reserved_names()
 
     @unittest.skipUnless(os.name == "nt", "Windows device names must be refused before filesystem access")
     def test_windows_stage_rejects_reserved_devices(self):

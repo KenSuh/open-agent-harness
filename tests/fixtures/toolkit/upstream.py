@@ -82,7 +82,7 @@ def make_executable(repo: pathlib.Path, path: str) -> str:
 
 def head(repo: pathlib.Path) -> str:
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
-                          text=True).stdout.strip()
+                          text=True, encoding="utf-8").stdout.strip()
 
 
 def bundled(repo: pathlib.Path, *, name: str = "demo", subpath: str = "skills/demo", skills=(".",),

@@ -18,7 +18,7 @@ from oah.lease import Store
 from oah.paths import repo_info
 from oah.toolkit.catalog import Catalog, load_catalog, read_upstream
 from oah.toolkit.fetch import fetch, stage_item
-from oah.toolkit.install import InstallError, apply_install, destination_locks, plan_install, swap_in
+from oah.toolkit.install import InstallError, apply_install, plan_install, swap_in
 from oah.toolkit.update import (DEFAULTS, LeasesActive, active_leases, cache_dir, idle_state,
                                 installed_destinations, read_state, refresh_cache, run_update, scheduled_update,
                                 vendored_destinations)
@@ -57,7 +57,7 @@ class UpdateFixture(unittest.TestCase):
 
     def update(self, check_only=False, destinations=None):
         return run_update(catalog=self.catalog, destinations=destinations or self.destinations(),
-                          check_only=check_only, settings=DEFAULTS, now=NOW, gitleaks=None)
+                          check_only=check_only, settings=DEFAULTS, now=NOW, gitleaks=None, home=self.home)
 
     def assert_rolled_back(self, before: dict[str, bytes], fragment: str):
         results = self.update()
@@ -112,7 +112,7 @@ class UpdateTest(UpdateFixture):
         destinations = installed_destinations(catalog, project_root=self.project, home=self.home, level="project")
         destinations += installed_destinations(catalog, project_root=self.project, home=self.home, level="global")
         results = run_update(catalog=catalog, destinations=destinations, check_only=False, settings=DEFAULTS,
-                             now=NOW, gitleaks=None)
+                             now=NOW, gitleaks=None, home=self.home)
         self.assertEqual([r.status for r in results], ["rolled-back", "rolled-back"])
         self.assertIn("new executable file scripts/new-tool.sh", results[0].reasons)
         self.assertEqual(snapshot(folder), before)
@@ -130,9 +130,7 @@ class UpdateTest(UpdateFixture):
         self.assertEqual(marker["commit"], new)
         self.assertEqual((self.installed / "ref.md").read_text(encoding="utf-8"), "reference\nmore\n")
         self.assertEqual((self.installed / "LICENSE").read_text(encoding="utf-8"), MIT_TEXT)
-        locks = set(self.installed.parent.glob(".oah-publish-*.lock"))
-        self.assertEqual(len(locks), 1)
-        self.assertEqual(set(self.installed.parent.iterdir()), {self.installed, *locks})
+        self.assertEqual(set(self.installed.parent.iterdir()), {self.installed})
 
     def test_check_only_writes_nothing(self):
         commit(self.upstream, {"skills/demo/ref.md": "changed\n"})
@@ -234,94 +232,40 @@ class SwapTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in root.iterdir()), ["dest"])
 
 
-class DestinationLocksTest(unittest.TestCase):
-    def _assert_one_acquisition(self, paths):
+class PublicationLockTest(unittest.TestCase):
+    def test_processes_share_one_home_publication_lock(self):
         from oah.lockfile import StateLock
+        from oah.toolkit.install import publication_lock
 
+        home = make_tmp_dir(self) / "home"
+        self.assertFalse(home.exists())
         with mock.patch("oah.toolkit.install.StateLock",
                         side_effect=lambda path: StateLock(path, timeout=.2, poll=.01)) as acquire:
-            with destination_locks(paths):
-                self.assertEqual(acquire.call_count, 1, "acquire each physical lock only once")
-                lock = acquire.call_args.args[0]
+            with publication_lock(home):
+                self.assertEqual(acquire.call_count, 1)
+                self.assertEqual(acquire.call_args.args[0], home / ".oah" / "skills-publish.lock")
                 script = '''
 import pathlib, sys
-from oah.lockfile import LockTimeout, StateLock
+from oah.lockfile import StateLock
+import oah.toolkit.install as install
+install.StateLock = lambda path: StateLock(path, timeout=.05, poll=.01)
 try:
-    with StateLock(pathlib.Path(sys.argv[1]), timeout=.05, poll=.01):
+    with install.publication_lock(pathlib.Path(sys.argv[1])):
         print("acquired")
-except LockTimeout:
+except install.InstallError:
     print("blocked")
 '''
                 env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
                 def probe():
-                    result = subprocess.run([sys.executable, "-c", script, str(lock)], env=env,
-                                            capture_output=True, text=True, timeout=5)
+                    result = subprocess.run([sys.executable, "-c", script, str(home)], env=env,
+                                            capture_output=True, text=True, encoding="utf-8", timeout=5)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     return result.stdout.strip()
 
                 self.assertEqual(probe(), "blocked")
             self.assertEqual(probe(), "acquired")
-
-    def test_one_acquisition_unifies_case_aliased_skill_roots(self):
-        root = make_tmp_dir(self)
-        shared = root / "shared"
-        shared.mkdir()
-        alias = root / "SHARED"
-        if not alias.exists() or not alias.samefile(shared):
-            self.skipTest("requires a case-insensitive filesystem")
-        claude, codex = root / ".claude" / "skills", root / ".agents" / "skills"
-        for folder, target in ((claude, shared), (codex, alias)):
-            folder.parent.mkdir()
-            directory_alias(target, folder)
-        self._assert_one_acquisition([claude / "demo", codex / "demo"])
-
-    @unittest.skipUnless(os.name == "nt", "Windows case aliases")
-    def test_one_acquisition_unifies_windows_case_aliased_skill_roots(self):
-        self.test_one_acquisition_unifies_case_aliased_skill_roots()
-
-    def test_one_acquisition_unifies_hard_linked_lock_files(self):
-        root = make_tmp_dir(self)
-        claude, codex = root / ".claude" / "skills", root / ".agents" / "skills"
-        with destination_locks([claude / "demo"]):
-            lock = next(claude.glob(".oah-publish-*.lock"))
-        codex.mkdir(parents=True)
-        os.link(lock, codex / lock.name)
-        self._assert_one_acquisition([claude / "demo", codex / "demo"])
-
-    def test_distinct_locks_use_identity_order_through_aliases(self):
-        from oah.lockfile import StateLock
-
-        root = make_tmp_dir(self)
-        paths = [root / name / "demo" for name in ("first", "second")]
-        for path in paths:
-            with destination_locks([path]):
-                pass
-        locks = sorted((next(path.parent.glob(".oah-publish-*.lock")) for path in paths),
-                       key=lambda path: (path.stat().st_dev, path.stat().st_ino))
-        aliases = []
-        for name, lock in zip(("z-alias", "a-alias"), locks):
-            folder = root / name
-            folder.mkdir()
-            os.link(lock, folder / lock.name)
-            aliases.append(folder / "demo")
-        expected = [(lock.stat().st_dev, lock.stat().st_ino) for lock in locks]
-        for requests in (paths, aliases, list(reversed(aliases))):
-            with mock.patch("oah.toolkit.install.StateLock", side_effect=StateLock) as acquire:
-                with destination_locks(requests):
-                    actual = [call.args[0].stat() for call in acquire.call_args_list]
-                    self.assertEqual([(info.st_dev, info.st_ino) for info in actual], expected)
-
-    def test_lock_stays_in_real_parent_and_folds_destination_name(self):
-        root = make_tmp_dir(self)
-        parent = root / "skills"
-        with destination_locks([parent / "Caf\u00e9"]):
-            locks = list(parent.glob(".oah-publish-*.lock"))
-            self.assertEqual(len(locks), 1, "publication locks must live beside the destination")
-        with destination_locks([parent / "CAFE\u0301"]):
-            self.assertEqual(list(parent.glob(".oah-publish-*.lock")), locks)
-        self.assertTrue(locks[0].is_file(), "keep the lock entry after releasing it")
-        self.assertFalse((root / ".oah").exists())
+        self.assertEqual(list(home.rglob("*")), [home / ".oah", home / ".oah" / "skills-publish.lock"])
 
 
 class ScheduledTest(UpdateFixture):
@@ -353,14 +297,11 @@ class ScheduledTest(UpdateFixture):
         directory_alias(self.home, alias)
         self._concurrent_global_updates(alias)
 
-    def test_global_publication_unifies_mount_aliases_with_different_device_ids(self):
-        self.home.mkdir()
-        alias = self.home.with_name("other-mount")
-        directory_alias(self.home, alias)
-        self.assertTrue(alias.samefile(self.home))
-        self._concurrent_global_updates(alias, different_device=True)
+    @unittest.skipUnless(os.name == "nt", "Windows home junctions")
+    def test_global_publication_unifies_windows_home_junctions(self):
+        self.test_global_publication_unifies_directory_aliases()
 
-    def _concurrent_global_updates(self, alias_home, *, different_device=False):
+    def _concurrent_global_updates(self, alias_home):
         plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
                             project_root=self.project, home=self.home)
         apply_install(plan, catalog=self.catalog, now=NOW)
@@ -375,24 +316,12 @@ import contextlib, datetime as dt, json, os, pathlib, sys, time
 import oah.toolkit.update as update
 from oah.toolkit.catalog import load_catalog
 from oah.toolkit.fetch import fetch
-catalog_path, project, home, state, sync, name, candidate, different_device = sys.argv[1:]
+catalog_path, project, home, state, sync, name, candidate = sys.argv[1:]
 project, home, state, sync = map(pathlib.Path, (project, home, state, sync))
 catalog = load_catalog(pathlib.Path(catalog_path))
 destinations = update.installed_destinations(catalog, project_root=project, home=home, level="global")
-# A portable mount simulation: both paths reach the same real files, but the second
-# client's stat reports a different device ID for their parent, as separate mounts can.
-parent = destinations[0].path.parent.resolve()
-original_stat = pathlib.Path.stat
-def stat(path, *args, **kwargs):
-    info = original_stat(path, *args, **kwargs)
-    if different_device == "True" and name == "older" and path == parent:
-        fields = list(info)
-        fields[2] += 1
-        return os.stat_result(fields)
-    return info
-pathlib.Path.stat = stat
-(sync / (name + "-device")).write_text(str(parent.stat().st_dev), encoding="utf-8")
 publishing = False
+guard_calls = 0
 def wait_for(path):
     deadline = time.monotonic() + 20
     while not path.exists():
@@ -401,11 +330,13 @@ def wait_for(path):
         time.sleep(.01)
 @contextlib.contextmanager
 def guard():
-    global publishing
+    global publishing, guard_calls
     with update.idle_state(state):
-        (sync / (name + "-ready")).touch()
-        wait_for(sync / (name + "-go"))
-        publishing = True
+        guard_calls += 1
+        if guard_calls == 2:
+            (sync / (name + "-ready")).touch()
+            wait_for(sync / (name + "-go"))
+            publishing = True
         yield
 original = update._identity
 def identity(path):
@@ -420,7 +351,7 @@ def pinned_fetch(repository, ref, scratch, **kwargs):
     return fetch(repository, candidate, scratch, **kwargs)
 results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
     settings=update.DEFAULTS, now=dt.datetime.now(dt.timezone.utc), gitleaks=None,
-    fetcher=pinned_fetch, guard=guard)
+    fetcher=pinned_fetch, guard=guard, home=home)
 print(json.dumps([r.status for r in results]))
 '''
         processes = []
@@ -428,9 +359,8 @@ print(json.dumps([r.status for r in results]))
         for name, candidate, project in (("newer", newer, self.project), ("older", older, other_project)):
             home = self.home if name == "newer" else alias_home
             process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(project),
-                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate,
-                                        str(different_device)],
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+                                        str(home), str(sync / (name + "-state")), str(sync), name, candidate],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
             processes.append(process)
             self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
 
@@ -443,9 +373,6 @@ print(json.dumps([r.status for r in results]))
         try:
             self.assertTrue(wait_for("older-ready"))
             self.assertTrue(wait_for("newer-ready"))
-            if different_device:
-                self.assertNotEqual((sync / "older-device").read_text(encoding="utf-8"),
-                                    (sync / "newer-device").read_text(encoding="utf-8"))
             (sync / "newer-go").touch()
             self.assertTrue(wait_for("newer-checked"))
             (sync / "older-go").touch()
@@ -465,8 +392,8 @@ print(json.dumps([r.status for r in results]))
         marker = json.loads((installed / ".oah-skill.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["commit"], newer)
         self.assertEqual((installed / "ref.md").read_text(encoding="utf-8"), "newer candidate\n")
-        locks = list(installed.parent.glob(".oah-publish-*.lock"))
-        self.assertEqual(len(locks), 1, "the destination lock belongs beside the destination")
+        self.assertTrue((self.home / ".oah" / "skills-publish.lock").is_file())
+        self.assertEqual(list(installed.parent.iterdir()), [installed])
 
     def test_install_and_update_share_global_publication_lock(self):
         self._install_during_update("global")
@@ -498,14 +425,19 @@ print(json.dumps([r.status for r in results]))
             # before the update starts, so the install must later lose its absence CAS.
             self.installed.rename(sync / "project-pin")
         script = '''
-import contextlib, datetime as dt, json, pathlib, sys, time
+import contextlib, datetime as dt, json, os, pathlib, sys, time
 import oah.toolkit.install as install
 import oah.toolkit.update as update
 from oah.toolkit.catalog import load_catalog
+from oah.lease import Store
+from oah.lockfile import StateLock
+from oah.paths import repo_info, state_dir
 catalog_path, kit, project, home, sync, level, operation = sys.argv[1:]
 kit, project, home, sync = map(pathlib.Path, (kit, project, home, sync))
 catalog = load_catalog(pathlib.Path(catalog_path))
 now = dt.datetime.now(dt.timezone.utc)
+lock = Store(state_dir(repo_info(project), os.environ)).lock_path
+guard = lambda: StateLock(lock)
 def wait_for(name):
     deadline = time.monotonic() + 20
     while not (sync / name).exists():
@@ -529,7 +461,7 @@ if operation == "install":
         return original_swap(*args, **kwargs)
     install.swap_in = swap
     try:
-        install.apply_install(plan, catalog=catalog, now=now)
+        install.apply_install(plan, catalog=catalog, now=now, guard=guard)
         print(json.dumps(["installed"]))
     except install.InstallError as exc:
         print(json.dumps([exc.code, str(exc)]))
@@ -543,16 +475,18 @@ else:
         return original_move(src, dest, *args, **kwargs)
     install.shutil.move = move
     results = update.run_update(catalog=catalog, destinations=destinations, check_only=False,
-        settings=update.DEFAULTS, now=now, gitleaks=None)
+        settings=update.DEFAULTS, now=now, gitleaks=None, home=home, guard=guard)
     print(json.dumps([r.status for r in results]))
 '''
         env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
         processes = []
+        installer_project = make_git_repo(self) if level == "global" else self.project
 
         def start(operation):
+            project = installer_project if operation == "install" else self.project
             process = subprocess.Popen([sys.executable, "-c", script, str(self.catalog_path), str(self.kit),
-                                        str(self.project), str(self.home), str(sync), level, operation],
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+                                        str(project), str(self.home), str(sync), level, operation],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=env)
             processes.append(process)
             self.addCleanup(lambda p=process: (p.kill(), p.communicate()) if p.poll() is None else None)
             return process
@@ -614,7 +548,7 @@ else:
         def stage_then_create(*args, **kwargs):
             result = original(*args, **kwargs)
             dest.mkdir(parents=True)
-            (dest / "mine.md").write_text("preserve me\n", encoding="utf-8")
+            (dest / "mine.md").write_bytes(b"preserve me\n")
             return result
 
         with mock.patch.object(install, "build_copy", stage_then_create):
@@ -622,6 +556,20 @@ else:
                 apply_install(plan, catalog=self.catalog, now=NOW)
         self.assertEqual(caught.exception.code, "OAH_SKILLS_INSTALL_CONFLICT")
         self.assertEqual(snapshot(dest), {"mine.md": b"preserve me\n"})
+
+    def test_install_revalidates_absence_with_crlf_text_default(self):
+        original = pathlib.Path.write_text
+
+        def windows_write(path, text, *args, **kwargs):
+            kwargs.setdefault("newline", "\r\n")
+            return original(path, text, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "write_text", windows_write):
+            self.test_install_revalidates_absence_after_staging()
+
+    @unittest.skipUnless(os.name == "nt", "Windows text fixtures must preserve the asserted bytes")
+    def test_windows_install_revalidates_absence_after_staging(self):
+        self.test_install_revalidates_absence_after_staging()
 
     def test_install_revalidates_changes_during_fetch(self):
         import oah.toolkit.install as install
@@ -643,6 +591,39 @@ else:
             with self.assertRaises(InstallError):
                 apply_install(plan, catalog=self.catalog, now=NOW)
         self.assertEqual((dest / "ref.md").read_text(encoding="utf-8"), "concurrent edit\n")
+
+    def test_install_revalidates_source_after_staging(self):
+        import oah.toolkit.install as install
+
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="claude", level="user",
+                            project_root=self.project, home=self.home)
+        original = install.build_copy
+
+        def stage_then_edit(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (self.kit / "demo" / "ref.md").write_bytes(b"changed source\n")
+            return result
+
+        with mock.patch.object(install, "build_copy", stage_then_edit), self.assertRaises(InstallError) as caught:
+            apply_install(plan, catalog=self.catalog, now=NOW)
+        self.assertIn("changed", str(caught.exception))
+        self.assertFalse(plan.copies[0].dest.exists())
+
+    def test_install_revalidates_shared_source_between_copies(self):
+        import oah.toolkit.install as install
+
+        plan = plan_install(["demo"], catalog=self.catalog, source_dirs=[self.kit], target="both", level="user",
+                            project_root=self.project, home=self.home)
+        original = install.swap_in
+
+        def publish_then_edit(*args, **kwargs):
+            original(*args, **kwargs)
+            (self.kit / "demo" / "ref.md").write_bytes(b"changed source\n")
+
+        with mock.patch.object(install, "swap_in", publish_then_edit), self.assertRaises(InstallError) as caught:
+            apply_install(plan, catalog=self.catalog, now=NOW)
+        self.assertIn("changed", str(caught.exception))
+        self.assertFalse(plan.copies[1].dest.exists())
 
     def test_destination_metadata_changed_before_preparation_is_deferred(self):
         destinations = self.destinations()
@@ -709,9 +690,14 @@ else:
         commit(self.upstream, {"skills/demo/ref.md": "candidate\n"})
         before = snapshot(self.installed)
 
+        calls = 0
+
         @contextlib.contextmanager
         def change_before_publication():
-            (self.installed / "ref.md").write_text("concurrent edit\n", encoding="utf-8")
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (self.installed / "ref.md").write_text("concurrent edit\n", encoding="utf-8")
             yield
 
         results = run_update(catalog=self.catalog, destinations=self.destinations(), check_only=False,

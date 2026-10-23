@@ -33,8 +33,8 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Upstream, read_upstream
 from oah.toolkit.checks import DiffSummary, diff_summary, identify_license, privacy_problems, suspicious, text_digest
 from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, manifest_problems, stage_item
-from oah.toolkit.install import (KIT_MARK, _identity, build_copy, destination_locks, installed_executables,
-                                 installed_skills, marker_of, swap_in, target_dirs)
+from oah.toolkit.install import (KIT_MARK, _identity, build_copy, installed_executables,
+                                 installed_skills, marker_of, publication_lock, swap_in, target_dirs)
 from oah.toolkit.skillmeta import MARKER_FILE, UPSTREAM_FILE, load_problems
 
 DEFAULTS = {"update_interval_days": 1, "auto_update": True, "size_jump_ratio": 2.0,
@@ -223,9 +223,11 @@ def no_guard() -> Iterator[None]:
 def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_only: bool, settings: Mapping,
                now: dt.datetime, gitleaks: Resolved | None, fetcher: Fetcher = fetch,
                catalog_path: pathlib.Path | None = None, guard: Guard = no_guard,
-               after_publish: Callable[[list[UpdateResult]], None] | None = None) -> list[UpdateResult]:
-    """Prepare every destination's new copy, then publish the passing ones inside guard().
+               after_publish: Callable[[list[UpdateResult]], None] | None = None,
+               home: pathlib.Path | None = None) -> list[UpdateResult]:
+    """Snapshot preparation inputs and publish passing copies inside guard().
 
+    guard holds the repository state lock, before the per-user lock for global copies.
     after_publish runs inside the same guard once publication ends (never for --check).
     """
     results: list[UpdateResult] = []
@@ -233,7 +235,13 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
     inputs = {path for d in destinations for path in (d.path, d.baseline) if path is not None}
     if catalog_path is not None:
         inputs.add(catalog_path)
-    with no_guard() if check_only else destination_locks(d.path for d in destinations):
+    publication_home = (home if home is not None else pathlib.Path.home()) if any(
+        d.level == "global" for d in destinations) else None
+
+    def user_lock() -> ContextManager[None]:
+        return publication_lock(publication_home) if publication_home is not None else no_guard()
+
+    with no_guard() if check_only else guard(), no_guard() if check_only else user_lock():
         identities = {path: _identity(path) for path in inputs}
         by_item: dict[str, list[Destination]] = {}
         for destination in destinations:
@@ -318,7 +326,7 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
         if check_only:
             return results
         try:
-            with guard(), destination_locks(d.path for d in destinations):
+            with guard(), user_lock():
                 if any(_identity(path) != identity for path, identity in identities.items()):
                     for result in results:
                         if result.status not in ("", "current"):
