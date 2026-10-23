@@ -1,6 +1,7 @@
 # oah.rerank 테스트 — 동의·키 관문 순서, 순서만 바꾸는 계약, 가짜 HTTP 서버로 TypeSafe 요청 형식과 키 비노출을 확인한다.
 from __future__ import annotations
 
+import contextlib
 import copy
 import email.message
 import http.client
@@ -21,11 +22,11 @@ import urllib.request
 import urllib.response
 from unittest import mock
 
-from oah import rerank
+from oah import rerank, routing
 from oah.config import ConfigError, load_config
 from oah.rerank import base, typesafe
 from oah.secrets import Secret
-from tests.helpers import make_tmp_dir
+from tests.helpers import make_git_repo, make_tmp_dir
 
 
 def fake_key() -> str:
@@ -297,6 +298,49 @@ class AdviceTest(unittest.TestCase):
     def test_advice_needs_a_rule_tier(self) -> None:
         with self.assertRaises(ValueError):
             rerank.advise_difficulty({"kind": "docs"}, "x", config=config(), env={})
+
+    def test_call_signature_uses_repository_defaults(self) -> None:
+        root = make_git_repo(self)
+        (root / ".oah").mkdir()
+        nested = root / "src"
+        nested.mkdir()
+        axes = routing.Axes("review", "low", "medium", "normal")
+        for text in (None, '[rerank]\nenabled = false\nprovider = "fake"\n'):
+            if text is not None:
+                (root / ".oah" / "config.toml").write_text(text, encoding="utf-8")
+            with self.subTest(config=text), contextlib.chdir(nested), \
+                    mock.patch.dict(os.environ, self.env), \
+                    mock.patch("oah.secrets.get", side_effect=AssertionError("disabled advice read a key")):
+                advice = rerank.advise_difficulty(axes, "add a flag")
+                self.assertEqual(advice.status, "unused(not-configured)")
+                self.assertEqual(advice.tier, routing.recommend(axes).tier)
+                self.assertIsNone(advice.advisory_tier)
+
+    def test_call_signature_loads_repository_rerank_settings(self) -> None:
+        root = make_git_repo(self)
+        (root / ".oah").mkdir()
+        (root / ".oah" / "config.toml").write_text(
+            '[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        nested = root / "src"
+        nested.mkdir()
+        axes = routing.Axes("implementation", "medium", "high", "normal")
+        self.provider.advice_answer = ("low", 0.7)
+        with contextlib.chdir(nested), mock.patch.dict(os.environ, self.env), \
+                mock.patch.dict(rerank.PROVIDERS, {"fake": self.provider}):
+            advice = rerank.advise_difficulty(axes, "add a flag")
+        self.assertEqual(advice.status, "used")
+        self.assertEqual(advice.tier, routing.recommend(axes).tier)
+        self.assertEqual((advice.advisory_tier, advice.confidence), ("low", 0.7))
+        self.assertEqual(self.provider.calls[0][:3], (
+            "advise", dict(axes.to_json(), tier=advice.rule_tier), "add a flag"))
+        self.assertNotIn(self.key, json.dumps(advice.to_record()))
+
+    def test_routing_axes_with_explicit_config_need_no_repository(self) -> None:
+        axes = routing.Axes("security", "low", "low", "normal")
+        with contextlib.chdir(make_tmp_dir(self)):
+            advice = rerank.advise_difficulty(axes, "add a flag", config={}, env={}, keychain=NoKeychain())
+        self.assertEqual(advice.status, "unused(not-enabled)")
+        self.assertEqual(advice.tier, routing.recommend(axes).tier)
 
 
 class FakeServer:
