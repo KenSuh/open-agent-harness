@@ -69,7 +69,6 @@ _FIELD_LINE = re.compile(r"([A-Za-z-]+):(.*)")
 _AC_BULLET = re.compile(r"- (AC[1-9][0-9]*):(.*)")
 _BULLET = re.compile(r"[-*+](?:\s|$)")
 _INTENT_LINE = re.compile(r"INTENT (\S+)@r([1-9][0-9]*) (sha256:[0-9a-f]{64})")
-_INTENT_CANDIDATE = re.compile(r"INTENT\b")
 _AC_LINE = re.compile(r"(AC[1-9][0-9]*): (met|unmet|deferred) (?:—|--) (\S.*)")
 _AC_CANDIDATE = re.compile(r"(AC[0-9]+)\s*:")
 
@@ -277,8 +276,13 @@ def parse(text: str) -> Intent:
         problems.append(Problem("OAH_INTENT_AC_INVALID", "there is no ### Success conditions heading"))
     if problems:
         raise IntentInvalid(problems)
+    try:
+        revision = int(fields["Revision"])
+    except ValueError as exc:
+        raise IntentInvalid([Problem("OAH_INTENT_FIELD_INVALID",
+                                     "Revision is too large to read; use a smaller positive whole number")]) from exc
     section = "\n".join(lines[begin:end + 1]) + "\n"
-    return Intent(id=fields["Intent-ID"], revision=int(fields["Revision"]), status=fields["Status"],
+    return Intent(id=fields["Intent-ID"], revision=revision, status=fields["Status"],
                   section=section, digest=digest_of(section), acs=tuple(ac for ac, _ in conditions),
                   conditions=tuple(conditions))
 
@@ -337,7 +341,13 @@ def read_source(path: pathlib.Path) -> str:
         raise SourceError("OAH_INTENT_SOURCE_UNREADABLE", f"cannot read {path}: {exc}") from exc
     finally:
         os.close(fd)
-    if len(data) != before.st_size or not _same_file(before, after):
+    try:
+        path_after = os.lstat(path)
+    except OSError as exc:
+        raise changed from exc
+    if (len(data) != before.st_size or not _same_file(before, after)
+            or not stat.S_ISREG(path_after.st_mode) or not _same_file(before, path_after)
+            or not _same_file(after, path_after)):
         raise changed
     try:
         text = data.decode("utf-8")
@@ -359,8 +369,13 @@ def explain_binding(binding: Binding | None, root: pathlib.Path) -> tuple[str, s
     if binding is None:
         return "unbound", "no intent is bound to this lease"
     path = source_path(binding, root)
-    if not os.path.lexists(path):
-        return "missing", f"the bound source {binding.source} does not exist"
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing", f"the bound source {binding.source} does not exist; restore it or bind the correct source"
+    except OSError as exc:
+        return "stale", (f"OAH_INTENT_SOURCE_UNREADABLE: cannot inspect {binding.source}: {exc}; "
+                         "check the path and permissions, then run the command again")
     try:
         parsed = parse(read_source(path))
     except (SourceError, IntentInvalid) as exc:
@@ -399,13 +414,19 @@ def check_return(text: str, binding: Binding) -> list[Problem]:
     ac_format = "'AC<n>: met|unmet|deferred — <evidence>'"
     for number, raw in enumerate(normalize_newlines(text).split("\n"), start=1):
         line = raw.strip()
-        if _INTENT_CANDIDATE.match(line):
+        if line.startswith("INTENT"):
             match = _INTENT_LINE.fullmatch(line)
             if match is None:
                 intent_problems.append(_return_problem(f"line {number}: malformed INTENT line {line!r}; write "
                                                        f"exactly {binding.line()!r}"))
             else:
-                intents.append((match.group(1), int(match.group(2)), match.group(3)))
+                try:
+                    revision = int(match.group(2))
+                except ValueError:
+                    intent_problems.append(_return_problem(f"line {number}: INTENT revision is too large; "
+                                                           f"write exactly {binding.line()!r}"))
+                else:
+                    intents.append((match.group(1), revision, match.group(3)))
             continue
         if _AC_CANDIDATE.match(line) is None:
             continue

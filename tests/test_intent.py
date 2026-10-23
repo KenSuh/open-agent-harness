@@ -136,6 +136,11 @@ class ParseTest(unittest.TestCase):
             intent.parse(no_title)
         self.assertIn("OAH_INTENT_SECTION_INVALID", codes(caught.exception.problems))
 
+    def test_revision_too_large_is_a_parse_problem(self):
+        with self.assertRaises(IntentInvalid) as caught:
+            intent.parse(section(revision="9" * 5000))
+        self.assertIn("OAH_INTENT_FIELD_INVALID", codes(caught.exception.problems))
+
     def test_success_conditions_table(self):
         cases = {
             "none": ((), "OAH_INTENT_AC_INVALID"),
@@ -220,6 +225,63 @@ class ReadSourceTest(unittest.TestCase):
         with patch("oah.intent.os.open", side_effect=grow_then_open):
             self.assert_source_error("OAH_INTENT_SOURCE_INVALID")
 
+    def assert_replacement_during_read_is_refused(self):
+        real_read = os.read
+        for kind in ("file", "symlink"):
+            with self.subTest(kind=kind):
+                self.path.write_text(packet(), encoding="utf-8")
+                replacement = self.dir / "replacement.md"
+                if kind == "symlink":
+                    target = self.dir / "target.md"
+                    target.write_text(packet(), encoding="utf-8")
+                    try:
+                        replacement.symlink_to(target)
+                    except (OSError, NotImplementedError):
+                        continue  # Windows may not grant the symlink privilege.
+                else:
+                    replacement.write_text(packet(), encoding="utf-8")
+                    before = self.path.stat()
+                    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                replaced = False
+
+                def read_then_replace(fd, size):
+                    nonlocal replaced
+                    data = real_read(fd, size)
+                    if not replaced:
+                        os.replace(replacement, self.path)
+                        replaced = True
+                    return data
+
+                with patch("oah.intent.os.read", side_effect=read_then_replace):
+                    self.assert_source_error("OAH_INTENT_SOURCE_INVALID")
+                self.path.unlink()
+
+    @unittest.skipUnless(os.name != "nt", "Windows needs a delete-sharing handle for replacement during read")
+    def test_read_source_refuses_replacement_during_read(self):
+        self.assert_replacement_during_read_is_refused()
+
+    @unittest.skipUnless(os.name == "nt", "Windows delete-sharing handles only")
+    def test_read_source_refuses_replacement_during_read_windows(self):
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        create_file.restype = wintypes.HANDLE
+
+        def open_shared(path, flags):
+            # GENERIC_READ, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
+            handle = create_file(str(path), 0x80000000, 7, None, 3, 0x80, None)
+            if handle == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+
+        with patch("oah.intent.os.open", side_effect=open_shared):
+            self.assert_replacement_during_read_is_refused()
+
 
 class BindingStateTest(unittest.TestCase):
     def setUp(self):
@@ -251,6 +313,7 @@ class BindingStateTest(unittest.TestCase):
             "malformed marker": (good.replace(intent.END, "<!-- OAH_INTENT:END"), "stale"),
             "duplicate markers": (good + good, "stale"),
             "invalid field": (section(revision="x"), "stale"),
+            "oversized revision": (section(revision="9" * 5000), "stale"),
             "not utf-8": (b"\xff\xfe", "stale"),
             "too large": (b"a" * intent.MAX_BYTES, "stale"),
         }
@@ -289,6 +352,42 @@ class BindingStateTest(unittest.TestCase):
             state, reason = intent.explain_binding(self.binding, self.root)
         self.assertEqual(state, "stale")
         self.assertIn("OAH_INTENT_SOURCE_UNREADABLE", reason)
+
+    def test_source_inspection_failure_is_stale(self):
+        for error in (PermissionError(13, "denied"), OSError(5, "I/O error")):
+            with self.subTest(error=error):
+                with patch("oah.intent.os.lstat", side_effect=error):
+                    state, reason = intent.explain_binding(self.binding, self.root)
+                self.assertEqual(state, "stale")
+                self.assertIn("OAH_INTENT_SOURCE_UNREADABLE", reason)
+
+    @unittest.skipUnless(os.name != "nt", "POSIX directory permissions only")
+    def test_source_in_unreadable_directory_is_stale(self):
+        folder = self.path.parent
+        mode = folder.stat().st_mode
+        folder.chmod(0)
+        try:
+            try:
+                os.lstat(self.path)
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("this user can inspect files through unreadable directories")
+            self.assertEqual(intent.binding_state(self.binding, self.root), "stale")
+        finally:
+            folder.chmod(mode)
+
+    def test_source_replaced_after_read_is_stale(self):
+        replacement = self.root / "replacement.md"
+        replacement.write_text(packet(), encoding="utf-8")
+        real_close = os.close
+
+        def close_then_replace(fd):
+            real_close(fd)
+            os.replace(replacement, self.path)
+
+        with patch("oah.intent.os.close", side_effect=close_then_replace):
+            self.assertEqual(intent.binding_state(self.binding, self.root), "stale")
 
     def test_absolute_source(self):
         binding = intent.parse(packet()).bind(str(self.path))
@@ -351,6 +450,19 @@ class CheckReturnTest(unittest.TestCase):
     def test_crlf_return(self):
         text = "\r\n".join([self.line, "AC1: met — a", "AC2: met — b"]) + "\r\n"
         self.assertEqual(intent.check_return(text, self.binding), [])
+
+    def test_revision_too_large_is_a_return_problem(self):
+        line = self.line.replace("@r1", "@r" + "9" * 5000)
+        messages = self.check(line, "AC1: met — a", "AC2: met — b")
+        self.assertTrue(messages)
+        self.assertTrue(any("revision" in message.lower() for message in messages))
+
+    def test_malformed_intent_prefix_alongside_valid_return(self):
+        for malformed in ("INTENTdemo@r1 garbage", "INTENT_demo", "INTENT1", "  INTENTdemo  "):
+            with self.subTest(malformed=malformed):
+                messages = self.check(self.line, "AC1: met — a", "AC2: met — b", malformed)
+                self.assertEqual(len(messages), 1, messages)
+                self.assertIn("malformed INTENT line", messages[0])
 
     def test_bullets_and_backticks_do_not_count(self):
         messages = self.check(f"- {self.line}", "`AC1: met — a`", "AC2: met — b")

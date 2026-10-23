@@ -130,13 +130,15 @@ def _pick_remote(ctx: _Context) -> tuple[str | None, str | None]:
     """The remote to compare with, or (None, reason)."""
     code, out, err = _git(ctx, "remote")
     if code != 0:
-        return None, f"git remote failed: {err.strip()}"
+        return None, f"git remote failed: {err.strip()}; fix the repository, then run oah preflight again"
     remotes = [line.strip() for line in out.splitlines() if line.strip()]
-    wanted = str(ctx.settings["remote"] or "")
-    if wanted:
-        return (wanted, None) if wanted in remotes else (None, f"the configured remote {wanted!r} does not exist")
     if not remotes:
         return None, "none"
+    wanted = str(ctx.settings["remote"] or "")
+    if wanted:
+        return ((wanted, None) if wanted in remotes else
+                (None, f"the configured remote {wanted!r} does not exist; set [preflight] remote in "
+                       ".oah/config.toml to an existing remote, then run oah preflight again"))
     if "origin" in remotes:
         return "origin", None
     if len(remotes) == 1:
@@ -174,7 +176,8 @@ def _check_base(ctx: _Context) -> Check:
             return Check("base", "warn", "there is no remote, so base freshness does not apply; that is fine "
                                          "for a local-only repository")
         ctx.not_proven.append("that the base is fresh: no remote was compared")
-        return Check("base", "warn", why or "no remote to compare with")
+        return Check("base", "warn" if ctx.offline else "abort", why or "no remote to compare with; configure "
+                     "[preflight] remote in .oah/config.toml and run oah preflight again")
     ctx.remote = remote
     branch, problem = _default_branch(ctx, remote)
     if branch is None:
