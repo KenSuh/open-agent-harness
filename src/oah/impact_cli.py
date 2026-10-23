@@ -212,8 +212,7 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     requested = [query.normalize_entity(raw) or _relative(raw, root) for raw in args.targets]
     scope = _task_scope(root, args.task) if args.task else None
     # Keep the mirror alive through missing-target searches as well as fetch and map construction.
-    with defaultbranch._mirror_lock(root, float(settings["lock_timeout"])):
-        branch = defaultbranch._refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
+    with defaultbranch._query_context(root, settings, offline=args.offline, no_refresh=args.no_refresh) as branch:
         maps = [data["files"]] + ([branch.data["files"]] if branch.data else [])
         files = {path: kind for mapped in reversed(maps) for path, kind in mapped.items()}
         for target in requested:

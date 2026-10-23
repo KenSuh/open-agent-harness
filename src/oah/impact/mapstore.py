@@ -33,6 +33,8 @@ import os
 import pathlib
 import re
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
@@ -58,6 +60,7 @@ MANIFEST_ORDER = (("worktree", "worktree changed"), ("head", "HEAD moved"), ("in
                   ("tool", "tool changed"))
 REF_ORDER = (("worktree", "worktree changed"), ("ref", "default branch changed"), ("head", "default branch moved"),
              ("tool", "tool changed"))
+_default_locations: ContextVar[dict | None] = ContextVar("impact_default_locations", default=None)
 
 
 @dataclass(frozen=True)
@@ -540,10 +543,35 @@ def load(path: pathlib.Path) -> dict:
     return stored
 
 
+@contextmanager
+def _default_scope():
+    """Reuse only repository locations during one A23 operation, never refs or map contents."""
+    token = _default_locations.set({})
+    try:
+        yield
+    finally:
+        _default_locations.reset(token)
+
+
+def _default_map_path(root: pathlib.Path, env: Mapping[str, str] | None = None) -> tuple[pathlib.Path, pathlib.Path]:
+    locations = _default_locations.get()
+    key = pathlib.Path(root).resolve()
+    location = locations.get(key) if locations is not None else None
+    if location is None:
+        info = repo_info(key)
+        location = info.root, info.common_dir
+        if locations is not None:
+            locations[key] = location
+    top, common = location
+    override = (os.environ if env is None else env).get("OAH_STATE_DIR")
+    state = pathlib.Path(override) if override else common / "oah"
+    return top, map_path(state, top)
+
+
 def _last_default_map(root: pathlib.Path, env: Mapping[str, str] | None = None) -> tuple[MapInfo, dict] | None:
     """Recover the recorded snapshot, independently of any mutable tracking ref."""
-    info = repo_info(pathlib.Path(root))
-    path = ref_map_path(state_dir(info, os.environ if env is None else env), info.root)
+    top, worktree = _default_map_path(root, env)
+    path = worktree.with_name(worktree.stem + ".default-branch.json")
     try:
         stored = load(path)
     except (OSError, ValueError):
@@ -551,7 +579,7 @@ def _last_default_map(root: pathlib.Path, env: Mapping[str, str] | None = None) 
     manifest = stored.get("manifest")
     if stored.get("schema") != MAP_SCHEMA or not isinstance(manifest, dict) \
             or stored.get("manifest_digest") != digest(manifest) \
-            or manifest.get("worktree") != hashlib.sha256(str(info.root.resolve()).encode("utf-8")).hexdigest() \
+            or manifest.get("worktree") != hashlib.sha256(str(top.resolve()).encode("utf-8")).hexdigest() \
             or stored.get("result") != digest(stored["data"]) \
             or not isinstance(manifest.get("head"), str) \
             or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", manifest["head"]) \
@@ -728,7 +756,12 @@ def _ref_map(root: pathlib.Path, ref: str, *, source: pathlib.Path | None, refre
              env: Mapping[str, str] | None = None, settings: Mapping[str, object] | None = None,
              remote: str | None = None, commit: str | None = None) -> tuple[MapInfo, dict]:
     """Read objects from source (the private mirror), but bind/store the map for the user's worktree."""
-    top, worktree_path, current = _context(root, env, settings)
+    if source is None:
+        top, worktree_path, current = _context(root, env, settings)
+    else:
+        top, worktree_path = _default_map_path(root, env)
+        current = configured(top, settings)
+        _head(top, current["git_timeout"])
     source = top if source is None else source
     path = ref_map_path(_state(worktree_path), top)
 

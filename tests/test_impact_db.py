@@ -16,6 +16,7 @@ from itertools import product
 from oah.impact import mapstore, sqlplugin
 from tests.helpers import git_commit, make_git_repo
 from tests.test_impact_map import SRC, run_impact
+from tests.test_impact_default_branch import RemoteTestCase
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "impact" / "sql"
 
@@ -564,7 +565,7 @@ class ExtractTest(unittest.TestCase):
         self.assertEqual(mysql["entities"]["db_table:bills"]["events"][0][2], "rename-from:invoices")
 
 
-class DbQueryTest(unittest.TestCase):
+class DbQueryTest(RemoteTestCase):
     def test_default_branch_only_db_identity(self):
         from tests.test_impact_default_branch import RemoteFixture
 

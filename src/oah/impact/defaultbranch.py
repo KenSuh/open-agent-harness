@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -29,7 +30,7 @@ from oah.engines.proc import REAP_SECONDS, RunResult, _WindowsJob, decode_output
 from oah.impact import mapstore
 from oah.impact.errors import ImpactError
 from oah.lockfile import LockTimeout, StateLock
-from oah.paths import git_argv, repo_info, state_dir
+from oah.paths import git_argv
 
 FALLBACK_BRANCH = "main"
 # No prompt may wait for an answer that cannot come: stdin is closed and the refresh runs unattended.
@@ -202,6 +203,8 @@ def _remotes(root: pathlib.Path, timeout: float) -> list[str]:
 def remote_for(root: pathlib.Path, timeout: float) -> str | None:
     """The current branch's upstream remote when it is a configured remote, else origin, else None."""
     remotes = _remotes(root, timeout)
+    if not remotes:
+        return None
     branch = _text(root, "symbolic-ref", "--quiet", "--short", "HEAD", timeout=timeout)
     upstream = _text(root, "config", "--get", f"branch.{branch}.remote", timeout=timeout) if branch else None
     if upstream in remotes:
@@ -222,9 +225,9 @@ def _saved_branch(root: pathlib.Path, remote: str, env: Mapping[str, str] | None
 
 
 def _legacy_mirror(root: pathlib.Path, env: Mapping[str, str] | None = None) -> pathlib.Path:
-    info = repo_info(root)
-    state = state_dir(info, os.environ if env is None else env)
-    key = mapstore.map_path(state, info.root).stem
+    _top, path = mapstore._default_map_path(root, env)
+    state = mapstore._state(path)
+    key = path.stem
     # Resolve the parent only: never follow a cache alias into the user's repository.
     return (state / "impact" / "mirrors").resolve() / (key + ".git")
 
@@ -399,7 +402,7 @@ def _branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: flo
                 fallback: str) -> tuple[str, str]:
     if not network:
         return fallback, "default branch lookup failed"
-    with _mirror_lock(root, timeout):
+    with mapstore._default_scope(), _mirror_lock(root, timeout):
         try:
             mirror, url, reason = _prepare(root, remote, timeout)
             return (fallback, reason) if reason else _discover(mirror, url, fallback, timeout)
@@ -422,7 +425,7 @@ def _discover(mirror: pathlib.Path, url: str, fallback: str, timeout: float) -> 
 
 def fetch(root: pathlib.Path, remote: str, branch: str, timeout: float) -> str:
     """Fetch one branch into oah's private bare mirror; "" on success, else the reason."""
-    with _mirror_lock(root, timeout):
+    with mapstore._default_scope(), _mirror_lock(root, timeout):
         try:
             mirror, url, reason = _prepare(root, remote, timeout)
             if not reason:
@@ -460,8 +463,21 @@ def _fetch(mirror: pathlib.Path, url: str, remote: str, branch: str, timeout: fl
 def refresh(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool = False, no_refresh: bool = False,
             env: Mapping[str, str] | None = None) -> DefaultBranch:
     """Fetch the default branch (unless told not to) and return its map, labelled; never raises for the network."""
-    with _mirror_lock(root, float(settings["lock_timeout"]), env):
-        return _refresh(root, settings, offline=offline, no_refresh=no_refresh, env=env)
+    with _query_context(root, settings, offline=offline, no_refresh=no_refresh, env=env) as branch:
+        return branch
+
+
+@contextmanager
+def _query_context(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool = False,
+                   no_refresh: bool = False, env: Mapping[str, str] | None = None):
+    """Keep fetched objects leased through the last search; no mirror wait without a remote or saved map."""
+    with mapstore._default_scope():
+        remote = remote_for(root, float(settings["git_timeout"]))
+        if remote is None and mapstore._last_default_map(root, env) is None:
+            yield DefaultBranch("unavailable", "no remote", None, None, None)
+            return
+        with _mirror_lock(root, float(settings["lock_timeout"]), env):
+            yield _refresh(root, settings, offline=offline, no_refresh=no_refresh, env=env)
 
 
 def _refresh(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool = False, no_refresh: bool = False,

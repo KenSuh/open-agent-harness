@@ -7,10 +7,11 @@ import shutil
 import subprocess
 import unittest
 
-from oah.impact import gatebind, kinds, lexical, query
+from oah.impact import defaultbranch, gatebind, kinds, lexical, query
 from oah.impact.defaults import effective
-from tests.helpers import git_commit, git_env, make_git_repo
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 from tests.test_impact_map import run_impact
+from tests.test_impact_default_branch import RemoteTestCase
 
 FIXTURE_REPO = pathlib.Path(__file__).resolve().parent / "fixtures" / "impact" / "repo"
 
@@ -248,9 +249,19 @@ class QueryTest(unittest.TestCase):
         self.assertEqual(query.apply_rerank(rows, disabled=True, enabled=True)[1], "unused(disabled-by-brief)")
 
 
-class CliTest(unittest.TestCase):
+class CliTest(RemoteTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        owner = unittest.TestCase()
+        cls.addClassCleanup(owner.doCleanups)
+        cls.template = fixture_repo(owner)
+        owner.addCleanup(defaultbranch._remove, cls.template.parent)
+
     def setUp(self):
-        self.repo = fixture_repo(self)
+        self.repo = make_tmp_dir(self) / "repo"
+        self.addCleanup(defaultbranch._remove, self.repo.parent)
+        shutil.copytree(self.template, self.repo)
 
     def test_cli_query_text(self):
         result = run_impact(self.repo, "tools/check.py")
