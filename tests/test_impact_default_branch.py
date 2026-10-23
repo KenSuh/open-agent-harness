@@ -10,9 +10,10 @@ import shutil
 import subprocess
 import sys
 import unittest
+import uuid
 from unittest.mock import patch
 
-from oah.engines.proc import RunResult, run_command
+from oah.engines.proc import run_command
 from oah.impact import ImpactError, defaultbranch, ensure_fresh, mapstore, query
 from oah.impact.defaults import DEFAULTS, MAP_KEYS, configured, effective
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
@@ -46,13 +47,45 @@ def trace_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
 
 
+def repository_bytes(repo: pathlib.Path) -> dict[str, bytes]:
+    """All user Git files, excluding oah's state folder."""
+    common = pathlib.Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    return {p.relative_to(common).as_posix(): p.read_bytes() for p in common.rglob("*")
+            if p.is_file() and not p.is_relative_to(common / "oah")}
+
+
+def fault_query(fx, fault: str, *args: str) -> subprocess.CompletedProcess:
+    """Real CLI and Git processes; remove the advertised branch or time out a real child at fetch."""
+    code = '''
+import subprocess
+import sys
+from oah.cli import main
+from oah.impact import defaultbranch
+original = defaultbranch.run_command
+def run(argv, **kwargs):
+    if "fetch" in argv and sys.argv[1] == "timeout":
+        return original((sys.executable, "-c", "import time; time.sleep(10)"), timeout=0.03)
+    result = original(argv, **kwargs)
+    if "ls-remote" in argv and sys.argv[1] == "failure":
+        subprocess.run(["git", "-C", sys.argv[2], "update-ref", "-d", "refs/heads/main"],
+                       check=True, capture_output=True)
+    return result
+defaultbranch.run_command = run
+raise SystemExit(main(["impact", *sys.argv[3:]]))
+'''
+    env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+    env.pop("OAH_STATE_DIR", None)
+    return subprocess.run([sys.executable, "-c", code, fault, str(fx.bare), *args], cwd=fx.lane,
+                          capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+
+
 class RemoteFixture:
     """A local bare remote seeded with BASE, a lane clone on its own branch, and a second clone that pushes."""
 
-    def __init__(self, test: unittest.TestCase, default: str = "main") -> None:
+    def __init__(self, test: unittest.TestCase, default: str = "main", *, object_format: str = "sha1") -> None:
         self.tmp = make_tmp_dir(test)
         seed = self.tmp / "seed"
-        subprocess.run(["git", "init", "-q", "-b", default, str(seed)], check=True)
+        subprocess.run(["git", "init", "-q", "-b", default, f"--object-format={object_format}", str(seed)], check=True)
         git_commit(seed, BASE)
         self.bare = self.tmp / "remote.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(self.bare)], check=True, env=git_env())
@@ -117,12 +150,18 @@ class RemoteSelectionTest(unittest.TestCase):
         git(lane, "remote", "remove", "origin")
         self.assertIsNone(defaultbranch.remote_for(lane, 30.0), "no upstream and no origin")
 
+    def test_no_symbolic_head_has_a_lookup_failure_reason(self):
+        git(self.fx.lane, "remote", "set-head", "origin", "-d")
+        git(self.fx.bare, "update-ref", "--no-deref", "HEAD", head(self.fx.pusher))
+        self.assertEqual(defaultbranch.default_branch_name(self.fx.lane, "origin", network=True, timeout=30.0),
+                         ("main", "default branch lookup failed"))
+
     def test_fetch_timeout_is_stale(self):
-        fetched = git(self.fx.lane, "rev-parse", "refs/remotes/origin/main")
+        fetched = defaultbranch.refresh(self.fx.lane, configured(self.fx.lane), env={}).commit
 
         def slow_fetch(argv, **kwargs):
             if "fetch" in argv:
-                return RunResult(None, "", "", True)
+                return run_command((sys.executable, "-c", "import time; time.sleep(10)"), timeout=0.03)
             return run_command(argv, **kwargs)
 
         with patch("oah.impact.defaultbranch.run_command", side_effect=slow_fetch):
@@ -154,6 +193,23 @@ class RemoteSelectionTest(unittest.TestCase):
         self.assertEqual((result.state, result.reason, result.branch, result.commit),
                          ("stale", "fetch failed", "trunk", new))
         self.assertEqual(result.data, saved.data)
+
+    def test_skipped_refresh_starts_no_network_process(self):
+        settings = configured(self.fx.lane)
+        defaultbranch.refresh(self.fx.lane, settings, env={})
+        for options, overrides in (({"offline": True}, {}), ({"no_refresh": True}, {}),
+                                   ({}, {"refresh_default_branch": False})):
+            with self.subTest(options=options, overrides=overrides):
+                calls = []
+
+                def probe(argv, **kwargs):
+                    calls.extend(arg for arg in argv if arg in ("fetch", "ls-remote"))
+                    return run_command(argv, **kwargs)
+
+                with patch("oah.impact.defaultbranch.run_command", side_effect=probe):
+                    result = defaultbranch.refresh(self.fx.lane, {**settings, **overrides}, env={}, **options)
+                self.assertEqual(calls, [])
+                self.assertEqual(result.state, "stale")
 
     def _assert_no_askpass(self, source: str) -> None:
         marker = self.fx.tmp / "askpass-called"
@@ -301,8 +357,10 @@ class RefMapTest(unittest.TestCase):
             ensure_fresh(self.fx.lane, env={})
         self.assertIn("built-in: git", trace_text(trace), "the trace works")
         self.assertNotRegex(trace_text(trace), NETWORK_GIT)
-        result = run_impact(self.fx.lane, "refresh", env_extra={"GIT_TRACE": str(trace)})
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for action in ("build", "refresh", "status"):
+            result = run_impact(self.fx.lane, action, env_extra={"GIT_TRACE": str(trace)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list((self.fx.lane / ".git/oah/impact/mirrors").glob("*.git")), [])
         self.assertNotRegex(trace_text(trace), NETWORK_GIT)
 
 
@@ -322,7 +380,226 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertEqual(len(found), 1, result.stdout)
         return found[0]
 
+    def test_incremental_bundle_list_cannot_change_user_refs_or_config(self):
+        base = head(self.fx.pusher)
+        first, second = self.fx.tmp / "first.bundle", self.fx.tmp / "second.bundle"
+        git(self.fx.pusher, "bundle", "create", str(first), "main")
+        self.fx.advance(RELEASE)
+        git(self.fx.pusher, "bundle", "create", str(second), f"^{base}", "main")
+        bundle_list = self.fx.tmp / "bundles.list"
+        bundle_list.write_text("[bundle]\nversion = 1\nmode = all\nheuristic = creationToken\n"
+                               f'[bundle "first"]\nuri = {first.as_uri()}\ncreationToken = 1\n'
+                               f'[bundle "second"]\nuri = {second.as_uri()}\ncreationToken = 2\n',
+                               encoding="utf-8")
+        git(self.lane, "config", "fetch.bundleURI", bundle_list.as_uri())
+        git(self.lane, "config", "fetch.bundleCreationToken", "1")
+        # Prove this fixture exercises the incremental-bundle side effects on this Git build.
+        control = self.fx.tmp / "control.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(self.fx.tmp / "seed"), str(control)],
+                       check=True, env=git_env())
+        git(control, "config", "fetch.bundleURI", bundle_list.as_uri())
+        git(control, "config", "fetch.bundleCreationToken", "1")
+        git(control, "fetch", "-q", str(self.fx.bare), "+refs/heads/main:refs/remotes/origin/main")
+        self.assertEqual(git(control, "config", "--get", "fetch.bundleCreationToken"), "2")
+        self.assertTrue(any(r.startswith("refs/bundles/") for r in refs(control)))
+        before = repository_bytes(self.lane)
+        result = self.query("tools/check.py", "--json")
+        self.assertEqual(json.loads(result.stdout)["maps"]["default_branch"]["state"], "fresh")
+        self.assertEqual(repository_bytes(self.lane), before)
+
+    def test_nonfresh_results_use_only_the_recorded_snapshot(self):
+        cases = (("offline", "offline"), ("disabled", "refresh_default_branch=false"),
+                 ("no-refresh", "no-refresh"), ("lookup", "fetch failed"),
+                 ("no-symref", "default branch lookup failed"), ("failure", "fetch failed"),
+                 ("timeout", "fetch timed out"), ("no-remote", "no remote"))
+        for saved in (False, True):
+            for mode, reason in cases:
+                with self.subTest(saved=saved, mode=mode):
+                    fx = RemoteFixture(self)
+                    commit = fx.advance(RELEASE)
+                    if saved:
+                        first = run_impact(fx.lane, "tools/check.py", "--json")
+                        self.assertEqual(first.returncode, 0, first.stderr)
+                        self.assertEqual(json.loads(first.stdout)["maps"]["default_branch"]["commit"], commit)
+                    # Tracking refs, including a local remote HEAD, are never fallback authority.
+                    git(fx.lane, "update-ref", "refs/remotes/origin/main", head(fx.lane))
+                    options = []
+                    if mode in ("offline", "no-refresh"):
+                        options = ["--" + mode]
+                    elif mode == "disabled":
+                        (fx.lane / ".oah").mkdir()
+                        (fx.lane / ".oah/config.toml").write_text("[impact]\nrefresh_default_branch = false\n",
+                                                                 encoding="utf-8")
+                    elif mode == "lookup":
+                        git(fx.lane, "remote", "set-url", "origin", str(fx.tmp / "missing.git"))
+                    elif mode == "no-symref":
+                        git(fx.bare, "update-ref", "--no-deref", "HEAD", commit)
+                    elif mode == "no-remote":
+                        git(fx.lane, "remote", "remove", "origin")
+                    if mode == "no-refresh":
+                        built = run_impact(fx.lane, "build")
+                        self.assertEqual(built.returncode, 0, built.stderr)
+                    for output in ([], ["--json"]):
+                        if mode == "failure":
+                            git(fx.bare, "update-ref", "refs/heads/main", commit)
+                        result = (fault_query(fx, mode, "tools/check.py", *options, *output)
+                                  if mode in ("failure", "timeout") else
+                                  run_impact(fx.lane, "tools/check.py", *options, *output))
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        state = "stale" if saved else "unavailable"
+                        label = f"default-branch={state}({reason})"
+                        self.assertIn(label, result.stdout)
+                        self.assertIn("OAH_IMPACT_DEFAULT_BRANCH_" + state.upper(), result.stderr)
+                        if output:
+                            branch = json.loads(result.stdout)["maps"]["default_branch"]
+                            self.assertEqual((branch["state"], branch["reason"], branch["commit"]),
+                                             (state, reason, commit if saved else None))
+                        elif saved:
+                            self.assertIn(f"last-fetched={commit} ref=origin/main", result.stdout)
+                            self.assertIn("release.yml:2", result.stdout)
+
+    def test_failed_new_default_recovers_the_saved_branch(self):
+        for fault, reason in (("failure", "fetch failed"), ("timeout", "fetch timed out")):
+            with self.subTest(fault=fault):
+                fx = RemoteFixture(self, default="trunk")
+                git(fx.lane, "remote", "set-head", "origin", "-d")
+                saved = fx.advance(RELEASE)
+                first = run_impact(fx.lane, "tools/check.py")
+                self.assertEqual(first.returncode, 0, first.stderr)
+                git(fx.bare, "symbolic-ref", "HEAD", "refs/heads/main")
+                for output in ([], ["--json"]):
+                    git(fx.bare, "update-ref", "refs/heads/main", head(fx.pusher))
+                    result = fault_query(fx, fault, "tools/check.py", *output)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"default-branch=stale({reason})", result.stdout)
+                    self.assertIn("release.yml", result.stdout)
+                    if output:
+                        branch = json.loads(result.stdout)["maps"]["default_branch"]
+                        self.assertEqual((branch["branch"], branch["commit"]), ("trunk", saved))
+                    else:
+                        self.assertIn(f"last-fetched={saved} ref=origin/trunk", result.stdout)
+                self.assertEqual(mapstore.load(fx.map_files()[0])["manifest"]["ref"], "refs/remotes/origin/trunk")
+
+    def test_remote_default_is_confirmed_despite_an_old_local_head(self):
+        self.query("tools/check.py")
+        git(self.fx.pusher, "switch", "-q", "-c", "trunk")
+        self.fx.default = "trunk"
+        commit = self.fx.advance(RELEASE)
+        git(self.fx.bare, "symbolic-ref", "HEAD", "refs/heads/trunk")
+        before = repository_bytes(self.lane)
+        for output in ([], ["--json"]):
+            result = self.query("tools/check.py", *output)
+            self.assertIn(f"default-branch={commit}", result.stdout)
+            if output:
+                branch = json.loads(result.stdout)["maps"]["default_branch"]
+                self.assertEqual((branch["state"], branch["branch"]), ("fresh", "trunk"))
+            else:
+                self.assertIn("ref=origin/trunk", result.stdout)
+        self.assertEqual(repository_bytes(self.lane), before)
+
+    def test_fetch_uses_global_setup_but_ignores_repository_config(self):
+        config = self.fx.tmp / "global-config"
+        alias = "oah-local-remote"
+        git(self.lane, "config", "--file", str(config), f"url.{self.fx.bare.as_posix()}.insteadOf", alias)
+        git(self.lane, "remote", "set-url", "origin", alias)
+        git(self.lane, "config", "remote.origin.uploadpack", "oah-no-such-upload-pack")
+        commit = self.fx.advance(RELEASE)
+        before = repository_bytes(self.lane)
+        result = run_impact(self.lane, "tools/check.py", "--json", env_extra={"GIT_CONFIG_GLOBAL": str(config)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        branch = json.loads(result.stdout)["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["commit"]), ("fresh", commit))
+        self.assertEqual(repository_bytes(self.lane), before)
+        state = self.fx.map_files()[0].parent.parent
+        mirrors = list((state / "mirrors").glob("*.git"))
+        self.assertEqual(len(mirrors), 1)
+        self.assertEqual(git(mirrors[0], "rev-parse", "--is-bare-repository"), "true")
+        self.assertEqual(git(mirrors[0], "rev-parse", "refs/remotes/origin/main"), commit)
+        self.assertNotIn(alias.encode(), (mirrors[0] / "config").read_bytes())
+        self.assertFalse((mirrors[0] / "FETCH_HEAD").exists())
+
+    def test_remote_url_cannot_enter_output_state_or_trace(self):
+        sensitive = uuid.uuid4().hex
+        self.fx.advance(RELEASE)
+        remote = self.fx.tmp / (sensitive + ".git")
+        self.fx.bare.rename(remote)
+        trace2 = self.fx.tmp / "trace2.json"
+        config = self.fx.tmp / "global-config"
+        git(self.lane, "config", "--file", str(config), "core.logAllRefUpdates", "always")
+        for destination in (remote, self.fx.tmp / (sensitive + "-missing.git")):
+            git(self.lane, "remote", "set-url", "origin", str(destination))
+            result = run_impact(self.lane, "tools/check.py", "--json",
+                env_extra={"GIT_TRACE": str(self.trace), "GIT_TRACE2_EVENT": str(trace2),
+                           "GIT_CONFIG_GLOBAL": str(config)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(sensitive in result.stdout + result.stderr + trace_text(self.trace) + trace_text(trace2),
+                             "the remote URL must not enter output or Git traces")
+        state = self.fx.map_files()[0].parent.parent
+        for path in state.rglob("*"):
+            if path.is_file():
+                self.assertFalse(sensitive.encode() in path.read_bytes(), "the remote URL must not enter state")
+
+    def test_mirror_preserves_object_format(self):
+        fx = RemoteFixture(self, object_format="sha256")
+        commit = fx.advance(RELEASE)
+        self.assertEqual(len(commit), 64)
+        result = run_impact(fx.lane, "tools/check.py", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        branch = json.loads(result.stdout)["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["commit"]), ("fresh", commit))
+
+    def test_relative_remote_and_state_override_are_isolated(self):
+        commit = self.fx.advance(RELEASE)
+        git(self.lane, "remote", "set-url", "origin", "../remote.git")
+        state = self.fx.tmp / "private state"
+        common = self.lane / ".git"
+        before = repository_bytes(self.lane)
+        result = run_impact(self.lane, "tools/check.py", "--json", env_extra={
+            "OAH_STATE_DIR": str(state), "GIT_DIR": str(common), "GIT_COMMON_DIR": str(common),
+            "GIT_WORK_TREE": str(self.lane), "GIT_OBJECT_DIRECTORY": str(common / "objects")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        branch = json.loads(result.stdout)["maps"]["default_branch"]
+        self.assertEqual((branch["state"], branch["commit"]), ("fresh", commit))
+        self.assertEqual(len(list((state / "impact/mirrors").glob("*.git"))), 1)
+        self.assertEqual(len(list((state / "impact/maps").glob("*.default-branch.json"))), 1)
+        self.assertEqual(repository_bytes(self.lane), before)
+
+    def test_incomplete_mirror_cannot_fall_back_to_the_user_repository(self):
+        mirror = defaultbranch._mirror_path(self.lane, {})
+        mirror.mkdir(parents=True)
+        (mirror / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        self.fx.advance(RELEASE)
+        before = repository_bytes(self.lane)
+        result = self.query("tools/check.py", "--json")
+        self.assertEqual(repository_bytes(self.lane), before)
+        self.assertEqual(json.loads(result.stdout)["maps"]["default_branch"]["state"], "fresh")
+
+    def test_missing_target_searches_the_mirror_at_the_recorded_sha(self):
+        git_commit(self.lane, {"tools/future.py": "print('new in this lane')\n"})
+        commit = self.fx.advance({".github/workflows/future.yml": "steps:\n  - run: python tools/future.py\n"})
+        for options in ([], ["--offline"]):
+            result = self.query("tools/future.py", "--json", *options)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["maps"]["default_branch"]["commit"], commit)
+            self.assertIn((".github/workflows/future.yml", "exec", "default-branch"),
+                          {(r["source"], r["binding"], r["found_in"]) for r in report["rows"]})
+
+    def test_pre_mirror_saved_map_remains_usable_after_lookup_failure(self):
+        commit = self.fx.advance({".github/workflows/future.yml": "steps:\n  - run: python tools/future.py\n"})
+        git(self.lane, "fetch", "-q", "origin")
+        mapstore.ref_map(self.lane, "refs/remotes/origin/main", env={})
+        git_commit(self.lane, {"tools/future.py": "print('new in this lane')\n"})
+        for options in (["--offline"], []):
+            git(self.lane, "remote", "set-url", "origin", str(self.fx.tmp / "missing.git"))
+            result = self.query("tools/future.py", "--json", *options)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["maps"]["default_branch"]["commit"], commit)
+            self.assertEqual(report["maps"]["default_branch"]["state"], "stale")
+            self.assertIn((".github/workflows/future.yml", "exec", "default-branch"),
+                          {(r["source"], r["binding"], r["found_in"]) for r in report["rows"]})
+
     def test_two_maps_show_new_default_branch_check(self):
+        before = refs(self.lane)
         new = self.fx.advance(RELEASE)
         result = self.query("tools/check.py")
         self.assertEqual(self.maps_line(result), f"maps: worktree={head(self.lane)} default-branch={new} ref=origin/main")
@@ -331,11 +608,11 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"(?m)^exec\s+lexical\s+workflow\s+\.github/workflows/ci\.yml:2\s", result.stdout)),
                          1, "a row in both maps is printed once")
         self.assertNotRegex(result.stdout, r"ci\.yml:2 .*default-branch only")
-        self.assertEqual(git(self.lane, "rev-parse", "refs/remotes/origin/main"), new)
+        self.assertEqual(refs(self.lane), before)
         self.assertEqual(len(self.fx.map_files()), 1)
         stored = json.loads(self.fx.map_files()[0].read_text(encoding="utf-8"))
         self.assertEqual(stored["commit"], new)
-        self.assertRegex(trace_text(self.trace), r"built-in: git .*fetch .*--no-write-fetch-head")
+        self.assertNotRegex(trace_text(self.trace), NETWORK_GIT, "URL-bearing Git commands suppress tracing")
 
         report = json.loads(self.query("tools/check.py", "--json").stdout)
         self.assertEqual(report["label"], f"worktree={head(self.lane)} default-branch={new}")
@@ -369,6 +646,7 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertNotIn(str(self.fx.tmp / "gone.git"), result.stderr, "git's own error text is not echoed")
 
     def test_offline_runs_no_fetch(self):
+        self.query("tools/check.py", trace=False)
         fetched = git(self.lane, "rev-parse", "refs/remotes/origin/main")
         self.fx.advance(RELEASE)
         result = self.query("tools/check.py", "--offline")
@@ -382,6 +660,7 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertEqual(report["maps"]["default_branch"]["commit"], fetched)
 
     def test_refresh_off_runs_no_fetch(self):
+        self.query("tools/check.py", trace=False)
         (self.lane / ".oah").mkdir()
         (self.lane / ".oah" / "config.toml").write_text("[impact]\nrefresh_default_branch = false\n", encoding="utf-8")
         result = self.query("tools/check.py")
@@ -433,7 +712,7 @@ class DefaultBranchCliTest(unittest.TestCase):
         result = run_impact(fx.lane, "tools/check.py", env_extra={"GIT_TRACE": str(self.trace)})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"default-branch={new} ref=origin/trunk", result.stdout)
-        self.assertRegex(trace_text(self.trace), r"built-in: git .*ls-remote")
+        self.assertNotRegex(trace_text(self.trace), NETWORK_GIT, "URL-bearing Git commands suppress tracing")
         self.assertNotIn("refs/remotes/origin/HEAD", refs(fx.lane), "the remote HEAD ref is not written")
 
     def test_saved_trunk_survives_skipped_or_failed_discovery(self):
@@ -470,7 +749,7 @@ class DefaultBranchCliTest(unittest.TestCase):
         local_before = (common / "config").read_bytes()
         fetch_head = (common / "FETCH_HEAD").read_bytes() if (common / "FETCH_HEAD").exists() else None
         refs_before = refs(self.lane)
-        new = self.fx.advance({**RELEASE, "tag-me.txt": "x\n"})
+        self.fx.advance({**RELEASE, "tag-me.txt": "x\n"})
         git(self.fx.pusher, "tag", "v9")
         git(self.fx.pusher, "push", "-q", "origin", "v9")
         self.query("tools/check.py")
@@ -480,8 +759,7 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.assertFalse(marker.exists(), "no credential helper ran")
         after = refs(self.lane)
         changed = {name for name in set(refs_before) | set(after) if refs_before.get(name) != after.get(name)}
-        self.assertEqual(changed, {"refs/remotes/origin/main"})
-        self.assertEqual(after["refs/remotes/origin/main"], new)
+        self.assertEqual(changed, set())
 
     def test_fetch_ignores_configured_refmaps(self):
         git(self.lane, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/remotes/mirror/*")
@@ -491,8 +769,8 @@ class DefaultBranchCliTest(unittest.TestCase):
         self.query("tools/check.py")
         after = refs(self.lane)
         changed = {name for name in set(before) | set(after) if before.get(name) != after.get(name)}
-        self.assertEqual(changed, {"refs/remotes/origin/main"})
-        self.assertEqual(after["refs/remotes/origin/main"], new)
+        self.assertEqual(changed, set())
+        self.assertEqual(mapstore.load(self.fx.map_files()[0])["commit"], new)
 
     def test_default_branch_coverage_warnings_are_visible(self):
         link = "tools/excluded.py"

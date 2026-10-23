@@ -110,7 +110,7 @@ def _expand(relative: str, files: dict) -> list[str]:
         return [relative]
     prefix = relative + "/" if relative else ""
     inside = [path for path in sorted(files) if path.startswith(prefix)]
-    return inside or [relative]
+    return inside
 
 
 def _git_names(root: pathlib.Path, *args: str) -> list[str]:
@@ -164,7 +164,13 @@ def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBran
     if branch.data is None:
         rows = query.query(data, targets, gates=gates, graph=graph, settings=settings)
         return rows, {row: "worktree" for row in rows}
-    theirs = _with_live_hits(root, branch.data, branch.commit, targets, settings)
+    source = defaultbranch._mirror_path(root)
+    if branch.state == "stale":
+        try:
+            mapstore.resolve_rev(source, branch.commit, timeout=settings["git_timeout"])
+        except ImpactError:
+            source = root  # Maps recorded before mirror isolation still have their objects in the user's repo.
+    theirs = _with_live_hits(source, branch.data, branch.commit, targets, settings)
     for target in targets:
         entity = query.normalize_entity(target)
         if entity and all(entity not in (m["db"] or {"entities": {}})["entities"] for m in (data, theirs)):
@@ -195,9 +201,14 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     requested = [query.normalize_entity(raw) or _relative(raw, root) for raw in args.targets]
     scope = _task_scope(root, args.task) if args.task else None
     branch = defaultbranch.refresh(root, settings, offline=args.offline, no_refresh=args.no_refresh)
-    files = {**(branch.data["files"] if branch.data else {}), **data["files"]}
+    maps = [data["files"]] + ([branch.data["files"]] if branch.data else [])
+    files = {path: kind for mapped in reversed(maps) for path, kind in mapped.items()}
     for target in requested:
-        add([target] if query.normalize_entity(target) else _expand(target, files))
+        if query.normalize_entity(target):
+            add([target])
+        else:
+            selected = [path for mapped in maps for path in _expand(target, mapped)]
+            add(selected or [target])
     if scope is not None:
         selected, notes = query.select_scope(scope, files, args.kind)
         warnings += notes

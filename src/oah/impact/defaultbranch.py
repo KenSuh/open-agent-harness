@@ -1,16 +1,13 @@
 # 기본 브랜치 지도 — 원격의 기본 브랜치를 읽기 전용으로 가져와 두 번째 지도를 갱신하고, 가져오지 못하면 마지막 가져온 ref 를 낡음(stale)으로 표기한다.
 """The remote's default branch, fetched before a query (A23).
 
-`refresh` finds the remote (the current branch's upstream remote, else `origin`) and its default branch
-(`refs/remotes/<remote>/HEAD`, else `git ls-remote --symref`, else the saved branch or `main`), fetches that
-one branch into its remote-tracking ref and refreshes the default-branch map for the fetched commit.
+`refresh` confirms the remote's symbolic HEAD on every online query, then fetches that one branch into
+a private bare repository in oah's state folder. The user's refs, objects and configuration are never
+fetch destinations. Git uses normal system/global configuration and credentials, without loading the
+user repository's local configuration. No remote URL, FETCH_HEAD, reflog or Git error text is stored.
 
-The fetch is read-only towards the remote and writes only `refs/remotes/<remote>/<branch>` (and objects):
-no tags, no `FETCH_HEAD`, no remote HEAD, no configuration, no maintenance. git uses the user's own setup;
-oah reads, passes and stores no credential, turns interactive prompts off and never echoes git's error
-text, which can contain a URL. Offline, disabled or failed, the last fetched ref is used and labelled
-`stale(<reason>)`; with no fetched ref the result is `unavailable(<reason>)`. The network never fails a
-query.
+Only a confirmed default branch fetched successfully in this run is fresh. Every other case uses the
+last recorded map's branch and SHA, labelled stale; with no recorded snapshot it is unavailable.
 """
 from __future__ import annotations
 
@@ -23,7 +20,7 @@ from typing import Mapping
 from oah.engines.proc import run_command
 from oah.impact import mapstore
 from oah.impact.errors import ImpactError
-from oah.paths import git_argv
+from oah.paths import git_argv, repo_info, state_dir
 
 FALLBACK_BRANCH = "main"
 # No prompt may wait for an answer that cannot come: stdin is closed and the refresh runs unattended.
@@ -67,7 +64,9 @@ class DefaultBranch:
         fix = {"offline": "drop --offline when the network is back",
                "no-refresh": "drop --no-refresh to fetch it",
                "refresh_default_branch=false": "set [impact] refresh_default_branch = true in .oah/config.toml",
-               "no remote": "add one with git remote add origin <url> if this project has a shared repository"}
+               "no remote": "add one with git remote add origin <url> if this project has a shared repository",
+               "default branch lookup failed": f"check git ls-remote --symref {self.remote or 'origin'} HEAD, "
+                                               "restore the remote's symbolic HEAD, then retry"}
         hint = fix.get(self.reason, f"run git fetch {self.remote or 'origin'} yourself to see why, then retry")
         if self.reason.startswith("map failed"):
             hint = "run oah impact refresh, then retry the query"
@@ -89,7 +88,8 @@ def _git(root: pathlib.Path, *args: str, timeout: float, env: Mapping[str, str] 
 
 
 def _network_git(root: pathlib.Path, *args: str, timeout: float):
-    return _git(root, "-c", "core.askPass=", *args, timeout=timeout, env={**os.environ, **QUIET_ENV})
+    return _git(root, "--git-dir", str(root), "-c", "core.askPass=", *args, timeout=timeout,
+                env={**mapstore._isolated_git_env(), **QUIET_ENV})
 
 
 def _text(root: pathlib.Path, *args: str, timeout: float) -> str | None:
@@ -123,22 +123,52 @@ def _saved_branch(root: pathlib.Path, remote: str, env: Mapping[str, str] | None
     return FALLBACK_BRANCH
 
 
+def _mirror_path(root: pathlib.Path, env: Mapping[str, str] | None = None) -> pathlib.Path:
+    info = repo_info(root)
+    state = state_dir(info, os.environ if env is None else env)
+    key = mapstore.map_path(state, info.root).stem
+    return (state / "impact" / "mirrors" / (key + ".git")).resolve()
+
+
+def _prepare(root: pathlib.Path, remote: str, timeout: float,
+             env: Mapping[str, str] | None = None) -> tuple[pathlib.Path, str | None, str]:
+    mirror = _mirror_path(root, env)
+    result = _git(root, "remote", "get-url", "--", remote, timeout=timeout,
+                  env=mapstore._isolated_git_env())
+    url = result.stdout.strip() if result.returncode == 0 else ""
+    if not url:
+        return mirror, None, "fetch failed"
+    # Local relative URLs are relative to the user's checkout, not the mirror. Leave Git URL schemes,
+    # scp syntax and remote-helper syntax intact so system/global URL rewrites still work.
+    if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
+        url = str((root / pathlib.Path(url).expanduser()).resolve())
+    mirror.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not mapstore._bare(mirror):
+        object_format = _text(root, "rev-parse", "--show-object-format", timeout=timeout)
+        if object_format not in ("sha1", "sha256"):
+            return mirror, None, "fetch failed"
+        result = _network_git(mirror, "init", "--bare", "--quiet", "--template=",
+                              f"--object-format={object_format}", str(mirror), timeout=timeout)
+        if result.timed_out or result.returncode != 0:
+            return mirror, None, "fetch timed out" if result.timed_out else "fetch failed"
+    return mirror, url, ""
+
+
 def default_branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: float) -> tuple[str, str]:
-    """(branch, reason): the remote's HEAD branch, from the local remote HEAD ref, else (network allowed) from
-    `git ls-remote --symref`, else the saved branch or main. reason is non-empty when the remote could not
-    be asked."""
+    """(branch, reason): confirm the remote's symbolic HEAD, or return the saved name with a reason."""
     return _branch_name(root, remote, network=network, timeout=timeout, fallback=_saved_branch(root, remote))
 
 
 def _branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: float,
                 fallback: str) -> tuple[str, str]:
-    prefix = f"refs/remotes/{remote}/"
-    local = _text(root, "symbolic-ref", "--quiet", prefix + "HEAD", timeout=timeout)
-    if local and local.startswith(prefix) and _valid(local[len(prefix):]):
-        return local[len(prefix):], ""
     if not network:
-        return fallback, ""
-    result = _network_git(root, "ls-remote", "--symref", "--end-of-options", remote, "HEAD", timeout=timeout)
+        return fallback, "default branch lookup failed"
+    mirror, url, reason = _prepare(root, remote, timeout)
+    return (fallback, reason) if reason else _discover(mirror, url, fallback, timeout)
+
+
+def _discover(mirror: pathlib.Path, url: str, fallback: str, timeout: float) -> tuple[str, str]:
+    result = _network_git(mirror, "ls-remote", "--symref", "--end-of-options", url, "HEAD", timeout=timeout)
     if result.timed_out:
         return fallback, "fetch timed out"
     if result.returncode != 0:
@@ -147,15 +177,21 @@ def _branch_name(root: pathlib.Path, remote: str, *, network: bool, timeout: flo
         match = re.match(r"ref: refs/heads/(\S+)\tHEAD\Z", line.rstrip("\r"))
         if match and _valid(match.group(1)):
             return match.group(1), ""
-    return fallback, ""
+    return fallback, "default branch lookup failed"
 
 
 def fetch(root: pathlib.Path, remote: str, branch: str, timeout: float) -> str:
-    """Fetch one branch into its remote-tracking ref; "" on success, else the reason."""
-    argv = ("-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", f"remote.{remote}.followRemoteHEAD=never",
+    """Fetch one branch into oah's private bare mirror; "" on success, else the reason."""
+    mirror, url, reason = _prepare(root, remote, timeout)
+    return reason or _fetch(mirror, url, remote, branch, timeout)
+
+
+def _fetch(mirror: pathlib.Path, url: str, remote: str, branch: str, timeout: float) -> str:
+    # FETCH_HEAD and reflogs can contain the URL, so suppress both even inside the private mirror.
+    argv = ("-c", "core.logAllRefUpdates=false",
             "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-prune",
-            "--refmap=", "--end-of-options", remote, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
-    result = _network_git(root, *argv, timeout=timeout)
+            "--end-of-options", url, f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}")
+    result = _network_git(mirror, *argv, timeout=timeout)
     if result.timed_out:
         return "fetch timed out"
     return "" if result.returncode == 0 else "fetch failed"
@@ -166,8 +202,26 @@ def refresh(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool
     """Fetch the default branch (unless told not to) and return its map, labelled; never raises for the network."""
     timeout = float(settings["git_timeout"])
     remote = remote_for(root, timeout)
+    saved = mapstore._last_default_map(root, env)
+    previous = None
+    if saved:
+        info, stored = saved
+        ref = stored["manifest"].get("ref", "")
+        name = stored["manifest"].get("remote")
+        if not name and isinstance(ref, str) and ref.startswith("refs/remotes/"):
+            name = ref.removeprefix("refs/remotes/").partition("/")[0]
+        prefix = f"refs/remotes/{name}/"
+        if isinstance(ref, str) and name and _valid(name) and ref.startswith(prefix) and _valid(ref[len(prefix):]):
+            previous = DefaultBranch("stale", "", name, ref[len(prefix):], info.commit, info, stored["data"])
+
+    def fallback(reason: str, branch: str | None = None) -> DefaultBranch:
+        if previous:
+            return DefaultBranch("stale", reason, previous.remote, previous.branch, previous.commit,
+                                 previous.info, previous.data)
+        return DefaultBranch("unavailable", reason, remote, branch, None)
+
     if remote is None:
-        return DefaultBranch("unavailable", "no remote", None, None, None)
+        return fallback("no remote")
     if no_refresh:
         skip = "no-refresh"
     elif offline:
@@ -176,19 +230,19 @@ def refresh(root: pathlib.Path, settings: Mapping[str, object], *, offline: bool
         skip = "refresh_default_branch=false"
     else:
         skip = ""
-    branch, reason = _branch_name(root, remote, network=not skip, timeout=timeout,
-                                 fallback=_saved_branch(root, remote, env))
-    if not skip and not reason:
-        reason = fetch(root, remote, branch, timeout)
-    reason = skip or reason
+    if skip:
+        return fallback(skip)
+    mirror, url, reason = _prepare(root, remote, timeout, env)
+    if reason:
+        return fallback(reason)
+    branch, reason = _discover(mirror, url, previous.branch if previous else FALLBACK_BRANCH, timeout)
+    if not reason:
+        reason = _fetch(mirror, url, remote, branch, timeout)
+    if reason:
+        return fallback(reason, branch)
     ref = f"refs/remotes/{remote}/{branch}"
-    commit = _text(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}", timeout=timeout)
-    if commit is None:
-        return DefaultBranch("unavailable", reason or "nothing fetched", remote, branch, None)
     try:
-        info, data = mapstore.ref_map(root, ref, refresh=not no_refresh, env=env, settings=settings)
+        info, data = mapstore._ref_map(root, ref, source=mirror, env=env, settings=settings, remote=remote)
     except ImpactError as exc:
-        stale_map = no_refresh and exc.code == "OAH_IMPACT_STALE"
-        return DefaultBranch("unavailable", "no-refresh" if stale_map else f"map failed: {exc.code}", remote,
-                             branch, None)
-    return DefaultBranch("stale" if reason else "fresh", reason, remote, branch, info.commit, info, data)
+        return fallback(f"map failed: {exc.code}", branch)
+    return DefaultBranch("fresh", "", remote, branch, info.commit, info, data)

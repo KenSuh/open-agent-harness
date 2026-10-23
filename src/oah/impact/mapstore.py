@@ -118,11 +118,28 @@ def tool_digest(settings: Mapping[str, object]) -> str:
 
 # --- git -----------------------------------------------------------------------------------------------
 
+def _isolated_git_env() -> dict[str, str]:
+    """Keep normal system/global Git setup, without inherited repository locations or URL tracing."""
+    local = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+             "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+             "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_CURL_VERBOSE"}
+    env = {k: v for k, v in os.environ.items() if k.upper() not in local
+           and not k.upper().startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE"))}
+    # These also override trace2 targets configured in system/global config.
+    env.update(GIT_TRACE="0", GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
+    return env
+
+
+def _bare(root: pathlib.Path) -> bool:
+    return (root / "HEAD").is_file() and (root / "objects").is_dir()
+
+
 def _git(root: pathlib.Path, *args: str, timeout: float, encoding: str = "utf-8",
          stdin_text: str | None = None, ok: Iterable[int] = (0,)) -> str:
     argv = (*git_argv(), "--literal-pathspecs", "--no-optional-locks", "-c", "core.quotepath=false",
             "-C", str(root), *args)
-    result = run_command(argv, timeout=timeout, encoding=encoding, stdin_text=stdin_text)
+    result = run_command(argv, timeout=timeout, encoding=encoding, stdin_text=stdin_text,
+                         env=_isolated_git_env() if _bare(root) else None)
     if result.timed_out:
         raise ImpactError("OAH_IMPACT_GIT_TIMEOUT", f"git {args[0]} took longer than {timeout:g}s in {root}; "
                           "raise [impact] git_timeout and retry")
@@ -363,6 +380,17 @@ def _grep_lines(root: pathlib.Path, rev: str | None, needles: set[str], paths: l
                 ignore_case: bool = False) -> list[tuple[str, int, str]]:
     if not needles:
         return []
+    if rev is not None and _bare(root):
+        patterns = sorted(n for n in needles if n and "\n" not in n)
+        if not patterns or paths == []:
+            return []
+        rows = []
+        for chunk in [None] if paths is None else _chunks(paths):
+            output = _git(root, "grep", "-n", "-I", "-F", "-z", "--no-color", "-f", "-",
+                          *(("-i",) if ignore_case else ()), rev, "--", *(chunk or []), timeout=timeout,
+                          stdin_text="\n".join(patterns) + "\n", ok=(0, 1))
+            rows.extend(lexical._parse_grep(output, rev + ":"))
+        return rows
     if paths is None:
         return lexical.grep(root, rev, sorted(needles), ignore_case=ignore_case, timeout=timeout)
     lines = []
@@ -506,8 +534,8 @@ def load(path: pathlib.Path) -> dict:
     return stored
 
 
-def _last_default_ref(root: pathlib.Path, env: Mapping[str, str] | None = None) -> str | None:
-    """Recover discovery metadata from this worktree's last persisted default-branch map."""
+def _last_default_map(root: pathlib.Path, env: Mapping[str, str] | None = None) -> tuple[MapInfo, dict] | None:
+    """Recover the recorded snapshot, independently of any mutable tracking ref."""
     info = repo_info(pathlib.Path(root))
     path = ref_map_path(state_dir(info, os.environ if env is None else env), info.root)
     try:
@@ -517,9 +545,19 @@ def _last_default_ref(root: pathlib.Path, env: Mapping[str, str] | None = None) 
     manifest = stored.get("manifest")
     if stored.get("schema") != MAP_SCHEMA or not isinstance(manifest, dict) \
             or stored.get("manifest_digest") != digest(manifest) \
-            or manifest.get("worktree") != hashlib.sha256(str(info.root.resolve()).encode("utf-8")).hexdigest():
+            or manifest.get("worktree") != hashlib.sha256(str(info.root.resolve()).encode("utf-8")).hexdigest() \
+            or stored.get("result") != digest(stored["data"]) \
+            or not isinstance(manifest.get("head"), str) \
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", manifest["head"]) \
+            or stored.get("commit") != manifest["head"] or not isinstance(stored.get("tool"), str):
         return None
-    ref = manifest.get("ref")
+    return _info(stored, path, "stale"), stored
+
+
+def _last_default_ref(root: pathlib.Path, env: Mapping[str, str] | None = None) -> str | None:
+    """Recover discovery metadata from this worktree's last persisted default-branch map."""
+    saved = _last_default_map(root, env)
+    ref = saved[1]["manifest"].get("ref") if saved else None
     return ref if isinstance(ref, str) else None
 
 
@@ -677,26 +715,42 @@ def ref_map(root: pathlib.Path, ref: str, *, refresh: bool = True, env: Mapping[
     A commit never changes, so the map is keyed by the SHA the ref names now. A map for an older SHA is
     refreshed incrementally, or refused with OAH_IMPACT_STALE when refresh is False. Nothing is fetched here.
     """
+    return _ref_map(root, ref, source=None, refresh=refresh, env=env, settings=settings)
+
+
+def _ref_map(root: pathlib.Path, ref: str, *, source: pathlib.Path | None, refresh: bool = True,
+             env: Mapping[str, str] | None = None, settings: Mapping[str, object] | None = None,
+             remote: str | None = None) -> tuple[MapInfo, dict]:
+    """Read objects from source (the private mirror), but bind/store the map for the user's worktree."""
     top, worktree_path, current = _context(root, env, settings)
+    source = top if source is None else source
     path = ref_map_path(_state(worktree_path), top)
+
+    def manifest_inputs():
+        manifest, inputs, excluded = _ref_manifest(source, ref, current)
+        manifest["worktree"] = hashlib.sha256(str(top.resolve()).encode("utf-8")).hexdigest()
+        if remote is not None:
+            manifest["remote"] = remote
+        return manifest, inputs, excluded
+
     if not refresh:
-        manifest, _inputs, _excluded = _ref_manifest(top, ref, current)
+        manifest, _inputs, _excluded = manifest_inputs()
         stored, reason, _incremental = _judge(path, manifest, REF_ORDER)
         if stored is not None and not reason:
             return _info(stored, path, "fresh"), stored["data"]
         raise ImpactError("OAH_IMPACT_STALE", f"the default-branch map is {reason}; run oah impact without "
                           "--no-refresh to refresh it")
     with StateLock(path.parent.parent / ".lock", timeout=float(current["lock_timeout"])):
-        manifest, inputs, excluded = _ref_manifest(top, ref, current)
+        manifest, inputs, excluded = manifest_inputs()
         stored, reason, incremental = _judge(path, manifest, REF_ORDER)
         if stored is not None and not reason:
             return _info(stored, path, "fresh"), stored["data"]
         if stored is not None and incremental:
-            data, changed = refresh_data(top, stored["data"], stored["inputs"], inputs, manifest["head"], current,
+            data, changed = refresh_data(source, stored["data"], stored["inputs"], inputs, manifest["head"], current,
                                          rev=manifest["head"])
             action = "refreshed"
         else:
-            data = build_data(top, manifest["head"], current)
+            data = build_data(source, manifest["head"], current)
             changed, action = len(data["files"]), "built"
         data["excluded_paths"] = excluded
         return _info(_write(path, manifest, inputs, data), path, action, changed, reason), data

@@ -576,7 +576,7 @@ class DbQueryTest(unittest.TestCase):
         report = json.loads(result.stdout)
         identity = report["db_impact"]
         self.assertEqual(identity["status"], "available")
-        graph = mapstore.snapshot(fx.lane, commit)[1]["db"]
+        graph = mapstore.snapshot(fx.pusher, commit)[1]["db"]
         self.assertEqual(identity["maps"], {"default_branch": {"commit": commit, "graph": mapstore.digest(graph)}})
         db_rows = [row for row in report["rows"] if row["layer"] == "db"]
         self.assertTrue(db_rows)
@@ -600,8 +600,8 @@ class DbQueryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         identity = report["db_impact"]
-        expected = {name: {"commit": commit, "graph": mapstore.digest(mapstore.snapshot(fx.lane, commit)[1]["db"])}
-                    for name, commit in (("worktree", mine), ("default_branch", theirs))}
+        expected = {name: {"commit": commit, "graph": mapstore.digest(mapstore.snapshot(repo, commit)[1]["db"])}
+                    for name, repo, commit in (("worktree", fx.lane, mine), ("default_branch", fx.pusher, theirs))}
         self.assertEqual(identity["status"], "available")
         self.assertEqual(identity["maps"], expected)
         self.assertNotEqual(expected["worktree"]["graph"], expected["default_branch"]["graph"])

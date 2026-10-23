@@ -403,6 +403,43 @@ class CliTest(unittest.TestCase):
                     self.assertIn(("tools/new.py", "exec", "default-branch"),
                                   {(r["target"], r["binding"], r["found_in"]) for r in scoped["rows"]})
 
+    def test_file_directory_transitions_keep_both_maps_targets(self):
+        from tests.test_impact_default_branch import RemoteFixture, git
+
+        for file_side in ("worktree", "default-branch"):
+            with self.subTest(file_side=file_side):
+                fx = RemoteFixture(self)
+                repo = fx.lane if file_side == "worktree" else fx.pusher
+                git(repo, "rm", "-r", "tools")
+                git_commit(repo, {"tools": "print('single file')\n",
+                                  ".github/workflows/file.yml": "steps:\n  - run: python tools\n"
+                                                                "  - run: sha256sum tools\n"})
+                if file_side == "default-branch":
+                    git(repo, "push", "-q", "origin", "HEAD:main")
+                for output in ([], ["--json"]):
+                    result = run_impact(fx.lane, "tools/", "--strong-only", *output)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if output:
+                        report = json.loads(result.stdout)
+                        self.assertEqual(set(report["targets"]), {"tools", "tools/check.py"})
+                        locations = {(r["source"], r["line"], r["binding"], r["target"]) for r in report["rows"]}
+                        self.assertTrue({(".github/workflows/ci.yml", 2, "exec", "tools/check.py"),
+                                         (".github/workflows/file.yml", 2, "exec", "tools"),
+                                         (".github/workflows/file.yml", 3, "pin", "tools")} <= locations)
+                    else:
+                        self.assertIn(".github/workflows/ci.yml:2", result.stdout)
+                        self.assertIn(".github/workflows/file.yml:2", result.stdout)
+                        self.assertIn(".github/workflows/file.yml:3", result.stdout)
+
+    def test_directory_present_in_one_map_has_no_phantom_target(self):
+        from tests.test_impact_default_branch import RemoteFixture
+
+        fx = RemoteFixture(self)
+        fx.advance({"newtools/check.py": "print('check')\n"})
+        result = run_impact(fx.lane, "newtools/", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["targets"], ["newtools/check.py"])
+
     def test_cli_reads_impact_config(self):
         (self.repo / ".oah").mkdir()
         config = self.repo / ".oah" / "config.toml"
