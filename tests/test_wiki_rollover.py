@@ -410,6 +410,19 @@ class RecoveryTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
                 self.assertEqual(snapshot(folder, w.state), before)
 
+    def test_resolved_reconciles_the_older_conflict(self):
+        w, folder, stream = self.crashed("archive-published")
+        (folder / "log.md").write_bytes((folder / "log.md").read_bytes() + b"edited\n")
+        with self.assertRaises(WikiError) as ctx:
+            w.recover()
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertIn("oah wiki recover --resolved", str(ctx.exception))
+        with self.assertRaises(WikiError):  # the published archive duplicates entries still in log.md
+            w.recover(resolved=True)
+        (folder / "log_archive_01.md").unlink()
+        self.assertTrue(w.recover(resolved=True).startswith("OAH_WIKI_RECOVERY_RESOLVED"))
+        self.assertFalse(w.journal_path.exists())
+
     def test_corrupt_journal_is_never_reset(self):
         w, folder, _ = self.crashed("validated")
         w.journal_path.write_text("{not json", encoding="utf-8")
@@ -492,7 +505,7 @@ if __name__ == "__main__":
 
 
 class HardeningTest(unittest.TestCase):
-    """Amendment 4 (A16 port): hash checks, revalidation after publication, rollback from the journal."""
+    """Amendment 4 (A16 port): hash checks, revalidation, and recording (never touching) late changes."""
 
     def setUp(self):
         self.w, self.folder = make_store(self, make_log(newest_first(20, body=40)))
@@ -566,70 +579,99 @@ class HardeningTest(unittest.TestCase):
             with open(self.log_path, "ab") as handle:
                 handle.write(self.APPEND)
 
-    def test_append_during_rollover_is_rolled_back(self):
-        with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=self.append_after_publication)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
-        self.assertIn("rolled back", str(ctx.exception))
-        self.assertEqual(self.log_path.read_bytes(), self.original + self.APPEND)
-        self.assertEqual(self.wiki_files(), ["log.md"])
-        self.assertFalse(self.w.journal_path.exists())
-        self.assertTrue(self.w.rollover(today=TODAY).line.startswith("OAH_WIKI_ROLLED_OVER"))
+    def assert_recorded_not_touched(self, fault, differ: str) -> dict:
+        """A change right after publication: no file is touched, the journal records it, all refuse."""
+        published = {}
 
-    def test_identity_change_after_publication_is_rolled_back(self):
-        def swap(step: str) -> None:
-            if step == "log-replaced":  # an editor rewrites log.md with the same bytes as a new file
-                data = self.log_path.read_bytes()
-                temp = self.folder / "other"
-                temp.write_bytes(data)
-                temp.replace(self.log_path)
+        def watch(step: str) -> None:
+            if step == "log-replaced":
+                published["log"] = self.log_path.read_bytes()
+                published["archive"] = (self.folder / "log_archive_01.md").read_bytes()
+            fault(step)
 
         with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=swap)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_CONCURRENT_EDIT")
-        self.assertEqual(self.log_path.read_bytes(), self.original)
-        self.assertEqual(self.wiki_files(), ["log.md"])
-
-    def test_failed_rollback_keeps_bytes_in_the_journal(self):
-        def fault(step: str) -> None:
-            self.append_after_publication(step)
-            if step == "rollback":
-                raise PermissionError("simulated: log.md is held open")
-
-        with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=fault)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
-        self.assertEqual(self.wiki_files(), ["log.md", "log_archive_01.md"])  # nothing extra in the worktree
+            self.w.rollover(today=TODAY, fault=watch)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_PENDING")
+        self.assertIn(differ, str(ctx.exception))
+        live = snapshot(self.folder)
         journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
-        self.assertEqual((journal["phase"], journal["reason"]), ("rollback-failed", "rollback-failed"))
-        self.assertEqual(base64.b64decode(journal["restore_log"]), self.original + self.APPEND)
-        for call in (lambda: self.w.lint(), lambda: self.w.log("x", today=TODAY), lambda: self.w.rollover(today=TODAY)):
+        self.assertEqual((journal["phase"], journal["reason"]), ("changed-after-publication",) * 2)
+        self.assertEqual(base64.b64decode(journal["current_log"]), self.log_path.read_bytes())
+        self.assertEqual(base64.b64decode(journal["replacement_log"]), published["log"])
+        for call in (lambda: self.w.lint(), lambda: self.w.log("x", today=TODAY), lambda: self.w.rollover(today=TODAY),
+                     lambda: self.w.maintain_task("t1", today=TODAY)):
             with self.assertRaises(WikiError) as pending:
                 call()
             self.assertEqual(pending.exception.code, "OAH_WIKI_RECOVERY_PENDING")
-            self.assertIn("reason rollback-failed", str(pending.exception))
-        line = self.w.recover()
-        self.assertTrue(line.startswith("OAH_WIKI_RECOVERED rolled back (rollback-failed)"), line)
-        self.assertEqual(self.log_path.read_bytes(), self.original + self.APPEND)
-        self.assertEqual(self.wiki_files(), ["log.md"])
-        self.assertFalse(self.w.journal_path.exists())
-        self.assertEqual(self.w.recover(), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
-
-    def test_unmergeable_change_after_publication_is_never_overwritten(self):
-        def fault(step: str) -> None:
-            if step == "log-replaced":
-                self.log_path.write_bytes(b"someone rewrote the log\n")
-
-        with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=fault)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
-        journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
-        self.assertEqual(journal["reason"], "changed-after-publication")
-        self.assertEqual(base64.b64decode(journal["current_log"]), b"someone rewrote the log\n")
+            self.assertIn("changed-after-publication", str(pending.exception))
         before = snapshot(self.folder, self.w.state)
         with self.assertRaises(WikiError) as conflict:
             self.w.recover()
         self.assertEqual(conflict.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertIn(differ, str(conflict.exception))
+        self.assertIn(str(self.w.journal_path), str(conflict.exception))
+        self.assertIn("oah wiki recover --resolved", str(conflict.exception))
+        self.assertEqual(snapshot(self.folder, self.w.state), before)
+        self.assertEqual(snapshot(self.folder), live)
+        return published
+
+    def test_late_write_after_publication_is_recorded_not_restored(self):
+        published = self.assert_recorded_not_touched(self.append_after_publication, "log.md")
+        self.assertEqual(self.log_path.read_bytes(), published["log"] + self.APPEND)  # untouched
+        self.assertTrue((self.folder / "log_archive_01.md").exists())
+
+    def test_identity_change_after_publication_is_recorded(self):
+        def swap(step: str) -> None:
+            if step == "log-replaced":  # an editor rewrites log.md with the same bytes as a new file
+                temp = self.folder / "other"
+                temp.write_bytes(self.log_path.read_bytes())
+                temp.replace(self.log_path)
+
+        self.assert_recorded_not_touched(swap, "log.md")
+
+    def test_archive_change_after_publication_is_recorded(self):
+        def edit(step: str) -> None:
+            if step == "log-replaced":
+                with open(self.folder / "log_archive_01.md", "ab") as handle:
+                    handle.write(b"edited archive\n")
+
+        self.assert_recorded_not_touched(edit, "log_archive_01.md")
+
+    def test_resolved_after_a_manual_fix(self):
+        self.assert_recorded_not_touched(self.append_after_publication, "log.md")
+        # The user decides the late text belongs to the newest kept entry and leaves both files as they are.
+        line = self.w.recover(resolved=True)
+        self.assertTrue(line.startswith("OAH_WIKI_RECOVERY_RESOLVED 2 files parse"), line)
+        self.assertFalse(self.w.journal_path.exists())
+        [record] = [json.loads(x) for x in (self.w.state / "recovery-resolutions.jsonl").read_text(
+            encoding="utf-8").splitlines()]
+        self.assertEqual(record["reason"], "changed-after-publication")
+        self.assertEqual(sorted(record["files"]), ["log.md", "log_archive_01.md"])
+        self.assertTrue(self.w.log("works again", today=TODAY).title == "works again")
+        self.assertEqual(self.w.recover(resolved=True), "OAH_WIKI_RECOVER_NOTHING nothing to recover")
+
+    def test_resolved_refuses_while_an_entry_is_duplicated(self):
+        self.assert_recorded_not_touched(self.append_after_publication, "log.md")
+        self.log_path.write_bytes(self.original)  # a "fix" that brings back entries the archive also holds
+        before = snapshot(self.folder, self.w.state)
+        with self.assertRaises(WikiError) as ctx:
+            self.w.recover(resolved=True)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertIn("is in both log.md", str(ctx.exception))
+        self.assertIn("log_archive_01.md", str(ctx.exception))
+        self.assertEqual(snapshot(self.folder, self.w.state), before)
+        (self.folder / "log_archive_01.md").unlink()  # the real fix: the archive goes, log.md keeps every entry
+        self.assertTrue(self.w.recover(resolved=True).startswith("OAH_WIKI_RECOVERY_RESOLVED 1 files"))
+        self.assertEqual(wiki_stream(self.folder), self.stream)
+
+    def test_resolved_refuses_an_unparsable_log(self):
+        self.assert_recorded_not_touched(self.append_after_publication, "log.md")
+        self.log_path.write_bytes(b"no marker any more\n")
+        before = snapshot(self.folder, self.w.state)
+        with self.assertRaises(WikiError) as ctx:
+            self.w.recover(resolved=True)
+        self.assertEqual(ctx.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
+        self.assertIn("no marker", str(ctx.exception))
         self.assertEqual(snapshot(self.folder, self.w.state), before)
 
     def test_dry_run_writes_nothing(self):
@@ -640,45 +682,3 @@ class HardeningTest(unittest.TestCase):
         self.assertIsNone(result.archive)
         self.assertEqual(snapshot(self.folder, self.w.state), before)
 
-    def test_restore_removes_the_new_archive_so_no_entry_is_in_two_files(self):
-        def assert_each_entry_once(expected_stream: bytes) -> None:
-            data = [e.data for p in sorted(self.folder.glob("log*.md")) for e in log.parse_log(p.read_bytes(), p.name).entries]
-            self.assertEqual(len(data), len(set(data)), "an entry is in two files")
-            self.assertEqual(wiki_stream(self.folder), expected_stream)
-            self.assertEqual(self.wiki_files(), ["log.md"])
-
-        late = self.stream + self.APPEND
-        with self.assertRaises(WikiError):  # live rollback after a late write
-            self.w.rollover(today=TODAY, fault=self.append_after_publication)
-        assert_each_entry_once(late)
-
-        w, folder = make_store(self, make_log(newest_first(20, body=40)))
-        self.w, self.folder, self.log_path = w, folder, folder / "log.md"
-
-        def fault(step: str) -> None:
-            self.append_after_publication(step)
-            if step == "rollback":
-                raise PermissionError("simulated")
-
-        with self.assertRaises(WikiError):  # restore by `oah wiki recover` after a failed rollback
-            w.rollover(today=TODAY, fault=fault)
-        self.assertTrue((folder / "log_archive_01.md").exists())
-        w.recover()
-        assert_each_entry_once(late)
-
-    def test_a_changed_new_archive_is_never_overwritten(self):
-        def fault(step: str) -> None:
-            if step == "log-replaced":
-                with open(self.folder / "log_archive_01.md", "ab") as handle:
-                    handle.write(b"edited archive\n")
-
-        with self.assertRaises(WikiError) as ctx:
-            self.w.rollover(today=TODAY, fault=fault)
-        self.assertEqual(ctx.exception.code, "OAH_WIKI_ROLLBACK_FAILED")
-        journal = json.loads(self.w.journal_path.read_text(encoding="utf-8"))
-        self.assertEqual(journal["reason"], "changed-after-publication")
-        before = snapshot(self.folder, self.w.state)
-        with self.assertRaises(WikiError) as conflict:
-            self.w.recover()
-        self.assertEqual(conflict.exception.code, "OAH_WIKI_RECOVERY_CONFLICT")
-        self.assertEqual(snapshot(self.folder, self.w.state), before)

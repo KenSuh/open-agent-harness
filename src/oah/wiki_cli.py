@@ -45,7 +45,10 @@ def register(commands: argparse._SubParsersAction) -> None:
                               "into the next numbered archive")
     rollover.add_argument("--apply", action="store_true",
                           help="write the plan; needs a lease whose scope covers log.md and the new archive")
-    sub.add_parser("recover", help="finish or check an interrupted rollover")
+    recover = sub.add_parser("recover", help="finish or check an interrupted rollover")
+    recover.add_argument("--resolved", action="store_true",
+                         help="after fixing a recovery conflict by hand: check that the log and archives parse "
+                              "and no entry appears twice, then drop the journal")
     sub.add_parser("hygiene", help="print one line of problem counts and their change since the last run")
 
     maintain = sub.add_parser("maintain", help="task upkeep before the final commit: log entry, index line and "
@@ -134,7 +137,7 @@ def _require_lease(wiki: Wiki, plan) -> None:
 
 
 def _recover(args: argparse.Namespace, wiki: Wiki) -> int:
-    print(wiki.recover())
+    print(wiki.recover(resolved=args.resolved))
     return EXIT_OK
 
 

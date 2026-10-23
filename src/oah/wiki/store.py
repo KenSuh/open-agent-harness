@@ -26,6 +26,7 @@ from oah.wiki.base import EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSetting
 
 JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
+RESOLUTIONS = "recovery-resolutions.jsonl"
 Fault = Callable[[str], None]
 
 
@@ -258,60 +259,26 @@ class Wiki:
         write_text_atomic(log_path, plan.log.decode("utf-8"))
         published = _identity(log_path)
         fault("log-replaced")
-        # After publication: re-read both files. The log must be the file and bytes we published, the
-        # archive ours, and the preservation stream unchanged.
+        # After publication: re-read both files. Only the exact published file and bytes, with an
+        # unchanged preservation stream, let the journal go. Anything else is recorded, never touched.
         log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
         if (_identity(log_path) == published and log_now == plan.log and archive_now == plan.archive
                 and self._stream(log_now) == stream):
             unlink_durable(self.journal_path)
             return RolloverResult(f"OAH_WIKI_ROLLED_OVER {plan.summary()}", archive_path)
-        self._roll_back_after_publication(journal, original, plan, log_path, archive_path, log_now, archive_now,
-                                          fault)
-        raise AssertionError("unreachable")
+        live = {"phase": "changed-after-publication", "reason": "changed-after-publication",
+                "detected_at": _now(), "current_log": _b64(log_now or b""), "current_log_sha256": _sha(log_now or b"")}
+        if archive_now is not None:
+            live.update(current_archive=_b64(archive_now), current_archive_sha256=_sha(archive_now))
+        write_json_atomic(self.journal_path, dict(journal, **live))
+        differ = self._differing(log_path, archive_path, plan.log, plan.archive)
+        raise WikiError("OAH_WIKI_RECOVERY_PENDING", f"{differ} changed right after rollover published them. "
+                        f"No file was touched; the live bytes are recorded in {self.journal_path} (reason "
+                        "changed-after-publication). Run `oah wiki recover` for what to reconcile.", EXIT_ENVIRONMENT)
 
-    def _roll_back_after_publication(self, journal: dict, original: bytes, plan: log_module.RolloverPlan,
-                                     log_path: pathlib.Path, archive_path: pathlib.Path, log_now: bytes | None,
-                                     archive_now: bytes | None, fault: Fault) -> None:
-        """Undo a publication someone else touched, from the journal's original bytes; always raises.
-
-        Bytes appended to the new log are kept after the original bytes. Any other change cannot be
-        merged safely: the journal keeps every version and the wiki waits for `oah wiki recover`.
-        """
-        appended = log_now[len(plan.log):] if log_now is not None and log_now.startswith(plan.log) else None
-        restore = original + appended if appended is not None else None
-        if restore is not None and archive_now in (None, plan.archive):
-            try:
-                restore_text = restore.decode("utf-8")
-            except UnicodeDecodeError:
-                restore = None
-            else:
-                try:
-                    fault("rollback")
-                    write_text_atomic(log_path, restore_text)
-                    if read_bytes(archive_path) == plan.archive:
-                        unlink_durable(archive_path)
-                except OSError as exc:
-                    write_json_atomic(self.journal_path, dict(
-                        journal, phase="rollback-failed", reason="rollback-failed", detail=f"{type(exc).__name__}: {exc}",
-                        restore_log=_b64(restore), restore_log_sha256=_sha(restore),
-                        current_log=_b64(log_now), current_log_sha256=_sha(log_now)))
-                    raise WikiError("OAH_WIKI_ROLLBACK_FAILED", f"log.md changed after rollover published it, and "
-                                    f"rolling back failed ({exc}). The bytes log.md must get back are kept in "
-                                    f"{self.journal_path} (reason rollback-failed). Run `oah wiki recover`.",
-                                    EXIT_ENVIRONMENT) from exc
-                unlink_durable(self.journal_path)
-                raise WikiError("OAH_WIKI_CONCURRENT_EDIT", "log.md changed right after rollover published it; the "
-                                "rollover was rolled back from the journal and nothing was lost. Retry when no one "
-                                "is editing the log.", EXIT_REFUSED)
-        current = log_now or b""
-        write_json_atomic(self.journal_path, dict(
-            journal, phase="rollback-failed", reason="changed-after-publication",
-            detail="log.md or the new archive was edited in a way rollover cannot merge",
-            current_log=_b64(current), current_log_sha256=_sha(current)))
-        raise WikiError("OAH_WIKI_ROLLBACK_FAILED", f"log.md or {archive_path.name} was edited right after rollover "
-                        "published them, in a way that cannot be rolled back safely. Nothing was overwritten; every "
-                        f"version is kept in {self.journal_path} (reason changed-after-publication). Run "
-                        "`oah wiki recover` for what to reconcile.", EXIT_ENVIRONMENT)
+    def _differing(self, log_path: pathlib.Path, archive_path: pathlib.Path, log: bytes, archive: bytes) -> str:
+        names = [path.name for path, data in ((log_path, log), (archive_path, archive)) if read_bytes(path) != data]
+        return " and ".join(names) or f"{log_path.name} (another file now has its name)"
 
     def _load_journal(self) -> dict | None:
         data = read_json(self.journal_path, None)
@@ -324,29 +291,33 @@ class Wiki:
         if not (isinstance(data, dict) and data.get("version") == 1 and all(isinstance(data.get(k), str) for k in keys)
                 and isinstance(data.get("archive_set"), dict)):
             raise corrupt
-        optional = tuple(key for key in ("restore_log", "current_log") if key in data)
+        optional = tuple(key for key in ("current_log", "current_archive") if key in data)
         if not _decode_fields(data, ("original_log", "replacement_log", "archive_bytes", *optional)):
             raise corrupt
-        if (any(_sha(data[key]) != data.get(f"{key}_sha256")
-                for key in ("original_log", "replacement_log", *optional))
+        if (any(_sha(data[key]) != data.get(f"{key}_sha256") for key in ("original_log", "replacement_log", *optional))
                 or _sha(data["archive_bytes"]) != data.get("archive_sha256")
                 or self.settings.naming.number(data["archive"]) is None or data["log"] != "log.md"):
             raise corrupt
         return data
 
-    def recover(self, *, fault: Fault = _no_fault) -> str:
+    def recover(self, *, resolved: bool = False, fault: Fault = _no_fault) -> str:
+        """Finish an interrupted rollover, or (resolved=True) accept files the user reconciled by hand."""
         with self.session(recovering=True):
             journal = self._load_journal()
             if journal is None:
                 return "OAH_WIKI_RECOVER_NOTHING nothing to recover"
+            if resolved:
+                return self._resolve(journal)
             folder = pathlib.Path(journal["wiki_dir"])
             log_path, archive_path = folder / journal["log"], folder / journal["archive"]
             log_now, archive_now = read_bytes(log_path), read_bytes(archive_path)
             others = self._digests(folder, skip=journal["archive"]) if folder.is_dir() else None
             original, replacement, archive = (journal["original_log"], journal["replacement_log"],
                                               journal["archive_bytes"])
-            if journal.get("phase") == "rollback-failed":
-                return self._recover_rollback(journal, log_path, archive_path, log_now, archive_now, others)
+            if journal.get("phase") == "changed-after-publication":
+                differ = self._differing(log_path, archive_path, replacement, archive)
+                raise self._conflict(log_path, archive_path, f"{differ} changed right after rollover published them "
+                                     "(reason changed-after-publication)")
             if others == journal["archive_set"]:
                 if log_now == replacement and archive_now == archive:
                     unlink_durable(self.journal_path)
@@ -363,31 +334,45 @@ class Wiki:
                     return f"OAH_WIKI_RECOVERED completed: published {archive_path.name} and replaced log.md"
             raise self._conflict(log_path, archive_path)
 
-    def _recover_rollback(self, journal: dict, log_path: pathlib.Path, archive_path: pathlib.Path,
-                          log_now: bytes | None, archive_now: bytes | None, others: dict | None) -> str:
-        """Finish a rollback that failed: restore log.md from the journal and remove the new archive."""
-        reason = journal.get("reason", "rollback-failed")
-        restore = journal.get("restore_log")
-        if (restore is not None and others == journal["archive_set"]
-                and log_now in (restore, journal["replacement_log"], journal.get("current_log"))
-                and archive_now in (None, journal["archive_bytes"])):
-            if log_now != restore:
-                write_text_atomic(log_path, restore.decode("utf-8"))
-            if archive_now is not None:
-                unlink_durable(archive_path)
-            unlink_durable(self.journal_path)
-            return f"OAH_WIKI_RECOVERED rolled back ({reason}): log.md restored from the journal, {archive_path.name} removed"
-        raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"the rollover journal says {reason}, and log.md or "
-                        f"{archive_path.name} cannot be restored automatically. Nothing was changed. {self.journal_path} "
-                        "keeps original_log, replacement_log and current_log (base64): merge log.md by hand so every "
-                        f"entry appears once, delete {archive_path.name} if its entries are back in log.md, then move "
-                        "the journal away.", EXIT_ENVIRONMENT)
-
-    def _conflict(self, log_path: pathlib.Path, archive_path: pathlib.Path) -> WikiError:
-        return WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"{log_path} or the archives ({archive_path.name} and its "
-                         f"siblings) no longer match {self.journal_path}. Nothing was changed. Compare them with the "
-                         "journal's original and replacement bytes, reconcile by hand, then move the journal away.",
+    def _conflict(self, log_path: pathlib.Path, archive_path: pathlib.Path, what: str = "") -> WikiError:
+        what = what or (f"{log_path.name} or the archives ({archive_path.name} and its siblings) no longer match "
+                        "the journal")
+        return WikiError("OAH_WIKI_RECOVERY_CONFLICT", f"{what}. Nothing was changed. {self.journal_path} keeps the "
+                         "original, published and live bytes (base64). Fix log.md and the archives by hand so every "
+                         f"entry appears exactly once (in {log_path.parent}), then run `oah wiki recover --resolved`.",
                          EXIT_ENVIRONMENT)
+
+    def _resolve(self, journal: dict) -> str:
+        """Accept a manual reconciliation: everything parses and no entry appears twice; else change nothing."""
+        folder = pathlib.Path(journal["wiki_dir"])
+        problems: list[str] = []
+        files: dict[str, bytes] = {}
+        try:
+            log_data = read_bytes(folder / "log.md")
+            if log_data is None:
+                raise WikiError("OAH_WIKI_LOG_INVALID", "log.md is missing", EXIT_REFUSED)
+            files["log.md"] = log_data
+            files.update({name: data for name, data in self._archives(folder).values()})
+            seen: dict[bytes, str] = {}
+            for name, data in files.items():
+                for entry in log_module.parse_log(data, name).entries:
+                    key = entry.data.replace(b"\r\n", b"\n").rstrip()
+                    if key in seen:
+                        problems.append(f"'## {entry.date} {entry.title}' is in both {seen[key]} and {name}")
+                    seen.setdefault(key, f"{name}:{entry.line}")
+        except WikiError as exc:
+            problems.append(str(exc))
+        if problems:
+            raise WikiError("OAH_WIKI_RECOVERY_CONFLICT", "the wiki is not reconciled yet; nothing was changed. "
+                            + "; ".join(problems[:10]) + (f" (and {len(problems) - 10} more)" if len(problems) > 10 else "")
+                            + ". Fix these by hand, then run `oah wiki recover --resolved` again.", EXIT_ENVIRONMENT)
+        record = {"version": 1, "at": _now(), "wiki_dir": str(folder), "phase": journal.get("phase"),
+                  "reason": journal.get("reason"), "archive": journal["archive"],
+                  "files": {name: _sha(data) for name, data in sorted(files.items())}}
+        append_jsonl(self.state / RESOLUTIONS, record)
+        unlink_durable(self.journal_path)
+        return (f"OAH_WIKI_RECOVERY_RESOLVED {len(files)} files parse and every entry appears once; the journal "
+                f"is removed and the resolution recorded in {self.state / RESOLUTIONS}")
 
     # ---- task maintenance (oah wiki maintain --task) --------------------------------------------
 

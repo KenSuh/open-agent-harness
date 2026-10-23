@@ -573,6 +573,10 @@ class RolloverCliTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith("OAH_WIKI_ROLLED_OVER archive=log_archive_01.md"), out)
 
+    def test_cli_recover_resolved(self):
+        code, out, _ = run_cli(self.repo, "wiki", "recover", "--resolved", state=self.state)
+        self.assertEqual((code, out.strip()), (0, "OAH_WIKI_RECOVER_NOTHING nothing to recover"))
+
     def test_maintain_rolls_over_without_a_lease(self):
         code, out, err = run_cli(self.repo, "wiki", "maintain", "--task", "t9", state=self.state)
         self.assertEqual(code, 0, err)
