@@ -100,6 +100,14 @@ class PrivacyScanTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assert_hit(out, "home-path")
 
+    def test_unicode_home_paths_and_placeholders(self):
+        for root in ("/" + "Us" + "ers/", "/" + "home/"):
+            for username in ("홍길동", "élise", "用户"):
+                with self.subTest(root=root, username=username):
+                    value = root + username + "/project"
+                    self.assertEqual(self.scanner.scan_text(value, []), [("home-path", 1, root + username)])
+            self.assertEqual(self.scanner.scan_text(root + "<username>/project", []), [])
+
     def test_email_hit_and_noreply_allowed(self):
         repo = make_repo(self)
         commit(repo, {"a.md": f"mail {PERSONAL_EMAIL}\n", "b.md": f"{NOREPLY} dev" + "@example.com\n"})
@@ -115,6 +123,15 @@ class PrivacyScanTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out.count("PRIVACY_HIT key keys.txt:"), 3, out)
         self.assertNotIn("kinds.md", out)
+
+    def test_email_allowlist_requires_domain_boundary(self):
+        for domain in self.scanner.ALLOWED_EMAIL_DOMAINS:
+            for deceptive in ("my" + domain, "not-" + domain):
+                with self.subTest(domain=deceptive):
+                    address = "alice" + "@" + deceptive
+                    self.assertEqual(self.scanner.scan_text(address, []), [("email", 1, address)])
+            for allowed in (domain, "docs." + domain):
+                self.assertEqual(self.scanner.scan_text("alice" + "@" + allowed, []), [])
 
     def test_env_secret_assignment_hit(self):
         repo = make_repo(self)
@@ -133,6 +150,13 @@ class PrivacyScanTest(unittest.TestCase):
         self.assertIn("a.md:1", out)
         self.assertNotIn("b.md", out)
         self.assertIn("c.md:1", out)
+
+    def test_bare_env_secret_names(self):
+        for name in ("KEY", "TOKEN", "SECRET", "PASSWORD"):
+            with self.subTest(name=name):
+                assignment = name + "=" + "abcd1234efgh5678"
+                self.assertEqual(self.scanner.scan_text(assignment, []), [("env-secret", 1, assignment)])
+                self.assertEqual(self.scanner.scan_text(name + "=short", []), [])
 
     def test_commit_identity_must_be_allowlisted(self):
         repo = make_repo(self)
@@ -157,6 +181,23 @@ class PrivacyScanTest(unittest.TestCase):
         code, out, _ = self.run_scan(repo)
         self.assertEqual(code, 1)
         self.assertIn("message", out)
+
+    def test_merge_only_secret_removed_later_is_found(self):
+        repo = make_repo(self)
+        commit(repo, {"keys.txt": "base\n"})
+        git(repo, "checkout", "-q", "-b", "side")
+        commit(repo, {"keys.txt": "side\n"})
+        git(repo, "checkout", "-q", "main")
+        commit(repo, {"keys.txt": "main\n"})
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(repo, "merge", "--no-commit", "side")
+        commit(repo, {"keys.txt": OPENAI_LIKE + "\n"}, message="resolve conflict")
+        merge_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        commit(repo, {"keys.txt": "clean\n"})
+        code, out, _ = self.run_scan(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"PRIVACY_HIT key commit {merge_sha[:12]} keys.txt", out)
+        self.assertEqual(out.count("PRIVACY_HIT key "), 1, out)
 
     def test_allowlist_suppresses_hit_with_reason(self):
         repo = make_repo(self)
@@ -188,6 +229,8 @@ class PrivacyScanTest(unittest.TestCase):
 
     def test_scanner_and_its_tests_do_not_flag_themselves(self):
         repo = make_repo(self)
+        old_pattern = 'r"' + "/" + "home/" + '(?!<)[A-Za-z0-9._-]+"'
+        commit(repo, {"tools/privacy_scan.py": old_pattern})
         commit(repo, {"tools/privacy_scan.py": SCANNER_PATH.read_text(encoding="utf-8"),
                       "tests/test_privacy_scan.py": pathlib.Path(__file__).read_text(encoding="utf-8")})
         code, out, _ = self.run_scan(repo)

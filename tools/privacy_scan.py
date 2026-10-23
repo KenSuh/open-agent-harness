@@ -26,8 +26,8 @@ from typing import Callable, Iterable
 # nor a plain text search for the same words.
 _USERS = "Us" + "ers"
 CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/" + _USERS + r"/(?!<)[A-Za-z0-9._-]+")),
-    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/home/(?!<)[A-Za-z0-9._-]+")),
+    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/" + _USERS + r"/(?!<)[\w.-]+")),
+    ("home-path", re.compile(r"(?<![A-Za-z0-9_])/" + "ho" + r"me/(?!<)[\w.-]+")),
     ("home-path", re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:\\{1,2}" + _USERS + r"\\{1,2}(?!<)[^\\/\s\"'<>]+")),
     ("key", re.compile(r"(?<![A-Za-z0-9])" + "s" + "k-" + r"[A-Za-z0-9_-]{20,}")),
     ("key", re.compile(r"(?<![A-Za-z0-9])gh" + "[pousr]_" + r"[A-Za-z0-9]{36,}")),
@@ -35,7 +35,7 @@ CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("key", re.compile(r"(?<![A-Za-z0-9])xo" + "x[abprs]-" + r"[A-Za-z0-9-]{10,}")),
     ("key", re.compile(r"(?<![A-Za-z0-9])AK" + "IA" + r"[0-9A-Z]{16}(?![A-Za-z0-9])")),
     ("key", re.compile(r"-----BEGIN [A-Z ]*PRIV" + "ATE " + r"KEY-----")),
-    ("env-secret", re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]*(?:K" + "EY|T" + "OKEN|SEC" + "RET|PASS" + "WORD)"
+    ("env-secret", re.compile(r"(?<![A-Za-z0-9_])(?:[A-Z][A-Z0-9_]*)?(?:K" + "EY|T" + "OKEN|SEC" + "RET|PASS" + "WORD)"
                               + r"(?![A-Za-z0-9_])\s*[:=]\s*['\"]?[A-Za-z0-9/+_.=-]{12,}")),
     ("keychain", re.compile(r"secu" + r"rity\s+find-(?:generic|internet)-password")),
 ]
@@ -109,7 +109,8 @@ def load_allowlist(path: pathlib.Path) -> list[Allow]:
 def _email_allowed(address: str) -> bool:
     lowered = address.lower()
     domain = lowered.rsplit("@", 1)[-1]
-    return (lowered in ALLOWED_EMAILS or domain.endswith(ALLOWED_EMAIL_DOMAINS)
+    return (lowered in ALLOWED_EMAILS
+            or any(domain == allowed or domain.endswith("." + allowed) for allowed in ALLOWED_EMAIL_DOMAINS)
             or domain.endswith(ALLOWED_EMAIL_TLDS))
 
 
@@ -155,7 +156,7 @@ def scan_repo(repo: pathlib.Path, git: str, terms: list[Term]) -> tuple[list[Hit
             hits.append(Hit(rule, f"{path}:{number}", path, value))
             seen.add((path, rule, value))
 
-    log = _git(repo, git, "log", "-p", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0",
+    log = _git(repo, git, "log", "-p", "-m", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0",
                "--format=%x00commit %H", "HEAD").decode("utf-8", errors="replace")
     commit, path = "", ""
     for line in log.splitlines():

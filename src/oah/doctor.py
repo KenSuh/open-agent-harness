@@ -123,7 +123,11 @@ def _check_tool(spec: ToolSpec, *, search_path: str | None, timeout: float, reso
         return ToolStatus(spec.name, spec.requirement, "unsupported-shim", None, exc.path, str(exc))
     if resolved is None:
         return ToolStatus(spec.name, spec.requirement, "missing", None, None, spec.purpose)
-    result = runner(resolved.argv + spec.version_args, timeout=timeout)
+    try:
+        result = runner(resolved.argv + spec.version_args, timeout=timeout)
+    except OSError as exc:
+        return ToolStatus(spec.name, spec.requirement, "error", None, resolved.source,
+                          f"{spec.purpose}; --version could not launch: {exc}")
     if result.timed_out:
         return ToolStatus(spec.name, spec.requirement, "error", None, resolved.source,
                           f"{spec.purpose}; --version timed out after {timeout:g}s")
@@ -138,7 +142,11 @@ def _check_tool(spec: ToolSpec, *, search_path: str | None, timeout: float, reso
             return ToolStatus(spec.name, spec.requirement, "too-old", version, resolved.source,
                               f"{spec.purpose}; needs {wanted} or newer")
     if spec.name == "codex":
-        login = runner(resolved.argv + ("login", "status"), timeout=timeout)
+        try:
+            login = runner(resolved.argv + ("login", "status"), timeout=timeout)
+        except OSError as exc:
+            return ToolStatus(spec.name, spec.requirement, "error", version, resolved.source,
+                              f"{spec.purpose}; 'codex login status' could not launch: {exc}")
         if login.timed_out:
             return ToolStatus(spec.name, spec.requirement, "error", version, resolved.source,
                               f"{spec.purpose}; 'codex login status' timed out")
@@ -221,7 +229,10 @@ def _repo_root(search_path: str | None) -> pathlib.Path | None:
         return None
     if git is None:
         return None
-    result = run_command(git.argv + ("rev-parse", "--show-toplevel"), timeout=10)
+    try:
+        result = run_command(git.argv + ("rev-parse", "--show-toplevel"), timeout=10)
+    except OSError:
+        return None
     top = result.stdout.strip()
     return pathlib.Path(top) if result.returncode == 0 and top else None
 

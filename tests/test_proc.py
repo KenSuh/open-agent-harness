@@ -1,13 +1,17 @@
 # 외부 명령 해석·실행 검사 — npm shim 해석, .cmd 거부, 인자 그대로 전달, 시간 초과 시 프로세스 트리 종료.
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
+from oah.engines import proc as proc_module
 from oah.engines.proc import (
     UnsupportedBatchShim,
     classify,
@@ -22,7 +26,15 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
             return False
@@ -125,6 +137,79 @@ class ResolveTest(unittest.TestCase):
         with self.assertRaises(UnsupportedBatchShim):
             classify(shim, "tool", platform="win32", search_path=None)
 
+    def test_windows_lookup_searches_only_absolute_path_entries(self):
+        work = make_tmp_dir(self)
+        untrusted, first, second = (work / name for name in ("untrusted", "first", "second"))
+        for folder in (untrusted, first, second, untrusted / "relative"):
+            folder.mkdir(parents=True, exist_ok=True)
+        for name in ("git", "codex", "node"):
+            (untrusted / (name + ".exe")).write_bytes(b"")
+            (untrusted / "relative" / (name + ".exe")).write_bytes(b"")
+            (second / (name + ".exe")).write_bytes(b"")
+        (untrusted / "codex.cmd").write_bytes(b"")
+        (first / "codex.cmd").write_bytes(b"")
+        (first / "codex.exe").write_bytes(b"")
+        search = ";".join(("", ".", "relative", str(first), str(second)))
+        with contextlib.chdir(untrusted), patch.dict(os.environ, PATHEXT=".exe;.cmd;.bat", PATH=search):
+            for name in ("git", "node", "codex"):
+                with self.subTest(name=name):
+                    expected = (first if name == "codex" else second) / (name + ".exe")
+                    self.assertEqual(proc_module._find_command(name, search, platform="win32"), str(expected))
+                    self.assertEqual(proc_module._find_command(name, None, platform="win32"), str(expected))
+                    self.assertIsNone(proc_module._find_command(name, ";.;relative", platform="win32"))
+                    self.assertIsNone(proc_module._find_command(name, "", platform="win32"))
+            self.assertEqual(proc_module._find_command("node.exe", search, platform="win32"),
+                             str(second / "node.exe"))
+            (first / "codex.exe").unlink()
+            self.assertEqual(proc_module._find_command("codex", search, platform="win32"),
+                             str(first / "codex.cmd"))
+
+    def test_npm_node_lookup_ignores_current_directory(self):
+        work = make_tmp_dir(self)
+        untrusted = work / "untrusted"
+        untrusted.mkdir()
+        (untrusted / "node.exe").write_bytes(b"")
+        installed = work / "installed"
+        installed.mkdir()
+        (installed / "node.exe").write_bytes(b"")
+        shim = npm_layout(work / "npm", "tool", "run.js", command="tool", script_rel="run.js")
+        with contextlib.chdir(untrusted), patch.dict(os.environ, PATHEXT=".exe;.cmd"):
+            result = classify(shim, "tool", platform="win32", search_path=str(installed))
+            self.assertEqual(result.argv[0], str(installed / "node.exe"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows PATH behaviour")
+    def test_windows_current_directory_tools_are_not_resolved(self):
+        work = make_tmp_dir(self)
+        untrusted, installed = work / "untrusted", work / "installed"
+        untrusted.mkdir()
+        installed.mkdir()
+        for name in ("git", "codex", "node"):
+            (untrusted / (name + ".exe")).write_bytes(b"")
+            (installed / (name + ".exe")).write_bytes(b"")
+        (untrusted / "codex.cmd").write_text("@echo off\r\n", encoding="utf-8")
+        # Run the real Python binary from its installed directory, with an untrusted cwd.
+        probe = (
+            "import json, sys; from oah.engines.proc import resolve_command; "
+            "tools = [resolve_command(name, sys.argv[1]) for name in ('git', 'codex', 'node')]; "
+            "print(json.dumps([tool.source for tool in tools]))"
+        )
+        env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+        # First prove absent PATH tools aren't taken from cwd.
+        absent_probe = (
+            "from oah.engines.proc import resolve_command; import sys; "
+            "assert all(resolve_command(n, sys.argv[1]) is None for n in ('git', 'codex', 'node'))"
+        )
+        empty = work / "empty"
+        empty.mkdir()
+        absent = subprocess.run([sys.executable, "-c", absent_probe, str(empty)], cwd=untrusted,
+                                env=env, capture_output=True, timeout=30)
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        result = subprocess.run([sys.executable, "-c", probe, str(installed)], cwd=untrusted,
+                                env=env, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout.splitlines()[0]),
+                         [str(installed / (name + ".exe")) for name in ("git", "codex", "node")])
+
     @unittest.skipUnless(os.name == "nt", "Windows batch-shim behaviour")
     def test_windows_npm_shim_keeps_metacharacters_literal(self):
         node = require_node(self)
@@ -181,6 +266,40 @@ class RunTest(unittest.TestCase):
         while _pid_alive(child_pid) and time.monotonic() < deadline:
             time.sleep(0.2)
         self.assertFalse(_pid_alive(child_pid), "the grandchild survived the timeout")
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object lifetime")
+    def test_timeout_kills_child_after_launcher_exits(self):
+        work = make_tmp_dir(self)
+        launcher_pid = work / "launcher.pid"
+        child_pid = work / "child.pid"
+        marker = work / "survived"
+        child = (
+            "import pathlib, sys, time; time.sleep(8); "
+            "pathlib.Path(sys.argv[1]).write_text('alive'); time.sleep(30)"
+        )
+        launcher = (
+            "import os, pathlib, subprocess, sys; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+            "p = subprocess.Popen([sys.executable, '-c', sys.argv[4], sys.argv[3]]); "
+            "pathlib.Path(sys.argv[2]).write_text(str(p.pid)); print('launcher exited', flush=True)"
+        )
+        started = time.monotonic()
+        result = run_command([sys.executable, "-c", launcher, str(launcher_pid), str(child_pid),
+                              str(marker), child], timeout=3)
+        pid = int(child_pid.read_text(encoding="utf-8"))
+        try:
+            self.assertTrue(result.timed_out)
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertFalse(_pid_alive(int(launcher_pid.read_text(encoding="utf-8"))))
+            deadline = time.monotonic() + 5
+            while _pid_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(_pid_alive(pid), "child survived its exited launcher")
+            self.assertFalse(marker.exists())
+            self.assertIn("launcher exited", result.stdout)
+        finally:
+            if _pid_alive(pid):
+                os.kill(pid, 9)
 
 
 class DecodeTest(unittest.TestCase):

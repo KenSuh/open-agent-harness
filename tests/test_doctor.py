@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import pathlib
+import subprocess
+import sys
 import unittest
 
 from oah.console import make_safe
 from oah.doctor import check_tools, exit_code, python_status, render_json, render_text
-from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim
+from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from tests.helpers import make_tmp_dir, make_unlazy
 
 OK_VERSIONS = {
@@ -131,6 +135,58 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(codex.status, "unsupported-shim")
         self.assertIn("OAH_UNSUPPORTED_BATCH_SHIM", codex.note)
         self.assertEqual(exit_code(statuses), 1)
+
+    def test_version_launch_error_is_reported_and_checks_continue(self):
+        broken = make_tmp_dir(self) / ("broken.exe" if os.name == "nt" else "broken")
+        broken.write_bytes(b"not an executable\n")
+        broken.chmod(0o755)
+        good = (sys.executable, "-c", "print('tool 24.0.0')")
+
+        def resolver(name, search_path=None):
+            argv = (str(broken),) if name == "git" else good
+            return Resolved(argv, argv[0], "native")
+
+        statuses = check_tools(search_path=None, env={}, home=self.home, repo_root=None,
+                               platform=sys.platform, resolver=resolver)
+        found = self.by_name(statuses)
+        self.assertEqual(found["git"].status, "error")
+        self.assertEqual(found["git"].source, str(broken))
+        self.assertIn("--version", found["git"].note)
+        self.assertEqual(found["gitleaks"].status, "ok")
+        self.assertFalse(json.loads(render_json(statuses, sys.platform))["ok"])
+
+    def test_login_launch_error_is_reported_and_checks_continue(self):
+        work = make_tmp_dir(self)
+        missing = work / "missing-executable"
+
+        def resolver(name, search_path=None):
+            return Resolved((sys.executable,), sys.executable, "native") if name == "codex" else None
+
+        def runner(argv, **kwargs):
+            # Both checks use real subprocesses, including the failed login launch.
+            command = (str(missing),) if argv[-2:] == ("login", "status") else argv
+            return run_command(command, **kwargs)
+
+        statuses = check_tools(search_path=None, env={}, home=self.home, repo_root=None,
+                               platform=sys.platform, resolver=resolver, runner=runner)
+        found = self.by_name(statuses)
+        self.assertEqual(found["codex"].status, "error")
+        self.assertTrue(found["codex"].version.startswith("Python "))
+        self.assertIn("login status", found["codex"].note)
+        self.assertEqual(found["gitleaks"].status, "missing")
+        self.assertFalse(json.loads(render_json(statuses, sys.platform))["ok"])
+
+    def test_doctor_json_survives_broken_git(self):
+        work = make_tmp_dir(self)
+        tool = work / ("git.exe" if os.name == "nt" else "git")
+        tool.write_bytes(b"not an executable\n")
+        tool.chmod(0o755)
+        env = dict(os.environ, PATH=str(work), PYTHONPATH=str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+        result = subprocess.run([sys.executable, "-m", "oah", "doctor", "--json"],
+                                env=env, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(next(item for item in data["tools"] if item["name"] == "git")["status"], "error")
 
     def test_npm_shim_tool_reports_version(self):
         self.tools.resolved["codex"] = Resolved(("C:/npm/node.exe", "C:/npm/codex.js"), "C:/npm/codex.cmd",
