@@ -12,8 +12,10 @@ Status: draft            # becomes "accepted" when you approve it
 process steps: they belong outside this section. -->
 - AC1: <checkable condition>
 ### Constraints
-<!-- "No network" forbids installs, downloads, fetches and outside web access.
-It does not turn off `oah impact` or a configured re-ranker; name them here to turn them off. -->
+<!-- "No network" forbids installs, downloads, fetches and outside web access, except two things oah
+needs: `oah impact`'s automatic refresh of the default branch, and a configured re-ranker. Write it as
+"no network except the re-ranker and oah impact's automatic default-branch refresh". Name the re-ranker
+here to turn it off; the default-branch refresh always stays on. -->
 ### Non-goals
 ### Open questions
 <!-- OAH_INTENT:END -->

@@ -97,8 +97,10 @@ class TemplateTest(unittest.TestCase):
 
     def test_template_explains_no_network(self):
         constraints = packet.render("demo").split("### Constraints", 1)[1].split("### Non-goals", 1)[0]
-        self.assertIn('"No network" forbids installs, downloads, fetches and outside web access', constraints)
-        self.assertIn("does not turn off `oah impact` or a configured re-ranker", constraints)
+        self.assertIn('"No network" forbids installs, downloads, fetches and outside web access, except', constraints)
+        self.assertIn("`oah impact`'s automatic refresh of the default branch", constraints)
+        self.assertIn("no network except the re-ranker and oah impact's automatic default-branch refresh", constraints)
+        self.assertIn("the default-branch refresh always stays on", constraints)
 
     def test_template_return_lists_rerank_and_db_impact(self):
         returned = packet.render("demo").split("## Return", 1)[1]
