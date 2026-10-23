@@ -17,6 +17,13 @@
   and risk still runs. A selection with no skills says so, and names the skills that were wanted.
 - **Local telemetry (A9).** With `state_dir`, each selection is appended to
   `<state_dir>/skills-telemetry.jsonl`. Nothing is sent anywhere.
+
+For a task, `choose(root, kind=…, stage=…, risk=…, scope=…, state_dir=…, env=…)` does all of it:
+- it reads `[skills]` from `root` (`settings_for`), whose keys the toolkit updater shares;
+- the roots are the project copies, the published kit-cache copies (`kit_roots`, leaving out items held
+  by `[skills] pins`), then the user and plugin copies under the home folder named by `env`;
+- `rerank_skills` runs the optional re-ranker. It can only re-order the selection, and it reports
+  `used` or `unused(<reason>)`.
 """
 from __future__ import annotations
 
@@ -157,6 +164,7 @@ class SkillRoot:
     origin: str
     label: str
     plugin: str = ""
+    only: tuple[str, ...] = ()  # when set, only these skill folders are read
 
 
 @dataclass(frozen=True)
@@ -209,7 +217,8 @@ def installed(roots: Sequence[SkillRoot]) -> InstalledSet:
         rank = ORIGINS.index(root.origin) if root.origin in ORIGINS else len(ORIGINS)
         try:
             folders = sorted((item for item in pathlib.Path(root.path).iterdir()
-                              if not item.name.startswith(".") and item.is_dir()),
+                              if not item.name.startswith(".") and item.is_dir()
+                              and (not root.only or item.name in root.only)),
                              key=lambda item: item.name.casefold())
         except OSError:
             continue  # a root that does not exist is normal
@@ -272,9 +281,41 @@ def _plugin_roots(claude_home: pathlib.Path, home: pathlib.Path,
     return roots
 
 
+def kit_roots(state_dir: pathlib.Path, *, pins: Iterable[str] = (), catalog=None) -> list[SkillRoot]:
+    """The kit-cache skills A15 may select: published items of the shipped catalog, minus pinned items.
+
+    An item counts as a validated update only when its upstream record exists; the automatic check writes
+    that record last, after license, load and privacy checks. Items named in `[skills] pins` are left out,
+    so the user's own copy stays in use.
+    """
+    from oah.toolkit.catalog import CatalogError, item_skill_dirs, load_catalog
+    from oah.toolkit.skillmeta import UPSTREAM_FILE
+    from oah.toolkit.update import cache_dir
+
+    try:
+        catalog = catalog if catalog is not None else load_catalog()
+    except CatalogError:
+        return []
+    held = {str(name).casefold() for name in pins}
+    roots: list[SkillRoot] = []
+    for entry in catalog.bundled:
+        item = cache_dir(state_dir) / entry.name
+        if entry.name.casefold() in held or not (item / UPSTREAM_FILE).is_file():
+            continue
+        groups: dict[pathlib.Path, list[str]] = {}
+        for folder in item_skill_dirs(item, entry):
+            groups.setdefault(folder.parent, []).append(folder.name)
+        for parent, names in groups.items():
+            folder = parent.absolute()
+            roots.append(SkillRoot(folder, "kit", folder.as_posix(), only=tuple(names)))
+    return roots
+
+
 def default_roots(repo_root: pathlib.Path, *, home: pathlib.Path, env: Mapping[str, str],
-                  kit_cache: pathlib.Path | None = None) -> list[SkillRoot]:
-    """The usual skill folders for this repository and user, in precedence order."""
+                  kit_cache: pathlib.Path | Sequence[SkillRoot] | None = None) -> list[SkillRoot]:
+    """The usual skill folders for this repository and user, in precedence order.
+
+    `kit_cache` is one folder of skill folders, or the roots `kit_roots` returns."""
     repo_root, home = pathlib.Path(repo_root), pathlib.Path(home)
     claude_home = pathlib.Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else home / ".claude"
     codex_home = pathlib.Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
@@ -282,7 +323,9 @@ def default_roots(repo_root: pathlib.Path, *, home: pathlib.Path, env: Mapping[s
         SkillRoot(repo_root / ".claude" / "skills", "project", ".claude/skills"),
         SkillRoot(repo_root / ".agents" / "skills", "project", ".agents/skills"),
     ]
-    if kit_cache is not None:
+    if isinstance(kit_cache, (list, tuple)):
+        roots.extend(kit_cache)
+    elif kit_cache is not None:
         folder = pathlib.Path(kit_cache).absolute()
         roots.append(SkillRoot(folder, "kit", folder.as_posix()))
     for folder in (claude_home / "skills", codex_home / "skills", home / ".agents" / "skills"):
@@ -323,12 +366,14 @@ class Selection:
     warnings: tuple[str, ...]
     notes: tuple[str, ...]
 
-    def brief_text(self) -> str:
+    def brief_text(self, rerank: str | None = None) -> str:
         lines = ["## Skills", "",
                  f"Selected by rules for kind `{self.kind}`, stage `{self.stage}` and risk `{self.risk}`"
                  + (f", file kinds {', '.join(self.file_kinds)}" if self.file_kinds else "")
                  + ", from the skills installed on this machine. Other installed skills stay available "
                    "when the work calls for them.", ""]
+        if rerank is not None:
+            lines += [f"Skill order: rerank={rerank.removeprefix('rerank=')}", ""]
         if self.skills:
             for skill in self.skills:
                 lines.append(f"- `{skill.id}` ({skill.origin}): `{skill.label}`")
@@ -562,3 +607,66 @@ def _record(selection: Selection, state_dir: pathlib.Path, now: dt.datetime | No
                    f"selection still worked. Repair or remove {state_dir / TELEMETRY_FILE}")
         return replace(selection, warnings=selection.warnings + (warning,))
     return selection
+
+
+# One task ----------------------------------------------------------------------------------------
+
+def config_defaults() -> dict:
+    """The `[skills]` defaults of the selector and of the toolkit updater, which share that section."""
+    from oah.toolkit.update import DEFAULTS as UPDATE_DEFAULTS
+
+    return {**DEFAULTS, **UPDATE_DEFAULTS}
+
+
+def settings_for(root: pathlib.Path) -> dict:
+    """`[skills]` of `root`'s .oah/config.toml over both default sets, so neither side's keys are unknown."""
+    from oah.config import load_config
+
+    return load_config(pathlib.Path(root)).section("skills", config_defaults())
+
+
+def home_of(env: Mapping[str, str]) -> pathlib.Path:
+    """The home folder named by `env` (USERPROFILE on Windows, HOME elsewhere), else the process's."""
+    value = env.get("USERPROFILE" if os.name == "nt" else "HOME")
+    return pathlib.Path(value) if value else pathlib.Path.home()
+
+
+def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_disabled: bool = False,
+                  env: Mapping[str, str] | None = None, keychain=None, providers=None) -> tuple[Selection, str]:
+    """The selection in the re-ranker's order, and `used` or `unused(<reason>)`.
+
+    The re-ranker may only re-order: a result that is not the same set of skills keeps the rule order and
+    reports `unused(error:dropped)`. Only skill ids and their reasons are sent to an enabled provider."""
+    from oah import rerank
+
+    candidates = [rerank.Candidate(skill.id, "; ".join(skill.reasons)) for skill in selection.skills]
+    try:
+        result = rerank.rerank("skills", candidates, config=config, query=query, brief_disabled=brief_disabled,
+                               env=env, keychain=keychain, providers=providers)
+    except rerank.ProviderError as exc:
+        return selection, f"unused(error:{exc.code})"
+    names = [candidate.name for candidate in result.order]
+    if sorted(names) != sorted(skill.id for skill in selection.skills):
+        return selection, "unused(error:dropped)"
+    if not result.used:
+        return selection, result.status
+    by_id = {skill.id: skill for skill in selection.skills}
+    return replace(selection, skills=tuple(by_id[name] for name in names)), result.status
+
+
+def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Sequence[str],
+           state_dir: pathlib.Path | None, env: Mapping[str, str], brief_disabled: bool = False,
+           keychain=None, providers=None, now: dt.datetime | None = None) -> tuple[Selection, str]:
+    """Select and re-rank the skills for one task in the repository `root` (see the module docstring)."""
+    from oah import rerank
+    from oah.config import load_config
+
+    root = pathlib.Path(root)
+    settings = settings_for(root)
+    kit = kit_roots(state_dir, pins=settings["pins"]) if state_dir is not None else None
+    roots = default_roots(root, home=home_of(env), env=env, kit_cache=kit)
+    selection = select(kind, stage, risk, scope, roots=roots, settings=settings, state_dir=state_dir,
+                       repo_root=root, now=now)
+    config = load_config(root).section("rerank", rerank.DEFAULTS)
+    return rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
+                         brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers)

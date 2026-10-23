@@ -8,6 +8,7 @@ import os
 import pathlib
 import tomllib
 import unittest
+import unittest.mock
 from importlib import resources
 
 from oah import rerank, skillsel
@@ -434,6 +435,119 @@ class TemplateTest(unittest.TestCase):
         self.assertIs(section["enabled"], False)
         self.assertEqual(skills["mode"], "reference")
         self.assertIn("${TYPESAFE_API_KEY}", text)
+
+
+class ReversingProvider:
+    """A fake re-ranker that prefers the last candidate; it never touches the network."""
+
+    name = "fake"
+
+    def key_name(self, config):
+        return "FAKE_RERANK_KEY"
+
+    def score(self, kind, query, items, *, key, config):
+        return [float(index) for index, _ in enumerate(items)]
+
+
+def fake_key() -> str:
+    return "fake-" + os.urandom(8).hex()
+
+
+class TaskSelectionTest(unittest.TestCase):
+    """The lane P4b seams: shared [skills] settings, A15 kit-cache precedence and re-ranking."""
+
+    def setUp(self) -> None:
+        self.base = make_tmp_dir(self)
+        self.repo, self.home, self.state = self.base / "repo", self.base / "home", self.base / "state"
+        (self.repo / ".oah").mkdir(parents=True)
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+        self.cache = self.state / "toolkit" / "cache" / "mattpocock-skills"
+
+    def config(self, text: str) -> None:
+        (self.repo / ".oah" / "config.toml").write_text(text, encoding="utf-8")
+
+    def choose(self, **kw):
+        kw.setdefault("keychain", __import__("oah.secrets", fromlist=["NoKeychain"]).NoKeychain())
+        return skillsel.choose(self.repo, kind="implementation", stage="initial", risk="normal", scope=["src/app.py"],
+                               state_dir=self.state, env=self.env, **kw)
+
+    def publish_cache(self) -> None:
+        make_skill(self.cache / "engineering", "tdd", name="tdd", description="cache copy")
+        (self.cache / "UPSTREAM.json").write_text("{}", encoding="utf-8")
+
+    def origin_of(self, selection, skill_id: str) -> str:
+        return next(skill.origin for skill in selection.skills if skill.id == skill_id)
+
+    def test_settings_accept_toolkit_and_selector_keys(self) -> None:
+        self.config('[skills]\nmode = "attach"\npins = ["ponytail"]\nupdate_interval_days = 2\n')
+        settings = skillsel.settings_for(self.repo)
+        self.assertEqual((settings["mode"], settings["pins"], settings["update_interval_days"]),
+                         ("attach", ["ponytail"], 2))
+        self.assertEqual(settings["rules"], skillsel.DEFAULTS["rules"])
+        selection, status = self.choose()
+        self.assertEqual(status, "unused(not-enabled)")
+        self.assertEqual(selection.mode, "attach")
+
+    def test_cache_update_wins_over_user_copy_and_project_pin_wins_over_cache(self) -> None:
+        make_skill(self.home / ".claude" / "skills", "tdd", name="tdd", description="user copy")
+        self.assertEqual(self.origin_of(self.choose()[0], "tdd"), "user")
+        make_skill(self.cache / "engineering", "tdd", name="tdd", description="unpublished copy")
+        self.assertEqual(self.origin_of(self.choose()[0], "tdd"), "user", "a cache copy without its upstream "
+                         "record is not a validated update")
+        self.publish_cache()
+        selection = self.choose()[0]
+        self.assertEqual(self.origin_of(selection, "tdd"), "kit")
+        self.assertNotIn("grilling", [skill.id for skill in selection.skills])
+        make_skill(self.repo / ".claude" / "skills", "tdd", name="tdd", description="project pin")
+        before = (self.repo / ".claude" / "skills" / "tdd" / "SKILL.md").read_bytes()
+        self.assertEqual(self.origin_of(self.choose()[0], "tdd"), "project")
+        self.assertEqual((self.repo / ".claude" / "skills" / "tdd" / "SKILL.md").read_bytes(), before)
+
+    def test_user_pinned_item_keeps_the_users_copy(self) -> None:
+        make_skill(self.home / ".claude" / "skills", "tdd", name="tdd", description="user copy")
+        self.publish_cache()
+        self.config('[skills]\npins = ["mattpocock-skills"]\n')
+        self.assertEqual(self.origin_of(self.choose()[0], "tdd"), "user")
+
+    def test_kit_roots_list_only_installed_skills_of_published_items(self) -> None:
+        self.publish_cache()
+        make_skill(self.cache / "engineering", "not-in-catalog", name="not-in-catalog")
+        roots = skillsel.kit_roots(self.state)
+        found = skillsel.installed(roots).skills
+        self.assertEqual(sorted(found), ["tdd"])
+        self.assertEqual(skillsel.kit_roots(self.state, pins=["mattpocock-skills"]), [])
+
+    def test_rerank_keeps_every_required_skill(self) -> None:
+        make_skill(self.home / ".claude" / "skills", "tdd", name="tdd")
+        make_skill(self.home / ".claude" / "skills", "verification-before-completion")
+        self.config('[rerank]\nenabled = true\nprovider = "fake"\n')
+        plain, _ = self.choose()
+        self.env["FAKE_RERANK_KEY"] = fake_key()
+        ranked, status = self.choose(providers={"fake": ReversingProvider()})
+        self.assertEqual(status, "used")
+        self.assertEqual([s.id for s in ranked.skills], [s.id for s in reversed(plain.skills)])
+        self.assertEqual(len(ranked.skills), 2)
+        self.assertIn("Skill order: rerank=used", ranked.brief_text(rerank=status))
+
+    def test_rerank_dropping_provider_falls_back_to_rule_order(self) -> None:
+        make_skill(self.home / ".claude" / "skills", "tdd", name="tdd")
+        make_skill(self.home / ".claude" / "skills", "verification-before-completion")
+        plain, _ = self.choose()
+
+        def dropping(kind, candidates, **kw):
+            return rerank.RerankResult(tuple(candidates)[:1], "used", "fake")
+
+        with unittest.mock.patch.object(rerank, "rerank", dropping):
+            kept, status = skillsel.rerank_skills(plain, config={}, query="q")
+        self.assertEqual(status, "unused(error:dropped)")
+        self.assertEqual(kept.skills, plain.skills)
+
+    def test_rerank_status_without_key(self) -> None:
+        self.env["FAKE_RERANK_KEY"] = fake_key()
+        self.assertEqual(self.choose(providers={"fake": ReversingProvider()})[1], "unused(not-enabled)")
+        self.config('[rerank]\nenabled = true\nprovider = "typesafe"\n')
+        self.assertEqual(self.choose()[1], "unused(no key)")
+        self.assertEqual(self.choose(brief_disabled=True)[1], "unused(disabled-by-brief)")
 
 
 if __name__ == "__main__":
