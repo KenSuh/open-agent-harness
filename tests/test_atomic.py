@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from oah.atomic import StateCorrupt, append_jsonl, read_json, write_json_atomic
+from oah.atomic import StateCorrupt, StorageError, append_jsonl, read_json, write_json_atomic
 from tests.helpers import make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -78,8 +78,10 @@ class AtomicTest(unittest.TestCase):
         folder = make_tmp_dir(self)
         started = time.monotonic()
         with patch("oah.atomic.os.replace", side_effect=PermissionError("held")):
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(StorageError) as caught:
                 write_json_atomic(folder / "leases.json", {"a": 1}, retry_seconds=0.3)
+        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+        self.assertIn(str(folder / "leases.json"), str(caught.exception))
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(list(folder.iterdir()), [])
 
@@ -117,6 +119,28 @@ class AtomicTest(unittest.TestCase):
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
         self.assertEqual(json.loads(lines[1])["message"], "줄\n바꿈")
+
+    def test_append_refuses_torn_or_invalid_event_lines_without_changing_bytes(self):
+        path = make_tmp_dir(self) / "events.jsonl"
+        for raw in (b'{"event":"note"}\n{"event":', b'{"event":"note"}',
+                    b'{"event":"note"}\ninvalid\n', b'{"event":"\xff"}\n'):
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                with self.assertRaises(StateCorrupt) as caught:
+                    append_jsonl(path, {"event": "note", "message": "next"})
+                self.assertIn(str(path), str(caught.exception))
+                self.assertEqual(path.read_bytes(), raw)
+
+    def test_transaction_event_is_appended_once(self):
+        path = make_tmp_dir(self) / "events.jsonl"
+        event = {"event": "note", "transaction_id": "tx1", "message": "once"}
+        append_jsonl(path, event)
+        before = path.read_bytes()
+        append_jsonl(path, event)
+        self.assertEqual(path.read_bytes(), before)
+        with self.assertRaises(StateCorrupt):
+            append_jsonl(path, dict(event, message="different event using the same id"))
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -7,9 +7,7 @@ conflict rather than missing one. `src` covers `src/a.py`; it does not cover `sr
 """
 from __future__ import annotations
 
-import os
 import pathlib
-import posixpath
 import unicodedata
 from typing import Iterable, Sequence
 
@@ -27,37 +25,35 @@ def _key(path: str) -> str:
 
 
 def _relative_to_root(path: pathlib.Path, root: pathlib.Path, raw: str) -> str:
-    for candidate, base in ((path, root), (path.resolve(strict=False), root.resolve(strict=False))):
-        try:
-            return candidate.relative_to(base).as_posix()
-        except ValueError:
-            pass
-        text, prefix = os.path.normcase(str(candidate)), os.path.normcase(str(base))
-        if text == prefix:
-            return "."
-        if text.startswith(prefix.rstrip("\\/") + os.sep):
-            return pathlib.PurePath(str(candidate)[len(str(base).rstrip("\\/")) + 1:]).as_posix()
-    raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r} is outside the repository")
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError as exc:
+        raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r} is outside the repository") from exc
+    except RuntimeError as exc:
+        raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r} contains a symlink loop") from exc
+
+
+def _check_components(text: str, raw: str) -> None:
+    # Apply this on every OS so scopes remain unambiguous when shared with Windows.
+    if any(part not in (".", "..") and part.endswith((".", " ")) for part in text.split("/")):
+        raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r}: path components must not end in a dot or space")
 
 
 def _normalize_one(raw: str, root: pathlib.Path) -> str:
-    text = raw.strip()
-    if not text:
+    text = raw.replace("\\", "/")
+    if not text.strip():
         raise ScopeError("OAH_SCOPE_INVALID", "an empty path is not a scope")
     if text == REPO:
         return REPO
+    _check_components(text, raw)
     path = pathlib.Path(text)
-    if path.is_absolute():
-        text = _relative_to_root(path, root, raw)
-    text = text.replace("\\", "/")
+    text = _relative_to_root(path if path.is_absolute() else root / path, root, raw)
+    _check_components(text, raw)
     if ":" in text:
         raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r}: ':' is not allowed in a scope path")
-    normalized = posixpath.normpath(text)
-    if normalized == ".":
+    if text == ".":
         return REPO
-    if normalized == ".." or normalized.startswith("../") or normalized.startswith("/"):
-        raise ScopeError("OAH_SCOPE_INVALID", f"{raw!r} is outside the repository")
-    return unicodedata.normalize("NFC", normalized)
+    return unicodedata.normalize("NFC", text)
 
 
 def normalize_scope(raw: Sequence[str], root: pathlib.Path) -> tuple[str, ...]:
@@ -88,8 +84,13 @@ def overlaps(a: Sequence[str], b: Sequence[str]) -> bool:
     return any(_covers(x, y) or _covers(y, x) for x in a for y in b)
 
 
-def outside(scope: Sequence[str], changed: Iterable[str]) -> list[str]:
+def outside(scope: Sequence[str], changed: Iterable[str], *, root: pathlib.Path | None = None) -> list[str]:
     """The changed repository-relative paths that no scope entry covers, in order."""
+    if root is not None:
+        scope = normalize_scope(scope, root)
+        paths = [(path, _normalize_one(path, root)) for path in changed]
+    else:
+        paths = [(path, path) for path in changed]
     if REPO in scope:
         return []
-    return [path for path in changed if not any(_covers(entry, path) for entry in scope)]
+    return [path for path, normalized in paths if not any(_covers(entry, normalized) for entry in scope)]

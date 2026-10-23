@@ -11,9 +11,11 @@ import datetime as dt
 import pathlib
 import re
 import secrets
-from typing import Callable, Sequence
+from contextlib import contextmanager
+from typing import Callable, Iterator, Sequence
 
-from oah.atomic import StateCorrupt, append_jsonl, read_json, write_json_atomic
+from oah.atomic import StateCorrupt, StorageError, read_json
+from oah.journal import Journal
 from oah.lockfile import StateLock
 from oah.paths import RepoInfo
 from oah.scope import outside, overlaps
@@ -36,11 +38,19 @@ def utc_now() -> dt.datetime:
 
 
 def _iso(moment: dt.datetime) -> str:
-    return moment.astimezone(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return moment.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _parse(text: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    moment = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if moment.utcoffset() is None:
+        raise ValueError("lease timestamps must include a timezone")
+    return moment
+
+
+def _expiration(now: dt.datetime, ttl_hours: float) -> str:
+    duration = max(dt.timedelta(microseconds=1), dt.timedelta(hours=ttl_hours))
+    return _iso(now + duration)
 
 
 @dataclasses.dataclass
@@ -108,11 +118,15 @@ class Store:
         self.leases_path = self.dir / "leases.json"
         self.events_path = self.dir / "events.jsonl"
         self.lock_path = self.dir / ".lock"
+        self.journal = Journal(self.dir)
 
     # Reading -------------------------------------------------------------------------------------
 
     def _load(self) -> list[Lease]:
         data = read_json(self.leases_path, {"version": SCHEMA_VERSION, "leases": []})
+        return self._decode(data)
+
+    def _decode(self, data: object) -> list[Lease]:
         if not (isinstance(data, dict) and data.get("version") == SCHEMA_VERSION
                 and isinstance(data.get("leases"), list)):
             raise StateCorrupt(f"{StateCorrupt.code}: {self.leases_path} is not a version-{SCHEMA_VERSION} lease file")
@@ -120,20 +134,35 @@ class Store:
 
     def snapshot(self) -> list[tuple[Lease, bool]]:
         """Every lease with an expired flag. Takes no lock and creates no file."""
+        self.journal.check_pending()
         now = self.now()
-        return [(lease, lease.expired(now)) for lease in self._load()]
+        entries = [(lease, lease.expired(now)) for lease in self._load()]
+        self.journal.check_pending()
+        return entries
 
     # Writing (always under the lock) -------------------------------------------------------------
 
-    def _save(self, leases: list[Lease]) -> None:
-        write_json_atomic(self.leases_path, {"version": SCHEMA_VERSION, "leases": [l.to_json() for l in leases]})
+    def _commit(self, leases: list[Lease], event: str, task: str, agent: str, lease_id: str | None,
+                **extra: object) -> None:
+        self.journal.commit({"version": SCHEMA_VERSION, "leases": [l.to_json() for l in leases]},
+                            {"ts": _iso(self.now()), "event": event, "task": task, "agent": agent,
+                             "lease_id": lease_id, **extra})
 
-    def _event(self, event: str, task: str, agent: str, lease_id: str | None, **extra: object) -> None:
-        append_jsonl(self.events_path, {"ts": _iso(self.now()), "event": event, "task": task, "agent": agent,
-                                        "lease_id": lease_id, **extra})
+    @contextmanager
+    def _lock(self) -> Iterator[None]:
+        try:
+            with StateLock(self.lock_path, timeout=self.lock_timeout):
+                self.journal.recover(self._decode)
+                yield
+        except StorageError:
+            raise
+        except OSError as exc:
+            raise StorageError(self.lock_path, exc) from exc
 
-    def _lock(self) -> StateLock:
-        return StateLock(self.lock_path, timeout=self.lock_timeout)
+    def inspect(self, task: str) -> Lease:
+        """Prepare a finish scan: recover pending writes and inspect the current lease under the lock."""
+        with self._lock():
+            return self._find(self._load(), task)
 
     def _find(self, leases: list[Lease], task: str) -> Lease:
         for lease in leases:
@@ -143,14 +172,12 @@ class Store:
 
     def _prune(self, leases: list[Lease]) -> list[Lease]:
         now = self.now()
-        alive = [lease for lease in leases if not lease.expired(now)]
-        if len(alive) != len(leases):
-            self._save(alive)
-            for lease in leases:
-                if lease.expired(now):
-                    self._event("lease_expired", lease.task, lease.agent, lease.id, scope=lease.scope,
-                                expires_at=lease.expires_at)
-        return alive
+        for lease in list(leases):
+            if lease.expired(now):
+                leases.remove(lease)
+                self._commit(leases, "lease_expired", lease.task, lease.agent, lease.id, scope=lease.scope,
+                             expires_at=lease.expires_at)
+        return leases
 
     def start(self, *, task: str, agent: str, scope: Sequence[str], note: str, ttl_hours: float,
               info: RepoInfo) -> Lease:
@@ -171,11 +198,10 @@ class Store:
             now = self.now()
             lease = Lease(id=secrets.token_hex(8), task=task, agent=agent, scope=list(scope), note=note,
                           worktree=str(info.root), branch=info.branch, head_at_start=info.head,
-                          created_at=_iso(now), expires_at=_iso(now + dt.timedelta(hours=ttl_hours)))
+                          created_at=_iso(now), expires_at=_expiration(now, ttl_hours))
             leases.append(lease)
-            self._save(leases)
-            self._event("lease_started", task, agent, lease.id, scope=lease.scope, note=note,
-                        expires_at=lease.expires_at, worktree=lease.worktree, branch=lease.branch)
+            self._commit(leases, "lease_started", task, agent, lease.id, scope=lease.scope, note=note,
+                         expires_at=lease.expires_at, worktree=lease.worktree, branch=lease.branch)
             return lease
 
     def renew(self, *, task: str, agent: str, ttl_hours: float, scope: Sequence[str] | None = None) -> Lease:
@@ -196,13 +222,12 @@ class Store:
                         raise LeaseError("OAH_LEASE_CONFLICT",
                                          f"scope {', '.join(scope)} overlaps {other.describe()}")
                 lease.scope = list(scope)
-            lease.expires_at = _iso(self.now() + dt.timedelta(hours=ttl_hours))
-            self._save(leases)
-            self._event("lease_renewed", task, agent, lease.id, scope=lease.scope, old_scope=old_scope,
-                        expires_at=lease.expires_at)
+            lease.expires_at = _expiration(self.now(), ttl_hours)
+            self._commit(leases, "lease_renewed", task, agent, lease.id, scope=lease.scope, old_scope=old_scope,
+                         expires_at=lease.expires_at)
             return lease
 
-    def finish(self, *, task: str, agent: str, summary: str, changed: Sequence[str],
+    def finish(self, *, task: str, agent: str, lease_id: str, summary: str, changed: Sequence[str],
                allow_out_of_scope: bool) -> tuple[Lease, list[str]]:
         _check_names(task, agent)
         with self._lock():
@@ -210,16 +235,18 @@ class Store:
             lease = self._find(leases, task)
             if lease.agent != agent:
                 raise LeaseError("OAH_LEASE_NOT_YOURS", f"{lease.describe()}")
-            beyond = outside(lease.scope, changed)
+            if lease.id != lease_id:
+                raise LeaseError("OAH_LEASE_CHANGED", f"the lease for {task} was replaced during the change scan; "
+                                                    "inspect the current lease and retry oah finish")
+            beyond = outside(lease.scope, changed, root=pathlib.Path(lease.worktree))
             if beyond and not allow_out_of_scope:
                 shown = ", ".join(beyond[:20]) + (f" and {len(beyond) - 20} more" if len(beyond) > 20 else "")
                 raise LeaseError("OAH_SCOPE_EXCEEDED",
                                  f"changes outside scope {', '.join(lease.scope)}: {shown}. Widen the scope with "
                                  "oah renew --scope, or pass --allow-out-of-scope (recorded)")
             leases.remove(lease)
-            self._save(leases)
-            self._event("lease_finished", task, agent, lease.id, summary=summary, out_of_scope=beyond,
-                        allowed_out_of_scope=bool(beyond))
+            self._commit(leases, "lease_finished", task, agent, lease.id, summary=summary, out_of_scope=beyond,
+                         allowed_out_of_scope=bool(beyond))
             return lease, beyond
 
     def release(self, *, task: str, agent: str, reason: str, force: bool) -> Lease:
@@ -233,12 +260,11 @@ class Store:
             if forced and not force:
                 raise LeaseError("OAH_LEASE_NOT_YOURS", f"{lease.describe()}; pass --force to release it anyway")
             leases.remove(lease)
-            self._save(leases)
-            self._event("lease_released", task, agent, lease.id, reason=reason.strip(), forced=forced,
-                        holder=lease.agent)
+            self._commit(leases, "lease_released", task, agent, lease.id, reason=reason.strip(), forced=forced,
+                         holder=lease.agent)
             return lease
 
     def log(self, *, task: str, agent: str, message: str) -> None:
         _check_names(task, agent)
         with self._lock():
-            self._event("note", task, agent, None, message=message)
+            self._commit(self._load(), "note", task, agent, None, message=message)

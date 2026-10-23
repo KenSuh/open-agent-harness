@@ -8,8 +8,10 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
-from oah.lease import LeaseError, Store
+from oah.atomic import StateCorrupt
+from oah.lease import Lease, LeaseError, Store
 from oah.paths import RepoInfo
 from tests.helpers import make_tmp_dir
 
@@ -144,15 +146,16 @@ class StoreTest(unittest.TestCase):
                          ("lease_released", True, "session crashed"))
 
     def test_finish_refuses_out_of_scope_changes(self):
-        self.start(task="t1", scope=("src",))
+        lease = self.start(task="t1", scope=("src",))
         error = self.assert_code("OAH_SCOPE_EXCEEDED", self.store.finish, task="t1", agent="claude",
+                                 lease_id=lease.id,
                                  summary="done", changed=["src/a.py", "docs/b.md"], allow_out_of_scope=False)
         self.assertIn("docs/b.md", str(error))
         self.assertEqual(len(self.store.snapshot()), 1)
 
     def test_finish_allows_out_of_scope_when_asked_and_records_it(self):
-        self.start(task="t1", scope=("src",))
-        lease, beyond = self.store.finish(task="t1", agent="claude", summary="done",
+        started = self.start(task="t1", scope=("src",))
+        lease, beyond = self.store.finish(task="t1", agent="claude", lease_id=started.id, summary="done",
                                           changed=["src/a.py", "docs/b.md"], allow_out_of_scope=True)
         self.assertEqual(beyond, ["docs/b.md"])
         self.assertEqual(self.store.snapshot(), [])
@@ -161,8 +164,9 @@ class StoreTest(unittest.TestCase):
                          ("lease_finished", ["docs/b.md"], "done"))
 
     def test_finish_by_other_agent_is_refused(self):
-        self.start(task="t1", agent="claude")
+        lease = self.start(task="t1", agent="claude")
         self.assert_code("OAH_LEASE_NOT_YOURS", self.store.finish, task="t1", agent="codex", summary="x",
+                         lease_id=lease.id,
                          changed=[], allow_out_of_scope=False)
 
     def test_log_appends_a_note(self):
@@ -182,6 +186,54 @@ class StoreTest(unittest.TestCase):
             self.store.snapshot()
         with self.assertRaises(StateCorrupt):
             self.start()
+
+    def test_naive_timestamps_are_corrupt_on_read_and_mutation(self):
+        original = self.start().to_json()
+        for field in ("created_at", "expires_at"):
+            with self.subTest(field=field):
+                record = dict(original, **{field: "2026-10-23T10:00:00"})
+                self.store.leases_path.write_text(json.dumps({"version": 1, "leases": [record]}), encoding="utf-8")
+                for call in (self.store.snapshot, lambda: self.start(task="t2", scope=("docs",))):
+                    with self.assertRaises(StateCorrupt) as caught:
+                        call()
+                    self.assertIn(str(self.store.leases_path), str(caught.exception))
+                with self.assertRaises(StateCorrupt):
+                    Lease.from_json(record, self.store.leases_path)
+
+    def test_fractional_ttl_survives_start_and_renew(self):
+        self.clock.advance(microseconds=500000)
+        lease = self.start(ttl_hours=0.000001)
+        self.assertFalse(lease.expired(self.clock()))
+        self.assertEqual(dt.datetime.fromisoformat(lease.expires_at.replace("Z", "+00:00")) - self.clock(),
+                         dt.timedelta(microseconds=3600))
+        self.clock.advance(microseconds=1000)
+        renewed = self.store.renew(task="t1", agent="claude", ttl_hours=0.000001)
+        self.assertFalse(renewed.expired(self.clock()))
+        self.clock.advance(microseconds=3600)
+        self.assertTrue(self.store.snapshot()[0][1])
+
+    def test_positive_ttl_below_clock_resolution_still_has_future_expiry(self):
+        self.clock.advance(microseconds=500000)
+        lease = self.start(ttl_hours=1e-12)
+        self.assertFalse(lease.expired(self.clock()))
+        renewed = self.store.renew(task="t1", agent="claude", ttl_hours=1e-12)
+        self.assertFalse(renewed.expired(self.clock()))
+
+    def test_failed_event_append_is_replayed_by_next_mutation(self):
+        real_open = open
+
+        def fail_append(path, mode="r", *args, **kwargs):
+            if pathlib.Path(path) == self.store.events_path and "a" in mode:
+                raise OSError("disk full at event append")
+            return real_open(path, mode, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=fail_append):
+            with self.assertRaises(OSError):
+                self.start()
+        recovered = Store(self.state, now=self.clock)
+        recovered.log(task="t1", agent="claude", message="after crash")
+        self.assertEqual([event["event"] for event in self.events()], ["lease_started", "note"])
+        self.assertEqual(len(recovered.snapshot()), 1)
 
 
 class ConcurrentStartTest(unittest.TestCase):

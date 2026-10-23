@@ -7,7 +7,8 @@ import os
 import pathlib
 import sys
 
-from oah.atomic import StateCorrupt
+from oah.atomic import StateCorrupt, StorageError
+from oah.journal import PendingTransaction
 from oah.lease import DEFAULT_TTL_HOURS, Lease, LeaseError, Store
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, run_git, state_dir
@@ -55,6 +56,7 @@ def _identity(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    store = None
     try:
         info = repo_info(pathlib.Path.cwd())
         store = Store(state_dir(info, os.environ))
@@ -62,8 +64,12 @@ def run(args: argparse.Namespace) -> int:
     except (LeaseError, ScopeError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
-    except (NotARepo, GitMissing, LockTimeout, StateCorrupt) as exc:
+    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
         print(exc, file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    except OSError as exc:
+        path = pathlib.Path(exc.filename) if exc.filename else store.dir if store else pathlib.Path(".")
+        print(StorageError(path, exc), file=sys.stderr)
         return EXIT_ENVIRONMENT
 
 
@@ -105,28 +111,50 @@ def _status(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
 def _changed_files(lease: Lease, info: RepoInfo) -> list[str]:
     """Files changed in the lease's worktree since the lease started: committed, staged, unstaged, untracked."""
     worktree = pathlib.Path(lease.worktree)
-    where = worktree if worktree.is_dir() else info.root
-    if lease.head_at_start:
-        tracked = run_git(where, "diff", "--name-only", "-z", lease.head_at_start)
-    else:
-        tracked = run_git(where, "ls-files", "-z")
-    untracked = run_git(where, "ls-files", "--others", "--exclude-standard", "-z")
-    for result in (tracked, untracked):
-        if result.returncode != 0:
-            raise GitMissing(f"{GitMissing.code}: git failed while listing changes: {result.stderr.strip()}")
+    message = (f"recorded worktree {worktree} is missing or no longer belongs to this repository; "
+               "restore that worktree before finishing, or explicitly release the lease")
+    if not worktree.is_dir():
+        raise LeaseError("OAH_LEASE_WORKTREE_INVALID", message)
+    try:
+        current = repo_info(worktree)
+    except NotARepo as exc:
+        raise LeaseError("OAH_LEASE_WORKTREE_INVALID", message) from exc
+    if current.root.resolve() != worktree.resolve() or current.common_dir.resolve() != info.common_dir.resolve():
+        raise LeaseError("OAH_LEASE_WORKTREE_INVALID", message)
+    registered = run_git(worktree, "worktree", "list", "--porcelain", "-z")
+    roots = [pathlib.Path(field[len("worktree "):]).absolute() for field in registered.stdout.split("\0")
+             if field.startswith("worktree ")]
+    if registered.returncode != 0 or worktree.absolute() not in roots:
+        raise LeaseError("OAH_LEASE_WORKTREE_INVALID", message)
+    commands = []
+    diff = ("diff", "--no-renames", "--name-only", "-z")
+    if current.head is not None:
+        if lease.head_at_start is not None:
+            commands.append((*diff, lease.head_at_start, current.head, "--"))
+        else:
+            commands.append(("ls-tree", "-r", "--name-only", "-z", current.head))
+    elif lease.head_at_start is not None:
+        raise LeaseError("OAH_LEASE_WORKTREE_INVALID", f"{worktree}: HEAD disappeared since lease start; "
+                                                    "restore the recorded worktree history before finishing")
+    commands.extend([(*diff, "--cached", "--"), (*diff, "--"),
+                     ("ls-files", "--others", "--exclude-standard", "-z")])
     changed: list[str] = []
-    for name in (tracked.stdout + untracked.stdout).split("\0"):
-        if name and name not in changed:
-            changed.append(name)
+    for command in commands:
+        result = run_git(worktree, *command)
+        if result.returncode != 0:
+            raise GitMissing(f"{GitMissing.code}: git failed while listing changes in {worktree}: "
+                             f"{result.stderr.strip()}")
+        for name in result.stdout.split("\0"):
+            if name and name not in changed:
+                changed.append(name)
     return changed
 
 
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
-    lease = next((lease for lease, _ in store.snapshot() if lease.task == args.task), None)
-    if lease is None:
-        raise LeaseError("OAH_LEASE_NOT_FOUND", f"no lease for task {args.task}")
+    lease = store.inspect(args.task)
     changed = _changed_files(lease, info)
-    lease, beyond = store.finish(task=args.task, agent=args.agent, summary=args.summary, changed=changed,
+    lease, beyond = store.finish(task=args.task, agent=args.agent, lease_id=lease.id,
+                                 summary=args.summary, changed=changed,
                                  allow_out_of_scope=args.allow_out_of_scope)
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
     print(f"OAH_LEASE_FINISHED task={lease.task} agent={lease.agent} changed={len(changed)}{extra}")

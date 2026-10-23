@@ -17,6 +17,17 @@ def make_tmp_dir(test: unittest.TestCase) -> pathlib.Path:
     return path
 
 
+def directory_alias(target: pathlib.Path, link: pathlib.Path) -> None:
+    """A real directory symlink, or a Windows junction (which needs no symlink privilege)."""
+    if os.name == "nt":
+        import subprocess
+
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, capture_output=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
 def write_posix_tool(folder: pathlib.Path, name: str, body: str) -> pathlib.Path:
     """An executable /bin/sh script named `name` (POSIX only)."""
     folder.mkdir(parents=True, exist_ok=True)
