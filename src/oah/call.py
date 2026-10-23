@@ -401,7 +401,7 @@ class Prepared:
         return cls(**fields)
 
 
-def _advise(axes: routing.Axes, task: str, *, root: pathlib.Path) -> str:
+def advise(axes: routing.Axes, task: str, *, root: pathlib.Path) -> str:
     """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
     try:
         rerank = importlib.import_module("oah.rerank")
@@ -477,7 +477,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
-        advisory = _advise(axes, request.task, root=root)
+        advisory = advise(axes, request.task, root=root)
     skill_axes = axes or routing.score_axes(
         stage=request.stage, kind=request.axes.get("kind"), scope=scope,
         overrides={axis: value for axis, value in request.axes.items() if axis != "kind" and value is not None}).axes

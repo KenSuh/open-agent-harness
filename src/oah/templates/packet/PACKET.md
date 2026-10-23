@@ -13,20 +13,18 @@ process steps: they belong outside this section. -->
 - AC1: <checkable condition>
 ### Constraints
 <!-- "No network" forbids installs, downloads, fetches and outside web access, except two things oah
-needs: `oah impact`'s automatic refresh of the default branch, and a configured re-ranker. Write it as
-"no network except the re-ranker and oah impact's automatic default-branch refresh". Name the re-ranker
-here to turn it off; the default-branch refresh always stays on. -->
+needs: `oah impact`'s automatic refresh of the default branch, and a re-ranker you enabled (it also
+needs its key). Write it as
+"no network except the re-ranker and oah impact's automatic default-branch refresh".
+Write "no re-ranker" here to turn the re-ranker off; the default-branch refresh always stays on. -->
 ### Non-goals
 ### Open questions
 <!-- OAH_INTENT:END -->
 ## Scope        (paths this task may write)
 <!-- One bullet per path, such as "- src/app.py". Use "- repo" for the whole repository.
 An empty Scope is reported (OAH_SCOPE_EMPTY). -->
-## Plan         (stage → engine → tier)
-- initial implementation → claude
-- review → codex
-- correction → codex
-## Acceptance   (GATES.md in this folder)
+{{SCOPE}}## Plan         (stage → engine → tier)
+{{PLAN}}## Acceptance   (GATES.md in this folder)
 <!-- One gate per success condition in GATES.md next to this file: "- [ ] G1: <result>" with
 CHECK:, EXPECT: and EVIDENCE: lines below it. -->
 ## Return       (INTENT <id>@r<n> <digest> + one "AC<n>: met|unmet|deferred — evidence" line each;

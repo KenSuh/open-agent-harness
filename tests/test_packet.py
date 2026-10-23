@@ -48,6 +48,12 @@ def codes(result: packet.CheckResult, level: str | None = None) -> list[str]:
     return [p.code for p in result.problems if level is None or p.level == level]
 
 
+NO_NETWORK_NOTE = """<!-- "No network" forbids installs, downloads, fetches and outside web access, except two things oah
+needs: `oah impact`'s automatic refresh of the default branch, and a re-ranker you enabled (it also
+needs its key). Write it as
+"no network except the re-ranker and oah impact's automatic default-branch refresh".
+Write "no re-ranker" here to turn the re-ranker off; the default-branch refresh always stays on. -->"""
+
 GATES_OK = """# Gates: demo
 
 - [ ] G1: the report lists every file
@@ -101,6 +107,11 @@ class TemplateTest(unittest.TestCase):
         self.assertIn("`oah impact`'s automatic refresh of the default branch", constraints)
         self.assertIn("no network except the re-ranker and oah impact's automatic default-branch refresh", constraints)
         self.assertIn("the default-branch refresh always stays on", constraints)
+
+    def test_template_no_network_note_is_pinned(self):
+        note = packet.render("demo").split("### Constraints\n", 1)[1].split("\n### Non-goals", 1)[0]
+        self.assertEqual(note, NO_NETWORK_NOTE)
+        self.assertFalse(packet.rerank_disabled(packet.render("demo")))
 
     def test_template_return_lists_rerank_and_db_impact(self):
         returned = packet.render("demo").split("## Return", 1)[1]
@@ -231,12 +242,17 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(packet.check_text(accepted().replace("\n", "\r\n"), task="demo").problems, ())
 
 
-def run_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
+def run_cli(cwd: pathlib.Path, *argv: str, home: pathlib.Path | None = None) -> tuple[int, str, str]:
+    """`oah <argv>` in-process, with a temporary home folder so no skill of this machine is read."""
     out, err = io.StringIO(), io.StringIO()
     previous = pathlib.Path.cwd()
     os.chdir(cwd)
+    home = home or pathlib.Path(cwd).parent / "home"
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            for name in [key for key in os.environ if key.startswith("OAH_")] + ["CLAUDE_CONFIG_DIR", "CODEX_HOME"]:
+                os.environ.pop(name, None)
             code = cli.main(list(argv))
     finally:
         os.chdir(previous)
@@ -288,12 +304,131 @@ class PacketCliTest(unittest.TestCase):
         self.assertIn("OAH_INTENT_SOURCE_MISSING", out)
         self.assertIn("oah packet new nothing", out)
 
+    def test_rerank_disabled_by_constraints(self):
+        def constraints(text: str) -> str:
+            return accepted().replace("### Constraints\n", f"### Constraints\n{text}\n")
+
+        for text in ("No re-ranker for this task.", "- without the reranker", "Re-ranker: off",
+                     "disable the re-ranker", "Turn off the re-ranker."):
+            with self.subTest(text=text):
+                self.assertTrue(packet.rerank_disabled(constraints(text)))
+        for text in ("no network except the re-ranker and oah impact's automatic default-branch refresh",
+                     "<!-- no re-ranker -->", "Use the re-ranker."):
+            with self.subTest(text=text):
+                self.assertFalse(packet.rerank_disabled(constraints(text)))
+        self.assertFalse(packet.rerank_disabled(accepted(extra="No re-ranker in the return section.")))
+
     def test_cli_outside_repository(self):
         outside = make_tmp_dir(self)
         with patch.dict(os.environ, GIT_CEILING_DIRECTORIES=str(outside.parent)):
             code, _, err = run_cli(outside, "packet", "new", "demo")
         self.assertEqual(code, 69)
         self.assertTrue(err.startswith("OAH_NOT_A_REPO"), err)
+
+
+class PacketPlanTest(unittest.TestCase):
+    """`oah packet new` scores the axes, records tier and skills in ## Plan, and refreshes impact first."""
+
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/app.py": "x = 1\n", "db/migrations/001.sql": "create table t (id int);\n"})
+        self.home = self.repo.parent / "home"
+        for name in ("test-driven-development", "requesting-code-review", "receiving-code-review"):
+            folder = self.home / ".claude" / "skills" / name
+            folder.mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+        self.path = self.repo / ".oah" / "tasks" / "demo" / "PACKET.md"
+
+    def new(self, *extra: str) -> tuple[int, str, str]:
+        return run_cli(self.repo, "packet", "new", "demo", *extra, home=self.home)
+
+    def plan(self) -> str:
+        return self.path.read_text(encoding="utf-8").split("## Plan", 1)[1].split("\n## Acceptance", 1)[0]
+
+    def test_new_records_axes_tier_and_skills_in_plan(self):
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        text = self.path.read_text(encoding="utf-8")
+        self.assertEqual(intent.parse(text).status, "draft")
+        self.assertIn("## Scope        (paths this task may write)\n", text)
+        self.assertEqual(packet.check(self.path, require_accepted=False).scope, ("src/app.py",))
+        plan = self.plan()
+        for line in ("- initial → claude → medium", "- review → codex → medium", "- correction → codex → medium",
+                     "- initial: kind=implementation intensity=low reasoning=medium risk=normal → medium "
+                     "(advice=unused(not-configured))",
+                     "  - skills (rerank=unused(not-enabled)):",
+                     "    - `test-driven-development` (user): code changes are written test-first "
+                     "(kind implementation, stage initial)",
+                     "    - `requesting-code-review` (user): review work follows a review checklist (kind review); "
+                     "review rounds follow a review checklist (stage review)"):
+            self.assertIn(line, plan.splitlines())
+        self.assertIn("why: kind implementation from stage initial", plan)
+        self.assertNotIn(str(self.home), text)
+        self.assertNotIn("\r", text)
+        self.assertIn("plan: initial → claude → medium; review → codex → medium; correction → codex → medium", out)
+        self.assertIn("rerank=unused(not-enabled)", out)
+
+    def test_risky_scope_and_explicit_axes_raise_the_tier(self):
+        code, out, err = self.new("--scope", "db/migrations/001.sql", "--kind", "migration")
+        self.assertEqual(code, 0, out + err)
+        plan = self.plan()
+        self.assertIn("- initial → claude → high", plan.splitlines())
+        self.assertIn("- review → codex → high", plan.splitlines())
+        self.assertIn("kind=migration", plan)
+        self.assertIn("risk path db/migrations/001.sql (migration)", plan)
+
+    def test_empty_scope_warns_in_plan(self):
+        code, out, err = self.new()
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_SCOPE_EMPTY", self.plan())
+        self.assertIn("OAH_SCOPE_EMPTY", err)
+
+    def test_plan_lines_are_read_by_call(self):
+        self.assertEqual(self.new("--scope", "src/app.py")[0], 0)
+        from oah import call
+        read = call.read_packet(self.repo, self.path, parse_intent=None)
+        self.assertEqual(read.plan, {"initial": ("claude", "medium"), "review": ("codex", "medium"),
+                                     "correction": ("codex", "medium")})
+        self.assertEqual(read.scope, ("src/app.py",))
+
+    def test_new_refreshes_impact_first(self):
+        import oah.impact
+
+        seen = []
+        real = oah.impact.ensure_fresh
+
+        def spy(root, **kwargs):
+            seen.append((pathlib.Path(root).resolve(), self.path.exists()))
+            return real(root, **kwargs)
+
+        with patch.object(oah.impact, "ensure_fresh", spy):
+            code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(seen, [(self.repo.resolve(), False)])
+        self.assertTrue(any(line.startswith("impact=map ") for line in out.splitlines()), out)
+
+    def test_new_refuses_when_impact_cannot_refresh(self):
+        import oah.impact
+
+        def stale(root, **kwargs):
+            raise oah.impact.ImpactError("OAH_IMPACT_STALE", "the inputs kept changing")
+
+        with patch.object(oah.impact, "ensure_fresh", stale):
+            code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 69)
+        self.assertTrue(err.startswith("OAH_IMPACT_STALE"), err)
+        self.assertFalse(self.path.exists())
+
+    def test_new_without_commits_reports_impact_unavailable(self):
+        empty = make_git_repo(self)
+        code, out, err = run_cli(empty, "packet", "new", "demo", home=self.home)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("impact=unavailable(no commits yet)", out.splitlines())
+        self.assertTrue((empty / ".oah" / "tasks" / "demo" / "PACKET.md").is_file())
+
+    def test_no_rerank_flag_is_recorded(self):
+        self.assertEqual(self.new("--scope", "src/app.py", "--no-rerank")[0], 0)
+        self.assertIn("  - skills (rerank=unused(disabled-by-brief)):", self.plan().splitlines())
 
 
 if __name__ == "__main__":

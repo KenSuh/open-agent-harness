@@ -1,8 +1,11 @@
 # 작업 패킷 — .oah/tasks/<task>/PACKET.md 를 템플릿에서 초안으로 만들고, 의도·필수 구획·Scope·과정 단계·GATES.md 구조를 검사한다.
 """Task packets: one file per task that holds the intent, scope, plan, acceptance and return format.
 
-`create(root, task)` writes `.oah/tasks/<task>/PACKET.md` from the template as a draft and never
-overwrites. `check(path)` reads it safely (`oah.intent.read_source`) and reports problems:
+`create(root, task, plan=…, scope=…)` writes `.oah/tasks/<task>/PACKET.md` from the template as a draft
+and never overwrites. `plan_text(StagePlan…)` writes the `## Plan` body that `oah packet new` scores: one
+`- <stage> → <engine> → <tier>` line per stage (the format `oah call` reads), then the axes, the rule
+reasons, the advisory judgement and the selected skills with their reasons and `rerank=` status. Skill
+lines name the skill and its origin, never a path, because the packet is committed. `check(path)` reads it safely (`oah.intent.read_source`) and reports problems:
 
 - errors: the intent section's own problems (`oah.intent.parse`), a missing or duplicated
   `## Scope`, `## Plan`, `## Acceptance` or `## Return` section, a status other than accepted
@@ -22,6 +25,7 @@ import importlib.resources
 import os
 import pathlib
 import re
+from typing import Sequence
 
 from oah import intent
 from oah.intent import IntentInvalid, Problem, SourceError
@@ -33,6 +37,9 @@ REQUIRED_SECTIONS = ("Scope", "Plan", "Acceptance", "Return")
 PLACEHOLDERS = ("<what is wrong or missing today>", "<what is true when this task is done>",
                 "<checkable condition>")
 _TASK_TOKEN = "{{TASK}}"
+_PLAN_TOKEN = "{{PLAN}}"
+_SCOPE_TOKEN = "{{SCOPE}}"
+DEFAULT_PLAN = "- initial implementation → claude\n- review → codex\n- correction → codex\n"
 
 # Phrases that describe how the work is done rather than what is true afterwards (PLAN 5.6, A7).
 PROCESS_PATTERNS = (
@@ -113,16 +120,19 @@ def task_of(path: pathlib.Path) -> str | None:
     return None
 
 
-def render(task: str) -> str:
-    """The packet template for `task`, as a draft."""
+def render(task: str, *, plan: str | None = None, scope: Sequence[str] = ()) -> str:
+    """The packet template for `task`, as a draft, with this `## Plan` body and these Scope paths."""
     _check_task(task)
     template = importlib.resources.files("oah").joinpath("templates/packet/PACKET.md")
-    return template.read_text(encoding="utf-8").replace("\r\n", "\n").replace(_TASK_TOKEN, task)
+    text = template.read_text(encoding="utf-8").replace("\r\n", "\n").replace(_TASK_TOKEN, task)
+    body = plan if plan is not None else DEFAULT_PLAN
+    text = text.replace(_PLAN_TOKEN, body if body.endswith("\n") else body + "\n")
+    return text.replace(_SCOPE_TOKEN, "".join(f"- {entry}\n" for entry in scope))
 
 
-def create(root: pathlib.Path, task: str) -> pathlib.Path:
+def create(root: pathlib.Path, task: str, *, plan: str | None = None, scope: Sequence[str] = ()) -> pathlib.Path:
     """Write the draft packet for `task`; refuses with OAH_PACKET_EXISTS rather than overwrite."""
-    text = render(task)
+    text = render(task, plan=plan, scope=scope)
     path = packet_path(root, task)
     if os.path.lexists(path):
         raise PacketError("OAH_PACKET_EXISTS", f"{path} already exists; edit it, and raise its Revision when "
@@ -134,6 +144,42 @@ def create(root: pathlib.Path, task: str) -> pathlib.Path:
     except FileExistsError as exc:
         raise PacketError("OAH_PACKET_EXISTS", f"{path} already exists; edit it instead") from exc
     return path
+
+
+@dataclasses.dataclass(frozen=True)
+class StagePlan:
+    """One stage of `## Plan`: its engine, rule-scored axes and tier, and the skills chosen for it."""
+
+    stage: str
+    engine: str
+    axes: object  # routing.Axes
+    tier: str
+    reasons: tuple[str, ...]
+    advice: str
+    selection: object  # skillsel.Selection
+    rerank: str
+
+
+def plan_text(plans: Sequence[StagePlan]) -> str:
+    """The `## Plan` body: stage lines `oah call` reads, then how each tier and skill was chosen."""
+    lines = [f"- {plan.stage} → {plan.engine} → {plan.tier}" for plan in plans]
+    lines += ["", "Scored by rules when oah packet new made this packet. Change a tier above to override it; "
+              "oah call records that as tier source packet."]
+    for plan in plans:
+        axes = plan.axes
+        lines.append(f"- {plan.stage}: kind={axes.kind} intensity={axes.intensity} reasoning={axes.reasoning} "
+                     f"risk={axes.risk} → {plan.tier} (advice={plan.advice})")
+        lines.append(f"  - why: {'; '.join(plan.reasons)}")
+        lines.append(f"  - skills (rerank={plan.rerank}):")
+        for skill in plan.selection.skills:
+            lines.append(f"    - `{skill.id}` ({skill.origin}): {'; '.join(skill.reasons)}")
+        if not plan.selection.skills:
+            lines.append("    - none selected")
+        for item in plan.selection.unavailable:
+            lines.append(f"    - wanted, not used: `{item.skill}`: {item.reason}")
+        for warning in plan.selection.warnings:
+            lines.append(f"    - warning: {warning}")
+    return "\n".join(lines) + "\n"
 
 
 # Checking ---------------------------------------------------------------------------------------
