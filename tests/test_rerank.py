@@ -9,8 +9,10 @@ import json
 import os
 import pathlib
 import secrets as token_source
+import socket
 import threading
 import time
+import traceback
 import unittest
 import urllib.request
 import urllib.response
@@ -506,6 +508,107 @@ class TypeSafeHttpTest(unittest.TestCase):
 
 
 class KeyLeakTest(unittest.TestCase):
+    def assert_sanitized_failure(self, action, code: str, key: str, response_text: str) -> None:
+        failure = None
+        try:
+            action()
+        except Exception as exc:
+            failure = exc
+        self.assertIsNotNone(failure, "the provider must refuse the failed request")
+        pending = [failure]
+        seen = set()
+        while pending:
+            error = pending.pop()
+            if id(error) in seen:
+                continue
+            seen.add(id(error))
+            attributes = {name: getattr(error, name) for name in dir(error)
+                          if name != "__traceback__" and not callable(getattr(error, name))}
+            texts = (repr(error), repr(error.args), repr(attributes),
+                     "".join(traceback.format_exception(error)))
+            for text in texts:
+                for private in (key, response_text):
+                    self.assertFalse(private in text, "exception exposes credential or response data")
+            pending.extend(item for item in attributes.values() if isinstance(item, BaseException))
+        self.assertIsInstance(failure, rerank.ProviderError)
+        self.assertEqual(failure.code, code)
+        self.assertTrue(failure.__context__ is None, "provider errors must have no exception context")
+        self.assertTrue(failure.__cause__ is None, "provider errors must have no exception cause")
+
+    def test_malformed_response_errors_have_no_chain(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = (response_text + key).encode("utf-8")
+        for label, payload in (("utf8", echo + b"\xff"), ("json", b'{"echo":"' + echo + b'",}')):
+            with self.subTest(case=label):
+                server = FakeServer(self, lambda path, body, p=payload: (200, p, 0, {}))
+                self.assert_sanitized_failure(
+                    lambda: typesafe.post_json(server.url(), {}, key=key, timeout=5),
+                    "bad-response", key, response_text)
+
+    def test_every_failure_path_has_only_sanitized_exception_data(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = response_text + key
+        provider = typesafe.TypeSafeProvider()
+        axes = AdviceTest.AXES
+        cases = [
+            ("bad-header", "invalid-header", 200, {}, 0, key + "\n", {}, 5, None),
+            ("bad-url", "insecure-url", 200, {}, 0, key, {}, 5, f"https://{echo}\uff0f.invalid"),
+            ("bad-request", "bad-request", 200, {}, 0, key, {echo: b"bytes"}, 5, None),
+            ("bad-request-encoding", "bad-request", 200, {}, 0, key, {echo: "\ud800"}, 5, None),
+            ("http-error", "unauthorized", 401, {"echo": echo}, 0, key, {}, 5, None),
+            ("timeout", "timeout", 200, {"echo": echo}, 0.3, key, {}, 0.05, None),
+            ("network", "network", 200, {}, 0, key, {}, 5, None),
+            ("bad-utf8", "bad-response", 200, echo.encode() + b"\xff", 0, key, {}, 5, None),
+            ("bad-json", "bad-response", 200, echo.encode(), 0, key, {}, 5, None),
+            ("bad-shape", "bad-response", 200, {"echo": echo}, 0, key, {}, 5, None),
+            ("number-overflow", "bad-response", 200,
+             {"echo": echo, "answers": {"c0": {"type": "noul", "noul": 10**400},
+                                        "tier": {"type": "choice", "choice": echo}}},
+             0, key, {}, 5, None),
+            ("json-integer-overflow", "bad-response", 200,
+             ('{"echo":"' + echo + '","number":' + "9" * 5000 + '}').encode(),
+             0, key, {}, 5, None),
+            ("response-overflow", "bad-response", 200,
+             (echo + "x" * typesafe.RESPONSE_LIMIT).encode(), 0, key, {}, 5, None),
+            ("transport-overflow", "network", 200, {"echo": echo}, 0, key, {}, 10**400, None),
+            ("invalid-port", "network", 200, {}, 0, key, {}, 5, f"http://127.0.0.1:{echo}"),
+        ]
+        for label, code, status, body, delay, credential, payload, timeout, url in cases:
+            with self.subTest(case=label):
+                endpoint = url or "http://127.0.0.1:9876/v1/systemone"
+
+                def http_open(handler, request):
+                    if delay:
+                        raise socket.timeout(echo)
+                    if label == "network":
+                        raise urllib.error.URLError(echo)
+                    if label == "transport-overflow":
+                        raise OverflowError(echo)
+                    if label == "invalid-port":
+                        # Run the real port validation without opening a socket.
+                        urllib.parse.urlsplit(request.full_url).port
+                    data = body if isinstance(body, bytes) else json.dumps(body).encode("utf-8")
+                    response = urllib.response.addinfourl(io.BytesIO(data), email.message.Message(),
+                                                         request.full_url, status)
+                    response.msg = echo
+                    return response
+
+                with mock.patch.object(urllib.request.HTTPHandler, "http_open", http_open):
+                    if label not in ("bad-shape", "number-overflow"):
+                        self.assert_sanitized_failure(
+                            lambda: typesafe.post_json(endpoint, payload, key=credential, timeout=timeout),
+                            code, key, response_text)
+                    # Shape and score validation happen in the provider after transport succeeds.
+                    if label not in ("bad-request", "bad-request-encoding", "transport-overflow"):
+                        cfg = typesafe_config(endpoint, timeout_seconds=timeout)
+                        for action in (
+                            lambda: provider.score("impact", "q", candidates("a"), key=credential, config=cfg),
+                            lambda: provider.advise(axes, "task", key=credential, config=cfg),
+                        ):
+                            self.assert_sanitized_failure(action, code, key, response_text)
+
     def test_post_json_rejects_malformed_credentials_without_echoing(self) -> None:
         key = fake_key()
         for suffix in ("\n", "\r\nInjected: value", "\n value", "\x00", "\x7f", "Ł"):

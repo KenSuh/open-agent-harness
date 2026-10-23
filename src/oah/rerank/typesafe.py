@@ -130,6 +130,8 @@ def _check_url(url: str) -> None:
         parts = urllib.parse.urlsplit(url)
         host = parts.hostname
     except ValueError:
+        parts = None
+    if parts is None:
         raise ProviderError("insecure-url") from None
     if parts.scheme == "https" and host:
         return
@@ -145,22 +147,25 @@ def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object
     # Reject them before http.client can include a rejected header value in an exception.
     if not isinstance(key, str) or not key or any(not 0x21 <= ord(char) <= 0x7e for char in key):
         raise ProviderError("invalid-header")
+    data = None
     try:
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError):
+        pass
+    if data is None:
         raise ProviderError("bad-request") from None
     from oah import __version__
 
-    request = urllib.request.Request(url, data=data, method="POST", headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {key}",
-        "User-Agent": f"open-agent-harness/{__version__}",
-    })
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     code: str | None = None
     raw = b""
     try:
+        request = urllib.request.Request(url, data=data, method="POST", headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {key}",
+            "User-Agent": f"open-agent-harness/{__version__}",
+        })
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(RESPONSE_LIMIT + 1)
     except urllib.error.HTTPError as exc:
@@ -170,7 +175,7 @@ def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object
         code = "timeout" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "network"
     except (socket.timeout, TimeoutError):
         code = "timeout"
-    except (OSError, http.client.HTTPException):
+    except (OSError, http.client.HTTPException, ValueError, OverflowError):
         code = "network"
     if code is not None:
         raise ProviderError(code) from None
@@ -178,8 +183,10 @@ def post_json(url: str, payload: Mapping, *, key: str, timeout: float) -> object
         raise ProviderError("bad-response")
     try:
         return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ProviderError("bad-response") from None
+    except ValueError:  # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.
+        pass
+    # Raise only after the handler exits: `from None` alone retains private data in __context__.
+    raise ProviderError("bad-response") from None
 
 
 class TypeSafeProvider:
