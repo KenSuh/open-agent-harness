@@ -224,7 +224,7 @@ def _allowed(hit: Hit, allowlist: list[Allow]) -> bool:
 def run_gitleaks(repo: pathlib.Path, gitleaks: str) -> bool:
     """True when gitleaks finds nothing in the history."""
     result = subprocess.run([gitleaks, "detect", "--source", str(repo), "--redact", "--no-banner",
-                             "--exit-code", "1"], capture_output=True)
+                             "--exit-code", "1", "--log-opts=--all --full-history -m"], capture_output=True)
     if result.returncode == 0:
         return True
     if result.returncode == 1:

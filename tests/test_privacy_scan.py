@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from tests.helpers import make_tmp_dir
 
@@ -256,6 +257,36 @@ class PrivacyScanTest(unittest.TestCase):
         allow.write_text("email docs/*.md ^alice@ # a documented public contact\n", encoding="utf-8")
         code, out, _ = self.run_scan(repo, "--allowlist", str(allow))
         self.assertEqual(code, 0, out)
+
+    def test_gitleaks_only_merge_secret_removed_later_is_found(self):
+        if shutil.which("gitleaks") is None:
+            self.skipTest("gitleaks is not installed")
+        secret = "s" + "k_" + "live_" + "A1b2C3d4E5f6G7h8I9j0K1l2"
+        self.assertEqual(self.scanner.scan_text(secret, []), [])
+        repo = make_repo(self)
+        commit(repo, {"keys.txt": "base\n"})
+        git(repo, "checkout", "-q", "-b", "side")
+        commit(repo, {"keys.txt": "side\n"})
+        git(repo, "checkout", "-q", "main")
+        commit(repo, {"keys.txt": "main\n"})
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(repo, "merge", "--no-commit", "side")
+        commit(repo, {"keys.txt": secret + "\n"}, message="resolve conflict")
+        commit(repo, {"keys.txt": "clean\n"})
+        code, out, _ = self.run_scan(repo)
+        self.assertEqual(code, 0, out)
+        code, out, _ = self.run_scan(repo, "--gitleaks", "require")
+        self.assertEqual(code, 1, out)
+        self.assert_hit(out, "gitleaks")
+        self.assertIn("PRIVACY_SCAN_HITS n=1", out)
+
+    def test_gitleaks_requests_full_history_and_merge_diffs(self):
+        repo = pathlib.Path("repo")
+        with patch.object(self.scanner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(self.scanner.run_gitleaks(repo, "gitleaks"))
+        run.assert_called_once_with(
+            ["gitleaks", "detect", "--source", str(repo), "--redact", "--no-banner",
+             "--exit-code", "1", "--log-opts=--all --full-history -m"], capture_output=True)
 
     def test_allowlist_entry_without_reason_is_an_error(self):
         repo = make_repo(self)
