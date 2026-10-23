@@ -55,7 +55,13 @@ def _build(modules: list[ModuleType]) -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", metavar="<command>")
     for module in modules:
         before = set(commands.choices)
-        module.register(commands)
+        try:
+            module.register(commands)
+        except (argparse.ArgumentError, ValueError) as exc:
+            if isinstance(exc, ValueError) and not str(exc).startswith(
+                    ("conflicting subparser: ", "conflicting subparser alias: ")):
+                raise
+            raise RuntimeError(f"oah command module {module.__name__} failed to register: {exc}") from exc
         added = set(commands.choices) - before
         if added != set(module.COMMANDS):
             raise RuntimeError(f"oah command module {module.__name__} registered {sorted(added)} "

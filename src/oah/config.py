@@ -33,7 +33,7 @@ class ConfigError(Exception):
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return types.MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
     return value
 
@@ -77,6 +77,9 @@ def _same_type(default: Any, value: Any) -> bool:
 class Config:
     path: pathlib.Path | None
     raw: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "raw", _freeze(self.raw))
 
     def sections(self) -> tuple[str, ...]:
         """The top-level table names present in the file, in file order."""
@@ -134,7 +137,7 @@ def load_config(root: pathlib.Path) -> Config:
     try:
         data = path.read_bytes()
     except FileNotFoundError:
-        return Config(path=None, raw=types.MappingProxyType({}))
+        return Config(path=None, raw={})
     except OSError as exc:
         raise ConfigError("OAH_CONFIG_INVALID",
                           f"{path} cannot be read ({exc.strerror or exc}); "
@@ -150,4 +153,4 @@ def load_config(root: pathlib.Path) -> Config:
         raise ConfigError("OAH_CONFIG_INVALID",
                           f"{path} is not valid TOML ({exc}); fix the syntax "
                           "or remove the file to use the defaults") from exc
-    return Config(path=path, raw=_freeze(parsed))
+    return Config(path=path, raw=parsed)

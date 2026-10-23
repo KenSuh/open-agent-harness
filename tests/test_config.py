@@ -179,6 +179,36 @@ class SectionTest(unittest.TestCase):
     def test_config_can_be_built_directly(self):
         self.assertEqual(Config(path=None, raw={}).section("s", {"a": 1}), {"a": 1})
 
+    def test_direct_config_raw_is_read_only(self):
+        config = Config(path=None, raw={"s": {"items": [{"values": [1]}],
+                                              "tuple_items": ({"values": [2]},)}})
+        with self.assertRaises(TypeError):
+            config.raw["other"] = {}  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            config.raw["s"]["items"][0]["values"] = ()
+        with self.assertRaises(AttributeError):
+            config.raw["s"]["items"].append(3)
+        with self.assertRaises(AttributeError):
+            config.raw["s"]["items"][0]["values"].append(3)
+        with self.assertRaises(TypeError):
+            config.raw["s"]["tuple_items"][0]["values"] = ()
+        with self.assertRaises(AttributeError):
+            config.raw["s"]["tuple_items"][0]["values"].append(3)
+        self.assertEqual(config.section("s", {}),
+                         {"items": [{"values": [1]}], "tuple_items": [{"values": [2]}]})
+
+    def test_direct_config_is_isolated_from_original_input(self):
+        raw = {"s": {"items": [{"values": [1]}], "tuple_items": ({"values": [2]},)}}
+        config = Config(path=None, raw=raw)
+        raw["s"]["items"][0]["values"].append(3)
+        raw["s"]["items"].append({"values": [4]})
+        raw["s"]["tuple_items"][0]["values"].append(5)
+        raw["s"]["added"] = True
+        raw["other"] = {}
+        self.assertEqual(config.sections(), ("s",))
+        self.assertEqual(config.section("s", {}),
+                         {"items": [{"values": [1]}], "tuple_items": [{"values": [2]}]})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -134,6 +134,35 @@ class DiscoveryTest(unittest.TestCase):
         self.assertIn("oah.zz_broken_cli", str(ctx.exception))
         self.assertIn("run", str(ctx.exception))
 
+    def test_registration_collision_raises(self):
+        add_command_module(self, "zz_clash_cli", EXTRA.replace(
+            'add_parser("extra",', 'add_parser("doctor",'))
+        for build in (build_parser, lambda: main([])):
+            with self.subTest(build=build):
+                with self.assertRaises(RuntimeError) as ctx:
+                    build()
+                self.assertIn("oah.zz_clash_cli", str(ctx.exception))
+                self.assertIn("doctor", str(ctx.exception))
+
+    def test_registration_alias_collision_raises(self):
+        add_command_module(self, "zz_clash_cli", EXTRA.replace(
+            'help="an extra command"', 'aliases=["doctor"], help="an extra command"'))
+        for build in (build_parser, lambda: main([])):
+            with self.subTest(build=build):
+                with self.assertRaises(RuntimeError) as ctx:
+                    build()
+                self.assertIn("oah.zz_clash_cli", str(ctx.exception))
+                self.assertIn("doctor", str(ctx.exception))
+
+    def test_unrelated_registration_value_error_propagates(self):
+        add_command_module(self, "zz_broken_cli", EXTRA.replace(
+            'extra = commands.add_parser("extra", help="an extra command")',
+            'raise ValueError("invalid module setting")'))
+        for build in (build_parser, lambda: main([])):
+            with self.subTest(build=build):
+                with self.assertRaisesRegex(ValueError, "^invalid module setting$"):
+                    build()
+
     def test_unclaimed_registered_command_raises(self):
         add_command_module(self, "zz_sneaky_cli", EXTRA.replace(
             'help="an extra command")', 'help="an extra command")\n        commands.add_parser("hidden")'))
