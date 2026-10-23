@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 from dataclasses import dataclass
 
 from oah.atomic import StorageError, read_json, write_json_atomic, write_text_atomic
@@ -25,14 +26,14 @@ RUN_ID_RE = re.compile(r"r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 TERMINAL = ("finished", "failed", "timed_out", "refused", "lost")
 _PROGRESS = {status: n for n, status in enumerate(("created", "prepared", "queued", "running"))}
 UNVERIFIED_FIELDS = ("cli_version", "resolved_model", "requested_effort", "launch_effort", "header_effort",
-                     "header_check", "resolved_inference_effort", "normalization_basis")
+                     "header_check", "resolved_inference_effort", "normalization_basis", "detached")
 RESULT_FIELDS = (
     "run_id", "task", "engine", "stage", "status", "created_at", "started_at", "finished_at", "duration_s",
     "exit_code", "timed_out", "pid", "command", "cwd", "read_only", "cli_path", "cli_version",
     "requested_model", "resolved_model", "model_source", "observed_models",
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
-    "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error",
+    "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
 )
 
 
@@ -52,25 +53,30 @@ class Run:
     task: str
     path: pathlib.Path
 
+    def file_path(self, name: str) -> pathlib.Path:
+        """Re-check the run and file immediately before use, including unlink by a caller."""
+        state = self.path.parents[2]
+        return _contained_path(state, *self.path.relative_to(state).parts, name)
+
     @property
     def prompt_path(self) -> pathlib.Path:
-        return self.path / "prompt.md"
+        return self.file_path("prompt.md")
 
     @property
     def stdout_path(self) -> pathlib.Path:
-        return self.path / "stdout.log"
+        return self.file_path("stdout.log")
 
     @property
     def stderr_path(self) -> pathlib.Path:
-        return self.path / "stderr.log"
+        return self.file_path("stderr.log")
 
     @property
     def result_path(self) -> pathlib.Path:
-        return self.path / "result.json"
+        return self.file_path("result.json")
 
     @property
     def launch_path(self) -> pathlib.Path:
-        return self.path / "launch.json"
+        return self.file_path("launch.json")
 
     def write_prompt(self, text: str) -> None:
         write_text_atomic(self.prompt_path, text)
@@ -94,7 +100,8 @@ class Run:
         if "status" in fields and fields["status"] not in (*_PROGRESS, *TERMINAL):
             raise RunError("OAH_RUN_STATUS_INVALID", f"unknown run status {fields['status']!r}; use a lifecycle "
                            "status such as queued, running or finished")
-        with StateLock(self.path.parents[2] / ".lock"):
+        self.file_path("result.json")
+        with StateLock(_contained_path(self.path.parents[2], ".lock")):
             data = self.read()
             current, incoming = data.get("status"), fields.get("status")
             if incoming is not None and ((current in TERMINAL and incoming != current) or
@@ -109,12 +116,30 @@ class Run:
 
 
 def _contained_path(state_dir: pathlib.Path, *parts: str) -> pathlib.Path:
-    """Refuse symlinks and Windows junctions that resolve outside the trusted state root."""
+    """Refuse every symlink or junction beneath the trusted state root."""
+    # Re-check at each operation, not just lookup. This does not defend against a concurrent local
+    # attacker who can already write to the state folder and swap a component after this check.
     root = pathlib.Path(state_dir).resolve()
-    path = pathlib.Path(state_dir).joinpath(*parts)
+    path = root.joinpath(*parts)
+
+    def unsafe() -> RunError:
+        return RunError("OAH_RUN_PATH_UNSAFE", f"{path} is linked or outside {root}; remove the linked path "
+                        "and retry with run storage inside the state folder")
+
+    if not path.is_relative_to(root) or ".." in path.relative_to(root).parts:
+        raise unsafe()
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        # Python 3.11 has no Path.is_junction(); Windows marks junctions as reparse points.
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise unsafe()
     if not path.resolve().is_relative_to(root):
-        raise RunError("OAH_RUN_PATH_UNSAFE", f"{path} resolves outside {root}; remove the linked directory "
-                       "and retry with run storage inside the state folder")
+        raise unsafe()
     return path
 
 
@@ -138,8 +163,11 @@ def new_run(state_dir: pathlib.Path, task: str, engine: str, stage: str, *, now:
     record.update(run_id=run_id, task=task, engine=engine, stage=stage, status="created", created_at=_iso(now),
                   warnings=[])
     try:
+        _contained_path(state_dir, "runs", task, temp.name)
         temp.mkdir(parents=True)
-        write_json_atomic(temp / "result.json", record)
+        write_json_atomic(_contained_path(state_dir, "runs", task, temp.name, "result.json"), record)
+        _contained_path(state_dir, "runs", task, temp.name)
+        _contained_path(state_dir, "runs", task, run_id)
         os.rename(temp, final)
     except OSError as exc:
         raise StorageError(final, exc) from exc
@@ -153,6 +181,7 @@ def find_run(state_dir: pathlib.Path, run_id: str) -> Run:
     runs = _contained_path(state_dir, "runs")
     matches = []
     for parent in sorted(runs.iterdir()) if runs.is_dir() else []:
+        _contained_path(state_dir, "runs", parent.name)
         if not parent.is_dir():
             continue
         task_directory(state_dir, parent.name)

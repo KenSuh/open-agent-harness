@@ -9,8 +9,10 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
 from oah.lockfile import StateLock
+from oah import runs
 from oah.runs import RESULT_FIELDS, UNVERIFIED, RunError, find_run, new_run
 from tests.helpers import directory_alias, make_tmp_dir
 
@@ -18,6 +20,81 @@ NOW = dt.datetime(2026, 10, 23, 12, 0, 5, tzinfo=dt.timezone.utc)
 
 
 class RunsTest(unittest.TestCase):
+    def test_alias_installed_after_validation_refuses_each_run_operation(self):
+        for component in ("runs", "task", "run"):
+            for operation in (lambda run: run.write_prompt("new"), lambda run: run.write_logs("out", "err"),
+                              lambda run: run.read(), lambda run: run.result(header_effort="high"),
+                              lambda run: run.launch_path.unlink()):
+                with self.subTest(component=component, operation=operation):
+                    state, outside = make_tmp_dir(self), make_tmp_dir(self)
+                    run = new_run(state, "p3b", "codex", "review")
+                    run.launch_path.write_text("keep", encoding="utf-8")
+                    original = {"runs": state / "runs", "task": run.path.parent, "run": run.path}[component]
+                    moved = outside / "moved"
+                    original.rename(moved)
+                    directory_alias(moved, original)
+                    before = {str(p.relative_to(outside)): p.read_bytes() for p in outside.rglob("*") if p.is_file()}
+                    with self.assertRaises(RunError) as ctx:
+                        operation(run)
+                    self.assertEqual(ctx.exception.code, "OAH_RUN_PATH_UNSAFE")
+                    self.assertEqual(before, {str(p.relative_to(outside)): p.read_bytes()
+                                              for p in outside.rglob("*") if p.is_file()})
+
+    def test_in_state_aliases_are_also_refused(self):
+        state = make_tmp_dir(self)
+        (state / "actual").mkdir()
+        directory_alias(state / "actual", state / "runs")
+        with self.assertRaises(RunError) as ctx:
+            new_run(state, "p3b", "codex", "review")
+        self.assertEqual(ctx.exception.code, "OAH_RUN_PATH_UNSAFE")
+
+    def test_creation_rechecks_task_after_initial_validation(self):
+        state, outside = make_tmp_dir(self), make_tmp_dir(self)
+        original = runs.task_directory
+
+        def validated_then_replaced(*args):
+            path = original(*args)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            directory_alias(outside, path)
+            return path
+
+        with mock.patch.object(runs, "task_directory", side_effect=validated_then_replaced):
+            with self.assertRaises(RunError) as ctx:
+                new_run(state, "p3b", "codex", "review")
+        self.assertEqual(ctx.exception.code, "OAH_RUN_PATH_UNSAFE")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_publication_rechecks_task_after_writing_temp_result(self):
+        state, outside = make_tmp_dir(self), make_tmp_dir(self)
+        original = runs.write_json_atomic
+
+        def write_then_replace(path, data):
+            original(path, data)
+            parent = path.parent.parent
+            parent.rename(outside / "moved")
+            directory_alias(outside / "moved", parent)
+
+        with mock.patch.object(runs, "write_json_atomic", side_effect=write_then_replace):
+            with self.assertRaises(RunError) as ctx:
+                new_run(state, "p3b", "codex", "review")
+        self.assertEqual(ctx.exception.code, "OAH_RUN_PATH_UNSAFE")
+        self.assertTrue(all(p.name.endswith(".tmp") for p in (outside / "moved").iterdir()))
+
+    @unittest.skipUnless(os.name != "nt", "file symlinks need Windows privilege")
+    def test_run_file_alias_refused_on_read_write_and_delete(self):
+        for operation in (lambda run: run.read(), lambda run: run.result(header_effort="high"),
+                          lambda run: run.result_path.unlink()):
+            with self.subTest(operation=operation):
+                run = new_run(make_tmp_dir(self), "p3b", "codex", "review")
+                target = make_tmp_dir(self) / "result.json"
+                path = run.result_path
+                path.rename(target)
+                path.symlink_to(target)
+                before = target.read_bytes()
+                with self.assertRaises(RunError):
+                    operation(run)
+                self.assertEqual(target.read_bytes(), before)
+
     def test_result_status_only_moves_forward(self):
         run = new_run(make_tmp_dir(self), "p3b", "codex", "review")
         run.result(status="running", pid=123)

@@ -476,11 +476,11 @@ class WorktreeSelectorTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(err.startswith("OAH_WORKTREE_UNRESOLVED"))
         self.assertIn("nothing was launched", err)
-        for path in (self.first, self.second):
-            self.assertIn(f"oah call codex --stage review --task t1 --tier low --worktree {path.resolve()}", err)
+        stored = [json.loads(path.read_text(encoding="utf-8")) for path in (self.project.state / "requests").glob("*.json")]
+        self.assertEqual({item["worktree"] for item in stored}, {str(self.first.resolve()), str(self.second.resolve())})
         self.assertFalse(self.project.record.exists())
         self.assertEqual(self.project.runs(), [])
-        retry = next(line.strip() for line in err.splitlines() if str(self.first.resolve()) in line)
+        retry = next(line.strip() for line in err.splitlines() if line.strip().startswith("oah call "))
         code, out, err = run_cli(self.project, *retry.split()[1:])
         self.assertEqual(code, 0, err)
         self.assertEqual(pathlib.Path(self.project.recorded()["cwd"]).resolve(), self.first.resolve())
@@ -494,6 +494,45 @@ class WorktreeSelectorTest(unittest.TestCase):
         self.assertIn(f"retry {self.first.resolve()}", str(ctx.exception))
         self.assertEqual(call.resolve_worktree(str(self.first), self.project.repo, retry=str).resolve(),
                          self.first.resolve())
+
+    def test_retry_reproduces_stored_request_and_free_text_exactly(self):
+        text = "quotes ' \" ’ $ ` % ! spaces 한글\r\nsecond line\n"
+        for source in ("message", "file", "stdin"):
+            with self.subTest(source=source):
+                prompt = self.project.repo / "round instructions.txt"
+                spec = self.project.repo / "reused brief.txt"
+                prompt.write_bytes(text.encode("utf-8"))
+                spec.write_bytes(b"Reusable spec.\r\n")
+                extra = {"message": ["--message", text], "file": ["--prompt-file", str(prompt)],
+                         "stdin": ["--prompt-file", "-"]}[source]
+                stdin = types.SimpleNamespace(buffer=io.BytesIO(text.encode("utf-8")))
+                with mock.patch.object(call_cli.sys, "stdin", stdin):
+                    code, _, err = run_cli(self.project, "call", "codex", "--stage", "review", "--task", "t1",
+                                           "--tier", "low", "--timeout-seconds", "19", "--brief-file", str(spec),
+                                           "--worktree", "wt", *extra)
+                self.assertEqual(code, 1, err)
+                retry = next(line.strip() for line in err.splitlines() if line.strip().startswith("oah call "))
+                words = retry.split()
+                self.assertEqual(words[:6], ["oah", "call", "codex", "--stage", "review", "--request-id"])
+                self.assertRegex(words[6], r"^q[0-9a-f]{24}$")
+                saved = json.loads((self.project.state / "requests" / (words[6] + ".json")).read_text(encoding="utf-8"))
+                self.assertEqual(saved["message"], text)
+                prompt.unlink()
+                spec.unlink()
+                with mock.patch.object(call, "prepare", wraps=call.prepare) as prepare:
+                    code, _, err = run_cli(self.project, *words[1:])
+                self.assertEqual(code, 0, err)
+                request = prepare.call_args.args[0]
+                self.assertEqual(request.round_instructions, text)
+                self.assertEqual(request.stored_brief, "Reusable spec.\r\n")
+                self.assertEqual((request.task, request.tier, request.timeout_s), ("t1", "low", 19))
+                self.assertIn(text, self.project.recorded()["stdin"])
+
+    def test_retry_refuses_unsafe_embedded_value(self):
+        args = argparse.Namespace(engine="codex’;Write-Output-INJECTED", stage="review")
+        with self.assertRaises(BriefError) as ctx:
+            call_cli.retry_command(args, "safe/path")
+        self.assertEqual(ctx.exception.code, "OAH_UNSAFE_ARGUMENT")
 
 
 class HeaderTest(unittest.TestCase):
@@ -535,6 +574,37 @@ def wait_until_gone(pid: int, seconds: float = 10.0) -> bool:
 
 
 class TimeoutAndBackgroundTest(unittest.TestCase):
+    def test_denied_breakaway_fallback_completes_a_real_background_run(self):
+        project = Project(self)
+        prepared = project.prepare(tier="low")
+        popen = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            flags = kwargs.pop("creationflags", 0)
+            if flags & 0x01000000:
+                raise PermissionError("breakaway denied")
+            if os.name == "nt":
+                kwargs["creationflags"] = flags
+            else:
+                kwargs["start_new_session"] = True
+            return popen(*args, **kwargs)
+
+        def launch(argv, **kwargs):
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(call, "_windows", return_value=True), \
+                    mock.patch.object(call.subprocess, "Popen", side_effect=spawn), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = call.launch_main(prepared.run_dir)
+            return subprocess.CompletedProcess(argv, code, out.getvalue().encode(), err.getvalue().encode())
+
+        with mock.patch.object(call.subprocess, "run", side_effect=launch), \
+                mock.patch.dict(os.environ, project.env, clear=True), contextlib.redirect_stderr(io.StringIO()) as err:
+            run_id = call.start_background(prepared, base_env=project.env)
+        data = call.wait(project.state, run_id, timeout=30)
+        self.assertEqual((data["status"], data["detached"]), ("finished", "unverified"))
+        self.assertIn("closing this terminal may stop the run", err.getvalue())
+        self.assertTrue(any("--require-detach" in warning for warning in data["warnings"]))
+
     def test_runner_can_finish_before_launcher_returns(self):
         project = Project(self)
         prepared = project.prepare(tier="low")
@@ -552,17 +622,77 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
         self.assertEqual((data["status"], data["exit_code"]), ("finished", 0))
         self.assertIsNotNone(data["finished_at"])
 
-    def test_windows_detachment_denial_never_retries_inside_job(self):
-        with mock.patch.object(call.os, "name", "nt"), \
-                mock.patch.object(call, "_boot_argv", return_value=[sys.executable, "-c", "pass"]), \
-                mock.patch.object(call.subprocess, "Popen", side_effect=OSError("breakaway denied")) as popen, \
+    def test_windows_breakaway_denial_falls_back_and_records_unverified(self):
+        project = Project(self)
+        prepared = project.prepare(tier="low")
+        from oah.atomic import write_json_atomic
+        write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=False))
+        child = types.SimpleNamespace(pid=12345, returncode=None)
+        with mock.patch.object(call, "_windows", return_value=True), \
+                mock.patch.object(call.subprocess, "Popen", side_effect=[PermissionError("breakaway denied"), child]) as popen, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = call.launch_main(prepared.run_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(popen.call_count, 2)
+        self.assertTrue(popen.call_args_list[0].kwargs["creationflags"] & 0x01000000)
+        self.assertFalse(popen.call_args_list[1].kwargs["creationflags"] & 0x01000000)
+        data = prepared.run.read()
+        self.assertEqual(data["detached"], "unverified")
+        self.assertIn("closing this terminal may stop the run", data["warnings"][-1])
+        self.assertIn("--require-detach", err.getvalue())
+
+    def test_require_detach_refuses_when_windows_denies_breakaway(self):
+        project = Project(self)
+        prepared = project.prepare(tier="low")
+        from oah.atomic import write_json_atomic
+        write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=True))
+        with mock.patch.object(call, "_windows", return_value=True), \
+                mock.patch.object(call.subprocess, "Popen", side_effect=PermissionError("breakaway denied")) as popen, \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            code = call.launch_main("unused")
+            code = call.launch_main(prepared.run_dir)
         self.assertEqual(code, call_cli.EXIT_ENVIRONMENT)
         self.assertEqual(popen.call_count, 1)
-        self.assertTrue(popen.call_args.kwargs["creationflags"] & 0x01000000)
+        self.assertEqual(prepared.run.read()["detached"], "unverified")
         self.assertIn("OAH_RUN_DETACH_FAILED", err.getvalue())
-        self.assertIn("without --background", err.getvalue())
+        self.assertIn("without --require-detach", err.getvalue())
+
+    def test_verified_detachment_requires_successful_launch(self):
+        project = Project(self)
+        prepared = project.prepare(tier="low")
+        from oah.atomic import write_json_atomic
+        write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=True))
+        with mock.patch.object(call, "_windows", return_value=True), \
+                mock.patch.object(call.subprocess, "Popen", return_value=types.SimpleNamespace(pid=12345)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(call.launch_main(prepared.run_dir), 0)
+        self.assertEqual(prepared.run.read()["detached"], "verified")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows denied-breakaway job")
+    def test_background_finishes_inside_job_that_denies_breakaway(self):
+        from oah.engines.proc import run_command
+
+        project = Project(self)
+        for required in (False, True):
+            with self.subTest(require_detach=required):
+                prepared = project.prepare(tier="low")
+                script = ("import sys; sys.path.insert(0,sys.argv[1]); from oah import call; "
+                          "from oah.atomic import read_json; from pathlib import Path; "
+                          "p=call.Prepared.from_json(read_json(Path(sys.argv[2]),None)); "
+                          f"call.start_background(p,require_detach={required!r}); "
+                          "data=call.wait(Path(p.run_dir).parents[2],p.run_id,timeout=30); "
+                          "raise SystemExit(0 if data['status']=='finished' else 1)")
+                from oah.atomic import write_json_atomic
+                write_json_atomic(prepared.run.launch_path, prepared.to_json())
+                result = run_command([sys.executable, "-c", script, str(pathlib.Path(call.__file__).parent.parent),
+                                      str(prepared.run.launch_path)], timeout=45, env=project.env)
+                self.assertEqual(prepared.run.read()["detached"], "unverified")
+                if required:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("OAH_RUN_DETACH_FAILED", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(prepared.run.read()["status"], "finished")
+                    self.assertIn("closing this terminal may stop the run", result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "native Windows kill-on-close jobs")
     def test_background_survives_originating_job_close(self):
@@ -611,7 +741,12 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
             if not ready.exists():
                 origin.kill()
                 self.fail(origin.communicate(timeout=10)[1].decode("utf-8", errors="replace"))
-            self.assertNotIn(prepared.run.read()["status"], ("finished", "failed"))
+            data = prepared.run.read()
+            if data["detached"] == "unverified":
+                self.assertEqual(call.wait(project.state, prepared.run_id, timeout=30)["status"], "finished")
+                self.skipTest("The host job denies breakaway; fallback completed but survival is unverified")
+            self.assertEqual(data["detached"], "verified")
+            self.assertNotIn(data["status"], ("finished", "failed"))
         finally:
             job.close()  # kills the origin; the detached runner must outlive it
         origin.wait(timeout=10)
@@ -689,6 +824,17 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
 
 
 class CallCliTest(unittest.TestCase):
+    def test_require_detach_flag_is_forwarded_and_requires_background(self):
+        project = Project(self)
+        with mock.patch.object(call, "start_background", return_value="test-run") as start:
+            code, _, err = run_cli(project, "call", "codex", "--stage", "review", "--tier", "low",
+                                   "--background", "--require-detach")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(start.call_args.kwargs["require_detach"])
+        code, _, err = run_cli(project, "call", "codex", "--stage", "review", "--require-detach")
+        self.assertEqual(code, 2)
+        self.assertIn("--background", err)
+
     def test_detachment_refusal_is_an_environment_error(self):
         project = Project(self)
         with mock.patch.object(call, "start_background", side_effect=EngineError(

@@ -210,7 +210,8 @@ SOURCE_MISMATCH = "OAH_INTENT_SOURCE_MISMATCH"
 
 
 def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
-    return runs.task_directory(state_dir, task) / BINDING_NAME
+    runs.task_directory(state_dir, task)
+    return runs._contained_path(state_dir, "runs", task, BINDING_NAME)
 
 
 def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
@@ -250,7 +251,7 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
     from oah.atomic import write_json_atomic
     from oah.lockfile import StateLock
 
-    with StateLock(pathlib.Path(state_dir) / ".lock"):
+    with StateLock(runs._contained_path(state_dir, ".lock")):
         bound = dispatch_binding(state_dir, task)
         if check_dispatch_binding(bound, packet, task):
             intent = packet.intent
@@ -300,7 +301,7 @@ def resolve_worktree(selector: str, root: pathlib.Path, *, retry: Callable[[str]
     if len(matches) == 1:
         return matches[0]
     candidates = matches or [path for path, _ in worktrees]
-    commands = "\n".join(f"  {retry(str(path))}" for path in candidates)
+    commands = "\n".join(f"  {path}\n    {retry(str(path))}" for path in candidates)
     if matches:
         raise EngineError("OAH_WORKTREE_UNRESOLVED", f"--worktree {selector!r} matches {len(matches)} worktrees; "
                           f"nothing was launched. Retry with the exact path:\n{commands}")
@@ -354,7 +355,9 @@ class Prepared:
 
     @classmethod
     def from_json(cls, data: dict) -> "Prepared":
-        return cls(**dict(data, argv=tuple(data["argv"]), warnings=tuple(data["warnings"])))
+        fields = dict(data, argv=tuple(data["argv"]), warnings=tuple(data["warnings"]))
+        fields.pop("require_detach", None)  # launch.json also stores this launcher-only option
+        return cls(**fields)
 
 
 def _advise(axes: routing.Axes, task: str) -> str:
@@ -468,7 +471,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
                                    effort=resolution.launch_effort,
-                                   output_last_message=str(run.path / "last-message.md"),
+                                   output_last_message=str(run.file_path("last-message.md")),
                                    output_schema=request.output_schema, ephemeral=request.ephemeral)
     else:
         section = settings.engines["claude"]
@@ -528,6 +531,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
     prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
+    run.file_path("last-message.md")
     try:
         result = run_command(list(prepared.argv), timeout=prepared.timeout_s, cwd=prepared.cwd, env=env,
                              stdin_text=prompt)
@@ -564,7 +568,8 @@ def _boot_argv(entry: str, run_dir: str) -> list[str]:
     return [sys.executable, "-c", _BOOT, package_root, entry, run_dir]
 
 
-def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None = None) -> str:
+def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
+                     require_detach: bool = False) -> str:
     """Start a detached runner for a prepared call and return its run id at once.
 
     A short-lived launcher starts the runner in its own session (POSIX) or as a detached process
@@ -573,40 +578,64 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     run = prepared.run
     from oah.atomic import write_json_atomic
 
-    write_json_atomic(run.launch_path, prepared.to_json())
+    write_json_atomic(run.launch_path, dict(prepared.to_json(), require_detach=require_detach))
     run.result(status="queued")
     env = dict(os.environ if base_env is None else base_env)
     launched = subprocess.run(_boot_argv("launch_main", prepared.run_dir), stdin=subprocess.DEVNULL,
                               capture_output=True, cwd=prepared.cwd, env=env, timeout=LAUNCH_TIMEOUT)
     text = launched.stdout.decode("utf-8", errors="replace").strip()
+    detail = launched.stderr.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
-        detail = launched.stderr.decode("utf-8", errors="replace").strip()
         if detail.startswith("OAH_RUN_DETACH_FAILED:"):
             run.result(status="failed", error=detail)
             raise EngineError("OAH_RUN_DETACH_FAILED", detail.split(": ", 1)[1])
         run.result(status="failed", error=f"OAH_RUN_LAUNCH_FAILED: {detail or 'no runner pid'}")
         raise EngineError("OAH_RUN_LAUNCH_FAILED", f"the background runner did not start ({detail or 'no pid'}); "
                           "run the same command without --background")
+    if detail:
+        print(detail, file=sys.stderr)
     run.result(status="queued", pid=int(text))
     return prepared.run_id
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _background_run(run_dir: str) -> runs.Run:
+    path = pathlib.Path(run_dir)
+    return runs.Run(id=path.name, task=path.parent.name, path=path)
 
 
 def launch_main(run_dir: str) -> int:
     """Entry point of the launcher: start the runner detached, print its pid and exit."""
     options: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
                      "close_fds": True}
+    from oah.atomic import read_json
+
+    run = _background_run(run_dir)
+    require_detach = read_json(run.launch_path, {}).get("require_detach", False)
     argv = _boot_argv("background_main", run_dir)
-    if os.name == "nt":
+    if _windows():
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
             child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
         except OSError as exc:
-            print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); detachment cannot be "
-                  "guaranteed. Run the same command without --background, or use a terminal whose job "
-                  "permits breakaway and retry", file=sys.stderr)
-            return 69
+            if require_detach:
+                print(f"OAH_RUN_DETACH_FAILED: Windows refused job breakaway ({exc}); retry without "
+                      "--require-detach, or use a terminal whose job permits breakaway", file=sys.stderr)
+                return 69
+            warning = (f"OAH_RUN_DETACH_UNVERIFIED: Windows refused job breakaway ({exc}); closing this terminal "
+                       "may stop the run. Keep it open and use oah wait, or retry with --require-detach "
+                       "in a terminal whose job permits breakaway")
+            run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
+            print(warning, file=sys.stderr, flush=True)
+            child = subprocess.Popen(argv, creationflags=flags, **options)
+        else:
+            run.result(detached="verified")
     else:
         child = subprocess.Popen(argv, start_new_session=True, **options)
+        run.result(detached="verified")
     print(child.pid, flush=True)
     child.returncode = 0  # the runner outlives this launcher on purpose; nothing waits for it here
     return 0
@@ -616,7 +645,7 @@ def background_main(run_dir: str) -> int:
     """Entry point of the detached runner."""
     from oah.atomic import read_json
 
-    prepared = Prepared.from_json(read_json(pathlib.Path(run_dir) / "launch.json", None))
+    prepared = Prepared.from_json(read_json(_background_run(run_dir).launch_path, None))
     try:
         execute(prepared)
     except BaseException as exc:

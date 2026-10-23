@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 from importlib import resources
 from typing import Callable, Sequence
 
@@ -36,7 +35,7 @@ VERIFY_FOOTER = resources.files("oah").joinpath("templates/engines/verify_footer
 LEASE_STAGES = ("initial", "correction")
 WORKER_LINE = ("You are a dispatched oah worker (OAH_WORKER=1, run {run_id}, task {task}). Skip any session-entry "
                "procedure and do only the task in this brief.")
-_POWERSHELL_SAFE = re.compile(r"[A-Za-z0-9._/\\:+=-]+")
+_COMMAND_SAFE = re.compile(r"[A-Za-z0-9._/-]+")
 
 HasFooter = Callable[[str], bool]
 
@@ -76,23 +75,21 @@ def raw_section(text: str) -> str | None:
 
 
 def shell_word(word: str) -> str:
-    """One literal word for the native shell: POSIX sh, or PowerShell on Windows."""
-    return _quote(word)
+    """A command value that needs no quoting in either POSIX sh or PowerShell."""
+    if not _COMMAND_SAFE.fullmatch(word):
+        raise BriefError("OAH_UNSAFE_ARGUMENT", f"cannot embed {word!r} in a generated command; rename the "
+                         "task, engine, packet or scope value to use only A-Z, a-z, 0-9, dot, underscore, "
+                         "slash and hyphen, then retry")
+    return word
 
 
 def _lf(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _quote(word: str) -> str:
-    if os.name == "nt":
-        return word if _POWERSHELL_SAFE.fullmatch(word) else "'" + word.replace("'", "''") + "'"
-    return shlex.quote(word)
-
-
 def lease_command(task: str, engine: str, packet_source: str) -> str:
     """The exact command that takes this task's lease and binds its intent."""
-    return f"oah start --task {_quote(task)} --agent {_quote(engine)} --packet {_quote(packet_source)}"
+    return f"oah start --task {shell_word(task)} --agent {shell_word(engine)} --packet {shell_word(packet_source)}"
 
 
 def _marker(footer: str, has_footer: HasFooter) -> str:
@@ -141,9 +138,9 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
             lines.append(f"- Lease: before editing, run exactly `{lease_command(task, engine, packet_source)}`. "
                          f"It binds INTENT {binding.id}@r{binding.revision} {binding.digest}.")
         elif scope:
-            scopes = " ".join(f"--scope {_quote(path)}" for path in scope)
-            lines.append(f"- Lease: before editing, run exactly `oah start --task {_quote(task)} --agent "
-                         f"{_quote(engine)} {scopes}`.")
+            scopes = " ".join(f"--scope {shell_word(path)}" for path in scope)
+            lines.append(f"- Lease: before editing, run exactly `oah start --task {shell_word(task)} --agent "
+                         f"{shell_word(engine)} {scopes}`.")
     if stage in LEASE_STAGES:
         lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
     if skills:

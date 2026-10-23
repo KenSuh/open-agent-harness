@@ -6,10 +6,12 @@ import argparse
 import json
 import os
 import pathlib
+import re
+import secrets
 import sys
 from typing import Callable, NamedTuple
 
-from oah import briefs, call, models, routing
+from oah import briefs, call, models, routing, runs
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
@@ -44,6 +46,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--override-stage", action="store_true",
                         help="run an engine that is not configured for this stage (recorded in the events)")
     parser.add_argument("--background", action="store_true", help="return the run id at once; then use oah wait")
+    parser.add_argument("--require-detach", action="store_true",
+                        help="refuse background dispatch if Windows denies job breakaway; use another terminal")
+    parser.add_argument("--request-id", help="retry a saved request from this repository's state folder")
+    parser.set_defaults(stored_brief_text=None)
     parser.add_argument("--timeout-seconds", type=float, help="stop the run after this many seconds (default: the "
                         "tier's timeout_min)")
     parser.add_argument("--refresh-models", action="store_true", help="rebuild the model catalog before launching")
@@ -81,18 +87,38 @@ def intent_tools() -> IntentTools:
 
 
 def retry_command(args: argparse.Namespace, worktree: str) -> str:
-    """This `oah call` command line again, with an exact --worktree."""
-    words = ["oah", "call", args.engine, "--stage", args.stage, "--task", args.task]
-    for name in ("tier", "kind", "intensity", "reasoning", "risk", "message", "prompt_file", "brief_file", "packet",
-                 "timeout_seconds"):
-        value = getattr(args, name)
-        if value not in (None, ""):
-            words += ["--" + name.replace("_", "-"), f"{value:g}" if isinstance(value, float) else str(value)]
-    for name in ("override_stage", "background", "refresh_models", "json"):
-        if getattr(args, name):
-            words.append("--" + name.replace("_", "-"))
-    words += ["--worktree", worktree]
-    return " ".join(briefs.shell_word(word) for word in words)
+    """Store the complete request; embed only its ID and safe engine/stage in the retry command."""
+    from oah.atomic import write_json_atomic
+
+    engine, stage = briefs.shell_word(args.engine), briefs.shell_word(args.stage)
+    saved = _snapshot(args)
+    saved.update(worktree=worktree, request_id=None)
+    request_id = "q" + secrets.token_hex(12)
+    state = state_dir(repo_info(pathlib.Path.cwd()), os.environ)
+    write_json_atomic(runs._contained_path(state, "requests", request_id + ".json"), saved)
+    return f"oah call {engine} --stage {stage} --request-id {request_id}"
+
+
+def _snapshot(args: argparse.Namespace) -> dict:
+    """Capture file/stdin instructions now so retries never re-read changed or exhausted input."""
+    saved = vars(args).copy()
+    if args.prompt_file:
+        saved.update(message=_read(args.prompt_file), prompt_file=None)
+    if args.brief_file:
+        saved.update(stored_brief_text=_read(args.brief_file), brief_file=None)
+    return saved
+
+
+def _restore(args: argparse.Namespace, state: pathlib.Path) -> argparse.Namespace:
+    from oah.atomic import read_json
+
+    if not re.fullmatch(r"q[0-9a-f]{24}", args.request_id):
+        raise EngineError("OAH_REQUEST_INVALID", "invalid request ID; copy the ID from a generated retry command")
+    saved = read_json(runs._contained_path(state, "requests", args.request_id + ".json"), None)
+    if not isinstance(saved, dict) or saved.get("engine") != args.engine or saved.get("stage") != args.stage:
+        raise EngineError("OAH_REQUEST_INVALID", "saved request is missing or has another engine/stage; "
+                          "run the original call again to generate a new retry command")
+    return argparse.Namespace(**saved)
 
 
 def _read(path: str) -> str:
@@ -118,6 +144,12 @@ def _report(data: dict, as_json: bool) -> int:
 
 
 def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
+    if args.request_id:
+        args = _restore(args, state)
+    if args.require_detach and not args.background:
+        print("OAH_USAGE: --require-detach needs --background; add --background or remove --require-detach",
+              file=sys.stderr)
+        return EXIT_USAGE
     axes = {name: getattr(args, name) for name in ("kind", "intensity", "reasoning", "risk")}
     if args.tier and any(axes.values()):
         print("OAH_USAGE: give either --tier or the difficulty axes, not both", file=sys.stderr)
@@ -125,6 +157,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     if args.message and args.prompt_file:
         print("OAH_USAGE: give either --message or --prompt-file, not both", file=sys.stderr)
         return EXIT_USAGE
+    args = argparse.Namespace(**_snapshot(args))
     if args.worktree:
         root = call.resolve_worktree(args.worktree, root, retry=lambda path: retry_command(args, path))
         state = state_dir(repo_info(root), os.environ)
@@ -133,8 +166,8 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     request = call.CallRequest(
         engine=args.engine, stage=args.stage, task=args.task, tier=args.tier, axes=axes,
         override_stage=args.override_stage,
-        round_instructions=_read(args.prompt_file) if args.prompt_file else args.message,
-        stored_brief=_read(args.brief_file) if args.brief_file else None,
+        round_instructions=args.message,
+        stored_brief=args.stored_brief_text,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
         refresh_models=args.refresh_models)
     prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
@@ -142,7 +175,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if args.background:
-        run_id = call.start_background(prepared)
+        run_id = call.start_background(prepared, require_detach=args.require_detach)
         print(f"OAH_RUN_STARTED run={run_id} folder={prepared.run_dir}")
         print(f"Wait for it with: oah wait {run_id}")
         return EXIT_OK

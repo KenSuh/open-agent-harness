@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -72,39 +73,42 @@ class LayoutTest(unittest.TestCase):
 
 
 class LeaseCommandTest(unittest.TestCase):
-    def test_powershell_words_quote_expansion_and_splatting_characters(self):
-        with mock.patch("oah.briefs.os.name", "nt"):
-            for word in ("%PATH%", "!PATH!", "$(Write-Output EXPANDED)", "`echo x`", "@args"):
-                with self.subTest(word=word):
-                    self.assertEqual(shell_word(word), "'" + word + "'")
-            self.assertEqual(shell_word("a'b"), "'a''b'")
-
-    @unittest.skipIf(os.name == "nt", "POSIX shell quoting")
-    def test_lease_arguments_round_trip_in_posix_shell(self):
-        folder = make_tmp_dir(self)
-        words = ["packets/$(printf EXPANDED).md", "`printf EXPANDED`", "a'b\"c", r"a\b", "%PATH%!x!", "a b"]
+    def test_unsafe_command_values_are_refused_before_building(self):
+        words = ["a'b", 'a"b', "x’;Write-Output-INJECTED", "a‘b", "a“b", "a”b", "$x", "`x`",
+                 "%PATH%", "!x!", "a b", "a\nb", "한글", "café", r"a\b", "C:/packet.md", "@args"]
         for word in words:
             with self.subTest(word=word):
-                # A real shell function captures the exact arguments of the delivered command.
-                command = ("oah() { " + shell_word(sys.executable) + " -c "
-                           + shell_word("import json,sys; print(json.dumps(sys.argv[1:]))") + ' "$@"; }; '
-                           + lease_command("task", "codex", word))
-                result = subprocess.run(["/bin/sh", "-c", command], cwd=folder, capture_output=True, text=True,
-                                        check=True)
-                self.assertEqual(json.loads(result.stdout), ["start", "--task", "task", "--agent", "codex",
-                                                            "--packet", word])
+                for operation in (lambda: shell_word(word), lambda: lease_command("t", "codex", word),
+                                  lambda: brief(packet_source=word),
+                                  lambda: brief(packet_source=None, binding=None, scope=[word]),
+                                  lambda: brief(task=word), lambda: brief(engine=word)):
+                    with self.assertRaises(BriefError) as ctx:
+                        operation()
+                    self.assertEqual(ctx.exception.code, "OAH_UNSAFE_ARGUMENT")
+                    self.assertIn("rename", str(ctx.exception).lower())
 
-    @unittest.skipUnless(os.name == "nt", "PowerShell quoting")
-    def test_arguments_round_trip_in_powershell(self):
-        shell = shutil.which("pwsh") or shutil.which("powershell")
-        self.assertIsNotNone(shell, "Install PowerShell to check native Windows command quoting")
-        words = ["$(Write-Output EXPANDED)", "`echo x`", "%PATH%", "!PATH!", "a'b\"c", r"a\b", "a b", "@args"]
-        # PowerShell serializes the parsed arguments itself, avoiding legacy native-argv quote handling.
-        command = "function oah { ConvertTo-Json -Compress -InputObject @($args) }; " + " ".join(
-            ["oah", *(shell_word(word) for word in words)])
-        result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", command],
+    def _native_round_trip(self, shell, command):
+        folder = make_tmp_dir(self)
+        record = folder / "record.json"
+        word = "packets/safe_Name-1.2.md"
+        env = dict(os.environ, OAH_TEST_PYTHON=sys.executable,
+                   OAH_TEST_SCRIPT=str(pathlib.Path(__file__).parent / "fakes" / "fake_codex.py"),
+                   FAKE_RECORD=str(record))
+        result = subprocess.run([*shell, command + shell_word(word)], env=env,
                                 capture_output=True, text=True, check=True)
-        self.assertEqual(json.loads(result.stdout), words)
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["argv"], ["exec", word])
+        self.assertEqual(result.returncode, 0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX native argv")
+    def test_safe_value_round_trips_through_posix_native_process(self):
+        self._native_round_trip(["/bin/sh", "-c"], '"$OAH_TEST_PYTHON" "$OAH_TEST_SCRIPT" exec ')
+
+    @unittest.skipUnless(os.name == "nt", "native PowerShell argv")
+    def test_safe_value_round_trips_through_powershell_native_process(self):
+        shell = shutil.which("powershell") or shutil.which("pwsh")
+        self.assertIsNotNone(shell, "Install PowerShell to check native Windows arguments")
+        self._native_round_trip([shell, "-NoProfile", "-NonInteractive", "-Command"],
+                                "& $env:OAH_TEST_PYTHON $env:OAH_TEST_SCRIPT exec ")
 
     def test_lease_command_only_for_implementation_and_correction(self):
         command = lease_command("p3b", "claude", ".oah/tasks/p3b/PACKET.md")
@@ -119,10 +123,6 @@ class LeaseCommandTest(unittest.TestCase):
         self.assertNotIn("Agent-Engine", review)
         self.assertNotIn("oah start", review)
         self.assertNotIn("--packet", review)
-
-    def test_lease_command_quotes_spaces(self):
-        self.assertEqual(lease_command("t", "codex", "my tasks/PACKET.md"),
-                         "oah start --task t --agent codex --packet 'my tasks/PACKET.md'")
 
     def test_without_packet_implementation_still_gets_a_scope_lease(self):
         text = brief(intent_section=None, binding=None, packet_source=None)
