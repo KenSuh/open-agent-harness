@@ -6,7 +6,7 @@
 - `plan_steps` / `run_steps` / `companion_setup` walk the steps after an app is installed. The whole
   plan is printed first, and each command runs only after a `y` (or `yes`, which covers only the
   printed plan). Steps that write outside the project are labelled `[global]`.
-- Checks use only the authentication status column or MCP launch settings, then discard output.
+- Checks use only the authentication status column or an exact MCP entry comparison, then discard output.
   Account identifiers and credentials are never extracted, shown, logged or saved.
 - `rules_section(aside_registered)` is the optional rules text for the rules block (5.11).
 
@@ -49,7 +49,7 @@ Which = Callable[..., "str | None"]
 Out = Callable[[str], None]
 Ask = Callable[[str], "str | None"]  # like input(), but None at end of input
 Runner = Callable[[Argv, pathlib.Path], int]
-Probe = Callable[[Argv, pathlib.Path], "int | None"]  # 0 ready, 1 absent/not ready, 2 MCP conflict, None unavailable
+Probe = Callable[[Argv, pathlib.Path], "int | None"]  # 0 ready/exact entry, 1 absent/not ready, 2 unverified MCP, None unavailable
 
 OK_STATUSES = ("done", "present", "manual")
 
@@ -94,7 +94,7 @@ class CompanionStep:
     instruction: str = ""
     needs: tuple[str, ...] = ()  # programs that must be on PATH
     requires: str | None = None  # an earlier step that must be done or present
-    skip_if: Argv | None = None  # probe 0: verified ready; 2: preserve conflicting MCP configuration
+    skip_if: Argv | None = None  # probe 0: ready/exact entry; 2: preserve unverified MCP configuration
     skip_if_found: str | None = None  # this program on PATH: already done
     verify: Argv | None = None  # readiness check after the step
     already: str = "already done"
@@ -120,7 +120,7 @@ class CompanionResult:
 
     @property
     def aside_registered(self) -> bool:
-        """True when Aside's MCP server is registered for Claude Code or Codex."""
+        """True when oah registered Aside this run or found exactly the entry it would write."""
         return any(o.step.key.startswith("aside-mcp-") and o.status in ("done", "present") for o in self.outcomes)
 
 
@@ -223,7 +223,7 @@ def plan_steps(apps: Iterable[str], *, os_name: str, project_root: pathlib.Path,
 
 def print_plan(steps: Sequence[CompanionStep], *, out: Out = print) -> None:
     out("Optional companion apps: the steps below. Nothing runs until you answer y (or you passed --yes).")
-    out("--yes skips optional installers unless you name the app; use --app aside to allow its CLI installer.")
+    out("--yes skips every step for unnamed apps; use --app orca or --app aside, or confirm the app interactively.")
     out("[global] marks a step that changes files outside this project, in your user folder.")
     for number, step in enumerate(steps, 1):
         out(f"  {number}. {step.app}: {step.title}{' [global]' if step.global_write else ''}")
@@ -238,7 +238,7 @@ def print_plan(steps: Sequence[CompanionStep], *, out: Out = print) -> None:
 
 
 def default_probe(argv: Argv, cwd: pathlib.Path) -> int | None:
-    """Return readiness only; discard output. MCP conflicts return 2, unavailable checks None."""
+    """Return readiness or an exact MCP entry match, not proof it can launch; discard output."""
     try:
         resolved = resolve_command(argv[0])
         if resolved is None:
@@ -267,17 +267,35 @@ def default_probe(argv: Argv, cwd: pathlib.Path) -> int | None:
         if not isinstance(data, dict):
             return 2
         transport = data.get("transport")
-        return 0 if (data.get("name") == "aside" and data.get("enabled") is True
-                     and isinstance(transport, dict) and transport.get("type") == "stdio"
-                     and transport.get("command") == "aside" and transport.get("args") == ["mcp"]) else 2
+        if not isinstance(transport, dict) or data.get("enabled") is not True:
+            return 2
+        # Vendor JSON includes unset defaults. Any override or unknown setting is a different entry.
+        defaults = {"disabled_reason": None, "startup_timeout_sec": None, "tool_timeout_sec": None,
+                    "enabled_tools": None, "disabled_tools": None}
+        transport_defaults = {"env": None, "env_vars": [], "cwd": None}
+        expected = defaults | {"name": "aside", "enabled": True, "transport": transport_defaults | {
+            "type": "stdio", "command": "aside", "args": ["mcp"]}}
+        actual = defaults | data | {"transport": transport_defaults | transport}
+        return 0 if actual == expected else 2
     if argv == ("claude", "mcp", "get", "aside"):
-        # Whitelist fields; environment values and other output are never extracted or displayed.
+        # Compare the complete displayed configuration, allowing only known presentation lines.
+        # Connection failure is not a configuration difference; a disabled entry is.
         expected = {"Scope": "User config (available in all your projects)", "Type": "stdio",
                     "Command": "aside", "Args": "mcp"}
-        fields = re.findall(r"^  (Scope|Type|Command|Args|Status): (.*)$", output, re.MULTILINE)
-        settings = dict(fields)
-        connected = settings.pop("Status", None) in ("✓ Connected", "✔ Connected", "√ Connected")
-        return 0 if len(fields) == len(expected) + 1 and connected and settings == expected else 2
+        settings = {}
+        if not output.startswith("aside:\n"):
+            return 2
+        for line in output.splitlines()[1:]:
+            if not line.strip() or line in ("  Environment:",
+                    'To remove this server, run: claude mcp remove "aside" -s user'):
+                continue
+            if line.startswith("  Status: ") and "disabled" not in line.lower():
+                continue
+            field = re.fullmatch(r"  (Scope|Type|Command|Args): (.*)", line)
+            if field is None or field[1] in settings:
+                return 2
+            settings[field[1]] = field[2]
+        return 0 if settings == expected else 2
     return result.returncode
 
 
@@ -341,12 +359,11 @@ def _instruction(step: CompanionStep, *, interactive: bool, ask: Ask, out: Out, 
 def run_steps(steps: Sequence[CompanionStep], *, project_root: pathlib.Path, yes: bool, which: Which = shutil.which,
               ask: Ask, out: Out = print, runner: Runner = default_runner, probe: Probe = default_probe,
               refresh: Callable[[], None] | None = None, with_optional: Iterable[str] = ()) -> list[StepOutcome]:
-    """Run consented steps; `yes` permits optional installers only for apps in `with_optional`."""
+    """Run steps for consented apps, asking per command unless `yes`; app consent is at companion_setup."""
     if refresh is None:
         from oah.setup.guide import refresh_path
 
         refresh = refresh_path
-    named = set(with_optional)
     statuses: dict[str, str] = {}
     outcomes = []
 
@@ -376,16 +393,12 @@ def run_steps(steps: Sequence[CompanionStep], *, project_root: pathlib.Path, yes
                 record(step, "present")
                 continue
             if step.key.startswith("aside-mcp-") and state != 1:
-                out(f"{step.app}: {step.title}: existing configuration is disabled, conflicting or could not be "
-                    "verified. It was left unchanged. Review it in your coding agent's MCP settings, enable "
-                    "Aside with the shown command, then run `python -m oah.setup.companions --app aside` again.")
+                check = step.skip_if + (("--json",) if step.skip_if[0] == "codex" else ())
+                out(f"{step.app}: {step.title}: existing entry, left unchanged, not verified. "
+                    f"Run `{show(check)}` in your terminal to check it in your coding agent's MCP settings, "
+                    "then run `python -m oah.setup.companions --app aside` again.")
                 record(step, "pending")
                 continue
-        if step.key == "aside-cli" and step.argv is not None and yes and step.app not in named:
-            out("aside: CLI installer skipped. To allow it, run `python -m oah.setup.companions --app aside`, "
-                "review the installer and answer y.")
-            record(step, "declined")
-            continue
         verify = step.verify
         if step.argv is None:
             record(step, _instruction(step, interactive=not yes, ask=ask, out=out, refresh=refresh,
@@ -408,7 +421,7 @@ def run_steps(steps: Sequence[CompanionStep], *, project_root: pathlib.Path, yes
             record(step, "failed")
             continue
         refresh()
-        if verify is not None and probe(verify, project_root) != 0:
+        if verify is not None and not step.key.startswith("aside-mcp-") and probe(verify, project_root) != 0:
             out(f"{step.app}: {step.title}: the command finished, but `{show(verify)}` does not pass yet. Open a "
                 "new terminal and run `python -m oah.setup.companions` again.")
             record(step, "pending")
@@ -428,8 +441,24 @@ def companion_setup(*, apps: Iterable[str] = APPS, os_name: str, project_root: p
     if dry_run:
         out(f"COMPANIONS_DRY_RUN steps={len(steps)}")
         return CompanionResult()
-    result = CompanionResult(run_steps(steps, project_root=project_root, yes=yes, which=which, ask=ask, out=out,
-                                       runner=runner, probe=probe, refresh=refresh, with_optional=with_optional))
+    named = set(with_optional)
+    outcomes = []
+    for app in dict.fromkeys(step.app for step in steps):
+        app_steps = [step for step in steps if step.app == app]
+        consented = app in named
+        if not consented and not yes:
+            purpose = next(tool.purpose for tool in companion_tools() if tool.name == app)
+            out(f"{app}: {purpose}. Select it to review and confirm its steps.")
+            answer = ask(f"  Set up {app}? [y/N] ")
+            consented = answer is not None and answer.strip().lower() in ("y", "yes")
+        if not consented:
+            out(f"{app}: skipped. To set it up, run `python -m oah.setup.companions --app {app}` "
+                "and confirm each step.")
+            outcomes.extend(StepOutcome(step, "declined") for step in app_steps)
+            continue
+        outcomes.extend(run_steps(app_steps, project_root=project_root, yes=yes, which=which, ask=ask, out=out,
+                                  runner=runner, probe=probe, refresh=refresh))
+    result = CompanionResult(outcomes)
     out("")
     out("COMPANIONS_OK" if result.ok else f"COMPANIONS_INCOMPLETE pending={','.join(result.pending)}")
     return result
@@ -480,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="which OS's commands to use (default: this one)")
     parser.add_argument("--project", type=pathlib.Path, help="the project folder (default: this git repository)")
     parser.add_argument("--yes", action="store_true",
-                        help="confirm printed commands; optional installers also require --app aside")
+                        help="confirm printed commands only for apps explicitly named with --app")
     parser.add_argument("--dry-run", action="store_true", help="only print the plan; run nothing")
     args = parser.parse_args(argv)
     root = args.project or find_project_root(None) or pathlib.Path.cwd()

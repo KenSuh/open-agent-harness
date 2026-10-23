@@ -47,9 +47,11 @@ python -m oah.setup.companions
 Add `--app orca` or `--app aside` to set up only one app, or `--dry-run` to only see the plan.
 It first prints every step with its exact command and where that command comes from. Steps marked
 `[global]` change files outside your project, in your user folder. Then it asks before each step:
-answer `y` to run it, or press Enter to skip it. `--yes` confirms the printed commands, but skips
-the Aside CLI installer unless you explicitly select `--app aside`. To install it without a prompt,
-review the plan with `--app aside --dry-run`, then run with `--app aside --yes`.
+first select each app by answering `y`, then answer `y` for each command, or press Enter to skip it.
+Naming an app with `--app` selects it too. Bare `--yes` skips all companion steps, even for installed
+apps: CLI setup, sign-in checks, skills, project and MCP registration, and the optional rules section.
+To confirm the printed commands for a selected app without prompts, review the plan with
+`--app aside --dry-run`, then run with `--app aside --yes`.
 
 **Orca steps**
 
@@ -80,10 +82,12 @@ review the plan with `--app aside --dry-run`, then run with `--app aside --yes`.
    user settings file.
 
 Setup checks an existing registration first (`claude mcp get aside`, `codex mcp get aside --json`).
-It skips only a usable stdio entry that launches `aside mcp`: Claude must report user scope and a
-connected server, and Codex must report it enabled. Disabled, conflicting or unrecognized entries
-stay pending and are left unchanged, including with `--yes`. Review the entry in your coding agent's
-MCP settings, enable or repair it yourself using the command shown above, then run setup again.
+An existing entry counts as registered only when it exactly matches what oah would write: user-level
+stdio `aside mcp`, enabled, without custom environment, working directory, timeouts or tool filters.
+Vendor output may omit unset defaults. Any other entry is reported as "existing entry, left unchanged,
+not verified" and stays pending, including with `--yes`. Run the check command shown above in your own
+terminal and review the entry in your coding agent's MCP settings before retrying. A successful MCP add
+in this run also counts as registered. This records registration, not proof that the server can launch.
 
 ## 3. Your account stays yours
 
@@ -94,7 +98,8 @@ or saving it.
 
 ## 4. The Aside rules
 
-Once Aside is registered, the rules block in `AGENTS.md` can gain a short optional section that
+After you select Aside and its registration is recorded, setup can offer a short optional section for
+the rules block in `AGENTS.md`. Confirm that write separately to add it. The section
 tells your agents to:
 
 - use the Aside tools for web tasks;
