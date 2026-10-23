@@ -2,3 +2,5 @@
 from oah.toolkit.skillmeta import SkillError, SkillInfo, read_skill
 
 __all__ = ["SkillError", "SkillInfo", "read_skill"]
+
+# The selector's precedence lookup lives in oah.toolkit.locate (locate_skill).

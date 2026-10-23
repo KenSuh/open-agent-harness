@@ -1,8 +1,8 @@
 # 운영체제 예약 항목 — 동의를 받은 뒤 macOS launchd 에이전트나 Windows 작업 스케줄러 작업으로 하루 한 번 예약 갱신을 돌리고, 깨끗이 지운다.
-"""An optional daily OS entry that runs `oah skills update --scheduled --yes` in one project.
+"""An optional daily OS entry that runs `oah skills update --scheduled` in one project.
 
-The command itself decides whether a check is due and waits while leases are active, so the entry
-only needs to start it once a day. macOS uses a launchd agent in ~/Library/LaunchAgents; Windows uses a
+The command itself decides whether a check is due and waits while leases are active, and it writes
+only the kit cache in oah's state folder, so the entry only needs to start it once a day. macOS uses a launchd agent in ~/Library/LaunchAgents; Windows uses a
 Task Scheduler task registered from XML, which keeps paths with spaces literal.
 """
 from __future__ import annotations
@@ -55,16 +55,15 @@ def entry_id(project_root: pathlib.Path) -> str:
     return hashlib.sha256(str(pathlib.Path(project_root).resolve()).encode("utf-8")).hexdigest()[:10]
 
 
-def scheduled_argv(*, include_user: bool, python: str = sys.executable) -> tuple[str, ...]:
-    argv = (python, "-m", "oah", "skills", "update", "--scheduled", "--yes")
-    return argv + ("--user",) if include_user else argv
+def scheduled_argv(*, python: str = sys.executable) -> tuple[str, ...]:
+    return (python, "-m", "oah", "skills", "update", "--scheduled")
 
 
-def plan_entry(*, project_root: pathlib.Path, home: pathlib.Path, state_dir: pathlib.Path, include_user: bool,
+def plan_entry(*, project_root: pathlib.Path, home: pathlib.Path, state_dir: pathlib.Path,
                platform: str = sys.platform, python: str = sys.executable) -> Entry:
     ident = entry_id(project_root)
     log = pathlib.Path(state_dir) / "toolkit" / "scheduled-update.log"
-    argv = scheduled_argv(include_user=include_user, python=python)
+    argv = scheduled_argv(python=python)
     if platform == "darwin":
         label = f"{LABEL_PREFIX}.{ident}"
         return Entry("launchd", label, pathlib.Path(home) / "Library" / "LaunchAgents" / f"{label}.plist", argv,

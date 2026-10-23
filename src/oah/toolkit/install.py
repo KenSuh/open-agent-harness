@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from oah.engines.proc import UnsupportedBatchShim, resolve_command
 from oah.toolkit.catalog import (Bundled, Catalog, CatalogError, Linked, Upstream, item_skill_dirs, read_upstream,
@@ -69,7 +69,7 @@ class Copy:
 class InstallPlan:
     copies: tuple[Copy, ...]
     linked: tuple[Linked, ...]
-    fetch_needed: tuple[str, ...]
+    sources: Mapping[str, pathlib.Path | None]   # item -> folder to copy from; None: fetch the pin
 
     @property
     def conflicts(self) -> tuple[Copy, ...]:
@@ -86,8 +86,9 @@ class InstallPlan:
             where = "outside the project" if copy.outside_project else "in the project"
             note = f" ({copy.reason})" if copy.reason else ""
             lines.append(f"{copy.action:8} {copy.item}/{copy.name} -> {copy.dest} [{copy.engine}, {where}]{note}")
-        for name in self.fetch_needed:
-            lines.append(f"fetch    {name} from its upstream at the pinned commit (no bundled copy here)")
+        for name, source in self.sources.items():
+            lines.append(f"source   {name}: " + (str(source) if source is not None
+                                                 else "fetched from its upstream at the pinned commit"))
         for entry in self.linked:
             for step in entry.steps:
                 kind = "run" if step.run is not None else "manual"
@@ -110,12 +111,24 @@ def _classify(dest: pathlib.Path, item: str) -> tuple[str, str]:
     return "replace", ""
 
 
-def plan_install(names: Sequence[str], *, catalog: Catalog, bundle_dir: pathlib.Path | None, target: str,
+def item_source(name: str, folders: Sequence[pathlib.Path | None]) -> pathlib.Path | None:
+    """The first of folders (kit cache, then bundled skills) that holds item name."""
+    for folder in folders:
+        if folder is not None and (folder / name / UPSTREAM_FILE).is_file():
+            return folder / name
+    return None
+
+
+def plan_install(names: Sequence[str], *, catalog: Catalog, source_dirs: Sequence[pathlib.Path | None], target: str,
                  level: str, project_root: pathlib.Path, home: pathlib.Path) -> InstallPlan:
-    """What `oah skills install` would do. Names may be bundled or linked; an unknown name is refused."""
+    """What `oah skills install` would do. Names may be bundled or linked; an unknown name is refused.
+
+    Each bundled item is copied from the first source folder that holds it (the kit cache, then the
+    bundled skills); with neither, it is fetched from its upstream at the pinned commit.
+    """
     copies: list[Copy] = []
     linked: list[Linked] = []
-    fetch_needed: list[str] = []
+    sources: dict[str, pathlib.Path | None] = {}
     seen: dict[pathlib.Path, str] = {}
     for name in names:
         entry = catalog.find(name)
@@ -126,8 +139,7 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, bundle_dir: pathlib.
         if isinstance(entry, Linked):
             linked.append(entry)
             continue
-        if bundle_dir is None or not (bundle_dir / entry.name / UPSTREAM_FILE).is_file():
-            fetch_needed.append(entry.name)
+        sources[entry.name] = item_source(entry.name, source_dirs)
         for engine, folder in target_dirs(target, level, project_root=project_root, home=home):
             for relative in entry.skills:
                 installed = skill_name(entry, relative)
@@ -138,7 +150,7 @@ def plan_install(names: Sequence[str], *, catalog: Catalog, bundle_dir: pathlib.
                 seen[dest] = entry.name
                 copies.append(Copy(entry.name, relative, installed, engine, dest, action,
                                    not _inside(folder, project_root), reason))
-    return InstallPlan(tuple(copies), tuple(linked), tuple(fetch_needed))
+    return InstallPlan(tuple(copies), tuple(linked), sources)
 
 
 def fetch_item(entry: Bundled, scratch: pathlib.Path, *, today: dt.date) -> pathlib.Path:
@@ -196,8 +208,7 @@ def swap_in(new: pathlib.Path, dest: pathlib.Path, *, verify: Callable[[pathlib.
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def apply_install(plan: InstallPlan, *, catalog: Catalog, bundle_dir: pathlib.Path | None,
-                  now: dt.datetime) -> list[pathlib.Path]:
+def apply_install(plan: InstallPlan, *, catalog: Catalog, now: dt.datetime) -> list[pathlib.Path]:
     """Copy every planned skill. Refuses the whole plan when any copy conflicts."""
     if plan.conflicts:
         raise InstallError("OAH_SKILLS_INSTALL_CONFLICT",
@@ -211,8 +222,7 @@ def apply_install(plan: InstallPlan, *, catalog: Catalog, bundle_dir: pathlib.Pa
             entry = catalog.find(copy.item)
             assert isinstance(entry, Bundled)
             if copy.item not in items:
-                item_dir = (fetch_item(entry, scratch / copy.item, today=now.date()) if copy.item in plan.fetch_needed
-                            else bundle_dir / copy.item)
+                item_dir = plan.sources.get(copy.item) or fetch_item(entry, scratch / copy.item, today=now.date())
                 items[copy.item] = (item_dir, read_upstream(item_dir))
             item_dir, record = items[copy.item]
             staged = scratch / "copies" / f"{copy.engine}-{copy.item}-{copy.name}"
@@ -286,31 +296,37 @@ def installed_skills(folders: Iterable[tuple[str, pathlib.Path]]) -> list[tuple[
     return found
 
 
-def list_rows(*, catalog: Catalog, bundle_dir: pathlib.Path | None, project_root: pathlib.Path,
-              home: pathlib.Path) -> list[Row]:
+def _item_row(entry: Bundled, folder: pathlib.Path, status: str) -> Row:
+    try:
+        return Row(entry.name, status, _short(read_upstream(folder).commit), entry.repository, entry.spdx, str(folder))
+    except CatalogError as exc:
+        return Row(entry.name, status, "-", entry.repository, entry.spdx, f"(unreadable: {exc})")
+
+
+def list_rows(*, catalog: Catalog, bundle_dir: pathlib.Path | None, cache_dir: pathlib.Path | None,
+              project_root: pathlib.Path, home: pathlib.Path) -> list[Row]:
+    """Bundled, cached, linked and installed skills; reads only."""
     rows: list[Row] = []
     for entry in catalog.bundled:
-        location, commit = "(fetched from upstream on install)", entry.commit
-        if bundle_dir is not None and (bundle_dir / entry.name / UPSTREAM_FILE).is_file():
-            try:
-                commit = read_upstream(bundle_dir / entry.name).commit
-                location = str(bundle_dir / entry.name)
-            except CatalogError as exc:
-                location = f"(bundle unreadable: {exc})"
-        rows.append(Row(entry.name, "bundled", _short(commit), entry.repository, entry.spdx, location))
+        bundled_copy = item_source(entry.name, [bundle_dir])
+        rows.append(_item_row(entry, bundled_copy, "bundled") if bundled_copy is not None else
+                    Row(entry.name, "bundled", _short(entry.commit), entry.repository, entry.spdx,
+                        "(fetched from upstream on install)"))
+        cached = item_source(entry.name, [cache_dir])
+        if cached is not None:
+            rows.append(_item_row(entry, cached, "cached"))
     for entry in catalog.linked:
         rows.append(Row(entry.name, "linked", entry.version, entry.source, entry.license,
                         "install: " + " && ".join(step.describe() for step in entry.steps)))
-    folders = (target_dirs("both", "project", project_root=project_root, home=home)
-               + target_dirs("both", "user", project_root=project_root, home=home))
-    for engine, folder in installed_skills(folders):
-        try:
-            info = read_skill(folder)
-        except SkillError as exc:
-            rows.append(Row(folder.name, f"installed ({engine}, unreadable)", "-", "-", "-", f"{folder}: {exc}"))
-            continue
-        origin = "oah" if (marker_of(folder) or {}).get("kit") == KIT_MARK else "other"
-        rows.append(Row(info.name, f"installed ({engine}, {origin})", _short(info.version), info.source or "-",
-                        info.license or "-", str(folder)))
+    for level, label in (("project", "project"), ("user", "global")):
+        for engine, folder in installed_skills(target_dirs("both", level, project_root=project_root, home=home)):
+            try:
+                info = read_skill(folder)
+            except SkillError as exc:
+                rows.append(Row(folder.name, f"installed ({engine} {label}, unreadable)", "-", "-", "-",
+                                f"{folder}: {exc}"))
+                continue
+            origin = "oah" if (marker_of(folder) or {}).get("kit") == KIT_MARK else "other"
+            rows.append(Row(info.name, f"installed ({engine} {label}, {origin})", _short(info.version),
+                            info.source or "-", info.license or "-", str(folder)))
     return rows
-
