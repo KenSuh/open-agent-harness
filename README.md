@@ -131,12 +131,10 @@ Everything in this section was run on macOS with Python 3.11 before it was writt
 
 ### Install from a clone (for development)
 
-Use the HTTPS URL from the repository's green **Code** button as `<repository-url>`.
-
 macOS (zsh or bash):
 
 ```sh
-git clone <repository-url> open-agent-harness
+git clone https://github.com/KenSuh/open-agent-harness.git open-agent-harness
 cd open-agent-harness
 python3.11 -m venv .venv
 source .venv/bin/activate
@@ -146,7 +144,7 @@ python -m pip install -e .
 Windows (PowerShell):
 
 ```powershell
-git clone <repository-url> open-agent-harness
+git clone https://github.com/KenSuh/open-agent-harness.git open-agent-harness
 cd open-agent-harness
 py -3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -387,12 +385,12 @@ this repository, its history, releases, issues or CI logs.
 **철칙.** API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 이 저장소와 그 이력, 릴리스, 이슈, CI
 로그 어디에도 들어가지 않는다.
 
-- 키는 실행할 때만 환경 변수나 OS 키체인에서, 문서로 정한 한 가지 조회 경로로 읽는다. 키가 없으면 그 기능은
-  꺼진 채로 두고 `unused(no key)` 라고 알린다.
+- 키는 실행할 때만 환경 변수나 OS 키체인에서 읽는다. 조회 경로는 문서로 정한 한 가지뿐이다. 키가 없으면 그
+  기능은 꺼 둔 채 `unused(no key)`라고 알린다.
 - 템플릿에는 `${ENV_VAR}` 자리표시자만 쓴다.
-- gitleaks 와 개인정보 스캔은 push 전마다 돈다. CI 에서도 모든 pull request 와 push 마다 전체 이력을 대상으로
-  돌고, 하나라도 걸리면 빌드가 실패한다.
-- 내 키는 내 환경 변수나 키체인에만 두고, 프로젝트 파일에는 절대 넣지 않는다.
+- push하기 전에는 늘 gitleaks와 개인정보 스캔을 돌린다. CI에서도 pull request와 push가 있을 때마다 전체 이력을
+  검사한다. 하나라도 걸리면 빌드가 실패한다.
+- 내 키는 내 환경 변수나 키체인에만 두고 프로젝트 파일에는 절대 넣지 않는다.
 
 ## License and third-party notices
 
@@ -405,81 +403,84 @@ are listed with their licenses in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES
 
 ## 한국어 소개
 
-### oah 는 무엇인가
+### oah는 무엇인가
 
-`oah` 는 **Claude Code** 와 **Codex CLI** 를 내 저장소에서 규율 있는 한 팀처럼 일하게 하는 것을 목표로 하는 작은
-명령줄 도구다. AI 로 프로그래밍을 막 시작한 사람을 먼저 생각하고 만든다. 설치 명령 하나와 `oah init` 만 실행하면
-완성된 하네스가 자동으로 갖춰지는 것이 목표다. 현재 리스와 `oah doctor` 는 동작하며, 설치 프로그램과 `oah init`,
-에이전트 오케스트레이션은 계획 단계다.
+`oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 규율 있게 한 팀으로 일하도록 돕는 작은 명령줄
+도구다. AI로 프로그래밍을 막 시작한 사람을 가장 먼저 염두에 두고 만든다. 설치 명령 하나와 `oah init`만
+실행하면 완성된 하네스가 자동으로 갖춰지게 하는 것이 목표다. 지금 동작하는 것은 리스와 `oah doctor`다. 설치
+프로그램과 `oah init`, 에이전트 오케스트레이션은 아직 계획 단계에 있다.
 
-두 AI 코딩 세션이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치는 일을 막을 장치가 없고, "끝났다" 는 에이전트의
-말뿐이며, 리뷰에는 횟수 제한도 증거도 없다. 계획된 워크플로에서는 둘에게 같은 규칙을 준다. Claude 가 1차 구현을 하고,
-Codex 가 정해진 라운드 안에서 리뷰하고 고치고 다시 리뷰한다. "끝났다" 는 주장은 증거로 뒷받침하고, 리뷰가
-수렴한 뒤에만 작업을 반영하는 것이 목표다.
+AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시에 고치는 일을 막을 장치가 없다. "끝났다"는 에이전트의
+말뿐이고 리뷰에는 횟수 제한도 증거도 없다. 계획한 워크플로는 두 세션에 같은 규칙을 적용한다. Claude가 1차
+구현을 하면 Codex가 정해진 라운드 안에서 리뷰하고 고친 뒤 다시 리뷰한다. "끝났다"는 주장을 증거로 뒷받침하고
+리뷰가 수렴한 뒤에만 작업을 반영하려 한다.
 
 ### 현재 상태
 
 > [!WARNING]
-> **개발자 미리보기다. 아직 일반 사용에는 준비되지 않았다.**
-> P0~P2 는 끝났다. 계획, 프로젝트 뼈대(`oah --version`, `oah doctor`, 개인정보 스캔, macOS·Windows CI),
-> 리스가 여기에 들어간다. P3~P9 는 지금 진행 중이다. 명령, 파일 형식, 이 문서는 바뀔 수 있다. 원클릭 설치
-> 프로그램과 `oah init` 은 아직 없다.
+> **개발자 미리보기다. 아직 누구나 쓸 수 있는 상태는 아니다.**
+> P0~P2에서 계획과 프로젝트 뼈대(`oah --version`, `oah doctor`, 개인정보 스캔, macOS·Windows CI), 리스를
+> 마쳤다. P3~P9는 지금 진행 중이라 명령과 파일 형식, 이 문서는 바뀔 수 있다. 원클릭 설치 프로그램과
+> `oah init`은 아직 없다.
 
 ### 지금 되는 것
 
-- **클론해서 개발용으로 설치.** 위 [What works today](#what-works-today) 의 명령을 따른다. `<repository-url>` 에는 저장소의 초록색 **Code** 버튼에 있는 HTTPS 주소를 넣는다. macOS 는
-  `source .venv/bin/activate`, Windows PowerShell 은 `.venv\Scripts\Activate.ps1` 로 가상 환경을 켠 뒤
-  `python -m pip install -e .` 를 실행한다.
-- **`oah --version`** 은 버전을 출력한다.
-- **`oah doctor`** 는 필요한 도구가 설치됐는지 확인하고, 빠진 도구에는 공식 설치 명령을 알려 준다.
-- **리스 명령.** `oah start`, `renew`, `status`, `finish`, `release`, `log` 가 동작한다. 실행 예시는 위
+- **클론해서 개발용으로 설치.** 위 [What works today](#what-works-today)의 명령을 그대로 복사해 붙여 넣으면
+  된다. 가상 환경은 macOS에서는 `source .venv/bin/activate`, Windows PowerShell에서는
+  `.venv\Scripts\Activate.ps1`로 켠 다음 `python -m pip install -e .`를 실행한다.
+- **`oah --version`**은 버전을 출력한다.
+- **`oah doctor`**는 필요한 도구가 설치됐는지 확인한다. 빠진 도구가 있으면 공식 설치 명령을 알려 준다.
+- **리스 명령.** `oah start`, `renew`, `status`, `finish`, `release`, `log`가 동작한다. 실행 예시는 위
   영어 절에 있다.
 
 | 명령 | 하는 일 |
 |---|---|
-| `oah start` | 경로에 리스를 잡는다. 다른 리스와 범위가 겹치면 `OAH_LEASE_CONFLICT` 로 거절한다. |
-| `oah renew` | 만료 시각을 늘리고, 원하면 범위를 바꾼다. 이미 만료된 리스는 거절한다. |
+| `oah start` | 경로에 리스를 잡는다. 다른 리스와 범위가 겹치면 `OAH_LEASE_CONFLICT`로 거절한다. |
+| `oah renew` | 만료 시각을 늘리고 원하면 범위도 바꾼다. 이미 만료된 리스는 거절한다. |
 | `oah status` | 활성 리스와 만료된(STALE) 리스를 보여 준다. 읽기만 한다. |
-| `oah finish` | 바뀐 파일을 범위와 비교한다. 범위 밖 파일이 있으면 `--allow-out-of-scope` 없이는 `OAH_SCOPE_EXCEEDED` 로 거절한다. |
-| `oah release` | 리스를 끝내지 않고 내려놓는다. `--reason` 이 필요하고, 다른 에이전트의 리스에는 `--force` 도 필요하다. |
+| `oah finish` | 바뀐 파일을 범위와 비교한다. 범위 밖 파일이 있으면 `--allow-out-of-scope` 없이는 `OAH_SCOPE_EXCEEDED`로 거절한다. |
+| `oah release` | 리스를 끝내지 않고 내려놓는다. `--reason`이 필요하며 다른 에이전트의 리스라면 `--force`도 붙여야 한다. |
 | `oah log` | 이벤트 로그에 메모를 남긴다. |
 
-만료된 리스는 `oah status` 에 STALE 로 보이고, 다음 `oah start` 가 정리한다. 정리 전에는 같은 범위 검사로
-`oah finish` 를 할 수 있으며, 범위 밖 변경으로 거절되면 STALE 상태를 유지한다.
+만료된 리스는 `oah status`에 STALE로 표시되고 다음 `oah start`가 정리한다. 정리되기 전에는 `oah finish`로
+끝낼 수도 있는데 이때도 범위 검사는 똑같이 한다. 범위 밖 변경 때문에 거절되면 리스는 STALE로 남는다.
 
 ### 요구 사항
 
 | 항목 | 내용 |
 |---|---|
-| 운영체제 | macOS 13 이상, Windows 11 네이티브(WSL 불필요). Windows 10 22H2 는 최선 지원이다. |
+| 운영체제 | macOS 13 이상, Windows 11 네이티브(WSL 불필요). Windows 10 22H2는 되는 데까지만 지원한다. |
 | 런타임 | Python 3.11 이상. 실행에 외부 파이썬 패키지가 필요 없다. |
 | 버전 관리 | git |
 | 엔진 | Claude Code, Codex CLI. 이후 단계(라우팅, `oah call`, 리뷰 루프)에 필요하다. |
-| 게이트 | unlazy 와 Node.js. 이후 단계(게이트, Stop 훅)에 필요하다. |
+| 게이트 | unlazy와 Node.js. 이후 단계(게이트, Stop 훅)에 필요하다. |
 | 선택 | uv, graphify, gh, gitleaks |
 
 ### 핵심 개념
 
-- **리스(지금 동작).** 누가 저장소의 어느 경로를 언제까지 작업하는지 기록한다. 시작할 때 선언된 범위가
-  겹치면 거절한다. 쓰는 동안 범위는 권고 사항이며, 범위 밖 쓰기를 막지는 못한다. `finish` 할 때 실제 변경
-  파일을 범위와 대조하고, 범위 밖 변경은 범위를 넓히거나 예외를 기록하지 않으면 종료를 거절한다.
-- **의도(계획, P4).** 모든 작업은 문제, 바라는 결과, 결과 기준의 성공 조건을 담은 의도 절 하나를 가진다. 이
-  절은 모든 단계와 워커, 리뷰어에게 그대로 전달되고, 목표가 바뀌면 새 의도를 만들지 않고 개정 번호만 올린다.
-- **게이트(계획, P5).** 명령, 기대 결과, 기록된 증거로 이루어진 확인 항목이다. unlazy 원장 형식을 쓰며,
-  게이트가 충족되지 않으면 `oah finish` 가 거절하게 된다.
-- **리뷰 루프(계획, P6).** Codex 가 에이전트 지시 파일을 뺀 깨끗한 스냅샷을 리뷰하고, 카나리 토큰으로
-  스냅샷을 읽었음을 보인다. 라운드마다 영수증을 남기고, 정해진 라운드 수에서 멈추며, 남은 지적은 소유자에게
-  넘긴다. base..head 의 모든 커밋에서 작성 엔진을 알고 그 엔진이 리뷰어 엔진과 달라야만 독립 리뷰로 표시한다.
-  작성 엔진을 모르는 커밋이 있으면 독립성을 입증할 수 없다. 별도 Codex 세션이 Codex 수정본을 리뷰해도
-  독립 리뷰가 아니다.
+- **리스(지금 동작).** 누가 저장소의 어느 경로를 언제까지 작업하는지 기록한다. 시작할 때 선언한 범위가 다른
+  리스와 겹치면 거절한다. 작업하는 동안 범위는 권고일 뿐이어서 범위 밖 파일을 쓰는 것까지 막지는 못한다. 대신
+  `finish`할 때 실제로 바뀐 파일을 범위와 대조한다. 범위 밖 변경이 있으면 범위를 넓히거나 예외를 기록해야 끝낼
+  수 있다.
+- **의도(계획, P4).** 작업마다 의도 절이 하나씩 있다. 의도 절에는 문제와 바라는 결과, 결과로 확인할 수 있는
+  성공 조건이 담긴다. 이 절은 모든 단계와 워커, 리뷰어에게 그대로 전달된다. 목표가 바뀌어도 새 의도를 만들지
+  않고 개정 번호만 올린다.
+- **게이트(계획, P5).** 명령과 기대 결과, 기록된 증거로 이루어진 확인 항목이다. 형식은 unlazy 원장을 따른다.
+  게이트를 채우지 못하면 `oah finish`가 거절한다.
+- **리뷰 루프(계획, P6).** Codex는 에이전트 지시 파일을 뺀 깨끗한 스냅샷을 리뷰하고 카나리 토큰으로 그 스냅샷을
+  읽었음을 보인다. 라운드마다 영수증을 남기며 정해진 라운드 수에 이르면 멈춘다. 남은 지적은 소유자에게 넘긴다.
+  독립 리뷰로 표시하려면 base..head의 모든 커밋마다 작성 엔진을 알 수 있어야 하며 그 엔진이 리뷰어 엔진과 달라야
+  한다. 작성 엔진을 모르는 커밋이 하나라도 있으면 독립성을 입증할 수 없다. Codex 수정본을 별도 Codex 세션이
+  리뷰해도 독립 리뷰가 아니다.
 
 ### 보안
 
 API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저장소와 그 이력, 릴리스, 이슈, CI 로그 어디에도
-들어가지 않는다. 키는 실행할 때만 환경 변수나 OS 키체인에서 읽고, 키가 없으면 기능을 끈 채 `unused(no key)`
-라고 알린다. 템플릿에는 `${ENV_VAR}` 자리표시자만 쓴다. 자세한 내용은 위 [Security](#security) 절에 있다.
+들어가지 않는다. 키는 실행할 때만 환경 변수나 OS 키체인에서 읽는다. 키가 없으면 그 기능을 끈 채
+`unused(no key)`라고 알린다. 템플릿에는 `${ENV_VAR}` 자리표시자만 쓴다. 자세한 내용은 위 [Security](#security)
+절에 있다.
 
 ### 라이선스
 
 MIT 라이선스로 배포한다. 함께 쓰는 외부 도구와 그 라이선스는
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 에 있다.
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)에 있다.
