@@ -36,7 +36,8 @@ class StubNode:
 
     def env(self, **extra: str) -> dict[str, str]:
         env = dict(os.environ, OAH_STUB_LOG=str(self.log), OAH_STUB_REPLY=str(self.reply_file),
-                   OAH_NODE=json.dumps(list(self.node)), PYTHONPATH=SRC)
+                   OAH_NODE=json.dumps(list(self.node)), PYTHONPATH=SRC,
+                   OAH_STATE_DIR=str(self.log.parent / "state"))
         env.update(extra)
         return env
 

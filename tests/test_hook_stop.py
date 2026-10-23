@@ -57,8 +57,9 @@ class StopHookTest(unittest.TestCase):
         self.ledger.write_text(text, encoding="utf-8")
 
     def check(self):
-        return check_mod.run_check(self.repo, self.ledger, BindingStore(self.state, "t1"), unlazy_dir=self.unlazy,
-                                   node=self.stub.node, env=self.env())
+        with patch.object(unlazy_mod, "PIN", stub_pin(self.unlazy)):
+            return check_mod.run_check(self.repo, self.ledger, BindingStore(self.state, "t1"), unlazy_dir=self.unlazy,
+                                       node=self.stub.node, env=self.env())
 
     def test_no_lease_and_no_unlazy_allows(self):
         self.assertIsNone(self.decide(unlazy=False))
@@ -86,6 +87,20 @@ class StopHookTest(unittest.TestCase):
                          stdin=json.dumps({"cwd": str(subdir), "session_id": "relative"}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"systemMessage": "verified copy"})
+
+    def test_handover_runs_snapshot_after_source_script_replacement(self):
+        script = self.unlazy / "scripts/stop-hook.mjs"
+        git_commit(self.unlazy, {"scripts/stop-hook.mjs":
+                                'print(\'{"systemMessage": "verified copy"}\')\n'})
+        original = unlazy_mod._run
+        def replace(argv, **options):
+            script.write_text('print(\'{"systemMessage": "unverified copy"}\')\n', encoding="utf-8")
+            return original(argv, **options)
+        env = dict(self.env(), OAH_NODE=json.dumps([sys.executable]))
+        with patch.object(unlazy_mod, "PIN", stub_pin(self.unlazy)):
+            with patch.object(unlazy_mod, "_run", side_effect=replace):
+                decision = hook_stop.decide({"cwd": str(self.repo)}, env=env, home=self.home)
+        self.assertEqual(decision, {"systemMessage": "verified copy"})
 
     def test_no_lease_skips_handover_when_unlazy_hook_is_installed(self):
         settings = self.repo / ".claude" / "settings.local.json"

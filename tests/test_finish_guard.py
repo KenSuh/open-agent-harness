@@ -285,6 +285,7 @@ class FinishGuardTest(unittest.TestCase):
         from oah.gates.bindings import BindingStore
         from oah import hook_stop, unlazy
 
+        self.enterContext(patch.object(unlazy, "PIN", stub_pin(self.unlazy)))
         self.start("--gates", "checks/main.md", "--gates", "checks/other.md")
         ledgers = [self.repo / "checks" / name for name in ("main.md", "other.md")]
         ledgers[0].parent.mkdir()
@@ -511,6 +512,9 @@ class SummaryPrivacyTest(unittest.TestCase):
     def test_summary_keeps_only_ids_enums_and_digests(self):
         stub = StubNode(self.tmp / "stub")
         unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        from oah import unlazy as unlazy_mod
+
+        self.enterContext(patch.object(unlazy_mod, "PIN", stub_pin(unlazy)))
         from oah.gates.bindings import BindingStore
         from oah.gates import check as check_mod
 

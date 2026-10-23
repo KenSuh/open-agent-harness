@@ -26,7 +26,7 @@ from oah.engines.proc import UnsupportedBatchShim, resolve_command
 
 GENERATED = (".oah/tasks/*/GATES.md", ".oah/tasks/*/GATES.summary.md", ".unlazy/*", ".unlazy-hook-state.json")
 CHUNK = 1024 * 1024
-EXECUTION_ENV = ("PATH", "UNLAZY_SHELL", "OAH_NODE", "ComSpec", "PATHEXT")
+EXECUTION_ENV = ("PATH", "UNLAZY_SHELL", "OAH_NODE", "ComSpec", "PATHEXT", "NODE_OPTIONS", "NODE_PATH")
 
 
 class InputsUncovered(Exception):
@@ -144,8 +144,10 @@ def collect(root: pathlib.Path, *, env_names: Sequence[str] = (), env: Mapping[s
     if os.name == "nt":
         # Windows environment names are case-insensitive, including for a plain caller-supplied dict.
         folded = {key.upper(): value for key, value in env.items()}
-        env = {**env, **{key: folded[key.upper()] for key in (*EXECUTION_ENV, *env_names)
-                        if key.upper() in folded}}
+        env = {**{key: value for key, value in env.items() if not key.upper().startswith("NODE_")},
+               **{key: value for key, value in folded.items() if key.startswith("NODE_")},
+               **{key: folded[key.upper()] for key in (*EXECUTION_ENV, *env_names)
+                  if key.upper() in folded}}
     index: dict[str, tuple[str, str]] = {}
     for record in _git_list(root, "ls-files", "-z", "--stage").split("\0"):
         if record:
@@ -168,7 +170,9 @@ def collect(root: pathlib.Path, *, env_names: Sequence[str] = (), env: Mapping[s
     environment["runtime:shell"] = _command_identity((_shell(env),), env)
     node = node if node is not None else unlazy.resolve_node(env)
     environment["runtime:node"] = _command_identity(node, env) if node else None
-    for name in set((*EXECUTION_ENV, *env_names)):
+    # Include new Node runtime switches without needing an oah release for each new variable.
+    node_env = [name for name in env if name.startswith("NODE_")]
+    for name in set((*EXECUTION_ENV, *env_names, *node_env)):
         value = env.get(name)
         environment[f"env:{name}"] = None if value is None else hashlib.sha256(value.encode("utf-8")).hexdigest()
     return Manifest(files=tuple(files), environment=tuple(sorted(environment.items())))

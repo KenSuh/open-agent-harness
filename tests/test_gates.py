@@ -4,15 +4,17 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from oah import unlazy
 from oah.gates import ledger_status, parse_ledger
 from oah.gates.ledger import definition_digest, gate_state, parse_text
-from tests.fixtures.gates.support import StubNode, automatic_evidence, make_unlazy_dir, met_ledger
-from tests.helpers import make_tmp_dir
+from tests.fixtures.gates.support import StubNode, automatic_evidence, make_unlazy_dir, met_ledger, stub_pin
+from tests.helpers import directory_alias, git_commit, make_tmp_dir
 
 SIMPLE = """# Gates: demo
 
@@ -31,6 +33,7 @@ class ContractTest(unittest.TestCase):
         self.tmp = make_tmp_dir(self)
         self.stub = StubNode(self.tmp / "stub")
         self.unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        self.enterContext(patch.object(unlazy, "PIN", stub_pin(self.unlazy)))
         self.ledger = self.tmp / "GATES.md"
         self.ledger.write_text(SIMPLE, encoding="utf-8")
 
@@ -120,6 +123,182 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_NODE_INVALID")
 
 
+class ExecutionSnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = make_tmp_dir(self)
+        self.source = make_unlazy_dir(self.tmp / "unlazy")
+        # Python stands in for Node but really opens and executes the script and its sibling dependency.
+        script = ("import pathlib\n"
+                  "exec((pathlib.Path(__file__).parent / 'lib' / 'gates.mjs').read_text(encoding='utf-8'))\n")
+        git_commit(self.source, {**{f"scripts/{name}": script for name in
+                                   ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs")},
+                                 "scripts/lib/gates.mjs": "print('verified-closure')\n"})
+        self.pin = stub_pin(self.source)
+        self.enterContext(patch.object(unlazy, "PIN", self.pin))
+        self.state = self.tmp / "state"
+        self.env = dict(os.environ, OAH_STATE_DIR=str(self.state))
+        self.env.pop("NODE_OPTIONS", None)
+        self.ledger = self.tmp / "GATES.md"
+        self.ledger.write_text(SIMPLE, encoding="utf-8")
+
+    def invoke(self, name, source=None):
+        options = {"node": (sys.executable,), "env": self.env}
+        source = source or self.source
+        if name == "gate-check.mjs":
+            return unlazy.gate_check(source, self.ledger, mode="status", **options)
+        if name == "gate-lint.mjs":
+            return unlazy.gate_lint(source, self.ledger, **options)
+        return unlazy.stop_hook(source, {"cwd": str(self.tmp)}, cwd=self.tmp, **options)
+
+    def test_script_replacement_after_verification_cannot_change_execution(self):
+        original = unlazy._run
+        for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+            with self.subTest(name=name):
+                source_script = self.source / "scripts" / name
+                saved = source_script.read_bytes()
+                def replace(argv, **options):
+                    replacement = source_script.with_suffix(".replacement")
+                    replacement.write_text("print('unverified-script')\n", encoding="utf-8")
+                    os.replace(replacement, source_script)
+                    return original(argv, **options)
+                try:
+                    with patch.object(unlazy, "_run", side_effect=replace):
+                        result = self.invoke(name)
+                    self.assertEqual(result.stdout.strip(), "verified-closure", result.stderr)
+                finally:
+                    source_script.write_bytes(saved)
+
+    def test_directory_alias_swap_cannot_change_loaded_dependency(self):
+        alias = self.tmp / "alias"
+        directory_alias(self.source, alias)
+        evil = self.tmp / "evil"
+        shutil.copytree(self.source, evil)
+        (evil / "scripts/lib/gates.mjs").write_text("print('unverified-dependency')\n", encoding="utf-8")
+        original = unlazy._run
+        for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+            with self.subTest(name=name):
+                def replace(argv, **options):
+                    alias.rmdir() if os.name == "nt" else alias.unlink()
+                    directory_alias(evil, alias)
+                    # Also replace the resolved target directory, not just the discovery alias.
+                    moved = self.tmp / "moved"
+                    self.source.rename(moved)
+                    shutil.copytree(evil, self.source)
+                    try:
+                        return original(argv, **options)
+                    finally:
+                        shutil.rmtree(self.source)
+                        moved.rename(self.source)
+                try:
+                    with patch.object(unlazy, "_run", side_effect=replace):
+                        result = self.invoke(name, alias)
+                    self.assertEqual(result.stdout.strip(), "verified-closure", result.stderr)
+                finally:
+                    alias.rmdir() if os.name == "nt" else alias.unlink()
+                    directory_alias(self.source, alias)
+        alias.rmdir() if os.name == "nt" else alias.unlink()
+
+    def test_snapshot_contains_only_verified_files_under_state_until_process_exits(self):
+        original = unlazy._run
+        seen = []
+        def inspect(argv, **options):
+            folder = pathlib.Path(argv[1]).parent.parent
+            self.assertTrue(folder.is_relative_to(self.state.resolve()))
+            self.assertEqual(json.loads((folder / "pin.json").read_text(encoding="utf-8"))["commit"],
+                             self.pin.commit)
+            for relative, digest in self.pin.files.items():
+                path = folder / relative
+                self.assertFalse(path.is_symlink())
+                self.assertEqual(unlazy.file_digest(path), digest)
+            if os.name != "nt":
+                self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((folder / "scripts/lib/gates.mjs").stat().st_mode & 0o777, 0o600)
+            seen.append(folder)
+            return original(argv, **options)
+        with patch.object(unlazy, "_run", side_effect=inspect):
+            for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                self.assertEqual(self.invoke(name).stdout.strip(), "verified-closure")
+        self.assertEqual(len(set(seen)), 3)  # no unverified reuse
+        self.assertTrue(all(not folder.exists() for folder in seen))
+
+    def test_copy_is_verified_even_if_source_was_verified_before_copying(self):
+        original = unlazy.require_pinned
+        def replace_after_verification(folder, pin=None):
+            original(folder, pin)
+            (folder / "scripts/lib/gates.mjs").write_text("print('unverified')\n", encoding="utf-8")
+        with patch.object(unlazy, "require_pinned", side_effect=replace_after_verification):
+            with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError):
+                self.invoke("gate-check.mjs")
+            run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows snapshots require protected inheritable ACLs")
+    def test_windows_snapshot_acl_grants_only_owner_access(self):
+        import ctypes
+        from ctypes import wintypes
+
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_security = advapi.GetFileSecurityW
+        get_security.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                 ctypes.POINTER(wintypes.DWORD))
+        get_security.restype = wintypes.BOOL
+        convert = advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW
+        convert.argtypes = (ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+                            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD))
+        convert.restype = wintypes.BOOL
+        kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+        kernel.LocalFree.restype = ctypes.c_void_p
+        original = unlazy._run
+        def inspect(argv, **options):
+            folder = pathlib.Path(argv[1]).parent.parent
+            for path in (folder, folder / "scripts/lib/gates.mjs"):
+                size = wintypes.DWORD()
+                get_security(str(path), 4, None, 0, ctypes.byref(size))
+                self.assertGreater(size.value, 0)
+                descriptor = ctypes.create_string_buffer(size.value)
+                self.assertTrue(get_security(str(path), 4, descriptor, size, ctypes.byref(size)))
+                text = ctypes.c_void_p()
+                self.assertTrue(convert(descriptor, 1, 4, ctypes.byref(text), None))
+                try:
+                    sddl = ctypes.wstring_at(text)
+                finally:
+                    kernel.LocalFree(text)
+                self.assertEqual(sddl.count("("), 1, sddl)
+                self.assertIn(";;;OW)", sddl)
+                self.assertIn(";FA;", sddl)
+                if path == folder:
+                    self.assertTrue(sddl.startswith("D:P"), sddl)
+                    self.assertIn("OICI", sddl)
+            return original(argv, **options)
+        with patch.object(unlazy, "_run", side_effect=inspect):
+            self.assertEqual(self.invoke("gate-check.mjs").stdout.strip(), "verified-closure")
+
+    def test_changed_source_dependency_is_refused_before_launch(self):
+        (self.source / "scripts/lib/gates.mjs").write_text("print('unverified')\n", encoding="utf-8")
+        with patch.object(unlazy, "_run") as run:
+            for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                with self.subTest(name=name), self.assertRaises(unlazy.UnlazyError):
+                    self.invoke(name)
+            run.assert_not_called()
+
+    def test_node_options_preloads_are_refused_before_launch(self):
+        self.env["NODE_OPTIONS"] = "--import=data:text/javascript,console.log(123456)"
+        with patch.object(unlazy, "_run") as run:
+            for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                with self.subTest(name=name):
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke(name)
+                    self.assertIn("Clear NODE_OPTIONS", str(caught.exception))
+            run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows runtime variable names are case-insensitive")
+    def test_windows_lowercase_node_options_cannot_bypass_refusal(self):
+        self.env["node_options"] = "--require=unverified.cjs"
+        with patch.object(unlazy, "_run") as run, self.assertRaises(unlazy.UnlazyError):
+            self.invoke("gate-check.mjs")
+        run.assert_not_called()
+
+
 @unittest.skipUnless(os.environ.get("OAH_TEST_UNLAZY_DIR"), "set OAH_TEST_UNLAZY_DIR to probe a real unlazy")
 class PinnedUnlazyProbeTest(unittest.TestCase):
     """Probe a real unlazy install (PLAN 11): approvals outside the root work, inside the root are refused."""
@@ -141,7 +320,7 @@ class PinnedUnlazyProbeTest(unittest.TestCase):
     def test_store_outside_root_runs_after_approval(self):
         store = self.tmp / "approved"
         store.mkdir(mode=0o700)
-        env = dict(os.environ, UNLAZY_APPROVAL_DIR=str(store))
+        env = dict(os.environ, UNLAZY_APPROVAL_DIR=str(store), OAH_STATE_DIR=str(self.tmp / "state"))
         result = unlazy.gate_check(self.unlazy, self.ledger, node=self.node, mode="run", approve=True,
                                    cwd=self.repo, root=self.repo, env=env)
         self.assertEqual(result.verdict, "met", result.stdout + result.stderr)
@@ -150,7 +329,7 @@ class PinnedUnlazyProbeTest(unittest.TestCase):
     def test_store_inside_root_is_refused(self):
         store = self.repo / ".git" / "oah-dev" / "unlazy-approved"
         store.mkdir(parents=True, mode=0o700)
-        env = dict(os.environ, UNLAZY_APPROVAL_DIR=str(store))
+        env = dict(os.environ, UNLAZY_APPROVAL_DIR=str(store), OAH_STATE_DIR=str(self.tmp / "state"))
         result = unlazy.gate_check(self.unlazy, self.ledger, node=self.node, mode="run", approve=True,
                                    cwd=self.repo, root=self.repo, env=env)
         self.assertEqual(result.returncode, 2)
@@ -388,6 +567,7 @@ class LedgerStatusTest(unittest.TestCase):
         self.ledger = self.tmp / "GATES.md"
         self.stub = StubNode(self.tmp / "stub")
         self.unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        self.enterContext(patch.object(unlazy, "PIN", stub_pin(self.unlazy)))
 
     def test_structural_status_labels(self):
         self.ledger.write_text(SIMPLE, encoding="utf-8")
@@ -527,7 +707,10 @@ class InputsTest(unittest.TestCase):
         base = collect(self.repo, env=base_env).digest_for(None)
         for name, value in (("PATH", str(self.repo)), ("UNLAZY_SHELL", str(self.repo / "shell")),
                             ("OAH_NODE", json.dumps([sys.executable])), ("ComSpec", "other-cmd.exe"),
-                            ("PATHEXT", ".EXE")):
+                            ("PATHEXT", ".EXE"), ("NODE_OPTIONS", "--no-warnings"),
+                            ("NODE_PATH", str(self.repo.parent / "modules")),
+                            ("NODE_EXTRA_CA_CERTS", str(self.repo.parent / "ca.pem")),
+                            ("NODE_PENDING_DEPRECATION", "1"), ("NODE_FUTURE_RUNTIME_OPTION", "1")):
             with self.subTest(name=name):
                 self.assertNotEqual(base, collect(self.repo, env=dict(base_env, **{name: value})).digest_for(None))
 
@@ -560,9 +743,12 @@ class InputsTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows environment names are case-insensitive")
     def test_windows_execution_environment_names_are_case_insensitive(self):
-        env = dict(os.environ, OAH_NODE=json.dumps([sys.executable]))
+        env = dict(os.environ, OAH_NODE=json.dumps([sys.executable]), NODE_OPTIONS="--no-warnings",
+                   NODE_PATH="modules", NODE_FUTURE_RUNTIME_OPTION="1")
         folded = {key.lower(): value for key, value in env.items()}
         self.assertEqual(collect(self.repo, env=env).digest_for(None), collect(self.repo, env=folded).digest_for(None))
+        folded["node_path"] = "other-modules"
+        self.assertNotEqual(collect(self.repo, env=env).digest_for(None), collect(self.repo, env=folded).digest_for(None))
 
     def test_submodule_inputs_are_refused_in_every_worktree_state(self):
         import shutil
@@ -593,6 +779,7 @@ class GateCheckFlowTest(unittest.TestCase):
         self.tmp = make_tmp_dir(self)
         self.stub = StubNode(self.tmp / "stub")
         self.unlazy = make_unlazy_dir(self.tmp / "unlazy")
+        self.enterContext(patch.object(unlazy, "PIN", stub_pin(self.unlazy)))
         self.ledger = self.repo / ".oah" / "tasks" / "t1" / "GATES.md"
         self.ledger.parent.mkdir(parents=True)
         self.store = BindingStore(self.tmp / "state", "t1")
@@ -630,7 +817,9 @@ class GateCheckFlowTest(unittest.TestCase):
         self.stub.reply("gate-check.mjs", pass_reply(self.ledger, met_ledger(RUNNABLE)))
         self.assertTrue(self.check().ok)
         for name, value in (("PATH", str(self.tmp)), ("UNLAZY_SHELL", str(self.tmp / "other-shell")),
-                            ("OAH_NODE", json.dumps([sys.executable]))):
+                            ("OAH_NODE", json.dumps([sys.executable])),
+                            ("NODE_OPTIONS", "--import=data:text/javascript,console.log(123456)"),
+                            ("NODE_PATH", str(self.tmp / "modules")), ("NODE_PENDING_DEPRECATION", "1")):
             with self.subTest(name=name):
                 env = self.stub.env(**{name: value})
                 self.assertEqual(gate_check_mod.freshness(self.repo, self.ledger, self.store,

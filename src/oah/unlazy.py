@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
+import secrets
+import shutil
 import types
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -235,6 +239,103 @@ def _run(argv: list[str], *, env: Mapping[str, str] | None, timeout: float, cwd:
         raise UnlazyError("OAH_NODE_MISSING", f"cannot start {argv[0]}: {exc}; {NODE_HINT}") from exc
 
 
+def _private_directory(folder: pathlib.Path) -> None:
+    """Create the snapshot with owner-only access, atomically on both supported platforms."""
+    if os.name != "nt":
+        folder.mkdir(mode=0o700)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                        ctypes.POINTER(wintypes.DWORD))
+    convert.restype = wintypes.BOOL
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
+
+    create = kernel.CreateDirectoryW
+    create.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes))
+    create.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = (ctypes.c_void_p,)
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    # Protected DACL: only the object's owner has full access; files and subdirectories inherit it.
+    if not convert("D:P(A;OICI;FA;;;OW)", 1, ctypes.byref(descriptor), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        if not create(str(folder), ctypes.byref(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+@contextmanager
+def _snapshot(folder: pathlib.Path, env: Mapping[str, str], anchor: pathlib.Path):
+    """Copy the entire pinned closure into private state, verify the copy, keep it through execution.
+
+    No copy is reused: each invocation checks its own bytes and removes them after the child exits.
+    The discovered paths may change during copying, but only a copy matching every pin can execute.
+    """
+    from oah.paths import NotARepo, repo_info, run_git, state_dir
+
+    pin = PIN
+    require_pinned(folder, pin)
+    commit = run_git(folder, "rev-parse", "--verify", "--quiet", "HEAD").stdout.strip()
+    if env.get("OAH_STATE_DIR"):
+        state = pathlib.Path(env["OAH_STATE_DIR"])
+    else:
+        try:
+            info = repo_info(anchor)
+        except NotARepo:
+            info = repo_info(folder)
+        state = state_dir(info, env)
+    try:
+        state = state.resolve()
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        copy = state / f"unlazy-{secrets.token_hex(16)}"
+        _private_directory(copy)
+        try:
+            for relative in pin.files:
+                target = copy / relative
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                # Copy bytes, never symlinks, hard links, git metadata, or unpinned neighboring code.
+                with target.open("xb") as handle:
+                    target.chmod(0o600)
+                    handle.write((folder / relative).read_bytes())
+            record = copy / "pin.json"
+            record.write_text(json.dumps({"commit": commit}), encoding="utf-8")
+            record.chmod(0o600)
+            if (json.loads(record.read_text(encoding="utf-8")) != {"commit": pin.commit}
+                    or any(file_digest(copy / relative) != digest for relative, digest in pin.files.items())):
+                raise UnlazyError("OAH_UNLAZY_UNPINNED", "unlazy changed while being copied; install the pinned "
+                                  f"copy and retry: {install_hint(folder, pin)}")
+            yield copy
+        finally:
+            shutil.rmtree(copy)
+    except OSError as exc:
+        raise UnlazyError("OAH_UNLAZY_SNAPSHOT_FAILED", f"cannot prepare or protect the private unlazy copy: {exc}; "
+                          "set OAH_STATE_DIR to a private writable state folder and retry") from exc
+
+
+def _execute(folder: pathlib.Path, name: str, args: Sequence[str], *, node: Sequence[str],
+             env: Mapping[str, str] | None, timeout: float, anchor: pathlib.Path,
+             cwd: pathlib.Path | None = None, stdin_text: str | None = None) -> RunResult:
+    env = dict(os.environ if env is None else env)
+    options = [value for key, value in env.items()
+               if (key.upper() if os.name == "nt" else key) == "NODE_OPTIONS"]
+    if any(options):
+        raise UnlazyError("OAH_NODE_OPTIONS_REFUSED", "Clear NODE_OPTIONS before running gates or the Stop hook; "
+                          "unverified Node preloads and runtime flags are not permitted")
+    _script(folder, name)  # preserve the missing-entry-point diagnostic
+    with _snapshot(pathlib.Path(folder), env, anchor) as copy:
+        return _run([*node, str(_script(copy, name)), *args], env=env, timeout=timeout, cwd=cwd,
+                    stdin_text=stdin_text)
+
+
 def gate_check(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence[str], mode: str,
                approve: bool = False, cwd: pathlib.Path | None = None, root: pathlib.Path | None = None,
                timeout: int | None = None, env: Mapping[str, str] | None = None,
@@ -244,7 +345,7 @@ def gate_check(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence
         raise ValueError(f"unknown gate-check mode {mode!r}")
     if mode == "status" and (approve or cwd is not None or timeout is not None):
         raise ValueError("--status takes no --approve, --cwd or --timeout")
-    argv = [*node, str(_script(unlazy_dir, "gate-check.mjs"))]
+    argv = []
     if MODES[mode]:
         argv.append(MODES[mode])
     if approve:
@@ -257,7 +358,8 @@ def gate_check(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence
         argv += ["--root", str(root)]
     argv += ["--", str(ledger)]
     limit = process_timeout or (STATUS_TIMEOUT if mode == "status" else RUN_TIMEOUT)
-    result = _run(argv, env=env, timeout=limit)
+    result = _execute(unlazy_dir, "gate-check.mjs", argv, node=node, env=env, timeout=limit,
+                      anchor=root or cwd or ledger.parent)
     verdict = "error" if result.timed_out else parse_verdict(result.returncode, result.stdout)
     return UnlazyResult(result.returncode, result.stdout, result.stderr, verdict)
 
@@ -265,8 +367,9 @@ def gate_check(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence
 def gate_lint(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence[str], strict: bool = False,
               env: Mapping[str, str] | None = None) -> UnlazyResult:
     """Run gate-lint.mjs on one ledger; it never executes a CHECK."""
-    argv = [*node, str(_script(unlazy_dir, "gate-lint.mjs"))] + (["--strict"] if strict else []) + ["--", str(ledger)]
-    result = _run(argv, env=env, timeout=STATUS_TIMEOUT)
+    argv = (["--strict"] if strict else []) + ["--", str(ledger)]
+    result = _execute(unlazy_dir, "gate-lint.mjs", argv, node=node, env=env, timeout=STATUS_TIMEOUT,
+                      anchor=ledger.parent)
     lines = _summary_lines(result.stdout)
     if result.returncode == 0 and any(line.startswith("LINT OK") for line in lines):
         verdict = "met"
@@ -280,7 +383,8 @@ def gate_lint(unlazy_dir: pathlib.Path, ledger: pathlib.Path, *, node: Sequence[
 def stop_hook(unlazy_dir: pathlib.Path, payload: Mapping, *, node: Sequence[str],
               env: Mapping[str, str] | None = None, cwd: pathlib.Path | None = None) -> UnlazyResult:
     """Run unlazy's own Stop hook with the Claude Code payload on stdin."""
-    argv = [*node, str(_script(unlazy_dir, "stop-hook.mjs"))]
-    result = _run(argv, env=env, timeout=STATUS_TIMEOUT, cwd=cwd, stdin_text=json.dumps(dict(payload)))
+    result = _execute(unlazy_dir, "stop-hook.mjs", (), node=node, env=env, timeout=STATUS_TIMEOUT,
+                      anchor=cwd or pathlib.Path(payload.get("cwd") or pathlib.Path.cwd()),
+                      cwd=cwd, stdin_text=json.dumps(dict(payload)))
     verdict = "met" if result.returncode == 0 and not result.timed_out else "error"
     return UnlazyResult(result.returncode, result.stdout, result.stderr, verdict)
