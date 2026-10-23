@@ -64,14 +64,29 @@ class LintTest(LintCase):
     def test_uncertain_code_links_are_reported(self):
         for text in ("```\ncode\n  ```\n[[real]]\n", "  ```\ncode\n```\n[[real]]\n",
                      "`open\n` [[real]] `\nclose`\n", "<div>\n```\n\n[[real]]\n```\n",
-                     "---\n```\n---\n[[real]]\n```\n", "\\` [[real]] `\n", "```\n[[real]]\n"):
-            with self.subTest(text=text):
-                self.write("index.md", text)
-                report = self.wiki().lint(now=NOW)
-                self.assertEqual([(p.line, p.detail) for p in report.problems
-                                  if p.path == "index.md" and p.kind == "broken_link"],
-                                 [(text[:text.index("[[real]]")].count("\n") + 1,
-                                   "[[real]] does not resolve")])
+                     "---\n```\n---\n[[real]]\n```\n", "\\` [[real]] `\n", "```\n[[real]]\n",
+                     "<!doctype html\n```\n>\n\n[[real]]\n```\n",
+                     "<!dOcTyPe html\n```\n>\n\n[[real]]\n```\n",
+                     "<![cdata[\n```\n]]>\n\n[[real]]\n```\n",
+                     "text <!-- ` --> [[real]] <!-- ` -->\n",
+                     "<https://example.org/`> [[real]] <https://example.org/`>\n",
+                     "text <span>\n`[[real]]`\n", "2 < 3 ``[[real]]``\n",
+                     "text <span\nattribute='value'>\n\n```\n[[real]]\n```\n",
+                     "[ref]: /url\n\"possible title\"\n\n```\n[[real]]\n```\n"):
+            for eol in ("\n", "\r\n"):
+                with self.subTest(eol=eol, text=text):
+                    self.write("index.md", text.replace("\n", eol))
+                    report = self.wiki().lint(now=NOW)
+                    self.assertEqual([(p.line, p.detail) for p in report.problems
+                                      if p.path == "index.md" and p.kind == "broken_link"],
+                                     [(text[:text.index("[[real]]")].count("\n") + 1,
+                                       "[[real]] does not resolve")])
+
+    def test_plain_column_zero_fence_still_hides_link(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                self.write("index.md", eol.join(("```", "[[hidden]]", "```", "")))
+                self.assertFalse(any(p.kind == "broken_link" for p in self.wiki().lint(now=NOW).problems))
 
     def test_scaffold_passes_lint(self):
         report = self.wiki().lint(now=NOW)

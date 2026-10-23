@@ -42,7 +42,8 @@ class PreCommitTest(unittest.TestCase):
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
-        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True, env=git_env())
+        subprocess.run(["git", "-C", str(self.repo), "-c", "core.autocrlf=false", "add", "-A"],
+                       check=True, env=git_env())
 
     def check(self, **settings) -> hook_pre_commit.Verdict:
         return hook_pre_commit.check(self.repo, WikiSettings(**settings), self.state)
@@ -131,15 +132,36 @@ class PreCommitTest(unittest.TestCase):
             "\\` [[real]] `\n",
             "---\n```\n---\n[[real]]\n```\n",
             "```\n[[real]]\n",
+            "<!doctype html\n```\n>\n\n[[real]]\n```\n",
+            "<!dOcTyPe html\n```\n>\n\n[[real]]\n```\n",
+            "<![cdata[\n```\n]]>\n\n[[real]]\n```\n",
+            "text <!-- ` --> [[real]] <!-- ` -->\n",
+            "<https://example.org/`> [[real]] <https://example.org/`>\n",
+            "text <span>\n`[[real]]`\n",
+            "2 < 3 ``[[real]]``\n",
+            "text <span\nattribute='value'>\n\n```\n[[real]]\n```\n",
+            "[ref]: /url\n\"possible title\"\n\n```\n[[real]]\n```\n",
         ]
-        for text in cases:
-            with self.subTest(text=text):
-                self.stage({"docs/wiki/a.md": text})
-                (self.wiki_dir / "a.md").write_bytes(b"[[wiki-guide]]\n")
-                verdict = self.check()
-                self.assertEqual(verdict.blocked, [])
-                self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
-                self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    data = text.replace("\n", eol).encode("utf-8")
+                    self.stage({"docs/wiki/a.md": data})
+                    staged = subprocess.run(["git", "-C", str(self.repo), "show", ":docs/wiki/a.md"],
+                                            check=True, capture_output=True).stdout
+                    self.assertEqual(staged, data)
+                    (self.wiki_dir / "a.md").write_bytes(b"[[wiki-guide]]\n")
+                    verdict = self.check()
+                    self.assertEqual(verdict.blocked, [])
+                    self.assertTrue(any("[[real]]" in line for line in verdict.warnings), verdict.warnings)
+                    self.assert_blocked(self.check(new_broken_links="block"), "[[real]]")
+
+    def test_plain_column_zero_fence_still_hides_staged_link(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                self.stage({"docs/wiki/a.md": eol.join(("```", "[[hidden]]", "```", ""))})
+                verdict = self.check(new_broken_links="block")
+                self.assertEqual((verdict.blocked, verdict.warnings), ([], []))
 
     def test_link_between_skipped_container_delimiters_warns_then_blocks(self):
         self.stage({"docs/wiki/a.md": "- ```\n  code\n[[real]]\n  ```\n  ```\n"})

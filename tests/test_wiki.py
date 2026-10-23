@@ -57,7 +57,8 @@ class MarkdownTest(unittest.TestCase):
     def test_html_blocks_cannot_invert_fence_pairing(self):
         blocks = [("<script>", "</script>"), ("<PRE>", "</PRE>"), ("<style>", "</style>"),
                   ("<textarea>", "</textarea>"), ("<!--", "-->"), ("<?php", "?>"),
-                  ("<!DOCTYPE html", ">"), ("<![CDATA[", "]]>"), ("<div>", ""),
+                  ("<!DOCTYPE html", ">"), ("<!doctype html", ">"), ("<!dOcTyPe html", ">"),
+                  ("<![CDATA[", "]]>"), ("<![cdata[", "]]>"), ("<![CdAtA[", "]]>"), ("<div>", ""),
                   ('<widget class="x">', ""), ("</widget>", "")]
         for eol in ("\n", "\r\n"):
             for opening, closing in blocks:
@@ -65,6 +66,44 @@ class MarkdownTest(unittest.TestCase):
                     lines = [opening, "```", closing, "", "[[real]]", "```", ""]
                     self.assertIn(("real", 5), [(link.target, link.line)
                                                for link in markdown.wikilinks(eol.join(lines))])
+
+    def test_inline_html_and_autolink_backticks_do_not_hide_links(self):
+        cases = [
+            "text <!-- ` --> [[real]] <!-- ` -->\n",
+            "<https://example.org/`> [[real]] <https://example.org/`>\n",
+            '<span title="`"> [[real]] <span title="`">\n',
+        ]
+        for eol in ("\n", "\r\n"):
+            for text in cases:
+                with self.subTest(eol=eol, text=text):
+                    self.assertEqual([(link.target, link.line)
+                                      for link in markdown.wikilinks(text.replace("\n", eol))],
+                                     [("real", 1)])
+
+    def test_possible_html_makes_inline_run_uncertain_until_blank(self):
+        for eol in ("\n", "\r\n"):
+            for opening in ("text <span>", "text <!-- comment -->", "<https://example.org/>",
+                            "2 < 3", "\\`escaped"):
+                with self.subTest(eol=eol, opening=opening):
+                    text = eol.join((opening, "`[[real]]`", "", "`[[hidden]]` [[after]]", ""))
+                    self.assertEqual([(link.target, link.line) for link in markdown.wikilinks(text)],
+                                     [("real", 2), ("after", 4)])
+
+    def test_unparsed_block_context_keeps_later_fences_uncertain(self):
+        prefixes = ["text <span\nattribute='value'>\n", "[ref]: /url\n\"possible title\"\n",
+                    "- [ref]: /url\n  \"possible title\"\n"]
+        for eol in ("\n", "\r\n"):
+            for prefix in prefixes:
+                with self.subTest(eol=eol, prefix=prefix):
+                    text = prefix + "\n```\n[[real]]\n```\n\n~~~\n[[tail]]\n~~~\n"
+                    self.assertEqual([link.target for link in markdown.wikilinks(text.replace("\n", eol))],
+                                     ["real", "tail"])
+
+    def test_plain_column_zero_fence_still_hides_link(self):
+        for eol in ("\n", "\r\n"):
+            with self.subTest(eol=eol):
+                text = eol.join(("plain paragraph", "", "```", "[[hidden]]", "```", ""))
+                self.assertEqual(markdown.wikilinks(text), [])
 
     def test_uncertain_code_keeps_real_links_as_candidates(self):
         cases = [

@@ -108,9 +108,9 @@ def _html_start(line: str, paragraph: bool | None) -> str:
     if _HTML_RAW.match(line):
         return "raw"
     for opening, kind in (("<!--", "comment"), ("<?", "instruction"), ("<![CDATA[", "cdata")):
-        if line.lstrip(" ").startswith(opening) and len(line) - len(line.lstrip(" ")) <= 3:
+        if line.lstrip(" ").upper().startswith(opening) and len(line) - len(line.lstrip(" ")) <= 3:
             return kind
-    if re.match(r"^ {0,3}<![A-Z]", line):
+    if re.match(r"^ {0,3}<![A-Za-z]", line):
         return "declaration"
     if _HTML_BLOCK.match(line) or (not paragraph and _HTML_TAG.match(line)):
         return "blank"
@@ -171,6 +171,19 @@ def _lint_steps(state: _LintState, line: str, number: int) -> list[tuple[_LintSt
     return steps
 
 
+def _unparsed_block(line: str, paragraph: bool | None) -> bool:
+    """Reference definitions and other HTML may span lines; their block boundaries are unknown."""
+    while True:
+        body = line.lstrip(" ")
+        if ((body.startswith("[") and not body.startswith("[["))
+                or ("<" in line and not _html_start(line, paragraph) and not _HTML_TAG.match(line))):
+            return True
+        match = _CONTAINER.match(line)
+        if match is None:
+            return False
+        line, paragraph = line[match.end():], False
+
+
 def _fenced_lines(lines: list[str]) -> tuple[int, list[bool]]:
     """Intersect closed-fence masks over all readings, merging equal states after every line.
 
@@ -179,11 +192,16 @@ def _fenced_lines(lines: list[str]) -> tuple[int, list[bool]]:
     """
     states = {_LintState(): 0}
     inline = []
+    uncertain_from = len(lines)
     for number, line in enumerate(lines):
+        body = strip_eol(line).expandtabs(4)
         following: dict[_LintState, int] = {}
         certain_inline = True
         for state, masked in states.items():
-            for after, start, allow_inline in _lint_steps(state, strip_eol(line).expandtabs(4), number):
+            if not (state.fence or state.html or state.frontmatter) and _unparsed_block(body, state.paragraph):
+                # Do not guess later fence pairings after syntax this parser cannot fully resolve.
+                uncertain_from = min(uncertain_from, number)
+            for after, start, allow_inline in _lint_steps(state, body, number):
                 closed = 0 if start is None else (1 << (number + 1)) - (1 << start)
                 mask = masked | closed
                 following[after] = following[after] & mask if after in following else mask
@@ -193,7 +211,7 @@ def _fenced_lines(lines: list[str]) -> tuple[int, list[bool]]:
     certain = (1 << len(lines)) - 1
     for masked in states.values():
         certain &= masked
-    return certain, inline
+    return certain & ((1 << uncertain_from) - 1), inline
 
 
 def _blank_code(text: str) -> str:
@@ -201,8 +219,8 @@ def _blank_code(text: str) -> str:
 
 
 def _mask_spans(line: str) -> tuple[str, bool]:
-    """Mask same-line spans, or flag an escaped/unpaired delimiter's nonblank run as uncertain."""
-    if any(match.start() and line[match.start() - 1] == "\\" for match in _TICKS.finditer(line)):
+    """Mask same-line spans unless HTML or escaped/unpaired ticks make their ownership uncertain."""
+    if "<" in line or any(match.start() and line[match.start() - 1] == "\\" for match in _TICKS.finditer(line)):
         return line, True
     out = list(line)
     position = 0
