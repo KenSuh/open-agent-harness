@@ -5,7 +5,8 @@
 
 1. `base`: fetch the default branch (never prompting for a password) and count how far HEAD is
    behind it. Behind, or a remote that cannot be reached without `--offline`, is ABORT. No remote
-   at all is a WARN.
+   at all is a WARN. Offline requires a successful comparison with a local tracking ref unless
+   there is no remote at all.
 2. `dirty`: uncommitted changes are a WARN.
 3. `leases`: active leases of other tasks that overlap the compared scope are ABORT; stale ones are
    a WARN. The compared scope is `--touch`, the packet's Scope and the task's own lease scope; when
@@ -176,17 +177,35 @@ def _check_base(ctx: _Context) -> Check:
             return Check("base", "warn", "there is no remote, so base freshness does not apply; that is fine "
                                          "for a local-only repository")
         ctx.not_proven.append("that the base is fresh: no remote was compared")
-        return Check("base", "abort", why or "no remote to compare with; configure "
-                     "[preflight] remote in .oah/config.toml and run oah preflight again")
-    ctx.remote = remote
+        check = Check("base", "abort", why or "no remote to compare with; configure "
+                      "[preflight] remote in .oah/config.toml and run oah preflight again")
+        compared = False
+    else:
+        ctx.remote = remote
+        check, compared = _compare_base(ctx, remote)
+    # The only exception above is a repository with no remotes. Every other offline
+    # path must actually compare HEAD with a usable tracking ref before it can pass.
+    if ctx.offline and not compared:
+        return dataclasses.replace(check, level="abort", message=check.message +
+                                   "; fetch once or run oah preflight without --offline, then retry")
+    return check
+
+
+def _compare_base(ctx: _Context, remote: str) -> tuple[Check, bool]:
+    """Return the base result and whether HEAD was successfully compared."""
+    # Return paths (each covered online and offline in test_preflight): unknown default
+    # branch, unreachable discovery, failed fetch (offline skips it), absent tracking
+    # ref, unborn HEAD, failed comparison, behind HEAD, and current/ahead HEAD.
+    # Remote selection paths in _check_base: no remotes, inspection failure, missing
+    # configured remote, and ambiguous remotes.
     branch, problem = _default_branch(ctx, remote)
     if branch is None:
         if problem and problem.startswith("unreachable: "):
             return Check("base", "abort", f"cannot reach {remote} ({problem[len('unreachable: '):]}). Check the "
                                           "network or your sign-in, or pass --offline to compare with the last "
-                                          "fetched state")
+                                          "fetched state"), False
         ctx.not_proven.append("that the base is fresh: the remote has no default branch to compare with")
-        return Check("base", "warn", f"{problem}; push a first commit or set [preflight] default_branch")
+        return Check("base", "warn", f"{problem}; push a first commit or set [preflight] default_branch"), False
     ctx.ref, ctx.ref_name = f"refs/remotes/{remote}/{branch}", f"{remote}/{branch}"
     if ctx.offline:
         ctx.not_proven.append(f"that the base is fresh: {remote} was not fetched (--offline)")
@@ -196,26 +215,26 @@ def _check_base(ctx: _Context) -> Check:
         if code != 0:
             return Check("base", "abort", f"cannot fetch {ctx.ref_name} ({err.strip() or 'no answer'}). Check the "
                                           "network or your sign-in, or pass --offline to compare with the last "
-                                          "fetched state")
+                                          "fetched state"), False
     if not _ref_exists(ctx, ctx.ref):
         ctx.ref = ctx.ref_name = None
         ctx.not_proven.append("that the base is fresh: the default branch was never fetched")
-        return Check("base", "warn", f"{remote}/{branch} is not known locally; run git fetch {remote}")
+        return Check("base", "warn", f"{remote}/{branch} is not known locally; run git fetch {remote}"), False
     if ctx.info.head is None:
-        return Check("base", "warn", "this branch has no commits yet, so there is nothing to compare")
+        return Check("base", "warn", "this branch has no commits yet, so there is nothing to compare"), False
     code, out, err = _git(ctx, "rev-list", "--count", f"HEAD..{ctx.ref}")
     if code != 0:
-        return Check("base", "abort", f"git could not compare HEAD with {ctx.ref_name}: {err.strip()}")
+        return Check("base", "abort", f"git could not compare HEAD with {ctx.ref_name}: {err.strip()}"), False
     behind = int(out.strip() or "0")
     source = "last fetched " if ctx.offline else ""
     if behind:
         plural = "commit" if behind == 1 else "commits"
         return Check("base", "abort", f"HEAD is {behind} {plural} behind {source}{ctx.ref_name}. Update first: "
-                                      f"git rebase {ctx.ref_name}")
+                                      f"git rebase {ctx.ref_name}"), True
     if ctx.offline:
         return Check("base", "warn", f"offline: HEAD is up to date with the last fetched {ctx.ref_name}, which may "
-                                     "be old")
-    return Check("base", "ok", f"HEAD is up to date with {ctx.ref_name}")
+                                     "be old"), True
+    return Check("base", "ok", f"HEAD is up to date with {ctx.ref_name}"), True
 
 
 def _check_dirty(ctx: _Context) -> Check:

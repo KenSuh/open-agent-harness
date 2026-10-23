@@ -80,19 +80,32 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("origin/main", self.check(report, "base").message)
         self.assertEqual(report.impact, "unavailable")
         self.assertIn("impact=unavailable", report.render().splitlines())
+        with patch("oah.preflight._network_git") as network, \
+                patch("oah.preflight._git", wraps=preflight._git) as local:
+            offline = self.run_checks(offline=True)
+        self.assertEqual(offline.verdict, "PROCEED_WITH_WARNINGS", offline.render())
+        self.assertEqual(self.check(offline, "base").level, "warn")
+        network.assert_not_called()
+        self.assertTrue(any(call.args[1:] == ("rev-list", "--count", "HEAD..refs/remotes/origin/main")
+                            for call in local.call_args_list))
 
     def test_behind_remote_aborts_with_rebase_command(self):
         self.push_change({"docs/other.md": "x\n"}, "elsewhere")
-        report = self.run_checks()
-        base = self.check(report, "base")
-        self.assertEqual(base.level, "abort", report.render())
-        self.assertIn("1 commit behind origin/main", base.message)
-        self.assertIn("git rebase origin/main", base.message)
-        self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
+        for offline in (False, True):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline)
+                base = self.check(report, "base")
+                self.assertEqual(base.level, "abort", report.render())
+                source = "last fetched " if offline else ""
+                self.assertIn(f"1 commit behind {source}origin/main", base.message)
+                self.assertIn("git rebase origin/main", base.message)
+                self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
 
     def test_ahead_of_remote_is_fine(self):
         git_commit(self.repo, {"src/b.py": "b = 1\n"}, "local work")
-        self.assertEqual(self.check(self.run_checks(), "base").level, "ok")
+        for offline, level in ((False, "ok"), (True, "warn")):
+            with self.subTest(offline=offline):
+                self.assertEqual(self.check(self.run_checks(offline=offline), "base").level, level)
 
     def test_unreachable_remote_aborts_unless_offline(self):
         git(self.repo, "fetch", "-q", "origin")
@@ -114,11 +127,12 @@ class PreflightTest(unittest.TestCase):
     def test_no_remote_warns(self):
         git(self.repo, "remote", "remove", "origin")
         for settings in ({}, {"remote": "typo"}):
-            with self.subTest(settings=settings):
-                report = self.run_checks(settings=settings)
-                self.assertEqual(self.check(report, "base").level, "warn", report.render())
-                self.assertIn("no remote", self.check(report, "base").message)
-                self.assertEqual(report.exit_code, 0)
+            for offline in (False, True):
+                with self.subTest(settings=settings, offline=offline):
+                    report = self.run_checks(settings=settings, offline=offline)
+                    self.assertEqual(self.check(report, "base").level, "warn", report.render())
+                    self.assertIn("no remote", self.check(report, "base").message)
+                    self.assertEqual(report.exit_code, 0)
 
     def test_unknown_configured_remote_aborts(self):
         for offline in (False, True):
@@ -128,6 +142,8 @@ class PreflightTest(unittest.TestCase):
                 self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
                 self.assertIn("typo", self.check(report, "base").message)
                 self.assertIn("[preflight] remote", self.check(report, "base").message)
+                if offline:
+                    self.assertIn("without --offline", self.check(report, "base").message)
 
     def test_remote_inspection_failure_aborts(self):
         real_git = preflight._git
@@ -140,14 +156,106 @@ class PreflightTest(unittest.TestCase):
                 report = self.run_checks(offline=offline)
                 self.assertEqual(self.check(report, "base").level, "abort", report.render())
                 self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
+                if offline:
+                    self.assertIn("without --offline", self.check(report, "base").message)
 
     def test_empty_remote_warns(self):
         empty = self.repo.parent / "empty.git"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(empty)], check=True)
         git(self.repo, "remote", "set-url", "origin", str(empty))
         git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
-        report = self.run_checks()
+        for offline, level in ((True, "abort"), (False, "warn")):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline)
+                base = self.check(report, "base")
+                self.assertEqual(base.level, level, report.render())
+                self.assertIn("no default branch", base.message)
+                if offline:
+                    self.assertIn("without --offline", base.message)
+
+    def test_configured_branch_never_fetched_aborts_offline(self):
+        # Re-adding the remote leaves its real main branch present only on the remote.
+        git(self.repo, "remote", "remove", "origin")
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        for offline, level in ((True, "abort"), (False, "ok")):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline, settings={"default_branch": "main"})
+                base = self.check(report, "base")
+                self.assertEqual(base.level, level, report.render())
+                self.assertEqual(report.exit_code, 2 if offline else 0)
+                if offline:
+                    self.assertIn("not known locally", base.message)
+                    self.assertIn("git fetch origin", base.message)
+                    self.assertIn("without --offline", base.message)
+
+    def test_unborn_head_requires_comparison_offline(self):
+        repo = make_git_repo(self)
+        git(repo, "remote", "add", "origin", str(self.remote))
+        git(repo, "fetch", "-q", "origin")
+        for offline, level in ((False, "warn"), (True, "abort")):
+            with self.subTest(offline=offline):
+                report = preflight.run_checks(repo_info(repo), state=repo.parent / "state", touch=("src",),
+                                              offline=offline, settings={"default_branch": "main"})
+                base = self.check(report, "base")
+                self.assertEqual(base.level, level, report.render())
+                self.assertIn("no commits", base.message)
+                if offline:
+                    self.assertIn("without --offline", base.message)
+
+    def test_default_branch_discovery_failure_aborts(self):
+        git(self.repo, "remote", "remove", "origin")
+        git(self.repo, "remote", "add", "origin", str(self.repo.parent / "gone.git"))
+        for offline in (False, True):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline)
+                base = self.check(report, "base")
+                self.assertEqual(base.level, "abort", report.render())
+                self.assertEqual(report.exit_code, 2)
+                self.assertIn("without --offline" if offline else "cannot reach origin", base.message)
+
+    def test_fetch_failure_uses_cached_comparison_only_offline(self):
+        git(self.repo, "remote", "set-url", "origin", str(self.repo.parent / "gone.git"))
+        for offline, level in ((False, "abort"), (True, "warn")):
+            with self.subTest(offline=offline):
+                report = self.run_checks(offline=offline, settings={"default_branch": "main"})
+                base = self.check(report, "base")
+                self.assertEqual(base.level, level, report.render())
+                self.assertIn("last fetched origin/main" if offline else "cannot fetch origin/main",
+                              base.message)
+
+    def test_tracking_ref_lost_after_fetch(self):
+        real_network_git = preflight._network_git
+
+        def fetch_then_lose_ref(ctx, *args):
+            result = real_network_git(ctx, *args)
+            if args[0] == "fetch" and result[0] == 0:
+                git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+            return result
+
+        with patch("oah.preflight._network_git", side_effect=fetch_then_lose_ref):
+            report = self.run_checks(settings={"default_branch": "main"})
         self.assertEqual(self.check(report, "base").level, "warn", report.render())
+        self.assertIn("not known locally", self.check(report, "base").message)
+        offline = self.run_checks(offline=True, settings={"default_branch": "main"})
+        self.assertEqual(self.check(offline, "base").level, "abort", offline.render())
+
+    def test_comparison_failure_aborts_in_both_modes(self):
+        real_git = preflight._git
+
+        def fail_comparison(ctx, *args):
+            if args[0] == "rev-list":
+                # Run git against a missing HEAD to exercise a real comparison failure.
+                return real_git(ctx, "rev-list", "--count", "refs/heads/missing.." + ctx.ref)
+            return real_git(ctx, *args)
+
+        for offline in (False, True):
+            with self.subTest(offline=offline), patch("oah.preflight._git", side_effect=fail_comparison):
+                report = self.run_checks(offline=offline)
+                base = self.check(report, "base")
+                self.assertEqual(base.level, "abort", report.render())
+                self.assertIn("could not compare HEAD", base.message)
+                if offline:
+                    self.assertIn("without --offline", base.message)
 
     def test_configured_branch_and_remote(self):
         git(self.repo, "remote", "rename", "origin", "upstream")
@@ -158,6 +266,8 @@ class PreflightTest(unittest.TestCase):
                 self.assertEqual(self.check(report, "base").level, "abort", report.render())
                 self.assertEqual((report.verdict, report.exit_code), ("ABORT", 2))
                 self.assertIn("[preflight] remote", self.check(report, "base").message)
+                if offline:
+                    self.assertIn("without --offline", self.check(report, "base").message)
         report = self.run_checks(settings={"remote": "upstream", "default_branch": "main"})
         self.assertEqual(self.check(report, "base").level, "ok", report.render())
         self.assertIn("upstream/main", self.check(report, "base").message)
