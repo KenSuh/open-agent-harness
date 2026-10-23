@@ -20,10 +20,11 @@ from tests.helpers import make_tmp_dir, make_unlazy
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
 
-def run_oah(*args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
+def run_oah(*args: str, env_extra: dict | None = None, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ, PYTHONPATH=SRC)
     env.update(env_extra or {})
-    return subprocess.run([sys.executable, "-m", "oah", *args], capture_output=True, env=env, timeout=60)
+    return subprocess.run([sys.executable, "-m", "oah", *args], capture_output=True, env=env, timeout=60,
+                          cwd=str(cwd) if cwd is not None else None)
 
 
 class CliTest(unittest.TestCase):
@@ -63,12 +64,38 @@ class CliTest(unittest.TestCase):
         self.assertNotIn(b"UnicodeEncodeError", text.stderr)
         output = text.stdout.decode("cp949")
         self.assertIn("\\U0001f600", output)
-        self.assertEqual(output.splitlines()[-1], "DOCTOR_MISSING required=4")
+        # git, claude and codex; Node is only recommended because this checkout uses no gates.
+        self.assertEqual(output.splitlines()[-1], "DOCTOR_MISSING required=3")
 
         as_json = run_oah("doctor", "--json", env_extra=env)
         self.assertEqual(as_json.returncode, 1, as_json.stderr)
         data = json.loads(as_json.stdout.decode("ascii"))
         self.assertEqual(data["ok"], False)
+
+    def doctor_in_project(self, *, ledger: bool) -> tuple[str, dict]:
+        work = make_tmp_dir(self)
+        project = work / "project"
+        (project / ".git").mkdir(parents=True)
+        if ledger:
+            (project / ".oah" / "tasks" / "demo").mkdir(parents=True)
+            (project / ".oah" / "tasks" / "demo" / "GATES.md").write_text("# Gates: demo\n", encoding="utf-8")
+        empty_path = work / "empty-path"
+        empty_path.mkdir()
+        env = {"PATH": str(empty_path), "HOME": str(work), "USERPROFILE": str(work)}
+        text = run_oah("doctor", env_extra=env, cwd=project)
+        as_json = run_oah("doctor", "--json", env_extra=env, cwd=project)
+        node = next(row for row in json.loads(as_json.stdout.decode("ascii"))["tools"] if row["name"] == "node")
+        return text.stdout.decode("utf-8").splitlines()[-1], node
+
+    def test_doctor_counts_node_as_required_when_the_project_uses_gates(self):
+        last, node = self.doctor_in_project(ledger=True)
+        self.assertEqual(last, "DOCTOR_MISSING required=4")
+        self.assertEqual(node["requirement"], "required")
+
+    def test_doctor_counts_node_as_recommended_without_gates(self):
+        last, node = self.doctor_in_project(ledger=False)
+        self.assertEqual(last, "DOCTOR_MISSING required=3")
+        self.assertEqual(node["requirement"], "recommended")
 
 
 def add_command_module(test: unittest.TestCase, name: str, body: str) -> None:

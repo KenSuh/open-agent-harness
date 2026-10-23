@@ -77,6 +77,12 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(cat.needs(argv), wanted)
 
+    def test_node_is_required_only_with_gates(self):
+        tools = {t.name: t for t in cat.catalog()}
+        self.assertEqual([name for name, t in tools.items() if t.required_for_gates], ["node"])
+        self.assertFalse(tools["node"].required)
+        self.assertEqual(tools["node"].install["macos"], (("brew", "install", "node"),))
+
     def test_sign_in_commands(self):
         tools = {t.name: t for t in cat.catalog()}
         self.assertEqual((tools["claude"].sign_in.status_args, tools["claude"].sign_in.login),
@@ -149,7 +155,7 @@ class CheckAndPlanTest(unittest.TestCase):
         self.assertIsNone(node.argv)
         self.assertTrue(node.manual)
         self.assertEqual(node.url, "https://nodejs.org/en/download")
-        self.assertEqual(node.display, "brew install node@24")
+        self.assertEqual(node.display, "brew install node")
         self.assertIn("brew", node.note)
 
     def test_plan_counts_programs_installed_earlier(self):
@@ -366,7 +372,7 @@ class GuidedSetupTest(unittest.TestCase):
         self.assertEqual(self.calls, [("/bin/sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh")])
         text = "\n".join(self.lines)
         self.assertIn("This runs: curl -LsSf https://astral.sh/uv/install.sh | sh", text)
-        self.assertIn("This runs: brew install node@24", text)
+        self.assertIn("This runs: brew install node", text)
         self.assertTrue(all(prompt.strip().endswith("[y/N]") for prompt in ask.prompts[:2]))
         # Required tools are present and signed in; only recommended ones were skipped.
         self.assertEqual((code, self.lines[-1]), (0, "SETUP_OK"))

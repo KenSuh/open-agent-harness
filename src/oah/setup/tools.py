@@ -94,6 +94,7 @@ class Tool:
     detect: str = "path"  # "path", "python" (the running interpreter) or "unlazy" (skill folder)
     sign_in: SignIn | None = None
     note: Mapping[str, str] = field(default_factory=dict)  # per OS, shown with the question
+    required_for_gates: bool = False  # `oah doctor` counts it as required in a project that uses gates
 
     @property
     def requirement(self) -> str:
@@ -127,10 +128,11 @@ def catalog() -> list[Tool]:
               windows=(powershell("irm https://astral.sh/uv/install.ps1 | iex"),),
               url=URL_UV),
         _tool("node", False, "runs unlazy's gate checks",
-              macos=(("brew", "install", "node@24"),),
+              # PLAN 6.1 names `brew install node@24`; that formula is keg-only and stays off PATH, so
+              # the linked `node` formula (the current release, well above unlazy's Node 16) is used.
+              macos=(("brew", "install", "node"),),
               windows=(("winget", "install", "OpenJS.NodeJS.LTS"),),
-              url=URL_NODE, min_version=(16, 0, 0),
-              note={"macos": "Homebrew keeps node@24 off PATH until you follow the hint it prints."}),
+              url=URL_NODE, min_version=(16, 0, 0), required_for_gates=True),
         _tool("claude", True, "initial implementation (Claude Code)",
               macos=(sh("curl -fsSL https://claude.ai/install.sh | bash"),),
               windows=(powershell("irm https://claude.ai/install.ps1 | iex"),

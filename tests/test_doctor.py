@@ -5,15 +5,16 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
 
 from oah.console import make_safe
-from oah.doctor import check_tools, exit_code, python_status, render_json, render_text
+from oah.doctor import check_tools, exit_code, gates_in_use, project_root, python_status, render_json, render_text
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.setup import catalog, display
-from tests.helpers import make_tmp_dir, make_unlazy
+from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy
 
 OK_VERSIONS = {
     "git": "git version 2.50.1",
@@ -102,7 +103,7 @@ class DoctorTest(unittest.TestCase):
         self.tools.results[("/fake/bin/node", "--version")] = ok("v14.21.3\n")
         statuses = self.check()
         self.assertEqual(self.by_name(statuses)["node"].status, "too-old")
-        self.assertIn("node (recommended): brew install node@24", render_text(statuses, "darwin"))
+        self.assertIn("node (recommended): brew install node\n", render_text(statuses, "darwin"))
         self.assertEqual(exit_code(statuses), 0)  # node is recommended, not required
 
     def test_codex_not_signed_in(self):
@@ -112,6 +113,69 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(codex.status, "not-signed-in")
         self.assertIn("codex login", codex.note)
         self.assertEqual(exit_code(statuses), 1)
+
+    def project(self, *, ledger=False, config=None):
+        root = make_tmp_dir(self) / "project"
+        (root / ".git").mkdir(parents=True)
+        if ledger:
+            (root / ".oah" / "tasks" / "demo").mkdir(parents=True)
+            (root / ".oah" / "tasks" / "demo" / "GATES.md").write_text("# Gates: demo\n", encoding="utf-8")
+        if config is not None:
+            (root / ".oah").mkdir(exist_ok=True)
+            (root / ".oah" / "config.toml").write_text(config, encoding="utf-8")
+        return root
+
+    def check_in(self, root):
+        return check_tools(search_path=None, env={}, home=self.home, repo_root=root, platform="darwin",
+                           resolver=self.tools.resolve, runner=self.tools.run)
+
+    def test_node_required_when_tasks_have_gate_ledgers(self):
+        self.tools.resolved["node"] = None
+        statuses = self.check_in(self.project(ledger=True))
+        node = self.by_name(statuses)["node"]
+        self.assertEqual((node.requirement, node.status), ("required", "missing"))
+        self.assertIn("this project uses gates", node.note)
+        self.assertEqual(exit_code(statuses), 1)
+        self.assertEqual(render_text(statuses, "darwin").splitlines()[-1], "DOCTOR_MISSING required=1")
+
+    def test_node_required_when_config_enables_gates(self):
+        self.tools.resolved["node"] = None
+        cases = {"[gates]\nenabled = true\n": "required", "[gates]\ncommit_ledgers = true\n": "required",
+                 "[gates]\nenabled = false\n": "recommended", "[stages]\ninitial = \"claude\"\n": "recommended",
+                 "[gates\nbroken": "recommended"}
+        for config, wanted in cases.items():
+            with self.subTest(config=config):
+                statuses = self.check_in(self.project(config=config))
+                self.assertEqual(self.by_name(statuses)["node"].requirement, wanted)
+                self.assertEqual(exit_code(statuses), 1 if wanted == "required" else 0)
+
+    def test_node_recommended_without_a_project(self):
+        self.tools.resolved["node"] = None
+        for root in (None, self.project()):
+            with self.subTest(root=root):
+                statuses = self.check_in(root)
+                self.assertEqual(self.by_name(statuses)["node"].requirement, "recommended")
+                self.assertEqual(exit_code(statuses), 0)
+
+    def test_gates_in_use_table(self):
+        self.assertFalse(gates_in_use(None))
+        self.assertFalse(gates_in_use(self.project()))
+        self.assertTrue(gates_in_use(self.project(ledger=True)))
+        self.assertTrue(gates_in_use(self.project(config="[gates]\n")))
+        self.assertFalse(gates_in_use(self.project(config="[gates]\nenabled = false\n")))
+
+    def test_project_root_walks_up_to_oah_or_git(self):
+        empty_path = str(make_tmp_dir(self))  # no git here, so the walk is used
+        root = self.project(ledger=True)
+        inner = root / "src" / "deep"
+        inner.mkdir(parents=True)
+        self.assertEqual(project_root(empty_path, cwd=inner), root)
+        plain = self.project()
+        self.assertEqual(project_root(empty_path, cwd=plain), plain)
+        if shutil.which("git"):
+            repo = make_git_repo(self)
+            (repo / "sub").mkdir()
+            self.assertEqual(project_root(None, cwd=repo / "sub").resolve(), repo.resolve())
 
     def test_claude_not_signed_in(self):
         self.tools.results[("/fake/bin/claude", "auth", "status")] = ok('{"loggedIn": false}\n')

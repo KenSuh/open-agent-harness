@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
+from oah.config import ConfigError, load_config
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, resolve_command, run_command
 from oah.setup.guide import signed_in
 from oah.setup.tools import Tool, catalog, display, os_name_for
@@ -51,9 +52,30 @@ def python_status(version_info: Sequence[int]) -> ToolStatus:
     return ToolStatus("python", "required", "too-old", version, sys.executable, "oah needs Python 3.11 or newer")
 
 
+def gates_in_use(root: pathlib.Path | None) -> bool:
+    """True when the project keeps gate ledgers (.oah/tasks/*/GATES.md) or has a [gates] table that
+    does not say `enabled = false`. An unreadable config counts only through its ledgers."""
+    if root is None:
+        return False
+    if any(path.is_file() for path in (root / ".oah" / "tasks").glob("*/GATES.md")):
+        return True
+    try:
+        gates = load_config(root).raw.get("gates")
+    except ConfigError:
+        return False
+    return isinstance(gates, Mapping) and gates.get("enabled") is not False
+
+
+def _requirement(tool: Tool, gates: bool) -> tuple[str, str]:
+    if tool.required_for_gates and gates and not tool.required:
+        return "required", f"{tool.purpose}; required because this project uses gates"
+    return tool.requirement, tool.purpose
+
+
 def _check_tool(tool: Tool, *, search_path: str | None, timeout: float, resolver: Resolver,
-                runner: Runner) -> ToolStatus:
-    name, requirement, purpose = tool.name, tool.requirement, tool.purpose
+                runner: Runner, gates: bool = False) -> ToolStatus:
+    name = tool.name
+    requirement, purpose = _requirement(tool, gates)
     try:
         resolved = resolver(tool.check[0], search_path)
     except UnsupportedBatchShim as exc:
@@ -107,7 +129,12 @@ def _check_unlazy(tool: Tool, *, env: Mapping[str, str], home: pathlib.Path,
 def check_tools(*, search_path: str | None, env: Mapping[str, str], home: pathlib.Path,
                 repo_root: pathlib.Path | None, platform: str, timeout: float = 10.0,
                 resolver: Resolver = resolve_command, runner: Runner = run_command) -> list[ToolStatus]:
-    """Check every catalog tool, in catalog order. `platform` only affects the install hints shown later."""
+    """Check every catalog tool, in catalog order. `platform` only affects the install hints shown later.
+
+    `repo_root` is the project: its skill folders are searched for unlazy, and when it uses gates the
+    tools marked `required_for_gates` (Node) count as required.
+    """
+    gates = gates_in_use(repo_root)
     statuses = []
     for tool in catalog():
         if tool.detect == "python":
@@ -116,7 +143,7 @@ def check_tools(*, search_path: str | None, env: Mapping[str, str], home: pathli
             statuses.append(_check_unlazy(tool, env=env, home=home, repo_root=repo_root))
         else:
             statuses.append(_check_tool(tool, search_path=search_path, timeout=timeout, resolver=resolver,
-                                        runner=runner))
+                                        runner=runner, gates=gates))
     return statuses
 
 
@@ -163,7 +190,7 @@ def render_json(statuses: Sequence[ToolStatus], platform: str) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
-def _repo_root(search_path: str | None) -> pathlib.Path | None:
+def _repo_root(search_path: str | None, cwd: pathlib.Path | None = None) -> pathlib.Path | None:
     try:
         git = resolve_command("git", search_path)
     except UnsupportedBatchShim:
@@ -171,16 +198,29 @@ def _repo_root(search_path: str | None) -> pathlib.Path | None:
     if git is None:
         return None
     try:
-        result = run_command(git.argv + ("rev-parse", "--show-toplevel"), timeout=10)
+        result = run_command(git.argv + ("rev-parse", "--show-toplevel"), timeout=10,
+                             cwd=str(cwd) if cwd is not None else None)
     except OSError:
         return None
     top = result.stdout.strip()
     return pathlib.Path(top) if result.returncode == 0 and top else None
 
 
+def project_root(search_path: str | None, *, cwd: pathlib.Path | None = None) -> pathlib.Path | None:
+    """The git top level; without git, the nearest folder upwards that holds .oah or .git."""
+    here = (pathlib.Path.cwd() if cwd is None else cwd).resolve()
+    top = _repo_root(search_path, here)
+    if top is not None:
+        return top
+    for folder in (here, *here.parents):
+        if (folder / ".oah").is_dir() or (folder / ".git").exists():
+            return folder
+    return None
+
+
 def doctor_main(*, json_output: bool) -> int:
     """`oah doctor` against the real machine."""
     statuses = check_tools(search_path=None, env=os.environ, home=pathlib.Path.home(),
-                           repo_root=_repo_root(None), platform=sys.platform)
+                           repo_root=project_root(None), platform=sys.platform)
     print(render_json(statuses, sys.platform) if json_output else render_text(statuses, sys.platform))
     return exit_code(statuses)
