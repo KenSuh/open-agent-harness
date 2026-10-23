@@ -1,4 +1,5 @@
 # 훅 설치 명령 — oah hooks install/uninstall/status 의 인자, 변경 미리보기 출력, 종료 코드를 맡는다.
+"""hooks: install, remove or list oah's opt-in Claude Code and git hooks."""
 from __future__ import annotations
 
 import argparse

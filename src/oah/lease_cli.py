@@ -8,6 +8,7 @@ import pathlib
 import sys
 
 from oah.atomic import StateCorrupt, StorageError, write_text_atomic
+from oah.config import ConfigError, load_config
 from oah.gates import guard
 from oah.gates.check import GateRefused
 from oah.gates.context import DEFAULTS as GATE_DEFAULTS, LEDGER_NAME, SUMMARY_NAME, find_tools, task_dir
@@ -81,7 +82,7 @@ def run(args: argparse.Namespace) -> int:
     except UnlazyError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
-    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
+    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError, ConfigError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
     except OSError as exc:
@@ -192,7 +193,7 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     artifacts = {f".oah/tasks/{lease.task}/{LEDGER_NAME}", f".oah/tasks/{lease.task}/{SUMMARY_NAME}", *lease.gates}
     changed = [name for name in _changed_files(lease, info) if name not in artifacts]
     root = pathlib.Path(lease.worktree)
-    settings = GATE_DEFAULTS
+    settings = load_config(root).section("gates", GATE_DEFAULTS)
     tools = find_tools(root, os.environ, pathlib.Path.home())
     report = guard.evaluate(root, lease.task, lease.gates, store.dir, tools=tools,
                             allow_structural=args.allow_structural, env_names=settings["input_env"],

@@ -150,6 +150,14 @@ class StopHookTest(unittest.TestCase):
         self.write_ledger(RUNNABLE + "\n- [ ] G2: another outcome\n  EVIDENCE: pending\n")  # progress resets
         self.assertEqual(self.decide(max_blocks=3)["decision"], "block")
 
+    def test_config_sets_stop_max_blocks(self):
+        git_commit(self.repo, {".oah/config.toml": "[gates]\nstop_max_blocks = 1\n"})
+        self.lease()
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        self.assertEqual(self.decide()["decision"], "block")
+        self.assertIn("releasing after 1 blocks", self.decide()["systemMessage"])
+
     def test_internal_error_allows_stop(self):
         self.lease()
         self.write_ledger(RUNNABLE)
@@ -176,10 +184,10 @@ class StopHookTest(unittest.TestCase):
         self.lease()
         self.write_ledger(RUNNABLE)
         payload = json.dumps({"session_id": "s1", "cwd": str(self.repo), "hook_event_name": "Stop"})
-        result = run_cli("hook_cli", ["hook", "stop"], cwd=self.repo, env=self.env(unlazy=False), stdin=payload)
+        result = run_cli(["hook", "stop"], cwd=self.repo, env=self.env(unlazy=False), stdin=payload)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["decision"], "block")
-        garbage = run_cli("hook_cli", ["hook", "stop"], cwd=self.repo, env=self.env(unlazy=False), stdin="{nope")
+        garbage = run_cli(["hook", "stop"], cwd=self.repo, env=self.env(unlazy=False), stdin="{nope")
         self.assertEqual(garbage.returncode, 0)
 
 

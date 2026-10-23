@@ -1,5 +1,5 @@
 # 이식 가능한 검사 명령 — 게이트 CHECK 줄에서 grep·파이프 없이 쓰는 oah check exists/contains/absent/json 을 맡는다.
-"""Tiny portable assertions for gate CHECK lines.
+"""check: portable assertions for gate CHECK lines.
 
 Each subcommand prints `OAH_CHECK_OK <kind> ...` and exits 0 on success. A failure prints
 `OAH_CHECK_FAILED: ...` on stderr and exits 1; usage errors exit 2. The failure text never contains

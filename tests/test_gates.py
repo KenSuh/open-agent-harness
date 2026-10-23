@@ -519,7 +519,7 @@ class GatesCliTest(unittest.TestCase):
                              OAH_STATE_DIR=str(self.state))
 
     def gates(self, *argv, unlazy=True):
-        return run_cli("gates_cli", ["gates", *argv], cwd=self.repo, env=self.env(unlazy))
+        return run_cli(["gates", *argv], cwd=self.repo, env=self.env(unlazy))
 
     def test_new_writes_template_and_refuses_overwrite(self):
         made = self.gates("new", "t1")
@@ -593,6 +593,24 @@ class GatesCliTest(unittest.TestCase):
         structural = self.gates("lint", "t1", unlazy=False)
         self.assertIn("structural only", structural.stdout)
         self.assertEqual(structural.returncode, 0)
+
+    def test_config_sets_timeout_and_rejects_unknown_keys(self):
+        git_commit(self.repo, {".oah/config.toml": "[gates]\ncheck_timeout = 45\n"})
+        ledger = self.repo / ".oah" / "tasks" / "t1" / "GATES.md"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.stub.reply("gate-check.mjs", pass_reply(ledger, met_ledger(RUNNABLE)))
+        self.gates("check", "t1")
+        args = self.stub.calls("gate-check.mjs")[-1]["args"]
+        self.assertEqual(args[args.index("--timeout") + 1], "45")
+        ledger.write_text(RUNNABLE, encoding="utf-8")
+        self.gates("check", "t1", "--timeout", "7")
+        args = self.stub.calls("gate-check.mjs")[-1]["args"]
+        self.assertEqual(args[args.index("--timeout") + 1], "7")
+        (self.repo / ".oah" / "config.toml").write_text("[gates]\nnope = 1\n", encoding="utf-8")
+        refused = self.gates("status", "t1")
+        self.assertEqual(refused.returncode, 69)
+        self.assertTrue(refused.stderr.startswith("OAH_CONFIG_UNKNOWN_KEY"), refused.stderr)
 
     def test_custom_ledger_path(self):
         custom = self.repo / "elsewhere.md"

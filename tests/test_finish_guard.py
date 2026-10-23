@@ -74,7 +74,7 @@ class FinishGuardTest(unittest.TestCase):
         return self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", *extra, unlazy=unlazy)
 
     def gates_check(self):
-        return run_cli("gates_cli", ["gates", "check", "t1"], cwd=self.repo, env=self.env())
+        return run_cli(["gates", "check", "t1"], cwd=self.repo, env=self.env())
 
     def write_ledger(self, text):
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -233,6 +233,21 @@ class FinishGuardTest(unittest.TestCase):
         finished = self.finish()
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertIn("gates=none", finished.stdout)
+
+    def test_commit_ledgers_config_skips_summary(self):
+        git_commit(self.repo, {".oah/config.toml": "[gates]\ncommit_ledgers = true\n"})
+        self.start()
+        self.write_ledger(met_ledger(RUNNABLE))
+        finished = self.finish("--allow-structural", unlazy=False)
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertFalse(self.summary.exists())
+
+    def test_invalid_gates_config_is_an_environment_error(self):
+        git_commit(self.repo, {".oah/config.toml": "[gates]\ncommit_ledgers = \"yes\"\n"})
+        self.start()
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 69)
+        self.assertTrue(refused.stderr.startswith("OAH_CONFIG_INVALID"), refused.stderr)
 
     def test_gate_artifacts_do_not_count_against_scope(self):
         self.start()

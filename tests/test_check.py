@@ -20,7 +20,7 @@ def run_check(cwd, *argv):
     os.chdir(cwd)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = check_cli.run(build_args(check_cli, ["check", *argv]))
+            code = check_cli.run(build_args(["check", *argv]))
     finally:
         os.chdir(previous)
     return code, out.getvalue(), err.getvalue()
@@ -93,20 +93,14 @@ class CheckTest(unittest.TestCase):
                 self.assertNotIn("OAH_CHECK_OK", out + err)
 
     def test_runs_through_platform_shell(self):
-        runner = self.dir / "runner.py"
-        runner.write_text(
-            "import argparse, sys\n"
-            f"sys.path.insert(0, {SRC!r})\n"
-            "from oah import check_cli\n"
-            "p = argparse.ArgumentParser(); check_cli.register(p.add_subparsers(dest='command'))\n"
-            "sys.exit(check_cli.run(p.parse_args(sys.argv[1:])))\n", encoding="utf-8")
-        line = f'"{sys.executable}" "{runner}" check contains notes.txt "line two"'
+        line = f'"{sys.executable}" -m oah check contains notes.txt "line two"'
         if os.name == "nt":
             shell = os.environ.get("ComSpec", "cmd.exe")
             argv = [shell, "/d", "/s", "/c", f'"{line}"']
         else:
             argv = ["/bin/sh", "-c", line]
-        result = subprocess.run(argv, cwd=self.dir, capture_output=True, text=True, encoding="utf-8", timeout=60)
+        result = subprocess.run(argv, cwd=self.dir, capture_output=True, text=True, encoding="utf-8", timeout=60,
+                                env=dict(os.environ, PYTHONPATH=SRC))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("OAH_CHECK_OK contains", result.stdout)
 

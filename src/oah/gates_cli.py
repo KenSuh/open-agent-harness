@@ -1,4 +1,5 @@
 # 게이트 명령 — oah gates new/status/check/lint 의 인자, unlazy 위임, 구조 전용 대체 출력, 종료 코드를 맡는다.
+"""gates: write, check and lint a task's gate ledger (unlazy format)."""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +9,7 @@ import pathlib
 import sys
 
 from oah.atomic import StateCorrupt, StorageError, write_text_atomic
+from oah.config import ConfigError, load_config
 from oah.gates import check as check_mod
 from oah.gates.bindings import BindingStore
 from oah.gates.context import DEFAULTS, GateTools, default_ledger, find_tools
@@ -43,8 +45,9 @@ def register(commands: argparse._SubParsersAction) -> None:
         if name == "check":
             action.add_argument("--approve", action="store_true",
                                 help="approve the CHECK commands unlazy prints (inspect them first)")
-            action.add_argument("--timeout", type=int, default=DEFAULTS["check_timeout"],
-                                help="seconds per CHECK (default %(default)s)")
+            action.add_argument("--timeout", type=int,
+                                help="seconds per CHECK (default: [gates] check_timeout, else "
+                                     f"{DEFAULTS['check_timeout']})")
         if name == "lint":
             action.add_argument("--strict", action="store_true", help="treat lint warnings as failures")
 
@@ -77,7 +80,7 @@ def _echo(text: str, stream=None) -> None:
         print(text.rstrip("\n"), file=stream or sys.stdout)
 
 
-def _new(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
+def _new(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
     task = _task(args.task)
     path = default_ledger(info.root, task)
     if path.exists():
@@ -88,7 +91,7 @@ def _new(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
     return EXIT_OK
 
 
-def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
+def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
     if not tools.available:
@@ -106,7 +109,7 @@ def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
         print(status.detail)
     store = BindingStore(state_dir(info, os.environ), _task(args.task))
     fresh = check_mod.freshness(info.root, ledger, store, unlazy_dir=tools.unlazy_dir,
-                                env_names=DEFAULTS["input_env"]) if status.verdict != "invalid" else {}
+                                env_names=settings["input_env"]) if status.verdict != "invalid" else {}
     for gate_id, binding in fresh.items():
         print(f"OAH_GATE {gate_id} binding={binding}")
     stale = [gate_id for gate_id, binding in fresh.items() if binding in ("stale", "missing")]
@@ -117,14 +120,15 @@ def _status(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
     return EXIT_OK if status.verdict == "met" and not stale else EXIT_REFUSED
 
 
-def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
+def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
     if not tools.available:
         raise GatesError("OAH_UNLAZY_MISSING", f"{tools.reason}. oah gates status still gives a structural report")
     store = BindingStore(state_dir(info, os.environ), _task(args.task))
     report = check_mod.run_check(info.root, ledger, store, unlazy_dir=tools.unlazy_dir, node=tools.node,
-                                 approve=args.approve, timeout=args.timeout, env_names=DEFAULTS["input_env"])
+                                 approve=args.approve, timeout=args.timeout or settings["check_timeout"],
+                                 env_names=settings["input_env"])
     if report.unlazy is not None:
         _echo(report.unlazy.stdout)
         _echo(report.unlazy.stderr, sys.stderr)
@@ -151,7 +155,7 @@ def _check(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
     return EXIT_REFUSED
 
 
-def _lint(args: argparse.Namespace, info: RepoInfo, tools: GateTools) -> int:
+def _lint(args: argparse.Namespace, info: RepoInfo, tools: GateTools, settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
     if not tools.available:
@@ -175,14 +179,15 @@ HANDLERS = {"new": _new, "status": _status, "check": _check, "lint": _lint}
 def run(args: argparse.Namespace) -> int:
     try:
         info = repo_info(pathlib.Path.cwd())
+        settings = load_config(info.root).section("gates", DEFAULTS)
         tools = find_tools(info.root, os.environ, pathlib.Path.home())
-        return HANDLERS[args.gates_command](args, info, tools)
+        return HANDLERS[args.gates_command](args, info, tools, settings)
     except (GatesError, check_mod.GateRefused) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if exc.code in ENVIRONMENT_CODES else EXIT_REFUSED
     except unlazy_mod.UnlazyError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
-    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError) as exc:
+    except (NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError, ConfigError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT

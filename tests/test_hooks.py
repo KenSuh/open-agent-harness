@@ -173,18 +173,18 @@ class HooksCliTest(unittest.TestCase):
         git_commit(self.repo, {"a.txt": "a\n"})
 
     def test_cli_dry_run_install_status_uninstall(self):
-        dry = run_cli("hooks_cli", ["hooks", "install", "stop", "--dry-run"], cwd=self.repo)
+        dry = run_cli(["hooks", "install", "stop", "--dry-run"], cwd=self.repo)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertIn("oah hook stop", dry.stdout)
         self.assertIn("OAH_HOOK_DRY_RUN kind=stop", dry.stdout)
         self.assertFalse((self.repo / ".claude" / "settings.local.json").exists())
-        done = run_cli("hooks_cli", ["hooks", "install", "stop", "pre-push"], cwd=self.repo)
+        done = run_cli(["hooks", "install", "stop", "pre-push"], cwd=self.repo)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("OAH_HOOK_INSTALLED kind=stop", done.stdout)
         self.assertIn("OAH_HOOK_INSTALLED kind=pre-push", done.stdout)
-        status = run_cli("hooks_cli", ["hooks", "status"], cwd=self.repo)
+        status = run_cli(["hooks", "status"], cwd=self.repo)
         self.assertRegex(status.stdout, r"stop\s+installed")
-        removed = run_cli("hooks_cli", ["hooks", "uninstall", "stop", "pre-push"], cwd=self.repo)
+        removed = run_cli(["hooks", "uninstall", "stop", "pre-push"], cwd=self.repo)
         self.assertIn("OAH_HOOK_REMOVED kind=stop", removed.stdout)
         self.assertNotIn(str(self.repo), removed.stdout.replace(str(self.repo.resolve()), ""))
 
@@ -192,11 +192,11 @@ class HooksCliTest(unittest.TestCase):
         hook = self.repo / ".git" / "hooks" / "pre-push"
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook.write_text("#!/bin/sh\n", encoding="utf-8")
-        refused = run_cli("hooks_cli", ["hooks", "install", "pre-push"], cwd=self.repo)
+        refused = run_cli(["hooks", "install", "pre-push"], cwd=self.repo)
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_HOOK_FOREIGN"), refused.stderr)
         self.assertIn("--force", refused.stderr)
-        unknown = run_cli("hooks_cli", ["hooks", "install", "nope"], cwd=self.repo)
+        unknown = run_cli(["hooks", "install", "nope"], cwd=self.repo)
         self.assertEqual(unknown.returncode, 2)
 
 
@@ -204,15 +204,15 @@ class HookDispatchTest(unittest.TestCase):
     def test_unknown_hook_exits_2_and_lists(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            code = hook_cli.run(build_args(hook_cli, ["hook", "no-such-hook"]))
+            code = hook_cli.run(build_args(["hook", "no-such-hook"]))
         self.assertEqual(code, 2)
         self.assertIn("OAH_HOOK_UNKNOWN", err.getvalue())
         self.assertIn("stop", err.getvalue())
         self.assertIn("pre-push", err.getvalue())
         self.assertNotIn("cli", hook_cli.known_hooks())
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(hook_cli.run(build_args(hook_cli, ["hook", "Bad_Name"])), 2)
-            self.assertEqual(hook_cli.run(build_args(hook_cli, ["hook", "cli"])), 2)
+            self.assertEqual(hook_cli.run(build_args(["hook", "Bad_Name"])), 2)
+            self.assertEqual(hook_cli.run(build_args(["hook", "cli"])), 2)
 
     def test_dispatch_dashes_to_underscores(self):
         seen = {}
@@ -223,9 +223,10 @@ class HookDispatchTest(unittest.TestCase):
                 seen["args"] = args.hook_args
                 return 7
 
+        args = build_args(["hook", "pre-push", "origin", "url"])
         with patch.object(hook_cli.importlib, "import_module", return_value=Fake) as importer, \
                 patch.object(hook_cli, "known_hooks", return_value=("pre-push", "stop")):
-            code = hook_cli.run(build_args(hook_cli, ["hook", "pre-push", "origin", "url"]))
+            code = hook_cli.run(args)
         importer.assert_called_with("oah.hook_pre_push")
         self.assertEqual((code, seen["args"]), (7, ["origin", "url"]))
 
@@ -259,7 +260,7 @@ class PrePushTest(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True), patch.object(hook_pre_push, "find_gitleaks", finder), \
                     patch("sys.stdin", io.StringIO(stdin)), contextlib.redirect_stdout(out), \
                     contextlib.redirect_stderr(err):
-                code_out = hook_pre_push.run(build_args(hook_cli, ["hook", "pre-push", "origin", "git@example.com:x"]))
+                code_out = hook_pre_push.run(build_args(["hook", "pre-push", "origin", "git@example.com:x"]))
         finally:
             os.chdir(previous)
         return code_out, out.getvalue(), err.getvalue()

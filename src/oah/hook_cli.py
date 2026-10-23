@@ -1,4 +1,5 @@
 # 훅 실행 분기 — oah hook <이름> 을 oah.hook_<이름> 모듈(대시는 밑줄)의 run(args) 로 넘기고, 모르는 이름은 알려진 목록과 함께 거절한다.
+"""hook: run one hook (called by the installed Claude Code and git hooks)."""
 from __future__ import annotations
 
 import argparse

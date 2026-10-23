@@ -1,4 +1,4 @@
-# 게이트 테스트 공용 도우미 — 가짜 node 준비, 가짜 unlazy 폴더, v1 자동 증거가 채워진 원장, 명령 모듈 실행을 맡는다.
+# 게이트 테스트 공용 도우미 — 가짜 node 준비, 가짜 unlazy 폴더, v1 자동 증거가 채워진 원장, oah 명령 실행을 맡는다.
 from __future__ import annotations
 
 import argparse
@@ -75,24 +75,17 @@ def met_ledger(text: str, *, skip: Sequence[str] = ()) -> str:
     return "".join(lines)
 
 
-def run_cli(module: str, argv: Sequence[str], *, cwd: pathlib.Path, env: dict | None = None,
-            stdin: str | None = None, timeout: float = 120) -> subprocess.CompletedProcess:
-    """Run `oah <argv>` through one command module's register/run, as cli.py discovery will."""
-    code = ("import argparse, sys\n"
-            "from oah.console import configure_stdio\n"
-            f"from oah import {module} as m\n"
-            "configure_stdio()\n"
-            "p = argparse.ArgumentParser(prog='oah')\n"
-            "s = p.add_subparsers(dest='command')\n"
-            "m.register(s)\n"
-            "sys.exit(m.run(p.parse_args(sys.argv[1:])))\n")
+def run_cli(argv: Sequence[str], *, cwd: pathlib.Path, env: dict | None = None, stdin: str | None = None,
+            timeout: float = 120) -> subprocess.CompletedProcess:
+    """Run `python -m oah <argv>` with this checkout's src on the path."""
     full_env = dict(env if env is not None else os.environ)
     full_env["PYTHONPATH"] = SRC
-    return subprocess.run([sys.executable, "-c", code, *argv], cwd=cwd, capture_output=True, text=True,
+    return subprocess.run([sys.executable, "-m", "oah", *argv], cwd=cwd, capture_output=True, text=True,
                           encoding="utf-8", env=full_env, input=stdin, timeout=timeout)
 
 
-def build_args(module, argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="oah")
-    module.register(parser.add_subparsers(dest="command"))
-    return parser.parse_args(list(argv))
+def build_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse `oah <argv>` with the real command discovery."""
+    from oah.cli import build_parser
+
+    return build_parser().parse_args(list(argv))

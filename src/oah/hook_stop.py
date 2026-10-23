@@ -24,6 +24,7 @@ from typing import Mapping
 
 from oah import unlazy as unlazy_mod
 from oah.atomic import read_json, write_json_atomic
+from oah.config import load_config
 from oah.gates import guard
 from oah.gates.check import GateRefused
 from oah.gates.context import DEFAULTS, find_tools
@@ -85,7 +86,7 @@ def _shown(items: list[str], limit: int = 6) -> str:
 
 
 def decide(payload: Mapping, *, env: Mapping[str, str] | None = None, home: pathlib.Path | None = None,
-           max_blocks: int = DEFAULTS["stop_max_blocks"]) -> dict | None:
+           max_blocks: int | None = None) -> dict | None:
     """The Stop decision for one payload: None (allow), a systemMessage, or a block."""
     env = os.environ if env is None else env
     home = home or pathlib.Path.home()
@@ -97,6 +98,8 @@ def decide(payload: Mapping, *, env: Mapping[str, str] | None = None, home: path
         except NotARepo:
             return None
         state = state_dir(info, env)
+        settings = load_config(info.root).section("gates", DEFAULTS)
+        max_blocks = settings["stop_max_blocks"] if max_blocks is None else max_blocks
         governing = [lease for lease, stale in Store(state).snapshot()
                      if not stale and same_worktree(lease.worktree, info.root)]
         if not governing:
@@ -106,7 +109,7 @@ def decide(payload: Mapping, *, env: Mapping[str, str] | None = None, home: path
         for lease in governing:
             try:
                 found = guard.assess(info.root, lease.task, lease.gates, state, tools=tools, env=env,
-                                     env_names=DEFAULTS["input_env"])
+                                     env_names=settings["input_env"])
             except GateRefused as exc:
                 problems.append(f"task {lease.task}: {exc}")
                 progress.append(f"{lease.task}:refused")
