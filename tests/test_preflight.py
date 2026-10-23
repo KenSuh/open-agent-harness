@@ -409,6 +409,45 @@ class PreflightTest(unittest.TestCase):
         self.assertTrue(failed.impact.startswith("failed("))
         self.assertEqual(self.run_checks(impact=impact, touch=()).impact, "skipped(no --touch paths)")
 
+    def test_impact_refusal_aborts(self):
+        def stale(root, paths):
+            raise preflight.ImpactRefused("OAH_IMPACT_STALE", "the map moved while it was built")
+
+        report = self.run_checks(impact=stale)
+        check = self.check(report, "impact")
+        self.assertEqual((check.level, report.verdict, report.impact), ("abort", "ABORT", "stale"))
+        self.assertTrue(check.message.startswith("OAH_IMPACT_STALE: the map moved"), check.message)
+
+        def empty(root, paths):
+            raise preflight.ImpactUnavailable("no commits yet")
+
+        report = self.run_checks(impact=empty)
+        self.assertEqual((self.check(report, "impact").level, report.impact), ("info", "unavailable(no commits yet)"))
+
+    def test_refresh_impact_refuses_or_reports_unavailable(self):
+        from oah.impact import ImpactError
+
+        def raising(error):
+            def ensure(root):
+                raise error
+            return ensure
+
+        for error in (ImpactError("OAH_IMPACT_STALE", "inputs kept moving"), OSError(5, "disk error"),
+                      ImpactError("OAH_IMPACT_LOCKED", "busy")):
+            with self.subTest(error=error), self.assertRaises(preflight.ImpactRefused) as caught:
+                preflight.refresh_impact(self.repo, ensure=raising(error))
+            self.assertEqual(caught.exception.code, "OAH_IMPACT_STALE")
+            self.assertIn("oah impact refresh", str(caught.exception))
+        with self.assertRaises(preflight.ImpactUnavailable):
+            preflight.refresh_impact(self.repo, ensure=raising(ImpactError("OAH_IMPACT_NO_COMMIT", "none")))
+
+    def test_touch_lists_strong_rows_from_fresh_map(self):
+        git_commit(self.repo, {".github/workflows/ci.yml": "jobs:\n  t:\n    steps:\n      - run: python src/a.py\n"})
+        lines = preflight.impact_hook(self.repo, ("src/a.py",))
+        self.assertTrue(lines[0].startswith("map "), lines)
+        self.assertIn("exec .github/workflows/ci.yml:4 for src/a.py", lines)
+        self.assertTrue(preflight.impact_hook(self.repo, ())[0].startswith("map fresh at "))
+
     def test_output_ends_with_not_proven_list(self):
         report = self.run_checks()
         lines = report.render().rstrip("\n").splitlines()
@@ -452,6 +491,28 @@ class PreflightCliTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.remote)], check=True)
         git(self.repo, "remote", "add", "origin", str(self.remote))
         git(self.repo, "push", "-q", "origin", "main")
+
+    def test_cli_refreshes_impact_without_touch(self):
+        import oah.impact
+
+        calls = []
+        real = oah.impact.ensure_fresh
+
+        def spy(root, **kwargs):
+            calls.append((pathlib.Path(root), kwargs))
+            return real(root, **kwargs)
+
+        with patch.object(oah.impact, "ensure_fresh", spy):
+            code, out, err = run_cli(self.repo, "preflight", "--offline")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual([root.resolve() for root, _ in calls], [self.repo.resolve()])
+        impact = next(line for line in out.splitlines() if line.lstrip().startswith("[info]") and "impact:" in line)
+        self.assertIn("the impact map is current", impact)
+
+    def test_cli_without_commits_reports_impact_unavailable(self):
+        empty = make_git_repo(self)
+        code, out, err = run_cli(empty, "preflight", "--offline")
+        self.assertIn("impact=unavailable(no commits yet)", out.splitlines(), out + err)
 
     def test_cli_exit_codes(self):
         self.assertEqual(preflight_cli.COMMANDS, ("preflight",))

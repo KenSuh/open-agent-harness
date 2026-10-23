@@ -14,13 +14,16 @@
 4. `recent`: commits on the default branch since the packet's base that touch the compared scope
    are a WARN. The base is the task lease's starting commit, else the last commit that changed the
    packet, else the packet's modification time.
-5. `impact`: the `impact` hook, given the normalized `--touch` paths, returns information lines
-   (the bound gates). Without a hook the report says `impact=unavailable`.
+5. `impact`: the `impact` hook runs first of all, with the normalized `--touch` paths (maybe none).
+   `impact_hook` refreshes the persisted map (`oah.impact.ensure_fresh`) and lists the pin and exec
+   rows for the paths. `ImpactRefused` (`OAH_IMPACT_STALE`) is ABORT, `ImpactUnavailable` (no commits
+   yet) is information, and any other hook error is a WARN. Without a hook the report says
+   `impact=unavailable`. Nothing here fetches for impact.
 6. `packet`: with a task, its packet must check clean, be accepted and have success conditions.
 7. `project`: each configured argv must exit 0.
 
 Settings are parameters (`DEFAULTS`, the `[preflight]` section of `.oah/config.toml`). The CLI passes
-`[preflight].checks` as `project_checks`; lane P4b injects `oah.impact.ensure_fresh` as `impact`. The verdict is PROCEED (0),
+`[preflight].checks` as `project_checks` and `impact_hook` as `impact`. The verdict is PROCEED (0),
 PROCEED_WITH_WARNINGS (0) or ABORT (2), and the rendered report ends with what it did not prove.
 """
 from __future__ import annotations
@@ -51,6 +54,59 @@ MAX_LISTED = 20
 NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 
 ImpactHook = Callable[[pathlib.Path, tuple[str, ...]], Sequence[str]]
+NO_COMMIT = "OAH_IMPACT_NO_COMMIT"
+
+
+class ImpactRefused(Exception):
+    """The impact map could not be made fresh; the caller refuses (`OAH_IMPACT_STALE`)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+class ImpactUnavailable(Exception):
+    """There is nothing to map yet (a repository without commits)."""
+
+
+def refresh_impact(root: pathlib.Path, *, ensure: Callable | None = None):
+    """Refresh the persisted impact map first (A11): its MapInfo, or a refusal; never a stale map.
+
+    A repository without commits raises ImpactUnavailable; every other failure is ImpactRefused with
+    `OAH_IMPACT_STALE`. Only the working tree is read: nothing is fetched."""
+    from oah.impact import ImpactError, ensure_fresh
+
+    try:
+        return (ensure or ensure_fresh)(pathlib.Path(root))
+    except ImpactError as exc:
+        if exc.code == NO_COMMIT:
+            raise ImpactUnavailable("no commits yet") from None
+        reason = str(exc)
+    except Exception as exc:  # a lock, storage, git or config failure leaves the map unconfirmed
+        reason = f"{getattr(exc, 'code', type(exc).__name__)}: {exc}"
+    raise ImpactRefused("OAH_IMPACT_STALE", f"the impact map could not be refreshed ({reason}). Fix that, run "
+                        "oah impact refresh, then retry; oah never works from a stale map")
+
+
+def impact_hook(root: pathlib.Path, touch: tuple[str, ...]) -> list[str]:
+    """Refresh the map, then name it and list the pin and exec rows for the touched paths."""
+    from oah.impact import gatebind, mapstore, query
+    from oah.impact.defaults import configured
+
+    info = refresh_impact(root)
+    lines = [f"map {info.action} at {info.commit[:12]}"]
+    if not touch:
+        return lines
+    try:
+        _info, data = mapstore.fresh_map(root, refresh=False)
+        gates, gate_status = gatebind.discover(pathlib.Path(root))
+        rows = query.query(data, list(touch), gates=gates, settings=configured(pathlib.Path(root)))
+    except Exception as exc:
+        raise ImpactRefused("OAH_IMPACT_STALE", f"the impact map changed while it was read ({exc}); run oah "
+                            "preflight again") from None
+    lines.append(f"gates: {gate_status}")
+    lines += [f"{row.binding} {row.where} for {row.target}" for row in rows if row.binding in query.STRONG]
+    return lines
 
 
 @dataclasses.dataclass(frozen=True)
@@ -349,20 +405,42 @@ def _check_recent(ctx: _Context, scope: tuple[str, ...], path: pathlib.Path | No
                                    "scope; read them before you start", tuple(commits))
 
 
-def _check_impact(ctx: _Context, impact: ImpactHook | None, touch: tuple[str, ...]) -> tuple[Check, str]:
+def _run_impact(impact: ImpactHook | None, root: pathlib.Path, touch: tuple[str, ...]) -> tuple | None:
+    """Run the impact hook (it refreshes the map first): ("lines", …), ("refused", …), ("unavailable", …)
+    or ("failed", …); None without a hook."""
     if impact is None:
+        return None
+    try:
+        return "lines", tuple(str(line) for line in impact(root, touch))
+    except ImpactRefused as exc:
+        return "refused", exc
+    except ImpactUnavailable as exc:
+        return "unavailable", str(exc)
+    except Exception as exc:  # a broken plugin must not hide the other checks
+        return "failed", f"{type(exc).__name__}: {exc}"
+
+
+def _check_impact(ctx: _Context, outcome: tuple | None, touch: tuple[str, ...]) -> tuple[Check, str]:
+    if outcome is None:
         ctx.not_proven.append("what else the touched paths affect (impact=unavailable)")
         return Check("impact", "info", "impact=unavailable: the impact map is not set up yet"), "unavailable"
+    kind, value = outcome
+    if kind == "refused":
+        ctx.not_proven.append("what else the touched paths affect (the impact map is stale)")
+        return Check("impact", "abort", str(value)), "stale"
+    if kind == "unavailable":
+        ctx.not_proven.append(f"what else the touched paths affect (impact=unavailable: {value})")
+        return (Check("impact", "info", f"impact=unavailable({value}): there is nothing to map yet; make a first "
+                                        "commit"), f"unavailable({value})")
+    if kind == "failed":
+        ctx.not_proven.append("what else the touched paths affect (impact=failed)")
+        return Check("impact", "warn", f"the impact step failed ({value})"), f"failed({value})"
     if not touch:
         ctx.not_proven.append("what else your paths affect: no --touch paths were given")
-        return Check("impact", "info", "skipped: pass --touch PATH… to see bound gates"), "skipped(no --touch paths)"
-    try:
-        lines = tuple(str(line) for line in impact(ctx.info.root, touch))
-    except Exception as exc:  # a broken plugin must not hide the other checks
-        reason = f"{type(exc).__name__}: {exc}"
-        ctx.not_proven.append("what else the touched paths affect (impact=failed)")
-        return Check("impact", "warn", f"the impact step failed ({reason})"), f"failed({reason})"
-    return Check("impact", "info", f"{len(lines)} item(s) for {', '.join(touch)}", lines), "used"
+        current = f"the impact map is current ({value[0]}); " if value else ""
+        return (Check("impact", "info", f"{current}pass --touch PATH… to see bound gates"),
+                "skipped(no --touch paths)")
+    return Check("impact", "info", f"{len(value)} item(s) for {', '.join(touch)}", value), "used"
 
 
 def _check_packet(ctx: _Context, task: str | None, path: pathlib.Path | None) -> Check:
@@ -439,11 +517,12 @@ def run_checks(info: RepoInfo, *, state: pathlib.Path, task: str | None = None, 
             touch_scope = normalize_scope(list(touch), info.root)
         except ScopeError:
             pass  # reported by the leases check
+    impact_outcome = _run_impact(impact, info.root, touch_scope)  # refresh the impact map first (A11)
     checks = [_check_base(ctx), _check_dirty(ctx)]
     scope, scope_problems = _compare_scope(ctx, tuple(touch))
     checks.append(_check_leases(ctx, scope, scope_problems, entries, store_error, task))
     checks.append(_check_recent(ctx, scope, path))
-    impact_check, impact_state = _check_impact(ctx, impact, touch_scope)
+    impact_check, impact_state = _check_impact(ctx, impact_outcome, touch_scope)
     checks.append(impact_check)
     checks.append(_check_packet(ctx, task, path))
     checks.append(_check_project(ctx, project_checks))

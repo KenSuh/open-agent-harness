@@ -43,7 +43,7 @@ def run(args: argparse.Namespace) -> int:
         checks = project_checks(settings, str(config.path or ".oah/config.toml"))
         report = preflight.run_checks(info, state=state_dir(info, os.environ), task=args.task,
                                       touch=tuple(args.touch), offline=args.offline, settings=settings,
-                                      project_checks=checks)
+                                      impact=preflight.impact_hook, project_checks=checks)
     except PacketError as exc:
         print(exc, file=sys.stderr)
         return EXIT_USAGE
