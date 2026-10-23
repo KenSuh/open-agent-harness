@@ -93,6 +93,18 @@ class Run:
                            "was changed by hand")
         return data
 
+    def claim_queued_orca(self) -> None:
+        """Only one terminal may move a queued Orca run into execution."""
+        with StateLock(_contained_path(self.path.parents[2], ".lock")):
+            data = self.read()
+            launcher = data.get("launcher")
+            if (data.get("status") != "queued" or not isinstance(launcher, dict) or
+                    launcher.get("name") != "orca"):
+                raise RunError("OAH_RUN_NOT_QUEUED", "this run is not a queued Orca run, so nothing was started; "
+                               "start a new run with oah call")
+            data.update(status="running", pid=os.getpid())
+            write_json_atomic(self.result_path, data)
+
     def result(self, **fields: object) -> dict:
         """Merge fields into result.json; unknown names are refused so records keep one schema."""
         unknown = sorted(set(fields) - set(RESULT_FIELDS))

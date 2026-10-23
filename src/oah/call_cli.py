@@ -247,6 +247,8 @@ def _wait(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
 
 
 def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> int:
+    from oah.launchers import orca as orca_launcher
+
     run = runs.find_run(state, args.run_id)
     data = run.read()
     launcher = data.get("launcher")
@@ -254,9 +256,11 @@ def _worker_run(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pat
         print(f"OAH_RUN_NOT_QUEUED: run {args.run_id} is {data.get('status')}, not a queued Orca run, so nothing "
               "was started; start a new run with oah call", file=sys.stderr)
         return EXIT_REFUSED
+    prepared = orca_launcher.worker_prepared(run, root, load_settings(root))
+    run.claim_queued_orca()
     print(f"oah worker {args.run_id}: {data.get('engine')} {data.get('stage')} model={data.get('resolved_model')} "
           f"effort={data.get('launch_effort')}; run folder {run.path}", flush=True)
-    call.background_main(str(run.path))
+    call.execute(prepared)
     return _report(run.read(), False)
 
 

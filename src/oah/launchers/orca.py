@@ -18,6 +18,7 @@ source of truth, and a terminal that ends without a final record makes the run `
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
@@ -26,7 +27,7 @@ import time
 from typing import Mapping, Sequence
 
 from oah import briefs, call, runs
-from oah.atomic import write_json_atomic, write_text_atomic
+from oah.atomic import read_json, write_json_atomic, write_text_atomic
 from oah.engines.effort import EngineError
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.paths import STATE_ENV
@@ -44,6 +45,13 @@ RUNNER = "worker-run"
 TERMINAL_LOG = "terminal.log"
 _WITHOUT = ("Nothing was launched. To run without Orca, drop --launcher orca or set "
             '[call] launcher = "process" in .oah/config.toml')
+_ENVIRONMENT = frozenset(("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "LOCALAPPDATA", "APPDATA",
+                          "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"))
+
+
+def _environment(env: Mapping[str, str]) -> dict[str, str]:
+    """Only OS paths and locale reach Orca; engine credentials stay in the worker's environment."""
+    return {key: value for key, value in env.items() if key.upper() in _ENVIRONMENT}
 
 
 class OrcaReplyError(Exception):
@@ -59,6 +67,9 @@ class Orca:
     version: str
     env: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "env", _environment(self.env))
+
     def json(self, *args: str, timeout: float = CLI_TIMEOUT) -> dict:
         """Run one documented command with --json and return its `result` object."""
         try:
@@ -73,12 +84,22 @@ class Orca:
             detail = (result.stderr or result.stdout).strip().splitlines()
             raise OrcaReplyError("unreadable", detail[-1][:300] if detail else f"exit code {result.returncode}") \
                 from None
-        if not isinstance(data, dict) or data.get("ok") is not True:
-            error = data.get("error") if isinstance(data, dict) else None
-            error = error if isinstance(error, dict) else {}
-            raise OrcaReplyError(str(error.get("code") or "error"), str(error.get("message") or "no message"))
+        if not isinstance(data, dict) or type(data.get("ok")) is not bool:
+            raise OrcaReplyError("unreadable", "the reply has no boolean ok field")
+        if data["ok"] is False:
+            if result.returncode == 0:
+                raise OrcaReplyError("cli-failed", "the error reply disagrees with exit code zero")
+            error = data.get("error")
+            if not isinstance(error, dict) or not all(isinstance(error.get(key), str) and error[key]
+                                                     for key in ("code", "message")):
+                raise OrcaReplyError("unreadable", "the reply has no error code and message")
+            raise OrcaReplyError(error["code"], error["message"])
+        if result.returncode != 0:
+            raise OrcaReplyError("cli-failed", f"the success reply disagrees with exit code {result.returncode}")
         found = data.get("result")
-        return found if isinstance(found, dict) else {}
+        if not isinstance(found, dict):
+            raise OrcaReplyError("unreadable", "the reply has no result object")
+        return found
 
 
 def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None = None) -> Orca:
@@ -100,10 +121,14 @@ def find(command: Sequence[str], env: Mapping[str, str], search_path: str | None
                               f"in .oah/config.toml. {_WITHOUT}")
         base = [*found.argv, *command[1:]]
     try:
-        probe = run_command([*base, "--version"], timeout=PROBE_TIMEOUT, env=env)
+        probe = run_command([*base, "--version"], timeout=PROBE_TIMEOUT, env=_environment(env))
         output = probe.stdout.strip().splitlines()
         version = output[0].strip() if output and probe.returncode == 0 and not probe.timed_out else ""
         detail = (probe.stderr.strip().splitlines() or [f"exit code {probe.returncode}"])[-1]
+    except UnsupportedBatchShim as exc:
+        raise EngineError(UNAVAILABLE, "Orca's configured command is a batch shim. Install a native executable "
+                          "or configure an explicit [interpreter.exe, script] command in [call] orca_command, "
+                          f"then retry. {_WITHOUT}") from exc
     except (OSError, ValueError) as exc:
         version, detail = "", str(exc)
     if not version:
@@ -190,16 +215,55 @@ def terminal_args(placement: Placement, title: str, command: str, *, windows: bo
     return args
 
 
+def _launch_digest(data: dict) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings) -> call.Prepared:
+    """Bind the saved execution to the located run before consuming any execution metadata."""
+    data = run.read()
+    saved = read_json(run.launch_path, None)
+    launcher = data.get("launcher") or {}
+
+    def invalid() -> runs.RunError:
+        return runs.RunError("OAH_RUN_LAUNCH_INVALID", "the saved launch does not match this queued run; "
+                             "start a new run with oah call")
+
+    if not isinstance(saved, dict) or _launch_digest(saved) != launcher.get("launch_digest"):
+        raise invalid()
+    try:
+        prepared = call.Prepared.from_json(saved)
+    except (KeyError, TypeError, ValueError):
+        raise invalid() from None
+    if (prepared.run_id != run.id or prepared.task != run.task or prepared.run_dir != str(run.path) or
+            prepared.engine not in call.routing.ENGINES or prepared.stage not in call.routing.STAGES or
+            any(data.get(key) != saved[key] for key in ("run_id", "task", "engine", "stage", "cwd")) or
+            data.get("command") != list(prepared.argv) or data.get("resolved_model") != prepared.model or
+            data.get("launch_effort") != prepared.launch_effort or
+            data.get("cli_version") != (prepared.cli_version or runs.UNVERIFIED) or
+            data.get("read_only") is not (prepared.stage == "review") or
+            pathlib.Path(prepared.cwd).resolve() != root.resolve() or
+            launcher.get("worktree") != prepared.cwd):
+        raise invalid()
+    call.routing.check_stage(prepared.engine, prepared.stage, settings.stages,
+                             override=data.get("override_stage") is True)
+    additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": run.task}
+    if prepared.env_additions != additions:
+        raise invalid()
+    return dataclasses.replace(prepared, env_additions=additions)
+
+
 def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows: bool | None = None) -> dict:
     """Queue the prepared run with its launcher record and open its Orca terminal; returns the record."""
     run = prepared.run
     command = runner_command(prepared.run_id)
-    write_json_atomic(run.launch_path, prepared.to_json())
+    launch = prepared.to_json()
+    write_json_atomic(run.launch_path, launch)
     info = {"name": "orca", "orca_version": orca.version, "worktree": str(placement.path),
             "worktree_id": placement.worktree_id, "worktree_created": placement.created, "terminal": None,
             "terminal_process_id": None, "host_platform": runs.UNVERIFIED, "command": command,
             "worker_env": "env", "reported_model": runs.UNVERIFIED, "reported_effort": runs.UNVERIFIED,
-            "terminal_cursor": "0"}
+            "terminal_cursor": "0", "launch_digest": _launch_digest(launch)}
     run.result(status="queued", launcher=info)
     windows = os.name == "nt" if windows is None else windows
     try:
@@ -225,21 +289,37 @@ def _append_log(run: runs.Run, lines: Sequence[str]) -> None:
     write_text_atomic(path, before + "".join(f"{line}\n" for line in lines))
 
 
-def _capture(orca: Orca, run: runs.Run, handle: str) -> None:
+def _failure(exc: OrcaReplyError) -> EngineError:
+    return EngineError(FAILED, f"Orca could not follow the terminal ({exc}); check Orca's command-line tool "
+                       "and retry oah wait, or run without --launcher orca")
+
+
+_MISSING_TERMINAL = ("terminal_handle_stale", "selector_not_found")
+
+
+def _capture(orca: Orca, run: runs.Run, handle: str, deadline: float) -> None:
     """Copy new terminal output into terminal.log, in at most READ_PAGES reads of READ_LIMIT lines."""
     info = dict(run.read().get("launcher") or {})
     cursor = start_cursor = str(info.get("terminal_cursor") or "0")
     lines: list[str] = []
     for _ in range(READ_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
             terminal = orca.json("terminal", "read", "--terminal", handle, "--cursor", cursor, "--limit",
-                                 str(READ_LIMIT)).get("terminal")
-        except OrcaReplyError:
+                                 str(READ_LIMIT), timeout=min(CLI_TIMEOUT, remaining)).get("terminal")
+        except OrcaReplyError as exc:
+            if exc.code not in (*_MISSING_TERMINAL, "cli-timeout", "timeout"):
+                raise _failure(exc) from exc
             break
-        terminal = terminal if isinstance(terminal, dict) else {}
+        if (not isinstance(terminal, dict) or not isinstance(terminal.get("tail"), list) or
+                not all(isinstance(line, str) for line in terminal["tail"]) or
+                not all(isinstance(terminal.get(key), str) and terminal[key]
+                        for key in ("nextCursor", "latestCursor"))):
+            raise _failure(OrcaReplyError("unreadable", "the reply has no terminal tail and cursors"))
         tail = terminal.get("tail")
-        if isinstance(tail, list):
-            lines.extend(line for line in tail if isinstance(line, str))
+        lines.extend(tail)
         following = terminal.get("nextCursor")
         if not isinstance(following, str) or following == cursor:
             break
@@ -252,14 +332,25 @@ def _capture(orca: Orca, run: runs.Run, handle: str) -> None:
         run.result(launcher=dict(info, terminal_cursor=cursor))
 
 
-def _lost(orca: Orca, run: runs.Run, handle: str, reason: str) -> dict:
-    try:
-        preview = orca.json("terminal", "show", "--terminal", handle).get("terminal")
-        preview = preview.get("preview") if isinstance(preview, dict) else None
-    except OrcaReplyError:
-        preview = None
+def _preview(orca: Orca, run: runs.Run, handle: str, deadline: float) -> None:
+    preview = None
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        try:
+            terminal = orca.json("terminal", "show", "--terminal", handle,
+                                 timeout=min(CLI_TIMEOUT, remaining)).get("terminal")
+            if not isinstance(terminal, dict) or not isinstance(terminal.get("preview"), str):
+                raise OrcaReplyError("unreadable", "the reply has no terminal preview string")
+            preview = terminal["preview"]
+        except OrcaReplyError as exc:
+            if exc.code not in (*_MISSING_TERMINAL, "cli-timeout", "timeout"):
+                raise _failure(exc) from exc
     if isinstance(preview, str) and preview:
         _append_log(run, ["--- terminal preview ---", *preview.splitlines()])
+
+
+def _lost(orca: Orca, run: runs.Run, handle: str, reason: str, deadline: float) -> dict:
+    _preview(orca, run, handle, deadline)
     return run.result(status="lost", error=f"OAH_RUN_LOST: the Orca terminal {handle} {reason} before the runner "
                       f"recorded a result; read {run.file_path(TERMINAL_LOG)} and call the engine again")
 
@@ -284,21 +375,29 @@ def wait(orca: Orca, state_dir: pathlib.Path, run_id: str, *, timeout: float = c
         problem = None
         try:
             reply = orca.json("terminal", "wait", "--terminal", handle, "--for", "exit", "--timeout-ms", str(ms),
-                              timeout=ms / 1000 + CLI_TIMEOUT)
-            exited = (reply.get("wait") or {}).get("status") == "exited"
+                              timeout=min(remaining, ms / 1000 + 1.0))
+            found = reply.get("wait")
+            if (not isinstance(found, dict) or found.get("status") != "exited" or
+                    found.get("satisfied") is not True or found.get("condition") != "exit"):
+                raise OrcaReplyError("unreadable", "the reply has no satisfied exit wait object")
+            exited = True
         except OrcaReplyError as exc:
-            exited, problem = False, (None if exc.code == "timeout" else exc)
-        _capture(orca, run, handle)
+            if exc.code not in (*_MISSING_TERMINAL, "cli-timeout", "timeout"):
+                raise _failure(exc) from exc
+            exited, problem = False, (None if exc.code in ("timeout", "cli-timeout") else exc)
+        _capture(orca, run, handle, deadline)
         if not exited and problem is None:
             continue
         data = run.read()
         if data.get("status") in runs.TERMINAL:
+            if exited:
+                _preview(orca, run, handle, deadline)
             return data
         pid = data.get("pid")
         if problem is not None and isinstance(pid, int) and call._alive(pid):
             time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))  # Orca lost the handle; the runner lives
             continue
-        return _lost(orca, run, handle, "exited" if exited else f"is unknown to Orca ({problem.code})")
+        return _lost(orca, run, handle, "exited" if exited else f"is unknown to Orca ({problem.code})", deadline)
 
 
 def wait_until_done(orca: Orca, state_dir: pathlib.Path, run_id: str) -> dict:

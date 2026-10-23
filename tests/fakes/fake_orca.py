@@ -1,7 +1,7 @@
 # 가짜 Orca CLI·앱 — 받은 인자를 기록하고 worktree·terminal 명령의 JSON 응답을 흉내 내며, 터미널은 별도 호스트 프로세스가 소유한다.
 """A stand-in for the `orca` CLI and the Orca app behind it, with the reply shapes of Orca 1.4.237.
 
-CLI:   python fake_orca.py <group> <command> [--flag value ...] --json
+CLI:   python fake_orca.py --state <folder> <group> <command> [--flag value ...] --json
 Host:  python fake_orca.py __host   (the test starts it; like the real app it owns the terminals, so a
        terminal outlives the CLI call and runs with the host's environment, not the caller's)
 
@@ -10,6 +10,10 @@ FAKE_ORCA_VERSION   printed by --version (default 1.4.237)
 FAKE_ORCA_DISABLED  "1": --version fails, as when Orca's command-line tool is not enabled
 FAKE_ORCA_FAIL      one command such as "terminal create" that answers ok:false
 FAKE_ORCA_OAH       (host) JSON argv run in place of the word `oah` in a terminal command
+FAKE_ORCA_HOLD      "1": leave a queued terminal for direct worker-run tests
+
+CLI controls come from <folder>/controls.json, so production need not forward any FAKE_* variables.
+Optional command/reply/exit_code controls inject malformed replies for contract tests.
 
 A terminal command must be safe words followed by `; exit`; anything else is refused, so the tests
 see any change to the generated command.
@@ -130,6 +134,8 @@ def terminal_create(options: dict) -> int:
                                                       "shell": options.get("shell")}), encoding="utf-8")
     os.replace(request.with_suffix(".tmp"), request)
     pidfile = terminals() / f"{handle}.pid"
+    if os.environ.get("FAKE_ORCA_HOLD") == "1":
+        pidfile.write_text("0", encoding="utf-8")
     deadline = time.monotonic() + 15
     while not pidfile.exists():
         if time.monotonic() > deadline:
@@ -194,6 +200,10 @@ def cli(argv: list[str]) -> int:
         print(os.environ.get("FAKE_ORCA_VERSION", "1.4.237"))
         return 0
     words = " ".join(argv[:2])
+    malformed = load("controls.json").get("reply")
+    if malformed is not None and words == load("controls.json").get("command"):
+        print(json.dumps(malformed))
+        return int(load("controls.json").get("exit_code", 0))
     if os.environ.get("FAKE_ORCA_FAIL") == words:
         return reply(code="fake_failure", message=f"{words} failed on purpose")
     if "--json" not in argv:
@@ -252,4 +262,11 @@ def host() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(host() if sys.argv[1:] == ["__host"] else cli(sys.argv[1:]))
+    argv = sys.argv[1:]
+    if argv[:1] == ["--state"]:
+        os.environ["FAKE_ORCA_STATE"] = argv[1]
+        argv = argv[2:]
+        for key, value in load("controls.json").items():
+            if key.startswith("FAKE_ORCA_"):
+                os.environ[key] = value
+    sys.exit(host() if argv == ["__host"] else cli(argv))
