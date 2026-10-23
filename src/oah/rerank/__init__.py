@@ -25,7 +25,7 @@ from typing import Callable, Mapping, Sequence
 
 from oah import secrets
 from oah.rerank.base import (TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
-                             _raise_if_interrupted, _sanitize_interruption)
+                             _classify_failure, _raise_if_interrupted)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, TypeSafeProvider
 
 __all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "Provider", "ProviderError",
@@ -91,7 +91,7 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
           keychain: secrets.Keychain | None,
           providers: Mapping[str, Provider] | None) -> tuple[Provider | None, secrets.Secret | None, str]:
     """(provider, key, status): provider and key are set only when every gate passed."""
-    provider = key = None
+    provider = key = key_name = None
     try:
         if brief_disabled:
             return None, None, unused("disabled-by-brief")
@@ -103,8 +103,11 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
         provider = (PROVIDERS if providers is None else providers).get(name.strip())
         if provider is None:
             return None, None, unused("unknown-provider")
+        key_name, status = _call(lambda: provider.key_name(config))
+        if status != USED:
+            return None, None, status
         try:
-            key = secrets.get(provider.key_name(config), env=env, keychain=keychain)
+            key = secrets.get(key_name, env=env, keychain=keychain)
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if not isinstance(exc, ValueError):
@@ -114,7 +117,7 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
             return None, None, unused("no key")
         return provider, key, USED
     finally:
-        del config, brief_disabled, env, keychain, providers, provider, key
+        del config, brief_disabled, env, keychain, providers, provider, key, key_name
 
 
 def _call(action: Callable[[], object]) -> tuple[object, str]:
@@ -124,16 +127,10 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
         try:
             return action(), USED
         except BaseException as exc:
-            _raise_if_interrupted(exc)
-            if isinstance(exc, ProviderError):
-                return None, unused(f"error:{exc.code}")
-            if isinstance(exc, Exception):
-                return None, unused("error:internal")
-            failure = _sanitize_interruption(exc)
-        _raise_if_interrupted(failure)
-        if isinstance(failure, ProviderError):
-            return None, unused(f"error:{failure.code}")
-        raise failure.with_traceback(None) from None
+            failure = _classify_failure(exc)
+        if type(failure) is str:
+            return None, unused(f"error:{failure}")
+        raise BaseException.with_traceback(failure, None) from None
     finally:
         del action, failure
 
@@ -189,11 +186,12 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         return RerankResult(order, USED, provider.name,
                             tuple((item.name, score) for item, score in zip(sent, scores)))
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
-        failure = _sanitize_interruption(exc)
+        failure = _classify_failure(exc)
     finally:
         del kind, candidates, config, query, brief_disabled, env, keychain, providers, provider, key, raw
-    _raise_if_interrupted(failure)
-    raise failure.with_traceback(None) from None
+    if type(failure) is str:
+        raise ProviderError(failure) from None
+    raise BaseException.with_traceback(failure, None) from None
 
 
 def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, brief_disabled: bool = False,
@@ -223,8 +221,9 @@ def advise_difficulty(axes: Mapping[str, str], task: str, *, config: Mapping, br
             confidence = validated[0]
         return Advice(rule_tier, tier, confidence, USED, provider.name)
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
-        failure = _sanitize_interruption(exc)
+        failure = _classify_failure(exc)
     finally:
         del axes, task, config, brief_disabled, env, keychain, providers, provider, key, answer, confidence
-    _raise_if_interrupted(failure)
-    raise failure.with_traceback(None) from None
+    if type(failure) is str:
+        raise ProviderError(failure) from None
+    raise BaseException.with_traceback(failure, None) from None

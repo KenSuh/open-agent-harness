@@ -44,9 +44,9 @@ def _interruption_type(error: BaseException) -> type[BaseException] | None:
                 pending.pop()
             elif id(current) in seen:
                 continue
-            elif isinstance(current, _INTERRUPTIONS):
+            elif issubclass(type(current), _INTERRUPTIONS):
                 return type(current)
-            elif isinstance(current, BaseExceptionGroup):
+            elif issubclass(type(current), BaseExceptionGroup):
                 seen.add(id(current))
                 pending.append(iter(BaseExceptionGroup.exceptions.__get__(current)))
         return None
@@ -64,14 +64,11 @@ def _interruption_fallback(exception_type: type[BaseException]) -> BaseException
 
 def _sanitize_interruption(error: BaseException) -> BaseException:
     """Propagate one fresh interruption, never a group or an original exception's private state."""
-    exception_type = clean = None
-    fallback = ProviderError("internal")
+    exception_type = clean = fallback = None
     try:
         exception_type = _interruption_type(error)
         if exception_type is None:
-            if isinstance(error, (Exception, BaseExceptionGroup)):
-                return fallback
-            exception_type = type(error)
+            return ProviderError("internal")
         fallback = _interruption_fallback(exception_type)
         try:
             # Bypass subclass constructors and copy no arguments, notes or attributes.
@@ -79,22 +76,51 @@ def _sanitize_interruption(error: BaseException) -> BaseException:
             BaseException.__init__(clean)
         except BaseException:
             clean = fallback
-        try:
-            traceback.clear_frames(BaseException.__traceback__.__get__(error))
-        except BaseException:
-            pass  # Cleanup failure must not replace the selected interruption.
         return clean
     finally:
         del error, exception_type, clean, fallback
 
 
+def _classify_failure(error: BaseException) -> str | BaseException:
+    """Return only a validated code or a fresh interruption, never provider state or user attributes."""
+    failure = "internal"
+    attributes = name = code = None
+    try:
+        try:
+            if _interruption_type(error) is not None:
+                failure = _sanitize_interruption(error)
+            elif issubclass(type(error), BaseExceptionGroup):
+                pass  # Groups never have provider codes, regardless of their other bases.
+            elif issubclass(type(error), ProviderError):
+                attributes = BaseException.__dict__["__dict__"].__get__(error)
+                # Bypass attribute/dict hooks and equality hooks on non-string dictionary keys.
+                for name, code in dict.items(attributes):
+                    if type(name) is str and name == "code":
+                        if type(code) is str and _CODE_RE.fullmatch(code):
+                            failure = code
+                        break
+        except BaseException as exc:
+            failure = (_sanitize_interruption(exc) if _interruption_type(exc) is not None
+                       else "internal")
+        try:
+            traceback.clear_frames(BaseException.__traceback__.__get__(error))
+        except BaseException as exc:
+            if not issubclass(type(failure), _INTERRUPTIONS):
+                failure = (_sanitize_interruption(exc) if _interruption_type(exc) is not None
+                           else "internal")
+        return failure
+    finally:
+        del error, failure, attributes, name, code
+
+
 def _raise_if_interrupted(error: object) -> None:
-    """Give direct and grouped interruptions precedence over every ordinary error classification."""
+    """Give direct and grouped interruptions the shared classifier's fixed precedence."""
     failure = None
     try:
-        if isinstance(error, BaseException) and _interruption_type(error) is not None:
-            failure = _sanitize_interruption(error)
-            raise failure.with_traceback(None) from None
+        if issubclass(type(error), BaseException):
+            failure = _classify_failure(error)
+            if type(failure) is not str:
+                raise BaseException.with_traceback(failure, None) from None
     finally:
         del error, failure
 

@@ -20,13 +20,12 @@ import http.client
 import json
 import math
 import socket
-import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import TIERS, Candidate, ProviderError, _raise_if_interrupted, _sanitize_interruption
+from oah.rerank.base import TIERS, Candidate, ProviderError, _classify_failure, _raise_if_interrupted
 from oah.secrets import Secret
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
@@ -56,22 +55,7 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
         try:
             return action(*args, **kwargs)
         except BaseException as exc:
-            try:
-                _raise_if_interrupted(exc)
-            except BaseException as interruption:
-                return None, _sanitize_interruption(interruption)
-            if isinstance(exc, BaseExceptionGroup) or not isinstance(exc, Exception):
-                # The sanitizer also contains cleanup failures; do not clear its input a second time.
-                return None, _sanitize_interruption(exc)
-            try:
-                if isinstance(exc, ProviderError):
-                    return None, exc.code
-                return None, "internal"
-            finally:
-                try:
-                    traceback.clear_frames(BaseException.__traceback__.__get__(exc))
-                except BaseException:
-                    pass  # Discard cleanup failures along with the original private exception.
+            return None, _classify_failure(exc)
     finally:
         del action, args, kwargs
 
@@ -79,9 +63,8 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
 def _finish(result: _T | None, code: _Failure) -> _T:
     """Raise only after sensitive helpers returned and their callers dropped every input."""
     try:
-        _raise_if_interrupted(code)
         if isinstance(code, BaseException):
-            raise code.with_traceback(None) from None
+            raise BaseException.with_traceback(code, None) from None
         if code is not None:
             raise ProviderError(code).with_traceback(None) from None
         return cast(_T, result)
@@ -117,6 +100,8 @@ def _number(value: object) -> float | None:
             return None
         try:
             number = float(value)
+        except (BaseExceptionGroup, ProviderError):
+            raise  # Let the shared classifier handle these before ordinary parse errors.
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if not isinstance(exc, (OverflowError, TypeError, ValueError)):
@@ -223,6 +208,8 @@ def _check_url(url: str) -> str | None:
         try:
             parts = urllib.parse.urlsplit(url)
             host = parts.hostname
+        except (BaseExceptionGroup, ProviderError):
+            raise
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if not isinstance(exc, ValueError):
@@ -268,6 +255,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         data = None
         try:
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except (BaseExceptionGroup, ProviderError):
+            raise
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if not isinstance(exc, (TypeError, ValueError)):
@@ -288,6 +277,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
             with opener.open(request, timeout=timeout) as response:
                 raw = response.read(RESPONSE_LIMIT + 1)
+        except (BaseExceptionGroup, ProviderError):
+            raise
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if isinstance(exc, urllib.error.HTTPError):
@@ -307,6 +298,8 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             return None, "bad-response"
         try:
             return json.loads(raw.decode("utf-8")), None
+        except (BaseExceptionGroup, ProviderError):
+            raise
         except BaseException as exc:
             _raise_if_interrupted(exc)
             # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.

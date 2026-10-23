@@ -23,7 +23,7 @@ from unittest import mock
 
 from oah import rerank
 from oah.config import ConfigError, load_config
-from oah.rerank import typesafe
+from oah.rerank import base, typesafe
 from oah.secrets import Secret
 from tests.helpers import make_tmp_dir
 
@@ -677,9 +677,367 @@ class KeyLeakTest(unittest.TestCase):
         self.check_interrupted_request(KeyboardInterrupt)
 
     def test_other_base_exceptions_have_no_private_traceback(self) -> None:
-        for exception_type in (SystemExit, GeneratorExit, BaseException):
+        for exception_type in (SystemExit, GeneratorExit):
             with self.subTest(exception_type=exception_type.__name__):
                 self.check_interrupted_request(exception_type)
+
+    def check_classified_failure(self, factory, code="internal", interruption_type=None,
+                                 *, source="call") -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = key + response_text
+        cfg = typesafe_config("http://127.0.0.1:9876/v1/systemone")
+
+        def fail(*args, **kwargs):
+            error = factory(echo)
+            error.add_note(echo)
+            error.private = echo
+            error.__cause__ = ValueError(echo)
+            error.__context__ = ValueError(echo)
+            raise error
+
+        class FailingProvider:
+            name = "fake"
+
+            def key_name(self, config):
+                return "FAKE_RERANK_KEY"
+
+            score = staticmethod(fail)
+            advise = staticmethod(fail)
+
+        class FailingBody(dict):
+            get = fail
+
+        provider = typesafe.TypeSafeProvider()
+        if source == "key-name":
+            FailingProvider.key_name = fail
+        actions = {
+            "rerank": lambda: rerank.rerank("impact", candidates("a"), config=enabled(),
+                                            env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                                            providers={"fake": FailingProvider()}),
+            "advice": lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                                                      env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                                                      providers={"fake": FailingProvider()}),
+            "typesafe-score": lambda: provider.score("impact", "q", candidates("a"),
+                                                      key=Secret(key), config=cfg),
+            "typesafe-advice": lambda: provider.advise(AdviceTest.AXES, "task", key=Secret(key), config=cfg),
+            "post": lambda: provider._post({}, Secret(key), cfg),
+            "post-json": lambda: typesafe.post_json(cfg["typesafe"]["url"], {}, key=Secret(key), timeout=5),
+            "parse-rerank": lambda: typesafe.parse_rerank_response(FailingBody(), 1),
+            "parse-advice": lambda: typesafe.parse_advice_response(FailingBody()),
+        }
+        if source == "transport":
+            actions["rerank"] = lambda: rerank.rerank("impact", candidates("a"), config=cfg,
+                env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain())
+            actions["advice"] = lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=cfg,
+                env={"TYPESAFE_API_KEY": key}, keychain=NoKeychain())
+        for api, action in actions.items():
+            patcher = (mock.patch.object(urllib.request.HTTPHandler, "http_open", fail)
+                       if source == "transport" else mock.patch.object(typesafe, "_post_json", fail))
+            with self.subTest(api=api), patcher:
+                frames = []
+
+                def capture(frame, event, arg):
+                    if event == "return" and frame.f_globals.get("__name__", "").startswith("oah.rerank"):
+                        frames.append(frame)
+
+                previous_profile = sys.getprofile()
+                try:
+                    sys.setprofile(capture)
+                    if interruption_type is not None or api not in ("rerank", "advice"):
+                        self.assert_sanitized_failure(action, code, key, response_text,
+                                                      interruption_type or rerank.ProviderError)
+                    else:
+                        result = None
+                        try:
+                            result = action()
+                        except BaseException as exc:
+                            # Inspect the actual chain before reporting a failed status contract.
+                            text = "".join(traceback.format_exception(exc))
+                            self.assertFalse(key in text or response_text in text,
+                                             "provider exception chain exposes private data")
+                        self.assertIsNotNone(result, "ordinary provider failures must return a status")
+                        self.assertEqual(result.status, f"unused(error:{code})")
+                        self.assert_private_values_absent((result.to_record(),), key, response_text)
+                        if api == "rerank":
+                            self.assertEqual(names(result), ["a"])
+                        else:
+                            self.assertEqual(result.tier, AdviceTest.AXES["tier"])
+                finally:
+                    sys.setprofile(previous_profile)
+                self.assertTrue(frames)
+                for frame in frames:
+                    with self.subTest(helper=frame.f_code.co_name):
+                        self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+
+    def test_provider_error_groups_are_sanitized_before_reading_code(self) -> None:
+        class Group(ExceptionGroup, rerank.ProviderError):
+            pass
+
+        for populated in (False, True):
+            def factory(echo):
+                error = Group(echo, [ValueError(echo)])
+                if populated:
+                    error.code = "timeout"
+                return error
+
+            with self.subTest(populated=populated):
+                self.check_classified_failure(factory)
+
+    def test_provider_failure_classification_matrix(self) -> None:
+        accesses = []
+
+        class MissingCode(rerank.ProviderError):
+            pass
+
+        class InvalidCode(rerank.ProviderError):
+            pass
+
+        class RaisingCode(Exception):
+            @property
+            def code(self):
+                private = BaseException.__dict__["__dict__"].__get__(self).get("private")
+                if private:
+                    accesses.append("raising-code")
+                    raise ValueError(private)
+                return "internal"
+
+        class PrivateCode(Exception):
+            @property
+            def code(self):
+                private = BaseException.__dict__["__dict__"].__get__(self).get("private")
+                if private:
+                    accesses.append("private-code")
+                    return private
+                return "internal"
+
+        bases = (KeyboardInterrupt, SystemExit, GeneratorExit, BaseExceptionGroup, ExceptionGroup,
+                 rerank.ProviderError, MissingCode, InvalidCode, RaisingCode, PrivateCode,
+                 OSError, ValueError)
+        kinds = [(base.__name__, base) for base in bases]
+        for first in bases:
+            for second in bases:
+                if first is second:
+                    continue
+                try:
+                    mixed = type("MixedFailure", (first, second), {})
+                except TypeError:
+                    continue  # Python forbids conflicting layouts or inconsistent MROs.
+                kinds.append((f"{first.__name__}+{second.__name__}", mixed))
+
+        for label, kind in kinds:
+            is_group = issubclass(kind, BaseExceptionGroup)
+            interruption = next((base for base in (KeyboardInterrupt, SystemExit, GeneratorExit)
+                                 if issubclass(kind, base)), None)
+            expected_type = None
+            if interruption is not None:
+                try:
+                    BaseException.__new__(kind)
+                    expected_type = kind
+                except TypeError:
+                    expected_type = interruption
+            valid_code = (issubclass(kind, rerank.ProviderError) and
+                          not issubclass(kind, (MissingCode, InvalidCode, RaisingCode, PrivateCode)))
+            code = "timeout" if valid_code and not is_group and interruption is None else "internal"
+            for shape in ("direct", "grouped", "nested"):
+                def factory(echo):
+                    if is_group:
+                        error = BaseExceptionGroup.__new__(kind, echo, [ValueError(echo)])
+                        BaseException.__init__(error, echo, [ValueError(echo)])
+                    else:
+                        allocator = OSError if issubclass(kind, OSError) else BaseException
+                        error = allocator.__new__(kind)
+                        BaseException.__init__(error, echo)
+                    attributes = BaseException.__dict__["__dict__"].__get__(error)
+                    attributes["private"] = echo
+                    if valid_code:
+                        attributes["code"] = "timeout"
+                    elif issubclass(kind, InvalidCode):
+                        attributes["code"] = echo
+                    if shape != "direct":
+                        error = BaseExceptionGroup(echo, [ValueError(echo), error])
+                    if shape == "nested":
+                        error = BaseExceptionGroup(echo, [BaseExceptionGroup(echo, [error, error]),
+                                                          SystemExit(echo)])
+                    return error
+
+                expected = expected_type
+                if expected is None and shape == "nested":
+                    expected = SystemExit
+                with self.subTest(kind=label, shape=shape):
+                    self.check_classified_failure(factory, code if shape == "direct" else "internal",
+                                                  expected)
+                    self.assertEqual(accesses, [], "classification must never evaluate code properties")
+
+    def test_non_interruption_base_exception_is_internal(self) -> None:
+        self.check_classified_failure(BaseException)
+
+    def test_provider_code_lookup_never_runs_attribute_or_string_hooks(self) -> None:
+        accesses = []
+
+        class Hooked(rerank.ProviderError):
+            def __getattribute__(self, name):
+                if name in ("code", "__dict__", "__class__"):
+                    accesses.append(name)
+                    raise ValueError("private attribute hook")
+                return super().__getattribute__(name)
+
+        class HookedString(str):
+            def __format__(self, spec):
+                accesses.append("format")
+                raise ValueError(str.__str__(self))
+
+        for code_kind in ("plain", "subclass", "missing", "non-string"):
+            def factory(echo):
+                error = BaseException.__new__(Hooked)
+                BaseException.__init__(error, echo)
+                attributes = BaseException.__dict__["__dict__"].__get__(error)
+                if code_kind == "plain":
+                    attributes["code"] = "timeout"
+                elif code_kind == "subclass":
+                    attributes["code"] = HookedString(echo)
+                elif code_kind == "non-string":
+                    attributes["code"] = 123
+                return error
+
+            with self.subTest(code_kind=code_kind):
+                self.check_classified_failure(factory, "timeout" if code_kind == "plain" else "internal")
+                self.assertEqual(accesses, [], "classification must bypass provider attribute hooks")
+
+    def test_provider_code_lookup_never_runs_dictionary_hooks(self) -> None:
+        accesses = []
+
+        class HookedDict(dict):
+            def get(self, *args):
+                accesses.append("get")
+                raise ValueError("private dictionary hook")
+
+            def items(self):
+                accesses.append("items")
+                raise ValueError("private dictionary hook")
+
+        class CollidingKey:
+            def __hash__(self):
+                return hash("code")
+
+            def __eq__(self, other):
+                accesses.append("eq")
+                raise ValueError("private equality hook")
+
+        for colliding in (False, True):
+            def factory(echo):
+                error = BaseException.__new__(rerank.ProviderError)
+                BaseException.__init__(error, echo)
+                error.__dict__ = HookedDict({CollidingKey(): echo} if colliding else {"code": "timeout"})
+                return error
+
+            with self.subTest(colliding=colliding):
+                self.check_classified_failure(factory, "internal" if colliding else "timeout")
+                self.assertEqual(accesses, [], "classification must bypass dictionary and equality hooks")
+
+    def test_provider_key_name_failures_use_the_same_classifier(self) -> None:
+        for interruption in (None, KeyboardInterrupt, SystemExit, GeneratorExit):
+            def factory(echo):
+                if interruption is not None:
+                    return BaseExceptionGroup(echo, [ValueError(echo), interruption(echo)])
+                error = rerank.ProviderError("timeout")
+                error.private = echo
+                return error
+
+            with self.subTest(interruption=interruption):
+                self.check_classified_failure(factory, "timeout", interruption, source="key-name")
+
+    def test_invalid_provider_key_names_do_not_survive_in_gate_frames(self) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+
+        class InvalidKeyName(FakeProvider):
+            def key_name(self, config):
+                return key + response_text
+
+        frames = []
+
+        def capture(frame, event, arg):
+            if event == "return" and frame.f_globals.get("__name__", "").startswith("oah."):
+                frames.append(frame)
+
+        previous_profile = sys.getprofile()
+        try:
+            sys.setprofile(capture)
+            for action in (
+                lambda: rerank.rerank("impact", candidates("a"), config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                    providers={"fake": InvalidKeyName()}),
+                lambda: rerank.advise_difficulty(AdviceTest.AXES, "task", config=enabled(),
+                    env={"FAKE_RERANK_KEY": key}, keychain=NoKeychain(),
+                    providers={"fake": InvalidKeyName()}),
+            ):
+                self.assertEqual(action().status, "unused(error:key-name)")
+        finally:
+            sys.setprofile(previous_profile)
+        self.assertTrue(frames)
+        for frame in frames:
+            with self.subTest(helper=frame.f_code.co_name):
+                self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+
+    def test_transport_groups_and_provider_errors_reach_the_shared_classifier(self) -> None:
+        for first, second in ((ExceptionGroup, rerank.ProviderError), (ExceptionGroup, ValueError),
+                              (rerank.ProviderError, OSError), (OSError, rerank.ProviderError),
+                              (rerank.ProviderError, ValueError), (ValueError, rerank.ProviderError)):
+            kind = type("MixedTransportFailure", (first, second), {})
+            for grouped in (False, True):
+                def factory(echo):
+                    if issubclass(kind, BaseExceptionGroup):
+                        error = BaseExceptionGroup.__new__(kind, echo, [ValueError(echo)])
+                    else:
+                        allocator = OSError if issubclass(kind, OSError) else BaseException
+                        error = allocator.__new__(kind)
+                        BaseException.__init__(error, echo)
+                    BaseException.__dict__["__dict__"].__get__(error)["code"] = "timeout"
+                    return ExceptionGroup(echo, [error]) if grouped else error
+
+                code = "internal" if grouped or issubclass(kind, BaseExceptionGroup) else "timeout"
+                with self.subTest(first=first.__name__, second=second.__name__, grouped=grouped):
+                    self.check_classified_failure(factory, code, source="transport")
+
+    def test_classification_failures_are_internal_or_fresh_interruptions(self) -> None:
+        pattern = base._CODE_RE
+        for phase in ("code", "cleanup"):
+            for interruption in (None, KeyboardInterrupt, SystemExit, GeneratorExit):
+                for grouped in (False, True):
+                    private = None
+
+                    def factory(echo):
+                        nonlocal private
+                        private = echo
+                        error = BaseException.__new__(rerank.ProviderError)
+                        BaseException.__init__(error, echo)
+                        error.code = "timeout"
+                        return error
+
+                    def fail_classification(*args):
+                        error = (interruption or ValueError)(private)
+                        if grouped:
+                            error = BaseExceptionGroup(private, [ValueError(private), error])
+                        raise error
+
+                    def fullmatch(code):
+                        if code == "timeout":
+                            fail_classification()
+                        return pattern.fullmatch(code)
+
+                    patcher = (mock.patch.object(base, "_CODE_RE", mock.Mock(fullmatch=fullmatch))
+                               if phase == "code" else mock.patch.object(traceback, "clear_frames",
+                                                                          fail_classification))
+                    with self.subTest(phase=phase, interruption=interruption, grouped=grouped), patcher:
+                        self.check_classified_failure(factory, "internal", interruption)
+
+    def test_interruption_sanitizing_does_not_validate_provider_codes(self) -> None:
+        pattern = mock.Mock()
+        pattern.fullmatch.side_effect = ValueError("code validation failed")
+        with mock.patch.object(base, "_CODE_RE", pattern):
+            self.check_classified_failure(KeyboardInterrupt, interruption_type=KeyboardInterrupt)
+        pattern.fullmatch.assert_not_called()
 
     def test_interruption_groups_propagate_through_public_apis(self) -> None:
         key = fake_key()
