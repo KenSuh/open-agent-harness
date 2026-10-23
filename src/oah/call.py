@@ -12,6 +12,12 @@
 timeout) and records the exit code, logs, header check and inference normalization. `start_background`
 hands the same prepared run to a detached Python runner and returns at once; `wait` polls the record
 for at most `WAIT_LIMIT_S` seconds and can be called again.
+
+The first dispatch of a task that has a packet records its intent source in
+`runs/<task>/intent-binding.json`. Later rounds reuse that source; a different source, another Intent-ID,
+an in-place edit or an older revision refuses with `OAH_INTENT_SOURCE_CHANGED`, and only a raised Revision
+of the same Intent-ID in the same source moves the binding forward. `resolve_worktree` turns a path,
+branch or worktree name into exactly one worktree before any intent is read.
 """
 from __future__ import annotations
 
@@ -144,6 +150,7 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
 class Packet:
     source: str  # repository-relative, with forward slashes
     intent: object | None  # has .section, .id, .revision, .digest
+    section: str | None  # the intent section exactly as the source holds it
     scope: tuple[str, ...]
     plan: dict  # stage -> (engine, tier)
 
@@ -161,13 +168,20 @@ def _section_lines(text: str, heading: str) -> list[str]:
     return out
 
 
-def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callable[[str], object] | None) -> Packet:
-    """The parts of a packet a call needs. The intent is parsed by oah.intent (lane P4a)."""
+def _read_text(path: pathlib.Path) -> str:
+    text = path.read_bytes().decode("utf-8")  # bytes, so CRLF stays byte-intact
+    return text[1:] if text.startswith("\ufeff") else text
+
+
+def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callable[[str], object] | None,
+                read_source: Callable[[pathlib.Path], str] | None = None) -> Packet:
+    """The parts of a packet a call needs. oah.intent (lane P4a) reads the source safely and parses it."""
     try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise EngineError("OAH_PACKET_UNREADABLE", f"{path} cannot be read as UTF-8 ({exc}); check the path given "
-                          "with --packet") from exc
+        text = (read_source or _read_text)(path)
+    except Exception as exc:
+        code = getattr(exc, "code", "OAH_PACKET_UNREADABLE")
+        message = str(exc).split(": ", 1)[1] if str(exc).startswith(f"{code}: ") else str(exc)
+        raise EngineError(code, f"{message}; check the path given with --packet") from exc
     try:
         intent = parse_intent(text) if parse_intent is not None else None
     except Exception as exc:
@@ -187,7 +201,112 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
         source = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         source = str(path)
-    return Packet(source=source, intent=intent, scope=tuple(scope), plan=plan)
+    section = briefs.raw_section(text) if intent is not None else None
+    return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan)
+
+
+BINDING_NAME = "intent-binding.json"
+SOURCE_CHANGED = "OAH_INTENT_SOURCE_CHANGED"
+
+
+def _binding_path(state_dir: pathlib.Path, task: str) -> pathlib.Path:
+    return pathlib.Path(state_dir) / "runs" / task / BINDING_NAME
+
+
+def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
+    """The intent source bound at the task's first dispatch, or None."""
+    from oah.atomic import read_json
+
+    data = read_json(_binding_path(state_dir, task), None)
+    return data if isinstance(data, dict) else None
+
+
+def check_dispatch_binding(bound: dict | None, packet: Packet, task: str) -> bool:
+    """Refuse a swapped intent; True when this dispatch moves the binding (first dispatch or a new revision)."""
+    intent = packet.intent
+    if intent is None:
+        return False
+    if bound is None:
+        return True
+    fix = (f"To change the goal, raise Revision of Intent-ID {bound['id']} in {bound['source']} and accept it again; "
+           "never point a task at a different intent source")
+    line = f"INTENT {bound['id']}@r{bound['revision']} {bound['digest']}"
+    if packet.source != bound["source"]:
+        raise EngineError(SOURCE_CHANGED, f"task {task} was first dispatched with intent source {bound['source']} "
+                          f"({line}); this dispatch reads {packet.source}. {fix}. To continue, run the command again "
+                          f"with --packet {briefs.shell_word(bound['source'])} or without --packet")
+    if intent.id != bound["id"]:
+        raise EngineError(SOURCE_CHANGED, f"{packet.source} now holds Intent-ID {intent.id}, but task {task} is bound "
+                          f"to {line}. {fix}")
+    if intent.revision < bound["revision"] or (intent.revision == bound["revision"] and intent.digest != bound["digest"]):
+        what = "an older revision" if intent.revision < bound["revision"] else "the same revision with edited content"
+        raise EngineError(SOURCE_CHANGED, f"{packet.source} holds {what} (INTENT {intent.id}@r{intent.revision} "
+                          f"{intent.digest}) than the binding {line}. {fix}")
+    return intent.revision > bound["revision"]
+
+
+def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, run_id: str) -> None:
+    """Bind (or advance) the task's intent source under the state lock, re-checking against a racing dispatch."""
+    from oah.atomic import write_json_atomic
+    from oah.lockfile import StateLock
+
+    with StateLock(pathlib.Path(state_dir) / ".lock"):
+        bound = dispatch_binding(state_dir, task)
+        if check_dispatch_binding(bound, packet, task):
+            intent = packet.intent
+            history = list(bound.get("history", [])) if bound else []
+            history.append({"revision": intent.revision, "digest": intent.digest, "run_id": run_id})
+            write_json_atomic(_binding_path(state_dir, task),
+                              {"source": packet.source, "id": intent.id, "revision": intent.revision,
+                               "digest": intent.digest, "history": history})
+
+
+def _stored_brief_matches(stored: str, packet: Packet | None) -> None:
+    if packet is None or packet.intent is None:
+        return
+    section = briefs.raw_section(stored)
+    normalized = section.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n" if section else None
+    if normalized != packet.intent.section:
+        found = "no intent section" if section is None else "a different intent section"
+        raise EngineError(SOURCE_CHANGED, f"the stored brief carries {found}, not INTENT {packet.intent.id}@r"
+                          f"{packet.intent.revision} {packet.intent.digest} from {packet.source}; rebuild the brief "
+                          "from the bound packet instead of reusing it. A changed goal needs a new revision of the "
+                          "same Intent-ID, not a different source")
+
+
+def resolve_worktree(selector: str, root: pathlib.Path, *, retry: Callable[[str], str]) -> pathlib.Path:
+    """The one worktree of this repository named by a path, a branch or a worktree folder name."""
+    from oah.paths import run_git
+
+    listed = run_git(root, "worktree", "list", "--porcelain", "-z")
+    if listed.returncode != 0:
+        raise EngineError("OAH_WORKTREE_UNRESOLVED", f"git could not list the worktrees of {root}: "
+                          f"{listed.stderr.strip()}")
+    worktrees: list[tuple[pathlib.Path, str | None]] = []
+    for record in listed.stdout.split("\0\0"):
+        fields = [field for field in record.split("\0") if field]
+        path = next((f[len("worktree "):] for f in fields if f.startswith("worktree ")), None)
+        if path is None:
+            continue
+        branch = next((f[len("branch "):] for f in fields if f.startswith("branch ")), None)
+        worktrees.append((pathlib.Path(path), branch))
+    target = pathlib.Path(selector).expanduser()
+    target = target if target.is_absolute() else pathlib.Path.cwd() / target
+    matches: list[pathlib.Path] = []
+    for path, branch in worktrees:
+        by_path = target.exists() and path.exists() and os.path.samefile(path, target)
+        by_branch = branch is not None and selector in (branch, branch.removeprefix("refs/heads/"))
+        if (by_path or by_branch or selector == path.name) and path not in matches:
+            matches.append(path)
+    if len(matches) == 1:
+        return matches[0]
+    candidates = matches or [path for path, _ in worktrees]
+    commands = "\n".join(f"  {retry(str(path))}" for path in candidates)
+    if matches:
+        raise EngineError("OAH_WORKTREE_AMBIGUOUS", f"--worktree {selector!r} matches {len(matches)} worktrees; "
+                          f"nothing was launched. Retry with the exact path:\n{commands}")
+    raise EngineError("OAH_WORKTREE_UNRESOLVED", f"--worktree {selector!r} names no worktree of this repository; "
+                      f"nothing was launched. Retry with one of:\n{commands}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -265,21 +384,27 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
-            parse_intent: Callable[[str], object] | None = None, now: dt.datetime | None = None) -> Prepared:
+            parse_intent: Callable[[str], object] | None = None,
+            read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None) -> Prepared:
     """Decide engine, tier, model and effort; write the run folder and brief. Raises before any launch."""
     root = pathlib.Path(root)
     briefs.check_footer(footer, has_footer)
-    stored = (briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
-              if request.stored_brief is not None else None)
     warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
                                         override=request.override_stage))
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)
-    packet_path = request.packet or root / ".oah" / "tasks" / request.task / "PACKET.md"
+    bound = dispatch_binding(state_dir, request.task)
+    default_packet = root / (bound["source"] if bound else f".oah/tasks/{request.task}/PACKET.md")
+    packet_path = request.packet or default_packet
     packet = None
-    if request.packet is not None or packet_path.is_file():
-        packet = read_packet(root, packet_path, parse_intent=parse_intent)
+    if request.packet is not None or bound is not None or packet_path.is_file():
+        packet = read_packet(root, packet_path, parse_intent=parse_intent, read_source=read_source)
+        check_dispatch_binding(bound, packet, request.task)
+    stored = None
+    if request.stored_brief is not None:
+        stored = briefs.deliver(request.stored_brief, footer=footer, has_footer=has_footer)
+        _stored_brief_matches(stored, packet)
     scope = packet.scope if packet and packet.scope else _lease_scope(state_dir, request.task)
     axes = reasons = None
     advisory = "unused(tier-given)"
@@ -320,6 +445,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str]) -> Prepared:
+    if packet is not None:
+        record_dispatch_binding(state_dir, packet, request.task, run.id)
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -331,7 +458,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         text = stored
     else:
         text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
-                            scope=list(scope), intent_section=getattr(intent, "section", None), binding=intent,
+                            scope=list(scope), intent_section=(packet.section or getattr(intent, "section", None)) if packet else None,
+                            binding=intent,
                             packet_source=packet.source if packet else None,
                             round_instructions=request.round_instructions, skills=request.skills, footer=footer,
                             has_footer=has_footer)
@@ -399,7 +527,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     env.update(prepared.env_additions)
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
-    prompt = run.prompt_path.read_text(encoding="utf-8")
+    prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
     try:
         result = run_command(list(prepared.argv), timeout=prepared.timeout_s, cwd=prepared.cwd, env=env,
                              stdin_text=prompt)

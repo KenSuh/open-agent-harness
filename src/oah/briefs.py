@@ -16,6 +16,10 @@ footer and its `has_footer` test come from `oah.intent` and are passed in. `deli
 brief or spec: it appends the canonical footer, keeps one already canonical footer, and otherwise
 refuses with `OAH_FOOTER_NOT_APPENDED` (C3). `strip_intent_footer` removes exactly one intent footer at
 its fixed position, for comparing a brief with an older baseline.
+
+`intent_footer()` is the one shared intent footer, the same for every engine; lane P7b installs it into
+each generated role definition. `raw_section(text)` cuts the intent section out of a packet exactly as
+`oah.intent.read_source` returned it (line endings and all), so briefs carry it byte-intact.
 """
 from __future__ import annotations
 
@@ -23,6 +27,8 @@ import re
 from importlib import resources
 from typing import Callable, Sequence
 
+INTENT_BEGIN = "<!-- OAH_INTENT:BEGIN -->"
+INTENT_END = "<!-- OAH_INTENT:END -->"
 VERIFY_MARKER = "<!-- OAH_VERIFY_FOOTER -->"
 VERIFY_FOOTER = resources.files("oah").joinpath("templates/engines/verify_footer.md").read_text(encoding="utf-8")
 LEASE_STAGES = ("initial", "correction")
@@ -37,6 +43,39 @@ class BriefError(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+def intent_footer() -> str:
+    """The shared intent footer for every brief and role definition, from oah.intent (lane P4a)."""
+    try:
+        from oah import intent
+    except ImportError as exc:
+        raise BriefError("OAH_FOOTER_NOT_APPENDED", "this oah build has no canonical intent footer (oah.intent is "
+                         "missing), so no worker brief can be delivered; update or reinstall oah") from exc
+    return intent.FOOTER
+
+
+def has_intent_footer(text: str) -> bool:
+    """True when the shared footer's marker is a whole line at line start (C4)."""
+    from oah import intent
+
+    return intent.has_footer(text)
+
+
+def raw_section(text: str) -> str | None:
+    """The intent section from the BEGIN line through the END line, byte for byte; None unless exactly one."""
+    lines = text.splitlines(keepends=True)
+    begins = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == INTENT_BEGIN]
+    ends = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == INTENT_END]
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        return None
+    section = "".join(lines[begins[0]:ends[0] + 1])
+    return section if section.endswith(("\n", "\r")) else section + "\n"
+
+
+def shell_word(word: str) -> str:
+    """A command-line word, double-quoted when it holds anything but plain path characters."""
+    return _quote(word)
 
 
 def _lf(text: str) -> str:

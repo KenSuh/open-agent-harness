@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import importlib.util
 import io
 import json
@@ -40,7 +41,13 @@ def has_footer(text: str) -> bool:
 
 
 def parse_intent(text: str) -> Intent:
-    return Intent(SECTION, "t1", 2, "sha256:" + "cd" * 32)
+    """A small stand-in for oah.intent.parse: LF-normalized section, its fields and its digest."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    begin, end = lines.index("<!-- OAH_INTENT:BEGIN -->"), lines.index("<!-- OAH_INTENT:END -->")
+    section = "\n".join(lines[begin:end + 1]) + "\n"
+    fields = dict(line.split(": ", 1) for line in lines[begin:end] if line.startswith(("Intent-ID: ", "Revision: ")))
+    digest = "sha256:" + hashlib.sha256(section.encode("utf-8")).hexdigest()
+    return Intent(section, fields["Intent-ID"], int(fields["Revision"]), digest)
 
 
 def toml_list(argv: list[str]) -> str:
@@ -85,11 +92,16 @@ class Project:
     def recorded(self) -> dict:
         return json.loads(self.record.read_text(encoding="utf-8"))
 
-    def packet(self, body: str) -> pathlib.Path:
-        path = self.repo / ".oah" / "tasks" / "t1" / "PACKET.md"
-        path.parent.mkdir(parents=True)
-        path.write_text(SECTION + body, encoding="utf-8")
+    def packet(self, body: str = "", *, section: str = SECTION, name: str = ".oah/tasks/t1/PACKET.md",
+               newline: str = "\n") -> pathlib.Path:
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((section + body).replace("\n", newline).encode("utf-8"))
         return path
+
+    def runs(self) -> list[str]:
+        folder = self.state / "runs" / "t1"
+        return sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
 
 
 class RunFolderTest(unittest.TestCase):
@@ -290,6 +302,121 @@ class RoutingTest(unittest.TestCase):
         self.assertFalse((project.state / "runs").exists())
 
 
+NON_ASCII = SECTION.replace("Status: accepted\n", "Status: accepted\n### Problem\n한글 목표 — 이모지 \U0001f600 그대로.\n")
+
+
+class IntentLineageTest(unittest.TestCase):
+    def test_section_stays_byte_intact_with_non_ascii_and_crlf(self):
+        project = Project(self)
+        project.packet("## Scope\n- src/a.py\n", section=NON_ASCII, newline="\r\n")
+        data = project.run(stage="review", tier="low")
+        raw = NON_ASCII.replace("\n", "\r\n")
+        prompt_bytes = find_run(project.state, data["run_id"]).prompt_path.read_bytes()
+        self.assertEqual(prompt_bytes.count(raw.encode("utf-8")), 1)
+        self.assertEqual(project.recorded()["stdin"].count(raw), 1)
+        prompt = prompt_bytes.decode("utf-8")
+        self.assertEqual(sum(1 for line in prompt.replace("\r\n", "\n").split("\n") if line == MARKER), 1)
+        self.assertTrue(prompt.endswith(FOOTER))
+
+    def test_swapped_source_refused_on_later_round(self):
+        project = Project(self)
+        project.packet()
+        first = project.run(stage="review", tier="low")
+        binding = json.loads((project.state / "runs" / "t1" / "intent-binding.json").read_text(encoding="utf-8"))
+        self.assertEqual((binding["source"], binding["id"], binding["revision"]), (".oah/tasks/t1/PACKET.md", "t1", 2))
+        other = project.packet(name="elsewhere/PACKET.md")
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(stage="correction", tier="low", packet=other)
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        self.assertIn("raise Revision of Intent-ID t1", str(ctx.exception))
+        self.assertIn("--packet .oah/tasks/t1/PACKET.md", str(ctx.exception))
+        self.assertEqual(project.runs(), [first["run_id"]])
+
+    def test_in_place_edit_refused_and_new_revision_advances(self):
+        project = Project(self)
+        path = project.packet()
+        project.run(stage="review", tier="low")
+        path.write_text(SECTION.replace("Status: accepted", "Status: accepted\n### Problem\nedited"), encoding="utf-8")
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(stage="correction", tier="low")
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        self.assertIn("same revision with edited content", str(ctx.exception))
+        path.write_text(SECTION.replace("Revision: 2", "Revision: 3"), encoding="utf-8")
+        data = project.run(stage="correction", tier="low")
+        self.assertEqual(data["status"], "finished")
+        binding = json.loads((project.state / "runs" / "t1" / "intent-binding.json").read_text(encoding="utf-8"))
+        self.assertEqual([entry["revision"] for entry in binding["history"]], [2, 3])
+        path.write_text(SECTION, encoding="utf-8")
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(stage="correction", tier="low")
+        self.assertIn("an older revision", str(ctx.exception))
+
+    def test_later_round_reuses_bound_source(self):
+        project = Project(self)
+        custom = project.packet("## Scope\n- docs/x.md\n", name="plans/T1.md")
+        project.run(stage="review", tier="low", packet=custom)
+        data = project.run(stage="correction", tier="low")
+        prompt = find_run(project.state, data["run_id"]).prompt_path.read_text(encoding="utf-8")
+        self.assertIn("--packet plans/T1.md", prompt)
+        self.assertIn("Scope: docs/x.md", prompt)
+        custom.unlink()
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(stage="correction", tier="low")
+        self.assertEqual(ctx.exception.code, "OAH_PACKET_UNREADABLE")
+
+    def test_stored_brief_with_other_intent_refused(self):
+        project = Project(self)
+        project.packet()
+        with self.assertRaises(EngineError) as ctx:
+            project.prepare(stage="review", tier="low", stored_brief=SECTION.replace("Revision: 2", "Revision: 1"))
+        self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_CHANGED")
+        with self.assertRaises(EngineError):
+            project.prepare(stage="review", tier="low", stored_brief="no intent here\n")
+        data = project.run(stage="review", tier="low", stored_brief="Reused.\n\n" + SECTION.replace("\n", "\r\n"))
+        self.assertEqual(data["status"], "finished")
+        self.assertEqual(project.runs(), [data["run_id"]])
+
+
+def add_worktree(repo: pathlib.Path, path: pathlib.Path, branch: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(path)], check=True,
+                   capture_output=True)
+
+
+class WorktreeSelectorTest(unittest.TestCase):
+    def setUp(self):
+        self.project = Project(self)
+        git_commit(self.project.repo, {}, "config")
+        base = make_tmp_dir(self)
+        self.first, self.second = base / "a" / "wt", base / "b" / "wt"
+        add_worktree(self.project.repo, self.first, "lane-x")
+        add_worktree(self.project.repo, self.second, "lane-y")
+
+    def test_ambiguous_selector_refused_before_launch(self):
+        code, _, err = run_cli(self.project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+                               "--worktree", "wt")
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_WORKTREE_AMBIGUOUS"))
+        self.assertIn("nothing was launched", err)
+        for path in (self.first, self.second):
+            self.assertIn(f"oah call codex --stage review --task t1 --tier low --worktree {path.resolve()}", err)
+        self.assertFalse(self.project.record.exists())
+        self.assertEqual(self.project.runs(), [])
+        retry = next(line.strip() for line in err.splitlines() if str(self.first.resolve()) in line)
+        code, out, err = run_cli(self.project, *retry.split()[1:])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(pathlib.Path(self.project.recorded()["cwd"]).resolve(), self.first.resolve())
+
+    def test_branch_and_unresolvable_selectors(self):
+        root = call.resolve_worktree("lane-y", self.project.repo, retry=lambda path: f"retry {path}")
+        self.assertEqual(root.resolve(), self.second.resolve())
+        with self.assertRaises(EngineError) as ctx:
+            call.resolve_worktree("nope", self.project.repo, retry=lambda path: f"retry {path}")
+        self.assertEqual(ctx.exception.code, "OAH_WORKTREE_UNRESOLVED")
+        self.assertIn(f"retry {self.first.resolve()}", str(ctx.exception))
+        self.assertEqual(call.resolve_worktree(str(self.first), self.project.repo, retry=str).resolve(),
+                         self.first.resolve())
+
+
 class HeaderTest(unittest.TestCase):
     def test_header_downgrade_fails_run(self):
         data = Project(self).run(tier="high", env={"FAKE_CODEX_HEADER_EFFORT": "medium"})
@@ -391,7 +518,8 @@ def run_cli(project: Project, *argv: str) -> tuple[int, str, str]:
     os.chdir(project.repo)
     try:
         with mock.patch.dict(os.environ, project.env, clear=True), \
-                mock.patch.object(call_cli, "intent_footer", return_value=(FOOTER, has_footer, parse_intent)), \
+                mock.patch.object(call_cli, "intent_tools",
+                                  return_value=call_cli.IntentTools(FOOTER, has_footer, parse_intent, call._read_text)), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = call_cli.run(parser.parse_args(list(argv)))
     finally:

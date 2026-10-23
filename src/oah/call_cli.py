@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 import sys
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from oah import briefs, call, models, routing
 from oah.atomic import StateCorrupt, StorageError
@@ -22,7 +22,7 @@ from oah.runs import TERMINAL, RunError
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT, EXIT_AGAIN = 0, 1, 2, 69, 75
 COMMANDS = ("call", "wait")
 ENVIRONMENT_CODES = ("OAH_ENGINE_MISSING", "OAH_CONFIG_INVALID", "OAH_CODEX_CONFIG_INVALID",
-                     "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE")
+                     "OAH_UNSUPPORTED_BATCH_SHIM", "OAH_PACKET_UNREADABLE", "OAH_INTENT_SOURCE_UNREADABLE")
 
 
 def register(commands: argparse._SubParsersAction) -> None:
@@ -36,7 +36,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--prompt-file", help="read the round instructions from this file ('-' reads stdin)")
     parser.add_argument("--brief-file", help="deliver this stored brief instead of building one (the canonical "
                         "intent footer is added)")
-    parser.add_argument("--packet", help="the task packet (default .oah/tasks/<task>/PACKET.md when it exists)")
+    parser.add_argument("--packet", help="the task packet (default: the source bound at the task's first dispatch, "
+                        "else .oah/tasks/<task>/PACKET.md when it exists)")
+    parser.add_argument("--worktree", help="run in this worktree of the repository: a path, a branch or a worktree "
+                        "folder name that names exactly one worktree")
     parser.add_argument("--override-stage", action="store_true",
                         help="run an engine that is not configured for this stage (recorded in the events)")
     parser.add_argument("--background", action="store_true", help="return the run id at once; then use oah wait")
@@ -61,21 +64,40 @@ def load_settings(root: pathlib.Path) -> call.Settings:
                                    config.section("models", models.DEFAULTS))
 
 
-def intent_footer() -> tuple[str, Callable[[str], bool], Callable[[str], object] | None]:
-    """The canonical intent footer, its presence test and the intent parser, from oah.intent."""
-    try:
-        from oah import intent  # lane P4a
-    except ImportError as exc:
-        raise briefs.BriefError("OAH_FOOTER_NOT_APPENDED", "this oah build has no canonical intent footer "
-                                "(oah.intent is missing), so no worker brief can be delivered; update or reinstall "
-                                "oah") from exc
-    return intent.FOOTER, intent.has_footer, getattr(intent, "parse", None)
+class IntentTools(NamedTuple):
+    footer: str
+    has_footer: Callable[[str], bool]
+    parse: Callable[[str], object]
+    read_source: Callable[[pathlib.Path], str]
+
+
+def intent_tools() -> IntentTools:
+    """The shared intent footer, its presence test, the parser and the safe source reader (oah.intent, lane P4a)."""
+    footer = briefs.intent_footer()
+    from oah import intent
+
+    return IntentTools(footer, briefs.has_intent_footer, intent.parse, intent.read_source)
+
+
+def retry_command(args: argparse.Namespace, worktree: str) -> str:
+    """This `oah call` command line again, with an exact --worktree."""
+    words = ["oah", "call", args.engine, "--stage", args.stage, "--task", args.task]
+    for name in ("tier", "kind", "intensity", "reasoning", "risk", "message", "prompt_file", "brief_file", "packet",
+                 "timeout_seconds"):
+        value = getattr(args, name)
+        if value not in (None, ""):
+            words += ["--" + name.replace("_", "-"), f"{value:g}" if isinstance(value, float) else str(value)]
+    for name in ("override_stage", "background", "refresh_models", "json"):
+        if getattr(args, name):
+            words.append("--" + name.replace("_", "-"))
+    words += ["--worktree", worktree]
+    return " ".join(briefs.shell_word(word) for word in words)
 
 
 def _read(path: str) -> str:
     if path == "-":
         return sys.stdin.buffer.read().decode("utf-8-sig")
-    return pathlib.Path(path).read_text(encoding="utf-8-sig")
+    return pathlib.Path(path).read_bytes().decode("utf-8-sig")  # bytes keep a stored brief's line endings
 
 
 def _summary(data: dict) -> str:
@@ -102,8 +124,11 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     if args.message and args.prompt_file:
         print("OAH_USAGE: give either --message or --prompt-file, not both", file=sys.stderr)
         return EXIT_USAGE
+    if args.worktree:
+        root = call.resolve_worktree(args.worktree, root, retry=lambda path: retry_command(args, path))
+        state = state_dir(repo_info(root), os.environ)
     settings = load_settings(root)
-    footer, has_footer, parse_intent = intent_footer()
+    tools = intent_tools()
     request = call.CallRequest(
         engine=args.engine, stage=args.stage, task=args.task, tier=args.tier, axes=axes,
         override_stage=args.override_stage,
@@ -111,8 +136,8 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
         stored_brief=_read(args.brief_file) if args.brief_file else None,
         packet=(root / args.packet) if args.packet else None, timeout_s=args.timeout_seconds,
         refresh_models=args.refresh_models)
-    prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=footer,
-                            has_footer=has_footer, parse_intent=parse_intent)
+    prepared = call.prepare(request, settings, root=root, state_dir=state, env=os.environ, footer=tools.footer,
+                            has_footer=tools.has_footer, parse_intent=tools.parse, read_source=tools.read_source)
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if args.background:

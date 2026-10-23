@@ -5,8 +5,8 @@ import importlib.util
 import unittest
 from collections import namedtuple
 
-from oah.briefs import (VERIFY_FOOTER, VERIFY_MARKER, BriefError, build, deliver, lease_command,
-                        strip_intent_footer)
+from oah.briefs import (VERIFY_FOOTER, VERIFY_MARKER, BriefError, build, deliver, has_intent_footer, intent_footer,
+                        lease_command, raw_section, strip_intent_footer)
 
 MARKER = "<!-- OAH_INTENT_FOOTER -->"
 FOOTER = f"{MARKER}\n## Intent rules\n- Keep the intent section exactly as it is.\n- End with INTENT and AC lines.\n"
@@ -135,6 +135,32 @@ class FooterTest(unittest.TestCase):
         with self.assertRaises(BriefError) as ctx:
             strip_intent_footer(text + "trailing round text\n", footer=FOOTER, has_footer=has_footer)
         self.assertEqual(ctx.exception.code, "OAH_FOOTER_MISPLACED")
+
+    def test_raw_section_is_byte_intact(self):
+        text = ("# Packet\r\n" + SECTION.replace("works", "한글 \U0001f600 그대로") + "## Scope\n").replace(
+            "Revision: 1\n", "Revision: 1\r\n")
+        raw = raw_section(text)
+        self.assertTrue(raw.startswith("<!-- OAH_INTENT:BEGIN -->\n"))
+        self.assertIn("Revision: 1\r\n", raw)
+        self.assertIn("한글 \U0001f600 그대로", raw)
+        self.assertEqual(text.count(raw), 1)
+        built = brief(intent_section=raw)
+        self.assertEqual(built.encode("utf-8").count(raw.encode("utf-8")), 1)
+        self.assertIsNone(raw_section("no markers"))
+        self.assertIsNone(raw_section(SECTION + SECTION))
+
+    @unittest.skipIf(importlib.util.find_spec("oah.intent"), "oah.intent exists")
+    def test_intent_footer_without_intent_module_refuses(self):
+        with self.assertRaises(BriefError) as ctx:
+            intent_footer()
+        self.assertEqual(ctx.exception.code, "OAH_FOOTER_NOT_APPENDED")
+
+    @unittest.skipUnless(importlib.util.find_spec("oah.intent"), "lane P4a (oah.intent) has not landed")
+    def test_intent_footer_is_the_shared_footer(self):
+        from oah import intent
+
+        self.assertEqual(intent_footer(), intent.FOOTER)
+        self.assertTrue(has_intent_footer(brief(footer=intent_footer(), has_footer=has_intent_footer)))
 
     @unittest.skipUnless(importlib.util.find_spec("oah.intent"), "lane P4a (oah.intent) has not landed")
     def test_real_intent_footer_when_available(self):
