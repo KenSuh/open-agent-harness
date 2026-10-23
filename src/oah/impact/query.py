@@ -59,11 +59,17 @@ def count_line(total: int, shown: int, overflow: int) -> str:
     return f"total={total} shown={shown} overflow={overflow}"
 
 
-def apply_rerank(rows: list[Row], *, disabled: bool = False) -> tuple[list[Row], str]:
-    """The single re-ranker call site (A2). Lane P3b's `oah.rerank.rerank("impact", rows, config=...)` plugs in
-    here; it may re-order rows but never drop pin or exec rows. Until then nothing is re-ranked."""
+def apply_rerank(rows: list[Row], *, disabled: bool = False, enabled: bool = False) -> tuple[list[Row], str]:
+    """The single re-ranker call site (A2). A provider runs only when the user enabled it explicitly
+    (`[impact] rerank = true`) and its key is present; the brief can still turn it off.
+
+    Lane P3b's `oah.rerank.rerank("impact", rows, config=...)` plugs in after the enabled check, and its key
+    lookup reports `unused(no-key)`. It may re-order rows but never drop pin or exec rows. Until it lands an
+    enabled re-ranker has no provider, so nothing is re-ranked."""
     if disabled:
         return rows, "unused(disabled-by-brief)"
+    if not enabled:
+        return rows, "unused(not-enabled)"
     return rows, "unused(not-configured)"
 
 

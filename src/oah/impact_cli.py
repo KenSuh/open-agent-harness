@@ -55,7 +55,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _identity(info: mapstore.MapInfo) -> str:
-    return f"commit={info.commit} tool={info.tool_digest[:12]} result={info.result_digest[:12]}"
+    return (f"commit={info.commit} manifest={info.manifest_digest[:12]} tool={info.tool_digest[:12]} "
+            f"result={info.result_digest[:12]}")
 
 
 def _action(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
@@ -128,7 +129,7 @@ def _task_scope(root: pathlib.Path, task: str) -> list[str]:
                       "or pass paths instead", EXIT_USAGE)
 
 
-def _with_live_hits(root: pathlib.Path, data: dict, commit: str, targets: list[str], settings: dict) -> dict:
+def _with_live_hits(root: pathlib.Path, data: dict, commit: str | None, targets: list[str], settings: dict) -> dict:
     """Search by name for targets the map does not track (new or deleted files); nothing is stored."""
     known = mapstore.needle_set(data["files"], settings["min_needle"])
     missing = set()
@@ -167,10 +168,10 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
         add(selected)
     changed = _changed(root, since, info.commit if args.ref else None) if since else []
     add(changed)
-    data = _with_live_hits(root, data, info.commit, targets, settings)
+    data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
     gates, gate_status = gatebind.discover(root)
     rows = query.query(data, targets, gates=gates, graph=query.load_graph(root, settings), settings=settings)
-    rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank)
+    rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank, enabled=settings["rerank"])
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
     identity = query.db_identity(data, info.commit, shown)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []

@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 from oah.impact import ImpactError, ensure_fresh, mapstore
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
@@ -64,6 +65,12 @@ class MapStoreTest(unittest.TestCase):
         self.assertEqual(stored["result"], canonical_digest(stored["data"]))
         self.assertEqual(info.result_digest, stored["result"])
         self.assertTrue(info.path.is_relative_to(self.repo / ".git" / "oah" / "impact"))
+        manifest = stored["manifest"]
+        self.assertEqual(set(manifest), {"worktree", "head", "index", "dirty", "untracked", "ledgers", "config",
+                                         "tool"})
+        self.assertEqual((manifest["head"], manifest["tool"], manifest["config"]), (info.commit, info.tool_digest, None))
+        self.assertEqual(stored["manifest_digest"], canonical_digest(manifest))
+        self.assertEqual(info.manifest_digest, stored["manifest_digest"])
         self.assertEqual(ensure_fresh(self.repo).action, "fresh")
 
     def test_commit_makes_map_stale(self):
@@ -71,7 +78,7 @@ class MapStoreTest(unittest.TestCase):
         git_commit(self.repo, {"src/new.py": "x = 1\n"})
         info, reason = mapstore.status(self.repo, env={})
         self.assertEqual(info.action, "stale")
-        self.assertIn("behind HEAD", reason)
+        self.assertIn("HEAD moved", reason)
         refreshed = ensure_fresh(self.repo)
         self.assertEqual((refreshed.action, refreshed.changed, refreshed.commit), ("refreshed", 1, head(self.repo)))
         self.assertEqual(mapstore.status(self.repo, env={})[0].action, "fresh")
@@ -92,6 +99,90 @@ class MapStoreTest(unittest.TestCase):
         git_commit(self.repo, {"db/001.sql": "CREATE TABLE gadgets (id int);\n", "src/store.py": None})
         again = ensure_fresh(self.repo)
         self.assertEqual(again.result_digest, self.full_build_elsewhere().result_digest)
+        (self.repo / "db" / "002.sql").write_text("CREATE TABLE sprockets (id int);\n", encoding="utf-8")
+        (self.repo / "src" / "app.py").write_text("query('sprockets'); print('src/helpers.py')\n", encoding="utf-8")
+        (self.repo / "docs" / "guide.md").unlink()
+        dirty = ensure_fresh(self.repo)
+        self.assertEqual(dirty.action, "refreshed")
+        self.assertEqual(dirty.result_digest, self.full_build_elsewhere().result_digest)
+
+    def test_working_tree_inputs_make_map_stale(self):
+        mapstore.build(self.repo, env={})
+        (self.repo / "docs" / "guide.md").write_text("See tools/check.py now.\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "working tree changed")
+        info = ensure_fresh(self.repo)
+        self.assertEqual((info.action, info.changed), ("refreshed", 1))
+        data = mapstore.load(info.path)["data"]
+        self.assertIn(["docs/guide.md", 1, ""], data["hits"]["tools/check.py"])
+        stored = mapstore.load(info.path)
+        self.assertEqual(list(stored["manifest"]["dirty"]), ["docs/guide.md"])
+        (self.repo / "notes.txt").write_text("util.py\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "working tree changed")
+        self.assertIn("notes.txt", mapstore.load(ensure_fresh(self.repo).path)["manifest"]["untracked"])
+        (self.repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        ensure_fresh(self.repo)
+        (self.repo / "debug.log").write_text("util.py\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "fresh", "ignored files are not inputs")
+
+    def test_index_change_makes_map_stale(self):
+        (self.repo / "docs" / "guide.md").write_text("changed\n", encoding="utf-8")
+        ensure_fresh(self.repo)
+        subprocess.run(["git", "-C", str(self.repo), "add", "docs/guide.md"], check=True)
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "index changed")
+        self.assertEqual(ensure_fresh(self.repo).action, "refreshed")
+
+    def test_ledgers_and_config_make_map_stale(self):
+        (self.repo / ".gitignore").write_text(".oah/tasks/\n", encoding="utf-8")
+        git_commit(self.repo, {})
+        ensure_fresh(self.repo)
+        ledger = self.repo / ".oah" / "tasks" / "T" / "GATES.md"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("# Gates\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "ledgers changed", "ignored ledgers still count")
+        info = ensure_fresh(self.repo)
+        self.assertEqual(list(mapstore.load(info.path)["manifest"]["ledgers"]), [".oah/tasks/T/GATES.md"])
+        ledger.write_text("# Gates\n- [x] G1: done\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "ledgers changed")
+        ensure_fresh(self.repo)
+        (self.repo / ".oah" / "config.toml").write_text("[impact]\nlimit = 3\n", encoding="utf-8")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "config changed")
+        info = ensure_fresh(self.repo)
+        self.assertEqual((info.action, info.changed), ("refreshed", 1), "the untracked config file is an input too")
+
+    def test_state_folder_inside_worktree_is_not_an_input(self):
+        env = {"OAH_STATE_DIR": str(self.repo / "local-state")}
+        info = mapstore.build(self.repo, env=env)
+        self.assertTrue(info.path.is_relative_to(self.repo / "local-state"))
+        self.assertEqual(mapstore.status(self.repo, env=env)[1], "fresh", "storing the map must not stale it")
+
+    def test_inputs_changing_during_build_retry_then_refuse(self):
+        real = mapstore.build_data
+        calls = []
+
+        def editing(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                (self.repo / "docs" / "guide.md").write_text(f"edit {len(calls)}\n", encoding="utf-8")
+            return real(*args, **kwargs)
+
+        with patch.object(mapstore, "build_data", editing):
+            info = mapstore.build(self.repo, env={})
+        self.assertEqual(len(calls), 2, "the build is retried once the inputs settle")
+        self.assertEqual(mapstore.status(self.repo, env={})[1], "fresh")
+        self.assertEqual(info.manifest_digest, mapstore.status(self.repo, env={})[0].manifest_digest)
+
+        def always_editing(*args, **kwargs):
+            calls.append(1)
+            (self.repo / "docs" / "guide.md").write_text(f"edit {len(calls)}\n", encoding="utf-8")
+            return real(*args, **kwargs)
+
+        before = info.path.read_bytes()
+        with patch.object(mapstore, "build_data", always_editing):
+            with self.assertRaises(ImpactError) as caught:
+                mapstore.build(self.repo, env={})
+        self.assertEqual(caught.exception.code, "OAH_IMPACT_STALE")
+        self.assertIn("kept changing", str(caught.exception))
+        self.assertEqual(info.path.read_bytes(), before, "a map built from moving inputs is never stored")
 
     def test_refresh_handles_delete_rename(self):
         mapstore.build(self.repo, env={})

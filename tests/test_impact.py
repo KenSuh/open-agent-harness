@@ -241,9 +241,11 @@ class QueryTest(unittest.TestCase):
 
     def test_rerank_status(self):
         rows = [row("mention", source="b"), row("link", source="a")]
-        self.assertEqual(query.apply_rerank(rows)[1], "unused(not-configured)")
+        self.assertEqual(query.apply_rerank(rows)[1], "unused(not-enabled)")
         self.assertEqual(query.apply_rerank(rows)[0], rows, "an unused re-ranker never changes the rows")
-        self.assertEqual(query.apply_rerank(rows, disabled=True)[1], "unused(disabled-by-brief)")
+        self.assertEqual(query.apply_rerank(rows, enabled=True)[1], "unused(not-configured)",
+                         "enabled, but no provider is installed")
+        self.assertEqual(query.apply_rerank(rows, disabled=True, enabled=True)[1], "unused(disabled-by-brief)")
 
 
 class CliTest(unittest.TestCase):
@@ -255,8 +257,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(lines[0], "impact: tools/check.py")
-        self.assertRegex(lines[1], r"\Amap: commit=[0-9a-f]{40} tool=[0-9a-f]{12} result=[0-9a-f]{12} \(built\)\Z")
-        self.assertIn("rerank=unused(not-configured)", lines)
+        self.assertRegex(lines[1], r"\Amap: commit=[0-9a-f]{40} manifest=[0-9a-f]{12} tool=[0-9a-f]{12} "
+                                   r"result=[0-9a-f]{12} \(built\)\Z")
+        self.assertIn("rerank=unused(not-enabled)", lines)
         self.assertTrue(any(line.startswith("gates: unavailable") for line in lines))
         self.assertTrue(any(line.startswith("db-impact: commit=") for line in lines))
         self.assertRegex(result.stdout, r"exec\s+lexical\s+workflow\s+\.github/workflows/ci\.yml:2\s+tools/check\.py")
@@ -366,13 +369,33 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(bad.returncode, 69, bad.stderr)
                 self.assertIn(code, bad.stderr)
 
+    def test_cli_rerank_needs_explicit_enable(self):
+        (self.repo / ".oah").mkdir()
+        (self.repo / ".oah" / "config.toml").write_text("[impact]\nrerank = true\n", encoding="utf-8")
+        result = run_impact(self.repo, "tools/check.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rerank=unused(not-configured)", result.stdout.splitlines())
+        brief = run_impact(self.repo, "tools/check.py", "--no-rerank")
+        self.assertIn("rerank=unused(disabled-by-brief)", brief.stdout.splitlines())
+
+    def test_cli_answers_from_working_tree(self):
+        (self.repo / "docs" / "notes.md").write_text("Run tools/check.py first.\n", encoding="utf-8")
+        result = run_impact(self.repo, "tools/check.py", "--json")
+        sources = {row["source"] for row in json.loads(result.stdout)["rows"] if row["layer"] == "lexical"}
+        self.assertIn("docs/notes.md", sources, "untracked files are inputs")
+        (self.repo / "docs" / "guide.md").write_text("Nothing here.\n", encoding="utf-8")
+        again = json.loads(run_impact(self.repo, "tools/check.py", "--json").stdout)
+        self.assertEqual(again["map"]["action"], "refreshed")
+        self.assertNotIn("docs/guide.md", {row["source"] for row in again["rows"] if row["layer"] == "lexical"},
+                         "dirty edits are inputs")
+
     def test_cli_build_refresh_status(self):
         built = run_impact(self.repo, "build")
         self.assertEqual(built.returncode, 0, built.stderr)
         self.assertRegex(built.stdout, r"\AOAH_IMPACT_BUILT commit=[0-9a-f]{40} ")
         git_commit(self.repo, {"src/new.py": "n = 1\n"})
         status = run_impact(self.repo, "status")
-        self.assertIn("map: stale (behind HEAD", status.stdout)
+        self.assertIn("map: stale (HEAD moved", status.stdout)
         self.assertIn("oah impact refresh", status.stdout)
         refreshed = run_impact(self.repo, "refresh", "--json")
         self.assertEqual(json.loads(refreshed.stdout)["action"], "refreshed")

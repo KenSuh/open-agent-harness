@@ -16,12 +16,14 @@ DEFAULTS: dict[str, object] = {
     "wiki_dirs": ["docs/wiki"],
     "graph_file": "graphify-out/graph.json",
     "db_globs": ["**/*.sql"],
+    "ledger_globs": [".oah/tasks/*/GATES.md"],  # gate ledgers bind the map's identity, ignored or not
+    "rerank": False,              # a re-ranker runs only when enabled here explicitly and its key is present
     "git_timeout": 300.0,
     "lock_timeout": 120.0,
     "kinds": [[kind, list(globs)] for kind, globs in DEFAULT_KINDS],
 }
 # Settings that change what the map stores. The others only change how results are shown.
-MAP_KEYS = ("history_limit", "min_needle", "kinds", "db_globs")
+MAP_KEYS = ("history_limit", "min_needle", "kinds", "db_globs", "ledger_globs")
 
 
 def effective(settings: Mapping[str, object] | None) -> dict[str, object]:
@@ -47,11 +49,13 @@ def _check(settings: Mapping[str, object]) -> None:
     for key in ("git_timeout", "lock_timeout"):
         if not isinstance(settings[key], (int, float)) or isinstance(settings[key], bool) or settings[key] <= 0:
             fail(key, "a positive number of seconds")
-    for key in ("wiki_dirs", "db_globs"):
+    for key in ("wiki_dirs", "db_globs", "ledger_globs"):
         if not isinstance(settings[key], (list, tuple)) or not all(isinstance(v, str) for v in settings[key]):
             fail(key, "an array of strings")
     if not isinstance(settings["graph_file"], str):
         fail("graph_file", "a string")
+    if not isinstance(settings["rerank"], bool):
+        fail("rerank", "true or false")
     kinds = settings["kinds"]
     if not isinstance(kinds, (list, tuple)) or not all(
             isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[0], str)

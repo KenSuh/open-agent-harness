@@ -99,9 +99,12 @@ def classify_command(text: str, needle: str) -> str | None:
     return None
 
 
-def grep(root: pathlib.Path, rev: str, needles: Sequence[str], *, paths: Sequence[str] | None = None,
+def grep(root: pathlib.Path, rev: str | None, needles: Sequence[str], *, paths: Sequence[str] | None = None,
          ignore_case: bool = False, timeout: float = GIT_TIMEOUT) -> list[tuple[str, int, str]]:
-    """Lines at rev that contain any needle as a fixed string: `git grep -n -I -F` with patterns on stdin."""
+    """Lines that contain any needle as a fixed string: `git grep -n -I -F` with patterns on stdin.
+
+    rev names a commit; None searches the working tree, tracked and untracked files alike (ignored files never).
+    """
     patterns = sorted({needle for needle in needles if needle and "\n" not in needle})
     if not patterns or (paths is not None and not paths):
         return []
@@ -109,7 +112,8 @@ def grep(root: pathlib.Path, rev: str, needles: Sequence[str], *, paths: Sequenc
             "--no-color", "-f", "-"]
     if ignore_case:
         argv.append("-i")
-    argv += [rev, "--", *(paths or [])]
+    argv += ["--untracked"] if rev is None else [rev]
+    argv += ["--", *(paths or [])]
     result = run_command(argv, timeout=timeout, stdin_text="\n".join(patterns) + "\n")
     if result.timed_out:
         raise ImpactError("OAH_IMPACT_GIT_TIMEOUT", f"git grep took longer than {timeout:g}s in {root}; "
@@ -117,8 +121,9 @@ def grep(root: pathlib.Path, rev: str, needles: Sequence[str], *, paths: Sequenc
     if result.returncode == 1:
         return []
     if result.returncode != 0:
-        raise ImpactError("OAH_IMPACT_GIT_FAILED", f"git grep failed at {rev}: {result.stderr.strip()}")
-    return _parse_grep(result.stdout, rev + ":")
+        raise ImpactError("OAH_IMPACT_GIT_FAILED", f"git grep failed at {rev or 'the working tree'}: "
+                          f"{result.stderr.strip()}")
+    return _parse_grep(result.stdout, "" if rev is None else rev + ":")
 
 
 def _parse_grep(output: str, prefix: str) -> list[tuple[str, int, str]]:

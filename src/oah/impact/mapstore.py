@@ -1,15 +1,23 @@
-# 영향 지도 저장 — 커밋 시점의 어휘 참조·DB 그래프·공동 변경 이력을 상태 폴더에 신원(커밋·도구·결과 digest)과 함께 저장하고, 낡으면 증분 갱신하거나 거부한다.
+# 영향 지도 저장 — 작업 트리의 어휘 참조·DB 그래프·공동 변경 이력을 입력 매니페스트(HEAD·인덱스·더러운/추적 안 된 파일·원장·설정·도구)와 결과 digest 로 묶어 저장하고, 낡으면 증분 갱신하거나 거부한다.
 """The persisted impact map.
 
-One JSON file per worktree under `<state>/impact/maps/`. Its identity is `{commit, tool, result}`:
-- `commit` is the HEAD the map describes;
-- `tool` digests the oah version, the map schema, this package's source and the settings in MAP_KEYS;
-- `result` digests the canonical JSON of the map's data.
-A map is fresh only when all three match. A stale map is refreshed (incrementally when only the commit
-moved) or refused with OAH_IMPACT_STALE; it is never answered from silently.
+One JSON file per worktree under `<state>/impact/maps/`. The map describes the working tree: tracked and
+untracked (not ignored) files, with dirty edits as they are on disk. Its freshness identity is a manifest
+of every input it binds:
+- `worktree` (which checkout) and `head` (the commit);
+- `index`, the digest of `git ls-files -s`, so staged changes count;
+- `dirty` and `untracked`, the byte digest of each such file (`deleted` for a removed tracked file);
+- `ledgers`, the bytes of every gate ledger, ignored ones included;
+- `config`, the bytes of `.oah/config.toml`;
+- `tool`, which digests the oah version, the map schema, this package's source and the settings in MAP_KEYS.
+The map also keeps `result`, the digest of its data. Any manifest or result difference makes it stale; a
+stale map is refreshed or refused with OAH_IMPACT_STALE, never answered from silently. The manifest is
+taken before and after every build: when the inputs moved meanwhile the build is retried, and refused as
+stale when they keep moving.
 
-Incremental refresh keeps hits from unchanged files, re-reads changed files for the needles both maps
-share, and searches the whole tree for new needles only. The result equals a full build byte for byte.
+Incremental refresh compares per-path input keys (index blob for clean files, byte digest otherwise). It
+keeps hits from unchanged files, re-reads changed files for the needles both maps share, and searches the
+whole tree for new needles only. The result equals a full build byte for byte.
 """
 from __future__ import annotations
 
@@ -25,6 +33,7 @@ from typing import Iterable, Mapping
 
 import oah
 from oah.atomic import write_text_atomic
+from oah.config import CONFIG_RELATIVE_PATH
 from oah.engines.proc import run_command
 from oah.impact import kinds as kinds_module
 from oah.impact import lexical, sqlplugin
@@ -33,9 +42,14 @@ from oah.impact.errors import EXIT_USAGE, ImpactError
 from oah.lockfile import StateLock
 from oah.paths import git_argv, repo_info, state_dir
 
-MAP_SCHEMA = 1
+MAP_SCHEMA = 2
 STRONG_KINDS = ("workflow", "manifest", "config")
 PATHS_PER_CALL = 8000  # characters of pathspec per git call, well under the Windows command-line limit
+BUILD_ATTEMPTS = 3
+# Most specific first: an untracked config file is also a working-tree input, but "config changed" says more.
+MANIFEST_ORDER = (("worktree", "worktree changed"), ("head", "HEAD moved"), ("index", "index changed"),
+                  ("ledgers", "ledgers changed"), ("config", "config changed"), ("dirty", "working tree changed"),
+                  ("untracked", "working tree changed"), ("tool", "tool changed"))
 
 
 @dataclass(frozen=True)
@@ -47,10 +61,11 @@ class MapInfo:
     action: str  # fresh, stale, built, refreshed or ephemeral
     changed: int = 0
     reason: str = ""
+    manifest_digest: str = ""
 
     def to_json(self) -> dict:
-        return {"commit": self.commit, "tool": self.tool_digest, "result": self.result_digest,
-                "action": self.action, "changed": self.changed, "reason": self.reason}
+        return {"commit": self.commit, "manifest": self.manifest_digest, "tool": self.tool_digest,
+                "result": self.result_digest, "action": self.action, "changed": self.changed, "reason": self.reason}
 
 
 def canonical(data: object) -> str:
@@ -73,8 +88,9 @@ def tool_digest(settings: Mapping[str, object]) -> str:
 
 def _git(root: pathlib.Path, *args: str, timeout: float, encoding: str = "utf-8",
          stdin_text: str | None = None, ok: Iterable[int] = (0,)) -> str:
-    result = run_command((*git_argv(), "--literal-pathspecs", "-c", "core.quotepath=false", "-C", str(root), *args),
-                         timeout=timeout, encoding=encoding, stdin_text=stdin_text)
+    argv = (*git_argv(), "--literal-pathspecs", "--no-optional-locks", "-c", "core.quotepath=false",
+            "-C", str(root), *args)
+    result = run_command(argv, timeout=timeout, encoding=encoding, stdin_text=stdin_text)
     if result.timed_out:
         raise ImpactError("OAH_IMPACT_GIT_TIMEOUT", f"git {args[0]} took longer than {timeout:g}s in {root}; "
                           "raise [impact] git_timeout and retry")
@@ -89,6 +105,14 @@ def resolve_rev(root: pathlib.Path, rev: str, timeout: float = 30.0) -> str:
     if not sha:
         raise ImpactError("OAH_IMPACT_BAD_REF", f"{rev!r} is not a commit in this repository; "
                           "check the name with git log", EXIT_USAGE)
+    return sha
+
+
+def _head(root: pathlib.Path, timeout: float) -> str:
+    sha = _git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", timeout=timeout, ok=(0, 1)).strip()
+    if not sha:
+        raise ImpactError("OAH_IMPACT_NO_COMMIT", "this repository has no commits yet; make a first commit, "
+                          "then run oah impact build")
     return sha
 
 
@@ -122,6 +146,16 @@ def read_blobs(root: pathlib.Path, rev: str, paths: list[str], timeout: float) -
     return contents
 
 
+def read_worktree(root: pathlib.Path, paths: list[str]) -> dict[str, str]:
+    contents = {}
+    for path in paths:
+        try:
+            contents[path] = (root / path).read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            continue  # removed since the manifest was taken; the after-build manifest catches it
+    return contents
+
+
 def read_history(root: pathlib.Path, rev: str, limit: int, timeout: float) -> list[list]:
     """[[sha, [files]]], newest first, for the last `limit` commits reachable from rev."""
     output = _git(root, "log", "--no-renames", "--name-only", "-z", "--format=%x1e%H", f"-n{int(limit)}", rev,
@@ -135,17 +169,93 @@ def read_history(root: pathlib.Path, rev: str, limit: int, timeout: float) -> li
     return history
 
 
-def diff_names(root: pathlib.Path, old: str, new: str, timeout: float) -> list[str] | None:
-    """Paths that differ between two commits (renames as delete plus add), or None when old is gone."""
-    if not _commit_exists(root, old, timeout):
+# --- the input manifest --------------------------------------------------------------------------------
+
+def _file_key(path: pathlib.Path) -> str | None:
+    try:
+        if path.is_symlink():
+            return "sha256:" + hashlib.sha256(os.readlink(path).encode("utf-8", "surrogateescape")).hexdigest()
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
         return None
-    output = _git(root, "diff", "--no-renames", "--name-only", "-z", old, new, "--", timeout=timeout)
-    return sorted({name for name in output.split("\0") if name})
 
 
-def _commit_exists(root: pathlib.Path, rev: str, timeout: float) -> bool:
-    result = run_command((*git_argv(), "-C", str(root), "cat-file", "-e", rev + "^{commit}"), timeout=timeout)
-    return result.returncode == 0
+def _status(root: pathlib.Path, timeout: float) -> tuple[set[str], set[str]]:
+    """(tracked paths whose working copy differs from the index, untracked paths), without taking index locks."""
+    output = _git(root, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames",
+                  "--ignore-submodules=all", timeout=timeout)
+    dirty, untracked = set(), set()
+    entries = iter(output.split("\0"))
+    for entry in entries:
+        if entry.startswith("1 "):
+            fields = entry.split(" ", 8)
+            if fields[1][1] != ".":
+                dirty.add(fields[8])
+        elif entry.startswith("2 "):
+            dirty.add(entry.split(" ", 9)[9])
+            next(entries, None)  # the original path of a rename
+        elif entry.startswith("u "):
+            dirty.add(entry.split(" ", 10)[10])
+        elif entry.startswith("? ") and not entry.endswith("/"):
+            untracked.add(entry[2:])
+    return dirty, untracked
+
+
+def _ledgers(root: pathlib.Path, settings: Mapping[str, object]) -> dict[str, str]:
+    found = {}
+    for pattern in settings["ledger_globs"]:
+        for path in root.glob(pattern):
+            key = _file_key(path) if path.is_file() else None
+            if key:
+                found[path.relative_to(root).as_posix()] = key
+    return dict(sorted(found.items()))
+
+
+def _outside(root: pathlib.Path, folder: pathlib.Path | None):
+    """A predicate that drops paths under folder (the state folder, when it lives inside the worktree)."""
+    try:
+        prefix = pathlib.Path(folder).resolve().relative_to(root.resolve()).as_posix() if folder else None
+    except ValueError:
+        prefix = None
+    if not prefix or prefix == ".":
+        return lambda path: True
+    return lambda path: path != prefix and not path.startswith(prefix + "/")
+
+
+def take_manifest(root: pathlib.Path, settings: Mapping[str, object],
+                  state: pathlib.Path | None = None) -> tuple[dict, dict[str, str]]:
+    """(manifest, inputs): the identity of everything the map reads, and the input key of every file it reads.
+
+    Paths under the state folder are never inputs, so storing the map cannot make it stale.
+    """
+    timeout, keep = settings["git_timeout"], _outside(root, state)
+    head = _head(root, timeout)
+    listing = _git(root, "ls-files", "-s", "-z", timeout=timeout)
+    inputs = {}
+    for entry in listing.split("\0"):
+        meta, _, path = entry.partition("\t")
+        fields = meta.split(" ")
+        if path and len(fields) == 3 and fields[0] != "160000" and keep(path):
+            inputs[path] = "blob:" + fields[1]
+    dirty_paths, untracked_paths = _status(root, timeout)
+    dirty, untracked = {}, {}
+    for path in sorted(filter(keep, dirty_paths)):
+        key = _file_key(root / path)
+        dirty[path] = key or "deleted"
+        if key:
+            inputs[path] = key
+        else:
+            inputs.pop(path, None)
+    for path in sorted(filter(keep, untracked_paths)):
+        key = _file_key(root / path)
+        if key:
+            untracked[path] = inputs[path] = key
+    config = _file_key(root.joinpath(*CONFIG_RELATIVE_PATH.parts))
+    manifest = {"worktree": hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest(), "head": head,
+                "index": hashlib.sha256(listing.encode("utf-8", "surrogateescape")).hexdigest(),
+                "dirty": dirty, "untracked": untracked, "ledgers": _ledgers(root, settings),
+                "config": config, "tool": tool_digest(settings)}
+    return manifest, dict(sorted(inputs.items()))
 
 
 # --- scanning ------------------------------------------------------------------------------------------
@@ -179,7 +289,7 @@ def _flag(kind: str, text: str, needle: str) -> str:
     return ""
 
 
-def _grep_lines(root: pathlib.Path, rev: str, needles: set[str], paths: list[str] | None, timeout: float,
+def _grep_lines(root: pathlib.Path, rev: str | None, needles: set[str], paths: list[str] | None, timeout: float,
                 ignore_case: bool = False) -> list[tuple[str, int, str]]:
     if not needles:
         return []
@@ -191,22 +301,25 @@ def _grep_lines(root: pathlib.Path, rev: str, needles: set[str], paths: list[str
     return lines
 
 
-def scan_lexical(root: pathlib.Path, rev: str, needles: set[str], files: Mapping[str, str],
+def scan_lexical(root: pathlib.Path, rev: str | None, needles: set[str], files: Mapping[str, str],
                  paths: list[str] | None, timeout: float) -> dict[str, list[list]]:
-    """{needle: [[source, line, flag]]}; flag is pin, exec, wikilink or empty."""
+    """{needle: [[source, line, flag]]}; flag is pin, exec, wikilink or empty. rev None is the working tree."""
     hits: dict[str, list[list]] = {}
     for source, number, text in _grep_lines(root, rev, needles, paths, timeout):
-        kind = files.get(source, "code")
+        if source not in files:
+            continue
         for needle in lexical.find_needles(text, needles):
-            hits.setdefault(needle, []).append([source, number, _flag(kind, text, needle)])
+            hits.setdefault(needle, []).append([source, number, _flag(files[source], text, needle)])
     return hits
 
 
-def scan_db(root: pathlib.Path, rev: str, names: set[str], paths: list[str] | None,
-            timeout: float) -> dict[str, list[list]]:
+def scan_db(root: pathlib.Path, rev: str | None, names: set[str], files: Mapping[str, str],
+            paths: list[str] | None, timeout: float) -> dict[str, list[list]]:
     """{name: [[source, line]]} for DB entity names used as identifiers anywhere, ignoring case."""
     hits: dict[str, list[list]] = {}
     for source, number, text in _grep_lines(root, rev, names, paths, timeout, ignore_case=True):
+        if source not in files:
+            continue
         for name in lexical.find_identifiers(text, names):
             hits.setdefault(name, []).append([source, number])
     return hits
@@ -223,9 +336,13 @@ def db_names(graph: Mapping | None, min_needle: int) -> set[str]:
             if entity.startswith(("db_table:", "db_routine:")) and len(info["name"]) >= min_needle}
 
 
-def _db_graph(root: pathlib.Path, rev: str, files: Mapping[str, str], settings: Mapping[str, object]) -> dict | None:
+def _db_graph(root: pathlib.Path, rev: str | None, files: Mapping[str, str],
+              settings: Mapping[str, object]) -> dict | None:
     sql = db_files(files, settings)
-    return sqlplugin.extract(read_blobs(root, rev, sql, settings["git_timeout"])) if sql else None
+    if not sql:
+        return None
+    contents = read_worktree(root, sql) if rev is None else read_blobs(root, rev, sql, settings["git_timeout"])
+    return sqlplugin.extract(contents)
 
 
 def _carry(old: Mapping[str, list], keep: set[str], changed: set[str]) -> dict[str, list[list]]:
@@ -249,42 +366,45 @@ def _finish(data: dict) -> dict:
     return data
 
 
-def build_data(root: pathlib.Path, rev: str, settings: Mapping[str, object]) -> dict:
+def _classified(paths: Iterable[str], settings: Mapping[str, object]) -> dict[str, str]:
+    return {path: kinds_module.classify(path, settings["kinds"]) for path in sorted(paths)}
+
+
+def build_data(root: pathlib.Path, rev: str | None, settings: Mapping[str, object], *,
+               inputs: Mapping[str, str] | None = None, head: str | None = None) -> dict:
+    """The map's data: at commit rev, or (rev None) over the working tree's inputs with history from head."""
     timeout, minimum = settings["git_timeout"], settings["min_needle"]
-    files = list_files(root, rev, settings)
+    files = list_files(root, rev, settings) if rev is not None else _classified(inputs or {}, settings)
     graph = _db_graph(root, rev, files, settings)
     return _finish({
         "files": files,
         "hits": scan_lexical(root, rev, needle_set(files, minimum), files, None, timeout),
         "db": graph,
-        "db_hits": scan_db(root, rev, db_names(graph, minimum), None, timeout),
-        "history": read_history(root, rev, settings["history_limit"], timeout),
+        "db_hits": scan_db(root, rev, db_names(graph, minimum), files, None, timeout),
+        "history": read_history(root, rev or head, settings["history_limit"], timeout),
     })
 
 
-def refresh_data(root: pathlib.Path, old: Mapping, old_rev: str, rev: str,
-                 settings: Mapping[str, object]) -> tuple[dict, int] | None:
-    """The map at rev from the map at old_rev, or None when old_rev is no longer available."""
+def refresh_data(root: pathlib.Path, old: Mapping, old_inputs: Mapping[str, str], inputs: Mapping[str, str],
+                 head: str, settings: Mapping[str, object]) -> tuple[dict, int]:
+    """The working-tree map for inputs, from the map built for old_inputs."""
     timeout, minimum = settings["git_timeout"], settings["min_needle"]
-    names = diff_names(root, old_rev, rev, timeout)
-    if names is None:
-        return None
-    changed = set(names)
-    files = list_files(root, rev, settings)
-    existing = [path for path in names if path in files]
+    changed = {path for path in set(old_inputs) | set(inputs) if old_inputs.get(path) != inputs.get(path)}
+    files = _classified(inputs, settings)
+    existing = sorted(path for path in changed if path in files)
     before, after = needle_set(old["files"], minimum), needle_set(files, minimum)
     hits = _carry(old["hits"], before & after, changed)
-    _merge(hits, scan_lexical(root, rev, before & after, files, existing, timeout))
-    _merge(hits, scan_lexical(root, rev, after - before, files, None, timeout))
+    _merge(hits, scan_lexical(root, None, before & after, files, existing, timeout))
+    _merge(hits, scan_lexical(root, None, after - before, files, None, timeout))
     graph = old["db"]
     if any(path in changed for path in db_files(set(old["files"]) | set(files), settings)):
-        graph = _db_graph(root, rev, files, settings)
+        graph = _db_graph(root, None, files, settings)
     old_names, new_names = db_names(old["db"], minimum), db_names(graph, minimum)
     db_hits = _carry(old["db_hits"], old_names & new_names, changed)
-    _merge(db_hits, scan_db(root, rev, old_names & new_names, existing, timeout))
-    _merge(db_hits, scan_db(root, rev, new_names - old_names, None, timeout))
+    _merge(db_hits, scan_db(root, None, old_names & new_names, files, existing, timeout))
+    _merge(db_hits, scan_db(root, None, new_names - old_names, files, None, timeout))
     data = _finish({"files": files, "hits": hits, "db": graph, "db_hits": db_hits,
-                    "history": read_history(root, rev, settings["history_limit"], timeout)})
+                    "history": read_history(root, head, settings["history_limit"], timeout)})
     return data, len(changed)
 
 
@@ -306,107 +426,127 @@ def load(path: pathlib.Path) -> dict:
     return stored
 
 
-def _context(root: pathlib.Path, env: Mapping[str, str] | None) -> tuple[pathlib.Path, str, pathlib.Path]:
+def _context(root: pathlib.Path, env: Mapping[str, str] | None,
+             settings: Mapping[str, object] | None) -> tuple[pathlib.Path, pathlib.Path, dict]:
+    """(worktree root, map file, settings). The map file sits at <state>/impact/maps/<key>.json."""
     info = repo_info(pathlib.Path(root))
     if info.head is None:
         raise ImpactError("OAH_IMPACT_NO_COMMIT", "this repository has no commits yet; make a first commit, "
                           "then run oah impact build")
     state = state_dir(info, os.environ if env is None else env)
-    return info.root, info.head, map_path(state, info.root)
+    return info.root, map_path(state, info.root), configured(info.root, settings)
 
 
-def _judge(path: pathlib.Path, head: str, tool: str) -> tuple[dict | None, str]:
+def _state(path: pathlib.Path) -> pathlib.Path:
+    return path.parent.parent.parent
+
+
+def _judge(path: pathlib.Path, manifest: Mapping) -> tuple[dict | None, str, bool]:
+    """(stored map, reason it is stale or "", whether it can be refreshed incrementally)."""
     try:
         stored = load(path)
     except FileNotFoundError:
-        return None, "missing"
+        return None, "missing", False
     except (OSError, ValueError):
-        return None, "unreadable"
-    if stored.get("schema") != MAP_SCHEMA:
-        return None, "older map format"
-    if stored.get("tool") != tool:
-        return stored, "tool changed"
-    if stored.get("result") != digest(stored["data"]):
-        return stored, "result digest mismatch"
-    if stored.get("commit") != head:
-        return stored, f"behind HEAD (map {str(stored.get('commit'))[:12]}, HEAD {head[:12]})"
-    return stored, ""
+        return None, "unreadable", False
+    if stored.get("schema") != MAP_SCHEMA or not isinstance(stored.get("manifest"), dict) \
+            or not isinstance(stored.get("inputs"), dict):
+        return None, "older map format", False
+    if stored.get("tool") != manifest["tool"] or stored["manifest"].get("tool") != manifest["tool"]:
+        return stored, "tool changed", False
+    if stored.get("result") != digest(stored["data"]) or stored.get("manifest_digest") != digest(stored["manifest"]):
+        return stored, "result digest mismatch", False
+    for key, reason in MANIFEST_ORDER:
+        if stored["manifest"].get(key) != manifest[key]:
+            if key == "head":
+                reason = f"HEAD moved (map {str(stored['manifest'].get('head'))[:12]}, HEAD {manifest['head'][:12]})"
+            return stored, reason, key != "worktree"
+    return stored, "", True
 
 
 def _info(stored: Mapping, path: pathlib.Path, action: str, changed: int = 0, reason: str = "") -> MapInfo:
-    return MapInfo(stored["commit"], stored["tool"], stored["result"], path, action, changed, reason)
+    return MapInfo(stored["manifest"]["head"], stored["tool"], stored["result"], path, action, changed, reason,
+                   stored["manifest_digest"])
 
 
 def status(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
            settings: Mapping[str, object] | None = None) -> tuple[MapInfo | None, str]:
-    """Read only: (info with action fresh or stale, reason). Creates nothing."""
-    top, head, path = _context(root, env)
-    settings = configured(top, settings)
-    stored, reason = _judge(path, head, tool_digest(settings))
+    """Read only: (info with action fresh or stale, reason). Creates nothing and takes no index lock."""
+    top, path, settings = _context(root, env, settings)
+    manifest, _inputs = take_manifest(top, settings, _state(path))
+    stored, reason, _incremental = _judge(path, manifest)
     if stored is None:
         return None, reason
     return _info(stored, path, "stale" if reason else "fresh", reason=reason), reason or "fresh"
 
 
-def _write(path: pathlib.Path, commit: str, tool: str, data: dict) -> dict:
-    stored = {"schema": MAP_SCHEMA, "commit": commit, "tool": tool, "result": digest(data),
+def _write(path: pathlib.Path, manifest: dict, inputs: Mapping[str, str], data: dict) -> dict:
+    stored = {"schema": MAP_SCHEMA, "commit": manifest["head"], "tool": manifest["tool"], "manifest": manifest,
+              "manifest_digest": digest(manifest), "inputs": dict(inputs), "result": digest(data),
               "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "data": data}
     write_text_atomic(path, canonical(stored) + "\n")
     return stored
 
 
-def _update(root: pathlib.Path, *, env: Mapping[str, str] | None, settings: Mapping[str, object] | None,
+def _update(top: pathlib.Path, path: pathlib.Path, settings: Mapping[str, object], *,
             force: bool) -> tuple[MapInfo, dict]:
-    top, head, path = _context(root, env)
-    settings = configured(top, settings)
-    tool = tool_digest(settings)
     with StateLock(path.parent.parent / ".lock", timeout=float(settings["lock_timeout"])):
-        stored, reason = _judge(path, head, tool)
-        if not force and stored is not None and not reason:
-            return _info(stored, path, "fresh"), stored["data"]
-        if not force and stored is not None and reason.startswith("behind HEAD"):
-            refreshed = refresh_data(top, stored["data"], stored["commit"], head, settings)
-            if refreshed is not None:
-                data, changed = refreshed
-                return _info(_write(path, head, tool, data), path, "refreshed", changed, reason), data
-        data = build_data(top, head, settings)
-        return _info(_write(path, head, tool, data), path, "built", len(data["files"]), reason or "forced"), data
+        for _attempt in range(BUILD_ATTEMPTS):
+            manifest, inputs = take_manifest(top, settings, _state(path))
+            stored, reason, incremental = _judge(path, manifest)
+            if not force and stored is not None and not reason:
+                return _info(stored, path, "fresh"), stored["data"]
+            if not force and stored is not None and incremental:
+                data, changed = refresh_data(top, stored["data"], stored["inputs"], inputs, manifest["head"],
+                                             settings)
+                action = "refreshed"
+            else:
+                data = build_data(top, None, settings, inputs=inputs, head=manifest["head"])
+                changed, action = len(data["files"]), "built"
+            if take_manifest(top, settings, _state(path))[0] == manifest:
+                return _info(_write(path, manifest, inputs, data), path, action, changed, reason or "forced"), data
+    raise ImpactError("OAH_IMPACT_STALE", f"files kept changing while the impact map was built "
+                      f"({BUILD_ATTEMPTS} attempts), so it was not stored; let your edits settle, then run "
+                      "oah impact refresh.")
 
 
 def build(root: pathlib.Path, *, env: Mapping[str, str] | None = None,
           settings: Mapping[str, object] | None = None) -> MapInfo:
-    """A full build at HEAD, replacing any stored map."""
-    return _update(root, env=env, settings=settings, force=True)[0]
+    """A full build of the working tree, replacing any stored map."""
+    top, path, settings = _context(root, env, settings)
+    return _update(top, path, settings, force=True)[0]
 
 
 def fresh_map(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, str] | None = None,
               settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
-    """(info, data) for a map that matches HEAD. Stale maps are refreshed, or refused when refresh is False."""
-    top, head, path = _context(root, env)
-    settings = configured(top, settings)
-    stored, reason = _judge(path, head, tool_digest(settings))
+    """(info, data) for a map that matches the current inputs. Stale maps are refreshed, or refused when
+    refresh is False."""
+    top, path, settings = _context(root, env, settings)
+    manifest, _inputs = take_manifest(top, settings, _state(path))
+    stored, reason, _incremental = _judge(path, manifest)
     if stored is not None and not reason:
         return _info(stored, path, "fresh"), stored["data"]
     if not refresh:
         hint = "run oah impact build" if stored is None else "run oah impact refresh"
         raise ImpactError("OAH_IMPACT_STALE", f"the impact map is {reason}; {hint} (or drop --no-refresh) "
                           "and retry. oah never answers from a stale map.")
-    return _update(root, env=env, settings=settings, force=False)
+    return _update(top, path, settings, force=False)
 
 
 def ensure_fresh(root: pathlib.Path, *, refresh: bool = True, env: Mapping[str, str] | None = None,
                  settings: Mapping[str, object] | None = None) -> MapInfo:
-    """Make sure the map matches HEAD: the call preflight, packet new, review and finish make first."""
+    """Make sure the map matches the working tree: the call preflight, packet new, review and finish make first."""
     return fresh_map(root, refresh=refresh, env=env, settings=settings)[0]
 
 
 def snapshot(root: pathlib.Path, rev: str, *, settings: Mapping[str, object] | None = None) -> tuple[MapInfo, dict]:
-    """An in-memory map at any commit (for --ref); nothing is stored."""
+    """An in-memory map at any commit (for --ref); nothing is stored and the working tree is not read."""
     top = repo_info(pathlib.Path(root)).root
     settings = configured(top, settings)
     sha = resolve_rev(top, rev)
     data = build_data(top, sha, settings)
-    return MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"])), data
+    return MapInfo(sha, tool_digest(settings), digest(data), pathlib.Path(), "ephemeral", len(data["files"]),
+                   manifest_digest=digest({"head": sha, "tool": tool_digest(settings)})), data
 
 
 def run_hook(name: str) -> int:
