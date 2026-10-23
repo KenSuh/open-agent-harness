@@ -65,3 +65,42 @@ def make_unlazy(folder: pathlib.Path, version: str | None = "2.1.0") -> pathlib.
         (folder / "package.json").write_text(json.dumps({"name": "unlazy-skill", "version": version}),
                                              encoding="utf-8")
     return folder
+
+
+NOREPLY_EMAIL = "1234+someone" + "@" + "users.noreply.github.com"
+
+
+def git_env() -> dict[str, str]:
+    """An environment that gives commits a fixed, allowlisted identity."""
+    return dict(os.environ, GIT_AUTHOR_NAME="Someone", GIT_AUTHOR_EMAIL=NOREPLY_EMAIL,
+                GIT_COMMITTER_NAME="Someone", GIT_COMMITTER_EMAIL=NOREPLY_EMAIL)
+
+
+def make_git_repo(test: unittest.TestCase) -> pathlib.Path:
+    """A fresh repository on branch main, with no commits."""
+    import subprocess
+
+    repo = make_tmp_dir(test) / "repo"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    return repo
+
+
+def git_commit(repo: pathlib.Path, files: dict, message: str = "change") -> str:
+    """Write (str/bytes) or delete (None) files, commit everything, and return the new HEAD."""
+    import subprocess
+
+    for name, content in files.items():
+        path = repo / name
+        if content is None:
+            path.unlink()
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=git_env())
+    subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m", message],
+                   check=True, env=git_env())
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                          text=True).stdout.strip()
