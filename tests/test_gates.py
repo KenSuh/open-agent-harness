@@ -340,6 +340,147 @@ class ExecutionSnapshotTest(unittest.TestCase):
                 self.assertIn(str(self.state), str(caught.exception))
                 run.assert_not_called()
 
+    @unittest.skipUnless(os.name != "nt", "macOS noowners synthesizes POSIX ownership")
+    def test_macos_noowners_mount_refuses_even_with_caller_synthesized_ownership(self):
+        volume = self.tmp / "volume"
+        volume.mkdir(mode=0o700)
+        self.state = volume / "state"
+        self.env["OAH_STATE_DIR"] = str(self.state)
+        original_lstat = pathlib.Path.lstat
+        verify = unlazy._verify_state_ancestry
+        for uid in (os.getuid(), os.getuid() + 1):
+            with self.subTest(uid=uid):
+                def lstat(path):
+                    info = list(original_lstat(path))
+                    # On noowners both callers see themselves as the owner, with private modes.
+                    info[4] = uid if path.is_relative_to(volume) else 0
+                    return os.stat_result(info)
+                def flags(path):
+                    return 0x00200000 if path.is_relative_to(volume) else 0
+                def macos_verify(folder, **options):
+                    return verify(folder, platform="darwin")
+                with patch.object(os, "getuid", return_value=uid), \
+                        patch.object(pathlib.Path, "lstat", lstat), \
+                        patch.object(unlazy, "_macos_mount_flags", side_effect=flags, create=True), \
+                        patch.object(unlazy, "_verify_state_ancestry", side_effect=macos_verify), \
+                        patch.object(unlazy, "run_command", return_value=RunResult(0, "drwx------ 1 owner\n", "", False)), \
+                        patch.object(unlazy, "_private_directory", wraps=unlazy._private_directory) as create, \
+                        patch.object(unlazy, "_strip_snapshot_acls"), patch.object(unlazy, "_run") as run:
+                    for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                        with self.subTest(name=name):
+                            with self.assertRaises(unlazy.UnlazyError) as caught:
+                                self.invoke(name)
+                            self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                            self.assertIn(str(volume), str(caught.exception))
+                            self.assertIn("honours ownership", str(caught.exception))
+                            self.assertIn("OAH_STATE_DIR", str(caught.exception))
+                create.assert_not_called()
+                run.assert_not_called()
+                self.assertFalse(self.state.exists())
+
+    @unittest.skipUnless(os.name != "nt", "macOS volume verification uses POSIX ancestry")
+    def test_macos_mount_query_checks_each_existing_component_and_fails_closed(self):
+        verify = unlazy._verify_state_ancestry
+        self.state.mkdir(mode=0o700)
+        with patch.object(unlazy, "run_command", return_value=RunResult(0, "drwx------ 1 owner\n", "", False)), \
+                patch.object(unlazy, "_macos_mount_flags", return_value=0, create=True) as flags:
+            verify(self.state, platform="darwin")
+            self.assertEqual([call.args[0] for call in flags.call_args_list],
+                             [*reversed(self.state.parents), self.state])
+        with patch.object(unlazy, "run_command", return_value=RunResult(0, "drwx------ 1 owner\n", "", False)), \
+                patch.object(unlazy, "_macos_mount_flags", side_effect=OSError("statfs failed"), create=True):
+            with self.assertRaises(unlazy.UnlazyError) as caught:
+                verify(self.state, platform="darwin")
+        self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+        self.assertIn("statfs failed", str(caught.exception))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS statfs reads real mount flags")
+    def test_macos_mount_flags_query_real_filesystem_and_missing_path(self):
+        self.assertIsInstance(unlazy._macos_mount_flags(self.tmp), int)
+        self.assertEqual(unlazy._macos_mount_flags(pathlib.Path("/")) & os.ST_RDONLY,
+                         os.statvfs("/").f_flag & os.ST_RDONLY)
+        with self.assertRaises(OSError):
+            unlazy._macos_mount_flags(self.tmp / "missing")
+
+    def test_windows_default_root_and_profile_dacls_allow_private_snapshots(self):
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
+        users = self.tmp / "Users"
+        home = users / "owner"
+        self.state = home / "AppData" / "Local" / "oah" / "state"
+        home.mkdir(parents=True, mode=0o700)
+        self.env["OAH_STATE_DIR"] = str(self.state)
+        seen = set()
+        def descriptor(path):
+            seen.add(path)
+            if path.is_relative_to(self.state) and path != self.state:
+                return f"O:{sid}D:P(A;OICI;FA;;;OW)"
+            if path.is_relative_to(home):
+                return f"O:{sid}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+            if path == users:
+                return "O:SYD:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FRFX;;;WD)(A;OICIIO;GRGX;;;WD)"
+            # Representative system-volume root: AU may create directories here; inherited
+            # grants apply to children, while our fresh snapshot has a protected DACL.
+            return ("O:BAD:PAI(A;;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;BU)"
+                    "(A;OICIIO;GRGX;;;BU)(A;;0x100004;;;AU)(A;OICIIO;0x100006;;;AU)(A;OICIIO;GA;;;CO)")
+        ancestry = unlazy._verify_state_ancestry
+        verify = unlazy._verify_snapshot_permissions
+        def windows_ancestry(folder, **options):
+            return ancestry(folder, platform="win32")
+        def windows_verify(folder):
+            return verify(folder, platform="win32")
+        with patch.object(unlazy, "_windows_user_sid", return_value=sid), \
+                patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor), \
+                patch.object(unlazy, "_verify_state_ancestry", side_effect=windows_ancestry), \
+                patch.object(unlazy, "_verify_snapshot_permissions", side_effect=windows_verify):
+            for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+                with self.subTest(name=name):
+                    self.assertEqual(self.invoke(name).stdout.strip(), "verified-closure")
+        self.assertTrue({self.tmp, users, home, self.state}.issubset(seen))
+
+    def test_windows_ancestor_child_creation_and_traverse_rights_are_allowed(self):
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
+        for rights in ("LC", "0x100004", "GX", "FRFX", "0x1200a9", "CCDCLCSWRPWPLOCRRC", "FWGW"):
+            with self.subTest(rights=rights):
+                def descriptor(path):
+                    return f"O:{sid}D:P(A;OICI;FA;;;OW)" + (f"(A;;{rights};;;AU)" if path == self.tmp else "")
+                with patch.object(unlazy, "_windows_user_sid", return_value=sid), \
+                        patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor):
+                    unlazy._verify_state_ancestry(self.state, platform="win32")
+
+    def test_windows_ancestor_replacement_rights_refuse_before_snapshot_creation(self):
+        sid = unlazy._windows_user_sid() if os.name == "nt" else "S-1-5-21-100-200-300-1001"
+        ancestry = unlazy._verify_state_ancestry
+        # DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER and full control, plus unknown rights.
+        for rights in ("SD", "DT", "WD", "WO", "FA", "GA", "LCSD", "0x10000", "0x40", "0x40000",
+                       "0x80000", "0x1f01ff", "0x10000000", "0x110004", "0x2000000", "unknown"):
+            with self.subTest(rights=rights):
+                def descriptor(path):
+                    return f"O:{sid}D:P(A;OICI;FA;;;OW)" + (f"(A;;{rights};;;AU)" if path == self.tmp else "")
+                def windows_ancestry(folder, **options):
+                    return ancestry(folder, platform="win32")
+                with patch.object(unlazy, "_windows_user_sid", return_value=sid), \
+                        patch.object(unlazy, "_windows_security_descriptor", side_effect=descriptor), \
+                        patch.object(unlazy, "_verify_state_ancestry", side_effect=windows_ancestry), \
+                        patch.object(unlazy, "_private_directory", wraps=unlazy._private_directory) as create, \
+                        patch.object(unlazy, "_run") as run:
+                    with self.assertRaises(unlazy.UnlazyError) as caught:
+                        self.invoke("gate-check.mjs")
+                self.assertEqual(caught.exception.code, "OAH_UNLAZY_SNAPSHOT_PERMISSIONS")
+                self.assertIn(str(self.tmp), str(caught.exception))
+                create.assert_not_called()
+                run.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows real ancestor DACL with create-subdirectory rights")
+    def test_windows_real_parent_create_subdirectory_grant_allows_snapshot(self):
+        parent = self.tmp / "root"
+        unlazy._private_directory(parent)
+        subprocess.run(["icacls.exe", str(parent), "/grant", "*S-1-5-11:(S,AD)"],
+                       check=True, capture_output=True)
+        self.env["OAH_STATE_DIR"] = str(parent / "Users" / "owner" / "AppData" / "Local" / "oah")
+        for name in ("gate-check.mjs", "gate-lint.mjs", "stop-hook.mjs"):
+            with self.subTest(name=name):
+                self.assertEqual(self.invoke(name).stdout.strip(), "verified-closure")
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS ACLs can permit replacing a child")
     def test_macos_ancestor_acl_grant_refuses_before_copy_or_execution(self):
         parent = self.tmp / "parent"
@@ -421,6 +562,7 @@ class ExecutionSnapshotTest(unittest.TestCase):
                                      "" if failure == "empty" else output,
                                      "ACL query warning" if failure == "warning" else "", failure == "timeout")
                 with patch.object(sys, "platform", "darwin"), \
+                        patch.object(unlazy, "_macos_mount_flags", return_value=0), \
                         patch.object(unlazy, "run_command", side_effect=tool), \
                         patch.object(pathlib.Path, "read_bytes", read), \
                         patch.object(unlazy, "_run") as run:

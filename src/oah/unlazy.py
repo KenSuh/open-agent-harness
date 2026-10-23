@@ -376,6 +376,31 @@ def _windows_security_descriptor(path: pathlib.Path) -> str:
         kernel.LocalFree(text)
 
 
+def _macos_mount_flags(path: pathlib.Path) -> int:
+    """Read Darwin's statfs64 flags, including MNT_IGNORE_OWNERSHIP (noowners)."""
+    import ctypes
+
+    class Statfs(ctypes.Structure):
+        _fields_ = [("f_bsize", ctypes.c_uint32), ("f_iosize", ctypes.c_int32),
+                    ("f_blocks", ctypes.c_uint64), ("f_bfree", ctypes.c_uint64),
+                    ("f_bavail", ctypes.c_uint64), ("f_files", ctypes.c_uint64),
+                    ("f_ffree", ctypes.c_uint64), ("f_fsid", ctypes.c_int32 * 2),
+                    ("f_owner", ctypes.c_uint32), ("f_type", ctypes.c_uint32),
+                    ("f_flags", ctypes.c_uint32), ("f_fssubtype", ctypes.c_uint32),
+                    ("f_fstypename", ctypes.c_char * 16), ("f_mntonname", ctypes.c_char * 1024),
+                    ("f_mntfromname", ctypes.c_char * 1024), ("f_flags_ext", ctypes.c_uint32),
+                    ("f_reserved", ctypes.c_uint32 * 7)]
+
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    statfs = libc.statfs64
+    statfs.argtypes, statfs.restype = (ctypes.c_char_p, ctypes.POINTER(Statfs)), ctypes.c_int
+    info = Statfs()
+    if statfs(os.fsencode(path), ctypes.byref(info)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(path))
+    return info.f_flags
+
+
 def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None) -> None:
     """Prove that no other account can replace any component leading to state.
 
@@ -420,14 +445,23 @@ def _verify_state_ancestry(folder: pathlib.Path, *, platform: str | None = None)
                     if fields[5] in trusted or fields[5] == "OW":
                         continue
                     rights = fields[2]
-                    # Only documented read/execute rights may be granted to other accounts.
-                    # Everything else (including DELETE_CHILD, DELETE, WRITE_DAC/OWNER) refuses.
-                    readonly = bool(re.fullmatch(r"(?:FR|FX|GR|GX)+", rights))
+                    # Creating children or writing this directory's attributes cannot replace an
+                    # existing protected child. Refuse DELETE_CHILD, DELETE, WRITE_DAC/OWNER,
+                    # full control and unknown rights; keep snapshot DACL checks owner-only.
+                    safe = bool(re.fullmatch(r"(?:FR|FW|FX|GR|GW|GX|CC|DC|LC|SW|RP|WP|LO|CR|RC)+", rights))
                     if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
-                        readonly = not (int(rights, 16) & ~0xA01200A9)
-                    if not readonly:
-                        raise OSError("the directory DACL grants another account write/delete/rename access")
+                        # Generic read/write/execute, synchronize, READ_CONTROL and file-specific
+                        # rights except FILE_DELETE_CHILD (0x40).
+                        safe = not (int(rights, 16) & ~0xE01201BF)
+                    if not safe:
+                        raise OSError("the directory DACL grants another account replacement/delete/permission access "
+                                      "or contains unverified rights")
             else:
+                # Query every component: a nested mount can synthesize this caller's st_uid even
+                # when the volume above it enforces ownership. Modes alone then prove no privacy.
+                if platform == "darwin" and _macos_mount_flags(path) & 0x00200000:  # MNT_IGNORE_OWNERSHIP
+                    raise OSError("the volume ignores ownership (noowners); choose a state folder on a volume "
+                                  "that honours ownership using OAH_STATE_DIR")
                 if info.st_uid not in ({os.getuid()} if path == folder else {0, os.getuid()}):
                     raise OSError("the directory is not owned by your account or a trusted system ancestor")
                 if info.st_mode & 0o022:
