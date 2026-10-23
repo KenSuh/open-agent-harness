@@ -125,6 +125,8 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
             return None, unused("error:internal")
         except BaseException as exc:
             failure = _sanitize_interruption(exc)
+        if isinstance(failure, ProviderError):
+            return None, unused(f"error:{failure.code}")
         raise failure.with_traceback(None) from None
     finally:
         del action, failure

@@ -56,15 +56,18 @@ def _outcome(action: Callable[..., tuple[_T | None, str | None]],
         try:
             return action(*args, **kwargs)
         except BaseException as exc:
+            if not isinstance(exc, Exception):
+                # The sanitizer also contains cleanup failures; do not clear its input a second time.
+                return None, _sanitize_interruption(exc)
             try:
                 if isinstance(exc, ProviderError):
                     return None, exc.code
-                if isinstance(exc, Exception):
-                    return None, "internal"
-                # Preserve interruption semantics, but never its arguments, attributes or traceback.
-                return None, _sanitize_interruption(exc)
+                return None, "internal"
             finally:
-                traceback.clear_frames(exc.__traceback__)
+                try:
+                    traceback.clear_frames(BaseException.__traceback__.__get__(exc))
+                except BaseException:
+                    pass  # Discard cleanup failures along with the original private exception.
     finally:
         del action, args, kwargs
 

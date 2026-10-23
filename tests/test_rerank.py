@@ -567,13 +567,14 @@ class KeyLeakTest(unittest.TestCase):
                 pending.append(vars(value))
 
     def assert_sanitized_failure(self, action, code: str | None, key: str, response_text: str,
-                                 exception_type=rerank.ProviderError) -> None:
+                                 exception_type=rerank.ProviderError) -> BaseException:
         failure = None
         try:
             action()
         except BaseException as exc:
             failure = exc
         self.assertIsNotNone(failure, "the provider must refuse the failed request")
+        self.assertIs(type(failure), exception_type)
         pending = [failure]
         seen = set()
         while pending:
@@ -606,13 +607,13 @@ class KeyLeakTest(unittest.TestCase):
             pending.extend(item for item in attributes.values() if isinstance(item, BaseException))
             if isinstance(error, BaseExceptionGroup):
                 pending.extend(error.exceptions)
-        self.assertIs(type(failure), exception_type)
         if exception_type is rerank.ProviderError:
             self.assertEqual(failure.code, code)
         elif not isinstance(failure, BaseExceptionGroup):
             self.assertEqual(failure.args, ())
         self.assertTrue(failure.__context__ is None, "provider errors must have no exception context")
         self.assertTrue(failure.__cause__ is None, "provider errors must have no exception cause")
+        return failure
 
     def check_interrupted_request(self, exception_type) -> None:
         key = fake_key()
@@ -705,6 +706,119 @@ class KeyLeakTest(unittest.TestCase):
                     action()
                 self.assertIs(type(caught.exception.exceptions[0]), KeyboardInterrupt)
                 self.assertIs(type(caught.exception.exceptions[1].exceptions[0]), SystemExit)
+
+    def check_group_failure(self, depth, exception_type, *, width=1, sanitizer_failure=False,
+                           collapsed=True) -> None:
+        key = fake_key()
+        response_text = "private-response-" + token_source.token_hex(16)
+        echo = key + response_text
+        endpoint = "http://127.0.0.1:9876/v1/systemone"
+        cfg = typesafe_config(endpoint)
+
+        def fail(*args, **kwargs):
+            error = exception_type(echo)
+            for _ in range(depth):
+                error = BaseExceptionGroup(echo, [error] * width)
+                error.add_note(echo)
+                error.private = echo
+            raise error
+
+        class InterruptedProvider:
+            name = "fake"
+
+            def key_name(self, config):
+                return "FAKE_RERANK_KEY"
+
+            score = staticmethod(fail)
+            advise = staticmethod(fail)
+
+        provider = typesafe.TypeSafeProvider()
+        actions = {
+            "transport": lambda: typesafe.post_json(endpoint, {}, key=Secret(key), timeout=5),
+            "score": lambda: provider.score("impact", "q", candidates("a"), key=Secret(key), config=cfg),
+            "advice": lambda: provider.advise(AdviceTest.AXES, "task", key=Secret(key), config=cfg),
+        }
+        for source in ("transport", "plugin"):
+            settings = cfg if source == "transport" else enabled()
+            env = {"TYPESAFE_API_KEY" if source == "transport" else "FAKE_RERANK_KEY": key}
+            providers = None if source == "transport" else {"fake": InterruptedProvider()}
+            actions[source + "-rerank"] = lambda settings=settings, env=env, providers=providers: \
+                rerank.rerank("impact", candidates("a"), config=settings, env=env,
+                              keychain=NoKeychain(), providers=providers)
+            actions[source + "-advice"] = lambda settings=settings, env=env, providers=providers: \
+                rerank.advise_difficulty(AdviceTest.AXES, "task", config=settings, env=env,
+                                        keychain=NoKeychain(), providers=providers)
+        expected = (exception_type if exception_type in (KeyboardInterrupt, SystemExit)
+                    else rerank.ProviderError) if collapsed else BaseExceptionGroup
+        for api, action in actions.items():
+            with self.subTest(api=api):
+                frames = []
+
+                def capture(frame, event, arg):
+                    if event == "return" and frame.f_globals.get("__name__", "").startswith("oah.rerank"):
+                        frames.append(frame)
+
+                clear_frames = traceback.clear_frames
+
+                def clear(tb):
+                    if sanitizer_failure:
+                        raise RuntimeError(echo)
+                    clear_frames(tb)
+
+                previous_profile = sys.getprofile()
+                try:
+                    sys.setprofile(capture)
+                    with mock.patch.object(urllib.request.HTTPHandler, "http_open", fail), \
+                            mock.patch.object(traceback, "clear_frames", clear):
+                        if expected is rerank.ProviderError and api.endswith(("-rerank", "-advice")):
+                            result = None
+                            try:
+                                result = action()
+                            except BaseException:
+                                pass
+                            self.assertIsNotNone(result, "ordinary provider failures must return a status")
+                            self.assertEqual(result.status, "unused(error:internal)")
+                        else:
+                            failure = self.assert_sanitized_failure(
+                                action, "internal", key, response_text, expected)
+                            if not collapsed:
+                                for _ in range(depth):
+                                    self.assertIs(type(failure), BaseExceptionGroup)
+                                    failure = failure.exceptions[0]
+                                self.assertIs(type(failure), exception_type)
+                finally:
+                    sys.setprofile(previous_profile)
+                self.assertTrue(frames)
+                for frame in frames:
+                    with self.subTest(helper=frame.f_code.co_name):
+                        self.assert_private_values_absent(frame.f_locals.values(), key, response_text)
+
+    def test_deep_interruption_groups_do_not_leak_or_get_swallowed(self) -> None:
+        for depth in (600, 5000):
+            for exception_type in (KeyboardInterrupt, SystemExit):
+                with self.subTest(depth=depth, interruption=exception_type.__name__):
+                    self.check_group_failure(depth, exception_type)
+
+    def test_group_sanitization_has_a_count_bound(self) -> None:
+        for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            with self.subTest(interruption=exception_type.__name__):
+                self.check_group_failure(1, exception_type, width=5000)
+        # Shared subgroups must not expand exponentially while finding the fallback type.
+        self.check_group_failure(600, GeneratorExit, width=2)
+
+    def test_deep_groups_without_control_flow_use_fixed_provider_error(self) -> None:
+        for depth in (600, 5000):
+            with self.subTest(depth=depth):
+                self.check_group_failure(depth, GeneratorExit)
+
+    def test_sanitizer_failure_discards_original_exception_and_context(self) -> None:
+        for depth in (0, 3, 600, 5000):
+            for exception_type in (KeyboardInterrupt, SystemExit, GeneratorExit, RuntimeError):
+                with self.subTest(depth=depth, interruption=exception_type.__name__):
+                    self.check_group_failure(depth, exception_type, sanitizer_failure=True)
+
+    def test_groups_within_bounds_preserve_structure(self) -> None:
+        self.check_group_failure(32, KeyboardInterrupt, collapsed=False)
 
     def test_interruption_subclass_needing_arguments_is_not_swallowed(self) -> None:
         class NeedsArgument(KeyboardInterrupt):
