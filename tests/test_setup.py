@@ -565,14 +565,36 @@ class GuidedSetupTest(unittest.TestCase):
         env = {key: value for key, value in os.environ.items() if key.upper() not in ("PATH", "PYTHONPATH")}
         env.update(PATH=str(work / "empty-bin"), PYTHONPATH=str(SRC), HOME=str(work), USERPROFILE=str(work),
                    PYTHONDONTWRITEBYTECODE="1")
-        result = subprocess.run([sys.executable, "-m", "oah.setup", "--os", "windows", "--dry-run"], env=env,
-                                capture_output=True, timeout=60, cwd=str(work))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        text = result.stdout.decode("utf-8")
-        self.assertIn("winget install --id Git.Git -e --source winget", text)
-        self.assertIn("irm https://chatgpt.com/codex/install.ps1 | iex", text)
-        self.assertTrue(text.rstrip().splitlines()[-1].startswith("SETUP_DRY_RUN planned="))
-        self.assertEqual(list(work.iterdir()), [])
+        for git_found in (False, True):
+            with self.subTest(git_found=git_found):
+                available = {name: name for name in ("winget", "powershell")}
+                if git_found:
+                    available["git"] = "git"
+                # Patch before importing setup: Windows refreshes PATH from the registry, so an
+                # empty process PATH alone cannot keep installed tools out of this test.
+                script = (
+                    "import runpy, sys\n"
+                    "from unittest import mock\n"
+                    "sys.argv = ['oah.setup'] + sys.argv[1:]\n"
+                    f"available = {available!r}\n"
+                    "with mock.patch('shutil.which', side_effect=available.get):\n"
+                    "    runpy.run_module('oah.setup', run_name='__main__')\n"
+                )
+                result = subprocess.run([sys.executable, "-c", script, "--os", "windows", "--dry-run"],
+                                        env=env, capture_output=True, timeout=60, cwd=str(work))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                text = result.stdout.decode("utf-8")
+                self.assertIn(["git", "required", "found" if git_found else "missing"],
+                              [line.split() for line in text.splitlines()])
+                command = "winget install --id Git.Git -e --source winget"
+                if git_found:
+                    self.assertNotIn("  - git (required):", text)
+                    self.assertNotIn(command, text)
+                else:
+                    self.assertIn(f"  - git (required): {command}", text.splitlines())
+                self.assertIn("irm https://chatgpt.com/codex/install.ps1 | iex", text)
+                self.assertTrue(text.rstrip().splitlines()[-1].startswith("SETUP_DRY_RUN planned="))
+                self.assertEqual(list(work.iterdir()), [])
 
     def test_module_main_rejects_unknown_option(self):
         env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONDONTWRITEBYTECODE="1")
