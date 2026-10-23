@@ -55,3 +55,18 @@ jobs:
 
       - name: Privacy scan
         run: python tools/privacy_scan.py --gitleaks off
+
+      # Installer dry runs: print every step, install nothing. /bin/bash is the bash 3.2 macOS ships.
+      - name: Installer dry run (bash 3.2)
+        if: runner.os == 'macOS'
+        run: /bin/bash install/install.sh --dry-run
+
+      - name: Installer dry run (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\install\install.ps1 -DryRun
+
+      - name: Installer dry run (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\install\install.ps1 -DryRun
