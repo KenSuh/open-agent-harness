@@ -1,7 +1,6 @@
 # 규칙 블록 검사 — 생성·추가·블록만 교체, 멱등, CRLF/LF 보존, 깨진·중복 표시줄 거부, 32 KiB·6 KB 한도, 로컬 규칙, CLAUDE.md 가져오기, 전역 파일 무변경을 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import os
@@ -9,6 +8,7 @@ import pathlib
 import unittest
 
 from oah import rules, rules_cli
+from oah.cli import _command_table, command_modules, main
 from oah.rules import BEGIN, END, RulesError
 from tests.helpers import make_git_repo, make_tmp_dir
 
@@ -186,15 +186,12 @@ class RulesTest(unittest.TestCase):
 
 
 def run_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
-    parser = argparse.ArgumentParser(prog="oah")
-    rules_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     old = os.getcwd()
     os.chdir(cwd)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = rules_cli.run(args)
+            code = main(list(argv))
     finally:
         os.chdir(old)
     return code, out.getvalue(), err.getvalue()
@@ -203,6 +200,7 @@ def run_cli(cwd: pathlib.Path, *argv: str) -> tuple[int, str, str]:
 class RulesCliTest(unittest.TestCase):
     def test_commands_tuple(self):
         self.assertEqual(rules_cli.COMMANDS, ("rules",))
+        self.assertIs(_command_table(command_modules())["rules"], rules_cli)
 
     def test_check_reports_drift(self):
         repo = make_git_repo(self)

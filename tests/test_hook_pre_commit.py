@@ -154,6 +154,32 @@ class PreCommitTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
         self.assertTrue(hook_pre_commit.check(repo, WikiSettings(), self.state).blocked)
 
+    def test_run_reads_wiki_config(self):
+        old_cwd, old_env = os.getcwd(), os.environ.get("OAH_STATE_DIR")
+        os.chdir(self.repo)
+        os.environ["OAH_STATE_DIR"] = str(self.state)
+        try:
+            self.stage({"docs/wiki/a.md": "[[nowhere]]\n"})
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(hook_pre_commit.run(argparse.Namespace()), 0)
+            self.assertIn("OAH_WIKI_NEW_BROKEN_LINKS", err.getvalue())
+            (self.repo / ".oah").mkdir()
+            (self.repo / ".oah" / "config.toml").write_text('[wiki]\nnew_broken_links = "block"\n', encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(hook_pre_commit.run(argparse.Namespace()), 1)
+            (self.repo / ".oah" / "config.toml").write_text('[wiki]\nbad = 1\n', encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(hook_pre_commit.run(argparse.Namespace()), 69)
+            self.assertTrue(err.getvalue().startswith("OAH_CONFIG_UNKNOWN_KEY"))
+        finally:
+            os.chdir(old_cwd)
+            if old_env is None:
+                os.environ.pop("OAH_STATE_DIR", None)
+            else:
+                os.environ["OAH_STATE_DIR"] = old_env
+
     def test_run_exit_codes(self):
         old_cwd, old_env = os.getcwd(), os.environ.get("OAH_STATE_DIR")
         os.chdir(self.repo)

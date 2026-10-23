@@ -1,7 +1,6 @@
 # 위키 기본 검사 — 마크다운 도우미, 머리말, 노트 생성·색인, 스캐폴드 템플릿, wiki 명령과 maintain 을 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import datetime
 import io
@@ -12,6 +11,7 @@ import subprocess
 import unittest
 
 from oah import wiki, wiki_cli
+from oah.cli import _command_table, command_modules, main
 from oah.wiki import markdown, notes
 from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.store import Wiki
@@ -204,9 +204,6 @@ class ScaffoldTest(unittest.TestCase):
 
 
 def run_cli(repo: pathlib.Path, *argv: str, state: pathlib.Path | None = None) -> tuple[int, str, str]:
-    parser = argparse.ArgumentParser(prog="oah")
-    wiki_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     old_cwd, old_env = os.getcwd(), os.environ.get("OAH_STATE_DIR")
     os.chdir(repo)
@@ -214,7 +211,7 @@ def run_cli(repo: pathlib.Path, *argv: str, state: pathlib.Path | None = None) -
         os.environ["OAH_STATE_DIR"] = str(state)
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = wiki_cli.run(args)
+            code = main(list(argv))
     finally:
         os.chdir(old_cwd)
         if old_env is None:
@@ -230,6 +227,25 @@ class WikiCliTest(unittest.TestCase):
 
     def test_commands_tuple(self):
         self.assertEqual(wiki_cli.COMMANDS, ("wiki",))
+        self.assertIs(_command_table(command_modules())["wiki"], wiki_cli)
+
+    def test_cli_reads_wiki_config(self):
+        repo = scaffold(self)
+        (repo / "docs" / "wiki").rename(repo / "notes")
+        (repo / ".oah").mkdir()
+        config = repo / ".oah" / "config.toml"
+        config.write_text('[wiki]\ndir = "notes"\nindex_line_limit = 10\n', encoding="utf-8")
+        code, out, err = run_cli(repo, "wiki", "lint", "--index", state=self.state)
+        self.assertEqual(code, 1, err)
+        self.assertIn("notes/index.md:1: overlong_line", out)
+        for text, code_name in [('[wiki]\nnope = 1\n', "OAH_CONFIG_UNKNOWN_KEY"),
+                                ('[wiki]\nstale_days = "soon"\n', "OAH_CONFIG_INVALID"),
+                                ('[wiki]\nnew_broken_links = "maybe"\n', "OAH_CONFIG_INVALID")]:
+            with self.subTest(text=text):
+                config.write_text(text, encoding="utf-8")
+                code, _, err = run_cli(repo, "wiki", "lint", state=self.state)
+                self.assertEqual(code, 69)
+                self.assertTrue(err.startswith(code_name), err)
 
     def test_cli_new_log_lint_roundtrip(self):
         repo = scaffold(self)

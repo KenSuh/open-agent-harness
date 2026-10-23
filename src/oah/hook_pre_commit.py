@@ -14,10 +14,11 @@ import sys
 from dataclasses import dataclass, field
 
 from oah.atomic import StateCorrupt, StorageError
+from oah.config import ConfigError, load_config
 from oah.engines.proc import run_command
 from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_dir
 from oah.wiki import log as log_module
-from oah.wiki.base import EXIT_ENVIRONMENT, WikiError, WikiSettings
+from oah.wiki.base import DEFAULTS, EXIT_ENVIRONMENT, WikiError, WikiSettings
 from oah.wiki.lint import Names, link_root_paths, links_checked
 from oah.wiki.markdown import wikilinks
 from oah.wiki.store import JOURNAL
@@ -181,8 +182,8 @@ def _lost_entries(prefix: str, head_blobs: dict[str, bytes], staged_blobs: dict[
 
 
 def _settings(root: pathlib.Path) -> WikiSettings:
-    # The [wiki] section of .oah/config.toml is wired in once oah.config lands; until then, defaults.
-    return WikiSettings.from_mapping({})
+    """The [wiki] section of .oah/config.toml over DEFAULTS."""
+    return WikiSettings.from_mapping(load_config(root).section("wiki", DEFAULTS))
 
 
 def run(args: argparse.Namespace) -> int:
@@ -192,7 +193,7 @@ def run(args: argparse.Namespace) -> int:
     except WikiError as exc:
         print(exc, file=sys.stderr)
         return exc.exit_code
-    except (NotARepo, GitMissing, StateCorrupt, StorageError) as exc:
+    except (ConfigError, NotARepo, GitMissing, StateCorrupt, StorageError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
     for line in verdict.warnings + verdict.blocked:

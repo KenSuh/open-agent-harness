@@ -1,7 +1,6 @@
 # graph 명령 검사 — 가짜 graphify 로 인자·종료 코드 전달, 설치 안내, 보고서 읽기, Windows 배치 shim 거부를 본다.
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import os
@@ -9,6 +8,7 @@ import pathlib
 import unittest
 
 from oah import graph, graph_cli
+from oah.cli import _command_table, command_modules, main
 from tests.helpers import make_git_repo, make_tmp_dir, write_posix_tool
 
 FAKE = 'printf "cwd=%s\\n" "$PWD"; for a in "$@"; do printf "arg=%s\\n" "$a"; done; echo "to stderr" >&2; exit ${FAKE_EXIT:-0}'
@@ -23,9 +23,6 @@ def path_without_graphify(front: pathlib.Path | None) -> str:
 
 
 def run_cli(cwd: pathlib.Path, path_dir: pathlib.Path | None, *argv: str, env: dict | None = None):
-    parser = argparse.ArgumentParser(prog="oah")
-    graph_cli.register(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(list(argv))
     out, err = io.StringIO(), io.StringIO()
     saved = {key: os.environ.get(key) for key in ("PATH", "FAKE_EXIT")}
     old = os.getcwd()
@@ -34,7 +31,7 @@ def run_cli(cwd: pathlib.Path, path_dir: pathlib.Path | None, *argv: str, env: d
     os.environ.update(env or {})
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = graph_cli.run(args)
+            code = main(list(argv))
     finally:
         os.chdir(old)
         for key, value in saved.items():
@@ -51,6 +48,7 @@ class GraphTest(unittest.TestCase):
 
     def test_commands_tuple(self):
         self.assertEqual(graph_cli.COMMANDS, ("graph",))
+        self.assertIs(_command_table(command_modules())["graph"], graph_cli)
 
     def test_missing_graphify_hint(self):
         for argv in (("graph", "update"), ("graph", "query", "what calls x"), ("graph", "report")):
@@ -101,11 +99,10 @@ class GraphTest(unittest.TestCase):
 
     def test_nothing_runs_without_an_explicit_command(self):
         self.assertEqual(graph.SUBCOMMANDS, ("update", "query", "path", "explain", "report"))
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as ctx:
             with contextlib.redirect_stderr(io.StringIO()):
-                parser = argparse.ArgumentParser(prog="oah")
-                graph_cli.register(parser.add_subparsers(dest="command"))
-                parser.parse_args(["graph"])
+                main(["graph"])
+        self.assertEqual(ctx.exception.code, 2)
 
     @unittest.skipUnless(os.name == "nt", "Windows batch shims")
     def test_windows_batch_shim_refused(self):
