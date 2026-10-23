@@ -1,4 +1,8 @@
 # 리스 명령 — oah start/renew/status/finish/release/log 의 인자, 저장소·상태 경로 찾기, 출력 형식, 종료 코드를 맡는다.
+"""Lease commands. `start --packet` binds the packet's accepted intent in the same command, or moves an
+existing binding to a raised Revision; `status` shows each lease's binding state; `finish` checks a bound
+lease's return (`--return`) against the binding (PLAN 5.6, A7).
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +13,7 @@ import pathlib
 import re
 import sys
 
+from oah import intent, packet
 from oah.atomic import StateCorrupt, StorageError
 from oah.config import ConfigError, load_config
 from oah.gates import guard
@@ -22,17 +27,21 @@ from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, run_git, state_
 from oah.scope import ScopeError, normalize_scope
 from oah.unlazy import UnlazyError
 
-EXIT_OK, EXIT_REFUSED, EXIT_ENVIRONMENT = 0, 1, 69
+EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 GATE_ENVIRONMENT_CODES = {"OAH_UNLAZY_FAILED"}
 # The only wiki files `oah wiki maintain` may change outside a task's scope (a log archive only when new).
 WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:log|index)\.md|docs/wiki/log_archive_[0-9]{2}\.md")
+_AC_STATUS = re.compile(r"(AC[1-9][0-9]*): (met|unmet|deferred) (?:—|--) \S")
 COMMANDS = ("start", "renew", "status", "finish", "release", "log")
 
 
 def register(commands: argparse._SubParsersAction) -> None:
     start = commands.add_parser("start", help="take a lease on paths before editing them")
     _identity(start)
-    start.add_argument("--scope", action="append", required=True, help="a path, or 'repo'; repeat for more")
+    start.add_argument("--scope", action="append", help="a path, or 'repo'; repeat for more (required without "
+                                                        "--packet; with --packet it adds to the packet's Scope)")
+    start.add_argument("--packet", help="bind this accepted packet's intent to the lease; the packet's Scope "
+                                        "becomes the lease scope. On your existing lease it binds a raised Revision")
     start.add_argument("--note", default="")
     start.add_argument("--ttl-hours", type=float, default=DEFAULT_TTL_HOURS)
     start.add_argument("--gates", action="append", help="a gate ledger this task must meet; repeat for more "
@@ -57,6 +66,8 @@ def register(commands: argparse._SubParsersAction) -> None:
                         help="without unlazy, finish on the ledger's boxes alone (recorded as unverified)")
     finish.add_argument("--allow-missing-wiki-maintenance", action="store_true",
                         help="finish although oah wiki maintain was not run for this task (recorded)")
+    finish.add_argument("--return", dest="return_file", metavar="FILE",
+                        help="your return text ('-' reads stdin); required when the lease is bound to an intent")
 
     release = commands.add_parser("release", help="drop a lease without finishing it")
     _identity(release)
@@ -118,14 +129,83 @@ def _ledger_paths(raw: list[str] | None, info: RepoInfo) -> list[str]:
     return paths
 
 
+def _packet_source(raw: str, info: RepoInfo) -> tuple[pathlib.Path, str]:
+    """The packet path and its repository-relative POSIX source; a packet outside the repository is refused."""
+    candidate = pathlib.Path(raw)
+    path = candidate if candidate.is_absolute() else pathlib.Path.cwd() / candidate
+    for base in (info.root, info.root.resolve()):
+        try:
+            return path, pathlib.Path(os.path.normpath(path)).relative_to(base).as_posix()
+        except ValueError:
+            continue
+    try:
+        return path, path.resolve().relative_to(info.root.resolve()).as_posix()
+    except (ValueError, OSError):
+        raise LeaseError("OAH_INTENT_SOURCE_INVALID", f"{raw} is outside this repository; keep the packet in the "
+                         "repository, such as .oah/tasks/<task>/PACKET.md (oah packet new <task>)") from None
+
+
+def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding, tuple[str, ...], list[str]]:
+    """The binding, lease scope and packet warnings from an accepted packet, or a refusal naming the first problem."""
+    path, source = _packet_source(args.packet, info)
+    result = packet.check(path, task=args.task)
+    if result.errors:
+        first, rest = result.errors[0], result.errors[1:]
+        more = f" Also: {'; '.join(str(problem) for problem in rest)}." if rest else ""
+        nxt = (f" Create it with: oah packet new {args.task}" if first.code == "OAH_INTENT_SOURCE_MISSING" else
+               f" Fix the packet, run oah packet check {args.task}, then run oah start again.")
+        raise LeaseError(first.code, f"{first.message}.{more}{nxt}")
+    explicit = list(args.scope or [])
+    if not result.scope and "repo" not in explicit:
+        raise LeaseError("OAH_SCOPE_EMPTY", f"the packet's ## Scope lists no paths. List the paths this task may "
+                         f"write in {source}, or pass --scope repo to lease the whole repository")
+    warnings = [f"warning {warning}" for warning in result.warnings]
+    return result.intent.bind(source), normalize_scope([*result.scope, *explicit], info.root), warnings
+
+
 def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
-    scope = normalize_scope(args.scope, info.root)
+    if not args.scope and not args.packet:
+        print("OAH_USAGE: oah start needs --scope PATH (repeat for more, or 'repo') or --packet PATH",
+              file=sys.stderr)
+        return EXIT_USAGE
     gates = _ledger_paths(args.gates, info)
+    if args.packet:
+        return _start_packet(args, info, store, gates)
+    scope = normalize_scope(args.scope, info.root)
     lease = store.start(task=args.task, agent=args.agent, scope=scope, note=args.note, ttl_hours=args.ttl_hours,
                         info=info, gates=gates)
     print(json.dumps(lease.to_json(), indent=2, ensure_ascii=True) if args.json
           else f"OAH_LEASE_STARTED {_summary(lease)}")
     return EXIT_OK
+
+
+def _start_packet(args: argparse.Namespace, info: RepoInfo, store: Store, gates: list[str]) -> int:
+    binding, scope, warnings = _bindable(args, info)
+    named = f"intent={binding.id}@r{binding.revision} {binding.digest}"
+    try:
+        lease = store.start(task=args.task, agent=args.agent, scope=scope, note=args.note, ttl_hours=args.ttl_hours,
+                            info=info, gates=gates, intent=binding)
+        line = f"OAH_LEASE_STARTED {_summary(lease)} {named}"
+    except LeaseError as exc:
+        if exc.code != "OAH_LEASE_EXISTS":
+            raise
+        lease, action = store.rebind(task=args.task, agent=args.agent, binding=binding, ttl_hours=args.ttl_hours,
+                                     scope=scope)
+        word = {"bound": "OAH_INTENT_BOUND", "rebound": "OAH_INTENT_REBOUND", "unchanged": "OAH_INTENT_UNCHANGED"}
+        line = f"{word[action]} task={lease.task} {named} expires={lease.expires_at}"
+    for warning in warnings:
+        print(warning, file=sys.stderr)
+    print(json.dumps(lease.to_json(), indent=2, ensure_ascii=True) if args.json else line)
+    return EXIT_OK
+
+
+def _intent_state(lease: Lease) -> tuple[str, str]:
+    """The lease's binding state and reason, judged against the lease's own worktree."""
+    try:
+        binding = lease.binding()
+    except ValueError as exc:
+        return "stale", str(exc)
+    return intent.explain_binding(binding, pathlib.Path(lease.worktree))
 
 
 def _renew(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
@@ -138,16 +218,18 @@ def _renew(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
 
 def _status(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     entries = store.snapshot()
+    states = [_intent_state(lease) for lease, _stale in entries]
     if args.json:
-        print(json.dumps({"leases": [dict(lease.to_json(), stale=stale) for lease, stale in entries]},
+        print(json.dumps({"leases": [dict(lease.to_json(), stale=stale, intent_state=state, intent_reason=reason)
+                                     for (lease, stale), (state, reason) in zip(entries, states)]},
                          indent=2, ensure_ascii=True))
         return EXIT_OK
     if not entries:
         print("no leases")
         return EXIT_OK
-    for lease, stale in entries:
+    for (lease, stale), (intent_state, _reason) in zip(entries, states):
         state = "STALE" if stale else "active"
-        print(f"{state:6}  {_summary(lease)}  worktree={lease.worktree}")
+        print(f"{state:6}  {_summary(lease)}  intent={intent_state}  worktree={lease.worktree}")
     return EXIT_OK
 
 
@@ -234,10 +316,54 @@ def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> 
     return {path for path, _ in exempt}, {"task": lease.task, "exempt": exempt}
 
 
+def _read_return(raw: str) -> str:
+    try:
+        data = sys.stdin.buffer.read() if raw == "-" else pathlib.Path(raw).read_bytes()
+        return data.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LeaseError(intent.RETURN_INVALID, f"cannot read the return {raw}: {exc}; save it as UTF-8 text and "
+                         "pass it with --return FILE, or --return - to read stdin") from None
+
+
+def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
+    """For a bound lease: refuse a binding that is not current or an invalid return; else the event record."""
+    try:
+        binding = lease.binding()
+    except ValueError as exc:
+        raise StateCorrupt(f"{StateCorrupt.code}: the lease for {lease.task} holds {exc}") from None
+    if binding is None:
+        return None
+    state, reason = intent.explain_binding(binding, pathlib.Path(lease.worktree))
+    if state != "current":
+        raise LeaseError("OAH_INTENT_NOT_CURRENT",
+                         f"the bound intent is {state}: {reason}. Restore {binding.source} as it was bound, or raise "
+                         f"its Revision, accept it and rebind with oah start --task {lease.task} --agent {lease.agent} "
+                         f"--packet {binding.source}; then run oah finish again")
+    shape = "one 'AC<n>: met|unmet|deferred — <evidence>' line per success condition"
+    if args.return_file is None:
+        raise LeaseError(intent.RETURN_INVALID,
+                         f"this lease is bound to {binding.line()}; pass your return with --return FILE (or --return - "
+                         f"for stdin). It needs that INTENT line and {shape}")
+    text = _read_return(args.return_file)
+    problems = intent.check_return(text, binding)
+    if problems:
+        raise LeaseError(intent.RETURN_INVALID, "; ".join(problem.message for problem in problems) +
+                         ". Fix the return and run oah finish again")
+    statuses = {}
+    for line in intent.normalize_newlines(text).split("\n"):
+        match = _AC_STATUS.match(line.strip())
+        if match:
+            statuses[match.group(1)] = match.group(2)
+    return {"line": binding.line(), "acs": {ac: statuses[ac] for ac in binding.acs}}
+
+
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     lease = store.inspect(args.task)
+    intent_report = _check_intent(args, lease)
     # The task's ledgers and summary are gate artifacts written by oah and unlazy, not changes to the scope.
     artifacts = {f".oah/tasks/{lease.task}/{LEDGER_NAME}", f".oah/tasks/{lease.task}/{SUMMARY_NAME}", *lease.gates}
+    if intent_report is not None:
+        artifacts.add(lease.binding().source)  # the bound packet itself, checked current just above
     root = pathlib.Path(lease.worktree)
     wiki_exempt, wiki_report = _wiki_maintenance(root, lease, args.allow_missing_wiki_maintenance)
     changed = [name for name in _changed_files(lease, info) if name not in artifacts and name not in wiki_exempt]
@@ -253,8 +379,10 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     lease, beyond = store.finish(task=args.task, agent=args.agent, lease_id=lease.id,
                                  summary=args.summary, changed=changed,
                                  allow_out_of_scope=args.allow_out_of_scope, gate_report=report.event(len(ledgers)),
-                                 wiki_report=wiki_report)
+                                 wiki_report=wiki_report, intent_report=intent_report)
     extra = f" out_of_scope={','.join(beyond)}" if beyond else ""
+    if intent_report is not None:
+        extra += f" intent={intent_report['line'].split(' ')[1]}"
     print(f"OAH_LEASE_FINISHED task={lease.task} agent={lease.agent} changed={len(changed)} "
           f"gates={report.outcome}{extra}")
     if report.handoff:
@@ -264,6 +392,9 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
         print(f"OAH_GATES_UNVERIFIED: finished on the ledger's boxes alone ({tools.reason}); recorded as unverified")
     if wiki_report and wiki_report.get("override"):
         print("OAH_WIKI_MAINTENANCE_SKIPPED: finished without oah wiki maintain (recorded)")
+    open_acs = [f"{ac}={state}" for ac, state in (intent_report or {}).get("acs", {}).items() if state != "met"]
+    if open_acs:
+        print(f"OAH_INTENT_ACS_OPEN {','.join(open_acs)}: name these conditions in your report; they are not met")
     return EXIT_OK
 
 

@@ -43,7 +43,8 @@ def run(args: argparse.Namespace) -> int:
     """`oah intent show|check (<task> | --file PATH)`.
 
     Both print the binding state and the intent's identity. The binding comes from the task's lease when
-    the lease record carries an `intent` field (lane P4b adds it); otherwise the state is `unbound`.
+    the lease record carries an `intent` field (`oah start --packet`); otherwise the state is `unbound`.
+    The state is judged against the lease's own worktree, the folder the binding's source is relative to.
 
     `check` also compares the packet with earlier statements of the same goal: the lease binding, and
     the packet's version at `HEAD` when git tracks it. A different `Intent-ID` is `OAH_INTENT_ID_CHANGED`.
@@ -61,21 +62,20 @@ def run(args: argparse.Namespace) -> int:
         return EXIT_ENVIRONMENT
 
 
-def lease_binding(info: RepoInfo, task: str | None) -> tuple[Binding | None, str]:
-    """The intent bound to the task's lease, if any, with a reason when there is none."""
+def lease_binding(info: RepoInfo, task: str | None) -> tuple[Binding | None, str, pathlib.Path]:
+    """The intent bound to the task's lease, if any, with a reason when there is none, and the lease worktree."""
     if task is None:
-        return None, "no task is known for this file, so no lease binding applies"
+        return None, "no task is known for this file, so no lease binding applies", info.root
     for lease, _stale in Store(state_dir(info, os.environ)).snapshot():
         if lease.task != task:
             continue
-        data = getattr(lease, "intent", None)
-        if data is None:
-            return None, f"the lease for {task} has no intent binding (oah start --packet binds one)"
+        if lease.intent is None:
+            return None, f"the lease for {task} has no intent binding (oah start --packet binds one)", info.root
         try:
-            return Binding.from_json(data), ""
+            return lease.binding(), "", pathlib.Path(lease.worktree)
         except ValueError as exc:
             raise StateCorrupt(f"{StateCorrupt.code}: the lease for {task} holds {exc}") from exc
-    return None, f"no lease for task {task}"
+    return None, f"no lease for task {task}", info.root
 
 
 def _head_version(root: pathlib.Path, path: pathlib.Path) -> intent.Intent | None:
@@ -122,11 +122,12 @@ def _run(args: argparse.Namespace) -> int:
         task = args.task
         path = packet.packet_path(info.root, task)
     root = info.root if info is not None else None
-    binding, unbound_reason = lease_binding(info, task) if info is not None else (None, "not in a repository")
+    binding, unbound_reason, bound_root = (lease_binding(info, task) if info is not None
+                                           else (None, "not in a repository", None))
     if binding is None:
         state, reason = "unbound", unbound_reason
     else:
-        state, reason = intent.explain_binding(binding, root)
+        state, reason = intent.explain_binding(binding, bound_root)
 
     problems: list[Problem] = []
     current: intent.Intent | None = None
