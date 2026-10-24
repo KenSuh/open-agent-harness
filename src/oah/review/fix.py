@@ -499,8 +499,10 @@ def _patch(root: pathlib.Path, before: str, changes: _Changes) -> bytes:
 
 
 def _git_word(path: str) -> str | None:
-    """A path as one shell word that sh and PowerShell read the same way; None when no quoting is safe."""
-    if _SAFE_PATH.fullmatch(path):
+    """A path as one shell word that sh and PowerShell read the same way; None when no quoting is safe.
+
+    A leading `-` is quoted as a literal pathspec too: Windows PowerShell 5.1 may drop `--` for native commands."""
+    if _SAFE_PATH.fullmatch(path) and not path.startswith("-"):
         return path
     if "'" in path or not path.isprintable():
         return None

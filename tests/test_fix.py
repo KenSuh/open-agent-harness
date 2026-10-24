@@ -590,27 +590,30 @@ def applied(test: unittest.TestCase, project: FixProject, step: dict | None = No
 class BindTest(unittest.TestCase):
     def test_applied_correction_shows_the_diff_and_the_commit_command(self):
         project = FixProject(self)
+        (project.repo / "src/i.py").write_text("THE USER'S OWN UNTRACKED FILE\n", encoding="utf-8")
         result = applied(self, project, {"write": {"src/app.py": "print('fixed')\n", "src/new.py": "NEW = 1\n",
-                                                   "src/odd name.py": "ODD = 1\n"}})
+                                                   "src/odd name.py": "ODD = 1\n", "src/[id].py": "ID = 1\n"}})
         text = "\n".join(result.lines)
-        for line in ("-print('v1')", "+print('fixed')", "+NEW = 1", "+ODD = 1"):
+        for line in ("-print('v1')", "+print('fixed')", "+NEW = 1", "+ODD = 1", "+ID = 1"):
             self.assertIn(line, text)
+        self.assertNotIn("THE USER'S OWN", text, "a file that was untracked before the run is not Codex's change")
         self.assertEqual(result.commands, [
-            "git add -u", "git add -- src/new.py ':(literal)src/odd name.py'",
+            "git add -u", "git add -- ':(literal)src/[id].py' src/new.py ':(literal)src/odd name.py'",
             'git commit -m "Correct R1-F1 of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
         self.assertEqual(result.next_command, "oah fix --bind --task t1")
         for command in (*result.commands, result.next_command):
             self.assertIn(command, result.lines)
         saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
         self.assertEqual((saved["commands"], saved["changed"], saved["new_files"]),
-                         (result.commands, ["src/app.py"], ["src/new.py", "src/odd name.py"]))
+                         (result.commands, ["src/app.py"], ["src/[id].py", "src/new.py", "src/odd name.py"]))
         patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
         self.assertEqual((patch.count("+NEW = 1"), patch.count("+print('fixed')")), (1, 1))
         self.assertIn(saved["changes_sha256"], project.record("A1-outcome.json")["evidence"])
         head = project.run_commands(result.commands)
         self.assertTrue(git(project.repo, "log", "-1", "--format=%B").rstrip().endswith("Agent-Engine: codex"))
         self.assertEqual(authors.commit_engines(project.repo, project.receipt(1)["head"], head), [(head, "codex")])
-        self.assertEqual(git(project.repo, "status", "--porcelain"), "")
+        self.assertEqual(git(project.repo, "status", "--porcelain"), "?? src/i.py",
+                         "the literal pathspec added src/[id].py, not the glob match src/i.py")
 
     def test_bind_records_the_head_binding(self):
         project = FixProject(self)
@@ -924,6 +927,25 @@ class TemplateTest(unittest.TestCase):
         self.assertEqual(placeholders, set(fix.PLACEHOLDERS))
         self.assertIn("Agent-Engine: codex", text)
         self.assertIn("Do not stage or commit", text)
+
+    def test_commit_commands_quote_paths_for_every_shell(self):
+        new = ("-dash.py", "src/a b.py", "src/a,b.py", "src/new.py", "src/[id].py", "src/한글.py", "src/it's.py",
+               "src/tab\there.py")
+        commands, unquoted = fix.commit_commands(task="t1", attempt_id="A2", receipt="R3", finding_ids=["R3-F1", "R3-F2"],
+                                                 changes=fix._Changes(("src/app.py",), new))
+        literal = [":(literal)-dash.py", ":(literal)src/a b.py", ":(literal)src/a,b.py", "src/new.py",
+                   ":(literal)src/[id].py", ":(literal)src/한글.py"]
+        self.assertEqual(commands[0], "git add -u")
+        self.assertEqual(shlex.split(commands[1]), ["git", "add", "--", *literal])
+        self.assertEqual(commands[2], 'git commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
+                                      '-m "Agent-Engine: codex"')
+        self.assertEqual(unquoted, ["src/it's.py", "src/tab\there.py"])
+        for command in commands:
+            self.assertFalse(set(command) & set("$`!"), "nothing either shell would expand")
+        many, _ = fix.commit_commands(task="t1", attempt_id="A1", receipt="R1",
+                                      finding_ids=[f"R1-F{k}" for k in range(1, 6)], changes=fix._Changes((), ("x.py",)))
+        self.assertEqual(many, ["git add -- x.py",
+                                'git commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
 
 
 if __name__ == "__main__":
