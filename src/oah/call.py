@@ -738,6 +738,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     job = _WindowsJob() if os.name == "nt" else None
     options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x4} if job is not None else
                {"start_new_session": True})
+    child = None
     try:
         with dispatch_guard(prepared):
             try:
@@ -755,31 +756,30 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                     child.communicate(timeout=REAP_SECONDS)
                     raise
         data, deadline = prompt.encode("utf-8"), time.monotonic() + prepared.timeout_s
-        try:
-            while True:
+        while True:
+            try:
+                out, err = child.communicate(input=data, timeout=max(min(POLL_SECONDS, deadline - time.monotonic()), 0))
+                break
+            except subprocess.TimeoutExpired:
+                data = None  # the input was handed over; a retry must not send it again
+                if time.monotonic() < deadline:
+                    continue
+                kill_tree(child)
                 try:
-                    out, err = child.communicate(input=data, timeout=max(min(POLL_SECONDS,
-                                                                             deadline - time.monotonic()), 0))
-                    break
+                    out, err = child.communicate(timeout=REAP_SECONDS)
                 except subprocess.TimeoutExpired:
-                    data = None  # the input was handed over; a retry must not send it again
-                    if time.monotonic() < deadline:
-                        continue
-                    kill_tree(child)
-                    try:
-                        out, err = child.communicate(timeout=REAP_SECONDS)
-                    except subprocess.TimeoutExpired:
-                        out, err = b"", b""
-                    return RunResult(None, decode_output(out), decode_output(err), True)
-        except BaseException:
-            # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
+                    out, err = b"", b""
+                return RunResult(None, decode_output(out), decode_output(err), True)
+        return RunResult(child.returncode, decode_output(out), decode_output(err), False)
+    except BaseException:
+        # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
+        if child is not None and child.poll() is None:
             kill_tree(child)
             try:
                 child.communicate(timeout=REAP_SECONDS)
             except Exception:
                 pass
-            raise
-        return RunResult(child.returncode, decode_output(out), decode_output(err), False)
+        raise
     finally:
         if job is not None:
             job.close()
