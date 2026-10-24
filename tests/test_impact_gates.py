@@ -11,6 +11,7 @@ from unittest.mock import patch
 from oah import preflight
 from oah.impact import ImpactError, gatebind
 from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.test_impact_default_branch import RemoteFixture
 from tests.test_impact_map import head, run_impact
 
 
@@ -86,6 +87,35 @@ class GateDiscoveryTest(unittest.TestCase):
                 self.assertEqual(current["map"], baseline["map"])
                 self.assertEqual(current["gates"], baseline["gates"])
                 self.assertEqual(current["rows"], baseline["rows"])
+
+    def test_ref_gates_stay_separate_from_default_branch_mirror(self):
+        fx = RemoteFixture(self)
+        relative = ".oah/tasks/lane/GATES.md"
+        original = ("- [ ] G1: original check\n  CHECK: python tools/check.py\n"
+                    "  EXPECT: OK\n  EVIDENCE: pending\n")
+        revision = git_commit(fx.lane, {relative: original})
+        git_commit(fx.lane, {"README.md": "later lane commit\n"})
+        (fx.lane / relative).write_text(original.replace("G1:", "G2:"), encoding="utf-8")
+        branch_commit = fx.advance({".oah/tasks/remote/GATES.md": original.replace("G1:", "G3:"),
+                                    "docs/remote.md": "See tools/check.py on the default branch.\n"})
+
+        for options, expected_commit, expected_gate in ((("--ref", revision), revision, "G1"),
+                                                        ((), head(fx.lane), "G2")):
+            with self.subTest(options=options):
+                result = run_impact(fx.lane, "tools/check.py", *options, "--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["maps"]["worktree"]["commit"], expected_commit)
+                branch = report["maps"]["default_branch"]
+                self.assertEqual((branch["state"], branch["commit"]), ("fresh", branch_commit))
+                self.assertEqual([(row["source"], row["binding"], row["found_in"])
+                                  for row in report["rows"] if row["layer"] == "gates"],
+                                 [(f"{relative}#{expected_gate}", "exec", "worktree")])
+                self.assertIn(("docs/remote.md", "default-branch"),
+                              [(row["source"], row["found_in"]) for row in report["rows"]])
+                missing = subprocess.run(["git", "-C", str(fx.lane), "cat-file", "-e", branch_commit],
+                                         capture_output=True, env=git_env())
+                self.assertNotEqual(missing.returncode, 0, "default-branch objects stay in the mirror")
 
     def test_revision_discovery_reads_blobs_with_configured_globs(self):
         text = self.ledger.read_text(encoding="utf-8")

@@ -159,7 +159,8 @@ def _rows(data: dict, targets: list[str], **options) -> list[query.Row]:
 def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBranch, targets: list[str],
                gates: list, settings: dict, *, warnings: list[str] | None = None) -> tuple[list[query.Row], dict]:
     """Rows from the worktree map and the default-branch map, merged (A23). An entity is refused only when
-    neither map knows it."""
+    neither map knows it. Gates belong only to the explicitly queried worktree or revision; the
+    default-branch mirror contributes its existing map layers without discovering gate ledgers."""
     graph = query.load_graph(root, settings)
     if branch.data is None:
         rows = query.query(data, targets, gates=gates, graph=graph, settings=settings)
@@ -228,7 +229,7 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
         changed = _changed(root, since, info.commit if args.ref else None) if since else []
         add(changed)
         data = _with_live_hits(root, data, info.commit if args.ref else None, targets, settings)
-        gates, gate_status = gatebind.discover(root)
+        gates, gate_status = gatebind.discover(root, rev=info.commit if args.ref else None)
         if branch.warning():
             warnings.append(branch.warning())
         if branch.info:
