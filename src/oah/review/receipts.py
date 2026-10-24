@@ -39,6 +39,7 @@ from typing import Iterable, Mapping
 from oah.atomic import StateCorrupt, StorageError, _fsync_folder, append_jsonl, read_jsonl
 from oah.lease import TASK_RE
 from oah.lockfile import StateLock
+from oah.review import ReviewError
 from oah.runs import RunError, _contained_path
 
 SCHEMA = 1
@@ -51,12 +52,6 @@ SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _RECEIPT_NAME = re.compile(r"R([1-9][0-9]{0,8})\.json")
 _ATTEMPT_NAME = re.compile(r"(A[1-9][0-9]{0,8})-(start|outcome|head)\.json")
-
-
-class ReviewError(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(f"{code}: {message}")
 
 
 def _iso(now: dt.datetime | None = None) -> str:
