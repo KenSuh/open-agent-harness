@@ -6,11 +6,10 @@ ancestor of HEAD) or the merge-base of HEAD with the default branch. The default
 without a fetch: `[preflight] default_branch` (a plain branch name, on the configured or `origin` remote, then
 locally), else the remote's HEAD branch, `main` or `master` on that remote, then local `main` or `master`.
 
-Everything else reads the fixed head, never the refreshed default branch (A23): the diff stat and changed
-files of base..head, the configured critical paths among them, and the DB impact. A change touches DB
-entities when a changed file defines or alters one (an event or index in the DB graph) or refers to a table
-or routine by name; the query then runs on the worktree map that `oah review` has just refreshed, and its
-identity line (`db-impact: commit=… graph=… output=…`) is what the reviewer must copy (A3).
+Diffs and source evidence read the fixed reviewed commits (A23). Impact also queries the refreshed
+default-branch map through the landed integration. DB-touch detection reads definitions and references
+on both sides of base..head, so deletion cannot erase recurrence evidence. The DB identity line names
+the queried graphs and result digest; the reviewer must copy it exactly (A3).
 """
 from __future__ import annotations
 
@@ -147,13 +146,11 @@ def critical(changed: Iterable[str], patterns: Sequence[str]) -> list[str]:
                                             glob_match(pattern.casefold(), path.casefold()) for pattern in patterns)]
 
 
-def db_impact(changed: Sequence[str], data: Mapping, commit: str, settings: Mapping) -> DbImpact:
-    """The DB entities base..head touches, the query oah ran for them and its identity line."""
-    from oah.impact import query
-
+def _touched_db(changed: Sequence[str], data: Mapping) -> set[str]:
+    """Entities defined or referenced by changed paths, including paths removed at HEAD."""
     graph = data.get("db")
     if not graph:
-        return DbImpact(query.db_line({"status": "unavailable"}), None, (), ())
+        return set()
     changed_set = set(changed)
     touched = {entity for entity, info in graph["entities"].items()
                if any(event[0] in changed_set for event in info["events"])
@@ -161,12 +158,84 @@ def db_impact(changed: Sequence[str], data: Mapping, commit: str, settings: Mapp
     names = {name for name, hits in (data.get("db_hits") or {}).items() if any(hit[0] in changed_set for hit in hits)}
     touched |= {entity for entity, info in graph["entities"].items()
                 if entity.startswith(("db_table:", "db_routine:")) and info["name"] in names}
+    return touched
+
+
+def db_impact(changed: Sequence[str], data: Mapping, commit: str, settings: Mapping, *,
+              before: tuple[Mapping, str] | None = None,
+              default_branch: tuple[Mapping, str] | None = None) -> DbImpact:
+    """Query touched entities from both sides of the diff and the fetched default-branch map."""
+    from oah.impact import mapstore, query
+    from oah.impact_cli import _rows
+
+    sources = {"worktree": (data, commit)}
+    if before is not None:
+        sources["base"] = before
+    if default_branch is not None:
+        sources["default_branch"] = default_branch
+    touched = _touched_db(changed, data)
+    if before is not None:
+        touched |= _touched_db(changed, before[0])
+    if not touched and not any(mapped.get("db") for mapped, _sha in sources.values()):
+        return DbImpact(query.db_line({"status": "unavailable"}), None, (), ())
     if not touched:
         return DbImpact(NOT_TOUCHED, None, (), ())
     targets = sorted(touched)
-    rows = query.query(data, targets, settings=settings)
-    lines = [f"{row.binding} {row.layer} {row.where} {row.target} {row.detail}".rstrip() for row in rows]
+    # A removed entity may exist only at the base. Query each graph for the entities it knows;
+    # every target came from one of the two reviewed commits, so none can disappear silently.
+    found: dict = {}
+    for label, (mapped, _sha) in sources.items():
+        for row in _rows(mapped, targets, settings=settings):
+            found.setdefault(row, []).append(label.replace("_", "-"))
+    rows = query.rank(found)
+    origins = {row: "+".join(labels) for row, labels in found.items()}
+    lines = [f"{row.binding} {row.layer} {row.where} {row.target} {row.detail} [{origins[row]}]".rstrip()
+             for row in rows]
     if len(lines) > ROW_LINES:
         lines = lines[:ROW_LINES] + [f"… {len(lines) - ROW_LINES} more rows (run the query yourself)"]
-    identity = query.db_identity(data, commit, rows)
+    identity = query.db_identity(data, commit, rows, default_branch=default_branch)
+    if before is not None:
+        identity = {"status": "available", "maps": {
+            label: {"commit": sha, "graph": mapstore.digest(mapped.get("db"))}
+            for label, (mapped, sha) in sources.items()},
+            "merged_output": mapstore.digest([query.row_json(row, origins) for row in rows])}
     return DbImpact(query.db_line(identity), "oah impact " + " ".join(targets), tuple(targets), tuple(lines))
+
+
+def assess_impact(root: pathlib.Path, changed: Sequence[str], base: str, head: str, info, data: Mapping, *,
+                  env: Mapping[str, str]) -> tuple[DbImpact, dict, tuple[str, ...], list[str]]:
+    """Use the landed refresh/merge helpers; only impact reads the leased default-branch mirror."""
+    from oah.impact import defaultbranch, gatebind, mapstore, query
+    from oah.impact.defaults import configured
+    from oah.impact.errors import ImpactError
+    from oah.impact_cli import _rows, _with_live_hits
+
+    settings = configured(root)
+    base_info, base_data = mapstore.snapshot(root, base, settings=settings)
+    warnings = info.warnings() + base_info.warnings()
+    gates, _status = gatebind.discover(root, rev=head)
+    mine = _with_live_hits(root, dict(data), head, list(changed), settings)
+    mine_rows = _rows(mine, list(changed), gates=gates, graph=query.load_graph(root, settings), settings=settings)
+    with defaultbranch._query_context(root, settings, env=env) as branch:
+        if branch.warning():
+            warnings.append(branch.warning())
+        theirs = branch.data
+        if branch.info:
+            warnings += branch.info.warnings()
+        if theirs is not None:
+            source = defaultbranch._snapshot_source(root, branch.commit, env)
+            # All missing-path searches use this refresh's private, leased object source.
+            try:
+                theirs = _with_live_hits(source, theirs, branch.commit, list(changed), settings)
+            except ImpactError:
+                if branch.state != "stale":
+                    raise
+                warnings.append("OAH_IMPACT_INCOMPLETE: default-branch path searches could not run; "
+                                "restore the remote and run oah review again")
+        rows, found = query.merge_maps(mine_rows, _rows(theirs, list(changed), settings=settings) if theirs else [])
+        db = db_impact(changed, data, head, settings, before=(base_data, base),
+                       default_branch=(theirs, branch.commit) if theirs is not None else None)
+        report = {"worktree": info.to_json(), "base": base_info.to_json(), "default_branch": branch.to_json(),
+                  "result": mapstore.digest([query.row_json(row, found) for row in rows])}
+    lines = tuple(f"{row.binding} {row.layer} {row.where} {row.target} {row.detail} [{found[row]}]" for row in rows)
+    return db, report, lines, warnings

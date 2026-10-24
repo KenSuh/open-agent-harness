@@ -8,15 +8,15 @@ Series
     definitions and attempted classes (a class tried in an earlier series is still tried), and the latest
     receipt the waits below look at. History problems (index and record problems, broken attempts) block
     every series and no decision overrides them. Ambiguities are not problems: when a correction on the
-    series' latest receipt no longer descends from that receipt's head or is not in the reviewed history
+    task's latest receipt no longer descends from that receipt's head or is not in the reviewed history
     (an amend, squash or rebase), the user decides.
 Gate, before any paid call
-    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems, returns `"converged"` when the
-    series' latest receipt converged at this head, raises `OAH_REVIEW_NEEDS_DECISION` while the round waits
+    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the round waits
     for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
     findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
-    decision), `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and
-    `OAH_REVIEW_ATTEMPTS_EXHAUSTED` once `round_attempts` calls of this round did not count. A call that
+    decision). With no wait it returns `"converged"` for this series' cached approval at this head.
+    Otherwise it raises `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and
+    `OAH_REVIEW_ATTEMPTS_EXHAUSTED` once `round_attempts` calls did not count, unless `--extra-attempt`. A call that
     starts with `--decision` settles the wait for the rest of its round (`round_decision`), until a later
     call stops for a decision again.
 Check, after the run
@@ -26,20 +26,19 @@ Check, after the run
     class ids. Broken references stop for a decision (`OAH_REVIEW_NEEDS_DECISION`); none of these rounds count.
 Decide
     No P0/P1 finding ends the series (`converged`, P2/P3 become follow-ups). A P0/P1 finding in a class a
-    finished correction attempt tried (by id, or by a new class whose normalized mechanism and rule equal
+    finished correction attempt tried (by id, or by any class whose normalized mechanism and rule equal
     that class's), one that needs a design or stored-format change, or one outside the task scope stops
     the series (`needs-decision`). Otherwise the series continues (`changes-requested`).
 """
 from __future__ import annotations
 
 import dataclasses
-import re
 from typing import Callable, Sequence
 
 from oah import intent as oah_intent
 from oah.review import ReviewError, canary
 from oah.review.receipts import SHA_RE, Attempt, Entry, Records, attempts as read_attempts, history_digest
-from oah.review.schema import BLOCKING, Output, OutputInvalid
+from oah.review.schema import BLOCKING, Output, OutputInvalid, definition_key
 from oah.review.settings import ReviewSettings
 
 NEEDS_DECISION = "OAH_REVIEW_NEEDS_DECISION"
@@ -116,8 +115,8 @@ def series(records: Records, log: Sequence[dict], base: str, *, head: str,
     names = {entry.name for entry in mine} | {name for attempt in chosen for name in attempt.names}
     problems = list(records.problems) + [problem for attempt in all_attempts for problem in attempt.problems]
     ambiguities: list[str] = []
-    latest = mine[-1] if mine else None
-    for attempt in chosen:
+    latest = everything[-1] if everything else None
+    for attempt in all_attempts:
         if latest is None or attempt.source_receipt_digest != latest.digest or attempt.problems:
             continue  # corrections reviewed by a later round are settled history
         reviewed = latest.record["head"]
@@ -143,6 +142,15 @@ def _uncorrected(s: Series, latest: Entry) -> list[str]:
             if item.get("severity") in BLOCKING and item["finding_id"] not in covered]
 
 
+def _decision_current(line: dict, s: Series) -> bool:
+    latest = s.task_latest
+    target = latest.digest if latest is not None else None
+    # Legacy logs settle only their own series' latest receipt. A decision for an older receipt
+    # must never clear a later task-wide stop from a different base.
+    legacy = target if latest == s.latest else ""
+    return line.get("decision_for", legacy) == target
+
+
 def waiting(s: Series, *, settled: bool = True) -> str | None:
     """Why the next call of this round needs a --decision, or None.
 
@@ -163,7 +171,7 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
         reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
                   "rewritten commits still carry the corrections")
     for line in s.round_lines():
-        if line.get("event") == "start" and line.get("decision") and settled:
+        if line.get("event") == "start" and line.get("decision") and settled and _decision_current(line, s):
             reason = None
         elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
             reason = (f"the last reviewer call of round {s.series_round} did not count and stopped for a decision: "
@@ -175,39 +183,42 @@ def round_decision(s: Series) -> str | None:
     """The decision an earlier call of this round started with, while it still settles the round."""
     decision = None
     for line in s.round_lines():
-        if line.get("event") == "start" and line.get("decision"):
+        if line.get("event") == "start" and line.get("decision") and _decision_current(line, s):
             decision = line["decision"]
         elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
             decision = None
     return decision
 
 
-def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings) -> str | None:
+def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings,
+         extra_attempt: bool = False) -> str | None:
     """Refuse before any paid call; `"converged"` means this head is already approved."""
     if s.problems:
         raise ReviewError(NEEDS_DECISION, "the review history of this series is incomplete or was changed, so "
                           "recurrence cannot be judged and nothing was launched:\n- " + "\n- ".join(s.problems) +
                           "\nRestore or complete the records first (a --decision does not override this), then run "
                           f"oah review --task {s.task} again")
-    latest = s.latest
-    if latest is not None and latest.record.get("outcome") == CONVERGED and latest.record.get("head") == head:
-        return CONVERGED
     reason = waiting(s)
     if reason is not None and decision is None:
         raise ReviewError(NEEDS_DECISION, f"{reason}. Nothing was launched. Run oah review --task {s.task} "
                           '--decision "<what you decided>" to continue; the decision is recorded')
+    latest = s.latest
+    if (reason is None and latest is not None and latest.record.get("outcome") == CONVERGED
+            and latest.record.get("head") == head):
+        return CONVERGED
     if settings.max_rounds is not None and len(s.receipts) >= settings.max_rounds and not extra_round:
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this series has {len(s.receipts)} counted rounds, the "
                           f"[review] max_rounds limit, so nothing was launched. Run oah review --task {s.task} "
                           "--extra-round to continue (it is recorded), or raise or remove max_rounds in "
                           ".oah/config.toml")
     used = sum(1 for line in s.round_lines() if line.get("event") == "start")
-    if used >= settings.round_attempts:
+    if used >= settings.round_attempts and not extra_attempt:
         raise ReviewError("OAH_REVIEW_ATTEMPTS_EXHAUSTED", f"round {s.series_round} of this series already used "
                           f"{used} reviewer calls that did not count ([review] round_attempts = "
                           f"{settings.round_attempts}), so oah does not call the paid reviewer again. Read the last "
-                          "run's stderr.log in the state folder's runs/ to find the cause and fix it, then raise "
-                          "round_attempts in .oah/config.toml to allow another call")
+                          "run's stderr.log in the state folder's runs/ to find the cause and fix it, then run "
+                          f"oah review --task {s.task} --base {s.base} --extra-attempt to permit one more call "
+                          "(recorded). Review settings remain pinned to the base")
     return None
 
 
@@ -264,10 +275,6 @@ def check(output: Output, s: Series, *, number: int, binding: oah_intent.Binding
                           f'. Check the history, then run oah review --task {s.task} --decision "<what you decided>"')
 
 
-def _normalized(text: str) -> str:
-    return " ".join(re.sub(r"[^\w\s]", " ", text.casefold()).split())
-
-
 def _tries(tried: list[tuple[str, str]]) -> str:
     word = "correction attempt" if len(tried) == 1 else "correction attempts"
     return f"{word} " + ", ".join(f"{attempt} ({outcome})" for attempt, outcome in tried)
@@ -279,17 +286,18 @@ def decide(output: Output, s: Series) -> Decision:
         return Decision(CONVERGED, None, tuple(finding.finding_id for finding in output.findings))
     attempted = s.attempted()
     classes = s.classes()
-    twins = {(_normalized(classes[c]["mechanism"]), _normalized(classes[c]["rule"])): c for c in attempted if c in classes}
-    new = {item.class_id: item for item in output.classes}
+    twins = {definition_key(classes[c]["mechanism"], classes[c]["rule"]): c for c in attempted if c in classes}
+    resolved = {**classes, **{item.class_id: item.to_json() for item in output.classes}}
     reasons: list[str] = []
     for finding in blocking:
         if finding.class_id in attempted:
             reasons.append(f"{finding.finding_id} repeats class {finding.class_id}, which "
                            f"{_tries(attempted[finding.class_id])} already tried to fix")
-        elif finding.class_id in new:
-            twin = twins.get((_normalized(new[finding.class_id].mechanism), _normalized(new[finding.class_id].rule)))
+        elif finding.class_id in resolved:
+            definition = resolved[finding.class_id]
+            twin = twins.get(definition_key(definition["mechanism"], definition["rule"]))
             if twin is not None:
-                reasons.append(f"{finding.finding_id} defines {finding.class_id} with the mechanism and rule of class "
+                reasons.append(f"{finding.finding_id} uses {finding.class_id} with the mechanism and rule of class "
                                f"{twin}, which {_tries(attempted[twin])} already tried to fix")
         if finding.fix_kind != "local":
             reasons.append(f"{finding.finding_id} needs a {finding.fix_kind} change")

@@ -447,6 +447,7 @@ class CallRequest:
     skills: tuple[tuple[str, str], ...] = ()
     no_rerank: bool = False  # the brief turns the re-ranker off (--no-rerank)
     isolated: bool = False  # Codex ignores the user's config.toml and execpolicy rules (oah review)
+    output_last_message: str | None = None  # review filters temporary output before retaining it
 
 
 @dataclasses.dataclass(frozen=True)
@@ -616,7 +617,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
                                    effort=resolution.launch_effort,
-                                   output_last_message=str(run.file_path("last-message.md")),
+                                   output_last_message=request.output_last_message or str(run.file_path("last-message.md")),
                                    output_schema=request.output_schema, ephemeral=request.ephemeral)
         if request.isolated:
             argv[-1:-1] = ISOLATED_CODEX_FLAGS  # before the stdin marker
@@ -677,11 +678,12 @@ def _effort_fields(prepared: Prepared, stdout: str, stderr: str, rules: Sequence
 
 
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
-            rules: Sequence[Mapping] | None = None) -> dict:
+            rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
     run = prepared.run
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
+    clean = redact or (lambda text: text)
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
     prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
@@ -691,10 +693,13 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     except (OSError, ValueError) as exc:
         run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
-                          error=f"OAH_ENGINE_LAUNCH_FAILED: {exc}")
+                          error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
     finished = dt.datetime.now(dt.timezone.utc)
-    run.write_logs(result.stdout, result.stderr)
+    stdout, stderr = clean(result.stdout), clean(result.stderr)
+    run.write_logs(stdout, stderr)
+    # Validate the actual header first: redaction must never turn a mismatch into an unreadable header.
     fields = _effort_fields(prepared, result.stdout, result.stderr, load_rules() if rules is None else rules)
+    fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
     if result.timed_out:
         status, error = "timed_out", (f"OAH_RUN_TIMEOUT: the engine ran longer than {prepared.timeout_s:g} s and its "
                                       "process tree was stopped; raise the tier's timeout_min or split the task")

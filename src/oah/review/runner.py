@@ -26,11 +26,12 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import hashlib
+import json
 import os
 import pathlib
 from typing import Callable, Mapping, Sequence
 
-from oah import call, call_cli, models, preflight
+from oah import call, call_cli, models, preflight, runs
 from oah import intent as oah_intent
 from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
@@ -61,6 +62,7 @@ class Request:
     decision: str | None = None
     tier: str | None = None
     timeout_s: float | None = None
+    extra_attempt: bool = False
 
 
 @dataclasses.dataclass
@@ -90,6 +92,24 @@ def reviewer_env(env: Mapping[str, str]) -> dict[str, str]:
         keep = {name.upper() for name in KEEP_ENV}
         return {key: value for key, value in env.items() if key.upper() in keep}
     return {key: value for key, value in env.items() if key in KEEP_ENV}
+
+
+def credential_redactor(env: Mapping[str, str]) -> Callable[[str], str]:
+    """Keep runtime credentials and their JSON/repr encodings out of review artifacts."""
+    values = {value for name, value in env.items() if value and name.upper().endswith(
+        ("_KEY", "_TOKEN", "_PASSWORD", "_SECRET"))}
+    encoded = set(values)
+    for value in values:
+        encoded.update(json.dumps(value, ensure_ascii=ascii_only)[1:-1] for ascii_only in (False, True))
+        encoded.add(repr(value)[1:-1])
+    needles = sorted(encoded, key=len, reverse=True)
+
+    def redact(text: str) -> str:
+        for value in needles:
+            text = text.replace(value, "[REDACTED]")
+        return text
+
+    return redact
 
 
 def reviewer_binary(base: Sequence[str]) -> tuple[str, str]:
@@ -172,6 +192,26 @@ def review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keych
            temp_root: pathlib.Path | None = None, rules: Sequence[Mapping] | None = None,
            ensure_impact: Callable | None = None) -> Result:
     """Run one round; pre-dispatch refusals raise ReviewError (or the shared config, git and state errors)."""
+    redact = credential_redactor(env)
+    if request.decision is not None:
+        request = dataclasses.replace(request, decision=redact(request.decision))
+    try:
+        return _review(request, cwd=cwd, env=env, keychain=keychain, temp_root=temp_root, rules=rules,
+                       ensure_impact=ensure_impact)
+    except BaseException as exc:
+        message = str(exc)
+        if redact(message) == message:
+            raise
+        code = getattr(exc, "code", "OAH_REVIEW_ENGINE_FAILED")
+        message = redact(message)
+        if message.startswith(code + ": "):
+            message = message[len(code) + 2:]
+        safe_error = ReviewError(code, message + "; fix the cause, then run oah review again")
+    raise safe_error from None
+
+
+def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keychain,
+            temp_root: pathlib.Path | None, rules: Sequence[Mapping] | None, ensure_impact: Callable | None) -> Result:
     if env.get("OAH_WORKER") == "1":
         raise ReviewError("OAH_REVIEW_WORKER_REFUSED", "dispatched workers do not start reviews; return your work "
                           "to the dispatcher, who runs oah review")
@@ -249,30 +289,30 @@ def _impact(root: pathlib.Path, env: Mapping[str, str], ensure_impact: Callable 
     except Exception as exc:  # the map moved, or its storage failed: never review with a stale map
         raise ReviewError("OAH_IMPACT_STALE", f"the impact map changed while it was read ({exc}); run oah review "
                           "again") from None
-    if info.commit != head:
+    if info.commit != head or _info.commit != head:
         raise ReviewError("OAH_IMPACT_STALE", f"HEAD moved to {info.commit} while the impact map was refreshed; "
                           "run oah review again")
-    return data
+    return _info, data
 
 
 def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Mapping[str, str], lease,
            binding: oah_intent.Binding, conf: review_settings.ReviewSettings, call_settings: call.Settings,
            span: context.Range, keychain, temp_root: pathlib.Path | None, rules: Sequence[Mapping] | None,
            ensure_impact: Callable | None) -> Result:
-    from oah.impact.defaults import configured
-
     task = request.task
-    data = _impact(root, env, ensure_impact, span.head)
+    redact = credential_redactor(env)
+    impact_info, data = _impact(root, env, ensure_impact, span.head)
     records = receipts.load(state, task)
     s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
                       is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
-                   settings=conf) == rounds.CONVERGED:
+                   settings=conf, extra_attempt=request.extra_attempt) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
                       f"{span.head}; nothing was launched", receipt=latest.record,
                       receipt_path=receipts.review_dir(state, task) / latest.name)
     extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
+    extra_attempt = request.extra_attempt
     warnings: list[str] = []
     stopped = rounds.waiting(s, settled=False)
     if request.decision is not None and stopped is None:
@@ -296,7 +336,9 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         critical = sorted({*critical, CONFIG_PATH})
         warnings.append(f"OAH_REVIEW_CONFIG_CHANGED: this change edits {CONFIG_PATH}; the review uses the "
                         "configuration committed at the base, and the reviewer is asked to check the change")
-    db = context.db_impact(changed, data, span.head, configured(root))
+    db, impact, impact_rows, impact_warnings = context.assess_impact(
+        root, changed, span.base, span.head, impact_info, data, env=env)
+    warnings.extend(impact_warnings)
     conditions = committed_conditions(root, span.head, binding)
     number, attempt = s.next_number, sum(1 for line in s.round_lines() if line.get("event") == "start") + 1
     tools = call_cli.intent_tools()
@@ -305,6 +347,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         value = canary.plant(snap.tree)
         schema_path = snap.tree.parent / "output-schema.json"
         schema_path.write_bytes(schema.text().encode("utf-8"))  # the bytes the receipt's digest names
+        final_path = snap.tree.parent / "last-message.md"
         context_ = prompt.PromptContext(
             task=task, number=number, series_round=s.series_round, base=span.base, head=span.head,
             scope=tuple(lease.scope), conditions=conditions, diff_stat=context.diff_stat(root, span.base, span.head),
@@ -316,31 +359,43 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                                                   s.classes().get(class_id, {}).get("mechanism", "(not recorded)"),
                                                   s.classes().get(class_id, {}).get("rule", "(not recorded)"))
                             for class_id, tried in s.attempted().items()),
-            decision=decision, stopped=stopped if decision else None, extra_round=extra)
+            decision=decision, stopped=stopped if decision else None, extra_round=extra,
+            impact=impact, impact_rows=impact_rows)
         prepared = call.prepare(
             call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
-                             round_instructions=prompt.round_instructions(context_), output_schema=str(schema_path),
-                             ephemeral=True, isolated=True, timeout_s=request.timeout_s),
-            call_settings, root=snap.tree, state_dir=state, env=env, footer=tools.footer, has_footer=tools.has_footer,
+                             round_instructions=redact(prompt.round_instructions(context_)), output_schema=str(schema_path),
+                             ephemeral=True, isolated=True, timeout_s=request.timeout_s,
+                             output_last_message=str(final_path)),
+            call_settings, root=snap.tree, state_dir=state,
+            env={name: value for name, value in env.items()
+                 if name.upper() not in ("OPENAI_API_KEY", "CODEX_API_KEY")},
+            footer=tools.footer, has_footer=tools.has_footer,
             parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
         warnings.extend(prepared.warnings)
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
                  "run_id": prepared.run_id}
         receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
-                                         "decision": request.decision})
+                                         "extra_attempt": extra_attempt, "decision": request.decision,
+                                         "decision_for": s.task_latest.digest if s.task_latest else None})
         for note in ([f"review R{number}: the user's decision before this round: {request.decision}"]
                      if request.decision else []) + ([f"review R{number} runs beyond [review] max_rounds = "
                                                       f"{conf.max_rounds} (--extra-round)"] if extra else []):
             Store(state).log(task=task, agent=lease.agent, message=note)
+        if extra_attempt:
+            Store(state).log(task=task, agent=lease.agent,
+                             message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
         try:
-            run = call.execute(prepared, base_env=reviewer_env(env), rules=rules)
+            run = call.execute(prepared, base_env=reviewer_env(env), rules=rules, redact=redact)
         except BaseException as exc:
             receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
                                              "code": getattr(exc, "code", type(exc).__name__),
-                                             "message": str(exc)[:600]})
+                                             "message": redact(str(exc))[:600]})
             raise
-        last = prepared.run.file_path("last-message.md")
+        last = runs._contained_path(snap.tree.parent, final_path.name)
         raw = last.read_bytes() if last.is_file() else b""
+        # Invalid UTF-8 remains invalid; replacing known UTF-8/JSON credential bytes cannot validate it.
+        raw = redact(raw.decode("utf-8", errors="surrogateescape")).encode("utf-8", errors="surrogateescape")
+        prepared.run._write_text("last-message.md", raw.decode("utf-8", errors="replace"))
     finished = dt.datetime.now(dt.timezone.utc)
     code = message = None
     output = None
@@ -359,14 +414,15 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             rounds.check(output, s, number=number, binding=binding, base=span.base, head=span.head,
                          canary_value=value, db_line=db.line)
         except ReviewError as exc:
-            code, message = exc.code, str(exc)
+            code, message = exc.code, redact(str(exc))
     if code is not None:
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})
         left = conf.round_attempts - attempt
         budget = (f" This was attempt {attempt} of {conf.round_attempts} for round {s.series_round} of this series; "
                   + (f"run oah review --task {task} again to retry." if left > 0 else
-                     "the budget is spent, so the next oah review refuses until round_attempts is raised."))
+                     f"the budget is spent; fix the cause, then run oah review --task {task} --base {span.base} "
+                     "--extra-attempt to permit one more call (recorded)."))
         return Result(code, 1, message + budget, lines=[f"run folder: {prepared.run_dir}"], warnings=warnings,
                       run_dir=prepared.run_dir)
     judged = rounds.decide(output, s)
@@ -388,9 +444,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         "findings": [finding.to_json() for finding in output.findings],
         "classes": [item.to_json() for item in output.classes], "outcome": judged.outcome,
         "follow_ups": list(judged.follow_ups), "decision_stop_reason": judged.stop_reason,
-        "decision": {"text": decision, "after": s.latest.name if s.latest else None} if decision else None,
-        "extra_round": extra, "history": s.history_items(), "history_digest": s.history_digest(),
+        "decision": {"text": decision, "after": s.task_latest.name if s.task_latest else None} if decision else None,
+        "extra_round": extra, "extra_attempt": extra_attempt,
+        "history": s.history_items(), "history_digest": s.history_digest(),
         "canary_verified": True, "canary_scope": canary.LIMIT, "db_impact": db.line, "db_query": db.query,
+        "impact": impact,
         "critical_paths": list(critical), "stripped": list(context_.stripped),
         "intent_return": output.intent_return, "evidence": output.evidence,
         "prompt_sha256": receipts.digest(prepared.run.prompt_path.read_bytes()), "output_sha256": receipts.digest(raw),

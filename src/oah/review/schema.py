@@ -146,6 +146,11 @@ def _build(data: dict) -> Output:
                   evidence=data["evidence"], db_impact=data["db_impact"])
 
 
+def definition_key(mechanism: str, rule: str) -> tuple[str, str]:
+    """Class identity ignores case, punctuation and whitespace, regardless of the chosen id."""
+    return tuple(" ".join(re.sub(r"[^\w\s]", " ", text.casefold()).split()) for text in (mechanism, rule))
+
+
 def _rules(output: Output, number: int) -> list[str]:
     problems: list[str] = []
     blocking = output.blocking()
@@ -168,6 +173,7 @@ def _rules(output: Output, number: int) -> list[str]:
                      for ref in finding.prior_refs if ref.round < 1]
     class_id = re.compile(rf"R{number}-C[1-9][0-9]*")
     defined: set[str] = set()
+    definitions: dict[tuple[str, str], str] = {}
     for item in output.classes:
         if not class_id.fullmatch(item.class_id):
             problems.append(f"class {item.class_id!r} is defined in round R{number}, so its id must be R{number}-C<k>; "
@@ -177,6 +183,11 @@ def _rules(output: Output, number: int) -> list[str]:
         defined.add(item.class_id)
         if not item.mechanism.strip() or not item.rule.strip():
             problems.append(f"class {item.class_id} needs a non-empty mechanism and rule")
+        key = definition_key(item.mechanism, item.rule)
+        if key in definitions and definitions[key] != item.class_id:
+            problems.append(f"class {item.class_id} has the same mechanism and rule as {definitions[key]}; "
+                            "use that class id instead")
+        definitions.setdefault(key, item.class_id)
     problems += [f"finding {f.finding_id} uses class {f.class_id}, which is not defined in classes"
                  for f in output.findings if class_id.fullmatch(f.class_id) and f.class_id not in defined]
     return problems

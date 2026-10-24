@@ -444,7 +444,7 @@ def output(number: int = 1, *, verdict: str = "approve", findings: list | None =
            **fields) -> dict:
     findings = findings or []
     if classes is None:
-        classes = [{"class_id": item["class_id"], "mechanism": "a mechanism", "rule": "a rule"}
+        classes = [{"class_id": item["class_id"], "mechanism": f"mechanism of {item['class_id']}", "rule": "a rule"}
                    for item in findings if item["class_id"].startswith(f"R{number}-C")]
     data = {"verdict": verdict, "base": SHA_A, "head": SHA_B, "summary": "s", "findings": findings,
             "classes": classes, "intent_return": "INTENT x@r1 sha256:" + "0" * 64, "evidence": "e",
@@ -458,6 +458,15 @@ def encoded(data: object) -> bytes:
 
 
 class SchemaTest(unittest.TestCase):
+    def test_distinct_ids_cannot_define_the_same_class_twice(self):
+        data = output(3)
+        data["classes"] = [
+            {"class_id": "R3-C1", "mechanism": "Cache outlives source.", "rule": "Invalidate on change"},
+            {"class_id": "R3-C2", "mechanism": "cache outlives source", "rule": "invalidate on change!"}]
+        with self.assertRaises(schema.OutputInvalid) as caught:
+            schema.parse(encoded(data), number=3)
+        self.assertIn("same mechanism and rule", str(caught.exception))
+
     def test_schema_file_is_strict(self):
         loaded = json.loads(schema.text())
         self.assertEqual(loaded, schema.SCHEMA)
@@ -765,7 +774,7 @@ class EnvTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows environment names ignore letter case")
     def test_reviewer_env_ignores_case_on_windows(self):
         kept = runner.reviewer_env({"Path": "p", "SystemRoot": "r", "UserProfile": "u", "OpenAI_Api_Key": "k"})
-        self.assertEqual(kept, {"Path": "p", "SystemRoot": "r", "UserProfile": "u"})
+        self.assertEqual(kept, {"Path": "p", "SystemRoot": "r", "UserProfile": "u", "OpenAI_Api_Key": "k"})
 
     def test_reviewer_binary_is_the_script_after_an_interpreter(self):
         folder = make_tmp_dir(self)

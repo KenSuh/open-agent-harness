@@ -9,6 +9,7 @@ and the DB impact line is the only line that starts with `db-impact:`.
 from __future__ import annotations
 
 import dataclasses
+import json
 
 from oah.review import canary
 from oah.review.context import DbImpact
@@ -50,6 +51,8 @@ class PromptContext:
     decision: str | None
     stopped: str | None  # why the series waited for the decision, or None when it did not
     extra_round: bool
+    impact: dict | None = None
+    impact_rows: tuple[str, ...] = ()
 
 
 def _fence(text: str, language: str = "text") -> str:
@@ -86,6 +89,11 @@ def round_instructions(ctx: PromptContext) -> str:
     critical = ("\nCritical paths changed (review them with extra care): " + ", ".join(ctx.critical)
                 if ctx.critical else "\nNo configured critical path changed.")
     parts.append(f"### What changed\n{_fence(ctx.diff_stat)}{critical}")
+    if ctx.impact is not None:
+        parts.append("### Impact maps\nImpact uses the reviewed worktree and the latest fetched default branch. "
+                     "Evidence commands still run at the reviewed HEAD. Map identities and freshness:\n"
+                     + _fence(json.dumps(ctx.impact, ensure_ascii=False, sort_keys=True), "json")
+                     + "\nAffected paths and checks:\n" + _fence("\n".join(ctx.impact_rows) or "(no rows)"))
     removed = ", ".join(ctx.stripped) if ctx.stripped else "none were present"
     parts.append("### Removed from this snapshot\nAgent instruction files and folders were removed from the working "
                  f"tree before you started: {removed}. If you need them, read them only with `git show {ctx.head}:<path>` "
@@ -97,7 +105,8 @@ def round_instructions(ctx: PromptContext) -> str:
     if ctx.db.query:
         rows = "\n".join(ctx.db.rows) or "(no rows)"
         db = (f"This change touches DB entities: {', '.join(ctx.db.entities)}. oah ran the DB-impact query "
-              f"`{ctx.db.query}` at the reviewed head; check the change against its rows:\n{_fence(rows)}\n"
+              f"`{ctx.db.query}` using both reviewed commits and the fetched default-branch map when available; "
+              f"check the change against its rows:\n{_fence(rows)}\n"
               "The graph identity of that query is the line below. Copy it exactly into db_impact:")
     else:
         db = "No DB-impact query applies to this change. Copy the line below exactly into db_impact:"

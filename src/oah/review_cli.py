@@ -41,6 +41,8 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--base", help="review against this commit (default: the merge-base with the default branch)")
     parser.add_argument("--extra-round", action="store_true",
                         help="run one round beyond [review] max_rounds (recorded in the receipt and the events)")
+    parser.add_argument("--extra-attempt", action="store_true",
+                        help="permit one additional reviewer call after round_attempts is spent (recorded)")
     parser.add_argument("--decision", metavar="TEXT",
                         help="continue a series that stopped for a decision; say what you decided (recorded)")
     parser.add_argument("--tier", choices=routing.TIERS,
@@ -66,7 +68,7 @@ def run(args: argparse.Namespace) -> int:
         print("OAH_USAGE: --decision needs the decision in words; say what you decided", file=sys.stderr)
         return EXIT_USAGE
     request = runner.Request(task=args.task, base=args.base, extra_round=args.extra_round, decision=args.decision,
-                             tier=args.tier, timeout_s=args.timeout_seconds)
+                             tier=args.tier, timeout_s=args.timeout_seconds, extra_attempt=args.extra_attempt)
     try:
         result = runner.review(request, cwd=pathlib.Path.cwd(), env=os.environ)
     except (ReviewError, EngineError, LeaseError, RunError, briefs.BriefError, routing.RoutingError) as exc:

@@ -10,6 +10,7 @@ record_dir) uses steps[k]; past the end it approves with no findings. A step may
   mutate          top-level fields replaced after the output is built
   intent_return   replaces the INTENT and AC lines
   exit            the exit code (default 0)
+  stdout, stderr  extra diagnostics; any string can contain {env:NAME} for a runtime-only echo probe
 Every call is recorded as call-<k>.json: argv, cwd, env, prompt, files (relative, without .git), remotes
 (`git remote -v`), canary (the value read), probe (the file a write attempt created) and
 schema_digest (of the --output-schema file).
@@ -112,6 +113,7 @@ def main(argv: list[str]) -> int:
     number = len(list(record_dir.glob("call-*.json")))
     steps = script.get("steps", [])
     step = steps[number] if number < len(steps) else {}
+    step = substitute_env(step)
     effort = next((m.group(1) for m in (re.fullmatch(r'model_reasoning_effort="([a-z]+)"', c) for c in configs) if m), "")
     header = step.get("header_effort", effort)
     lines = ["OpenAI Codex v0.163.0 (fake)", "--------", f"workdir: {options.get('-C', '')}",
@@ -120,6 +122,8 @@ def main(argv: list[str]) -> int:
         lines.append(f"reasoning effort: {header}")
     lines.append("--------")
     sys.stderr.write("\n".join(lines) + "\n")
+    sys.stdout.buffer.write(step.get("stdout", "").encode("utf-8"))
+    sys.stderr.buffer.write(step.get("stderr", "").encode("utf-8"))
     cwd = pathlib.Path.cwd()
     canary_path = cwd / ".oah-review-canary"
     canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.is_file() else ""
@@ -138,9 +142,24 @@ def main(argv: list[str]) -> int:
     (record_dir / f"call-{number:03d}.json").write_text(json.dumps(record), encoding="utf-8")
     message = step["raw"] if "raw" in step else build(prompt, step, canary)
     if "-o" in options:
-        pathlib.Path(options["-o"]).write_text(message, encoding="utf-8")
+        last = pathlib.Path(options["-o"])
+        if "final_link" in step:
+            last.symlink_to(step["final_link"])
+        else:
+            last.write_text(message, encoding="utf-8")
     print("fake review done")
     return int(step.get("exit", 0))
+
+
+def substitute_env(value):
+    """Resolve runtime credentials only inside the fake engine, never in its script fixture."""
+    if isinstance(value, str):
+        return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: os.environ.get(m[1], ""), value)
+    if isinstance(value, list):
+        return [substitute_env(item) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute_env(item) for key, item in value.items()}
+    return value
 
 
 if __name__ == "__main__":

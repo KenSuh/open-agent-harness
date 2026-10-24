@@ -27,6 +27,17 @@ def oah(project: Project, *args: str, env_extra: dict | None = None) -> subproce
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_extra_attempt_recovers_exhausted_range(self):
+        project = Project(self)
+        project.queue({"raw": "invalid"}, {"raw": "invalid"}, {})
+        for _ in range(2):
+            self.assertEqual(oah(project, "review", "--task", "t1").returncode, 1)
+        self.refused(project, "OAH_REVIEW_ATTEMPTS_EXHAUSTED")
+        done = oah(project, "review", "--task", "t1", "--extra-attempt", "--json")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIs(json.loads(done.stdout)["receipt"]["extra_attempt"], True)
+        self.assertEqual(project.receipt(1)["head"], project.head)
+
     def refused(self, project: Project, code: str, *args: str, exit_code: int = 1, **options) -> str:
         calls = len(project.calls())
         done = oah(project, "review", "--task", "t1", *args, **options)
