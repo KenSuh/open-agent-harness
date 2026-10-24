@@ -1,0 +1,450 @@
+# oah land 핵심 검사 — 실제 저장소·로컬 bare 원격·가짜 gh·gitleaks·unlazy 로 리뷰·게이트·영향·새로 걸린 검사·비밀 검사·CI 판정과 조건부 푸시, 기록을 본다.
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import unittest
+from unittest.mock import patch
+
+from oah import intent, land, unlazy
+from oah.gates.ledger import definition_digest
+from oah.review import receipts
+from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.test_review_summary import publish_receipt
+
+FAKE_GH = pathlib.Path(__file__).resolve().parent / "fakes" / "fake_gh.py"
+CLAUDE = "\n\nAgent-Engine: claude\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+PACKET = ("<!-- OAH_INTENT:BEGIN -->\n## Intent\nIntent-ID: t1\nRevision: 1\nStatus: accepted\n"
+          "### Problem\nThe app has no version.\n### Desired outcome\nIt prints one.\n"
+          "### Success conditions\n- AC1: the app prints v1\n- AC2: errors say what to do next\n"
+          "### Constraints\n### Non-goals\n### Open questions\n<!-- OAH_INTENT:END -->\n"
+          "## Scope\n- src\n- .oah/tasks/t1\n## Plan\n- initial → claude → medium\n## Acceptance\n## Return\n")
+LEDGER = ("# Gates: t1\n\n- [ ] G1: the app exists\n  CHECK: oah check exists src/app.py\n  EXPECT: OAH_CHECK_OK\n"
+          "  EVIDENCE: pending\n")
+ALL_MET = {"stdout": "GATES.md: 1 gates\nALL MET (1 met)\n", "code": 0}
+UNMET = {"stdout": "  UNMET GATES:G1 (unchecked): x\nGATES.md: 1 gates\nUNMET: 1 (met: 0)\n  GATES:G1\n", "code": 1}
+OTHER_LEDGER = ("# Gates: x\n\n- [ ] G1: the app runs\n  CHECK: python src/app.py\n  EXPECT: v1\n  EVIDENCE: pending\n")
+FAKE_GITLEAKS = """import json, os, sys
+with open(os.environ["FAKE_GITLEAKS_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+code = int(os.environ.get("FAKE_GITLEAKS_CODE", "0"))
+print("Finding: REDACTED\\nAuthor: Someone Private\\nEmail: someone@example.com" if code == 1 else "no leaks found")
+sys.exit(code)
+"""
+
+
+def git(repo: pathlib.Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+                          encoding="utf-8", env=git_env()).stdout.strip()
+
+
+def describe(result: land.Assessment) -> str:
+    return "\n".join(f"{check.name}: {check.state} {check.code} {check.message}" for check in result.checks)
+
+
+class LandProject:
+    """A finished task t1 on branch feat, reviewed and gated, whose main is on a local bare remote."""
+
+    def __init__(self, test: unittest.TestCase, *, config: str = "", main_files: dict | None = None,
+                 work_files: dict | None = None, ledger: str | None = LEDGER, commit_summary: bool = True,
+                 receipt: bool = True, finish: bool = True, unmet: tuple[str, ...] = ()) -> None:
+        self.test = test
+        self.work = make_tmp_dir(test)
+        self.repo = make_git_repo(test)
+        self.state, self.home = self.work / "state", self.work / "home"
+        self.home.mkdir()
+        self.stub = StubNode(self.work / "stub")
+        self.unlazy = make_unlazy_dir(self.work / "unlazy")
+        self.pin = stub_pin(self.unlazy)
+        self.remote = self.work / "remote.git"
+        self.gitleaks = self.work / "fake_gitleaks.py"
+        self.gitleaks.write_text(FAKE_GITLEAKS, encoding="utf-8")
+        self.gh_script, self.gh_log, self.gitleaks_log = (self.work / "gh.json", self.work / "gh.jsonl",
+                                                          self.work / "gitleaks.jsonl")
+        self.gh_argv: tuple | None = (sys.executable, str(FAKE_GH))
+        self.gitleaks_argv: tuple | None = (sys.executable, str(self.gitleaks))
+        self.base = git_commit(self.repo, {".gitattributes": "* -text\n", ".gitignore": ".oah/tasks/t1/GATES.md\n",
+                                           "README.md": "hello\n", ".oah/config.toml": config,
+                                           ".oah/tasks/t1/PACKET.md": PACKET, "src/app.py": "print('v0')\n",
+                                           **(main_files or {})}, "start" + CLAUDE)
+        subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(self.remote)], check=True,
+                       env=git_env())
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "push", "-q", "origin", "main")
+        git(self.repo, "checkout", "-q", "-b", "feat")
+        self.head = self.commit({"src/app.py": "print('v1')\n", **(work_files or {})})
+        self.env = self.stub.env(OAH_UNLAZY_DIR=str(self.unlazy), OAH_STATE_DIR=str(self.state),
+                                 HOME=str(self.home), USERPROFILE=str(self.home),
+                                 FAKE_GITLEAKS_LOG=str(self.gitleaks_log), FAKE_GITLEAKS_CODE="0",
+                                 FAKE_GH_SCRIPT=str(self.gh_script), FAKE_GH_LOG=str(self.gh_log))
+        for name in ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK", "NODE_OPTIONS"):
+            self.env.pop(name, None)
+        started = self.oah("start", "--task", "t1", "--agent", "claude", "--packet", ".oah/tasks/t1/PACKET.md")
+        test.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        source = self.repo / ".oah/tasks/t1/PACKET.md"
+        self.binding = intent.parse(intent.read_source(source)).bind(".oah/tasks/t1/PACKET.md")
+        if ledger is not None:
+            self.ledger = self.repo / ".oah/tasks/t1/GATES.md"
+            self.ledger.write_text(ledger, encoding="utf-8")
+            self.gates_check(unmet)
+            if commit_summary and (self.repo / ".oah/tasks/t1/GATES.summary.md").exists():
+                self.commit({}, "gate summary")
+        if receipt:
+            publish_receipt(self, 1, head=self.head, base=self.base)
+        if finish:
+            self.finish()
+        self.ci([{"name": "tests", "status": "completed", "conclusion": "success"}])
+
+    def oah(self, *argv: str, stdin: str | None = None):
+        return run_cli(list(argv), cwd=self.repo, env=self.env, pin=self.pin, stdin=stdin)
+
+    def commit(self, files: dict, message: str = "work", trailer: str = CLAUDE) -> str:
+        self.head = git_commit(self.repo, files, message + trailer)
+        return self.head
+
+    def gates_check(self, unmet: tuple[str, ...] = ()) -> None:
+        """`oah gates check t1` through the stub unlazy: every runnable gate passes except `unmet`."""
+        text = self.ledger.read_text(encoding="utf-8")
+        ids = [line.split(":")[0].split()[-1] for line in text.splitlines() if line.startswith("- [")]
+        met = len(ids) - len(unmet)
+        verdict = (f"UNMET: {len(unmet)} (met: {met})\n" + "".join(f"  GATES:{gate}\n" for gate in unmet)
+                   if unmet else f"ALL MET ({met} met")
+        run = {"write": {str(self.ledger): met_ledger(text, skip=unmet)}, "code": 1 if unmet else 0,
+               "stdout": "".join(f"  {'FAIL' if gate in unmet else 'PASS'} GATES:{gate}: x\n" for gate in ids)
+               + f"GATES.md: {len(ids)} gates\n" + (verdict if unmet else f"{verdict}, reran: {met})\n")}
+        status = {"stdout": f"GATES.md: {len(ids)} gates\n" + (verdict if unmet else f"{verdict})\n"),
+                  "code": 1 if unmet else 0}
+        self.stub.reply("gate-check.mjs", run, status)
+        self.oah("gates", "check", "t1")
+
+    def finish(self) -> None:
+        answer = self.work / "return.md"
+        answer.write_text(f"{self.binding.line()}\nAC1: met — prints v1\nAC2: met — explained\n", encoding="utf-8")
+        done = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(answer))
+        self.test.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def ci(self, runs: list[dict] | None = None, **script) -> None:
+        body = {"check_runs": {self.head: runs or []}, **script}
+        self.gh_script.write_text(json.dumps(body), encoding="utf-8")
+
+    def advance_main(self, files: dict, message: str = "elsewhere") -> str:
+        """Another clone lands a commit on the remote's main."""
+        other = make_tmp_dir(self.test) / "other"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(other)], check=True, env=git_env())
+        for name, content in files.items():
+            path = other / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        git(other, "add", "-f", "-A")
+        git(other, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+        git(other, "push", "-q", "origin", "HEAD:main")
+        return git(other, "rev-parse", "HEAD")
+
+    def remote_main(self) -> str:
+        return subprocess.run(["git", "--git-dir", str(self.remote), "rev-parse", "main"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def patched(self):
+        import contextlib
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.dict(os.environ, self.env, clear=True))
+        stack.enter_context(patch.object(unlazy, "PIN", self.pin))
+        stack.enter_context(patch.object(land, "find_gh", lambda env: self.gh_argv))
+        stack.enter_context(patch.object(land, "find_gitleaks", lambda env: self.gitleaks_argv))
+        return stack
+
+    def assess(self, **options) -> land.Assessment:
+        with self.patched():
+            return land.assess(self.repo, "t1", env=dict(self.env), home=self.home, **options)
+
+    def check(self, result: land.Assessment, name: str) -> land.Check:
+        return next(check for check in result.checks if check.name == name)
+
+
+class AssessTest(unittest.TestCase):
+    def test_ready_when_every_check_binds_to_head(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        self.assertEqual([check.name for check in result.checks], list(land.CHECKS))
+        self.assertEqual({check.state for check in result.checks}, {"passed"}, describe(result))
+        self.assertIsNone(result.failure)
+        self.assertEqual((result.head, result.fetched, result.remote, result.branch),
+                         (project.head, project.base, "origin", "main"))
+        self.assertEqual(result.impact["worktree"], project.head)
+        self.assertEqual(result.impact["default_branch"], project.base)
+        self.assertRegex(result.impact["result"], r"\A[0-9a-f]{64}\Z")
+        self.assertEqual(result.required, [])
+        self.assertEqual(sorted(result.changed), [".oah/tasks/t1/GATES.summary.md", "src/app.py"])
+        scanned = json.loads(project.gitleaks_log.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(scanned[scanned.index("--log-opts") + 1], f"{project.base}..{project.head}")
+        self.assertIn("--redact", scanned)
+        asked = json.loads(project.gh_log.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIn(f"repos/{{owner}}/{{repo}}/commits/{project.head}/check-runs?per_page=100&page=1", asked)
+        self.assertEqual(self.check_detail(project, result), {"receipt": "R1.json"})
+        data = result.to_json()
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["default_branch"], project.base)
+        self.assertEqual(data["impact"]["result"], result.impact["result"])
+
+    def check_detail(self, project, result):
+        detail = project.check(result, "review").detail
+        return {"receipt": detail.get("receipt")}
+
+    def test_review_check_uses_latest_task_event(self):
+        project = LandProject(self, receipt=False)
+        older = git(project.repo, "rev-parse", "HEAD~1")
+        publish_receipt(project, 1, head=older, base=project.base)
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
+        self.assertIn(f"R1.json approved head {older[:12]}, not HEAD {project.head[:12]}", result.failure.message)
+        publish_receipt(project, 2, head=project.head, base=project.base)
+        self.assertTrue(project.assess().ready)
+        receipts.log_round(project.state, "t1", {"event": "start", "base": project.base, "series_round": 3,
+                                                 "round": 3, "attempt": 1, "run_id": "later"})
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
+        self.assertIn("a review round started after R2.json", result.failure.message)
+        other = intent.Binding(".oah/tasks/t1/PACKET.md", "t1", 2, "sha256:" + "d" * 64, ("AC1", "AC2"))
+        publish_receipt(project, 3, head=project.head, base=project.base, binding=other)
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
+        self.assertIn("another intent binding", result.failure.message)
+
+    def test_exact_head_failures_have_named_codes(self):
+        older = LandProject(self, receipt=False)
+        publish_receipt(older, 1, head=git(older.repo, "rev-parse", "HEAD~1"), base=older.base)
+        result = older.assess()
+        self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_REVIEW_REQUIRED"), describe(result))
+        self.assertIn("oah review --task t1", result.failure.message)
+
+        failing = LandProject(self)
+        failing.ci([{"name": "tests", "status": "completed", "conclusion": "failure"},
+                    {"name": "lint", "status": "completed", "conclusion": "success"}])
+        result = failing.assess()
+        self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_CI_FAILED"), describe(result))
+        self.assertIn("tests (failure)", result.failure.message)
+        self.assertNotIn("lint", result.failure.message)
+
+        unbound = LandProject(self, commit_summary=False)
+        result = unbound.assess()
+        self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_GATES_SUMMARY_MISSING"),
+                         describe(result))
+        self.assertIn("oah gates check t1", result.failure.message)
+
+    def test_gates_need_a_committed_summary_at_head(self):
+        bare = LandProject(self, ledger=None)
+        result = bare.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_GATES_REQUIRED", describe(result))
+        self.assertIn("oah gates new t1", result.failure.message)
+
+        project = LandProject(self)
+        project.stub.reply("gate-check.mjs", UNMET)
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_GATES_UNMET", describe(result))
+        project.stub.reply("gate-check.mjs", ALL_MET)
+        self.assertTrue(project.assess().ready)
+
+        summary = project.repo / ".oah/tasks/t1/GATES.summary.md"
+        text = summary.read_text(encoding="utf-8")
+        project.commit({".oah/tasks/t1/GATES.summary.md": text.replace("binding=run", "binding=carry")}, "edit")
+        result = project.assess()
+        self.assertEqual(project.check(result, "gates").code, "OAH_LAND_GATES_SUMMARY_STALE", describe(result))
+
+    def test_offline_fetch_failure_and_missing_map_are_stale(self):
+        project = LandProject(self)
+        result = project.assess(offline=True)
+        self.assertEqual(result.failure.code, "OAH_LAND_IMPACT_STALE", describe(result))
+        self.assertEqual([project.check(result, name).state for name in ("lease", "intent", "review", "gates")],
+                         ["passed"] * 4)
+        self.assertEqual([project.check(result, name).state for name in ("required-checks", "fast-forward", "scan")],
+                         ["skipped"] * 3)
+        self.assertIn("offline", result.failure.message)
+        self.assertIsNone(result.fetched)
+
+        git(project.repo, "remote", "set-url", "origin", str(project.work / "gone.git"))
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_IMPACT_STALE", describe(result))
+        self.assertIn("fetch failed", result.failure.message)
+        git(project.repo, "remote", "set-url", "origin", str(project.remote))
+
+        from oah.impact.errors import ImpactError
+
+        def broken(*_args, **_kwargs):
+            raise ImpactError("OAH_IMPACT_GIT_FAILED", "git ls-files failed")
+
+        with patch("oah.impact.mapstore.fresh_map", broken):
+            result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_IMPACT_STALE", describe(result))
+        self.assertIn("OAH_IMPACT_GIT_FAILED", result.failure.message)
+
+        disabled = LandProject(self, config="[impact]\nrefresh_default_branch = false\n")
+        result = disabled.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_IMPACT_STALE", describe(result))
+        self.assertIn("refresh_default_branch", result.failure.message)
+
+    def test_new_gate_binding_on_default_branch_requires_the_check(self):
+        project = LandProject(self)
+        moved = project.advance_main({".oah/tasks/x/GATES.md": OTHER_LEDGER, "docs/note.md": "x\n"})
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_CHECKS_REQUIRED", describe(result))
+        self.assertEqual(result.fetched, moved)
+        self.assertEqual(project.check(result, "impact").state, "passed")
+        self.assertEqual(result.required, [{
+            "gate": ".oah/tasks/x/GATES.md#G1", "binding": "exec", "targets": ["src/app.py"],
+            "definition": definition_digest("python src/app.py", "v1", None), "state": "pending"}])
+        self.assertIn(".oah/tasks/x/GATES.md#G1", result.failure.message)
+        self.assertEqual(project.check(result, "fast-forward").code, "OAH_LAND_IMPACT_STALE")
+        self.assertIn("does not contain", project.check(result, "fast-forward").message)
+        self.assertEqual(project.check(result, "scan").state, "skipped")
+
+    def test_changed_gate_definition_must_pass_against_head(self):
+        weakened = OTHER_LEDGER.replace("CHECK: python src/app.py", "CHECK: python -c \"print('v1')\"")
+        copy = "\n- [ ] G2: the app runs\n  CHECK: python src/app.py\n  EXPECT: v1\n  EVIDENCE: pending\n"
+        cases = {"pending": LEDGER, "passed": LEDGER + copy}
+        for expected, ledger in cases.items():
+            with self.subTest(expected=expected):
+                project = LandProject(self, main_files={".oah/tasks/x/GATES.md": OTHER_LEDGER},
+                                      work_files={".oah/tasks/x/GATES.md": weakened}, ledger=ledger)
+                result = project.assess()
+                required = result.required
+                self.assertEqual([(item["gate"], item["state"]) for item in required],
+                                 [(".oah/tasks/x/GATES.md#G1", expected)], describe(result))
+                self.assertEqual(result.ready, expected == "passed", describe(result))
+        project = LandProject(self, main_files={".oah/tasks/x/GATES.md": OTHER_LEDGER},
+                              work_files={".oah/tasks/x/GATES.md": weakened}, ledger=LEDGER + copy,
+                              unmet=("G2",), finish=False)
+        result = project.assess()
+        self.assertEqual([(item["gate"], item["state"]) for item in result.required],
+                         [(".oah/tasks/x/GATES.md#G1", "failed")], describe(result))
+        self.assertEqual(project.check(result, "required-checks").code, "OAH_LAND_CHECKS_REQUIRED")
+
+    def test_scan_and_ci_results(self):
+        project = LandProject(self)
+        project.gitleaks_argv = None
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_SCAN_REQUIRED", describe(result))
+        self.assertIn("gitleaks", result.failure.message)
+        project.gitleaks_argv = (sys.executable, str(project.gitleaks))
+        for code, expected in (("1", "possible secrets"), ("3", "exited 3")):
+            project.env["FAKE_GITLEAKS_CODE"] = code
+            result = project.assess()
+            self.assertEqual(result.failure.code, "OAH_LAND_SCAN_FAILED", describe(result))
+            self.assertIn(expected, result.failure.message)
+            self.assertNotIn("Someone Private", describe(result))
+            self.assertNotIn("someone@example.com", json.dumps(result.to_json()))
+        project.env["FAKE_GITLEAKS_CODE"] = "0"
+
+        project.ci([{"name": "tests", "status": "in_progress", "conclusion": None}])
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_CI_PENDING", describe(result))
+        project.ci([])
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        self.assertEqual(project.check(result, "ci").state, "unverified")
+        self.assertIn("no CI check runs", project.check(result, "ci").message)
+        project.ci([{"name": f"job {k}", "status": "completed", "conclusion": "success"} for k in range(101)]
+                   + [{"name": "late", "status": "completed", "conclusion": "cancelled"}])
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_CI_FAILED", describe(result))
+        self.assertIn("late (cancelled)", result.failure.message)
+        project.ci([{"name": "tests", "status": "completed", "conclusion": "success",
+                     "head_sha": "e" * 40}])
+        self.assertEqual(project.check(project.assess(), "ci").state, "unverified")
+        fake_token = "gh" + "o_" + "Z" * 36
+        project.ci(exit=1, stderr=f"HTTP 401: Bad credentials {fake_token} for decoy-owner-login\n")
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        self.assertEqual(project.check(result, "ci").state, "unverified")
+        self.assertNotIn(fake_token, describe(result) + json.dumps(result.to_json()))
+        self.assertNotIn("decoy-owner-login", describe(result) + json.dumps(result.to_json()))
+        project.gh_argv = None
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        self.assertIn("gh is not installed", project.check(result, "ci").message)
+
+    def test_open_lease_dirty_tree_and_workers_refuse(self):
+        project = LandProject(self, finish=False)
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_LEASE_OPEN", describe(result))
+        self.assertIn("oah finish --task t1 --agent claude", result.failure.message)
+        (project.repo / "README.md").write_text("changed\n", encoding="utf-8")
+        with self.assertRaises(land.LandError) as caught:
+            project.assess()
+        self.assertEqual(caught.exception.code, "OAH_LAND_DIRTY_TREE")
+        (project.repo / "README.md").write_text("hello\n", encoding="utf-8")
+        project.env["OAH_WORKER"] = "1"
+        with self.assertRaises(land.LandError) as caught:
+            project.assess()
+        self.assertEqual(caught.exception.code, "OAH_LAND_WORKER_REFUSED")
+
+
+class PushTest(unittest.TestCase):
+    def test_push_fast_forwards_exactly_head(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (True, "OAH_LAND_LANDED"), pushed.message)
+        self.assertEqual(project.remote_main(), project.head)
+        self.assertEqual(git(project.repo, "rev-parse", "feat"), project.head)
+
+    def test_push_refuses_when_remote_moved_after_assessment(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        moved = project.advance_main({"docs/other.md": "landed elsewhere\n"})
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_IMPACT_STALE"), pushed.message)
+        self.assertIn(moved[:12], pushed.message)
+        self.assertIn("nothing landed", pushed.message)
+        self.assertEqual(project.remote_main(), moved)
+
+    @unittest.skipIf(os.name == "nt", "the racing pre-receive hook is a POSIX shell script")
+    def test_remote_enforces_the_assessed_sha_during_the_push(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        racer = git(project.repo, "commit-tree", "-p", project.base, "-m", "race", f"{project.base}^{{tree}}")
+        git(project.repo, "push", "-q", str(project.remote), f"{racer}:refs/heads/racer")
+        hook = project.remote / "hooks" / "pre-receive"
+        hook.write_text(f"#!/bin/sh\nunset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/main {racer}\ncat >/dev/null\n",
+                        encoding="utf-8")
+        hook.chmod(0o755)
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_IMPACT_STALE"), pushed.message)
+        self.assertEqual(project.remote_main(), racer)
+
+    def test_records_hold_shas_digests_and_codes_only(self):
+        project = LandProject(self)
+        result = project.assess()
+        with project.patched():
+            land.record(project.state, result, "check", None)
+            pushed = land.push(project.repo, result, env=dict(project.env))
+            land.record(project.state, result, "merge", pushed)
+        path = project.state / "land" / "t1" / "records.jsonl"
+        lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([line["mode"] for line in lines], ["check", "merge"])
+        self.assertEqual([line["landed"] for line in lines], [False, True])
+        first = lines[0]
+        self.assertEqual((first["head"], first["default_branch"], first["impact_result"]),
+                         (project.head, project.base, result.impact["result"]))
+        self.assertEqual(first["required_checks"], [])
+        self.assertEqual({item["name"] for item in first["checks"]}, set(land.CHECKS))
+        self.assertTrue(all(set(item) == {"name", "state", "code"} for item in first["checks"]))
+        raw = path.read_text(encoding="utf-8")
+        for private in (str(project.remote), str(project.repo), str(project.work)):
+            self.assertNotIn(private, raw)
+        self.assertNotIn("message", raw)
+
+
+if __name__ == "__main__":
+    unittest.main()
