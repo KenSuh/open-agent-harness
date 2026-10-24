@@ -432,6 +432,12 @@ max    = { model = "", effort = "highest", timeout_min = 90 }  # the highest eff
   - Every worker `oah` launches gets `OAH_WORKER=1`, `OAH_RUN_ID` and `OAH_TASK` in its environment.
   - The first line of its preamble says it is a dispatched worker.
   - Workers skip any session-entry procedure (5.11, 5.12).
+  - Workers use the dispatcher's existing lease. They never start, renew, release or finish a lease,
+    and their brief carries the lease's scope and the intent binding, never a lease command. With
+    `OAH_WORKER=1`, every lease write refuses with `OAH_WORKER_LEASE_REFUSED` (C1, 2026-10-24).
+  - Initial and correction workers run only in the dispatcher's leased worktree; a `--worktree` that
+    names another tree refuses with `OAH_WORKTREE_LEASE_MISMATCH`. Read-only reviews may run in any
+    tree (C1).
 
 ### 5.6 Packets and intent
 
@@ -479,7 +485,8 @@ Status: draft            # becomes "accepted" when you approve it
     rounds, return format) live outside the section. `oah packet check` warns
     (`OAH_INTENT_PROCESS_STEP`) when a condition reads like one.
   - **Bound in the same start command.**
-    - `oah start --packet <PACKET.md>` binds the lease to `{source, id, revision, digest}`.
+    - `oah start --packet <PACKET.md>` binds the lease to `{source, id, revision, digest}`. The
+      dispatcher runs it; dispatched workers never do (C1).
     - `oah status` and `oah intent show` use the first matching predicate below:
       - `unbound`: the lease has no intent binding;
       - `missing`: a binding exists, but its source does not exist;
@@ -1156,18 +1163,18 @@ The owner approved CI from P1 on 2026-10-23.
 | Piece | License | How the kit uses it |
 |---|---|---|
 | this kit | **MIT**, "Copyright (c) 2026 open-agent-harness contributors" | — |
-| unlazy (Leonxlnx/unlazy) | MIT | operational dependency installed by `oah init` at P5's contract-tested pin, verified by commit and scripts digest (5.8); vendored under A13 |
-| graphify (Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0 (earlier contributions under MIT, per NOTICE) | optional dependency, run as a CLI |
+| unlazy (Leonxlnx/unlazy) | MIT | operational dependency installed by `oah init` at P5's contract-tested pin, verified by commit and scripts digest (5.8); linked, not vendored: a file in its repository fails this repository's privacy scan unchanged (A13) |
+| graphify (Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0 (earlier contributions under MIT, per NOTICE) | optional dependency, run as a CLI; linked, not vendored: upstream has no skill folder, its CLI writes the skill from a template (A13) |
 | Claude Code | Anthropic's terms | external tool the user installs |
 | Codex CLI (openai/codex) | Apache-2.0 | external tool the user installs |
 | uv | Astral (dual MIT / Apache-2.0, not verified) | external tool the user installs |
-| superpowers (obra/superpowers) | MIT | optional recommendation, linked |
-| mattpocock skills | MIT | optional recommendation, linked |
+| superpowers (obra/superpowers) | MIT | optional recommendation, linked, not vendored: two of its files fail this repository's privacy scan unchanged (A13) |
+| mattpocock skills (mattpocock/skills) | MIT | vendored unchanged under `skills/mattpocock-skills/` at a pinned commit, with its LICENSE and a `THIRD_PARTY_NOTICES.md` entry (A13) |
 | netwaif/multi-agent-starter | MIT | ideas only (file-as-memory, backend registry, re-entry), credited |
 | netwaif/knot | **no license** | ideas only, credited; no text or code copied |
 
-`THIRD_PARTY_NOTICES.md` lists these. If anything is ever copied verbatim, its license text goes in
-first.
+`THIRD_PARTY_NOTICES.md` lists these, and its "Vendored skills" table lists every folder under `skills/`.
+If anything is ever copied verbatim, its license text goes in first.
 
 **Amendment 3 (A13).** A skill is vendored only where its verified upstream license permits it. Section 15
 lists every item with its verdict. Each vendored skill ships unchanged under `skills/<name>/`, with its
@@ -1364,7 +1371,7 @@ whose checklists carry it.
 | A3 | A task or review that touches DB tables, routines or GRANTs queries the DB backend plugin, and returns the query plus the graph identity (commit SHA, digest). Without the plugin it says so. | 5.6, 5.10 | P4, P6, P7 |
 | A4 | An empty `## Scope` warns loudly (`OAH_SCOPE_EMPTY`). A selection that depends on Scope's file kinds never silently selects nothing. | 5.6 | P4, P7 |
 | A5 | `oah tiers sync` replaces the managed rules block with the canonical text, not only when it is missing. | 5.11 | P7 |
-| A6 | Dispatched workers carry `OAH_WORKER=1`. Generated hooks and the rules block tell them to skip any session-entry procedure. | 5.5, 5.11, 5.12 | P3, P7, session-start hook (later) |
+| A6 | Dispatched workers carry `OAH_WORKER=1`. Generated hooks and the rules block tell them to skip any session-entry procedure. | 5.5, 5.11, 5.12 | P3, P7 (the session-start hook in lane P7b) |
 | A7 | Intent lineage. One intent section for every stage, worker and subagent. A changed goal raises the revision, never a new ID. Conditions are outcomes. The lease binds the section in the same start command, and status says `current`. Returns carry `INTENT` and per-AC lines. One shared footer goes to every brief and every tier agent file. A draft cannot bind. | 5.6, 5.11 | P3, P4, P6, P7 |
 | A8 | Wiki auto-clean, candidates only. Lint counts real problems only. Size-based log rollover. An opt-in commit check. Editor UI state is not tracked. An index lint writes outside the wiki. A hygiene delta line. | 5.1, 5.10, 5.12 | P7 |
 
@@ -1421,9 +1428,8 @@ and `call`; P6 consumes that integration after P4b lands.
 - [ ] `oah wiki lint --index` uses the banner patterns and configurable 120-code-point line limit in 5.10, resolves unindexed notes using normal lint rules, and writes candidates outside the wiki. Tests cover pattern matches, fenced-code exclusions and line-limit boundaries. (A8e)
 - [ ] `oah wiki hygiene` prints the nine named counters in 5.10 and persists counts/configuration atomically. Tests cover first-run and changed-configuration `delta=n/a`, signed subsequent deltas, and failed scans preserving the baseline. (A8f)
 - [ ] No wiki command deletes, merges or moves notes on its own; they produce candidates only. (A8)
-
-**Later: session-start hook**
-- [ ] `oah hook session-start` prints nothing when `OAH_WORKER=1`. (A6)
+- [ ] `oah hook session-start` prints nothing when `OAH_WORKER=1`. Lane P7b builds it with the hook
+  wiring in guided `oah init`. (A6)
 
 ### Candidates from the owner's later fixes (2026-10-23)
 
@@ -1432,7 +1438,7 @@ phase is planned, and is dropped only with a recorded reason.
 
 | # | Candidate | Phases |
 |---|---|---|
-| C1 | Only implementation and correction briefs carry the exact lease command (`oah start --packet <source>`, with the id, revision and digest it will bind). Review briefs never carry it. A test follows the delivered command and expects `oah intent show` to report `current`. | P3, P4, P6 |
+| C1 | **Replaced 2026-10-24 by owner decisions landed in lane P4b (PR #31).** A worker dispatched by `oah call` uses the dispatcher's existing lease; it never starts, renews, releases or finishes a lease. Every brief carries the lease's scope and the intent binding, never a lease command. Mutating workers (initial and correction stages) run only in the dispatcher's leased worktree: the Orca launcher reuses that worktree for them, and a `--worktree` naming another tree refuses with `OAH_WORKTREE_LEASE_MISMATCH`. Read-only reviews may run in any tree. The lease store enforces this: with `OAH_WORKER=1`, which `oah call` sets for every launcher, every lease write refuses with `OAH_WORKER_LEASE_REFUSED`. A reusable spec that still mentions a lease command only gets an `OAH_WORKER_LEASE_COMMAND` warning. A test runs the dispatcher's `oah start --packet` and expects `oah intent show` to report `current`. *This replaced:* only implementation and correction briefs carry the exact lease command (`oah start --packet <source>`), review briefs never do, and a test follows the delivered command. | P3, P4, P6 |
 | C2 | Briefs have one fixed layout: worker line, preamble, the intent section verbatim, round instructions, the verify footer (the verify-what-changed rule, 5.11), then the intent footer. A test that compares a brief with an older baseline strips exactly one intent footer at that position, and fails when the footer is missing or duplicated. | P3, P6 |
 | C3 | A dispatch that reuses a stored brief or spec constructs a delivered brief containing the canonical intent footer. If it cannot deliver that brief, it refuses dispatch with `OAH_FOOTER_NOT_APPENDED`. | P3 |
 | C4 | A footer counts as present only when its opening marker is a whole line at line start. A brief that merely mentions the marker still gets the footer. Tier sync uses the same rule for its managed block. | P3, P7 |
@@ -1441,14 +1447,14 @@ phase is planned, and is dropped only with a recorded reason.
 
 **Candidate checklist lines** (copy into each phase's checklist when that phase is planned):
 - **P3:**
-  - [ ] Implementation and correction briefs carry the exact lease command; review briefs do not. (C1)
+  - [ ] No brief carries a lease command; every brief carries the dispatcher's lease scope and the intent binding. (C1, replaced 2026-10-24)
   - [ ] Briefs use the fixed layout. (C2)
   - [ ] Reusing a stored brief or spec delivers a brief containing the canonical intent footer, or refuses dispatch with `OAH_FOOTER_NOT_APPENDED` if it cannot. (C3)
   - [ ] Footer presence means a marker line at line start. (C4)
 - **P4:**
-  - [ ] A test runs the delivered lease command and gets `current` from `oah intent show`. (C1)
+  - [ ] A test runs the dispatcher's `oah start --packet` and gets `current` from `oah intent show`. With `OAH_WORKER=1`, every lease write refuses with `OAH_WORKER_LEASE_REFUSED`, and mutating workers run only in the leased worktree. (C1, replaced 2026-10-24)
 - **P6:**
-  - [ ] Review briefs never carry a lease command. (C1)
+  - [ ] Review and correction workers use the dispatcher's lease and never carry a lease command; corrections run in the leased worktree, reviews may use any tree. (C1, replaced 2026-10-24)
   - [ ] Baseline comparison strips exactly one intent footer at its fixed position and fails when it is missing or duplicated. (C2)
 - **P7:**
   - [ ] Tier sync detects its managed block by a marker line at line start. (C4)
@@ -1567,6 +1573,14 @@ Each row is one of four verdicts:
 
 Names that match a private term are masked. Values (env, headers, tokens) were never recorded.
 
+**Verdicts as shipped (2026-10-24).** Lane P7t (PR #19) settled three rows that this inventory first
+marked `vendor`; they are now `link`. unlazy and superpowers are linked, not vendored, because files in
+their repositories fail this repository's privacy scan unchanged, and vendored files are never edited.
+graphify is linked because its upstream has no skill folder: its CLI writes the skill from a template.
+`skills/` holds the nine vendored items listed in `THIRD_PARTY_NOTICES.md`: the eight `vendor` rows
+below (mattpocock-skills among them) plus `humanize-korean`, an opt-in item added in
+P7t. `docs/toolkit.md` gives each linked item's install command and reason.
+
 ##### Skills
 
 | Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
@@ -1575,9 +1589,9 @@ Names that match a private term are masked. Values (env, headers, tokens) were n
 | skill | orca-cli | Operate Orca worktrees, terminals, repos, embedded browser and handoffs through the orca CLI. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orca-cli> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | orchestration | Coordinate supervised Orca worker agents: messages, task dispatch, DAGs, decision gates. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orchestration> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | typesafe-ai | Guidance for building features from TypeSafe typed-judgment AI primitives (routing, ranking, verification). | <https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai> | lock records no commit (folder hash 678c375b883794bf4292715a43acbba5c84681aa); upstream main HEAD at check 65a39f393687675ce170e6094757de20370365b9 | MIT | vendor |
-| skill | unlazy | Completion discipline and operational gate checker; installed at P5's contract-tested pin, verified by commit and scripts digest before gate commands (5.8), excluded from A15 updates. | <https://github.com/Leonxlnx/unlazy> | 2.1.0 (package.json); lock hash 16671491f6679ad9378f52604d3bc2415b4120c7 equals upstream main HEAD at check | MIT | vendor |
+| skill | unlazy | Completion discipline and operational gate checker; installed at P5's contract-tested pin, verified by commit and scripts digest before gate commands (5.8), excluded from A15 updates. | <https://github.com/Leonxlnx/unlazy> | 2.1.0 (package.json); lock hash 16671491f6679ad9378f52604d3bc2415b4120c7 equals upstream main HEAD at check | MIT | link |
 | skill | vercel-react-best-practices | React and Next.js performance rules from Vercel Engineering. | <https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices> | skill metadata 1.0.0; lock records no commit; upstream main HEAD at check 063bee94c3f4df8453406c830b0a7df0f2860278 | NOASSERTION | link |
-| skill | graphify | Turn code and documents into a persistent knowledge graph with query, path and explain tools. | <https://github.com/Graphify-Labs/graphify> | graphifyy 0.9.93 (PyPI); upstream commit not recorded | Apache-2.0 | vendor |
+| skill | graphify | Turn code and documents into a persistent knowledge graph with query, path and explain tools. | <https://github.com/Graphify-Labs/graphify> | graphifyy 0.9.93 (PyPI); upstream commit not recorded | Apache-2.0 | link |
 | skill | [private-term skill A] | excluded: matches a private term | - | - | - | exclude |
 | skill | [private-term skill B] | excluded: matches a private term (account-synced copy) | - | - | - | exclude |
 | skill | [owner-specific article skill] | excluded: owner-specific; matches a private term | - | - | - | exclude |
@@ -1601,7 +1615,7 @@ Names that match a private term are masked. Values (env, headers, tokens) were n
 
 | Kind | Name | Purpose | Upstream | Version/commit | License | Verdict |
 |---|---|---|---|---|---|---|
-| plugin | superpowers@claude-plugins-official | Workflow skills: brainstorming, plans, TDD, debugging, code review, worktrees, verification. | <https://github.com/obra/superpowers> | 7.0.0 @ bb92a77741419a4ab5f06e711a283343f1ada0c3 | MIT | vendor |
+| plugin | superpowers@claude-plugins-official | Workflow skills: brainstorming, plans, TDD, debugging, code review, worktrees, verification. | <https://github.com/obra/superpowers> | 7.0.0 @ bb92a77741419a4ab5f06e711a283343f1ada0c3 | MIT | link |
 | plugin | mattpocock-skills | Engineering and productivity skills: TDD, diagnosis, domain modeling, code review, PR writing, grilling. | <https://github.com/mattpocock/skills> | 1.3.1 @ 49dd158d1076134a641b33efb035946536778336 | MIT | vendor |
 | plugin | codex@openai-codex | Claude Code plugin that calls the Codex CLI for rescue, review and delegated work. | <https://github.com/openai/codex-plugin-cc> | 1.0.6 @ db52e28f4d9ded852ab3942cea316258ae4ef346 | Apache-2.0 | vendor |
 | plugin | ponytail@ponytail | 'Lazy senior dev' mode: skills that push agents to write less code, plus audit/debt/review helpers. | <https://github.com/DietrichGebert/ponytail> | 5.3.2; marketplace revision 2ed6c52c9d7e5e56942508591085fd45dea277d3 | MIT | vendor |
