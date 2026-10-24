@@ -395,7 +395,7 @@ def _strings(value: object) -> tuple[str, ...] | None:
     return None
 
 
-def _merge(attempt_id: str, items: list[Entry], receipts: Mapping[str, Entry]) -> Attempt:
+def _merge(attempt_id: str, items: list[Entry], receipts: Mapping[str, Entry], task: str) -> Attempt:
     problems: list[str] = []
     by_kind = {entry.kind: entry for entry in items}
     start, end, head = (by_kind.get(kind) for kind in KINDS[1:])
@@ -434,7 +434,8 @@ def _merge(attempt_id: str, items: list[Entry], receipts: Mapping[str, Entry]) -
     evidence: list[str] = []
     if end is None:
         problems.append(f"{attempt_id} is unfinished: it has a start record but no outcome, so recurrence "
-                        "evidence is incomplete")
+                        "evidence is incomplete. If no oah fix is still running, record it with oah fix --abort "
+                        f"--task {task}")
     else:
         outcome, after = end.record.get("outcome"), end.record.get("after_head")
         if outcome not in OUTCOMES:
@@ -456,7 +457,7 @@ def _merge(attempt_id: str, items: list[Entry], receipts: Mapping[str, Entry]) -
             evidence.append(head.record["evidence"])
     if fields.get("outcome") == "applied" and after is None:
         problems.append(f"{attempt_id} applied changes but no commit is bound to it; commit the result and record "
-                        "its head binding, then review again")
+                        f"its head binding with oah fix --bind --task {task}, then review again")
     elif fields.get("outcome") == "applied" and after == fields.get("before_head"):
         problems.append(f"{attempt_id} is applied, but its after_head is its before_head {after}; an applied "
                         "correction ends at a new commit")
@@ -472,7 +473,7 @@ def attempts(records: Records) -> list[Attempt]:
     for entry in records.entries:
         if entry.kind != "receipt":
             groups.setdefault(entry.record["attempt_id"], []).append(entry)
-    return [_merge(attempt_id, items, receipts) for attempt_id, items in groups.items()]
+    return [_merge(attempt_id, items, receipts, records.task) for attempt_id, items in groups.items()]
 
 
 def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetime | None = None) -> None:

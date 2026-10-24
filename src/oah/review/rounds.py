@@ -168,8 +168,8 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
     elif latest is not None and latest.record.get("outcome") == "changes-requested" and _uncorrected(s, latest):
         reason = (f"{latest.name} requested changes, but no finished correction attempt is recorded for "
                   f"{', '.join(_uncorrected(s, latest))}, so a recurrence could not be recognized. Record the "
-                  "corrections (oah fix records its own; manual corrections need the same records), or decide to go "
-                  "on without")
+                  "corrections (oah fix records its own; record a committed manual correction with oah fix --manual "
+                  f"--engine claude|human --task {s.task}), or decide to go on without")
     if reason is None and s.ambiguities:
         reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
                   "rewritten commits still carry the corrections")
