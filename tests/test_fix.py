@@ -53,6 +53,11 @@ class FixProject:
         if attributes is not None:
             files[".gitattributes"] = attributes
         self.base = git_commit(self.repo, files, "start")
+        origin = self.work / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", "--initial-branch=main", str(origin)],
+                       check=True, capture_output=True)
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "checkout", "-q", "-b", "feat")
         self.head = self.commit({"src/app.py": "print('v1')\n"})
         self.env = {key: value for key, value in os.environ.items()
@@ -205,6 +210,56 @@ class CallSeamTest(unittest.TestCase):
         self.assertTrue(run["error"].startswith("OAH_RUN_INTERRUPTED:"), run["error"])
         call.check_prepared(prepared)  # the lease lock was released on the way out
 
+    def exited_launcher_interruption(self):
+        project = FixProject(self)
+        project.queue_fix({"exit_with_descendant": True})
+        prepared = self.prepare(project, timeout_s=120)
+        pid_file = project.fix_dir / "descendant.txt"
+        children, exits = [], []
+        popen = subprocess.Popen
+
+        def capture(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            if str(FAKE_FIX) in args[0] and "exec" in args[0]:
+                children.append(child)
+            return child
+
+        def interrupt():
+            if wait_for(pid_file):
+                exits.append(children[0].wait(timeout=10))
+                _thread.interrupt_main()
+
+        from oah.engines.proc import kill_tree
+
+        with default_sigint(), mock.patch.object(subprocess, "Popen", side_effect=capture):
+            thread = threading.Thread(target=interrupt, daemon=True)
+            thread.start()
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+                thread.join(5)
+                self.assertEqual(exits, [0], "the launcher exited before interruption")
+                heartbeat = pid_file.with_suffix(".heartbeat")
+                stopped = heartbeat.read_bytes()
+                time.sleep(0.3)
+                self.assertEqual(heartbeat.read_bytes(), stopped,
+                                 "the exited launcher's descendant survived interruption")
+                self.assertEqual(prepared.run.read()["status"], "failed")
+                call.check_prepared(prepared)
+            finally:
+                if children:
+                    job = getattr(children[0], "_oah_job", None)
+                    if job is None or job.handle:
+                        kill_tree(children[0])
+
+    @unittest.skipIf(os.name == "nt", "POSIX process group cleanup")
+    def test_interrupt_stops_descendant_after_launcher_exits(self):
+        self.exited_launcher_interruption()
+
+    @unittest.skipUnless(os.name == "nt", "Windows job cleanup")
+    def test_windows_interrupt_stops_descendant_after_launcher_exits(self):
+        self.exited_launcher_interruption()
+
     def test_polled_wait_keeps_output_and_timeout(self):
         project = FixProject(self)
         output = "".join(f"line {number:06d} " + "x" * 60 + "\n" for number in range(4000))
@@ -235,6 +290,36 @@ FIXED = {"src/app.py": "print('fixed')\n"}
 
 
 class RefusalTest(unittest.TestCase):
+    def test_fix_and_manual_refuse_intent_different_from_source_review(self):
+        source = ".oah/tasks/t1/PACKET.md"
+        for change in ("revision", "source", "committed bytes"):
+            for mode in ("automatic", "manual"):
+                with self.subTest(change=change, mode=mode):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    packet = PACKET
+                    bound_source = source
+                    if change == "revision":
+                        packet = packet.replace("Revision: 1", "Revision: 2").replace(
+                            "Reports miss files.", "Reports skip files.")
+                    elif change == "source":
+                        bound_source = ".oah/tasks/t1/UPDATED.md"
+                    else:
+                        packet = packet.replace("\n", "\r\n")
+                    project.commit({bound_source: packet.encode("utf-8"), **FIXED}, trailer=HUMAN_TRAILER)
+                    binding = intent.parse(packet).bind(bound_source)
+                    store = Store(project.state)
+                    store.release(task="t1", agent="claude", reason="rebind", force=False)
+                    store.start(task="t1", agent="claude", scope=("src", ".oah/tasks/t1"), note="new intent",
+                                ttl_hours=1, info=repo_info(project.repo), intent=binding)
+                    self.assertEqual(intent.explain_binding(binding, project.repo)[0], "current")
+                    project.queue_fix({"write": {"src/app.py": "print('another correction')\n"}})
+                    runs_before = sorted((project.state / "runs" / "t1").iterdir())
+                    action = project.fix if mode == "automatic" else lambda: project.manual("human")
+                    error = project.refused("OAH_INTENT_SOURCE_MISMATCH", action)
+                    self.assertIn("oah review --task t1", str(error))
+                    self.assertEqual(sorted((project.state / "runs" / "t1").iterdir()), runs_before)
+
     def test_fix_refuses_every_non_current_intent_state(self):
         def no_lease(project):
             Store(project.state).release(task="t1", agent="claude", reason="test", force=False)
@@ -827,7 +912,7 @@ class SecretTest(unittest.TestCase):
         for data in artifacts:
             for key in keys:
                 for form in (key, json.dumps(key)[1:-1], json.dumps(key, ensure_ascii=False)[1:-1]):
-                    self.assertNotIn(form.encode("utf-8"), data, "a runtime credential reached a retained artifact")
+                    self.assertFalse(form.encode("utf-8") in data, "a runtime credential reached a retained artifact")
 
     def test_corrector_environment_excludes_credentials(self):
         project = FixProject(self)
@@ -891,6 +976,45 @@ class SecretTest(unittest.TestCase):
                                     *result.warnings)
                 if channel == "file":
                     self.assertIn("[REDACTED]", "\n".join(result.lines))
+
+    def test_credential_filenames_never_reach_metadata_or_executable_guidance(self):
+        for channel in ("new", "tracked", "out of scope", "unquotable", "encoded", "failed"):
+            with self.subTest(channel=channel):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16)
+                if channel == "encoded":
+                    key += "-한글"
+                name = ("outside/" if channel == "out of scope" else "src/") + key
+                if channel == "unquotable":
+                    name += "'file.txt"
+                if channel == "tracked":
+                    project.commit({name: "before\n"})
+                project.env["OPENAI_API_KEY"] = key
+                project.queue_fix({"write": {name: "after\n", **FIXED}, "exit": 1 if channel == "failed" else 0})
+                result = project.fix()
+                self.assert_private(project, [key], json.dumps(result.to_json()), result.message, *result.lines,
+                                    *result.warnings)
+                self.assertEqual((result.code, result.outcome), ("OAH_FIX_FAILED", "failed"))
+                self.assertEqual(result.commands, [], "sensitive filenames must withhold executable guidance")
+                saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["commands"], [])
+                if channel == "encoded":
+                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                    self.assertFalse("diff --git" in patch, "withhold Git-quoted sensitive filenames too")
+                project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
+
+    def test_bind_withholds_saved_commands_that_now_contain_a_credential(self):
+        project = FixProject(self)
+        project.changes_requested()
+        key = "runtime-" + token_source.token_hex(16)
+        project.queue_fix({"write": {"src/" + key: "correction\n"}})
+        self.assertEqual(project.fix().code, "OAH_FIX_APPLIED")
+        project.env["OPENAI_API_KEY"] = key
+        error = project.refused("OAH_FIX_NOT_COMMITTED", project.bind)
+        self.assertFalse(key in str(error), "a runtime credential reached a refusal")
+        self.assertNotIn("git add", str(error), "do not print a redacted executable command")
+        self.assertNotIn("git commit", str(error))
 
     def test_fix_exception_contains_no_credential(self):
         project = FixProject(self)

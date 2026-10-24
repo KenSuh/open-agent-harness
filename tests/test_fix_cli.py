@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import secrets as token_source
 import signal
 import subprocess
 import sys
@@ -51,6 +52,23 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_withholds_sensitive_filename_commands_in_text_and_json(self):
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16)
+                project.queue_fix({"write": {"outside/" + key: "correction\n"}})
+                args = ("--json",) if as_json else ()
+                done = oah(project, "fix", "--task", "t1", "--tier", "high", *args,
+                           env_extra={"OPENAI_API_KEY": key})
+                self.assertFalse(key in done.stdout + done.stderr, "a runtime credential reached CLI output")
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertNotIn("git add", done.stdout + done.stderr)
+                self.assertNotIn("git commit", done.stdout + done.stderr)
+                if as_json:
+                    self.assertEqual(json.loads(done.stdout)["commands"], [])
+
     def test_fix_command_is_discovered(self):
         parser = build_parser()
         commands = next(action for action in parser._actions if action.dest == "command")

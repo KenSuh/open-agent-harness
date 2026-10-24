@@ -55,7 +55,7 @@ import threading
 from importlib import resources
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
-from oah import call, call_cli, runs
+from oah import briefs, call, call_cli, runs
 from oah import intent as oah_intent
 from oah.atomic import read_json, write_json_atomic, write_text_atomic
 from oah.engines.proc import run_command
@@ -235,24 +235,24 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
     return _Task(task, state, lease, root)
 
 
-def _committed_reader(root: pathlib.Path) -> Callable[[pathlib.Path], str]:
-    """Read a packet as committed at HEAD: the bytes a review snapshot holds, whatever the checkout converted."""
+def _committed_reader(root: pathlib.Path, *, ref: str = "HEAD") -> Callable[[pathlib.Path], str]:
+    """Read a committed packet without checkout newline conversion; HEAD remains the dispatch default."""
     def read(path: pathlib.Path) -> str:
         try:
             relative = pathlib.Path(path).relative_to(root).as_posix()
         except ValueError:
             raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{path} is outside the worktree") from None
-        shown = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"HEAD:{relative}"],
+        shown = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{ref}:{relative}"],
                             timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
         if shown.timed_out or shown.returncode != 0:
-            raise oah_intent.SourceError("OAH_INTENT_SOURCE_MISSING", f"{relative} is not committed at HEAD")
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_MISSING", f"{relative} is not committed at {ref}")
         data = shown.stdout.encode("latin-1")
         if len(data) >= oah_intent.MAX_BYTES:
-            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at HEAD is too large for a packet")
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at {ref} is too large for a packet")
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at HEAD is not UTF-8 text") from None
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at {ref} is not UTF-8 text") from None
         return text[1:] if text.startswith("\ufeff") else text
 
     return read
@@ -280,6 +280,24 @@ def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
                           f"({binding.line()}). {nothing}. Correction and review briefs carry the committed packet, "
                           "so commit it as bound, then run the command again")
     return binding
+
+
+def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.Binding, nothing: str) -> None:
+    matches = (receipt.record.get("intent") == binding.to_json()
+               and receipt.record.get("intent_digest") == binding.digest)
+    if matches:
+        try:
+            source = oah_intent.source_path(binding, t.root)
+            reviewed = _committed_reader(t.root, ref=receipt.record["head"])(source)
+            current = _committed_reader(t.root)(source)
+            matches = (oah_intent.parse(reviewed).bind(binding.source) == binding
+                       and briefs.raw_section(reviewed) == briefs.raw_section(current))
+        except (oah_intent.SourceError, oah_intent.IntentInvalid):
+            matches = False
+    if not matches:
+        raise ReviewError("OAH_INTENT_SOURCE_MISMATCH", f"the current binding or committed intent section differs "
+                          f"from the intent reviewed by {receipt.name}. {nothing}. Run oah review --task {t.name} "
+                          "to review the updated intent before correcting its findings")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -447,13 +465,22 @@ def _task_lock(t: _Task) -> Iterator[None]:
         lock.__exit__(None, None, None)
 
 
+def _redacted(value, redact: Callable[[str], str]):
+    """Redact decoded strings before serialization, including filenames and JSON keys."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redacted(item, redact) for item in value]
+    if isinstance(value, dict):
+        return {redact(key): _redacted(item, redact) for key, item in value.items()}
+    return value
+
+
 def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]], Result]) -> Result:
-    """Run an operation; an error that carries a runtime credential is replaced by a redacted one."""
+    """Redact every output string; executable guidance is checked before it reaches this boundary."""
     redact = runner.credential_redactor(env)
     try:
-        return operation(redact)
-    except KeyboardInterrupt:
-        raise
+        return Result(**_redacted(operation(redact).to_json(), redact))
     except BaseException as exc:
         message = str(exc)
         if redact(message) == message:
@@ -461,7 +488,7 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
         code = getattr(exc, "code", "OAH_FIX_FAILED")
         message = redact(message)
         message = message[len(code) + 2:] if message.startswith(code + ": ") else message
-        safe = ReviewError(code, message)
+        safe = FixInterrupted(message) if isinstance(exc, KeyboardInterrupt) else ReviewError(code, message)
     raise safe from None
 
 
@@ -560,6 +587,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         receipt = _source(t, h, LAUNCHED)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED)
+        _check_review_intent(t, receipt, binding, LAUNCHED)
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
@@ -682,8 +710,12 @@ class _Attempt:
         root, rid = self.t.root, self.run_id
         head = _head(root)
         changes = _changes(root, self.before, untracked)
+        sensitive_paths = any(self.redact(name) != name for name in changes.files)
         raw = _patch(root, self.before, changes)
-        patch = self.redact(raw.decode("utf-8", errors="replace"))
+        # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
+        patch = ("OAH_FIX_SENSITIVE_PATH: diff withheld because a filename contains a runtime credential; "
+                 "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
+                 self.redact(raw.decode("utf-8", errors="replace")))
         digest = receipts.digest(raw)
         last = runs._contained_path(final.parent, final.name)
         message = self.redact(last.read_bytes().decode("utf-8", errors="replace")) if last.is_file() else ""
@@ -708,18 +740,28 @@ class _Attempt:
         else:
             outcome, reason = "no-change", None
             evidence = f"codex run {rid} finished without changing any file; {effort}"
+        if outcome == "applied" and sensitive_paths:
+            outcome = "failed"
+            reason = ("OAH_FIX_SENSITIVE_PATH: a changed filename contains a runtime credential; commit guidance "
+                      "was withheld. Rename or discard the affected files, then run oah fix again")
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "failed" and files:
             evidence += f"; it left {len(files)} changed file(s) in the worktree: {named}"
         commands, unquoted = (commit_commands(task=self.t.name, attempt_id=self.attempt_id,
                                               receipt=self.receipt.name.removesuffix(".json"),
                                               finding_ids=self.finding_ids, changes=changes)
                               if outcome == "applied" else ([], []))
+        if any(self.redact(command) != command for command in commands):
+            outcome, commands = "failed", []
+            reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a runtime credential and was withheld; "
+                      "remove sensitive commit metadata before correcting again")
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         beyond = outside(self.t.lease.scope, files)
         write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
-        write_json_atomic(self.prepared.run.file_path("correction.json"), {
+        write_json_atomic(self.prepared.run.file_path("correction.json"), _redacted({
             "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,
             "changed": list(changes.tracked), "new_files": list(changes.new), "changes_sha256": digest,
-            "commands": commands, "out_of_scope": beyond})
+            "commands": commands, "out_of_scope": beyond}, self.redact))
         return _Judged(outcome, evidence, reason, changes, patch, effort, commands, unquoted, beyond, message, head)
 
     def _result(self, judged: "_Judged") -> Result:
@@ -863,6 +905,8 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
         saved = _saved_correction(t, start)
         if head == before:
             commands = saved.get("commands") or []
+            if any(redact(command) != command for command in commands):
+                commands = []  # Never turn a saved executable command into redacted guidance.
             shown = (" with:\n" + "\n".join(commands)) if commands else ""
             raise ReviewError("OAH_FIX_NOT_COMMITTED", f"{attempt.attempt_id} waits for its commit, but HEAD is still "
                               f"its start head {before[:12]}. {RECORDED}. Commit the correction{shown}\nthen run oah fix "
@@ -924,13 +968,14 @@ def _manual(task: str, *, engine, cwd, env, findings, redact) -> Result:
         raise ReviewError("OAH_USAGE", f"--engine must be one of {', '.join(MANUAL_ENGINES)} for a manual correction; "
                           "a Codex correction is run with oah fix --task <task>")
     t = _task(task, cwd, env, RECORDED)
-    _check_intent(t, RECORDED)
+    binding = _check_intent(t, RECORDED)
     with _task_lock(t):
         h = _history(t)
         _check_history(t, h, RECORDED)
         receipt = _source(t, h, RECORDED)
         head = _head(t.root)
         _check_tree(t, receipt, head, RECORDED)
+        _check_review_intent(t, receipt, binding, RECORDED)
         chosen = _select(t, receipt, h, findings, RECORDED)
         class_ids, _classes_found = _classes(h, chosen)
         before = receipt.record["head"]

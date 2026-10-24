@@ -10,6 +10,7 @@ the end. A step may set:
   write          {path: text, or null to delete}, relative to the -C directory
   commit         true: commit everything with git itself, which Codex's read-only .git forbids
   hang           true: write pid-<k>.txt in record_dir before reading the brief, then sleep until killed
+  exit_with_descendant true: exit while a descendant keeps stdout/stderr open
   probe_lease    true: run `oah renew`, `oah finish` and `oah fix --bind` as this worker and record the results
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   last_message   the final message; default: a line, then the INTENT and AC lines read from the brief
@@ -88,6 +89,16 @@ def default_message(prompt: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--descendant"]:
+        pid_file = pathlib.Path(argv[1])
+        heartbeat = pid_file.with_suffix(".heartbeat")
+        heartbeat.write_bytes(b"0")
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        count = 0
+        while True:
+            time.sleep(0.05)
+            count += 1
+            heartbeat.write_bytes(str(count).encode("ascii"))
     if argv[:1] != ["--fix-script"] or argv[2:3] != ["--script"]:
         print("fake corrector: start with --fix-script FILE --script REVIEW_FILE", file=sys.stderr)
         return 2
@@ -129,6 +140,10 @@ def main(argv: list[str]) -> int:
         lines.append(f"reasoning effort: {header}")
     sys.stderr.write("\n".join(lines + ["--------"]) + "\n")
     sys.stderr.flush()
+    if step.get("exit_with_descendant"):
+        subprocess.Popen([sys.executable, __file__, "--descendant", str(record_dir / "descendant.txt")],
+                         stdin=subprocess.DEVNULL)
+        os._exit(0)
     if step.get("hang"):
         while True:
             time.sleep(1)

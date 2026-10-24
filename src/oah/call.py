@@ -773,7 +773,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     except BaseException:
         # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
-        if child is not None and child.poll() is None:
+        # An exited launcher can leave descendants holding the pipes and modifying the worktree.
+        if child is not None:
             kill_tree(child)
             try:
                 child.communicate(timeout=REAP_SECONDS)
