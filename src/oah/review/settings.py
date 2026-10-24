@@ -5,7 +5,9 @@
   series that reached it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED` until `--extra-round`.
 - `round_attempts`: how many dispatched attempts one round may use when they do not count (invalid output,
   missing canary, effort mismatch, engine failure). Default 2.
-- `codex_sha256`: pin the reviewer CLI file's sha256 (`sha256:` prefix optional). Empty means not pinned.
+- `codex_sha256`: pin the reviewer CLI file's sha256 (`sha256:` prefix optional). Empty means not pinned. The
+  pinned file is the resolved CLI entry: for an npm install that is the JavaScript launcher, not the native
+  program it starts.
 - `critical_paths`: globs whose changes the prompt (and `oah review summary`) call out. The defaults include
   `.oah/config.toml`, because it configures the review itself.
 
