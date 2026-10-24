@@ -690,7 +690,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     run.file_path("last-message.md")
     try:
         result = _run_prepared(prepared, env, prompt)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                           error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
@@ -730,8 +730,13 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                {"start_new_session": True})
     try:
         with dispatch_guard(prepared):
-            child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+            try:
+                child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+            except OSError as exc:
+                # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
+                raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
+                                                 "Check the executable path and permissions, then retry") from None
             if job is not None:
                 try:
                     job.start(child)

@@ -771,7 +771,7 @@ class SnapshotRoundTest(unittest.TestCase):
                                  "the engine must never write its raw final message into retained state")
 
     def test_real_launch_exception_is_redacted(self):
-        project = Project(self)
+        project = Project(self, remote=True)
         key = "runtime-" + token_source.token_hex(24)
         project.env["OPENAI_API_KEY"] = key
         tools = call_cli.intent_tools()
@@ -780,15 +780,38 @@ class SnapshotRoundTest(unittest.TestCase):
                                 root=project.repo, state_dir=project.state, env=project.env,
                                 footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
                                 read_source=tools.read_source, keychain=NoKeychain())
-        prepared = dataclasses.replace(prepared, argv=(str(project.repo / key),))
+        self.assertTrue((project.state / ".lock").is_file())
+        call.check_prepared(prepared)
+        prepared = dataclasses.replace(prepared, argv=(str(project.repo / f"{key}.exe"),))
         run = call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES,
                            redact=runner.credential_redactor(project.env))
         self.assertEqual(run["status"], "failed")
+        self.assertTrue(run["error"].startswith("OAH_ENGINE_LAUNCH_FAILED:"))
+        self.assertNotIn("OAH_STATE_IO", run["error"])
         self.assertIn("[REDACTED]", run["error"])
         self.assertFalse(key in json.dumps(run), "credential reached the launch exception result")
         for path in project.state.rglob("*"):
             if path.is_file():
                 self.assertFalse(key.encode("utf-8") in path.read_bytes(), "credential reached retained state")
+
+    def test_missing_executable_is_a_launch_error(self):
+        project = Project(self, remote=True)
+        tools = call_cli.intent_tools()
+        prepared = call.prepare(call.CallRequest(engine="codex", stage="review", task="t1", tier="high"),
+                                runner._call_settings(runner.config_at(project.repo, project.base)),
+                                root=project.repo, state_dir=project.state, env=project.env,
+                                footer=tools.footer, has_footer=tools.has_footer, parse_intent=tools.parse,
+                                read_source=tools.read_source, keychain=NoKeychain())
+        missing = project.repo / "missing-reviewer.exe"
+        self.assertFalse(missing.exists())
+        prepared = dataclasses.replace(prepared, argv=(str(missing),))
+        run = call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+        self.assertEqual(run["status"], "failed")
+        self.assertTrue(run["error"].startswith("OAH_ENGINE_LAUNCH_FAILED:"))
+        self.assertNotIn("OAH_STATE_IO", run["error"])
+        self.assertIn(str(missing), run["error"])
+        self.assertEqual(project.calls(), [])
+        call.check_prepared(prepared)  # A failed spawn must release the real state lock.
 
     def test_review_exception_contains_no_credential_or_raw_cause(self):
         project = Project(self)
