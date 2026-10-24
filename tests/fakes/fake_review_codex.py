@@ -7,6 +7,7 @@ record_dir) uses steps[k]; past the end it approves with no findings. A step may
   canary          "read" (default), "omit" or "wrong"
   header_effort   the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   raw             the final message text instead of JSON
+  escape_strings  strings whose first character is emitted as a noncanonical JSON Unicode escape
   mutate          top-level fields replaced after the output is built
   intent_return   replaces the INTENT and AC lines
   exit            the exit code (default 0)
@@ -80,7 +81,11 @@ def build(prompt: str, step: dict, canary: str) -> str:
                                         "\n".join([line] + [f"{ac}: met — checked by the fake reviewer" for ac in acs])),
               "evidence": "\n".join(evidence), "db_impact": db_line}
     output.update(substitute(step.get("mutate", {}), n))
-    return json.dumps(output, ensure_ascii=False)
+    encoded = json.dumps(output, ensure_ascii=False)
+    for value in step.get("escape_strings", []):
+        encoded = encoded.replace(json.dumps(value, ensure_ascii=False)[1:-1],
+                                  f"\\u{ord(value[0]):04x}" + json.dumps(value[1:], ensure_ascii=False)[1:-1])
+    return encoded
 
 
 def main(argv: list[str]) -> int:

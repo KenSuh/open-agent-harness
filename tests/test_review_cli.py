@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import sys
 import unittest
@@ -27,6 +28,26 @@ def oah(project: Project, *args: str, env_extra: dict | None = None) -> subproce
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_json_redacts_noncanonical_escaped_credentials(self):
+        for invalid in (False, True):
+            with self.subTest(invalid=invalid):
+                project = Project(self, remote=True)
+                key = "synthetic-" + secrets.token_hex(24)
+                project.env["OPENAI_API_KEY"] = key
+                step = {"escape_strings": [key], "summary": key}
+                if invalid:
+                    step["mutate"] = {"verdict": key}
+                project.queue(step)
+                done = oah(project, "review", "--task", "t1", "--json")
+                self.assertEqual(done.returncode, 1 if invalid else 0, done.stderr)
+                data = json.loads(done.stdout)
+                self.assertEqual(data["code"], "OAH_REVIEW_OUTPUT_INVALID" if invalid else "OAH_REVIEW_CONVERGED")
+                self.assertIn("[REDACTED]", done.stdout)
+                artifacts = [done.stdout.encode(), done.stderr.encode(),
+                             *(path.read_bytes() for path in project.state.rglob("*") if path.is_file())]
+                self.assertTrue(all(key.encode() not in artifact for artifact in artifacts))
+                self.assertNotIn("OPENAI_API_KEY", project.calls()[0]["env"])
+
     def test_cli_extra_attempt_recovers_exhausted_range(self):
         project = Project(self)
         project.queue({"raw": "invalid"}, {"raw": "invalid"}, {})

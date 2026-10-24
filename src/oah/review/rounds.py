@@ -4,14 +4,14 @@
 Series
     `series(records, log, base, head=..., is_ancestor=...)` keeps the receipts whose `base` is the series
     base, the correction attempts on them, those records in index order as the series history, and the
-    round-log lines of this base. Three things are task-wide, so a new base never clears them: the class
-    definitions and attempted classes (a class tried in an earlier series is still tried), and the latest
-    receipt the waits below look at. History problems (index and record problems, broken attempts) block
+    complete task log (round_lines filters the current base and round). Task-wide state includes the class
+    definitions and attempted classes (a class tried in an earlier series is still tried), all logged decision
+    stops, and the latest receipt the waits below look at. History problems (index and record problems, broken attempts) block
     every series and no decision overrides them. Ambiguities are not problems: when a correction on the
     task's latest receipt no longer descends from that receipt's head or is not in the reviewed history
     (an amend, squash or rebase), the user decides.
 Gate, before any paid call
-    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the round waits
+    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the task waits
     for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
     findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
     decision). With no wait it returns `"converged"` for this series' cached approval at this head.
@@ -95,7 +95,9 @@ class Series:
         return found
 
     def round_lines(self) -> list[dict]:
-        return [line for line in self.log if line.get("series_round") == self.series_round]
+        """Only numbering and attempt-budget accounting are series-local."""
+        return [line for line in self.log if line.get("base") == self.base
+                and line.get("series_round") == self.series_round]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,7 +133,7 @@ def series(records: Records, log: Sequence[dict], base: str, *, head: str,
     return Series(task=records.task, base=base, receipts=mine, attempts=chosen,
                   history=tuple(entry for entry in records.entries if entry.name in names),
                   problems=tuple(problems), ambiguities=tuple(ambiguities), next_number=len(everything) + 1,
-                  log=tuple(line for line in log if line.get("base") == base), task_receipts=everything,
+                  log=tuple(log), task_receipts=everything,
                   task_attempts=all_attempts)
 
 
@@ -170,28 +172,36 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
     if reason is None and s.ambiguities:
         reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
                   "rewritten commits still carry the corrections")
-    for line in s.round_lines():
+    pending = None
+    for line in s.log:
+        # A recorded decision settles earlier logged stops across bases. Its target is checked
+        # separately below before it can settle the latest receipt's wait.
+        if line.get("event") == "start" and line.get("decision"):
+            pending = None
         if line.get("event") == "start" and line.get("decision") and settled and _decision_current(line, s):
             reason = None
-        elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
-            reason = (f"the last reviewer call of round {s.series_round} did not count and stopped for a decision: "
-                      f"{line.get('message', '')}")
-    return reason
+        elif line.get("event") == "finish" and line.get("code") == NEEDS_DECISION:
+            if line.get("counted"):
+                pending = f"{line.get('receipt')} stopped the task for a decision"
+            else:
+                pending = (f"a reviewer call of round {line.get('series_round')} against base {line.get('base')} "
+                           f"did not count and stopped for a decision: {line.get('message', '')}")
+    return pending or reason
 
 
 def round_decision(s: Series) -> str | None:
     """The decision an earlier call of this round started with, while it still settles the round."""
     decision = None
-    for line in s.round_lines():
+    for line in s.log:
         if line.get("event") == "start" and line.get("decision") and _decision_current(line, s):
             decision = line["decision"]
-        elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
+        elif line.get("event") == "finish" and line.get("code") == NEEDS_DECISION:
             decision = None
     return decision
 
 
 def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings,
-         extra_attempt: bool = False) -> str | None:
+         extra_attempt: bool = False, binding: oah_intent.Binding | None = None) -> str | None:
     """Refuse before any paid call; `"converged"` means this head is already approved."""
     if s.problems:
         raise ReviewError(NEEDS_DECISION, "the review history of this series is incomplete or was changed, so "
@@ -204,7 +214,8 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
                           '--decision "<what you decided>" to continue; the decision is recorded')
     latest = s.latest
     if (reason is None and latest is not None and latest.record.get("outcome") == CONVERGED
-            and latest.record.get("head") == head):
+            and latest.record.get("head") == head and binding is not None
+            and latest.record.get("intent") == binding.to_json()):
         return CONVERGED
     if settings.max_rounds is not None and len(s.receipts) >= settings.max_rounds and not extra_round:
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this series has {len(s.receipts)} counted rounds, the "

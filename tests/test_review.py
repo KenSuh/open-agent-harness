@@ -768,13 +768,17 @@ class EnvTest(unittest.TestCase):
                  "OAH_STATE_DIR": "s", "OAH_WORKER": "0", "PWD": "w", "CLAUDE_CONFIG_DIR": "d",
                  "OAH_PROBE_PRIVATE": "v"}
         kept = runner.reviewer_env(given)
-        self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8",
-                                "OPENAI_API_KEY": "k", "CODEX_API_KEY": "c2"})
+        self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8"})
+
+    def test_reviewer_env_excludes_credentials_in_any_case(self):
+        names = ("OPENAI_API_KEY", "CODEX_API_KEY", "openai_api_key", "codex_api_key",
+                 "OpenAI_Api_Key", "Codex_Api_Key")
+        self.assertEqual(runner.reviewer_env({name: "synthetic" for name in names}), {})
 
     @unittest.skipUnless(os.name == "nt", "Windows environment names ignore letter case")
     def test_reviewer_env_ignores_case_on_windows(self):
         kept = runner.reviewer_env({"Path": "p", "SystemRoot": "r", "UserProfile": "u", "OpenAI_Api_Key": "k"})
-        self.assertEqual(kept, {"Path": "p", "SystemRoot": "r", "UserProfile": "u", "OpenAI_Api_Key": "k"})
+        self.assertEqual(kept, {"Path": "p", "SystemRoot": "r", "UserProfile": "u"})
 
     def test_reviewer_binary_is_the_script_after_an_interpreter(self):
         folder = make_tmp_dir(self)

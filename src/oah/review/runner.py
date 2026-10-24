@@ -4,8 +4,9 @@
 Order of refusals, all before any call: dispatched workers; a task without a bound lease or whose intent is
 not current, or whose bound packet is not committed at HEAD (`OAH_INTENT_NOT_CURRENT`); the range
 (`context.resolve`); a dirty tracked tree; a change that edits the base-choosing `[preflight]` settings without
-an explicit `--base`; a review stage other than Codex; a busy series or task; an impact map that cannot be
-refreshed (`OAH_IMPACT_STALE`); the series gate (`rounds.gate`); a reviewer CLI that does not match
+an explicit `--base`; a review stage other than Codex; a busy series or task; dispatch-source lineage;
+an impact map that cannot be refreshed (`OAH_IMPACT_STALE`); the series gate (`rounds.gate`);
+a reviewer CLI that does not match
 `[review] codex_sha256` (the resolved CLI entry file: for an npm install that is the JavaScript launcher, not the
 native program it starts).
 
@@ -15,10 +16,11 @@ warning. `[impact]` stays the worktree's, because the persisted impact map binds
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs
 the reviewer in the snapshot: stage `review` (read-only), `--output-schema`, `--ephemeral`, the user's Codex
-config and rules ignored, and an allowlisted environment plus the worker variables. Codex's own sign-in
-variables (`CODEX_API_KEY`, `OPENAI_API_KEY`) pass through, so API-key sign-in works; Codex's default shell
-policy keeps variables named like keys from the model's commands. The snapshot is removed as soon as the
-reviewer exits. A validated round publishes `R<n>.json` and its index line; every other call
+config and rules ignored, and an allowlisted environment plus the worker variables. API-key environment
+variables never pass through (in any letter case); sign in through `codex login`, including
+`codex login --with-api-key`. Structured output is redacted once, after JSON decoding and before retention
+or validation. The snapshot is removed as soon as the reviewer exits. A validated round publishes
+`R<n>.json` and its index line; every other call
 is an uncounted attempt in `rounds.jsonl`.
 """
 from __future__ import annotations
@@ -49,7 +51,7 @@ KEEP_ENV = ("PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "CODEX_HOME"
             "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
             "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
             "http_proxy", "https_proxy", "no_proxy", "all_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
-            "NODE_EXTRA_CA_CERTS", "CODEX_API_KEY", "OPENAI_API_KEY")
+            "NODE_EXTRA_CA_CERTS")
 OUTCOME_CODES = {"converged": "OAH_REVIEW_CONVERGED", "changes-requested": "OAH_REVIEW_CHANGES_REQUESTED",
                  "needs-decision": rounds.NEEDS_DECISION}
 
@@ -110,6 +112,31 @@ def credential_redactor(env: Mapping[str, str]) -> Callable[[str], str]:
         return text
 
     return redact
+
+
+def _safe_output(raw: bytes, redact: Callable[[str], str]) -> bytes:
+    """The structured-output boundary: decode, redact every string, then allow retention and validation."""
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        raise schema.OutputInvalid(["the final message is not UTF-8 text"]) from None
+    except (ValueError, RecursionError):
+        # Never quote malformed output: it has not crossed the decoded-string boundary.
+        raise schema.OutputInvalid(["the final message is not one JSON object"]) from None
+
+    def clean(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {redact(key): clean(item) for key, item in value.items()}
+        return value
+
+    try:
+        return (json.dumps(clean(data), ensure_ascii=True) + "\n").encode("utf-8")
+    except RecursionError:
+        raise schema.OutputInvalid(["the final message is nested too deeply"]) from None
 
 
 def reviewer_binary(base: Sequence[str]) -> tuple[str, str]:
@@ -301,12 +328,15 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
            ensure_impact: Callable | None) -> Result:
     task = request.task
     redact = credential_redactor(env)
+    packet = call.read_packet(root, root / binding.source, parse_intent=oah_intent.parse,
+                              read_source=oah_intent.read_source)
+    call.check_dispatch_binding(call.dispatch_binding(state, task), packet, task)
     impact_info, data = _impact(root, env, ensure_impact, span.head)
     records = receipts.load(state, task)
     s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
                       is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
-                   settings=conf, extra_attempt=request.extra_attempt) == rounds.CONVERGED:
+                   settings=conf, extra_attempt=request.extra_attempt, binding=binding) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
                       f"{span.head}; nothing was launched", receipt=latest.record,
@@ -393,9 +423,12 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             raise
         last = runs._contained_path(snap.tree.parent, final_path.name)
         raw = last.read_bytes() if last.is_file() else b""
-        # Invalid UTF-8 remains invalid; replacing known UTF-8/JSON credential bytes cannot validate it.
-        raw = redact(raw.decode("utf-8", errors="surrogateescape")).encode("utf-8", errors="surrogateescape")
-        prepared.run._write_text("last-message.md", raw.decode("utf-8", errors="replace"))
+        output_error = None
+        try:
+            raw = _safe_output(raw, redact)
+        except ReviewError as exc:
+            output_error, raw = exc, b""
+        prepared.run._write_text("last-message.md", raw.decode("utf-8"))
     finished = dt.datetime.now(dt.timezone.utc)
     code = message = None
     output = None
@@ -407,14 +440,18 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                                           f"{run.get('launch_effort')}, so this round does not count")
         else:
             code = "OAH_REVIEW_ENGINE_FAILED"
-            message = f"{code}: the reviewer did not finish ({run.get('error')}), so this round does not count"
+            message = (f"{code}: the reviewer did not finish ({run.get('error')}), so this round does not count. "
+                       "If sign-in is missing, use codex login (including codex login --with-api-key); the reviewer "
+                       "never receives CODEX_API_KEY or OPENAI_API_KEY environment variables. Then retry oah review.")
     else:
         try:
+            if output_error is not None:
+                raise output_error
             output = schema.parse(raw, number=number)
             rounds.check(output, s, number=number, binding=binding, base=span.base, head=span.head,
                          canary_value=value, db_line=db.line)
         except ReviewError as exc:
-            code, message = exc.code, redact(str(exc))
+            code, message = exc.code, str(exc)
     if code is not None:
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})
