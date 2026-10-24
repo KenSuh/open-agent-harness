@@ -141,6 +141,21 @@ class ListInstallTest(CliFixture):
         self.assertIn("OAH_LEASE_CONFLICT", err)
         self.assertFalse((self.project / ".claude" / "skills").exists())
 
+    def test_worker_project_install_cannot_acquire_a_lease(self):
+        store = Store(self.state)
+        store.start(task="dispatcher", agent="claude", scope=["src"], note="", ttl_hours=1,
+                    info=repo_info(self.project))
+        before = {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()}
+        with mock.patch.dict(os.environ, {"OAH_WORKER": "1"}):
+            code, out, err = self.oah("install", "demo")
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_WORKER_LEASE_REFUSED"), err)
+        self.assertIn("dispatcher", err)
+        self.assertEqual({p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*")
+                          if p.is_file()}, before)
+        self.assertFalse((self.project / ".claude").exists())
+        self.assertFalse((self.project / ".agents").exists())
+
     def test_global_install_uses_one_home_publication_lock(self):
         self._install_uses_one_home_publication_lock("--global", "--yes")
 
@@ -250,6 +265,23 @@ class ListInstallTest(CliFixture):
 
 
 class UpdateCommandTest(CliFixture):
+    def test_worker_project_update_preserves_skills_and_dispatcher_lease(self):
+        self.assertEqual(self.oah("install", "demo")[0], 0)
+        commit(self.upstream, {"skills/demo/ref.md": "updated reference\n"})
+        Store(self.state).start(task="dispatcher", agent="claude", scope=["src"], note="", ttl_hours=1,
+                                info=repo_info(self.project))
+        state_before = {p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*") if p.is_file()}
+        skill_paths = [p for folder in (".claude", ".agents")
+                       for p in (self.project / folder).rglob("*") if p.is_file()]
+        skills_before = {p: p.read_bytes() for p in skill_paths}
+        with mock.patch.dict(os.environ, {"OAH_WORKER": "1"}):
+            code, out, err = self.oah("update", "--project")
+        self.assertEqual(code, 1, out + err)
+        self.assertTrue(err.startswith("OAH_WORKER_LEASE_REFUSED"), err)
+        self.assertEqual({p.relative_to(self.state): p.read_bytes() for p in self.state.rglob("*")
+                          if p.is_file()}, state_before)
+        self.assertEqual({p: p.read_bytes() for p in skill_paths}, skills_before)
+
     def test_reinstall_cannot_advance_existing_project_pins(self):
         self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)
         folder = self.project / ".claude" / "skills" / "demo"

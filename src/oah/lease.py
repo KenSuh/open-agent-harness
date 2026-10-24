@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import os
 import pathlib
 import re
 import secrets
@@ -36,6 +37,12 @@ class LeaseError(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+def _refuse_worker_lease() -> None:
+    if os.environ.get("OAH_WORKER") == "1":
+        raise LeaseError("OAH_WORKER_LEASE_REFUSED", "dispatched workers use the dispatcher's lease; "
+                         "return your work to the dispatcher so it can manage the lease")
 
 
 def utc_now() -> dt.datetime:
@@ -198,6 +205,7 @@ class Store:
 
     def _commit(self, leases: list[Lease], event: str, task: str, agent: str, lease_id: str | None,
                 **extra: object) -> None:
+        _refuse_worker_lease()
         self.journal.commit({"version": SCHEMA_VERSION, "leases": [l.to_json() for l in leases]},
                             {"ts": _iso(self.now()), "event": event, "task": task, "agent": agent,
                              "lease_id": lease_id, **extra})
@@ -206,7 +214,10 @@ class Store:
     def _lock(self) -> Iterator[None]:
         try:
             with StateLock(self.lock_path, timeout=self.lock_timeout):
-                self.journal.recover(self._decode)
+                if os.environ.get("OAH_WORKER") == "1":
+                    self.journal.check_pending()  # recovery writes lease state; leave it to the dispatcher
+                else:
+                    self.journal.recover(self._decode)
                 yield
         except StorageError:
             raise
@@ -214,7 +225,7 @@ class Store:
             raise StorageError(self.lock_path, exc) from exc
 
     def inspect(self, task: str) -> Lease:
-        """Prepare a finish scan: recover pending writes and inspect the current lease under the lock."""
+        """Inspect under the lock; only the dispatcher may recover pending writes."""
         with self._lock():
             return self._find(self._load(), task)
 
@@ -248,6 +259,7 @@ class Store:
 
     def start(self, *, task: str, agent: str, scope: Sequence[str], note: str, ttl_hours: float,
               info: RepoInfo, gates: Sequence[str] = (), intent: Binding | None = None) -> Lease:
+        _refuse_worker_lease()
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         if not scope:
@@ -276,6 +288,7 @@ class Store:
 
     def renew(self, *, task: str, agent: str, ttl_hours: float, scope: Sequence[str] | None = None,
               gates: Sequence[str] | None = None) -> Lease:
+        _refuse_worker_lease()
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         with self._lock():
@@ -309,6 +322,7 @@ class Store:
         replaces the lease scope after the same overlap check as renew. Supplied `gates` replace the
         ledger paths in the same transaction; omitting them preserves the existing paths.
         """
+        _refuse_worker_lease()
         _check_names(task, agent)
         _check_ttl(ttl_hours)
         with self._lock():
@@ -343,6 +357,7 @@ class Store:
                wiki_report: dict | None = None, intent_report: dict | None = None,
                checked_binding: Binding | None = None,
                checked_generation: int | None = None) -> tuple[Lease, list[str]]:
+        _refuse_worker_lease()
         _check_names(task, agent)
         # Direct callers without a prior scan start their decision here. A scanned bound return must
         # carry the generation captured by inspect(), alongside its checked binding.
@@ -383,6 +398,7 @@ class Store:
             return lease, beyond
 
     def release(self, *, task: str, agent: str, reason: str, force: bool) -> Lease:
+        _refuse_worker_lease()
         _check_names(task, agent)
         if not reason or not reason.strip():
             raise LeaseError("OAH_REASON_REQUIRED", "say why the lease is released (--reason)")
@@ -398,6 +414,7 @@ class Store:
             return lease
 
     def log(self, *, task: str, agent: str, message: str) -> None:
+        _refuse_worker_lease()
         _check_names(task, agent)
         with self._lock():
             self._commit(self._load(), "note", task, agent, None, message=message)

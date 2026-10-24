@@ -39,7 +39,10 @@ class LeaseCliTest(unittest.TestCase):
 
     def test_worker_lifecycle_refuses_before_creating_state(self):
         for command, extra in (("start", ("--scope", "src")), ("renew", ()),
-                               ("finish", ("--summary", "done"))):
+                               ("finish", ("--summary", "done")),
+                               ("release", ("--reason", "done")),
+                               ("release", ("--reason", "done", "--force")),
+                               ("log", ("--message", "worker note"))):
             with self.subTest(command=command):
                 refused = oah(self.repo, command, "--task", "t1", "--agent", "claude", *extra,
                               env_extra={"OAH_WORKER": "1"})
@@ -58,7 +61,10 @@ class LeaseCliTest(unittest.TestCase):
             for command, extra in (("start", ("--scope", "src")),
                                    ("start", ("--packet", "missing.md")),
                                    ("renew", ("--scope", "repo")),
-                                   ("finish", ("--summary", "done", "--return", "missing.md"))):
+                                   ("finish", ("--summary", "done", "--return", "missing.md")),
+                                   ("release", ("--reason", "done")),
+                                   ("release", ("--reason", "done", "--agent", "codex", "--force")),
+                                   ("log", ("--message", "worker note"))):
                 with self.subTest(entry=entry, command=command, extra=extra):
                     refused = subprocess.run([sys.executable, *entry, command, "--task", "t1", "--agent",
                                               "claude", *extra], cwd=self.repo, capture_output=True, text=True,

@@ -20,7 +20,7 @@ from oah.gates.check import GateRefused
 from oah.gates.context import DEFAULTS as GATE_DEFAULTS, LEDGER_NAME, SUMMARY_NAME, GateTools, find_tools
 from oah.gates.summary import SummaryRejected
 from oah.journal import PendingTransaction
-from oah.lease import DEFAULT_TTL_HOURS, Lease, LeaseError, Store
+from oah.lease import DEFAULT_TTL_HOURS, Lease, LeaseError, Store, _refuse_worker_lease
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, run_git, state_dir
 from oah.scope import ScopeError, normalize_scope
@@ -160,12 +160,6 @@ def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding,
                          f"write in {source}, or pass --scope repo to lease the whole repository")
     warnings = [f"warning {warning}" for warning in result.warnings]
     return result.intent.bind(source), normalize_scope([*result.scope, *explicit], info.root), warnings
-
-
-def _refuse_worker_lease() -> None:
-    if os.environ.get("OAH_WORKER") == "1":
-        raise LeaseError("OAH_WORKER_LEASE_REFUSED", "dispatched workers use the dispatcher's lease; "
-                         "return your work to the dispatcher so it can manage the lease")
 
 
 def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:

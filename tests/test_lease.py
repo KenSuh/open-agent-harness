@@ -1,8 +1,10 @@
 # 리스 저장소 검사 — 시작·겹침 거절·만료 정리·갱신·해제·종료 범위 검사·이벤트, 그리고 동시 시작에서 한 건만 이기는지 본다.
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
+import os
 import pathlib
 import secrets
 import subprocess
@@ -13,7 +15,9 @@ from unittest.mock import patch
 
 from oah.atomic import StateCorrupt
 from oah.intent import Binding
+from oah.journal import PendingTransaction
 from oah.lease import Lease, LeaseError, Store
+from oah.lockfile import StateLock
 from oah.paths import RepoInfo
 from oah.scope import normalize_scope
 from tests.helpers import directory_alias, make_tmp_dir
@@ -78,6 +82,68 @@ class StoreTest(unittest.TestCase):
         self.assertEqual((lease.branch, lease.head_at_start, lease.worktree), ("main", "a" * 40, str(self.root)))
         [(found, stale)] = self.store.snapshot()
         self.assertEqual((found.id, stale), (lease.id, False))
+
+    def test_worker_mutations_refuse_before_locking_or_reading_state(self):
+        for state_kind in ("absent", "active", "locked", "corrupt"):
+            for method in ("start", "renew", "rebind", "finish", "release", "forced-release", "log"):
+                with self.subTest(state=state_kind, method=method):
+                    state = self.root / state_kind / method
+                    store = Store(state, now=self.clock, lock_timeout=0)
+                    lease = None
+                    if state_kind != "absent":
+                        lease = store.start(task="t1", agent="claude", scope=["src"], note="",
+                                            ttl_hours=1, info=self.info)
+                    if state_kind == "corrupt":
+                        store.leases_path.write_bytes(b"not json\n")
+                    before = {p.relative_to(state): p.read_bytes() for p in state.rglob("*") if p.is_file()}
+                    calls = {
+                        "start": lambda: store.start(task="t2", agent="codex", scope=["docs"], note="",
+                                                     ttl_hours=1, info=self.info),
+                        "renew": lambda: store.renew(task="t1", agent="claude", ttl_hours=2),
+                        "rebind": lambda: store.rebind(task="t1", agent="claude", binding=binding(), ttl_hours=2),
+                        "finish": lambda: store.finish(task="t1", agent="claude", lease_id=lease.id if lease else "",
+                                                       summary="done", changed=[], allow_out_of_scope=False),
+                        "release": lambda: store.release(task="t1", agent="claude", reason="done", force=False),
+                        "forced-release": lambda: store.release(task="t1", agent="codex", reason="done", force=True),
+                        "log": lambda: store.log(task="t1", agent="claude", message="worker note"),
+                    }
+                    with StateLock(state / ".lock") if state_kind == "locked" else contextlib.nullcontext():
+                        with patch.dict(os.environ, {"OAH_WORKER": "1"}):
+                            error = self.assert_code("OAH_WORKER_LEASE_REFUSED", calls[method])
+                    self.assertIn("dispatcher", str(error))
+                    self.assertEqual({p.relative_to(state): p.read_bytes() for p in state.rglob("*")
+                                      if p.is_file()}, before)
+                    if state_kind == "absent":
+                        self.assertFalse(state.exists())
+
+    def test_worker_reads_preserve_state_and_leave_recovery_to_dispatcher(self):
+        lease = self.start()
+        before = {p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()}
+        with patch.dict(os.environ, {"OAH_WORKER": "1"}):
+            self.assertEqual(self.store.snapshot()[0][0].id, lease.id)
+            self.assertEqual(self.store.inspect("t1").id, lease.id)
+            with self.store.checked(task="t1", lease_id=lease.id, generation=lease.generation) as checked:
+                self.assertEqual(checked.id, lease.id)
+        self.assertEqual({p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()}, before)
+        transaction_id = "pending-release"
+        transaction = {"version": 1, "transaction_id": transaction_id,
+                       "state": {"version": 1, "leases": []},
+                       "event": {"transaction_id": transaction_id, "event": "lease_released"}}
+        self.store.journal.path.write_text(json.dumps(transaction), encoding="utf-8")
+        before = {p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()}
+        reads = (self.store.snapshot, lambda: self.store.inspect("t1"))
+        with patch.dict(os.environ, {"OAH_WORKER": "1"}):
+            for read in reads:
+                with self.subTest(read=read), self.assertRaises(PendingTransaction):
+                    read()
+                self.assertEqual({p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()}, before)
+            with self.assertRaises(PendingTransaction):
+                with self.store.checked(task="t1", lease_id=lease.id, generation=lease.generation):
+                    self.fail("workers must not replay pending lease transactions")
+        self.assertEqual({p.name: p.read_bytes() for p in self.state.iterdir() if p.is_file()}, before)
+        self.store.log(task="t1", agent="claude", message="dispatcher recovery")
+        self.assertEqual(self.store.snapshot(), [])
+        self.assertFalse(self.store.journal.path.exists())
 
     def test_overlapping_start_is_refused_with_holder(self):
         self.start(task="t1", agent="claude", scope=("src",))

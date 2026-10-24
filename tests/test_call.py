@@ -916,14 +916,15 @@ class LeaseBindingTest(unittest.TestCase):
         script = (
             "import pathlib, sys\n"
             "from oah.lease import Store\n"
-            "from oah.lockfile import LockTimeout\n"
+            "from oah.lockfile import LockTimeout, StateLock\n"
             "try:\n"
-            "    Store(pathlib.Path(sys.argv[1]), lock_timeout=0.15).renew(\n"
-            "        task='t1', agent='claude', ttl_hours=1)\n"
+            "    store = Store(pathlib.Path(sys.argv[1]))\n"
+            "    with StateLock(store.lock_path, timeout=0.15):\n"
+            "        assert store.snapshot()[0][0].task == 't1'\n"
             "except LockTimeout:\n"
             "    print('locked')\n"
             "else:\n"
-            "    print('renewed')\n")
+            "    print('unlocked')\n")
         argv = (sys.executable, "-c", script, str(self.project.state))
         prepared = call.dataclasses.replace(prepared, argv=argv)
         popen = subprocess.Popen
@@ -939,7 +940,7 @@ class LeaseBindingTest(unittest.TestCase):
         with mock.patch.object(call.subprocess, "Popen", side_effect=spawning):
             result = call.execute(prepared, base_env=environment)
         self.assertEqual(result["status"], "finished", result.get("error"))
-        self.assertIn("renewed", prepared.run.stdout_path.read_text(encoding="utf-8"))
+        self.assertIn("unlocked", prepared.run.stdout_path.read_text(encoding="utf-8"))
 
     def test_call_refuses_stale_and_missing_binding(self):
         path = self.bind()
