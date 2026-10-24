@@ -53,8 +53,19 @@ def trace_text(path: pathlib.Path) -> str:
 def repository_bytes(repo: pathlib.Path) -> dict[str, bytes]:
     """All user Git files, excluding oah's state folder."""
     common = pathlib.Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    return {p.relative_to(common).as_posix(): p.read_bytes() for p in common.rglob("*")
-            if p.is_file() and not p.is_relative_to(common / "oah")}
+
+    def fail(error):
+        raise error  # An incomplete snapshot cannot prove the user's repository stayed unchanged.
+
+    files = {}
+    for folder, directories, names in os.walk(common, onerror=fail):
+        if pathlib.Path(folder) == common:
+            directories[:] = [name for name in directories if name != "oah"]
+        for name in names:
+            path = pathlib.Path(folder) / name
+            if path.is_file():
+                files[path.relative_to(common).as_posix()] = path.read_bytes()
+    return files
 
 
 def fault_query(fx, fault: str, *args: str) -> subprocess.CompletedProcess:
@@ -688,15 +699,19 @@ defaultbranch._generation_worker()
     def test_terminated_query_cannot_leave_a_writer_in_the_retry_generation(self):
         self._cancelled_fetch(signal.SIGKILL)
 
-    @unittest.skipUnless(os.name == "nt", "Windows console interruption")
+    def test_fetch_interruption_without_console_cannot_affect_the_retry_generation(self):
+        self._cancelled_fetch(None)
+
+    @unittest.skipUnless(os.name == "nt", "Windows fetch cancellation and Job cleanup")
     def test_windows_interrupted_fetch_cannot_affect_the_retry_generation(self):
-        self._cancelled_fetch(signal.CTRL_BREAK_EVENT)
+        self._cancelled_fetch(None)
 
     def _cancelled_fetch(self, cancellation):
         defaultbranch.refresh(self.fx.lane, self.settings, env={})
         self.fx.advance(RELEASE)
         ready, release = self.fx.tmp / "fetch-paused", self.fx.tmp / "release-fetch"
         entered = self.fx.tmp / "fetch-generation"
+        interrupt = self.fx.tmp / "interrupt-query"
         hooks = self.fx.tmp / "hooks"
         hooks.mkdir()
         hook = hooks / "reference-transaction"
@@ -714,25 +729,45 @@ defaultbranch._generation_worker()
         config = self.fx.tmp / "global-config"
         git(self.fx.lane, "config", "--file", str(config), "core.hooksPath", hooks.as_posix())
         code = '''
-import pathlib, signal, sys
+import json, pathlib, subprocess, sys, time
 from oah.impact import defaultbranch
 from oah.impact.defaults import configured
-if sys.platform == "win32":
-    def interrupt(*_):
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGBREAK, interrupt)
 original = defaultbranch._fetch
 def fetch(mirror, *args, **kwargs):
     pathlib.Path(sys.argv[1]).write_text(str(mirror), encoding="utf-8")
     return original(mirror, *args, **kwargs)
 defaultbranch._fetch = fetch
-defaultbranch.refresh(pathlib.Path.cwd(), configured(pathlib.Path.cwd()), env={})
+owners = []
+if sys.argv[2]:
+    original_run = defaultbranch.run_command
+    def run(argv, **kwargs):
+        if "fetch" not in argv:
+            return original_run(argv, **kwargs)
+        options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+        owner = subprocess.Popen(argv, env=kwargs.get("env"), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+        owners.append(owner)
+        deadline = time.monotonic() + 15
+        while not pathlib.Path(sys.argv[2]).exists():
+            if owner.poll() is not None or time.monotonic() >= deadline:
+                raise AssertionError("wait for the prepared fetch before cancelling the query")
+            time.sleep(0.01)
+        raise KeyboardInterrupt
+    defaultbranch.run_command = run
+try:
+    defaultbranch.refresh(pathlib.Path.cwd(), configured(pathlib.Path.cwd()), env={})
+finally:
+    for owner in owners:
+        out, _ = owner.communicate(timeout=10)
+        assert owner.returncode == 0 and json.loads(out)["returncode"] is None
+        print("fetch owner stopped and reaped", flush=True)
 '''
         env = dict(os.environ, PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src"),
                    GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1")
         env.pop("OAH_STATE_DIR", None)
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}
-        process = subprocess.Popen([sys.executable, "-c", code, str(entered)], cwd=self.fx.lane, env=env,
+        process = subprocess.Popen([sys.executable, "-c", code, str(entered),
+                                    str(interrupt) if cancellation is None else ""], cwd=self.fx.lane, env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
         pids = []
         try:
@@ -742,14 +777,17 @@ defaultbranch.refresh(pathlib.Path.cwd(), configured(pathlib.Path.cwd()), env={}
             self.assertTrue(ready.exists(), "the real fetch must hold a prepared Git ref transaction")
             pids = json.loads(ready.read_text(encoding="utf-8"))
             interrupted = pathlib.Path(entered.read_text(encoding="utf-8"))
-            try:
+            if cancellation is None:
+                # Raise on the helper's main thread after Git pauses; console delivery is unreliable
+                # on Windows CI while Python is blocked in communicate(). The real owner still has
+                # to observe _generation_run's cancellation marker and stop/reap its Git process tree.
+                interrupt.touch()
+            else:
                 process.send_signal(cancellation)
-            except OSError as exc:
-                if os.name == "nt" and getattr(exc, "winerror", None) == 6:
-                    self.skipTest("run this native Windows interruption test in a console")
-                raise
-            process.communicate(timeout=15)
+            out, _ = process.communicate(timeout=15)
             self.assertNotEqual(process.returncode, 0)
+            if cancellation is None:
+                self.assertEqual(out.strip(), b"fetch owner stopped and reaped")
             expected = self.fx.advance({"after-interruption.txt": "only the retry may fetch this commit\n"})
             result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
             current = defaultbranch._mirror_path(self.fx.lane, {})
@@ -952,6 +990,30 @@ print(json.dumps({"state": result.state, "commit": result.commit, "files": sorte
         self.assertEqual((result.state, result.commit), ("fresh", saved.commit))
         self.assertFalse(marker.exists())
 
+    def test_repository_snapshot_prunes_state_before_traversal(self):
+        mirror = defaultbranch._mirror_path(self.fx.lane, {})
+        mirror.parent.mkdir(parents=True)
+        before = repository_bytes(self.fx.lane)
+        directory_alias(self.fx.lane / ".git", mirror)
+        code = '''
+import pathlib, sys
+from tests.test_impact_default_branch import repository_bytes
+repo = pathlib.Path(sys.argv[1])
+state = repo / ".git" / "oah"
+def guard(event, args):
+    if event == "os.scandir" and pathlib.Path(args[0]).is_relative_to(state):
+        raise AssertionError("prune oah state before scanning repository files")
+sys.addaudithook(guard)
+repository_bytes(repo)
+'''
+        result = subprocess.run([sys.executable, "-c", code, str(self.fx.lane)], capture_output=True,
+                                text=True, encoding="utf-8", timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(repository_bytes(self.fx.lane), before)
+        config = self.fx.lane / ".git" / "config"
+        config.write_bytes(config.read_bytes() + b"\n# snapshot must detect user config changes\n")
+        self.assertNotEqual(repository_bytes(self.fx.lane), before)
+
     def test_mirror_alias_cannot_delete_or_modify_user_repository(self):
         mirror = defaultbranch._mirror_path(self.fx.lane, {})
         mirror.parent.mkdir(parents=True, exist_ok=True)
@@ -961,7 +1023,12 @@ print(json.dumps({"state": result.state, "commit": result.commit, "files": sorte
         self.assertEqual(result.state, "fresh")
         self.assertEqual(repository_bytes(self.fx.lane), before)
         self.assertNotEqual(defaultbranch._mirror_path(self.fx.lane, {}), mirror)
-        self.assertFalse(defaultbranch._linked(defaultbranch._mirror_path(self.fx.lane, {})))
+        current = defaultbranch._mirror_path(self.fx.lane, {})
+        self.assertEqual(current.parent, mirror.with_suffix(".generations"))
+        self.assertEqual(result.info.path.parent, self.fx.lane / ".git/oah/impact/maps")
+        self.assertFalse(defaultbranch._linked(current))
+        self.assertFalse((current / "oah").exists(), "mirror Git directories must not contain oah state")
+        self.assertFalse(any(defaultbranch._linked(p) for p in current.rglob("*")))
         self.assertTrue(defaultbranch._linked(mirror), "an unleased legacy cache is left untouched")
 
     def test_retiring_a_generation_alias_cannot_touch_its_target(self):
@@ -1062,6 +1129,13 @@ class DefaultBranchCliTest(RemoteTestCase):
         return found[0]
 
     def test_incremental_bundle_list_cannot_change_user_refs_or_config(self):
+        self._incremental_bundle_list()
+
+    def test_bundle_control_can_skip_without_skipping_repository_isolation(self):
+        result = self._incremental_bundle_list(control_token="2")
+        self.assertEqual(json.loads(result.stdout)["maps"]["default_branch"]["state"], "fresh")
+
+    def _incremental_bundle_list(self, *, control_token="1"):
         base = head(self.fx.pusher)
         first, second = self.fx.tmp / "first.bundle", self.fx.tmp / "second.bundle"
         git(self.fx.pusher, "bundle", "create", str(first), "main")
@@ -1074,19 +1148,23 @@ class DefaultBranchCliTest(RemoteTestCase):
                                encoding="utf-8")
         git(self.lane, "config", "fetch.bundleURI", bundle_list.as_uri())
         git(self.lane, "config", "fetch.bundleCreationToken", "1")
-        # Prove this fixture exercises the incremental-bundle side effects on this Git build.
+        # Bundle refs prove the list was consumed; Git builds differ on updating the creation token.
         control = self.fx.tmp / "control.git"
         subprocess.run(["git", "clone", "-q", "--bare", str(self.fx.tmp / "seed"), str(control)],
                        check=True, env=git_env())
         git(control, "config", "fetch.bundleURI", bundle_list.as_uri())
-        git(control, "config", "fetch.bundleCreationToken", "1")
+        git(control, "config", "fetch.bundleCreationToken", control_token)
         git(control, "fetch", "-q", str(self.fx.bare), "+refs/heads/main:refs/remotes/origin/main")
-        self.assertEqual(git(control, "config", "--get", "fetch.bundleCreationToken"), "2")
-        self.assertTrue(any(r.startswith("refs/bundles/") for r in refs(control)))
+        with self.subTest(control="plain Git incremental bundle list"):
+            if not any(r.startswith("refs/bundles/") for r in refs(control)):
+                self.skipTest("plain Git created no bundle refs; rerun the control with an unconsumed "
+                              "bundle list on a Git build supporting bundle URIs")
+        # A skipped control must never skip the repository-isolation assertions.
         before = repository_bytes(self.lane)
         result = self.query("tools/check.py", "--json")
         self.assertEqual(json.loads(result.stdout)["maps"]["default_branch"]["state"], "fresh")
         self.assertEqual(repository_bytes(self.lane), before)
+        return result
 
     def _nonfresh_result(self, saved, mode, reason):
         fx = self.fx
