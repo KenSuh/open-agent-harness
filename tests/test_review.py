@@ -9,7 +9,7 @@ import subprocess
 import unittest
 
 from oah.config import ConfigError
-from oah.review import ReviewError, canary, receipts, settings, snapshot
+from oah.review import ReviewError, canary, receipts, schema, settings, snapshot
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
@@ -335,6 +335,139 @@ class CanaryTest(unittest.TestCase):
         self.assertFalse(canary.verified("REVIEWED-TREE-CANARY: ", ""))
         self.assertIn("token file", canary.LIMIT)
         self.assertIn("tree identity", canary.LIMIT)
+
+
+def finding(number: int, k: int = 1, *, severity: str = "P1", class_id: str | None = None, refs: list | None = None,
+            **fields) -> dict:
+    item = {"finding_id": f"R{number}-F{k}", "class_id": class_id or f"R{number}-C{k}", "severity": severity,
+            "axis": "quality", "title": "a title", "detail": "a detail", "location": "src/app.py:1",
+            "in_scope": True, "fix_kind": "local", "prior_refs": refs or []}
+    item.update(fields)
+    return item
+
+
+def output(number: int = 1, *, verdict: str = "approve", findings: list | None = None, classes: list | None = None,
+           **fields) -> dict:
+    findings = findings or []
+    if classes is None:
+        classes = [{"class_id": item["class_id"], "mechanism": "a mechanism", "rule": "a rule"}
+                   for item in findings if item["class_id"].startswith(f"R{number}-C")]
+    data = {"verdict": verdict, "base": SHA_A, "head": SHA_B, "summary": "s", "findings": findings,
+            "classes": classes, "intent_return": "INTENT x@r1 sha256:" + "0" * 64, "evidence": "e",
+            "db_impact": "db-impact: not touched"}
+    data.update(fields)
+    return data
+
+
+def encoded(data: object) -> bytes:
+    return json.dumps(data).encode("utf-8")
+
+
+class SchemaTest(unittest.TestCase):
+    def test_schema_file_is_strict(self):
+        loaded = json.loads(schema.text())
+        self.assertEqual(loaded, schema.SCHEMA)
+        objects = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    objects.append(node)
+                for key in ("$ref", "pattern", "format", "oneOf", "allOf", "patternProperties"):
+                    self.assertNotIn(key, node)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(loaded)
+        self.assertGreaterEqual(len(objects), 4)
+        for node in objects:
+            self.assertIs(node["additionalProperties"], False)
+            self.assertEqual(sorted(node["required"]), sorted(node["properties"]))
+        self.assertEqual(sorted(loaded["properties"]), sorted(
+            ["verdict", "base", "head", "summary", "findings", "classes", "intent_return", "evidence", "db_impact"]))
+
+    def test_parse_accepts_a_valid_output(self):
+        parsed = schema.parse(encoded(output(2, verdict="request_changes", findings=[
+            finding(2), finding(2, 2, severity="P3", class_id="R1-C1", refs=[
+                {"round": 1, "receipt_digest": "sha256:" + "1" * 64, "finding_id": "R1-F1", "class_id": "R1-C1"}])])),
+            number=2)
+        self.assertEqual(parsed.verdict, "request_changes")
+        self.assertEqual([item.finding_id for item in parsed.blocking()], ["R2-F1"])
+        self.assertEqual(parsed.findings[1].prior_refs[0].class_id, "R1-C1")
+        self.assertEqual([item.class_id for item in parsed.classes], ["R2-C1"])
+        self.assertEqual(parsed.findings[0].to_json(), finding(2))
+
+    def test_parse_rejects_shape_errors(self):
+        good = output(1, verdict="request_changes", findings=[finding(1)])
+        cases = {
+            "not json": b"{not json",
+            "not utf-8": b"\xff\xfe{}",
+            "array": encoded([good]),
+            "missing field": encoded({key: value for key, value in good.items() if key != "evidence"}),
+            "extra field": encoded(dict(good, extra=1)),
+            "wrong type": encoded(dict(good, findings=[dict(finding(1), in_scope="yes")])),
+            "bad enum": encoded(dict(good, findings=[dict(finding(1), severity="P4")])),
+            "nested extra": encoded(dict(good, findings=[finding(1, refs=[
+                {"round": 1, "receipt_digest": "d", "finding_id": "f", "class_id": "c", "note": "x"}])])),
+            "boolean round": encoded(dict(good, findings=[finding(1, refs=[
+                {"round": True, "receipt_digest": "d", "finding_id": "f", "class_id": "c"}])])),
+            "string round": encoded(dict(good, findings=[finding(1, refs=[
+                {"round": "1", "receipt_digest": "d", "finding_id": "f", "class_id": "c"}])])),
+        }
+        for label, raw in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(schema.OutputInvalid) as caught:
+                    schema.parse(raw, number=1)
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_OUTPUT_INVALID")
+                self.assertTrue(caught.exception.problems)
+
+    def test_verdict_findings_consistency(self):
+        bad = {
+            "approve with P1": output(1, findings=[finding(1)]),
+            "approve with P0": output(1, findings=[finding(1, severity="P0")]),
+            "changes without blocking": output(1, verdict="request_changes", findings=[finding(1, severity="P2")]),
+            "changes without findings": output(1, verdict="request_changes"),
+        }
+        for label, data in bad.items():
+            with self.subTest(label=label):
+                with self.assertRaises(schema.OutputInvalid) as caught:
+                    schema.parse(encoded(data), number=1)
+                self.assertTrue(any("verdict" in problem for problem in caught.exception.problems), label)
+        parsed = schema.parse(encoded(output(1, findings=[finding(1, severity="P2"), finding(1, 2, severity="P3")])),
+                              number=1)
+        self.assertEqual(parsed.blocking(), [])
+
+    def test_finding_ids_unique_and_round_prefixed(self):
+        cases = {
+            "duplicate id": [finding(3), finding(3, class_id="R3-C2")],
+            "other round": [finding(2, class_id="R3-C1")],
+            "zero": [dict(finding(3), finding_id="R3-F0")],
+            "lower case": [dict(finding(3), finding_id="r3-f1")],
+        }
+        for label, findings in cases.items():
+            with self.subTest(label=label):
+                classes = [{"class_id": c, "mechanism": "m", "rule": "r"}
+                           for c in sorted({f["class_id"] for f in findings})]
+                with self.assertRaises(schema.OutputInvalid) as caught:
+                    schema.parse(encoded(output(3, verdict="request_changes", findings=findings, classes=classes)),
+                                 number=3)
+                self.assertTrue(any("finding" in problem for problem in caught.exception.problems), label)
+        class_cases = {
+            "class defined twice": [{"class_id": "R3-C1", "mechanism": "m", "rule": "r"}] * 2,
+            "new class from another round": [{"class_id": "R3-C1", "mechanism": "m", "rule": "r"},
+                                             {"class_id": "R2-C9", "mechanism": "m", "rule": "r"}],
+            "empty mechanism": [{"class_id": "R3-C1", "mechanism": " ", "rule": "r"}],
+            "empty rule": [{"class_id": "R3-C1", "mechanism": "m", "rule": ""}],
+        }
+        for label, classes in class_cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(schema.OutputInvalid) as caught:
+                    schema.parse(encoded(output(3, verdict="request_changes", findings=[finding(3)], classes=classes)),
+                                 number=3)
+                self.assertTrue(any("class" in problem for problem in caught.exception.problems), label)
 
 if __name__ == "__main__":
     unittest.main()
