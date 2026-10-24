@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-        # The Windows suite outgrew one 30-minute job; tools/test_shard.py splits the modules by size.
+        # The Windows suite outgrew one 30-minute job; tools/test_shard.py splits discovery suites by test count.
         shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
