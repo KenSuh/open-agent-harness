@@ -66,7 +66,7 @@ class PreflightTest(unittest.TestCase):
     def write_packet(self, task: str, text: str) -> pathlib.Path:
         path = self.repo / ".oah" / "tasks" / task / "PACKET.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="")
         (self.repo / ".git" / "info" / "exclude").write_text(".oah/\n", encoding="utf-8")
         return path
 

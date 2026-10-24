@@ -75,7 +75,7 @@ class OrcaProject:
                  f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n"
                  f"[call]\n{orca_line}{config}"}
         for task in ("t1", "adhoc"):
-            files[f".oah/tasks/{task}/PACKET.md"] = SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}")
+            files[f".oah/tasks/{task}/PACKET.md"] = SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}").encode("utf-8")
         git_commit(self.repo, files)
         self.state = self.repo / ".git" / "oah"
         for task in ("t1", "adhoc"):
@@ -338,6 +338,67 @@ class UnavailableTest(unittest.TestCase):
 
 
 class DispatchTest(unittest.TestCase):
+    def test_orca_handoff_refuses_a_mutating_placement_outside_the_lease(self):
+        project = OrcaProject(self)
+        sibling = make_tmp_dir(self) / "sibling"
+        add_worktree(project.repo, sibling, "sibling")
+        prepared = call.prepare(call.CallRequest(engine="codex", stage="correction", task="t1", tier="low"),
+                                call_cli.load_settings(project.repo), root=project.repo, state_dir=project.state,
+                                env=project.env, footer=FOOTER, has_footer=has_footer)
+        client = orca.find(project.orca_command, project.env)
+        placement = orca.existing_worktree(client, sibling)
+        with self.assertRaises(EngineError) as caught:
+            orca.start(client, prepared, placement)
+        self.assertEqual(caught.exception.code, "OAH_WORKTREE_LEASE_MISMATCH")
+        self.assertFalse(any(argv[:2] == ["terminal", "create"] for argv in project.orca_calls()))
+
+    def test_committed_packet_fixtures_keep_lf_bytes(self):
+        project = OrcaProject(self)
+        for task in ("t1", "adhoc"):
+            with self.subTest(task=task):
+                self.assertEqual((project.repo / f".oah/tasks/{task}/PACKET.md").read_bytes(),
+                                 SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}").encode("utf-8"))
+
+    def test_correction_reuses_the_dispatchers_leased_worktree(self):
+        project = OrcaProject(self)
+        project.start_host()
+        before = (project.state / "leases.json").read_bytes()
+        code, out, err = project.cli("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low",
+                                     "--launcher", "orca", "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["status"], "finished", data.get("error"))
+        self.assertEqual(pathlib.Path(data["cwd"]).resolve(), project.repo.resolve())
+        self.assertFalse(data["launcher"]["worktree_created"])
+        self.assertEqual((project.state / "leases.json").read_bytes(), before)
+        self.assertFalse(any(argv[:2] == ["worktree", "create"] for argv in project.orca_calls()))
+
+    def test_mutating_sibling_selector_refuses_before_opening_an_orca_terminal(self):
+        project = OrcaProject(self)
+        sibling = make_tmp_dir(self) / "sibling"
+        add_worktree(project.repo, sibling, "sibling")
+        for stage, engine in (("initial", "claude"), ("correction", "codex")):
+            with self.subTest(stage=stage):
+                code, _, err = project.cli("call", engine, "--stage", stage, "--task", "t1", "--tier", "low",
+                                           "--launcher", "orca", "--worktree", str(sibling), "--background")
+                self.assertEqual(code, 1, err)
+                self.assertIn("OAH_WORKTREE_LEASE_MISMATCH", err)
+                self.assertFalse(any(argv[:2] in (["worktree", "create"], ["terminal", "create"])
+                                     for argv in project.orca_calls()))
+                self.assertFalse(project.record.exists())
+
+    def test_review_can_still_run_in_a_new_orca_worktree(self):
+        project = OrcaProject(self)
+        project.start_host()
+        code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+                                     "--launcher", "orca", "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["status"], "finished", data.get("error"))
+        self.assertNotEqual(pathlib.Path(data["cwd"]).resolve(), project.repo.resolve())
+        self.assertTrue(data["launcher"]["worktree_created"])
+        self.assertIn("read-only", project.recorded()["argv"])
+
     def test_orca_dispatch_refuses_a_lease_changed_after_prepare(self):
         project = OrcaProject(self)
         prepare = call.prepare
@@ -367,7 +428,7 @@ class DispatchTest(unittest.TestCase):
                     store.release(task="t1", agent="codex", reason="queued race", force=False)
                 else:
                     path = project.repo / ".oah/tasks/t1/PACKET.md"
-                    path.write_text(SECTION.replace("Reports miss files.", "The goal changed."), encoding="utf-8")
+                    path.write_text(SECTION.replace("Reports miss files.", "The goal changed."), encoding="utf-8", newline="")
                 code, out, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
                 self.assertEqual(code, 1, out + err)
                 expected = "OAH_INTENT_NOT_CURRENT" if change == "source" else "OAH_LEASE_CHANGED"
@@ -452,7 +513,7 @@ class DispatchTest(unittest.TestCase):
                         data = json.loads((folder / "result.json").read_text(encoding="utf-8"))
                         data.update(run_id="r20260101T000000Z-00000000", task="other")
                         (folder / "result.json").write_text(json.dumps(data), encoding="utf-8")
-                    (folder / "prompt.md").write_text("replacement prompt", encoding="utf-8")
+                    (folder / "prompt.md").write_text("replacement prompt", encoding="utf-8", newline="")
                     replacement.update({p.name: p.read_bytes() for p in folder.iterdir() if p.is_file()})
                     return validated
 
@@ -489,7 +550,7 @@ class DispatchTest(unittest.TestCase):
         original = call.execute
 
         def replace_before_execute(validated):
-            prepared.run.prompt_path.write_text("replacement prompt", encoding="utf-8")
+            prepared.run.prompt_path.write_text("replacement prompt", encoding="utf-8", newline="")
             return original(validated)
 
         with mock.patch.object(call, "execute", side_effect=replace_before_execute):
@@ -633,7 +694,7 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
         self.assertEqual(len(list(rendezvous.glob("engine-*.json"))), 1)
         self.assertEqual(prepared.run.read()["status"], "finished")
 
-    def test_new_worktree_run_delivers_the_exact_brief_and_records_orca_ids(self):
+    def test_mutating_run_reuses_the_leased_tree_and_delivers_the_exact_brief(self):
         project = OrcaProject(self)
         project.start_host()
         message = "Build AC1 · 한글 \"quoted\" $HOME `tick`\r\nsecond line"
@@ -648,10 +709,9 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
         self.assertEqual(data["status"], "finished", data.get("error"))
         info = data["launcher"]
         worktree = pathlib.Path(info["worktree"])
-        self.assertNotEqual(worktree.resolve(), project.repo.resolve())
-        self.assertTrue(worktree.name.startswith("oah-t1-"))
+        self.assertEqual(worktree.resolve(), project.repo.resolve())
         self.assertEqual((info["name"], info["orca_version"], info["worktree_created"], info["worker_env"]),
-                         ("orca", "1.4.237", True, "env"))
+                         ("orca", "1.4.237", False, "env"))
         self.assertTrue(info["terminal"].startswith("term_"))
         self.assertIsInstance(info["terminal_process_id"], int)
         self.assertEqual(info["worktree_id"], f"{info['worktree_id'].split('::')[0]}::{worktree}")
@@ -678,13 +738,10 @@ raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--s
 
         calls = project.orca_calls()
         self.assertTrue(all("--json" in argv for argv in calls if argv != ["--version"]))
-        self.assertEqual([argv[:2] for argv in calls[:5]], [["--version"], ["worktree", "show"],
-                                                            ["worktree", "create"], ["worktree", "show"],
+        self.assertEqual([argv[:2] for argv in calls[:3]], [["--version"], ["worktree", "show"],
                                                             ["terminal", "create"]])
-        create = calls[2]
-        self.assertEqual(create[create.index("--name") + 1], worktree.name)
-        self.assertIn("--no-parent", create)
-        terminal = calls[4]
+        self.assertFalse(any(argv[:2] == ["worktree", "create"] for argv in calls))
+        terminal = calls[2]
         self.assertEqual(terminal[terminal.index("--command") + 1], f"oah worker-run {run_id} --stage initial; exit")
         self.assertEqual(terminal[terminal.index("--worktree") + 1], f"id:{info['worktree_id']}")
         flat = "\n".join(" ".join(argv) for argv in calls)

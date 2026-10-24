@@ -200,7 +200,7 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
 
         orca = orca_launcher.find(section["orca_command"], os.environ)
         orca_launcher.check_runner(os.environ)
-        if args.worktree:
+        if args.worktree or args.stage != "review":
             placement = orca_launcher.existing_worktree(orca, root)
         else:
             placement = orca_launcher.new_worktree(orca, root, args.task)
@@ -226,7 +226,6 @@ def _call(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Path) -> 
     for warning in prepared.warnings:
         print(warning, file=sys.stderr)
     if orca is not None:
-        call.check_prepared(prepared)
         info = orca_launcher.start(orca, prepared, placement)["launcher"]
         _print_skills(prepared)
         print(f"OAH_RUN_STARTED run={prepared.run_id} launcher=orca terminal={info['terminal']} "

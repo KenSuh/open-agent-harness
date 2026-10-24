@@ -281,7 +281,8 @@ def record_dispatch_binding(state_dir: pathlib.Path, packet: Packet, task: str, 
     try:
         with Store(state_dir).checked(task=task, lease_id=checked_lease.id,
                                       generation=checked_lease.generation) as live:
-            _check_dispatch_lease(live, root or pathlib.Path(live.worktree))
+            run = runs.Run(id=run_id, task=task, path=runs._contained_path(state_dir, "runs", task, run_id))
+            _check_dispatch_lease(live, root or pathlib.Path(live.worktree), stage=run.read()["stage"])
             bound = dispatch_binding(state_dir, task)
             if check_dispatch_binding(bound, packet, task):
                 intent = packet.intent
@@ -318,14 +319,18 @@ def check_lease_binding(lease) -> None:
                           f"{binding.source}; then call again")
 
 
-def _check_dispatch_lease(lease, root: pathlib.Path) -> None:
+def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
     from oah.lease import utc_now
 
     if lease.expired(utc_now()):
         raise EngineError("OAH_LEASE_CHANGED", "the checked lease expired; start a new lease with "
                           "oah start --packet and run oah call again")
+    if stage != "review" and root.resolve() != pathlib.Path(lease.worktree).resolve():
+        raise EngineError("OAH_WORKTREE_LEASE_MISMATCH", "a mutating worker must run in the dispatcher's leased "
+                          f"worktree ({lease.worktree}). Nothing was launched. Run oah call again with "
+                          "--worktree set to that exact path")
     check_lease_binding(lease)
-    # The execution worktree may differ from the lease's source worktree (Orca placement).
+    # A read-only review may use another tree; its intent must still match the lease.
     check_lease_binding(dataclasses.replace(lease, worktree=str(root)))
 
 
@@ -348,7 +353,7 @@ def dispatch_guard(prepared: Prepared):
                               "run oah call again to prepare it from the current lease") from None
         with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
                                                generation=saved["generation"]) as live:
-            _check_dispatch_lease(live, pathlib.Path(prepared.cwd))
+            _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
             yield
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1])
@@ -517,7 +522,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
                           "Nothing was launched. Accept the packet, then bind it with "
                           f"oah start --task {request.task} --agent {request.engine} --packet "
                           f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then call again")
-    check_lease_binding(holder)
+    _check_dispatch_lease(holder, root, stage=request.stage)
     leased = holder.binding()
     bound = dispatch_binding(state_dir, request.task)
     default_source = bound["source"] if bound else leased.source

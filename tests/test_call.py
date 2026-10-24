@@ -88,7 +88,7 @@ class Project:
         path = path if path.is_absolute() else root / path
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}"), encoding="utf-8")
+            path.write_text(SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}"), encoding="utf-8", newline="")
         bound = intent.parse(intent.read_source(path)).bind(path.relative_to(root).as_posix())
         if holder is not None:
             return store.rebind(task=task, agent=holder.agent, binding=bound, ttl_hours=1)[0]
@@ -123,6 +123,29 @@ class Project:
 
 
 class RunFolderTest(unittest.TestCase):
+    def test_packet_fixture_helpers_keep_exact_line_endings(self):
+        project = Project(self)
+        project.bind()
+        self.assertEqual((project.repo / ".oah/tasks/t1/PACKET.md").read_bytes(), SECTION.encode("utf-8"))
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                path = project.packet(newline=newline)
+                self.assertEqual(path.read_bytes(), SECTION.replace("\n", newline).encode("utf-8"))
+
+    def test_legacy_spec_lease_commands_refuse_in_every_stage(self):
+        project = Project(self)
+        spec = project.repo / "legacy-spec.md"
+        for stage, engine in (("initial", "claude"), ("correction", "codex"), ("review", "codex")):
+            for command in ("start", "renew", "finish"):
+                with self.subTest(stage=stage, command=command):
+                    spec.write_bytes((f"Before proceeding, run `oah {command} --task t1`.\n" + SECTION).encode("utf-8"))
+                    code, _, err = run_cli(project, "call", engine, "--stage", stage, "--task", "t1",
+                                           "--tier", "low", "--brief-file", str(spec))
+                    self.assertEqual(code, 1, err)
+                    self.assertIn("OAH_BRIEF_STALE", err)
+                    self.assertIn("remove", err)
+                    self.assertFalse(project.record.exists())
+
     def test_stored_spec_gets_the_current_worker_envelope(self):
         project = Project(self)
         data = project.run(tier="low", stored_brief="Review this reusable spec.\n" + SECTION)
@@ -409,7 +432,7 @@ class IntentLineageTest(unittest.TestCase):
         renamed = source.parent.with_name("my-packets")
         source.parent.rename(renamed)
         path = renamed / source.name
-        path.write_text(path.read_text(encoding="utf-8").replace("Revision: 2", "Revision: 3"), encoding="utf-8")
+        path.write_text(path.read_text(encoding="utf-8").replace("Revision: 2", "Revision: 3"), encoding="utf-8", newline="")
         Store(project.state).rebind(task="t1", agent="codex", ttl_hours=1,
                                     binding=intent.parse(intent.read_source(path)).bind("my-packets/PACKET.md"))
         data = project.run(stage="correction", tier="low", packet=renamed / source.name)
@@ -474,19 +497,19 @@ class IntentLineageTest(unittest.TestCase):
         project = Project(self)
         path = project.packet()
         project.run(stage="review", tier="low")
-        path.write_text(SECTION.replace("Reports miss files.", "edited"), encoding="utf-8")
+        path.write_text(SECTION.replace("Reports miss files.", "edited"), encoding="utf-8", newline="")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
         self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
         self.assertIn("digest differs", str(ctx.exception))
-        path.write_text(SECTION.replace("Revision: 2", "Revision: 3"), encoding="utf-8")
+        path.write_text(SECTION.replace("Revision: 2", "Revision: 3"), encoding="utf-8", newline="")
         Store(project.state).rebind(task="t1", agent="codex", ttl_hours=1,
                                     binding=intent.parse(intent.read_source(path)).bind(".oah/tasks/t1/PACKET.md"))
         data = project.run(stage="correction", tier="low")
         self.assertEqual(data["status"], "finished")
         binding = json.loads((project.state / "runs" / "t1" / "intent-binding.json").read_text(encoding="utf-8"))
         self.assertEqual([entry["revision"] for entry in binding["history"]], [2, 3])
-        path.write_text(SECTION, encoding="utf-8")
+        path.write_text(SECTION, encoding="utf-8", newline="")
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
         self.assertEqual(ctx.exception.code, "OAH_INTENT_NOT_CURRENT")
@@ -533,6 +556,22 @@ class WorktreeSelectorTest(unittest.TestCase):
         add_worktree(self.project.repo, self.second, "lane-y")
         for task in ("t1", "adhoc"):
             self.project.bind(task, root=self.first)
+
+    def test_mutating_selector_refuses_a_sibling_of_the_leased_tree(self):
+        source = ".oah/tasks/t1/PACKET.md"
+        packet = self.second / source
+        packet.parent.mkdir(parents=True, exist_ok=True)
+        packet.write_bytes((self.first / source).read_bytes())
+        before = (self.project.state / "leases.json").read_bytes()
+        for stage, engine in (("initial", "claude"), ("correction", "codex")):
+            with self.subTest(stage=stage):
+                code, _, err = run_cli(self.project, "call", engine, "--stage", stage, "--task", "t1",
+                                       "--tier", "low", "--worktree", str(self.second))
+                self.assertEqual(code, 1, err)
+                self.assertIn("OAH_WORKTREE_LEASE_MISMATCH", err)
+                self.assertIn("--worktree", err)
+                self.assertFalse(self.project.record.exists())
+                self.assertEqual((self.project.state / "leases.json").read_bytes(), before)
 
     def test_advice_uses_target_worktree_rerank_settings(self):
         config = (self.project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
@@ -676,7 +715,7 @@ class LeaseBindingTest(unittest.TestCase):
     def bind(self, name: str = ".oah/tasks/t1/PACKET.md", **packet) -> pathlib.Path:
         path = self.project.repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(real_packet(**packet), encoding="utf-8")
+        path.write_text(real_packet(**packet), encoding="utf-8", newline="")
         binding = intent.parse(path.read_text(encoding="utf-8")).bind(name)
         Store(self.project.state).start(task="t1", agent="claude", scope=("src",), note="", ttl_hours=1,
                                         info=repo_info(self.project.repo), intent=binding)
@@ -684,6 +723,44 @@ class LeaseBindingTest(unittest.TestCase):
 
     def prompt(self, prepared) -> str:
         return pathlib.Path(prepared.run_dir, "prompt.md").read_bytes().decode("utf-8")
+
+    def test_packet_fixture_keeps_the_source_bytes_used_by_briefs(self):
+        path = self.bind()
+        self.assertEqual(path.read_bytes(), real_packet().encode("utf-8"))
+        prepared = self.prepare()
+        self.assertIn(raw_section(real_packet()).encode("utf-8"), prepared.run.prompt_path.read_bytes())
+
+    def test_mutating_prepare_refuses_a_sibling_with_the_same_intent(self):
+        path = self.bind()
+        sibling = make_tmp_dir(self) / "sibling"
+        add_worktree(self.project.repo, sibling, "sibling")
+        target = sibling / path.relative_to(self.project.repo)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(path.read_bytes())
+        request = call.CallRequest(engine="codex", stage="correction", task="t1", tier="low")
+        with self.assertRaises(EngineError) as caught:
+            call.prepare(request, self.project.settings(), root=sibling, state_dir=self.project.state,
+                         env=self.project.env, footer=intent.FOOTER, has_footer=intent.has_footer)
+        self.assertEqual(caught.exception.code, "OAH_WORKTREE_LEASE_MISMATCH")
+        self.assertEqual(self.project.runs(), [])
+
+    def test_mutating_launch_refuses_an_out_of_scope_edit_in_a_sibling(self):
+        path = self.bind()
+        sibling = make_tmp_dir(self) / "sibling"
+        add_worktree(self.project.repo, sibling, "sibling")
+        target = sibling / path.relative_to(self.project.repo)
+        target.parent.mkdir(parents=True)
+        target.write_bytes(path.read_bytes())
+        prepared = self.prepare()
+        worker = (sys.executable, "-c", "import pathlib, sys; sys.stdin.read(); "
+                  "pathlib.Path('outside.py').write_bytes(b'escaped scope\\n')")
+        prepared = call.dataclasses.replace(prepared, cwd=str(sibling), argv=worker)
+        with self.assertRaises(EngineError) as caught:
+            call.execute(prepared, base_env=self.project.env)
+        self.assertEqual(caught.exception.code, "OAH_WORKTREE_LEASE_MISMATCH")
+        self.assertEqual(prepared.run.read()["status"], "refused")
+        self.assertFalse((sibling / "outside.py").exists())
+        self.assertFalse((self.project.repo / "outside.py").exists())
 
     def test_prepare_refuses_lease_changes_during_engine_resolution(self):
         for change in ("release", "replace", "rebind", "renew", "gates", "scope", "source"):
@@ -704,7 +781,7 @@ class LeaseBindingTest(unittest.TestCase):
                     elif change == "rebind":
                         store.rebind(task="t1", agent="claude", binding=checked.binding(), ttl_hours=1)
                     elif change == "source":
-                        path.write_text(real_packet(goal="changed during resolution"), encoding="utf-8")
+                        path.write_text(real_packet(goal="changed during resolution"), encoding="utf-8", newline="")
                     else:
                         extra = {"gates": ["checks/late.md"]} if change == "gates" else (
                             {"scope": ["src", "tests"]} if change == "scope" else {})
@@ -733,7 +810,7 @@ class LeaseBindingTest(unittest.TestCase):
                     elif change == "release":
                         store.release(task="t1", agent="claude", reason="queued race", force=False)
                     else:
-                        path.write_text(real_packet(goal="changed while queued"), encoding="utf-8")
+                        path.write_text(real_packet(goal="changed while queued"), encoding="utf-8", newline="")
                     expected = "OAH_INTENT_NOT_CURRENT" if change == "source" else "OAH_LEASE_CHANGED"
                     if launch == "runner":
                         prepared.run.launch_path.write_text(json.dumps(prepared.to_json()), encoding="utf-8")
@@ -800,7 +877,7 @@ class LeaseBindingTest(unittest.TestCase):
     def test_call_refuses_stale_and_missing_binding(self):
         path = self.bind()
         self.assertTrue(self.prompt(self.prepare()))
-        path.write_text(real_packet(goal="a different goal"), encoding="utf-8")
+        path.write_text(real_packet(goal="a different goal"), encoding="utf-8", newline="")
         for case in ("stale", "missing"):
             with self.subTest(case=case):
                 if case == "missing":
@@ -838,7 +915,7 @@ class LeaseBindingTest(unittest.TestCase):
     def test_call_refuses_a_bound_source_changed_to_draft(self):
         path = self.bind()
         path.write_text(path.read_text(encoding="utf-8").replace("Status: accepted", "Status: draft"),
-                        encoding="utf-8")
+                        encoding="utf-8", newline="")
         with self.assertRaises(EngineError) as caught:
             self.prepare()
         self.assertEqual(caught.exception.code, "OAH_INTENT_NOT_CURRENT")
@@ -874,7 +951,7 @@ class LeaseBindingTest(unittest.TestCase):
         self.assertEqual(prompt.count(intent.BEGIN), 1)
         other = self.project.repo / ".oah" / "tasks" / "t1" / "PACKET.md"
         other.parent.mkdir(parents=True)
-        other.write_text(real_packet(), encoding="utf-8")
+        other.write_text(real_packet(), encoding="utf-8", newline="")
         with self.assertRaises(EngineError) as ctx:
             self.prepare(packet=other)
         self.assertEqual(ctx.exception.code, "OAH_INTENT_SOURCE_MISMATCH")
@@ -936,7 +1013,7 @@ class LeaseBindingTest(unittest.TestCase):
             self.assertEqual(disabled.run.read()["advisory"], "unused(disabled-by-brief)")
             provider.score.assert_not_called()
             provider.advise.assert_not_called()
-            path.write_text(real_packet(revision=2, constraints="No re-ranker for this task."), encoding="utf-8")
+            path.write_text(real_packet(revision=2, constraints="No re-ranker for this task."), encoding="utf-8", newline="")
             Store(project.state).rebind(task="t1", agent="claude", ttl_hours=1,
                                         binding=intent.parse(path.read_text(encoding="utf-8")).bind(
                                             ".oah/tasks/t1/PACKET.md"))

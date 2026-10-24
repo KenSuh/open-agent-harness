@@ -204,12 +204,12 @@ def _show(orca: Orca, selector: str) -> dict:
 
 
 def existing_worktree(orca: Orca, path: pathlib.Path) -> Placement:
-    """The Orca worktree at a path P3b already resolved from --worktree."""
+    """The existing Orca tree: the dispatcher's leased tree for mutating stages, or a selected review tree."""
     try:
         worktree = _show(orca, f"path:{path}")
     except OrcaReplyError as exc:
         raise EngineError(FAILED, f"Orca does not show the worktree {path} ({exc}). Open the repository in Orca "
-                          "so it lists this worktree, or call without --worktree to let Orca create one. "
+                          "so it lists this worktree, or run without --launcher orca. "
                           "Nothing was launched") from exc
     return Placement(pathlib.Path(worktree["path"]), worktree["id"], False)
 
@@ -308,6 +308,7 @@ def worker_prepared(run: runs.Run, root: pathlib.Path, settings: call.Settings, 
 
 def start(orca: Orca, prepared: call.Prepared, placement: Placement, *, windows: bool | None = None) -> dict:
     """Queue the prepared run with its launcher record and open its Orca terminal; returns the record."""
+    call.check_prepared(dataclasses.replace(prepared, cwd=str(placement.path)))
     run = prepared.run
     command = runner_command(prepared.run_id, prepared.stage)
     launch = prepared.to_json()

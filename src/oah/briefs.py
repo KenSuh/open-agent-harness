@@ -145,7 +145,8 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
              f"- Packet: {packet_source or 'none'}"]
     if os.name == "nt":
         lines.append("- Shell: run the commands in this brief in PowerShell.")
-    lines.append("- Lease: the lease belongs to the dispatcher. Work only inside the scope above; never start, "
+    lines.append("- Lease: the lease belongs to the dispatcher. Mutating workers use the dispatcher's leased "
+                 "worktree; reviews stay read-only. Work only inside the scope above; never start, "
                  "renew or finish a lease. Return your changes and evidence to the dispatcher, who checks "
                  "scope and gates at finish.")
     if binding is not None:
@@ -221,9 +222,9 @@ def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFoo
         section = raw_section(body)
         if section is not None:
             body = body.replace(section, "", 1)
-    if stage == "review" and re.search(r"\boah\s+start\b", body):
-        raise BriefError("OAH_BRIEF_STALE", "the reusable review instructions carry a lease command; "
-                         "remove that command from the spec and retry the review")
+    if re.search(r"\boah\s+(?:start|renew|finish)\b", body):
+        raise BriefError("OAH_BRIEF_STALE", "the reusable worker instructions carry a lease command; "
+                         "remove that command from the spec and retry the call; workers use the dispatcher's lease")
     return body.strip("\r\n")
 
 

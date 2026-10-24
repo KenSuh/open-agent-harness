@@ -559,7 +559,7 @@ class IntentBindingTest(unittest.TestCase):
 
         path = packet.create(self.root, "t1", scope=("src",))
         path.write_text(path.read_text(encoding="utf-8").replace('Status: draft', 'Status: accepted'),
-                        encoding="utf-8")
+                        encoding="utf-8", newline="")
         bound = intent.parse(intent.read_source(path)).bind(".oah/tasks/t1/PACKET.md")
         lease = self.start(bound)
         report = {"line": bound.line(), "acs": {"AC1": "met"}}

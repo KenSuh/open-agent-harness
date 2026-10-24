@@ -196,7 +196,7 @@ class StartPacketTest(unittest.TestCase):
 
     def test_start_packet_refuses_packet_outside_repository(self):
         outside = make_tmp_dir(self) / "PACKET.md"
-        outside.write_text(packet_text(), encoding="utf-8")
+        outside.write_text(packet_text(), encoding="utf-8", newline="")
         refused = self.repo.oah("start", "--task", "t1", "--agent", "claude", "--packet", str(outside))
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_INTENT_SOURCE_INVALID"), refused.stderr)
@@ -288,7 +288,7 @@ class StatusTest(unittest.TestCase):
         repo = Repo(self)
         custom = repo.root / "plans" / "T1.md"
         custom.parent.mkdir()
-        custom.write_text(packet_text(), encoding="utf-8")
+        custom.write_text(packet_text(), encoding="utf-8", newline="")
         repo.ok("start", "--task", "t1", "--agent", "claude", "--packet", "plans/T1.md")
         for decoy in (False, True):
             if decoy:
@@ -319,7 +319,7 @@ class StatusTest(unittest.TestCase):
         repo.write_packet(packet_text("edited", scope=("src/edited",), acs=("changed",)), "edited")
         repo.path("gone").unlink()
         broken = repo.path("broken")
-        broken.write_text(broken.read_text(encoding="utf-8") + intent.BEGIN + "\n", encoding="utf-8")
+        broken.write_text(broken.read_text(encoding="utf-8") + intent.BEGIN + "\n", encoding="utf-8", newline="")
         repo.write_packet(packet_text("draft", scope=("src/draft",), status="draft"), "draft")
         states = {task: lease["intent_state"] for task, lease in repo.status().items()}
         self.assertEqual(states, {"plain": "unbound", "cur": "current", "edited": "stale", "gone": "missing",
@@ -340,7 +340,7 @@ class StatusTest(unittest.TestCase):
                        check=True, capture_output=True, env=git_env())
         packet = other / PACKET.format(task="t1")
         packet.parent.mkdir(parents=True)
-        packet.write_text(packet_text(), encoding="utf-8")
+        packet.write_text(packet_text(), encoding="utf-8", newline="")
         started = subprocess.run([sys.executable, "-m", "oah", "start", "--task", "t1", "--agent", "claude",
                                   "--packet", PACKET.format(task="t1")], cwd=other, capture_output=True, text=True,
                                  encoding="utf-8", env=repo.env, timeout=120)
@@ -476,7 +476,7 @@ class FinishTest(unittest.TestCase):
                     "    source = '.oah/tasks/t1/PACKET.md'\n"
                     "    path = info.root / source\n"
                     "    text = path.read_text(encoding='utf-8').replace('Revision: 1', 'Revision: 2')\n"
-                    "    path.write_text(text, encoding='utf-8')\n"
+                    "    path.write_text(text, encoding='utf-8', newline='')\n"
                     "    if sys.argv[1] == 'rebind':\n"
                     "        Store(state_dir(info, os.environ)).rebind(task='t1', agent='claude', ttl_hours=1,\n"
                     "                                                       binding=intent.parse(text).bind(source))\n"
@@ -561,7 +561,7 @@ class EndToEndTest(unittest.TestCase):
         repo.ok("packet", "new", "t1", "--scope", "src", "--kind", "security", "--intensity", "max",
                 "--reasoning", "xhigh", "--risk", "critical")
         path = repo.path()
-        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8")
+        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8", newline="")
         self.assertEqual(repo.start_packet().returncode, 0)
         for overrides, expected_risk in (((), "critical"), (("--risk", "normal"), "normal"),
                                          (("--tier", "low"), "critical")):
@@ -591,14 +591,14 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(draft.stderr.startswith("OAH_INTENT_NOT_ACCEPTED"), draft.stderr)
 
         path = repo.path()
-        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8")
+        path.write_text(accept(path.read_text(encoding="utf-8")), encoding="utf-8", newline="")
         self.assertIn("intent=t1@r1", repo.ok(*shlex.split(briefs.lease_command("t1", "claude", PACKET.format(
             task="t1")))[1:]).stdout)
         self.assertEqual(repo.status()["t1"]["intent_state"], "current")
         self.assertIn("state=current", repo.ok("intent", "show", "t1").stdout)
 
         accepted = path.read_text(encoding="utf-8")
-        path.write_text(accepted.replace("the digest is stable", "the digest never changes"), encoding="utf-8")
+        path.write_text(accepted.replace("the digest is stable", "the digest never changes"), encoding="utf-8", newline="")
         self.assertEqual(repo.status()["t1"]["intent_state"], "stale")
         refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
         self.assertEqual(refused.returncode, 1)
@@ -607,7 +607,7 @@ class EndToEndTest(unittest.TestCase):
 
         path.write_text(accept(accepted.replace("Status: accepted", 'Status: draft            # becomes "accepted" '
                                                 "when you approve it"), revision=2,
-                               goals=("the report lists every file", "the digest never changes")), encoding="utf-8")
+                               goals=("the report lists every file", "the digest never changes")), encoding="utf-8", newline="")
         rebound = repo.start_packet()
         self.assertEqual(rebound.returncode, 0, rebound.stderr)
         self.assertIn("OAH_INTENT_REBOUND task=t1 intent=t1@r2", rebound.stdout)

@@ -2,10 +2,10 @@
 
 Claude Code and Codex CLI both follow these rules in this repository.
 
-**Dispatched workers:** when `OAH_WORKER=1` is set, `oah` launched you for one task. Skip any session-entry procedure (status tours, handoff reading, greetings) and do only the task in your prompt.
+**Dispatched workers:** when `OAH_WORKER=1` is set, `oah` launched you for one task. Skip any session-entry procedure (status tours, handoff reading, greetings) and do only the task in your prompt. Initial and correction workers use the dispatcher's leased worktree; reviews stay read-only and may use another tree.
 
 1. **Stage order.** Claude Code does the initial implementation. Codex CLI then reviews, corrects and re-reviews in bounded rounds (`oah review`, `oah fix`). The initial implementer returns review findings instead of fixing them.
-2. **Leases.** Before editing, run `oah start --task <task> --agent <you> --scope <path>` (repeat `--scope`). Edit only inside your scope; widen it with `oah renew --scope …`. If another lease overlaps, stop and report. Close with `oah finish --summary "…"`.
+2. **Leases.** Dispatched workers use the dispatcher's lease and never start, renew or finish a lease; stay inside its scope and return changes and evidence to the dispatcher. For the dispatcher: before editing, run `oah start --task <task> --agent <you> --scope <path>` (repeat `--scope`); widen scope with `oah renew --scope …` and close with `oah finish --summary "…"`. If another lease overlaps, stop and report.
 3. **Packets and intent.** `.oah/tasks/<task>/PACKET.md` holds the task's intent, scope, plan and acceptance. Never edit the intent to fit your work; a changed goal raises its Revision. Return the `INTENT` line and one `AC<n>: met|unmet|deferred` line per success condition.
 4. **Preflight.** Run `oah preflight` before you start. Stop on ABORT.
 5. **Gates prove "done".** Every acceptance condition is a gate in `GATES.md` with CHECK, EXPECT and EVIDENCE. Run the check and record its real output. A ticked box without evidence is worse than an open one. Every number in a report needs its own check.

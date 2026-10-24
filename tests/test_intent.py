@@ -218,7 +218,7 @@ class ReadSourceTest(unittest.TestCase):
 
         def replace_then_open(path, flags, *args):
             replacement = self.dir / "replacement.md"
-            replacement.write_text(packet() + "changed\n", encoding="utf-8")
+            replacement.write_text(packet() + "changed\n", encoding="utf-8", newline="")
             os.replace(replacement, self.path)
             return real_open(path, flags, *args)
 
@@ -230,7 +230,7 @@ class ReadSourceTest(unittest.TestCase):
                 handle.write("more\n")
             return real_open(path, flags, *args)
 
-        self.path.write_text(packet(), encoding="utf-8")
+        self.path.write_text(packet(), encoding="utf-8", newline="")
         with patch("oah.intent.os.open", side_effect=grow_then_open):
             self.assert_source_error("OAH_INTENT_SOURCE_INVALID")
 
@@ -238,17 +238,17 @@ class ReadSourceTest(unittest.TestCase):
         real_read = os.read
         for kind in ("file", "symlink"):
             with self.subTest(kind=kind):
-                self.path.write_text(packet(), encoding="utf-8")
+                self.path.write_text(packet(), encoding="utf-8", newline="")
                 replacement = self.dir / "replacement.md"
                 if kind == "symlink":
                     target = self.dir / "target.md"
-                    target.write_text(packet(), encoding="utf-8")
+                    target.write_text(packet(), encoding="utf-8", newline="")
                     try:
                         replacement.symlink_to(target)
                     except (OSError, NotImplementedError):
                         continue  # Windows may not grant the symlink privilege.
                 else:
-                    replacement.write_text(packet(), encoding="utf-8")
+                    replacement.write_text(packet(), encoding="utf-8", newline="")
                     before = self.path.stat()
                     os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
                 replaced = False
@@ -315,14 +315,14 @@ class BindingStateTest(unittest.TestCase):
         self.rel = ".oah/tasks/demo/PACKET.md"
         self.path = self.root / self.rel
         self.path.parent.mkdir(parents=True)
-        self.path.write_text(packet(), encoding="utf-8")
+        self.path.write_text(packet(), encoding="utf-8", newline="")
         self.binding = intent.parse(packet()).bind(self.rel)
 
     def state(self, text: str | bytes | None = None, binding: Binding | None = None) -> str:
         if isinstance(text, bytes):
             self.path.write_bytes(text)
         elif text is not None:
-            self.path.write_text(text, encoding="utf-8")
+            self.path.write_text(text, encoding="utf-8", newline="")
         return intent.binding_state(binding or self.binding, self.root)
 
     def test_binding_state_table(self):
@@ -365,7 +365,7 @@ class BindingStateTest(unittest.TestCase):
 
     def test_symlink_to_valid_packet_is_stale(self):
         real = self.root / "real.md"
-        real.write_text(packet(), encoding="utf-8")
+        real.write_text(packet(), encoding="utf-8", newline="")
         self.path.unlink()
         try:
             self.path.symlink_to(real)
@@ -405,7 +405,7 @@ class BindingStateTest(unittest.TestCase):
 
     def test_source_replaced_after_read_is_stale(self):
         replacement = self.root / "replacement.md"
-        replacement.write_text(packet(), encoding="utf-8")
+        replacement.write_text(packet(), encoding="utf-8", newline="")
         real_close = os.close
 
         def close_then_replace(fd):
@@ -420,7 +420,7 @@ class BindingStateTest(unittest.TestCase):
         self.assertEqual(intent.binding_state(binding, self.root / "elsewhere"), "current")
 
     def test_stale_reason_names_the_difference(self):
-        self.path.write_text(section(revision="2"), encoding="utf-8")
+        self.path.write_text(section(revision="2"), encoding="utf-8", newline="")
         state, reason = intent.explain_binding(self.binding, self.root)
         self.assertEqual(state, "stale")
         self.assertIn("revision", reason)
@@ -568,7 +568,7 @@ class IntentCliTest(unittest.TestCase):
         self.write(full_packet())
 
     def write(self, text: str) -> None:
-        self.path.write_text(text, encoding="utf-8")
+        self.path.write_text(text, encoding="utf-8", newline="")
 
     def test_commands_and_registration(self):
         self.assertEqual(intent_cli.COMMANDS, ("intent",))
@@ -633,14 +633,14 @@ class IntentCliTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
 
     def test_check_refuses_lower_revision(self):
-        git_commit(self.repo, {self.rel: full_packet(revision="3")}, "r3")
+        git_commit(self.repo, {self.rel: full_packet(revision="3").encode("utf-8")}, "r3")
         self.write(full_packet(revision="2"))
         code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
         self.assertEqual(code, 1)
         self.assertIn("OAH_INTENT_REVISION_INVALID", out)
 
     def test_editing_a_committed_draft_needs_no_new_revision(self):
-        git_commit(self.repo, {self.rel: full_packet(status="draft")}, "draft")
+        git_commit(self.repo, {self.rel: full_packet(status="draft").encode("utf-8")}, "draft")
         self.write(full_packet(acs=("- AC1: refined while still a draft",)))
         code, out, _ = run_intent_cli(self.repo, "intent", "check", "demo")
         self.assertEqual(code, 0, out)

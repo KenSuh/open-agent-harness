@@ -90,7 +90,7 @@ class TemplateTest(unittest.TestCase):
 
     def test_new_refuses_existing_packet(self):
         path = packet.create(self.root, "demo")
-        path.write_text("mine\n", encoding="utf-8")
+        path.write_text("mine\n", encoding="utf-8", newline="")
         with self.assertRaises(packet.PacketError) as caught:
             packet.create(self.root, "demo")
         self.assertEqual(caught.exception.code, "OAH_PACKET_EXISTS")
@@ -228,7 +228,7 @@ class CheckTest(unittest.TestCase):
     def test_check_reads_gates_beside_packet(self):
         folder = make_tmp_dir(self) / "demo"
         folder.mkdir()
-        (folder / "PACKET.md").write_text(accepted(), encoding="utf-8")
+        (folder / "PACKET.md").write_text(accepted(), encoding="utf-8", newline="")
         self.assertEqual(packet.check(folder / "PACKET.md").problems, ())
         (folder / "GATES.md").write_text("# Gates\n", encoding="utf-8")
         self.assertEqual(codes(packet.check(folder / "PACKET.md")), ["OAH_GATES_INVALID"])
@@ -284,7 +284,7 @@ class PacketCliTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("warning OAH_SCOPE_EMPTY", out)
 
-        (self.repo / ".oah/tasks/demo/PACKET.md").write_text(accepted(), encoding="utf-8")
+        (self.repo / ".oah/tasks/demo/PACKET.md").write_text(accepted(), encoding="utf-8", newline="")
         code, out, _ = run_cli(self.repo, "packet", "check", "demo")
         self.assertEqual(code, 0, out)
         self.assertIn("OAH_PACKET_OK .oah/tasks/demo/PACKET.md intent=demo@r1 status=accepted", out)
@@ -292,12 +292,12 @@ class PacketCliTest(unittest.TestCase):
     def test_cli_check_file_infers_task_from_layout(self):
         path = self.repo / ".oah/tasks/demo/PACKET.md"
         path.parent.mkdir(parents=True)
-        path.write_text(accepted(ident="other"), encoding="utf-8")
+        path.write_text(accepted(ident="other"), encoding="utf-8", newline="")
         code, out, _ = run_cli(self.repo / "src", "packet", "check", "--file", str(path))
         self.assertEqual(code, 1)
         self.assertIn("OAH_INTENT_ID_CHANGED", out)
         loose = self.repo / "loose.md"
-        loose.write_text(accepted(ident="other"), encoding="utf-8")
+        loose.write_text(accepted(ident="other"), encoding="utf-8", newline="")
         self.assertEqual(run_cli(self.repo, "packet", "check", "--file", "loose.md")[0], 0)
 
     def test_cli_check_missing_packet(self):

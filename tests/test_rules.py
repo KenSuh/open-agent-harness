@@ -19,6 +19,21 @@ def block_of(data: bytes) -> bytes:
 
 
 class RulesTest(unittest.TestCase):
+    def test_dispatched_workers_are_exempt_from_lease_lifecycle_commands(self):
+        for lang in ("en", "ko"):
+            with self.subTest(lang=lang):
+                rules.sync(self.root, lang=lang)
+                text = self.agents.read_text(encoding="utf-8")
+                lease_rule = next(line for line in text.splitlines() if line.startswith("2. "))
+                if lang == "en":
+                    self.assertIn("dispatcher's lease", lease_rule)
+                    self.assertIn("never start, renew or finish", lease_rule)
+                    self.assertIn("dispatcher's leased worktree", text)
+                else:
+                    self.assertIn("발주자의 리스", lease_rule)
+                    self.assertIn("시작·갱신·종료하지 않는다", lease_rule)
+                    self.assertIn("발주자의 리스 워크트리", text)
+
     def setUp(self):
         self.root = make_tmp_dir(self)
         self.agents = self.root / "AGENTS.md"
