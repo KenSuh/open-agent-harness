@@ -695,6 +695,15 @@ defaultbranch._generation_worker()
     def test_interrupted_fetch_cannot_affect_the_retry_generation(self):
         self._cancelled_fetch(signal.SIGINT)
 
+    @unittest.skipIf(os.name == "nt", "POSIX inherited signal disposition")
+    def test_interrupted_fetch_with_inherited_sigint_ignore(self):
+        # POSIX background jobs can pass SIG_IGN through exec into both Python processes.
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            self._cancelled_fetch(signal.SIGINT)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
     @unittest.skipIf(os.name == "nt", "POSIX query termination")
     def test_terminated_query_cannot_leave_a_writer_in_the_retry_generation(self):
         self._cancelled_fetch(signal.SIGKILL)
@@ -708,6 +717,9 @@ defaultbranch._generation_worker()
 
     def _cancelled_fetch(self, cancellation):
         defaultbranch.refresh(self.fx.lane, self.settings, env={})
+        saved = defaultbranch._mirror_path(self.fx.lane, {})
+        pointer = (saved.parent / "current.json").read_bytes()
+        recorded = self.fx.map_files()[0].read_bytes()
         self.fx.advance(RELEASE)
         ready, release = self.fx.tmp / "fetch-paused", self.fx.tmp / "release-fetch"
         entered = self.fx.tmp / "fetch-generation"
@@ -729,15 +741,25 @@ defaultbranch._generation_worker()
         config = self.fx.tmp / "global-config"
         git(self.fx.lane, "config", "--file", str(config), "core.hooksPath", hooks.as_posix())
         code = '''
-import json, pathlib, subprocess, sys, time
+import json, pathlib, signal, subprocess, sys, time
 from oah.impact import defaultbranch
 from oah.impact.defaults import configured
+if sys.platform != "win32":
+    # Python preserves SIG_IGN inherited from a background test runner across exec.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
 original = defaultbranch._fetch
 def fetch(mirror, *args, **kwargs):
     pathlib.Path(sys.argv[1]).write_text(str(mirror), encoding="utf-8")
     return original(mirror, *args, **kwargs)
 defaultbranch._fetch = fetch
 owners = []
+original_popen = subprocess.Popen
+def popen(argv, **kwargs):
+    owner = original_popen(argv, **kwargs)
+    if "fetch" in argv:
+        owners.append(owner)
+    return owner
+subprocess.Popen = popen
 if sys.argv[2]:
     original_run = defaultbranch.run_command
     def run(argv, **kwargs):
@@ -746,7 +768,6 @@ if sys.argv[2]:
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
         owner = subprocess.Popen(argv, env=kwargs.get("env"), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
-        owners.append(owner)
         deadline = time.monotonic() + 15
         while not pathlib.Path(sys.argv[2]).exists():
             if owner.poll() is not None or time.monotonic() >= deadline:
@@ -786,8 +807,10 @@ finally:
                 process.send_signal(cancellation)
             out, _ = process.communicate(timeout=15)
             self.assertNotEqual(process.returncode, 0)
-            if cancellation is None:
+            if cancellation is None or cancellation == signal.SIGINT:
                 self.assertEqual(out.strip(), b"fetch owner stopped and reaped")
+            self.assertEqual((saved.parent / "current.json").read_bytes(), pointer)
+            self.assertEqual(self.fx.map_files()[0].read_bytes(), recorded)
             expected = self.fx.advance({"after-interruption.txt": "only the retry may fetch this commit\n"})
             result = defaultbranch.refresh(self.fx.lane, self.settings, env={})
             current = defaultbranch._mirror_path(self.fx.lane, {})
