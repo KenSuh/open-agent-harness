@@ -129,7 +129,7 @@ def main(argv: list[str]) -> int:
         probed = str(probe)
     except OSError as exc:
         probed = f"refused: {exc}"
-    remotes = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True).stdout
+    remotes = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True, encoding="utf-8").stdout
     schema = pathlib.Path(options.get("--output-schema", ""))
     schema_digest = "sha256:" + hashlib.sha256(schema.read_bytes()).hexdigest() if schema.is_file() else None
     record = {"argv": argv, "cwd": str(cwd), "env": dict(os.environ), "prompt": prompt,

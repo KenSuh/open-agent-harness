@@ -37,7 +37,7 @@ RULES = [{"id": "test-identity", "engine": "codex", "cli_versions": ["*"], "mode
 
 def git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
-                          env=git_env()).stdout.strip()
+                          encoding="utf-8", env=git_env()).stdout.strip()
 
 
 def same(path: str | os.PathLike) -> str:

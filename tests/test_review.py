@@ -50,7 +50,7 @@ def attempt_head(number: int, after_head: str = SHA_C, task: str = "t1") -> dict
 
 def git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
-                          env=git_env()).stdout.strip()
+                          encoding="utf-8", env=git_env()).stdout.strip()
 
 
 class SettingsTest(unittest.TestCase):
