@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from oah.config import ConfigError
 from oah.review import (ReviewError, authors, canary, context, prompt, receipts, runner, schema, settings,
@@ -418,6 +419,58 @@ class SnapshotTest(unittest.TestCase):
                 self.assertEqual(link.read_bytes(), b"print('hi')\n")
             else:  # native Windows Git may check links out as plain files
                 self.assertEqual(link.read_bytes(), b"src/app.py")
+
+    def test_snapshot_bytes_match_blobs_despite_line_endings_and_attributes(self):
+        repo = make_git_repo(self)
+        files = {"lf.txt": b"one\ntwo\n", "crlf.txt": b"one\r\ntwo\r\n",
+                 "nested/ident.txt": b"$Id$\n", "nested/encoded.txt": b"plain UTF-8\n"}
+        base = git_commit(repo, {".gitattributes": b"* -text\n", **files})
+        # Commit the existing byte-exact blobs, then introduce checkout conversions without re-adding them.
+        (repo / ".gitattributes").write_bytes(b"* text=auto eol=crlf\n")
+        (repo / "nested/.gitattributes").write_bytes(b"*.txt text eol=crlf ident working-tree-encoding=UTF-16LE\n")
+        git(repo, "add", ".gitattributes", "nested/.gitattributes")
+        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "introduce checkout conversions")
+        head = git(repo, "rev-parse", "HEAD")
+        expected = {name: subprocess.run(["git", "-C", str(repo), "cat-file", "blob", f"{head}:{name}"],
+                                         check=True, capture_output=True, env=git_env()).stdout for name in files}
+        self.assertEqual(expected, files)
+        for autocrlf in ("false", "true"):
+            with self.subTest(autocrlf=autocrlf), mock.patch.dict(os.environ, {
+                    "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.autocrlf", "GIT_CONFIG_VALUE_0": autocrlf,
+                    "GIT_CONFIG_KEY_1": "core.eol", "GIT_CONFIG_VALUE_1": "crlf"}):
+                with snapshot.make(repo, head, base=base) as snap:
+                    for name, blob in expected.items():
+                        with self.subTest(path=name):
+                            self.assertEqual((snap.tree / name).read_bytes(), blob)
+
+    def test_snapshot_ignores_global_and_tracked_smudge_filters(self):
+        repo = make_git_repo(self)
+        base = git_commit(repo, {"README.md": b"base\n"})
+        files = {"global.txt": b"global source\n", "nested/local.txt": b"local source\r\n"}
+        head = git_commit(repo, {**files, ".gitattributes": b"* -text\n",
+                                 "nested/.gitattributes": b"*.txt filter=oah-test\n"})
+        attributes = make_tmp_dir(self) / "attributes"
+        attributes.write_bytes(b"*.txt filter=oah-test\n")
+        # Git itself is a real, portable smudge process; its version output must never replace a blob.
+        with mock.patch.dict(os.environ, {
+                "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "core.attributesFile",
+                "GIT_CONFIG_VALUE_0": str(attributes), "GIT_CONFIG_KEY_1": "filter.oah-test.smudge",
+                "GIT_CONFIG_VALUE_1": "git --version", "GIT_CONFIG_KEY_2": "filter.oah-test.required",
+                "GIT_CONFIG_VALUE_2": "true"}):
+            with snapshot.make(repo, head, base=base) as snap:
+                for name, blob in files.items():
+                    with self.subTest(path=name):
+                        self.assertEqual((snap.tree / name).read_bytes(), blob)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows checkout")
+    def test_windows_snapshot_keeps_lf_with_autocrlf(self):
+        repo = make_git_repo(self)
+        base = git_commit(repo, {"README.md": b"base\n"})
+        head = git_commit(repo, {"src/app.py": b"print('hi')\n"})
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.autocrlf",
+                                          "GIT_CONFIG_VALUE_0": "true"}):
+            with snapshot.make(repo, head, base=base) as snap:
+                self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
 
     def test_strip_is_case_insensitive_at_every_depth(self):
         repo = make_git_repo(self)

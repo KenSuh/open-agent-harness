@@ -255,6 +255,72 @@ class SeriesTest(unittest.TestCase):
 
 
 class DecisionTest(unittest.TestCase):
+    def test_invalid_cross_base_decision_retries_instead_of_caching_old_approval(self):
+        for repeat_decision in (False, True):
+            with self.subTest(repeat_decision=repeat_decision):
+                project = Project(self, remote=True)
+                other_base = project.head
+                project.commit({"src/extra.py": "x = 1\n"})
+                project.queue({}, {"findings": [bug(fix_kind="design")]}, {"raw": "invalid"}, {})
+                self.assertEqual(project.review(base=project.base).code, "OAH_REVIEW_CONVERGED")
+                self.assertEqual(project.review(base=other_base).code, "OAH_REVIEW_NEEDS_DECISION")
+                project.refused("OAH_REVIEW_NEEDS_DECISION", base=project.base)
+                note = "keep the design and complete the re-review"
+                self.assertEqual(project.review(base=project.base, decision=note).code,
+                                 "OAH_REVIEW_OUTPUT_INVALID")
+                result = project.review(base=project.base, **({"decision": note} if repeat_decision else {}))
+                self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+                self.assertEqual(len(project.calls()), 4, "the unfinished decision round must run again")
+                receipt = project.receipt(3)
+                self.assertEqual((receipt["base"], receipt["series_round"]), (project.base, 2))
+                self.assertEqual(receipt["decision"], {"text": note, "after": "R2.json"})
+                self.assertIn(note, project.calls()[-1]["prompt"])
+                starts = [line for line in project.round_log() if line["event"] == "start"]
+                self.assertEqual([line["attempt"] for line in starts], [1, 1, 1, 2])
+                self.assertEqual(project.review(base=project.base).receipt_path, result.receipt_path)
+                self.assertEqual(len(project.calls()), 4)
+
+    def test_invalid_cross_base_decision_spends_normal_attempt_budget(self):
+        project = Project(self, remote=True)
+        other_base = project.head
+        project.commit({"src/extra.py": "x = 1\n"})
+        project.queue({}, {"findings": [bug(fix_kind="design")]}, {"raw": "invalid"}, {"raw": "invalid"}, {})
+        project.review(base=project.base)
+        project.review(base=other_base)
+        note = "retry the pending review"
+        self.assertEqual(project.review(base=project.base, decision=note).code, "OAH_REVIEW_OUTPUT_INVALID")
+        self.assertEqual(project.review(base=project.base).code, "OAH_REVIEW_OUTPUT_INVALID")
+        project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED", base=project.base)
+        project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED", base=project.base, decision=note)
+        result = project.review(base=project.base, extra_attempt=True)
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(project.receipt(3)["decision"]["text"], note)
+        self.assertEqual(len(project.calls()), 5)
+        starts = [line for line in project.round_log() if line["event"] == "start"]
+        self.assertEqual([line["attempt"] for line in starts], [1, 1, 1, 2, 3])
+
+    def test_cache_uses_only_the_latest_task_event_across_bases(self):
+        for step in ({}, {"raw": "invalid"}, "start-only"):
+            with self.subTest(step=step):
+                project = Project(self, remote=True)
+                other_base = project.head
+                project.commit({"src/extra.py": "x = 1\n"})
+                project.queue({}, *([] if step == "start-only" else [step]), {})
+                project.review(base=project.base)
+                if step == "start-only":
+                    receipts.log_round(project.state, "t1", {"event": "start", "base": other_base,
+                                                           "series_round": 1, "round": 2, "attempt": 1})
+                else:
+                    project.review(base=other_base)
+                result = project.review(base=project.base)
+                self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+                calls = 2 if step == "start-only" else 3
+                self.assertEqual(len(project.calls()), calls, "a later event invalidates the old base's cache")
+                self.assertEqual(result.receipt["base"], project.base)
+                self.assertEqual(result.receipt["series_round"], 2)
+                self.assertEqual(project.review(base=project.base).receipt_path, result.receipt_path)
+                self.assertEqual(len(project.calls()), calls)
+
     def test_counted_stop_in_task_log_blocks_later_legacy_cached_approval(self):
         project = Project(self, remote=True)
         other_base = project.head

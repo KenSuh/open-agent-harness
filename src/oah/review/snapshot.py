@@ -8,6 +8,8 @@ and everything under folders named like `STRIPPED_DIRS`, at any depth and in any
 case-insensitive file system loads `agents.md` as `AGENTS.md`). The index keeps them, so
 `git show <head>:<path>` still reads them. Hooks never run: the clone copies no template and every git call
 sets an empty `core.hooksPath`. Git context variables such as `GIT_DIR` are not passed on.
+Checkout disables line-ending conversion and overrides conversion attributes in `.git/info/attributes`,
+so regular files retain their committed blob bytes regardless of user or repository attributes and filters.
 
 The temporary folder is removed when the block ends, also on exceptions and interrupts. A folder that
 cannot be removed is reported through `warnings` instead of hiding the original error.
@@ -64,7 +66,8 @@ def _env() -> dict[str, str]:
 
 
 def _git(hooks: pathlib.Path, *args: str, cwd: pathlib.Path | None = None, timeout: float = GIT_TIMEOUT) -> str:
-    argv = [*git_argv(), "-c", f"core.hooksPath={hooks}"]
+    argv = [*git_argv(), "-c", f"core.hooksPath={hooks}", "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+            "-c", f"core.attributesFile={os.devnull}"]
     if cwd is not None:
         argv += ["-C", str(cwd)]
     result = run_command([*argv, *args], timeout=timeout, env=_env())
@@ -147,6 +150,11 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         tree = parent / "tree"
         _git(hooks, "clone", "--quiet", "--no-local", "--no-checkout", "--template=", "--", str(source), str(tree),
              timeout=CLONE_TIMEOUT)
+        info = tree / ".git" / "info"
+        info.mkdir(exist_ok=True)
+        # info/attributes outranks all .gitattributes, including nested files. Unset every
+        # checkout conversion: text/eol, external smudge filters, $Id$ and encoding conversion.
+        (info / "attributes").write_bytes(b"* -text -filter -ident -working-tree-encoding\n")
         _git(hooks, "checkout", "--quiet", "--detach", head, cwd=tree)
         found = _git(hooks, "rev-parse", "--verify", "HEAD^{commit}", cwd=tree).strip()
         if found != head:

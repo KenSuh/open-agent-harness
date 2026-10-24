@@ -14,7 +14,8 @@ Gate, before any paid call
     `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the task waits
     for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
     findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
-    decision). With no wait it returns `"converged"` for this series' cached approval at this head.
+    decision). With no wait it returns `"converged"` only when the task's latest event is an approval
+    for this base, head and complete intent binding. A later attempt invalidates every earlier approval.
     Otherwise it raises `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and
     `OAH_REVIEW_ATTEMPTS_EXHAUSTED` once `round_attempts` calls did not count, unless `--extra-attempt`. A call that
     starts with `--decision` settles the wait for the rest of its round (`round_decision`), until a later
@@ -212,10 +213,13 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
     if reason is not None and decision is None:
         raise ReviewError(NEEDS_DECISION, f"{reason}. Nothing was launched. Run oah review --task {s.task} "
                           '--decision "<what you decided>" to continue; the decision is recorded')
-    latest = s.latest
+    latest = s.task_latest
     if (reason is None and latest is not None and latest.record.get("outcome") == CONVERGED
-            and latest.record.get("head") == head and binding is not None
-            and latest.record.get("intent") == binding.to_json()):
+            and latest.record.get("base") == s.base and latest.record.get("head") == head and binding is not None
+            and latest.record.get("intent") == binding.to_json()
+            # Receipt numbering is task-wide. Publication supersedes that round's attempts;
+            # any higher-numbered call is a later, unfinished round, whatever its base.
+            and all(line.get("round", s.next_number) <= latest.record["round"] for line in s.log)):
         return CONVERGED
     if settings.max_rounds is not None and len(s.receipts) >= settings.max_rounds and not extra_round:
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this series has {len(s.receipts)} counted rounds, the "
