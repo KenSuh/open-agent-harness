@@ -1,6 +1,38 @@
 # 리뷰 결과 수정 — 최신 영수증의 P0/P1 발견을 Codex 작업자로 리스 작업 트리에서 한 번 고치고, 시도의 시작과 단 하나의 결과를 기록하며, 커밋 명령을 보여 주고 커밋을 시도에 묶는다.
 """`oah fix` without the command line (PLAN 5.9, A1, A6, A7, A17, A22).
 
+The dispatcher (the caller of these functions) owns every record; the corrector owns nothing. Each operation
+holds the task's review lock (`receipts.task_lock_path`, shared with `oah review`) and writes only through
+`receipts.publish`, in P6a's format. Nothing is ever rewritten.
+
+`correct(request, ...)` runs one Codex correction.
+- Refusals before dispatch, in this order: a dispatched worker (`OAH_FIX_WORKER_REFUSED`); a task without an
+  active lease, an unbound lease, or an intent that is not current or not committed at HEAD as bound
+  (`OAH_INTENT_NOT_CURRENT`); a correction stage other than Codex; proxy userinfo; a running `oah fix` or
+  `oah review` of the task (`OAH_FIX_BUSY`); an unfinished attempt; an applied attempt waiting for its commit;
+  any other history problem; no receipt, or a task's latest receipt that is not `changes-requested`; a dirty
+  tracked tree; a HEAD that does not descend from the reviewed head; and the findings (the receipt's P0/P1
+  findings without an applied attempt, or the ones named).
+- The corrector is an `oah.call` worker (stage `correction`, Codex `workspace-write`) in the lease's worktree,
+  with the reviewer's allowlisted environment. Its brief reads the packet committed at HEAD, the bytes a review
+  snapshot holds, so both briefs carry the same intent section.
+- The start record is published before launch, and exactly one outcome follows: `applied` (files changed),
+  `no-change`, `failed` (the run did not finish, its effort did not match, or HEAD moved) or `aborted`
+  (Ctrl-C or a stop signal, which also stops the corrector). Signals are held while a record is written.
+- The diff against the start head is printed and saved in the run folder (`correction.patch`,
+  `correction.json`) with the exact commit commands, which end the message with `Agent-Engine: codex`.
+
+`bind(task, ...)` binds the one applied attempt waiting for its commit to HEAD. HEAD must differ from and
+descend from its start head, the tracked tree must be clean and the attempt's new files committed, every new
+commit needs a known engine (`oah.review.authors`, the rule `oah review` uses) and one of them the attempt's
+engine, unless `engine` names who replaced its changes (recorded).
+
+`record_manual(task, engine=...)` records a correction already committed by `claude` or `human`: start,
+`applied` outcome and head binding. It starts from the newest bound result on the source receipt that HEAD
+contains, else from the reviewed head.
+
+`abort(task, ...)` records `aborted` for attempts whose `oah fix` stopped without an outcome (a hard kill).
+
 Round instructions
     `round_instructions(...)` fills `templates/review/correction.md`: the source receipt, the findings with
     their ids and class ids, and the class definitions, as bullets plus one fenced JSON block. Placeholders
@@ -8,13 +40,83 @@ Round instructions
 """
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import datetime as dt
 import json
+import os
+import pathlib
 import re
+import shutil
+import signal
+import tempfile
+import threading
 from importlib import resources
-from typing import Mapping, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
+from oah import call, call_cli, runs
+from oah import intent as oah_intent
+from oah.atomic import read_json, write_json_atomic, write_text_atomic
+from oah.engines.proc import run_command
+from oah.lease import Store
+from oah.lockfile import LockTimeout, StateLock
+from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
+from oah.review import ReviewError, authors, context, receipts, runner
+from oah.review.schema import BLOCKING
+from oah.scope import outside
+
+ENGINE = "codex"
+STAGE = "correction"
+MANUAL_ENGINES = ("claude", "human")
+DIFF_LINES = 400
+INTERRUPTED = "OAH_FIX_INTERRUPTED"
+OUTCOME_CODES = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE", "failed": "OAH_FIX_FAILED"}
 PLACEHOLDERS = ("TASK", "ATTEMPT", "RECEIPT", "RECEIPT_DIGEST", "BASE", "REVIEWED", "HEAD", "FINDINGS", "CLASSES")
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
+_SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+_STOP_SIGNALS = tuple(getattr(signal, name) for name in (("SIGBREAK",) if os.name == "nt" else ("SIGTERM", "SIGHUP"))
+                      if hasattr(signal, name))
+LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
+
+
+@dataclasses.dataclass(frozen=True)
+class Request:
+    task: str
+    findings: tuple[str, ...] = ()
+    tier: str | None = None
+    timeout_s: float | None = None
+
+
+@dataclasses.dataclass
+class Result:
+    code: str
+    exit_code: int
+    message: str
+    lines: list[str] = dataclasses.field(default_factory=list)
+    warnings: list[str] = dataclasses.field(default_factory=list)
+    attempt_id: str | None = None
+    outcome: str | None = None
+    records: list[dict] = dataclasses.field(default_factory=list)
+    commands: list[str] = dataclasses.field(default_factory=list)
+    next_command: str | None = None
+    run_dir: str | None = None
+
+    def to_json(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+class FixInterrupted(KeyboardInterrupt):
+    """Ctrl-C or a stop signal ended `oah fix` after the attempt's outcome was recorded."""
+
+    code = INTERRUPTED
+
+    def __init__(self, message: str) -> None:
+        self.message = f"{INTERRUPTED}: {message}"
+        super().__init__(self.message)
+
+
+def _iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _fence(text: str, language: str = "text") -> str:
@@ -26,6 +128,14 @@ def _fence(text: str, language: str = "text") -> str:
 
 def _line(text: object) -> str:
     return " ".join(str(text).split())
+
+
+def _ids(items: Iterable[str]) -> str:
+    return ", ".join(items)
+
+
+def _are(items: Sequence[str]) -> str:
+    return "is" if len(items) == 1 else "are"
 
 
 def round_instructions(*, task: str, attempt_id: str, receipt: str, receipt_digest: str, base: str, reviewed: str,
@@ -46,3 +156,864 @@ def round_instructions(*, task: str, attempt_id: str, receipt: str, receipt_dige
                              f"{_line(item.get('rule', ''))}" for item in classes) or "(none recorded)",
     }
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], template)
+
+
+# Signals -----------------------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _held_signals() -> Iterator[list[int]]:
+    """Hold Ctrl-C and stop signals while a record is written; the caller decides afterwards what they meant."""
+    held: list[int] = []
+    saved: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGINT, *_STOP_SIGNALS):
+            try:
+                if signal.getsignal(number) in (signal.SIG_IGN, None):
+                    continue  # ignored on purpose (a background job, nohup), or owned by foreign code
+                saved[number] = signal.signal(number, lambda signum, _frame: held.append(signum))
+            except (OSError, ValueError):
+                continue
+    try:
+        yield held
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def _stop_signals() -> Iterator[None]:
+    """While Codex runs, a stop signal (SIGTERM, SIGHUP; SIGBREAK on Windows) stops it the way Ctrl-C does."""
+    def stop(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    saved: dict[int, object] = {}
+    if threading.current_thread() is threading.main_thread():
+        for number in _STOP_SIGNALS:
+            try:
+                if signal.getsignal(number) is signal.SIG_DFL:
+                    saved[number] = signal.signal(number, stop)
+            except (OSError, ValueError):
+                continue
+    try:
+        yield
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
+
+
+# The task, its intent and its history ------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _Task:
+    name: str
+    state: pathlib.Path
+    lease: object  # oah.lease.Lease
+    root: pathlib.Path
+
+
+def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) -> _Task:
+    if env.get("OAH_WORKER") == "1":
+        raise ReviewError("OAH_FIX_WORKER_REFUSED", "dispatched workers do not run or record corrections; return your "
+                          "work to the dispatcher, who runs oah fix")
+    info = repo_info(pathlib.Path(cwd))
+    state = state_dir(info, env)
+    receipts.review_dir(state, task)
+    lease = next((lease for lease, stale in Store(state).snapshot() if lease.task == task and not stale), None)
+    if lease is None:
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {task} has no active lease, so oah fix has no current intent "
+                          f"or worktree to work with. {nothing}. Bind the accepted packet with oah start --task {task} "
+                          f"--agent <you> --packet .oah/tasks/{task}/PACKET.md (use your packet's path), then run the "
+                          "command again")
+    root = pathlib.Path(lease.worktree)
+    if not root.is_dir():
+        raise ReviewError("OAH_WORKTREE_UNRESOLVED", f"the lease of task {task} names the worktree {root}, which no "
+                          f"longer exists. {nothing}. Release it with oah release --task {task} --agent {lease.agent} "
+                          '--reason "worktree removed", then start the lease again in the task\'s worktree')
+    return _Task(task, state, lease, root)
+
+
+def _committed_reader(root: pathlib.Path) -> Callable[[pathlib.Path], str]:
+    """Read a packet as committed at HEAD: the bytes a review snapshot holds, whatever the checkout converted."""
+    def read(path: pathlib.Path) -> str:
+        try:
+            relative = pathlib.Path(path).relative_to(root).as_posix()
+        except ValueError:
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{path} is outside the worktree") from None
+        shown = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"HEAD:{relative}"],
+                            timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
+        if shown.timed_out or shown.returncode != 0:
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_MISSING", f"{relative} is not committed at HEAD")
+        data = shown.stdout.encode("latin-1")
+        if len(data) >= oah_intent.MAX_BYTES:
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at HEAD is too large for a packet")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise oah_intent.SourceError("OAH_INTENT_SOURCE_INVALID", f"{relative} at HEAD is not UTF-8 text") from None
+        return text[1:] if text.startswith("\ufeff") else text
+
+    return read
+
+
+def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
+    binding = t.lease.binding()
+    rebind = (f"oah start --task {t.name} --agent {t.lease.agent} --packet "
+              f"{binding.source if binding else f'.oah/tasks/{t.name}/PACKET.md'}")
+    if binding is None:
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {t.name} has a lease without an intent binding (unbound), so "
+                          f"there is no current intent to correct against. {nothing}. Bind the accepted packet with "
+                          f"{rebind} (use your packet's path), then run the command again")
+    found, reason = oah_intent.explain_binding(binding, t.root)
+    if found != "current":
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {t.name} is bound to {binding.line()} and that intent is "
+                          f"{found}: {reason}. {nothing}. Restore {binding.source} as it was bound, or raise its "
+                          f"Revision, accept it and rebind with {rebind}; then run the command again")
+    try:
+        committed = oah_intent.parse(_committed_reader(t.root)(oah_intent.source_path(binding, t.root)))
+    except (oah_intent.SourceError, oah_intent.IntentInvalid):
+        committed = None
+    if committed is None or committed.digest != binding.digest:
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"{binding.source} is not committed at HEAD as bound "
+                          f"({binding.line()}). {nothing}. Correction and review briefs carry the committed packet, "
+                          "so commit it as bound, then run the command again")
+    return binding
+
+
+@dataclasses.dataclass(frozen=True)
+class _History:
+    records: receipts.Records
+    attempts: tuple[receipts.Attempt, ...]
+
+    def start(self, attempt: receipts.Attempt) -> dict | None:
+        return next((entry.record for entry in self.records.entries
+                     if entry.kind == "attempt-start" and entry.record["attempt_id"] == attempt.attempt_id), None)
+
+    def unfinished(self) -> list[receipts.Attempt]:
+        return [item for item in self.attempts if not any(name.endswith("-outcome.json") for name in item.names)]
+
+    def waiting(self) -> list[receipts.Attempt]:
+        """Applied attempts whose result is not bound to a commit yet."""
+        return [item for item in self.attempts if item.outcome == "applied" and item.after_head is None]
+
+    def problems(self, *, besides: receipts.Attempt | None = None) -> list[str]:
+        found = list(self.records.problems)
+        for item in self.attempts:
+            if besides is None or item.attempt_id != besides.attempt_id:
+                found.extend(item.problems)
+        return found
+
+    def next_id(self) -> str:
+        numbers = [int(entry.record["attempt_id"][1:]) for entry in self.records.entries if entry.kind != "receipt"]
+        return f"A{max(numbers, default=0) + 1}"
+
+
+def _history(t: _Task) -> _History:
+    records = receipts.load(t.state, t.name)
+    return _History(records, tuple(receipts.attempts(records)))
+
+
+def _unfinished(t: _Task, attempts: Sequence[receipts.Attempt], nothing: str) -> ReviewError:
+    ids = _ids([item.attempt_id for item in attempts])
+    return ReviewError("OAH_FIX_ATTEMPT_UNFINISHED", f"{ids} {_are(attempts)} unfinished: the start is recorded but no "
+                       "outcome, because the oah fix that started it stopped early (killed or crashed). "
+                       f"{nothing}. Make sure "
+                       f"no oah fix or Codex process is still running in {t.root}, check git status there for changes "
+                       f"it may have left, then run oah fix --abort --task {t.name} to record it as aborted")
+
+
+def _check_history(t: _Task, h: _History, nothing: str) -> None:
+    unfinished = h.unfinished()
+    if unfinished:
+        raise _unfinished(t, unfinished, nothing)
+    waiting = h.waiting()
+    if waiting:
+        raise ReviewError("OAH_FIX_BIND_REQUIRED", f"{waiting[0].attempt_id} applied a correction that is not bound "
+                          f"to a commit yet. {nothing}. Commit it (oah fix printed the commands), then run oah fix "
+                          f"--bind --task {t.name}; the next correction or review needs that binding first")
+    problems = h.problems()
+    if problems:
+        raise ReviewError("OAH_FIX_HISTORY_INVALID", f"the review history of task {t.name} is incomplete or was changed, "
+                          f"so no correction can be recorded against it. {nothing}:\n- " + "\n- ".join(problems) +
+                          "\nRestore or complete the records first, then run the command again")
+
+
+def _source(t: _Task, h: _History, nothing: str) -> receipts.Entry:
+    found = h.records.receipts()
+    if not found:
+        raise ReviewError("OAH_FIX_NOTHING_TO_FIX", f"task {t.name} has no review receipt yet, so there are no findings "
+                          f"to correct. {nothing}. Run oah review --task {t.name} first")
+    latest = found[-1]
+    outcome = latest.record["outcome"]
+    if outcome == "converged":
+        raise ReviewError("OAH_FIX_NOT_REQUESTED", f"{latest.name} converged (the review approved head "
+                          f"{latest.record['head'][:12]}), so there is nothing to correct. {nothing}. Run oah review "
+                          f"--task {t.name} for new work, or finish the task")
+    if outcome != "changes-requested":
+        raise ReviewError("OAH_FIX_NOT_REQUESTED", f"{latest.name} stopped the series for a decision "
+                          f"({latest.record.get('decision_stop_reason')}), so oah fix does not correct it. {nothing}. "
+                          f'Decide how to continue, then run oah review --task {t.name} --decision "<what you decided>"')
+    return latest
+
+
+def _git_failed(root: pathlib.Path, what: str, result) -> ReviewError:
+    detail = "timed out" if result.timed_out else (result.stderr.strip() or "no output")
+    return ReviewError("OAH_FIX_GIT_FAILED", f"git could not {what} in {root} ({detail}); check the repository and retry")
+
+
+def _head(root: pathlib.Path) -> str:
+    result = run_git(root, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    head = result.stdout.strip()
+    if result.returncode != 0 or not receipts.SHA_RE.fullmatch(head):
+        raise _git_failed(root, "read HEAD", result)
+    return head
+
+
+def _is_ancestor(root: pathlib.Path, commit: str, head: str) -> bool:
+    return run_git(root, "merge-base", "--is-ancestor", commit, head).returncode == 0
+
+
+def _names(root: pathlib.Path, *args: str) -> list[str]:
+    result = run_git(root, *args)
+    if result.returncode != 0 or result.timed_out:
+        raise _git_failed(root, "list the changed files", result)
+    return [name for name in result.stdout.split("\0") if name]
+
+
+def _untracked(root: pathlib.Path) -> list[str]:
+    return _names(root, "ls-files", "--others", "--exclude-standard", "-z")
+
+
+def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str) -> None:
+    dirty = context.tracked_dirty(t.root)
+    if dirty:
+        listed = _ids(dirty[:10]) + (f" and {len(dirty) - 10} more" if len(dirty) > 10 else "")
+        raise ReviewError("OAH_FIX_DIRTY_TREE", f"tracked files have uncommitted changes ({listed}). {nothing}. A "
+                          "correction is recorded against a clean, committed tree, so commit or stash them first, then "
+                          "run the command again")
+    reviewed = receipt.record["head"]
+    if not _is_ancestor(t.root, reviewed, head):
+        raise ReviewError("OAH_FIX_HEAD_UNRELATED", f"HEAD {head} does not descend from {reviewed}, the head "
+                          f"{receipt.name} reviewed (the branch was switched or rewritten). {nothing}. Check out the "
+                          f"reviewed branch, or review the current head first with oah review --task {t.name}")
+
+
+def _select(t: _Task, receipt: receipts.Entry, h: _History, chosen: Sequence[str], nothing: str) -> list[dict]:
+    blocking = [item for item in receipt.record["findings"] if item.get("severity") in BLOCKING]
+    known = [item["finding_id"] for item in blocking]
+    if chosen:
+        unknown = [ident for ident in dict.fromkeys(chosen) if ident not in known]
+        if unknown:
+            raise ReviewError("OAH_FIX_FINDING_UNKNOWN", f"{_ids(unknown)} {_are(unknown)} not a P0 or P1 finding of "
+                              f"{receipt.name}. {nothing}. Its P0/P1 findings are "
+                              f"{_ids(known) or 'none'}; name one of them with --finding, or leave --finding out")
+        return [item for item in blocking if item["finding_id"] in set(chosen)]
+    applied: dict[str, str] = {}
+    for attempt in h.attempts:
+        if attempt.source_receipt_digest == receipt.digest and attempt.outcome == "applied":
+            for ident in attempt.finding_ids:
+                applied.setdefault(ident, attempt.attempt_id)
+    picked = [item for item in blocking if item["finding_id"] not in applied]
+    if not picked:
+        raise ReviewError("OAH_FIX_NOTHING_TO_FIX", f"every P0/P1 finding of {receipt.name} already has an applied "
+                          f"correction ({_ids(sorted(set(applied.values())))}). {nothing}. Run oah review --task "
+                          f"{t.name} for the next round, or name a finding with --finding to correct it again")
+    return picked
+
+
+def _classes(h: _History, findings: Sequence[Mapping]) -> tuple[list[str], list[dict]]:
+    defined: dict[str, dict] = {}
+    for entry in h.records.receipts():
+        for item in entry.record.get("classes", []):
+            defined.setdefault(item["class_id"], item)
+    ids = list(dict.fromkeys(item["class_id"] for item in findings))
+    return ids, [defined.get(ident, {"class_id": ident, "mechanism": "(not recorded)", "rule": "(not recorded)"})
+                 for ident in ids]
+
+
+@contextlib.contextmanager
+def _task_lock(t: _Task) -> Iterator[None]:
+    lock = StateLock(receipts.task_lock_path(t.state, t.name), timeout=0)
+    try:
+        lock.__enter__()
+    except LockTimeout:
+        raise ReviewError("OAH_FIX_BUSY", f"another oah fix or oah review of task {t.name} is running; wait for it to "
+                          "finish, then run the command again") from None
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]], Result]) -> Result:
+    """Run an operation; an error that carries a runtime credential is replaced by a redacted one."""
+    redact = runner.credential_redactor(env)
+    try:
+        return operation(redact)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        message = str(exc)
+        if redact(message) == message:
+            raise
+        code = getattr(exc, "code", "OAH_FIX_FAILED")
+        message = redact(message)
+        message = message[len(code) + 2:] if message.startswith(code + ": ") else message
+        safe = ReviewError(code, message)
+    raise safe from None
+
+
+# Changes in the worktree -------------------------------------------------------------------------
+
+
+def _git_bytes(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,)) -> bytes:
+    result = run_command([*git_argv(), "-C", str(root), *args], timeout=GIT_TIMEOUT, encoding="latin-1")
+    if result.timed_out or result.returncode not in ok:
+        raise _git_failed(root, "show the change", result)
+    return result.stdout.encode("latin-1")
+
+
+@dataclasses.dataclass(frozen=True)
+class _Changes:
+    tracked: tuple[str, ...]  # changed, added in the index, or deleted, against the start head
+    new: tuple[str, ...]  # untracked files that did not exist before the run
+
+    @property
+    def files(self) -> list[str]:
+        return list(self.tracked) + [name for name in self.new if name not in self.tracked]
+
+
+def _changes(root: pathlib.Path, before: str, untracked: Sequence[str]) -> _Changes:
+    tracked = _names(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", before, "--")
+    earlier = set(untracked)
+    return _Changes(tuple(tracked), tuple(name for name in _untracked(root) if name not in earlier))
+
+
+def _patch(root: pathlib.Path, before: str, changes: _Changes) -> bytes:
+    parts = [_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", before, "--")]
+    for name in changes.new:
+        parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--",
+                                "/dev/null", name, ok=(0, 1)))
+    return b"".join(parts)
+
+
+def _git_word(path: str) -> str | None:
+    """A path as one shell word that sh and PowerShell read the same way; None when no quoting is safe."""
+    if _SAFE_PATH.fullmatch(path):
+        return path
+    if "'" in path or not path.isprintable():
+        return None
+    return f"':(literal){path}'"
+
+
+def commit_commands(*, task: str, attempt_id: str, receipt: str, finding_ids: Sequence[str],
+                    changes: _Changes) -> tuple[list[str], list[str]]:
+    """The exact commands that commit a Codex correction, and the new files they could not name."""
+    commands = ["git add -u"] if changes.tracked else []
+    words, unquoted = [], []
+    for name in changes.new:
+        word = _git_word(name)
+        (words if word else unquoted).append(word or name)
+    if words:
+        commands.append("git add -- " + " ".join(words))
+    named = _ids(finding_ids) if len(finding_ids) <= 4 else f"{len(finding_ids)} findings"
+    commands.append(f'git commit -m "Correct {named} of {receipt} in task {task} (oah fix {attempt_id})" '
+                    '-m "Agent-Engine: codex"')
+    return commands, unquoted
+
+
+# The correction run ------------------------------------------------------------------------------
+
+
+def correct(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keychain=None,
+            rules: Sequence[Mapping] | None = None, temp_root: pathlib.Path | None = None) -> Result:
+    """Run one Codex correction of the task's latest review; refusals raise ReviewError before any launch."""
+    return _guarded(env, lambda redact: _correct(request, cwd=cwd, env=env, keychain=keychain, rules=rules,
+                                                 temp_root=temp_root, redact=redact))
+
+
+def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) -> Result:
+    t = _task(request.task, cwd, env, LAUNCHED)
+    binding = _check_intent(t, LAUNCHED)
+    settings = call_cli.load_settings(t.root)
+    stage = settings.stages.get(STAGE)
+    if stage != ENGINE:
+        raise ReviewError("OAH_FIX_ENGINE_UNSUPPORTED", f"[stages] correction is {stage!r} in .oah/config.toml, and oah "
+                          f"fix runs Codex corrections. {LAUNCHED}. Set [stages] correction = \"codex\" and install "
+                          f"Codex, or record a correction Claude made with oah fix --manual --engine claude --task "
+                          f"{t.name}")
+    try:
+        launch_env = runner.reviewer_env(env)
+    except ReviewError as exc:
+        if exc.code != "OAH_REVIEW_PROXY_CREDENTIALS":
+            raise
+        raise ReviewError("OAH_FIX_PROXY_CREDENTIALS", f"proxy userinfo is not allowed in the corrector's environment. "
+                          f"{LAUNCHED}. Use a credential-free proxy or Codex's own configuration, then run oah fix "
+                          "again") from None
+    with _task_lock(t):
+        h = _history(t)
+        _check_history(t, h, LAUNCHED)
+        receipt = _source(t, h, LAUNCHED)
+        before = _head(t.root)
+        _check_tree(t, receipt, before, LAUNCHED)
+        findings = _select(t, receipt, h, request.findings, LAUNCHED)
+        class_ids, classes = _classes(h, findings)
+        attempt_id = h.next_id()
+        untracked = _untracked(t.root)
+        instructions = round_instructions(
+            task=t.name, attempt_id=attempt_id, receipt=receipt.name.removesuffix(".json"),
+            receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
+            findings=findings, classes=classes)
+        tools = call_cli.intent_tools()
+        scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-fix-", dir=temp_root))
+        try:
+            final = scratch / "last-message.md"
+            prepared = call.prepare(
+                call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
+                                 round_instructions=redact(instructions), timeout_s=request.timeout_s,
+                                 output_last_message=str(final)),
+                settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
+                has_footer=tools.has_footer, parse_intent=tools.parse, read_source=_committed_reader(t.root),
+                keychain=keychain)
+            attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact)
+            return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+@dataclasses.dataclass
+class _Attempt:
+    t: _Task
+    attempt_id: str
+    receipt: receipts.Entry
+    findings: list[dict]
+    class_ids: list[str]
+    before: str
+    prepared: call.Prepared
+    binding: oah_intent.Binding
+    redact: Callable[[str], str]
+    published: list[dict] = dataclasses.field(default_factory=list)
+    ended: bool = False
+
+    @property
+    def finding_ids(self) -> list[str]:
+        return [item["finding_id"] for item in self.findings]
+
+    @property
+    def run_id(self) -> str:
+        return self.prepared.run_id
+
+    def _publish(self, kind: str, fields: dict, summary: dict | None = None) -> None:
+        record = {"schema": receipts.SCHEMA, "kind": f"attempt-{kind}", "task": self.t.name,
+                  "attempt_id": self.attempt_id, **fields}
+        name = f"{self.attempt_id}-{kind}.json"
+        digest = receipts.publish(self.t.state, self.t.name, name, record, summary=summary)
+        self.published.append({"name": name, "digest": digest})
+
+    def _end(self, outcome: str, evidence: str) -> None:
+        self._publish("outcome", {"outcome": outcome, "after_head": None,
+                                  "evidence": self.redact(evidence)[:2000] or "(no evidence)",
+                                  "finished_at": _iso(), "run_id": self.run_id}, {"outcome": outcome})
+        self.ended = True
+
+    def _left_behind(self, untracked: Sequence[str]) -> str:
+        try:
+            files = _changes(self.t.root, self.before, untracked).files
+        except ReviewError:
+            return "; oah could not list the changes it left in the worktree"
+        return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
+
+    def run(self, *, launch_env, rules, final: pathlib.Path, untracked: Sequence[str]) -> Result:
+        start = {"source_receipt": self.receipt.name, "source_receipt_digest": self.receipt.digest,
+                 "finding_ids": self.finding_ids, "class_ids": self.class_ids, "before_head": self.before,
+                 "engine": ENGINE, "manual": False, "started_at": _iso(), "run_id": self.run_id}
+        try:
+            with _held_signals() as held:
+                self._publish("start", start)
+            if held:
+                with _held_signals():
+                    self._end("aborted", f"oah fix was interrupted while it recorded the start of {self.attempt_id}; "
+                                         f"codex run {self.run_id} was never launched")
+                raise FixInterrupted(f"{self.attempt_id} was recorded as aborted before Codex started; nothing was "
+                                     f"launched. Run oah fix --task {self.t.name} again when you are ready")
+            with _stop_signals():
+                run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
+        except FixInterrupted:
+            raise
+        except BaseException as exc:
+            if not self.published or self.ended:
+                raise
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            with _held_signals():
+                if interrupted:
+                    self._end("aborted", f"codex run {self.run_id} was interrupted ({str(exc) or 'Ctrl-C'}) and oah "
+                                         f"stopped its process tree{self._left_behind(untracked)}")
+                else:
+                    self._end("failed", f"codex run {self.run_id} did not complete: {str(exc)[:300]}"
+                                        f"{self._left_behind(untracked)}")
+            if interrupted:
+                raise FixInterrupted(f"{self.attempt_id} was interrupted and recorded as aborted; oah stopped Codex. "
+                                     f"Check git status in {self.t.root} for changes it may have left, then run oah "
+                                     f"fix --task {self.t.name} again or correct the findings yourself") from None
+            code = getattr(exc, "code", "OAH_FIX_FAILED")
+            text = str(exc)
+            text = text[len(code) + 2:] if text.startswith(code + ": ") else text
+            raise ReviewError(code, f"{text}. {self.attempt_id} was recorded as failed; fix the cause, then run oah "
+                              f"fix --task {self.t.name} again") from None
+        with _held_signals() as held:
+            try:
+                judged = self._judge(run, final, untracked)
+            except Exception as exc:
+                self._end("failed", f"codex run {self.run_id} ended ({run.get('status')}), but oah could not inspect "
+                                    f"the worktree: {str(exc)[:300]}")
+                raise
+            self._end(judged.outcome, judged.evidence)
+        result = self._result(judged)
+        if held:
+            result.warnings.append(f"{INTERRUPTED}: a stop signal arrived after Codex finished; the outcome of "
+                                   f"{self.attempt_id} was recorded first")
+        return result
+
+    def _judge(self, run: dict, final: pathlib.Path, untracked: Sequence[str]) -> "_Judged":
+        root, rid = self.t.root, self.run_id
+        head = _head(root)
+        changes = _changes(root, self.before, untracked)
+        raw = _patch(root, self.before, changes)
+        patch = self.redact(raw.decode("utf-8", errors="replace"))
+        digest = receipts.digest(raw)
+        last = runs._contained_path(final.parent, final.name)
+        message = self.redact(last.read_bytes().decode("utf-8", errors="replace")) if last.is_file() else ""
+        if message:
+            write_text_atomic(self.prepared.run.file_path("last-message.md"), message)
+        verified = "verified" if run.get("effort_verified") is True else "unverified"
+        effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')}, {verified})"
+        files = changes.files
+        named = _ids(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
+        error = str(run.get("error") or run.get("status")).split("; ", 1)[0]
+        if head != self.before:
+            outcome = "failed"
+            reason = (f"HEAD moved from {self.before} to {head} during the run, so its result cannot be attributed to "
+                      f"{self.attempt_id}")
+            evidence = f"codex run {rid} ended ({run.get('status')}), but {reason}"
+        elif run.get("status") != "finished":
+            outcome, reason = "failed", error
+            evidence = f"codex run {rid} {run.get('status')}: {error}; {effort}"
+        elif files:
+            outcome, reason = "applied", None
+            evidence = f"codex run {rid} finished and changed {len(files)} file(s): {named}; changes {digest}; {effort}"
+        else:
+            outcome, reason = "no-change", None
+            evidence = f"codex run {rid} finished without changing any file; {effort}"
+        if outcome == "failed" and files:
+            evidence += f"; it left {len(files)} changed file(s) in the worktree: {named}"
+        commands, unquoted = (commit_commands(task=self.t.name, attempt_id=self.attempt_id,
+                                              receipt=self.receipt.name.removesuffix(".json"),
+                                              finding_ids=self.finding_ids, changes=changes)
+                              if outcome == "applied" else ([], []))
+        beyond = outside(self.t.lease.scope, files)
+        write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
+        write_json_atomic(self.prepared.run.file_path("correction.json"), {
+            "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,
+            "changed": list(changes.tracked), "new_files": list(changes.new), "changes_sha256": digest,
+            "commands": commands, "out_of_scope": beyond})
+        return _Judged(outcome, evidence, reason, changes, patch, effort, commands, unquoted, beyond, message, head)
+
+    def _result(self, judged: "_Judged") -> Result:
+        t, ids, receipt = self.t, _ids(self.finding_ids), self.receipt.name.removesuffix(".json")
+        warnings: list[str] = []
+        if judged.beyond:
+            warnings.append(f"OAH_FIX_OUT_OF_SCOPE: Codex changed files outside the scope {_ids(t.lease.scope)} of "
+                            f"task {t.name}: {_ids(judged.beyond)}. Restore them (git restore -- <path>, or delete new "
+                            "files) before you commit, or widen the scope with oah renew --scope")
+        found, reason = oah_intent.explain_binding(self.binding, t.root)
+        if found != "current":
+            warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent {self.binding.source} is "
+                            f"{found} ({reason}). Restore it with git restore -- {self.binding.source} before you commit; "
+                            "a changed goal needs a new revision, never an edit by a correction")
+        problems = oah_intent.check_return(judged.message, self.binding) if judged.outcome != "failed" else []
+        if problems:
+            warnings.append("OAH_FIX_RETURN_INVALID: the corrector's return does not match the bound intent: "
+                            + "; ".join(item.message for item in problems) + ". Read its last message in the run "
+                            "folder before you rely on it")
+        warnings += [f"OAH_FIX_UNQUOTABLE_PATH: {name!r} cannot be written safely for every shell; add it to the "
+                     "commit yourself with git add" for name in judged.unquoted]
+        lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
+        if judged.changes.files:
+            lines.append("changed files: " + _ids(judged.changes.tracked + tuple(f"{name} (new)"
+                                                                                    for name in judged.changes.new)))
+            shown = judged.patch.splitlines()
+            lines += shown[:DIFF_LINES]
+            if len(shown) > DIFF_LINES:
+                lines.append(f"… {len(shown) - DIFF_LINES} more lines: run git diff {self.before} in {t.root}, or read "
+                             f"correction.patch in the run folder")
+        result = Result(OUTCOME_CODES[judged.outcome], 0 if judged.outcome == "applied" else 1, "", lines=lines,
+                        warnings=warnings, attempt_id=self.attempt_id, outcome=judged.outcome,
+                        records=list(self.published), run_dir=self.prepared.run_dir)
+        if judged.outcome == "applied":
+            result.commands = list(judged.commands)
+            result.next_command = f"oah fix --bind --task {t.name}"
+            result.message = (f"OAH_FIX_APPLIED: {self.attempt_id} changed the worktree to correct {ids} of {receipt} "
+                              f"in task {t.name}. Nothing is committed yet: review the change, commit it with the "
+                              f"commands below, then run {result.next_command} so the next review counts it")
+            result.lines += ["Commit the correction with:", *result.commands, "Then bind the commit to the attempt:",
+                             result.next_command]
+        elif judged.outcome == "no-change":
+            result.message = (f"OAH_FIX_NO_CHANGE: {self.attempt_id} finished without changing any file; {ids} of "
+                              f"{receipt} {_are(self.finding_ids)} recorded as attempted (no-change). Correct the "
+                              f"findings yourself, commit, and record that with oah fix --manual --engine human|claude "
+                              f"--task {t.name}, or run oah fix --task {t.name} again to retry")
+        else:
+            if judged.head != self.before:
+                left = (f" Codex cannot commit in its sandbox, so something else moved HEAD; see git log "
+                        f"{self.before[:12]}..HEAD and decide what to keep before you go on.")
+            elif judged.changes.files:
+                left = (f" It left changes in the worktree ({_ids(judged.changes.files[:20])}); inspect them with git "
+                        f"diff, then discard them (git restore --source=HEAD --staged --worktree -- . and delete the "
+                        f"new files) before you run oah fix again.")
+            else:
+                left = ""
+            result.message = (f"OAH_FIX_FAILED: {self.attempt_id} failed: {judged.reason}. {ids} of {receipt} "
+                              f"{_are(self.finding_ids)} recorded as attempted (failed), and the run's changes do not "
+                              f"count.{left} Fix the cause, then run oah fix --task {t.name} again")
+        return result
+
+
+@dataclasses.dataclass(frozen=True)
+class _Judged:
+    outcome: str
+    evidence: str
+    reason: str | None
+    changes: _Changes
+    patch: str
+    effort: str
+    commands: list[str]
+    unquoted: list[str]
+    beyond: list[str]
+    message: str
+    head: str
+
+
+# Binding, manual corrections and recovery --------------------------------------------------------
+
+
+def _attribution(t: _Task, before: str, head: str, engine: str, nothing: str, *,
+                 replaced: str | None = None) -> list[tuple[str, str]]:
+    """The new commits' engines; each must be known and one of them `engine`."""
+    commits = authors.commit_engines(t.root, before, head)
+    unknown = [sha for sha, found in commits if found == authors.UNKNOWN]
+    if unknown:
+        raise ReviewError("OAH_FIX_TRAILER_MISSING", f"commit {_ids(sha[:12] for sha in unknown)} in "
+                          f"{before[:12]}..{head[:12]} carries no single valid Agent-Engine trailer (claude, codex or "
+                          f"human), so the next review could not tell who wrote it. {nothing}. Add the trailer (for the "
+                          f'newest commit: git commit --amend --no-edit --trailer "Agent-Engine: {engine}"), then run '
+                          "the command again")
+    engines = sorted({found for _sha, found in commits})
+    if engine not in engines:
+        if replaced is not None:
+            hint = (f"If these commits hold {replaced}'s changes, change their Agent-Engine trailer to {replaced} (git "
+                    "commit --amend) so the next review labels its independence honestly, then run oah fix --bind "
+                    f"again. If you replaced {replaced}'s changes with your own correction, run oah fix --bind --task "
+                    f"{t.name} --engine <who wrote it>; that is recorded")
+        else:
+            hint = ("Commit the correction with that trailer, or name the engine that wrote it with --engine "
+                    "claude|human")
+        raise ReviewError("OAH_FIX_ENGINE_MISMATCH", f"no commit in {before[:12]}..{head[:12]} carries Agent-Engine: "
+                          f"{engine} (found: {_ids(engines)}). {nothing}. {hint}")
+    return commits
+
+
+def _authored(commits: Sequence[tuple[str, str]]) -> str:
+    return _ids(f"{sha[:12]} ({engine})" for sha, engine in reversed(commits))
+
+
+def bind(task: str, *, cwd: pathlib.Path, env: Mapping[str, str], engine: str | None = None) -> Result:
+    """Bind the committed result of the applied attempt that waits for it (PLAN 5.9 head binding)."""
+    return _guarded(env, lambda redact: _bind(task, cwd=cwd, env=env, engine=engine, redact=redact))
+
+
+def _bind(task: str, *, cwd, env, engine, redact) -> Result:
+    t = _task(task, cwd, env, RECORDED)
+    with _task_lock(t):
+        h = _history(t)
+        unfinished = h.unfinished()
+        if unfinished:
+            raise _unfinished(t, unfinished, RECORDED)
+        waiting = h.waiting()
+        if not waiting:
+            raise ReviewError("OAH_FIX_NOTHING_TO_BIND", f"no applied correction of task {t.name} waits for its commit. "
+                              f"{RECORDED}. Run oah fix --task {t.name} to correct the latest review, or record a "
+                              "correction you made with oah fix --manual")
+        if len(waiting) > 1:
+            raise ReviewError("OAH_FIX_HISTORY_INVALID", f"{_ids(item.attempt_id for item in waiting)} all wait for a "
+                              f"commit, which oah fix never leaves behind. {RECORDED}. Inspect the records of task "
+                              f"{t.name} before you bind anything")
+        attempt = waiting[0]
+        start = h.start(attempt)
+        # A well-formed attempt that waits for its commit has exactly that one problem (receipts._merge).
+        problems = h.problems(besides=attempt) + (list(attempt.problems) if len(attempt.problems) != 1 else [])
+        if problems or start is None:
+            raise ReviewError("OAH_FIX_HISTORY_INVALID", f"the review history of task {t.name} is incomplete or was "
+                              f"changed. {RECORDED}:\n- " + "\n- ".join(problems or attempt.problems))
+        written_by = engine or start["engine"]
+        before, head = attempt.before_head, _head(t.root)
+        saved = _saved_correction(t, start)
+        if head == before:
+            commands = saved.get("commands") or []
+            shown = (" with:\n" + "\n".join(commands)) if commands else ""
+            raise ReviewError("OAH_FIX_NOT_COMMITTED", f"{attempt.attempt_id} waits for its commit, but HEAD is still "
+                              f"its start head {before[:12]}. {RECORDED}. Commit the correction{shown}\nthen run oah fix "
+                              f"--bind --task {t.name} again. If you rejected the change, commit your own correction, "
+                              "or a revert of it, and bind that")
+        if not _is_ancestor(t.root, before, head):
+            raise ReviewError("OAH_FIX_HEAD_UNRELATED", f"HEAD {head} does not descend from {before}, where "
+                              f"{attempt.attempt_id} started (the branch was switched or rewritten). {RECORDED}. Check "
+                              "out the branch that holds the committed correction, then run oah fix --bind again")
+        dirty = context.tracked_dirty(t.root)
+        untracked = set(_untracked(t.root))
+        left = [name for name in saved.get("new_files") or [] if name in untracked]
+        if dirty or left:
+            listed = _ids(dirty[:10] + [f"{name} (new, not committed)" for name in left[:10]])
+            raise ReviewError("OAH_FIX_DIRTY_TREE", f"the worktree still has uncommitted changes ({listed}). {RECORDED}. "
+                              f"Commit what belongs to {attempt.attempt_id}'s correction and discard the rest, then "
+                              f"run oah fix --bind --task {t.name} again")
+        commits = _attribution(t, before, head, written_by, RECORDED,
+                               replaced=None if engine else start["engine"])
+        evidence = f"bound to {head} by oah fix --bind: {len(commits)} commit(s) {_authored(commits)}"
+        if written_by != start["engine"]:
+            evidence += (f"; written by {written_by}, not by the attempt's engine {start['engine']}: the commits "
+                         f"replace its changes (--engine {written_by})")
+        record = {"schema": receipts.SCHEMA, "kind": "attempt-head", "task": t.name, "attempt_id": attempt.attempt_id,
+                  "after_head": head, "evidence": redact(evidence), "bound_at": _iso()}
+        name = f"{attempt.attempt_id}-head.json"
+        with _held_signals():
+            digest = receipts.publish(t.state, t.name, name, record)
+        if written_by != start["engine"]:
+            Store(t.state).log(task=t.name, agent=t.lease.agent, message=f"fix {attempt.attempt_id}: bound to {head} "
+                               f"with --engine {written_by} (not {start['engine']})")
+    return Result("OAH_FIX_BOUND", 0, f"OAH_FIX_BOUND: {attempt.attempt_id} is bound to {head}, so the next review "
+                  f"counts it. Run oah review --task {t.name} for the next round",
+                  lines=[f"commits: {_authored(commits)}"], attempt_id=attempt.attempt_id, outcome=attempt.outcome,
+                  records=[{"name": name, "digest": digest}], next_command=f"oah review --task {t.name}")
+
+
+def _saved_correction(t: _Task, start: Mapping) -> dict:
+    """What `oah fix` saved about its change, or {} for a manual attempt or a missing run folder."""
+    run_id = start.get("run_id")
+    if not isinstance(run_id, str):
+        return {}
+    try:
+        saved = read_json(runs.find_run(t.state, run_id).file_path("correction.json"), {})
+    except runs.RunError:
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def record_manual(task: str, *, engine: str, cwd: pathlib.Path, env: Mapping[str, str],
+                  findings: Sequence[str] = ()) -> Result:
+    """Record a correction that `claude` or `human` already committed, exactly like a Codex attempt."""
+    return _guarded(env, lambda redact: _manual(task, engine=engine, cwd=cwd, env=env, findings=tuple(findings),
+                                                redact=redact))
+
+
+def _manual(task: str, *, engine, cwd, env, findings, redact) -> Result:
+    if engine not in MANUAL_ENGINES:
+        raise ReviewError("OAH_USAGE", f"--engine must be one of {', '.join(MANUAL_ENGINES)} for a manual correction; "
+                          "a Codex correction is run with oah fix --task <task>")
+    t = _task(task, cwd, env, RECORDED)
+    _check_intent(t, RECORDED)
+    with _task_lock(t):
+        h = _history(t)
+        _check_history(t, h, RECORDED)
+        receipt = _source(t, h, RECORDED)
+        head = _head(t.root)
+        _check_tree(t, receipt, head, RECORDED)
+        chosen = _select(t, receipt, h, findings, RECORDED)
+        class_ids, _classes_found = _classes(h, chosen)
+        before = receipt.record["head"]
+        for attempt in h.attempts:  # start after the newest bound result HEAD contains
+            after = attempt.after_head
+            if (attempt.source_receipt_digest == receipt.digest and attempt.outcome == "applied" and after
+                    and after != before and _is_ancestor(t.root, before, after) and _is_ancestor(t.root, after, head)):
+                before = after
+        if head == before:
+            raise ReviewError("OAH_FIX_NOT_COMMITTED", f"HEAD is still {before[:12]}, so there is no committed "
+                              f"correction to record. {RECORDED}. Commit your correction with the trailer "
+                              f"Agent-Engine: {engine}, then run oah fix --manual --engine {engine} --task {t.name} again")
+        commits = _attribution(t, before, head, engine, RECORDED)
+        attempt_id = h.next_id()
+        ids = [item["finding_id"] for item in chosen]
+        evidence = (f"{engine} corrected {_ids(ids)} by hand in {len(commits)} commit(s) after {before[:12]} "
+                    "(oah fix --manual)")
+        now = _iso()
+        records = [
+            ("start", {"source_receipt": receipt.name, "source_receipt_digest": receipt.digest, "finding_ids": ids,
+                       "class_ids": class_ids, "before_head": before, "engine": engine, "manual": True,
+                       "started_at": now}, None),
+            ("outcome", {"outcome": "applied", "after_head": None, "evidence": redact(evidence), "finished_at": now},
+             {"outcome": "applied"}),
+            ("head", {"after_head": head, "evidence": redact(f"bound to {head} by oah fix --manual: "
+                                                             f"{_authored(commits)}"), "bound_at": now}, None),
+        ]
+        published = []
+        with _held_signals():
+            for kind, fields, summary in records:
+                name = f"{attempt_id}-{kind}.json"
+                record = {"schema": receipts.SCHEMA, "kind": f"attempt-{kind}", "task": t.name,
+                          "attempt_id": attempt_id, **fields}
+                published.append({"name": name, "digest": receipts.publish(t.state, t.name, name, record,
+                                                                           summary=summary)})
+    return Result("OAH_FIX_RECORDED", 0, f"OAH_FIX_RECORDED: {attempt_id} records the {engine} correction of "
+                  f"{_ids(ids)} of {receipt.name.removesuffix('.json')} ({len(commits)} commit(s) after "
+                  f"{before[:12]}), so the next review counts it. Run oah review --task {t.name} for the next round",
+                  lines=[f"commits: {_authored(commits)}"], attempt_id=attempt_id, outcome="applied",
+                  records=published, next_command=f"oah review --task {t.name}")
+
+
+def abort(task: str, *, cwd: pathlib.Path, env: Mapping[str, str]) -> Result:
+    """Record `aborted` for attempts whose `oah fix` stopped without an outcome; nothing else changes."""
+    return _guarded(env, lambda redact: _abort(task, cwd=cwd, env=env, redact=redact))
+
+
+def _abort(task: str, *, cwd, env, redact) -> Result:
+    t = _task(task, cwd, env, RECORDED)
+    with _task_lock(t):
+        h = _history(t)
+        unfinished = h.unfinished()
+        if not unfinished:
+            waiting = h.waiting()
+            hint = (f" {waiting[0].attempt_id} waits for its commit instead: commit it, then run oah fix --bind --task "
+                    f"{t.name}." if waiting else "")
+            raise ReviewError("OAH_FIX_NOTHING_TO_ABORT", f"task {t.name} has no unfinished correction attempt. "
+                              f"{RECORDED}.{hint}")
+        broken = [item.attempt_id for item in unfinished if h.start(item) is None]
+        if broken:
+            raise ReviewError("OAH_FIX_HISTORY_INVALID", f"{_ids(broken)} {'has' if len(broken) == 1 else 'have'} no "
+                              f"start record, so oah fix did not start {'it' if len(broken) == 1 else 'them'}. "
+                              f"{RECORDED}. Inspect the records of task {t.name} by hand")
+        published = []
+        with _held_signals():
+            for attempt in unfinished:
+                start = h.start(attempt)
+                status = "unknown"
+                if isinstance(start.get("run_id"), str):
+                    try:
+                        status = runs.find_run(t.state, start["run_id"]).read().get("status", "unknown")
+                    except runs.RunError:
+                        status = "missing"
+                evidence = (f"recorded by oah fix --abort: the oah fix that started {attempt.attempt_id} stopped without "
+                            f"recording an outcome (killed or crashed); its run was last {status}")
+                fields = {"outcome": "aborted", "after_head": None, "evidence": redact(evidence), "finished_at": _iso()}
+                if isinstance(start.get("run_id"), str):
+                    fields["run_id"] = start["run_id"]
+                name = f"{attempt.attempt_id}-outcome.json"
+                record = {"schema": receipts.SCHEMA, "kind": "attempt-outcome", "task": t.name,
+                          "attempt_id": attempt.attempt_id, **fields}
+                published.append({"name": name, "digest": receipts.publish(t.state, t.name, name, record,
+                                                                           summary={"outcome": "aborted"})})
+        ids = _ids(item.attempt_id for item in unfinished)
+        Store(t.state).log(task=t.name, agent=t.lease.agent, message=f"fix {ids}: recorded as aborted (oah fix --abort)")
+    return Result("OAH_FIX_ABORTED", 0, f"OAH_FIX_ABORTED: {ids} {'is' if len(unfinished) == 1 else 'are'} recorded "
+                  f"as aborted. An interrupted correction may have left changes in {t.root}: check git status, then "
+                  "commit or discard them before the next oah fix or oah review",
+                  attempt_id=unfinished[-1].attempt_id, outcome="aborted", records=published)

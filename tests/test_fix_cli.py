@@ -1,0 +1,206 @@
+# oah fix 명령 검사 — 실제 명령 탐색과 python -m oah 로 사용법, 의도 상태, 작업자 거부, JSON 왕복, Ctrl-C·SIGTERM·강제 종료 뒤 기록과 --abort 회복을 본다.
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+import unittest
+
+from oah import call
+from oah.cli import build_parser, main
+from oah.lease import Store
+from oah.paths import repo_info
+from oah.review import receipts
+from tests.test_fix import FIXED, FixProject, wait_for
+from tests.test_review_rounds import PACKET, git
+
+SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
+# Python keeps a SIG_IGN that a background test runner passes through exec, so the helper resets it.
+SIGINT_MAIN = ("import signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler); "
+               "from oah.cli import main; raise SystemExit(main(sys.argv[1:]))")
+
+
+def oah(project: FixProject, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
+    env = dict(project.env, PYTHONPATH=SRC)
+    env.update(env_extra or {})
+    return subprocess.run([sys.executable, "-m", "oah", *args], cwd=project.repo, capture_output=True, text=True,
+                          encoding="utf-8", env=env, timeout=600)
+
+
+def start_oah(project: FixProject, *args: str, code: str | None = None) -> subprocess.Popen:
+    env = dict(project.env, PYTHONPATH=SRC)
+    argv = [sys.executable, "-c", code, *args] if code else [sys.executable, "-m", "oah", *args]
+    return subprocess.Popen(argv, cwd=project.repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def names(project: FixProject) -> list[str]:
+    return [entry.name for entry in receipts.load(project.state, "t1").entries]
+
+
+def reap(pid: int) -> None:
+    """Stop a corrector the test itself orphaned (POSIX keeps it alive in its own session)."""
+    if os.name != "nt" and call._alive(pid):
+        os.kill(pid, signal.SIGKILL)
+
+
+class CliTest(unittest.TestCase):
+    def test_fix_command_is_discovered(self):
+        parser = build_parser()
+        commands = next(action for action in parser._actions if action.dest == "command")
+        self.assertIn("fix", commands.choices)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main([]), 0)
+        self.assertIn("fix: fix\n", out.getvalue())
+
+    def test_cli_usage_errors(self):
+        project = FixProject(self)
+        for args in (("--bind", "--manual"), ("--manual",), ("--manual", "--engine", "codex"), ("--engine", "claude"),
+                     ("--bind", "--finding", "R1-F1"), ("--abort", "--tier", "high"), ("--bind", "--timeout-seconds", "5"),
+                     ("--timeout-seconds", "0")):
+            with self.subTest(args=args):
+                done = oah(project, "fix", "--task", "t1", *args)
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        done = oah(project, "fix")
+        self.assertEqual(done.returncode, 2, "--task is required")
+        self.assertEqual(names(project), [])
+
+    def test_cli_intent_not_current_states(self):
+        def unbound(project):
+            store = Store(project.state)
+            store.release(task="t1", agent="claude", reason="test", force=False)
+            store.start(task="t1", agent="claude", scope=("src",), note="unbound", ttl_hours=1,
+                        info=repo_info(project.repo))
+
+        packet = ".oah/tasks/t1/PACKET.md"
+        cases = (("unbound", unbound),
+                 ("missing", lambda project: (project.repo / packet).unlink()),
+                 ("stale", lambda project: (project.repo / packet).write_text(
+                     PACKET.replace("Status: accepted", "Status: draft"), encoding="utf-8")))
+        for label, damage in cases:
+            with self.subTest(state=label):
+                project = FixProject(self)
+                project.changes_requested()
+                damage(project)
+                done = oah(project, "fix", "--task", "t1", "--json")
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertTrue(done.stderr.startswith("OAH_INTENT_NOT_CURRENT:"), done.stderr)
+                self.assertIn(label, done.stderr)
+                self.assertEqual(json.loads(done.stdout)["code"], "OAH_INTENT_NOT_CURRENT")
+                self.assertEqual(project.fix_calls(), [])
+                self.assertEqual(names(project), ["R1.json"])
+
+    def test_cli_worker_refused(self):
+        project = FixProject(self)
+        project.changes_requested()
+        for args in ((), ("--bind",), ("--manual", "--engine", "human"), ("--abort",)):
+            with self.subTest(args=args):
+                done = oah(project, "fix", "--task", "t1", *args, env_extra={"OAH_WORKER": "1"})
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertTrue(done.stderr.startswith("OAH_FIX_WORKER_REFUSED:"), done.stderr)
+        self.assertEqual(names(project), ["R1.json"])
+
+    def test_cli_round_trip_json(self):
+        project = FixProject(self)
+        project.queue({"findings": [{"finding_id": "R{n}-F1", "class_id": "R{n}-C1", "severity": "P1"}]}, {})
+        done = oah(project, "review", "--task", "t1", "--tier", "high", "--json")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (1, "OAH_REVIEW_CHANGES_REQUESTED"),
+                         done.stderr)
+        project.queue_fix({"write": FIXED})
+        done = oah(project, "fix", "--task", "t1", "--tier", "high", "--json")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        result = json.loads(done.stdout)
+        self.assertEqual((result["code"], result["attempt_id"], result["outcome"]), ("OAH_FIX_APPLIED", "A1", "applied"))
+        self.assertEqual(result["next_command"], "oah fix --bind --task t1")
+        done = oah(project, "fix", "--task", "t1")
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stderr.startswith("OAH_FIX_BIND_REQUIRED:"), done.stderr)
+        project.run_commands(result["commands"])
+        done = oah(project, "fix", "--bind", "--task", "t1", "--json")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (0, "OAH_FIX_BOUND"), done.stderr)
+        done = oah(project, "review", "--task", "t1", "--tier", "high", "--json")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        receipt = json.loads(done.stdout)["receipt"]
+        self.assertEqual((receipt["round"], receipt["outcome"]), (2, "converged"))
+        self.assertEqual([item["name"] for item in receipt["history"]],
+                         ["R1.json", "A1-start.json", "A1-outcome.json", "A1-head.json"])
+        done = oah(project, "fix", "--task", "t1")
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stderr.startswith("OAH_FIX_NOT_REQUESTED:"), done.stderr)
+
+    def interrupted(self, stop: signal.Signals, *, code: str | None = None) -> None:
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True})
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high", code=code)
+        pid_file = project.fix_dir / "pid-000.txt"
+        try:
+            self.assertTrue(wait_for(pid_file), "the corrector must start")
+            time.sleep(0.5)  # let the corrector read its brief while oah waits for it
+            process.send_signal(stop)
+            out, err = process.communicate(timeout=60)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        self.addCleanup(reap, pid)
+        self.assertEqual(process.returncode, 130, err.decode("utf-8", "replace"))
+        self.assertIn(b"OAH_FIX_INTERRUPTED: A1 was interrupted and recorded as aborted", err)
+        self.assertFalse(call._alive(pid), "stopping oah fix stops the corrector")
+        self.assertEqual(names(project), ["R1.json", "A1-start.json", "A1-outcome.json"])
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal delivery to a child process")
+    def test_cli_sigint_records_aborted(self):
+        self.interrupted(signal.SIGINT, code=SIGINT_MAIN)
+
+    @unittest.skipIf(os.name == "nt", "POSIX signal delivery to a child process")
+    def test_cli_sigterm_records_aborted(self):
+        self.interrupted(signal.SIGTERM)
+
+    def test_cli_killed_fix_needs_abort(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True}, {"write": FIXED})
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high")
+        pid_file = project.fix_dir / "pid-000.txt"
+        try:
+            self.assertTrue(wait_for(pid_file), "the corrector must start")
+        finally:
+            process.kill()  # a hard kill: no handler runs, so no outcome is recorded
+            process.communicate(timeout=30)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        reap(pid)
+        deadline = time.monotonic() + 10
+        while call._alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)  # Windows closes the corrector's job with its killed parent
+        self.assertFalse(call._alive(pid))
+        self.assertEqual(names(project), ["R1.json", "A1-start.json"])
+        done = oah(project, "review", "--task", "t1", "--tier", "high")
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stderr.startswith("OAH_REVIEW_NEEDS_DECISION:"), done.stderr)
+        self.assertIn("oah fix --abort --task t1", done.stderr)
+        done = oah(project, "fix", "--task", "t1")
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stderr.startswith("OAH_FIX_ATTEMPT_UNFINISHED:"), done.stderr)
+        done = oah(project, "fix", "--abort", "--task", "t1", "--json")
+        self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (0, "OAH_FIX_ABORTED"), done.stderr)
+        done = oah(project, "fix", "--abort", "--task", "t1")
+        self.assertEqual(done.returncode, 1)
+        self.assertTrue(done.stderr.startswith("OAH_FIX_NOTHING_TO_ABORT:"), done.stderr)
+        done = oah(project, "fix", "--task", "t1", "--tier", "high")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("OAH_FIX_APPLIED: A2 changed the worktree to correct R1-F1"), done.stdout)
+        self.assertIn('-m "Agent-Engine: codex"', done.stdout)
+        self.assertEqual(git(project.repo, "status", "--porcelain"), "M src/app.py")
+
+
+if __name__ == "__main__":
+    unittest.main()
