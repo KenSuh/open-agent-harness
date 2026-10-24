@@ -5,7 +5,9 @@ Environment:
 - FAKE_GH_LOG: a JSONL file; each call appends its argv.
 - FAKE_GH_SCRIPT: a JSON file {"check_runs": {"<sha>": [{"name", "status", "conclusion"}, ...]}, "exit": int,
   "stderr": str, "raw": str}. A non-zero "exit" prints "stderr" and exits with it; "raw" is printed instead of
-  JSON. Without a script every commit has no check runs.
+  JSON. Without a script every commit has no check runs. Optional "expected_repo" selects these runs only
+  when GH_REPO matches; otherwise "other_runs" models an unrelated configured repository. Local bare
+  destinations use oah's digest-only selector, which real gh rejects before making a request.
 Every run carries the decoys a real response has (`html_url`, `app.owner.login`, `id`), so a test can prove
 oah keeps only the name, status and conclusion.
 """
@@ -44,6 +46,8 @@ def main(argv: list[str]) -> int:
     sha, query = match.group(1), urllib.parse.parse_qs(match.group(2) or "")
     per_page, page = int(query.get("per_page", ["30"])[0]), int(query.get("page", ["1"])[0])
     runs = script.get("check_runs", {}).get(sha, [])
+    if "expected_repo" in script and os.environ.get("GH_REPO") != script["expected_repo"]:
+        runs = script.get("other_runs", [])
     chunk = runs[(page - 1) * per_page: page * per_page]
     body = {"total_count": len(runs), "check_runs": [
         dict(run, head_sha=run.get("head_sha", sha), id=4000 + index,

@@ -1,9 +1,11 @@
 # oah land 핵심 검사 — 실제 저장소·로컬 bare 원격·가짜 gh·gitleaks·unlazy 로 리뷰·게이트·영향·새로 걸린 검사·비밀 검사·CI 판정과 조건부 푸시, 기록을 본다.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import sys
 import unittest
@@ -167,6 +169,77 @@ class LandProject:
 
 
 class AssessTest(unittest.TestCase):
+    def test_rebased_imported_pending_gate_still_requires_evidence(self):
+        project = LandProject(self)
+        moved = project.advance_main({".oah/tasks/x/GATES.md": OTHER_LEDGER})
+        git(project.repo, "fetch", "origin", "main")
+        git(project.repo, "rebase", "origin/main")
+        project.head = git(project.repo, "rev-parse", "HEAD")
+        project.gates_check()
+        project.commit({}, "refresh gate summary")
+        publish_receipt(project, 2, base=moved)
+        project.ci([{"name": "tests", "status": "completed", "conclusion": "success"}])
+        result = project.assess()
+        self.assertEqual(result.check("gates").state, "passed", describe(result))
+        self.assertEqual(result.check("fast-forward").state, "passed", describe(result))
+        self.assertEqual(result.failure.code if result.failure else None, "OAH_LAND_CHECKS_REQUIRED", describe(result))
+        self.assertEqual([item["state"] for item in result.required], ["pending"])
+
+    def test_refuses_ambiguous_push_destinations_without_disclosure(self):
+        for kind in ("pushurl", "multiple-push", "multiple-fetch", "push-rewrite", "fetch-rewrite"):
+            with self.subTest(kind=kind):
+                project = LandProject(self)
+                other = project.work / ("private-" + secrets.token_hex(12) + ".git")
+                subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                               check=True, env=git_env())
+                if kind == "pushurl":
+                    git(project.repo, "config", "remote.origin.pushurl", str(other))
+                elif kind == "multiple-push":
+                    for url in (str(project.remote), str(other)):
+                        git(project.repo, "config", "--add", "remote.origin.pushurl", url)
+                elif kind == "multiple-fetch":
+                    git(project.repo, "config", "--add", "remote.origin.url", str(other))
+                else:
+                    key = "pushInsteadOf" if kind == "push-rewrite" else "insteadOf"
+                    git(project.repo, "config", f"url.{other}.{key}", str(project.remote))
+                result = project.assess()
+                self.assertFalse(result.ready, describe(result))
+                self.assertNotIn(str(other), json.dumps(result.to_json()))
+                self.assertEqual(project.remote_main(), project.base)
+
+    def test_ci_uses_assessed_destination_over_gh_repo_and_default(self):
+        project = LandProject(self)
+        unrelated = "elsewhere/" + secrets.token_hex(10)
+        project.env["GH_REPO"] = unrelated
+        project.ci([{"name": "destination", "status": "completed", "conclusion": "failure"}],
+                   expected_repo="oah-local-destination:" + hashlib.sha256(str(project.remote).encode("utf-8")).hexdigest(),
+                   other_runs=[{"name": "fork", "status": "completed", "conclusion": "success"}])
+        for inherited in (True, False):
+            if not inherited:
+                project.env.pop("GH_REPO", None)
+            result = project.assess()
+            self.assertEqual(result.check("ci").code, "OAH_LAND_CI_FAILED", describe(result))
+            self.assertNotIn(unrelated, json.dumps(result.to_json()))
+            self.assertNotIn(str(project.remote), json.dumps(result.to_json()))
+
+    def test_ci_selector_does_not_turn_local_paths_into_github_repositories(self):
+        for destination in ("/a/b", "C:\\a\\b", "file:///a/b"):
+            repository, _host = land._gh_repository(destination)
+            self.assertNotIn("/", repository)
+            self.assertNotIn(destination, repository)
+        for destination in ("https://github.com/owner/project.git", "git@github.com:owner/project.git",
+                            "ssh://git@github.com/owner/project.git"):
+            self.assertEqual(land._gh_repository(destination), ("github.com/owner/project", "github.com"))
+
+    def test_ci_does_not_certify_truncated_pagination(self):
+        project = LandProject(self)
+        runs = [{"name": "ok", "status": "completed", "conclusion": "success"}] * (land.GH_PER_PAGE * land.GH_PAGES)
+        for status, conclusion in (("completed", "failure"), ("in_progress", None)):
+            project.ci(runs + [{"name": "late", "status": status, "conclusion": conclusion}])
+            result = project.assess()
+            self.assertNotEqual(result.check("ci").state, "passed", describe(result))
+            self.assertFalse(result.ready, describe(result))
+
     def test_ready_when_every_check_binds_to_head(self):
         project = LandProject(self)
         result = project.assess()
@@ -391,6 +464,81 @@ class AssessTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    def test_push_diagnostics_are_fixed_even_with_oah_prefix(self):
+        marker = secrets.token_hex(24)
+        for stdout, stderr in ((f"!\tHEAD:refs/heads/main\t[remote rejected] {marker}\n", ""),
+                               ("", f"OAH_PUSH_REFUSED: {marker}\n")):
+            reason = land._push_reason(stdout, stderr, "refs/heads/main", False, 1)
+            self.assertNotIn(marker, reason)
+            self.assertEqual(reason, "git exited 1")
+
+    def test_changed_destination_after_assessment_refuses_push(self):
+        project = LandProject(self)
+        result = project.assess()
+        other = project.work / "other.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                       check=True, env=git_env())
+        git(project.repo, "remote", "set-url", "origin", str(other))
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertFalse(pushed.landed)
+        self.assertEqual(project.remote_main(), project.base)
+        self.assertEqual(git(other, "rev-parse", "main"), project.base)
+
+    @unittest.skipIf(os.name == "nt", "the transport failure hook is a POSIX shell script")
+    def test_failed_push_recognizes_head_in_remote_history(self):
+        import shlex
+
+        project = LandProject(self)
+        result = project.assess()
+        descendant = git(project.repo, "commit-tree", "-p", project.head, "-m", "next landing",
+                         f"{project.head}^{{tree}}")
+        hook = project.repo / ".git/hooks/pre-push"
+        command = ["git", "-C", str(project.repo), "-c", "core.hooksPath=/dev/null", "push", "-q",
+                   str(project.remote), f"{descendant}:refs/heads/main"]
+        hook.write_bytes(("#!/bin/sh\n" + shlex.join(command) + "\nexit 1\n").encode("utf-8"))
+        hook.chmod(0o755)
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+            land.record(project.state, result, "merge", pushed)
+        self.assertEqual(project.remote_main(), descendant)
+        self.assertTrue(pushed.landed, pushed.message)
+        self.assertNotIn("nothing landed", pushed.message)
+        self.assertTrue(json.loads((project.state / "land/t1/records.jsonl").read_text(encoding="utf-8"))["landed"])
+
+    @unittest.skipIf(os.name == "nt", "the interrupted transport hook is a POSIX shell script")
+    def test_failed_push_without_verifiable_remote_is_uncertain(self):
+        import shlex
+
+        project = LandProject(self)
+        result = project.assess()
+        moved_remote = project.work / "moved.git"
+        hook = project.repo / ".git/hooks/pre-push"
+        command = ["git", "-C", str(project.repo), "-c", "core.hooksPath=/dev/null", "push", "-q",
+                   str(project.remote), f"{project.head}:refs/heads/main"]
+        hook.write_bytes(("#!/bin/sh\n" + shlex.join(command) + "\n"
+                          + shlex.join(["mv", str(project.remote), str(moved_remote)]) + "\nexit 1\n").encode("utf-8"))
+        hook.chmod(0o755)
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+            land.record(project.state, result, "merge", pushed)
+        self.assertEqual(git(moved_remote, "rev-parse", "main"), project.head)
+        self.assertIsNone(pushed.landed, pushed.message)
+        self.assertEqual(pushed.code, "OAH_LAND_OUTCOME_UNCERTAIN")
+        self.assertIn("uncertain", pushed.message)
+        saved = json.loads((project.state / "land/t1/records.jsonl").read_text(encoding="utf-8"))
+        self.assertIsNone(saved["landed"])
+
+    def test_literal_push_destination_does_not_enter_git_trace_logs(self):
+        project = LandProject(self)
+        trace = project.work / "git-trace.log"
+        project.env["GIT_TRACE"] = str(trace)
+        result = project.assess()
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertTrue(pushed.landed, pushed.message)
+        self.assertNotIn(str(project.remote), trace.read_text(encoding="utf-8") if trace.exists() else "")
+
     def test_push_fast_forwards_exactly_head(self):
         project = LandProject(self)
         result = project.assess()

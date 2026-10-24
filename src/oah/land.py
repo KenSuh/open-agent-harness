@@ -21,7 +21,7 @@ unverified, and the first failure is the headline.
    maps, and the result digest is recorded. Offline mode, a failed fetch or unavailable impact is
    `OAH_LAND_IMPACT_STALE`.
 6. required-checks: these are the newly affected checks. Each is a gate in the ledgers committed at the fetched
-   SHA F that pins or execs a changed path, and whose `(ledger#id, definition)` is not at HEAD. It must pass against
+   SHA F that pins or execs a changed path. Its presence at HEAD is not execution evidence. It must pass against
    HEAD: one of the task's ledgers must hold a gate with the same definition (CHECK, EXPECT, CWD) whose binding is
    fresh and met. Otherwise it is `pending` (no such gate) or `failed`, and the check refuses with
    `OAH_LAND_CHECKS_REQUIRED`. CI workflow bindings are left to the CI check runs of the exact head.
@@ -35,22 +35,26 @@ unverified, and the first failure is the headline.
 The changed paths are `F..HEAD` when HEAD contains F (exactly what lands). Otherwise they are the review range,
 from the merge-base with the local default ref to HEAD.
 
-`push(root, assessment, env=...)` runs `git push --porcelain --force-with-lease=refs/heads/<branch>:<F> <remote>
-<HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step, so
-a branch that moved lands nothing (`OAH_LAND_IMPACT_STALE`). After a failed push, a fresh fetch says where the
-branch is.
+`push(root, assessment, env=...)` revalidates local authorization under the state lock, then runs
+`git push --porcelain --force-with-lease=refs/heads/<branch>:<F> <verified-destination>
+<HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step.
+After a failed push, a fresh fetch checks whether the remote history contains HEAD; failed verification leaves
+the outcome explicitly uncertain.
 
 A17: oah never reads a credential. `gh` and git use their own helpers. Remote URLs, `gh` and `git push` output
-and gitleaks findings are never echoed or stored, and `gh` names the repository through its `{owner}/{repo}`
-placeholders. `record` appends SHAs, digests, check names, states and codes to
+and gitleaks findings are never echoed or stored. `gh` uses an explicit destination selector with its
+`{owner}/{repo}` placeholders. `record` appends SHAs, digests, check names, states and codes to
 `<state>/land/<task>/records.jsonl`, and never messages or paths.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import pathlib
+import re
+import urllib.parse
 from typing import Mapping, Sequence
 
 from oah import intent as oah_intent
@@ -120,6 +124,9 @@ class Assessment:
     required: list[dict] = dataclasses.field(default_factory=list)
     checks: list[Check] = dataclasses.field(default_factory=list)
     warnings: list[str] = dataclasses.field(default_factory=list)
+
+    _destination: tuple[str, str] | None = dataclasses.field(default=None, init=False, repr=False)
+    _authorization: str | None = dataclasses.field(default=None, init=False, repr=False)
 
     @property
     def ready(self) -> bool:
@@ -327,6 +334,7 @@ class _Reassessment:
     newly: list[dict] = dataclasses.field(default_factory=list)
     commits: int = 0
     warnings: list[str] = dataclasses.field(default_factory=list)
+    destination: tuple[str, str] | None = dataclasses.field(default=None, repr=False)
 
 
 _STALE_FIXES = {"offline": "drop --offline when the network is back",
@@ -401,16 +409,13 @@ def _ledger_gates(source: pathlib.Path, rev: str, settings: Mapping) -> list[tup
 
 
 def _newly_affected(their_rows: Sequence, here: Sequence[tuple], there: Sequence[tuple]) -> list[dict]:
-    """Pin and exec gate rows of the fetched ledgers whose (gate, definition) HEAD does not hold."""
-    known = {(gate.label, definition) for gate, definition in here}
+    """Affected fetched definitions require evidence even when HEAD already contains the definition."""
     definitions = {gate.label: definition for gate, definition in there}
     found: dict[str, dict] = {}
     for row in their_rows:
         if row.layer != "gates" or row.binding not in ("pin", "exec"):
             continue
         definition = definitions.get(row.source)
-        if (row.source, definition) in known:
-            continue
         item = found.setdefault(row.source, {"gate": row.source, "binding": row.binding, "targets": [],
                                              "definition": definition})
         if row.binding == "pin":
@@ -420,6 +425,70 @@ def _newly_affected(their_rows: Sequence, here: Sequence[tuple], there: Sequence
     for item in found.values():
         item["targets"].sort()
     return [found[key] for key in sorted(found)]
+
+
+def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tuple[str, str]:
+    """One literal destination shared by the isolated fetch and push; never export its URL.
+
+    URL rewrites are deliberately unsupported. In particular the mirror does not load local
+    rewrites, whereas a push normally does. Refusing them avoids two different identities.
+    """
+    from oah.impact import mapstore
+
+    def refuse():
+        raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED",
+                        "landing needs one identical fetch and push destination without URL rewrites; configure "
+                        "one literal remote URL and at most one identical push URL, then run oah land again")
+
+    def config(args, config_env):
+        result = run_command([*git_argv(), "-C", str(root), "config", "--null", *args],
+                             timeout=GH_TIMEOUT, env=dict(config_env))
+        if result.timed_out or result.returncode not in (0, 1):
+            refuse()
+        return result.stdout.split("\0")[:-1] if result.returncode == 0 else []
+
+    isolated = mapstore._isolated_git_env()
+    destinations = []
+    for config_env in (isolated, env):
+        if config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], config_env):
+            refuse()
+        urls = config(["--get-all", f"remote.{remote}.url"], config_env)
+        pushes = config(["--get-all", f"remote.{remote}.pushurl"], config_env)
+        if len(urls) != 1 or not urls[0] or (pushes and pushes != urls):
+            refuse()
+        stored = urls[0]
+        url = stored
+        if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
+            url = str((root / pathlib.Path(url).expanduser()).resolve())
+        destinations.append((stored, url))
+    if destinations[0] != destinations[1]:
+        refuse()
+    return destinations[0]
+
+
+def _gh_repository(destination: str) -> tuple[str, str]:
+    """gh's explicit [HOST/]OWNER/REPO and API host; neither is returned to the caller."""
+    # An absolute local path such as /a/b must not become GitHub repository a/b.
+    # This invalid single-component selector makes real gh refuse before a request; fake gh
+    # can use its digest to model CI for the local bare repositories in the offline suite.
+    unsupported = "oah-local-destination:" + hashlib.sha256(destination.encode("utf-8")).hexdigest()
+    parsed = urllib.parse.urlsplit(destination)
+    if "://" in destination:
+        ports = {"https": 443, "ssh": 22, "git": 9418}
+        if parsed.scheme not in ports or not parsed.hostname:
+            return unsupported, "github.com"
+        if parsed.port not in (None, ports[parsed.scheme]) or parsed.query or parsed.fragment:
+            raise ValueError("unsupported CI destination")
+        host, path = parsed.hostname, parsed.path.strip("/")
+    else:
+        scp = re.fullmatch(r"(?:[^/@:]+@)?([^/:]+):([^:]+)", destination)
+        if not scp or pathlib.Path(destination).is_absolute() or len(scp[1]) <= 1:
+            return unsupported, "github.com"
+        host, path = scp[1], scp[2].strip("/")
+    path = path.removesuffix(".git")
+    if len(path.split("/")) != 2 or any(not part for part in path.split("/")):
+        return unsupported, "github.com"
+    return f"{host}/{path}", host
 
 
 def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bool) -> _Reassessment:
@@ -440,6 +509,8 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
         return _Reassessment(False, f"HEAD moved to {info.commit[:12]} while the impact map was refreshed; {retry}")
     warnings = list(info.warnings())
     try:
+        remote = defaultbranch.remote_for(root, float(settings["git_timeout"]))
+        destination = _destination(root, remote, env) if remote else None
         with defaultbranch._query_context(root, settings, offline=offline, env=env) as branch:
             if branch.state != "fresh":
                 return _Reassessment(False, _stale_message(branch), remote=branch.remote, branch=branch.branch,
@@ -450,6 +521,11 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
             changed = context.changed_files(root, base, head) if base != head else []
             here = _ledger_gates(root, head, settings)
             source = defaultbranch._snapshot_source(root, fetched, env)
+            if (branch.remote != remote or destination is None
+                    or _destination(root, remote, env) != destination
+                    or defaultbranch._source(source).get("url") != mapstore.digest(list(destination))):
+                raise LandError("OAH_LAND_DESTINATION_CHANGED",
+                                "the destination changed during assessment; run oah land again")
             there = _ledger_gates(source, fetched, settings)
             mine = _with_live_hits(root, dict(data), head, changed, settings)
             mine_rows = _rows(mine, changed, gates=[gate for gate, _ in here], graph=query.load_graph(root, settings),
@@ -463,8 +539,9 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
             return _Reassessment(True, remote=branch.remote, branch=branch.branch, fetched=fetched, contains=contains,
                                  base=base, changed=list(changed), result=digest,
                                  newly=_newly_affected(their_rows, here, there),
-                                 commits=_count(root, fetched, head) if contains else 0, warnings=warnings)
-    except (ImpactError, ReviewError) as exc:
+                                 commits=_count(root, fetched, head) if contains else 0, warnings=warnings,
+                                 destination=destination)
+    except (ImpactError, ReviewError, LandError) as exc:
         return _Reassessment(False, f"impact could not be reassessed against the fetched default branch ({exc}); fix "
                                     f"that, {retry}", warnings=warnings)
 
@@ -497,7 +574,7 @@ def _evidence_by_definition(root: pathlib.Path, state: pathlib.Path, task: str, 
 def _required_check(result: Assessment, reassessed: _Reassessment, seen: dict[str, list[bool]],
                     unread: str) -> Check:
     if not reassessed.newly:
-        return _passed("required-checks", "the fetched default branch binds no new gate to the changed paths")
+        return _passed("required-checks", "the fetched default branch binds no gate to the changed paths")
     for item in reassessed.newly:
         matches = seen.get(item["definition"])
         state = PASSED if matches and any(matches) else "failed" if matches is not None else "pending"
@@ -509,11 +586,10 @@ def _required_check(result: Assessment, reassessed: _Reassessment, seen: dict[st
     listed = "; ".join(f"{item['gate']} ({item['binding']} on {', '.join(item['targets'])}): {item['state']}"
                        for item in open_items)
     unverified = f" (no gate evidence of the task could be read: {unread})" if unread else ""
-    where = f"{reassessed.remote}/{reassessed.branch}"
     return _failed("required-checks", "OAH_LAND_CHECKS_REQUIRED",
                    f"the fetched default branch binds checks to files this task changed, and they have no passing "
-                   f"evidence against HEAD{unverified}: {listed}. Rebase onto {where} so the reviewed head carries "
-                   f"them, or add a gate with the same CHECK, EXPECT and CWD to the task's ledger and run oah gates "
+                   f"evidence against HEAD{unverified}: {listed}. Add a gate with the same CHECK, EXPECT and CWD to "
+                   f"the task's ledger and run oah gates "
                    f"check {result.task}; then commit, get the head reviewed and run oah land --check again")
 
 
@@ -570,15 +646,20 @@ def _scan_check(root: pathlib.Path, head: str, reassessed: _Reassessment, env: M
 
 
 def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
-                env: Mapping[str, str]) -> tuple[list[dict], str | None]:
+                env: Mapping[str, str], destination: str) -> tuple[list[dict], str | None]:
     """The check runs GitHub reports for exactly head, or a reason they could not be read (never gh's output)."""
     runs: list[dict] = []
     seen = 0
+    try:
+        repository, host = _gh_repository(destination)
+    except ValueError:
+        return [], "destination could not be verified"
     for page in range(1, GH_PAGES + 1):
         endpoint = f"repos/{{owner}}/{{repo}}/commits/{head}/check-runs?per_page={GH_PER_PAGE}&page={page}"
         try:
-            result = run_command([*gh, "api", "--method", "GET", "-H", "Accept: application/vnd.github+json",
-                                  endpoint], timeout=GH_TIMEOUT, cwd=str(root), env={**env, **GH_ENV})
+            result = run_command([*gh, "api", "--hostname", host, "--method", "GET", "-H",
+                                  "Accept: application/vnd.github+json", endpoint], timeout=GH_TIMEOUT, cwd=str(root),
+                                 env={**env, **GH_ENV, "GH_REPO": repository, "GH_HOST": host})
         except OSError:
             return [], "gh could not start"
         if result.timed_out:
@@ -598,12 +679,14 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                 conclusion = item.get("conclusion")
                 runs.append({"name": _one_line(item.get("name")), "status": str(item.get("status")),
                              "conclusion": None if conclusion is None else str(conclusion)})
-        if not items or seen >= total:
-            break
-    return runs, None
+        if seen >= total:
+            return runs, None
+        if not items:
+            return [], "check-run pagination was incomplete"
+    return [], "check-run pagination exceeded the supported limit; inspect all runs before landing"
 
 
-def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str]) -> Check:
+def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None = None) -> Check:
     from oah.engines.proc import UnsupportedBatchShim
 
     retry = "then run oah land --check again"
@@ -615,7 +698,12 @@ def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str]) -> Check:
         return Check("ci", UNVERIFIED, None, "gh is not installed, so CI was not checked (unverified, not passed); "
                                              "install it (oah doctor prints the command), sign in with gh auth login, "
                                              f"push the task branch, {retry}")
-    runs, problem = _check_runs(gh, root, head, env)
+    if destination is None:
+        return Check("ci", UNVERIFIED, None, f"the destination was not assessed, so CI is unverified; {retry}")
+    runs, problem = _check_runs(gh, root, head, env, destination)
+    if problem is not None and problem.startswith("check-run pagination"):
+        return _failed("ci", "OAH_LAND_CI_PENDING", "CI pagination is incomplete, so passing CI cannot be "
+                       f"established; inspect all check runs, {retry}")
     if problem is not None:
         return Check("ci", UNVERIFIED, None, f"gh could not read the check runs for HEAD ({problem}), so CI is "
                                              f"unverified, not passed; check gh auth status and that the task branch "
@@ -661,6 +749,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
         raise LandError("OAH_LAND_DIRTY_TREE", f"tracked files have uncommitted changes ({_listed(dirty)}); landing "
                                                "checks and pushes a commit, so commit or stash them, then run oah land "
                                                "again")
+    authorization = _authorization(state, task)
     lease = evidence.task_lease(state, task)
     untracked = _untracked_inputs(root, lease.gates if lease else ())
     if untracked:
@@ -669,6 +758,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
                                                f"remove them, run oah gates check {task} if a gate read them, then run "
                                                "oah land again")
     result = Assessment(task=task, head=head)
+    result._authorization = authorization
     result.checks.append(_lease_check(state, root))
     binding, intent_check = _intent_check(root, task, head, lease)
     result.checks.append(intent_check)
@@ -679,6 +769,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
     result.checks.append(_gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env))
     reassessed = _reassess(root, head, env, offline)
     result.remote, result.branch, result.warnings = reassessed.remote, reassessed.branch, reassessed.warnings
+    result._destination = reassessed.destination
     if reassessed.ok:
         result.fetched, result.base, result.changed = reassessed.fetched, reassessed.base, reassessed.changed
         result.commits = reassessed.commits
@@ -699,7 +790,8 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
         result.checks.append(_failed("impact", "OAH_LAND_IMPACT_STALE", reassessed.message))
         why = "impact was not reassessed against a freshly fetched default branch"
         result.checks += [_skipped("required-checks", why), _skipped("fast-forward", why), _skipped("scan", why)]
-    result.checks.append(_ci_check(root, head, env))
+    result.checks.append(_ci_check(root, head, env, destination=(result._destination[1]
+                                                              if result._destination else None)))
     return result
 
 
@@ -708,7 +800,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
 
 @dataclasses.dataclass(frozen=True)
 class Pushed:
-    landed: bool
+    landed: bool | None  # None means the transport failed and acceptance cannot be determined
     code: str
     message: str
     remote_sha: str | None = None
@@ -718,53 +810,155 @@ class Pushed:
 
 
 def _push_reason(stdout: str, stderr: str, ref: str, timed_out: bool, code: int | None) -> str:
-    """git's porcelain status for ref, or oah's own hook message; never a line that could hold the URL."""
-    for line in stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) == 3 and parts[1].endswith(":" + ref):
-            return _one_line(parts[2], 200)
-    own = [line.strip() for line in stderr.splitlines() if line.startswith("OAH_")]
-    if own:
-        return _one_line(own[0], 300)
+    """Only fixed diagnostics: neither porcelain reasons nor hook stderr are trusted."""
     return "timed out" if timed_out else f"git exited {code}"
 
 
-def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
-    """Fast-forward the remote default branch to exactly HEAD, only while it still equals the assessed SHA."""
-    from oah.impact import defaultbranch
-    from oah.impact.defaults import configured
+def _state_path(state: pathlib.Path, *parts: str) -> pathlib.Path:
+    from oah.runs import RunError, _contained_path
 
+    try:
+        return _contained_path(state, *parts)
+    except RunError:
+        raise LandError("OAH_RUN_PATH_UNSAFE", "landing authorization state contains a linked or unsafe path; "
+                        "remove linked state paths and run oah land again") from None
+
+
+def _authorization(state: pathlib.Path, task: str) -> str:
+    """Digest the cooperating authorization writers' state, including starts without receipts."""
+    from oah.impact.mapstore import digest
+    from oah.review import receipts
+
+    paths = (("leases.json",), ("events.jsonl",), ("reviews", task, receipts.INDEX_NAME),
+             ("reviews", task, receipts.ROUNDS_NAME), ("gates", task, "bindings.json"))
+    values = []
+    for parts in paths:
+        path = _state_path(state, *parts)
+        try:
+            values.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        except FileNotFoundError:
+            values.append(None)
+    return digest(values)
+
+
+def _revalidate_local(root: pathlib.Path, assessment: Assessment, env: Mapping[str, str]) -> Check | None:
+    from oah.config import load_config
+    from oah.gates.context import DEFAULTS as GATE_DEFAULTS
+    from oah.review import context
+
+    info = repo_info(root)
+    state = state_dir(info, env)
+    task, head = assessment.task, assessment.head
+    lease = evidence.task_lease(state, task)
+    if (info.head != head or context.tracked_dirty(root)
+            or _untracked_inputs(root, lease.gates if lease else ())):
+        return _failed("review", "OAH_LAND_AUTHORIZATION_CHANGED",
+                       "the reviewed tree changed while awaiting confirmation; run oah land --merge again")
+    checked = _lease_check(state, root)
+    if checked.state != PASSED:
+        return checked
+    binding, checked = _intent_check(root, task, head, lease)
+    if checked.state != PASSED:
+        return checked
+    checked = _review_check(root, state, task, head, binding)
+    if checked.state != PASSED:
+        return checked
+    settings = load_config(root).section("gates", GATE_DEFAULTS)
+    tools, error = _gate_tools(root, env, None)
+    checked = _gates_check(root, state, task, head, lease, settings, tools, error, env)
+    if checked.state != PASSED:
+        return checked
+    if assessment.required:
+        seen, unread = _evidence_by_definition(root, state, task, lease, settings, tools, error, env)
+        current = Assessment(task, head)
+        checked = _required_check(current, _Reassessment(True, remote=assessment.remote, branch=assessment.branch,
+                                                        newly=assessment.required), seen, unread)
+        if checked.state != PASSED:
+            return checked
+    if _authorization(state, task) != assessment._authorization:
+        return _failed("review", "OAH_LAND_AUTHORIZATION_CHANGED",
+                       "local authorization changed while awaiting confirmation; read fresh checks and confirm "
+                       "again with oah land --merge")
+    return None
+
+
+def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
+    """Revalidate after confirmation and serialize local authorization through the conditional push."""
     if not (assessment.ready and assessment.remote and assessment.branch and assessment.fetched):
         raise LandError("OAH_LAND_NOT_READY", "a push needs an assessment where every check passed; run oah land "
                                               "--merge")
+    from oah.lockfile import StateLock
+
+    state = state_dir(repo_info(root), env)
+    with StateLock(_state_path(state, ".lock")):
+        refusal = _revalidate_local(root, assessment, env)
+        if refusal is not None:
+            return Pushed(False, refusal.code, refusal.message)
+        if assessment._destination is None or _destination(root, assessment.remote, env) != assessment._destination:
+            return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
+                          "the destination changed after assessment; run oah land --merge and confirm again")
+        return _push_verified(root, assessment, env=env)
+
+
+def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
+    from oah.impact import defaultbranch, mapstore
+    from oah.impact.defaults import configured
+
     settings = configured(root)
     ref = f"refs/heads/{assessment.branch}"
     where = f"{assessment.remote}/{assessment.branch}"
+    # Literal destinations can contain credentials. Disable URL/curl tracing, including
+    # configured trace2 targets, before handing the destination to git or its children.
+    push_env = {key: value for key, value in env.items()
+                if not key.upper().startswith("GIT_TRACE") and key.upper() != "GIT_CURL_VERBOSE"}
+    push_env.update(PUSH_ENV, GIT_TRACE="0", GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
     result = run_command([*git_argv(), "-C", str(root), "push", "--porcelain",
-                          f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment.remote,
-                          f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env={**env, **PUSH_ENV})
+                          f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment._destination[1],
+                          f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env=push_env)
     if result.returncode == 0 and not result.timed_out:
         return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head} (a fast-forward from "
                                                f"{assessment.fetched[:12]})", assessment.head)
-    after = defaultbranch.refresh(root, settings, env=env)
-    now = after.commit if after.state == "fresh" else None
-    if now == assessment.head:
-        return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head}, although git reported a "
-                                               "problem after the update; check the remote's hooks", now)
-    if now is not None and now != assessment.fetched:
-        return Pushed(False, "OAH_LAND_IMPACT_STALE",
-                      f"{where} moved to {now[:12]} while landing, so the remote refused the conditional push and "
-                      "nothing landed. Run oah land --check again: it fetches the new SHA, reassesses impact and "
-                      "requires the affected checks again", now)
-    reason = _push_reason(result.stdout, result.stderr, ref, result.timed_out, result.returncode)
-    if now is None:
-        return Pushed(False, "OAH_LAND_PUSH_FAILED",
-                      f"git push did not complete ({reason}), and the remote's {assessment.branch} could not be read "
-                      f"afterwards ({after.label()}); run oah land --check to see where it stands")
-    return Pushed(False, "OAH_LAND_PUSH_FAILED",
-                  f"git push did not update {where} ({reason}); nothing landed. Run git push --dry-run "
-                  f"{assessment.remote} {assessment.head}:{ref} yourself to see git's message, fix it, then run oah "
-                  "land --merge again", now)
+    from oah.atomic import StateCorrupt
+    from oah.impact.errors import ImpactError
+    from oah.lockfile import LockTimeout
+
+    try:
+        # Keep this fetched generation leased until its history and identity have been checked.
+        with defaultbranch._query_context(root, settings, env=env) as after:
+            now = None
+            contains = None
+            if (after.state == "fresh" and after.remote == assessment.remote and after.branch == assessment.branch
+                    and _destination(root, assessment.remote, env) == assessment._destination):
+                source = defaultbranch._snapshot_source(root, after.commit, env)
+                if defaultbranch._source(source).get("url") == mapstore.digest(list(assessment._destination)):
+                    now = after.commit
+                    history = run_command([*git_argv(), "-C", str(source), "rev-list", now],
+                                          timeout=float(settings["git_timeout"]),
+                                          env=mapstore._isolated_git_env())
+                    if history.returncode == 0 and not history.timed_out:
+                        contains = assessment.head in history.stdout.splitlines()
+                        if not contains:
+                            shallow = run_git(source, "rev-parse", "--is-shallow-repository")
+                            if shallow.returncode != 0 or shallow.stdout.strip() != "false":
+                                contains = None
+            if contains is True:
+                return Pushed(True, "OAH_LAND_LANDED", f"{where} contains {assessment.head}, although git reported a "
+                              "problem after the update; inspect the remote history and hooks", now)
+            if contains is False and now != assessment.fetched:
+                return Pushed(False, "OAH_LAND_IMPACT_STALE",
+                              f"{where} moved to {now[:12]} while landing, and its history does not contain HEAD; "
+                              "nothing landed. Run oah land --check again: it fetches the new SHA, reassesses "
+                              "impact and requires the affected checks again", now)
+            if contains is False:
+                reason = _push_reason(result.stdout, result.stderr, ref, result.timed_out, result.returncode)
+                return Pushed(False, "OAH_LAND_PUSH_FAILED",
+                              f"git push did not update {where} ({reason}); nothing landed. Inspect git's hooks "
+                              "and remote permissions yourself, fix the refusal, then run oah land --merge again", now)
+    except (ImpactError, LandError, LockTimeout, StateCorrupt, OSError):
+        pass  # A failed verification must never turn a possible acceptance into 'nothing landed'.
+    return Pushed(None, "OAH_LAND_OUTCOME_UNCERTAIN",
+                  "git push reported a problem and acceptance could not be established; the outcome is uncertain. "
+                  "Inspect the destination's history for the assessed HEAD before retrying oah land --check")
 
 
 def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushed | None,
@@ -782,7 +976,7 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
             "required_checks": [dict(item) for item in assessment.required],
             "checks": [{"name": check.name, "state": check.state, "code": check.code} for check in assessment.checks],
             "ready": assessment.ready, "code": pushed.code if pushed else assessment.code,
-            "landed": bool(pushed and pushed.landed), "remote_sha": pushed.remote_sha if pushed else None}
+            "landed": pushed.landed if pushed else False, "remote_sha": pushed.remote_sha if pushed else None}
     try:
         path = _contained_path(state, "land", assessment.task, "records.jsonl")
         with StateLock(_contained_path(state, ".lock")):

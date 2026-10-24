@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import secrets
 import unittest
 from unittest.mock import patch
@@ -29,6 +31,88 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    def test_confirmation_revalidates_local_authorization(self):
+        from oah.review import receipts
+
+        for change in ("lease", "review", "intent", "gates", "new-approval"):
+            with self.subTest(change=change):
+                project = LandProject(self)
+
+                def answer(_prompt):
+                    if change == "lease":
+                        done = project.oah("start", "--task", "t1", "--agent", "claude", "--packet",
+                                           ".oah/tasks/t1/PACKET.md")
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                    elif change == "review":
+                        receipts.log_round(project.state, "t1", {"event": "start", "round": 2, "series_round": 2,
+                                           "attempt": 1, "run_id": "later", "base": project.base, "head": project.head})
+                    elif change == "intent":
+                        path = project.repo / ".oah/tasks/t1/PACKET.md"
+                        path.write_bytes(path.read_bytes().replace(b"Revision: 1", b"Revision: 2"))
+                    elif change == "gates":
+                        project.ledger.write_bytes(project.ledger.read_bytes().replace(b"[x]", b"[ ]"))
+                    else:
+                        from tests.test_review_summary import publish_receipt
+                        publish_receipt(project, 2)
+                    return "y\n"
+
+                done = land_command(project, "--merge", "--task", "t1", interactive=True, ask=answer)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(project.remote_main(), project.base)
+                if change == "review":
+                    self.assertIn("OAH_LAND_REVIEW_REQUIRED", done.stderr)
+
+    @unittest.skipIf(os.name == "nt", "the pre-push hook fixture uses a POSIX shell")
+    def test_push_hook_cannot_leak_oah_prefixed_stderr(self):
+        import shlex
+
+        project = LandProject(self)
+        marker = secrets.token_hex(24)
+        hook = project.repo / ".git/hooks/pre-push"
+        hook.write_bytes(("#!/bin/sh\nprintf '%s\\n' " + shlex.quote("OAH_PUSH_REFUSED: " + marker)
+                          + " >&2\nexit 1\n").encode("utf-8"))
+        hook.chmod(0o755)
+        for output in ((), ("--json",)):
+            done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head, *output)
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertNotIn(marker, done.stdout + done.stderr + json.dumps(records(project)))
+            self.assertIn("git exited 1", done.stdout + done.stderr)
+        self.assertEqual(project.remote_main(), project.base)
+
+    @unittest.skipIf(os.name == "nt", "the pre-push hook fixture uses a POSIX shell")
+    def test_authorization_lock_is_held_through_push(self):
+        import shlex
+
+        project = LandProject(self)
+        probe = project.work / "probe.py"
+        observed = project.work / "observed"
+        probe.write_text("# 상태 잠금 관찰용 시험 프로세스.\nfrom pathlib import Path\nfrom oah.lockfile import StateLock, LockTimeout\n"
+                         + "try:\n    with StateLock(Path(" + repr(str(project.state / ".lock"))
+                         + "), timeout=0.1):\n        result = 'unlocked'\n"
+                         + "except LockTimeout:\n    result = 'locked'\n"
+                         + "Path(" + repr(str(observed)) + ").write_text(result, encoding='utf-8')\n",
+                         encoding="utf-8")
+        hook = project.repo / ".git/hooks/pre-push"
+        hook.write_bytes(("#!/bin/sh\n" + shlex.join([sys.executable, str(probe)]) + "\n").encode("utf-8"))
+        hook.chmod(0o755)
+        done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(observed.read_text(encoding="utf-8"), "locked")
+
+    def test_linked_authorization_state_refuses_without_exposing_paths(self):
+        from tests.helpers import directory_alias
+
+        project = LandProject(self)
+        folder = project.state / "reviews/t1"
+        saved = project.work / ("private-" + secrets.token_hex(12))
+        folder.rename(saved)
+        directory_alias(saved, folder)
+        done = land_command(project, "--check", "--task", "t1", "--json")
+        self.assertEqual(done.returncode, 69, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["code"], "OAH_RUN_PATH_UNSAFE")
+        self.assertNotIn(str(saved), done.stdout + done.stderr)
+        self.assertNotIn(str(project.state), done.stdout + done.stderr)
+
     def test_land_is_discovered(self):
         self.assertIn("land", build_parser()._subparsers._group_actions[0].choices)
 
