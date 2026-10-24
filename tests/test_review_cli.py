@@ -1,6 +1,7 @@
 # oah review 명령 검사 — 실제 명령 탐색과 python -m oah 로 사용법, 종료 코드, 더러운 트리, 시리즈 잠금, base 검사, 의도 상태, 영향 갱신 실패, 작업자 거부, JSON 출력을 본다.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -15,7 +16,7 @@ from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import receipts
 from tests.helpers import git_commit
-from tests.test_review_rounds import Project, bug, git
+from tests.test_review_rounds import FAKE_REVIEWER, Project, bug, git, toml_list
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
@@ -28,6 +29,45 @@ def oah(project: Project, *args: str, env_extra: dict | None = None) -> subproce
 
 
 class CliTest(unittest.TestCase):
+    def test_binary_pin_executes_the_caller_script_from_another_worktree(self):
+        for relative_executable in (False, True):
+            with self.subTest(relative_executable=relative_executable):
+                project = Project(self, remote=True)
+                caller = project.temp_root.parent / "caller"
+                executable = pathlib.Path(sys.executable).name
+                if relative_executable:
+                    try:
+                        executable = os.path.relpath(sys.executable, caller)
+                    except ValueError:
+                        self.skipTest("a relative executable needs the same Windows drive")
+                trusted = FAKE_REVIEWER.read_bytes()
+                pinned = hashlib.sha256(trusted).hexdigest()
+                command = [executable, "tools/reviewer.py", "--script", str(project.script)]
+                config = (f"[engines.codex]\ncommand = {toml_list(command)}\n"
+                          f'[review]\ncodex_sha256 = "{pinned}"\n')
+                project.base = project.commit({".oah/config.toml": config, "tools/reviewer.py": trusted})
+                git(project.repo, "worktree", "add", "-q", "--detach", str(caller), project.base)
+                task_copy = trusted.replace(b'"fake review"', b'"task copy"').replace(b"0.163.0", b"9.999.0")
+                project.commit({"tools/reviewer.py": task_copy})
+                env = dict(project.env, PYTHONPATH=SRC)
+                env["PATH"] = str(pathlib.Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+                done = subprocess.run([sys.executable, "-m", "oah", "review", "--task", "t1", "--base",
+                                       project.base, "--json"], cwd=caller, capture_output=True, text=True,
+                                      encoding="utf-8", env=env, timeout=600)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                result = json.loads(done.stdout)
+                receipt = result["receipt"]
+                self.assertEqual(receipt["summary"], "fake review")
+                self.assertEqual(receipt["head"], project.head)
+                self.assertEqual(receipt["reviewer"]["cli_path"], os.path.realpath(caller / "tools/reviewer.py"))
+                self.assertEqual(receipt["reviewer"]["cli_sha256"], pinned)
+                self.assertEqual(receipt["reviewer"]["cli_version"], "0.163.0")
+                run = json.loads((pathlib.Path(result["run_dir"]) / "result.json").read_text(encoding="utf-8"))
+                self.assertTrue(os.path.isabs(run["command"][0]))
+                self.assertEqual(run["command"][1], receipt["reviewer"]["cli_path"])
+                self.assertEqual(len(project.calls()), 1)
+                self.assertNotEqual(pathlib.Path(project.calls()[0]["cwd"]), project.repo)
+
     def test_cli_json_redacts_noncanonical_escaped_credentials(self):
         for invalid in (False, True):
             with self.subTest(invalid=invalid):

@@ -139,10 +139,14 @@ def _safe_output(raw: bytes, redact: Callable[[str], str]) -> bytes:
         raise schema.OutputInvalid(["the final message is nested too deeply"]) from None
 
 
+def _reviewer_entry(base: Sequence[str]) -> int:
+    name = pathlib.Path(base[0]).name.casefold().removesuffix(".exe")
+    return 1 if len(base) > 1 and (name in INTERPRETERS or name.startswith("python3")) else 0
+
+
 def reviewer_binary(base: Sequence[str]) -> tuple[str, str]:
     """(resolved path, sha256) of the reviewer CLI file: the script after an interpreter, else the program."""
-    name = pathlib.Path(base[0]).name.casefold().removesuffix(".exe")
-    entry = base[1] if len(base) > 1 and (name in INTERPRETERS or name.startswith("python3")) else base[0]
+    entry = base[_reviewer_entry(base)]
     path = os.path.realpath(entry)
     if not os.path.isfile(path):
         raise ReviewError("OAH_ENGINE_MISSING", f"the reviewer CLI {entry} is not a file; install Codex (oah doctor "
@@ -352,7 +356,12 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this series is below [review] max_rounds, so --extra-round "
                         "changed nothing")
     decision = request.decision or rounds.round_decision(s)
-    cli_path, cli_sha = reviewer_binary(models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"]))
+    command = models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"])
+    for index in {0, _reviewer_entry(command)}:
+        command[index] = os.path.abspath(command[index])
+    cli_path, cli_sha = reviewer_binary(command)
+    call_settings = dataclasses.replace(call_settings, engines={
+        **call_settings.engines, ENGINE: {**call_settings.engines[ENGINE], "command": command}})
     if conf.codex_sha256 and cli_sha != conf.codex_sha256:
         raise ReviewError("OAH_REVIEW_BINARY_MISMATCH", f"the reviewer CLI {cli_path} has sha256 {cli_sha}, but "
                           f"[review] codex_sha256 pins {conf.codex_sha256}; nothing was launched. If you updated "
