@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "base", "head", "summary", "findings", "classes", "intent_return", "evidence", "db_impact"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approve", "request_changes"],
+      "description": "approve when no finding is P0 or P1, otherwise request_changes"
+    },
+    "base": {"type": "string", "description": "the full base SHA from the brief, copied exactly"},
+    "head": {"type": "string", "description": "the full head SHA from the brief, copied exactly"},
+    "summary": {"type": "string", "description": "a short summary of the review"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_id", "class_id", "severity", "axis", "title", "detail", "location", "in_scope",
+                     "fix_kind", "prior_refs"],
+        "properties": {
+          "finding_id": {"type": "string", "description": "R<round>-F<k>, new in this round"},
+          "class_id": {"type": "string", "description": "an earlier class id of the series, or a new R<round>-C<k> defined in classes"},
+          "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+          "axis": {"type": "string", "enum": ["goal", "tests", "quality", "security", "context", "regressions"]},
+          "title": {"type": "string"},
+          "detail": {"type": "string", "description": "the failure mechanism and the evidence for it"},
+          "location": {"type": "string", "description": "path:line, or the area"},
+          "in_scope": {"type": "boolean", "description": "whether the fix stays inside the task scope"},
+          "fix_kind": {"type": "string", "enum": ["local", "design", "stored-format"],
+                       "description": "design or stored-format when the fix needs a design or stored-format change"},
+          "prior_refs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["round", "receipt_digest", "finding_id", "class_id"],
+              "properties": {
+                "round": {"type": "integer"},
+                "receipt_digest": {"type": "string"},
+                "finding_id": {"type": "string"},
+                "class_id": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "classes": {
+      "type": "array",
+      "description": "definitions of the new classes this round introduces; earlier classes are reused by id",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class_id", "mechanism", "rule"],
+        "properties": {
+          "class_id": {"type": "string", "description": "R<round>-C<k>"},
+          "mechanism": {"type": "string", "description": "the failure mechanism"},
+          "rule": {"type": "string", "description": "the rule it violates"}
+        }
+      }
+    },
+    "intent_return": {"type": "string", "description": "the INTENT line and one AC line per success condition"},
+    "evidence": {"type": "string", "description": "the commands you ran with their results, and the canary line"},
+    "db_impact": {"type": "string", "description": "the DB impact line from the brief, copied exactly"}
+  }
+}

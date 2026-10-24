@@ -49,6 +49,7 @@ from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_ru
 from oah.engines.proc import run_command
 
 WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
+ISOLATED_CODEX_FLAGS = ("--ignore-user-config", "--ignore-rules")  # review rounds (PLAN 5.9 step 6)
 WAIT_LIMIT_S = 540.0
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
@@ -445,6 +446,8 @@ class CallRequest:
     refresh_models: bool = False
     skills: tuple[tuple[str, str], ...] = ()
     no_rerank: bool = False  # the brief turns the re-ranker off (--no-rerank)
+    isolated: bool = False  # Codex ignores the user's config.toml and execpolicy rules (oah review)
+    output_last_message: str | None = None  # review filters temporary output before retaining it
 
 
 @dataclasses.dataclass(frozen=True)
@@ -614,8 +617,10 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
                                    effort=resolution.launch_effort,
-                                   output_last_message=str(run.file_path("last-message.md")),
+                                   output_last_message=request.output_last_message or str(run.file_path("last-message.md")),
                                    output_schema=request.output_schema, ephemeral=request.ephemeral)
+        if request.isolated:
+            argv[-1:-1] = ISOLATED_CODEX_FLAGS  # before the stdin marker
     else:
         section = settings.engines["claude"]
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
@@ -673,24 +678,28 @@ def _effort_fields(prepared: Prepared, stdout: str, stderr: str, rules: Sequence
 
 
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
-            rules: Sequence[Mapping] | None = None) -> dict:
+            rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
     run = prepared.run
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
+    clean = redact or (lambda text: text)
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
     prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
     run.file_path("last-message.md")
     try:
         result = _run_prepared(prepared, env, prompt)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
-                          error=f"OAH_ENGINE_LAUNCH_FAILED: {exc}")
+                          error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
     finished = dt.datetime.now(dt.timezone.utc)
-    run.write_logs(result.stdout, result.stderr)
+    stdout, stderr = clean(result.stdout), clean(result.stderr)
+    run.write_logs(stdout, stderr)
+    # Validate the actual header first: redaction must never turn a mismatch into an unreadable header.
     fields = _effort_fields(prepared, result.stdout, result.stderr, load_rules() if rules is None else rules)
+    fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
     if result.timed_out:
         status, error = "timed_out", (f"OAH_RUN_TIMEOUT: the engine ran longer than {prepared.timeout_s:g} s and its "
                                       "process tree was stopped; raise the tier's timeout_min or split the task")
@@ -721,8 +730,13 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                {"start_new_session": True})
     try:
         with dispatch_guard(prepared):
-            child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+            try:
+                child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+            except OSError as exc:
+                # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
+                raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
+                                                 "Check the executable path and permissions, then retry") from None
             if job is not None:
                 try:
                     job.start(child)

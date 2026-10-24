@@ -77,6 +77,12 @@ def _same_type(default: Any, value: Any) -> bool:
 class Config:
     path: pathlib.Path | None
     raw: Mapping[str, Any]
+    label: str | None = None  # names bytes that came from somewhere else than a file, such as a commit
+
+    @property
+    def where(self) -> str:
+        """How messages name this configuration."""
+        return self._where()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "raw", _freeze(self.raw))
@@ -97,6 +103,8 @@ class Config:
         return self._merge(defaults, given, name)
 
     def _where(self) -> str:
+        if self.label is not None:
+            return self.label
         return str(self.path) if self.path is not None else str(CONFIG_RELATIVE_PATH)
 
     def _merge(self, defaults: Mapping[str, Any], given: Mapping[str, Any], dotted: str) -> dict:
@@ -131,6 +139,23 @@ class Config:
                            f"change it to {expected} or remove it to use the default")
 
 
+def parse_config(data: bytes, *, path: pathlib.Path | None = None, label: str | None = None) -> Config:
+    """Parse configuration bytes read from `path`, or from the place `label` names (such as a commit)."""
+    where = label or str(path or CONFIG_RELATIVE_PATH)
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("OAH_CONFIG_INVALID",
+                          f"{where} is not UTF-8 (byte {exc.start}); save it as UTF-8") from exc
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError("OAH_CONFIG_INVALID",
+                          f"{where} is not valid TOML ({exc}); fix the syntax "
+                          "or remove the file to use the defaults") from exc
+    return Config(path=path, raw=parsed, label=label)
+
+
 def load_config(root: pathlib.Path) -> Config:
     """Read <root>/.oah/config.toml; a missing file reads as empty."""
     path = pathlib.Path(root).joinpath(*CONFIG_RELATIVE_PATH.parts)
@@ -142,15 +167,4 @@ def load_config(root: pathlib.Path) -> Config:
         raise ConfigError("OAH_CONFIG_INVALID",
                           f"{path} cannot be read ({exc.strerror or exc}); "
                           "make it a readable file or remove it to use the defaults") from exc
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ConfigError("OAH_CONFIG_INVALID",
-                          f"{path} is not UTF-8 (byte {exc.start}); save it as UTF-8") from exc
-    try:
-        parsed = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError("OAH_CONFIG_INVALID",
-                          f"{path} is not valid TOML ({exc}); fix the syntax "
-                          "or remove the file to use the defaults") from exc
-    return Config(path=path, raw=parsed)
+    return parse_config(data, path=path)
