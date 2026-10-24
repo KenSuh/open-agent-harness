@@ -378,6 +378,12 @@ class AssessTest(unittest.TestCase):
             project.assess()
         self.assertEqual(caught.exception.code, "OAH_LAND_DIRTY_TREE")
         (project.repo / "README.md").write_text("hello\n", encoding="utf-8")
+        (project.repo / "notes.txt").write_text("a local note\n", encoding="utf-8")
+        with self.assertRaises(land.LandError) as caught:
+            project.assess()
+        self.assertEqual(caught.exception.code, "OAH_LAND_DIRTY_TREE")
+        self.assertIn("untracked files are present (notes.txt)", str(caught.exception))
+        (project.repo / "notes.txt").unlink()
         project.env["OAH_WORKER"] = "1"
         with self.assertRaises(land.LandError) as caught:
             project.assess()
@@ -415,8 +421,8 @@ class PushTest(unittest.TestCase):
         racer = git(project.repo, "commit-tree", "-p", project.base, "-m", "race", f"{project.base}^{{tree}}")
         git(project.repo, "push", "-q", str(project.remote), f"{racer}:refs/heads/racer")
         hook = project.remote / "hooks" / "pre-receive"
-        hook.write_text(f"#!/bin/sh\nunset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/main {racer}\ncat >/dev/null\n",
-                        encoding="utf-8")
+        script = f"#!/bin/sh\nunset GIT_QUARANTINE_PATH\ngit update-ref refs/heads/main {racer}\ncat >/dev/null\n"
+        hook.write_text(script, encoding="utf-8")
         hook.chmod(0o755)
         with project.patched():
             pushed = land.push(project.repo, result, env=dict(project.env))

@@ -329,8 +329,8 @@ class Round:
         return {"receipt": self.name, "digest": self.digest, "round": self.number, "series_round": self.series_round,
                 "base": self.base, "head": self.head, "verdict": self.verdict, "outcome": self.outcome,
                 "independent": self.independent, "independence": independence_label(self.independent),
-                "effort_verified": self.effort_verified, "reviewer": dict(self.reviewer), "findings": dict(self.findings),
-                "decision_stop_reason": self.stop_reason}
+                "effort_verified": self.effort_verified, "reviewer": dict(self.reviewer),
+                "findings": dict(self.findings), "decision_stop_reason": self.stop_reason}
 
     def row(self) -> str:
         sha = str(self.reviewer.get("cli_sha256") or "unknown")[:12]
@@ -392,7 +392,8 @@ class Summary:
         return {"task": self.task, "head": self.head, "intent": self.intent,
                 "status": {"converged": self.convergence.converged, "receipt": receipt.name if receipt else None,
                            "reason": self.convergence.reason},
-                "rounds": [item.to_json() for item in self.rounds], "follow_ups": [dict(item) for item in self.follow_ups],
+                "rounds": [item.to_json() for item in self.rounds],
+                "follow_ups": [dict(item) for item in self.follow_ups],
                 "critical_paths": list(self.critical), "gates": self.gates.to_json(), "problems": list(self.problems),
                 "markdown": self.render()}
 

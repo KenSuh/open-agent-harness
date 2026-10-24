@@ -156,6 +156,21 @@ class LandCliTest(unittest.TestCase):
         self.assertIn("OAH_LAND_SCAN_FAILED", text)  # the leak scenario really ran
         self.assertIn("gh exited 1", text)
 
+    def test_record_failure_does_not_hide_a_landing(self):
+        from oah.atomic import StorageError
+
+        project = LandProject(self)
+
+        def broken(*_args, **_kwargs):
+            raise StorageError(project.state / "land", PermissionError(13, "denied"))
+
+        with patch.object(land, "record", broken):
+            done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.splitlines()[-1].startswith("OAH_LAND_LANDED:"), done.stdout)
+        self.assertIn("OAH_LAND_RECORD_FAILED", done.stderr)
+        self.assertEqual(project.remote_main(), project.head)
+
     def test_usage_errors_exit_two(self):
         project = LandProject(self, ledger=None, receipt=False, finish=False)
         for args in (("--task", "t1"), ("--check", "--merge", "--task", "t1"), ("--check",),

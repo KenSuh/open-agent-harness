@@ -101,6 +101,15 @@ def _confirmation(args: argparse.Namespace, assessment: land.Assessment) -> tupl
                                   f"--task {task} again when you are ready")
 
 
+def _record(state: pathlib.Path, assessment: land.Assessment, mode: str, pushed: land.Pushed | None) -> None:
+    """Write the landing record; a failure never changes what happened, so it is only reported."""
+    try:
+        land.record(state, assessment, mode, pushed)
+    except (land.LandError, LockTimeout, StateCorrupt, OSError) as exc:
+        print(f"OAH_LAND_RECORD_FAILED: the landing record could not be written ({exc}); the result below stands. "
+              "Check the state folder's permissions and free space", file=sys.stderr)
+
+
 def _done(code: str, message: str, exit_code: int, as_json: bool, assessment: land.Assessment | None = None,
           pushed: land.Pushed | None = None) -> int:
     line = f"{code}: {message}"
@@ -131,20 +140,20 @@ def run(args: argparse.Namespace) -> int:
         if not args.json:
             print("\n".join(_check_lines(assessment)))
         if not assessment.ready:
-            land.record(state, assessment, mode, None)
+            _record(state, assessment, mode, None)
             failure = assessment.failure
             message = failure.message.rstrip(". ") + ". Nothing was pushed." if args.merge else failure.message
             return _done(failure.code, message, EXIT_REFUSED, args.json, assessment)
         if args.check:
-            land.record(state, assessment, mode, None)
+            _record(state, assessment, mode, None)
             return _done(land.READY, _ready_message(assessment), EXIT_OK, args.json, assessment)
         refusal = _confirmation(args, assessment)
         if refusal is not None:
             pushed = land.Pushed(False, *refusal)
-            land.record(state, assessment, mode, pushed)
+            _record(state, assessment, mode, pushed)
             return _done(refusal[0], refusal[1], EXIT_REFUSED, args.json, assessment, pushed)
         pushed = land.push(info.root, assessment, env=env)
-        land.record(state, assessment, mode, pushed)
+        _record(state, assessment, mode, pushed)
         return _done(pushed.code, pushed.message, EXIT_OK if pushed.landed else EXIT_REFUSED, args.json, assessment,
                      pushed)
     except (land.LandError, ReviewError) as exc:
