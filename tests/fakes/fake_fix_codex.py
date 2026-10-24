@@ -13,6 +13,7 @@ the end. A step may set:
   probe_lease    true: run `oah renew`, `oah finish` and `oah fix --bind` as this worker and record the results
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   last_message   the final message; default: a line, then the INTENT and AC lines read from the brief
+  sleep          seconds to wait after the header, before any change or output
   stdout, stderr extra output; {env:NAME} resolves in this process only
   exit           the exit code (default 0)
 Every correction call writes call-<k>.json: argv, cwd, env, prompt, the record names indexed in
@@ -131,6 +132,7 @@ def main(argv: list[str]) -> int:
     if step.get("hang"):
         while True:
             time.sleep(1)
+    time.sleep(float(step.get("sleep", 0)))
     for name, content in step.get("write", {}).items():
         target = cwd / name
         if content is None:

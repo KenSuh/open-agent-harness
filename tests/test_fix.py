@@ -1,16 +1,21 @@
 # oah fix 검사 — 가짜 리뷰어·수정자 프로세스와 실제 모듈로 수정 시도 기록, 작업자 실행, 끝마다 하나뿐인 결과, 커밋 묶기, 수동 수정, 리뷰 왕복, 비밀 차단을 본다.
 from __future__ import annotations
 
+import _thread
 import json
 import os
 import pathlib
 import shlex
 import subprocess
 import sys
+import threading
+import time
 import unittest
+from unittest import mock
 
-from oah import intent
+from oah import briefs, call, call_cli, intent
 from oah.lease import Store
+from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import ReviewError, fix, receipts, runner
 from oah.secrets import NoKeychain
@@ -140,6 +145,67 @@ class FixProject:
             subprocess.run(shlex.split(command), cwd=self.repo, check=True, capture_output=True, env=git_env())
         self.head = git(self.repo, "rev-parse", "HEAD")
         return self.head
+
+
+def wait_for(path: pathlib.Path, seconds: float = 60) -> bool:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def interrupt_when(path: pathlib.Path) -> threading.Thread:
+    """Deliver Ctrl-C to this (main) thread, as Python sees it, once the hanging worker wrote its pid file."""
+    def run():
+        if wait_for(path):
+            _thread.interrupt_main()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+class CallSeamTest(unittest.TestCase):
+    def prepare(self, project: FixProject, **fields) -> call.Prepared:
+        tools = call_cli.intent_tools()
+        return call.prepare(call.CallRequest(engine="codex", stage="correction", task="t1", tier="high", **fields),
+                            call_cli.load_settings(project.repo), root=project.repo, state_dir=project.state,
+                            env=runner.reviewer_env(project.env), footer=tools.footer, has_footer=tools.has_footer,
+                            parse_intent=tools.parse, read_source=tools.read_source, keychain=NoKeychain())
+
+    def test_interrupt_stops_the_tree(self):
+        project = FixProject(self)
+        project.queue_fix({"hang": True})
+        prepared = self.prepare(project, timeout_s=120)
+        pid_file = project.fix_dir / "pid-000.txt"
+        thread = interrupt_when(pid_file)
+        with self.assertRaises(KeyboardInterrupt):
+            call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+        thread.join(5)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        self.assertFalse(call._alive(pid), "an interrupted call must stop its worker")
+        run = prepared.run.read()
+        self.assertEqual(run["status"], "failed")
+        self.assertTrue(run["error"].startswith("OAH_RUN_INTERRUPTED:"), run["error"])
+        call.check_prepared(prepared)  # the lease lock was released on the way out
+
+    def test_polled_wait_keeps_output_and_timeout(self):
+        project = FixProject(self)
+        output = "".join(f"line {number:06d} " + "x" * 60 + "\n" for number in range(4000))
+        project.queue_fix({"sleep": 0.6, "stdout": output}, {"hang": True})
+        with mock.patch.object(call, "POLL_SECONDS", 0.05):
+            prepared = self.prepare(project, round_instructions="y" * 300_000)
+            run = call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+            self.assertEqual((run["status"], run["exit_code"]), ("finished", 0), run.get("error"))
+            self.assertEqual(project.fix_calls()[0]["prompt"].encode("utf-8"), prepared.run.prompt_path.read_bytes())
+            self.assertEqual(prepared.run.stdout_path.read_text(encoding="utf-8"), output + "fake correction done\n")
+            hanging = self.prepare(project, timeout_s=1)
+            run = call.execute(hanging, base_env=runner.reviewer_env(project.env), rules=RULES)
+        self.assertEqual((run["status"], run["timed_out"]), ("timed_out", True))
+        pid = int((project.fix_dir / "pid-001.txt").read_text(encoding="utf-8"))
+        self.assertFalse(call._alive(pid), "a timed-out call must stop its worker")
 
 
 class TemplateTest(unittest.TestCase):

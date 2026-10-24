@@ -10,7 +10,9 @@
 - the brief (`briefs.build`) and the argv; a review is always read-only.
 `execute` holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
 (prompt on stdin, the process tree killed on timeout), recording the exit code, logs, header check and
-inference normalization. `start_background`
+inference normalization. It waits in `POLL_SECONDS` slices, so Ctrl-C is handled while the worker runs on
+every OS; an interruption stops the worker's process tree and records the run as failed
+(`OAH_RUN_INTERRUPTED`) before it propagates. `start_background`
 hands the same prepared run to a detached Python runner and returns at once; `wait` polls the record
 for at most `WAIT_LIMIT_S` seconds and can be called again.
 
@@ -51,6 +53,7 @@ from oah.engines.proc import run_command
 WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
 ISOLATED_CODEX_FLAGS = ("--ignore-user-config", "--ignore-rules")  # review rounds (PLAN 5.9 step 6)
 WAIT_LIMIT_S = 540.0
+POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a running worker is polled
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
@@ -694,6 +697,13 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                           error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
+    except (KeyboardInterrupt, SystemExit):
+        # _run_prepared already stopped the process tree; never leave the run looking alive.
+        run.write_logs("", "")
+        run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
+                   error="OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
+                         "tree was stopped; call the engine again when you are ready")
+        raise
     finished = dt.datetime.now(dt.timezone.utc)
     stdout, stderr = clean(result.stdout), clean(result.stderr)
     run.write_logs(stdout, stderr)
@@ -744,15 +754,31 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                     child.kill()
                     child.communicate(timeout=REAP_SECONDS)
                     raise
+        data, deadline = prompt.encode("utf-8"), time.monotonic() + prepared.timeout_s
         try:
-            out, err = child.communicate(input=prompt.encode("utf-8"), timeout=prepared.timeout_s)
-        except subprocess.TimeoutExpired:
+            while True:
+                try:
+                    out, err = child.communicate(input=data, timeout=max(min(POLL_SECONDS,
+                                                                             deadline - time.monotonic()), 0))
+                    break
+                except subprocess.TimeoutExpired:
+                    data = None  # the input was handed over; a retry must not send it again
+                    if time.monotonic() < deadline:
+                        continue
+                    kill_tree(child)
+                    try:
+                        out, err = child.communicate(timeout=REAP_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        out, err = b"", b""
+                    return RunResult(None, decode_output(out), decode_output(err), True)
+        except BaseException:
+            # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
             kill_tree(child)
             try:
-                out, err = child.communicate(timeout=REAP_SECONDS)
-            except subprocess.TimeoutExpired:
-                out, err = b"", b""
-            return RunResult(None, decode_output(out), decode_output(err), True)
+                child.communicate(timeout=REAP_SECONDS)
+            except Exception:
+                pass
+            raise
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     finally:
         if job is not None:
