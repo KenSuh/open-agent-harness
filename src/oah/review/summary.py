@@ -179,7 +179,7 @@ def convergence(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
 
 
 def committed_bytes(root: pathlib.Path, rev: str, path: str) -> bytes | None:
-    """The bytes of `path` as committed at `rev`, or None when it is not there."""
+    """Exact committed blob bytes, without checkout filters or newline translation; None when absent."""
     if run_git(root, "cat-file", "-e", f"{rev}:{path}").returncode != 0:
         return None
     result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{path}"], timeout=GIT_TIMEOUT,
@@ -239,7 +239,7 @@ def parse_gate_summary(data: bytes) -> tuple[str | None, tuple[tuple[str, str], 
 
 def committed_gate_summary(root: pathlib.Path, task: str, rev: str, *, commit_ledgers: bool = False,
                            ledgers: Sequence[str] = ()) -> GateSummary:
-    """The task's committed gate record at `rev`: GATES.summary.md, or the ledgers with `commit_ledgers`."""
+    """The task's gate record at `rev`; its digest hashes exact committed blob bytes, including CRLF."""
     check_task(task)
     if commit_ledgers:
         from oah.gates import parse_text, structural_status

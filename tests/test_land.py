@@ -169,6 +169,56 @@ class LandProject:
 
 
 class AssessTest(unittest.TestCase):
+    def test_ci_later_page_errors_refuse_and_preserve_known_failures(self):
+        project = LandProject(self)
+        errors = ({"exit": 1}, {"raw": "invalid JSON"}, {"raw": "[]"},
+                  {"sleep": 2}, {"total_count": 102})
+        for failed in (False, True):
+            for error in errors:
+                with self.subTest(failed=failed, error=error):
+                    runs = [{"name": "ok", "status": "completed", "conclusion": "success"}] * 101
+                    if failed:
+                        runs[0] = {"name": "failed", "status": "completed", "conclusion": "failure"}
+                    project.ci(runs, pages={"2": error})
+                    with patch.object(land, "GH_TIMEOUT", 0.5):
+                        result = project.assess()
+                    self.assertFalse(result.ready, describe(result))
+                    self.assertEqual(result.check("ci").code,
+                                     "OAH_LAND_CI_FAILED" if failed else "OAH_LAND_CI_PENDING", describe(result))
+
+    def test_ci_invalid_pages_and_enums_refuse_without_disclosure(self):
+        project = LandProject(self)
+        private = secrets.token_hex(24)
+        for overrides in ({"status": private}, {"conclusion": private}, {"status": [private]},
+                          {"conclusion": {"private": private}}, {"head_sha": "e" * 40}):
+            with self.subTest(field=next(iter(overrides))):
+                project.ci([{"name": private, "status": "completed", "conclusion": "success", **overrides}])
+                result = project.assess()
+                self.assertFalse(result.ready, describe(result))
+                self.assertEqual(result.check("ci").code, "OAH_LAND_CI_PENDING")
+                self.assertNotIn(private, describe(result) + json.dumps(result.to_json()))
+        for raw in ('[]', '{"total_count": true, "check_runs": []}',
+                    '{"total_count": "0", "check_runs": []}',
+                    '{"total_count": 1, "check_runs": []}'):
+            with self.subTest(raw=raw):
+                project.ci(raw=raw)
+                self.assertFalse(project.assess().ready)
+
+    def test_fetched_ledger_settings_cannot_be_removed_or_relocated_by_head(self):
+        for old_globs, new_globs, path in (
+                ('[".oah/tasks/*/GATES.md"]', '[]', ".oah/tasks/x/GATES.md"),
+                ('["checks/*/GATES.md"]', '["elsewhere/*/GATES.md"]', "checks/x/GATES.md")):
+            with self.subTest(globs=new_globs):
+                project = LandProject(self, config=f"[impact]\nledger_globs = {old_globs}\n",
+                                      main_files={path: OTHER_LEDGER},
+                                      work_files={".oah/config.toml": f"[impact]\nledger_globs = {new_globs}\n"})
+                result = project.assess()
+                self.assertEqual(result.check("gates").state, "passed", describe(result))
+                self.assertEqual(result.check("required-checks").code, "OAH_LAND_CHECKS_REQUIRED", describe(result))
+                self.assertEqual([(item["gate"], item["state"]) for item in result.required],
+                                 [(f"{path}#G1", "pending")])
+                self.assertFalse(result.ready, describe(result))
+
     def test_rebased_imported_pending_gate_still_requires_evidence(self):
         project = LandProject(self)
         moved = project.advance_main({".oah/tasks/x/GATES.md": OTHER_LEDGER})
@@ -301,7 +351,8 @@ class AssessTest(unittest.TestCase):
                     {"name": "lint", "status": "completed", "conclusion": "success"}])
         result = failing.assess()
         self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_CI_FAILED"), describe(result))
-        self.assertIn("tests (failure)", result.failure.message)
+        self.assertIn("1 CI check run(s) failed", result.failure.message)
+        self.assertIn("positions 1", result.failure.message)
         self.assertNotIn("lint", result.failure.message)
 
         unbound = LandProject(self, commit_summary=False)
@@ -425,15 +476,15 @@ class AssessTest(unittest.TestCase):
                    + [{"name": "late", "status": "completed", "conclusion": "cancelled"}])
         result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_CI_FAILED", describe(result))
-        self.assertIn("late (cancelled)", result.failure.message)
+        self.assertIn("positions 102", result.failure.message)
         project.ci([{"name": "tests", "status": "completed", "conclusion": "success",
                      "head_sha": "e" * 40}])
-        self.assertEqual(project.check(project.assess(), "ci").state, "unverified")
-        fake_token = "gh" + "o_" + "Z" * 36
+        self.assertEqual(project.check(project.assess(), "ci").code, "OAH_LAND_CI_PENDING")
+        fake_token = "gh" + "o_" + secrets.token_hex(18)
         project.ci(exit=1, stderr=f"HTTP 401: Bad credentials {fake_token} for decoy-owner-login\n")
         result = project.assess()
-        self.assertTrue(result.ready, describe(result))
-        self.assertEqual(project.check(result, "ci").state, "unverified")
+        self.assertFalse(result.ready, describe(result))
+        self.assertEqual(project.check(result, "ci").code, "OAH_LAND_CI_PENDING")
         self.assertNotIn(fake_token, describe(result) + json.dumps(result.to_json()))
         self.assertNotIn("decoy-owner-login", describe(result) + json.dumps(result.to_json()))
         project.gh_argv = None
@@ -464,6 +515,39 @@ class AssessTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    def test_push_follow_tags_never_publishes_unconfirmed_tags(self):
+        for rejected in (False, True):
+            with self.subTest(rejected=rejected):
+                project = LandProject(self)
+                git(project.repo, "config", "push.followTags", "true")
+                git(project.repo, "-c", "tag.gpgsign=false", "tag", "-a", "unconfirmed", "-m", "tag", project.head)
+                result = project.assess()
+                self.assertTrue(result.ready, describe(result))
+                expected = project.base
+                if rejected:
+                    expected = project.advance_main({"docs/race.md": "another landing\n"})
+                with project.patched():
+                    pushed = land.push(project.repo, result, env=dict(project.env))
+                self.assertEqual(pushed.landed, not rejected, pushed.message)
+                self.assertEqual(project.remote_main(), expected if rejected else project.head)
+                self.assertEqual(git(project.remote, "for-each-ref", "--format=%(refname)", "refs/tags"), "")
+
+    @unittest.skipIf(os.name == "nt", "the per-ref rejection hook is a POSIX shell script")
+    def test_push_follow_tags_cannot_publish_tags_when_branch_update_is_rejected(self):
+        project = LandProject(self)
+        git(project.repo, "config", "push.followTags", "true")
+        git(project.repo, "-c", "tag.gpgsign=false", "tag", "-a", "unconfirmed", "-m", "tag", project.head)
+        hook = project.remote / "hooks/update"
+        hook.write_bytes(b'#!/bin/sh\n[ "$1" != refs/heads/main ]\n')
+        hook.chmod(0o755)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertFalse(pushed.landed, pushed.message)
+        self.assertEqual(project.remote_main(), project.base)
+        self.assertEqual(git(project.remote, "for-each-ref", "--format=%(refname)", "refs/tags"), "")
+
     def test_push_diagnostics_are_fixed_even_with_oah_prefix(self):
         marker = secrets.token_hex(24)
         for stdout, stderr in ((f"!\tHEAD:refs/heads/main\t[remote rejected] {marker}\n", ""),

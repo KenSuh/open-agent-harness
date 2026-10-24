@@ -31,6 +31,23 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    def test_private_ci_names_never_reach_text_json_or_records(self):
+        project = LandProject(self)
+        private = ["gh" + "p_" + secrets.token_hex(18), "account-" + secrets.token_hex(18)]
+        for status, conclusion, code in (("completed", "failure", "OAH_LAND_CI_FAILED"),
+                                         ("in_progress", None, "OAH_LAND_CI_PENDING")):
+            project.ci([{"name": value, "status": status, "conclusion": conclusion} for value in private])
+            for flags in ((), ("--json",)):
+                with self.subTest(status=status, flags=flags):
+                    done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head, *flags)
+                    self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                    self.assertIn(code, done.stdout + done.stderr)
+                    self.assertIn("positions 1, 2", done.stdout + done.stderr)
+                    emitted = done.stdout + done.stderr + json.dumps(records(project))
+                    for value in private:
+                        self.assertNotIn(value, emitted)
+        self.assertEqual(project.remote_main(), project.base)
+
     def test_confirmation_revalidates_local_authorization(self):
         from oah.review import receipts
 
@@ -144,7 +161,7 @@ class LandCliTest(unittest.TestCase):
         project.ci([{"name": "tests", "status": "completed", "conclusion": "failure"}])
         done = land_command(project, "--check", "--task", "t1")
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertTrue(done.stderr.startswith("OAH_LAND_CI_FAILED: CI check runs failed for HEAD"), done.stderr)
+        self.assertTrue(done.stderr.startswith("OAH_LAND_CI_FAILED: 1 CI check run(s) failed for HEAD"), done.stderr)
         self.assertIn("then run oah land --check again", done.stderr)
         self.assertIn("ci: failed OAH_LAND_CI_FAILED — ", done.stdout)
         offline = land_command(project, "--check", "--task", "t1", "--offline", "--json")

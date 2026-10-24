@@ -30,13 +30,13 @@ unverified, and the first failure is the headline.
 8. scan: gitleaks reports nothing in `F..HEAD`. Without gitleaks the check refuses with `OAH_LAND_SCAN_REQUIRED`;
    findings or a scanner error refuse with `OAH_LAND_SCAN_FAILED`. Its output, which names authors, is never shown.
 9. ci: through `gh`, every check run for HEAD completed as success, neutral or skipped (`OAH_LAND_CI_FAILED`,
-   `OAH_LAND_CI_PENDING`). No `gh`, no check runs, or a failed `gh` call is `unverified`, never `passed`.
+   `OAH_LAND_CI_PENDING`). Only absent `gh` or zero check runs is `unverified`; read errors refuse landing.
 
 The changed paths are `F..HEAD` when HEAD contains F (exactly what lands). Otherwise they are the review range,
 from the merge-base with the local default ref to HEAD.
 
 `push(root, assessment, env=...)` revalidates local authorization under the state lock, then runs
-`git push --porcelain --force-with-lease=refs/heads/<branch>:<F> <verified-destination>
+`git push --porcelain --no-follow-tags --force-with-lease=refs/heads/<branch>:<F> <verified-destination>
 <HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step.
 After a failed push, a fresh fetch checks whether the remote history contains HEAD; failed verification leaves
 the outcome explicitly uncertain.
@@ -66,6 +66,8 @@ CHECKS = ("lease", "intent", "review", "gates", "impact", "required-checks", "fa
 PASSED, FAILED, UNVERIFIED, SKIPPED = "passed", "failed", "unverified", "skipped"
 READY = "OAH_LAND_READY"
 CI_PASSING = ("success", "neutral", "skipped")
+CI_STATUSES = ("queued", "in_progress", "completed", "waiting", "requested", "pending")
+CI_CONCLUSIONS = (*CI_PASSING, "failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")
 GH_TIMEOUT = 60.0
 GH_PER_PAGE = 100
 GH_PAGES = 10
@@ -492,8 +494,9 @@ def _gh_repository(destination: str) -> tuple[str, str]:
 
 
 def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bool) -> _Reassessment:
+    from oah.config import CONFIG_RELATIVE_PATH, ConfigError, parse_config
     from oah.impact import defaultbranch, mapstore, query
-    from oah.impact.defaults import configured
+    from oah.impact.defaults import DEFAULTS, configured
     from oah.impact.errors import ImpactError
     from oah.impact_cli import _rows, _with_live_hits
     from oah.review import ReviewError, context
@@ -526,16 +529,24 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
                     or defaultbranch._source(source).get("url") != mapstore.digest(list(destination))):
                 raise LandError("OAH_LAND_DESTINATION_CHANGED",
                                 "the destination changed during assessment; run oah land again")
-            there = _ledger_gates(source, fetched, settings)
+            try:
+                config = parse_config(evidence.committed_bytes(source, fetched, str(CONFIG_RELATIVE_PATH)) or b"")
+                fetched_settings = configured(source, config.section("impact", DEFAULTS))
+            except ConfigError:
+                raise LandError("OAH_LAND_IMPACT_STALE", "the fetched impact configuration is invalid; fix it on "
+                                "the default branch, then run oah land again") from None
+            there = _ledger_gates(source, fetched, fetched_settings)
             mine = _with_live_hits(root, dict(data), head, changed, settings)
             mine_rows = _rows(mine, changed, gates=[gate for gate, _ in here], graph=query.load_graph(root, settings),
                               settings=settings)
-            theirs = _with_live_hits(source, branch.data, fetched, changed, settings)
-            their_rows = _rows(theirs, changed, gates=[gate for gate, _ in there], settings=settings)
+            fetched_info, fetched_data = mapstore._ref_map(root, branch.ref, source=source, env=env,
+                                                          settings=fetched_settings, remote=branch.remote,
+                                                          commit=fetched)
+            theirs = _with_live_hits(source, fetched_data, fetched, changed, fetched_settings)
+            their_rows = _rows(theirs, changed, gates=[gate for gate, _ in there], settings=fetched_settings)
             rows, found = query.merge_maps(mine_rows, their_rows)
             digest = mapstore.digest([query.row_json(row, found) for row in rows])
-            if branch.info:
-                warnings += branch.info.warnings()
+            warnings += fetched_info.warnings()
             return _Reassessment(True, remote=branch.remote, branch=branch.branch, fetched=fetched, contains=contains,
                                  base=base, changed=list(changed), result=digest,
                                  newly=_newly_affected(their_rows, here, there),
@@ -647,9 +658,10 @@ def _scan_check(root: pathlib.Path, head: str, reassessed: _Reassessment, env: M
 
 def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                 env: Mapping[str, str], destination: str) -> tuple[list[dict], str | None]:
-    """The check runs GitHub reports for exactly head, or a reason they could not be read (never gh's output)."""
+    """Validated enums and positions for head; read errors retain prior runs and never export gh's strings."""
     runs: list[dict] = []
     seen = 0
+    expected_total = None
     try:
         repository, host = _gh_repository(destination)
     except ValueError:
@@ -661,29 +673,41 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                                   "Accept: application/vnd.github+json", endpoint], timeout=GH_TIMEOUT, cwd=str(root),
                                  env={**env, **GH_ENV, "GH_REPO": repository, "GH_HOST": host})
         except OSError:
-            return [], "gh could not start"
+            return runs, "gh could not start"
         if result.timed_out:
-            return [], f"gh did not answer within {GH_TIMEOUT:g}s"
+            return runs, f"gh did not answer within {GH_TIMEOUT:g}s"
         if result.returncode != 0:
-            return [], f"gh exited {result.returncode}"
+            return runs, f"gh exited {result.returncode}"
         try:
             data = json.loads(result.stdout)
-            total, items = int(data["total_count"]), data["check_runs"]
-            if not isinstance(items, list):
+            total, items = data["total_count"], data["check_runs"]
+            if (type(total) is not int or total < 0 or not isinstance(items, list)
+                    or len(items) > GH_PER_PAGE):
                 raise TypeError
         except (ValueError, KeyError, TypeError):
-            return [], "gh did not return check-run JSON"
+            return runs, "gh did not return valid check-run JSON"
+        invalid = False
+        for position, item in enumerate(items, start=seen + 1):
+            if not isinstance(item, dict) or item.get("head_sha") != head:
+                invalid = True
+                continue
+            status, conclusion = item.get("status"), item.get("conclusion")
+            if (status not in CI_STATUSES or (conclusion is not None and conclusion not in CI_CONCLUSIONS)
+                    or (status == "completed" and conclusion is None)
+                    or (status != "completed" and conclusion is not None)):
+                invalid = True
+                continue
+            runs.append({"position": position, "status": status, "conclusion": conclusion})
+        if invalid:
+            return runs, "gh returned invalid check runs"
+        if expected_total is None:
+            expected_total = total
+        if total != expected_total or len(items) != min(GH_PER_PAGE, total - seen):
+            return runs, "check-run pagination was incomplete"
         seen += len(items)
-        for item in items:
-            if isinstance(item, dict) and item.get("head_sha") == head:
-                conclusion = item.get("conclusion")
-                runs.append({"name": _one_line(item.get("name")), "status": str(item.get("status")),
-                             "conclusion": None if conclusion is None else str(conclusion)})
-        if seen >= total:
+        if seen == total:
             return runs, None
-        if not items:
-            return [], "check-run pagination was incomplete"
-    return [], "check-run pagination exceeded the supported limit; inspect all runs before landing"
+    return runs, "check-run pagination exceeded the supported limit; inspect all runs before landing"
 
 
 def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None = None) -> Check:
@@ -692,35 +716,34 @@ def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destinat
     retry = "then run oah land --check again"
     try:
         gh = find_gh(env)
-    except UnsupportedBatchShim as exc:
-        return Check("ci", UNVERIFIED, None, f"{exc}; CI was not checked (unverified, not passed)")
+    except UnsupportedBatchShim:
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"gh needs a supported executable; fix its installation, {retry}")
     if gh is None:
         return Check("ci", UNVERIFIED, None, "gh is not installed, so CI was not checked (unverified, not passed); "
                                              "install it (oah doctor prints the command), sign in with gh auth login, "
                                              f"push the task branch, {retry}")
     if destination is None:
-        return Check("ci", UNVERIFIED, None, f"the destination was not assessed, so CI is unverified; {retry}")
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"the destination was not assessed; fix the impact check, {retry}")
     runs, problem = _check_runs(gh, root, head, env, destination)
-    if problem is not None and problem.startswith("check-run pagination"):
-        return _failed("ci", "OAH_LAND_CI_PENDING", "CI pagination is incomplete, so passing CI cannot be "
-                       f"established; inspect all check runs, {retry}")
+    failed = [run for run in runs if run["status"] == "completed" and run["conclusion"] not in CI_PASSING]
+    if failed:
+        positions = ", ".join(str(run["position"]) for run in failed)
+        incomplete = "; check-run reading is also incomplete" if problem is not None else ""
+        return _failed("ci", "OAH_LAND_CI_FAILED",
+                       f"{len(failed)} CI check run(s) failed for HEAD {head[:12]} at positions {positions}"
+                       f"{incomplete}; inspect the runs, fix them, push, wait for CI, {retry}")
     if problem is not None:
-        return Check("ci", UNVERIFIED, None, f"gh could not read the check runs for HEAD ({problem}), so CI is "
-                                             f"unverified, not passed; check gh auth status and that the task branch "
-                                             f"is pushed, {retry}")
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"CI check-run reading is incomplete ({problem}); inspect all "
+                       f"check runs and check gh auth status and that the task branch is pushed, {retry}")
     if not runs:
         return Check("ci", UNVERIFIED, None, f"no CI check runs are reported for HEAD {head[:12]}, so CI is "
                                              f"unverified, not passed; push the task branch and let CI run, {retry}")
-    failed = [run for run in runs if run["status"] == "completed" and run["conclusion"] not in CI_PASSING]
-    if failed:
-        listed = ", ".join(f"{run['name']} ({run['conclusion']})" for run in failed)
-        return _failed("ci", "OAH_LAND_CI_FAILED", f"CI check runs failed for HEAD {head[:12]}: {listed}; fix them, "
-                                                   f"push, wait for CI, {retry}")
     pending = [run for run in runs if run["status"] != "completed"]
     if pending:
-        listed = ", ".join(f"{run['name']} ({run['status']})" for run in pending)
-        return _failed("ci", "OAH_LAND_CI_PENDING", f"CI is still running for HEAD {head[:12]}: {listed}; wait for it "
-                                                    f"to finish, {retry}")
+        positions = ", ".join(str(run["position"]) for run in pending)
+        return _failed("ci", "OAH_LAND_CI_PENDING",
+                       f"{len(pending)} CI check run(s) are pending for HEAD {head[:12]} at positions {positions}; "
+                       f"wait for them to finish, {retry}")
     return _passed("ci", f"{len(runs)} CI check run{'s' if len(runs) != 1 else ''} passed for HEAD {head[:12]}",
                    {"runs": len(runs)})
 
@@ -912,7 +935,7 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
     push_env = {key: value for key, value in env.items()
                 if not key.upper().startswith("GIT_TRACE") and key.upper() != "GIT_CURL_VERBOSE"}
     push_env.update(PUSH_ENV, GIT_TRACE="0", GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
-    result = run_command([*git_argv(), "-C", str(root), "push", "--porcelain",
+    result = run_command([*git_argv(), "-C", str(root), "push", "--porcelain", "--no-follow-tags",
                           f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment._destination[1],
                           f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env=push_env)
     if result.returncode == 0 and not result.timed_out:

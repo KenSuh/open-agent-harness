@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
+import subprocess
 import unittest
 
 from oah.gates import summary as gate_summary
@@ -11,7 +13,7 @@ from oah.lease import Store
 from oah.review import receipts
 from oah.review import summary as review_summary
 from tests.fixtures.gates.support import run_cli
-from tests.helpers import make_tmp_dir
+from tests.helpers import git_env, make_tmp_dir
 from tests.test_review_cli import oah
 from tests.test_review_rounds import Project, bug, git
 
@@ -119,6 +121,43 @@ class SummaryEndToEndTest(unittest.TestCase):
 
 
 class SummaryTest(unittest.TestCase):
+    def test_summary_digest_binds_committed_blob_across_checkout_line_endings(self):
+        project = Project(self)
+        path = ".oah/tasks/t1/GATES.summary.md"
+        # Use the renderer's grammar, preserving exactly the bytes sent to git.
+        lf = gate_summary.render([], verified="unlazy").encode("utf-8")
+        for committed in (lf, lf.replace(b"\n", b"\r\n")):
+            with self.subTest(committed_crlf=b"\r\n" in committed):
+                project.commit({path: committed})  # * -text preserves both committed forms
+                blob = subprocess.run(["git", "-C", str(project.repo), "cat-file", "blob", f"HEAD:{path}"],
+                                      check=True, capture_output=True, env=git_env()).stdout
+                self.assertEqual(blob, committed)
+                (project.repo / path).write_bytes(lf.replace(b"\n", b"\r\n"))
+                data = review_summary.committed_gate_summary(project.repo, "t1", project.head)
+                self.assertEqual(data.digest, "sha256:" + hashlib.sha256(blob).hexdigest())
+        git(project.repo, "config", "core.autocrlf", "true")
+        project.commit({".gitattributes": b"* -text\n.oah/tasks/t1/GATES.summary.md text\n", path: lf})
+        blob = subprocess.run(["git", "-C", str(project.repo), "cat-file", "blob", f"HEAD:{path}"],
+                              check=True, capture_output=True, env=git_env()).stdout
+        self.assertEqual(blob, lf)
+        (project.repo / path).unlink()
+        git(project.repo, "checkout", "--", path)
+        self.assertEqual((project.repo / path).read_bytes(), lf.replace(b"\n", b"\r\n"))
+        self.assertEqual(review_summary.committed_gate_summary(project.repo, "t1", project.head).digest,
+                         "sha256:" + hashlib.sha256(blob).hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows committed CRLF summary")
+    def test_windows_summary_digest_uses_committed_bytes(self):
+        project = Project(self)
+        path = ".oah/tasks/t1/GATES.summary.md"
+        text = gate_summary.render([], verified="unlazy")
+        project.commit({path: text.replace("\n", "\r\n").encode("utf-8")})
+        blob = subprocess.run(["git", "-C", str(project.repo), "cat-file", "blob", f"HEAD:{path}"],
+                              check=True, capture_output=True, env=git_env()).stdout
+        self.assertEqual(blob, text.replace("\n", "\r\n").encode("utf-8"))
+        self.assertEqual(review_summary.committed_gate_summary(project.repo, "t1", project.head).digest,
+                         "sha256:" + hashlib.sha256(blob).hexdigest())
+
     def test_summary_reports_gate_summary_at_head(self):
         project = Project(self)
         publish_receipt(project, 1)
@@ -130,16 +169,20 @@ class SummaryTest(unittest.TestCase):
         text = gate_summary.render([(SHA_A, [entry("G1", "met", "run", SHA_A, SHA_A, SHA_A, SHA_A, SHA_A),
                                             entry("G2", "abandoned", "none", SHA_A, None, None, SHA_A, None)])],
                                    verified="unlazy")
-        project.commit({".oah/tasks/t1/GATES.summary.md": text}, "gates")
+        path = ".oah/tasks/t1/GATES.summary.md"
+        project.commit({path: text.encode("utf-8")}, "gates")
+        blob = subprocess.run(["git", "-C", str(project.repo), "cat-file", "blob", f"HEAD:{path}"],
+                              check=True, capture_output=True, env=git_env()).stdout
+        self.assertEqual(blob, text.encode("utf-8"))
         data = json.loads(summary_cli(project, "--json").stdout)
         self.assertEqual(data["gates"]["state"], "committed")
         self.assertEqual(data["gates"]["verified"], "unlazy")
         self.assertEqual(data["gates"]["gates"], [{"id": "G1", "status": "met"}, {"id": "G2", "status": "abandoned"}])
-        self.assertEqual(data["gates"]["digest"], "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self.assertEqual(data["gates"]["digest"], "sha256:" + hashlib.sha256(blob).hexdigest())
         self.assertIn("1 met, 1 abandoned (verified by unlazy)", data["markdown"])
         self.assertFalse(data["status"]["converged"])  # the summary commit moved HEAD past R1
 
-        project.commit({".oah/tasks/t1/GATES.summary.md": text.replace("verified: unlazy", "verified: maybe")}, "edit")
+        project.commit({path: text.replace("verified: unlazy", "verified: maybe").encode("utf-8")}, "edit")
         data = json.loads(summary_cli(project, "--json").stdout)
         self.assertEqual(data["gates"]["state"], "invalid")
         self.assertIn("does not match the summary grammar", data["markdown"])
