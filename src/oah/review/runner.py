@@ -145,6 +145,11 @@ def review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keych
     state = state_dir(info, env)
     lease = _lease(state, request.task)
     root = pathlib.Path(lease.worktree)
+    if not root.is_dir():
+        raise ReviewError("OAH_WORKTREE_UNRESOLVED", f"the lease of task {request.task} names the worktree {root}, "
+                          "which no longer exists; nothing was launched. Release it with oah release --task "
+                          f'{request.task} --agent {lease.agent} --reason "worktree removed", then start the lease '
+                          "again in the task's worktree")
     binding = _check_intent(root, lease)
     conf = review_settings.load(root)
     call_settings = call_cli.load_settings(root)
@@ -214,6 +219,14 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                       f"{span.head}; nothing was launched", receipt=latest.record,
                       receipt_path=receipts.review_dir(state, task) / latest.name)
     extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
+    warnings: list[str] = []
+    if request.decision is not None and rounds.waiting(s) is None:
+        warnings.append("OAH_REVIEW_DECISION_UNUSED: no decision was pending for this round; your note is recorded "
+                        "with it anyway")
+    if request.extra_round and not extra:
+        warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this series is below [review] max_rounds, so --extra-round "
+                        "changed nothing")
+    decision = request.decision or rounds.round_decision(s)
     cli_path, cli_sha = reviewer_binary(models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"]))
     if conf.codex_sha256 and cli_sha != conf.codex_sha256:
         raise ReviewError("OAH_REVIEW_BINARY_MISMATCH", f"the reviewer CLI {cli_path} has sha256 {cli_sha}, but "
@@ -228,12 +241,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     conditions = oah_intent.parse(committed).conditions
     number, attempt = s.next_number, sum(1 for line in s.round_lines() if line.get("event") == "start") + 1
     tools = call_cli.intent_tools()
-    warnings: list[str] = []
     started = dt.datetime.now(dt.timezone.utc)
     with snapshot.make(root, span.head, base=span.base, temp_root=temp_root, warnings=warnings) as snap:
         value = canary.plant(snap.tree)
         schema_path = snap.tree.parent / "output-schema.json"
-        schema_path.write_text(schema.text(), encoding="utf-8")
+        schema_path.write_bytes(schema.text().encode("utf-8"))  # the bytes the receipt's digest names
         context_ = prompt.PromptContext(
             task=task, number=number, series_round=s.series_round, base=span.base, head=span.head,
             scope=tuple(lease.scope), conditions=conditions, diff_stat=context.diff_stat(root, span.base, span.head),
@@ -243,7 +255,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             history_digest=s.history_digest(),
             attempted=tuple((class_id, attempt_id, outcome) for class_id, tried in s.attempted().items()
                             for attempt_id, outcome in tried),
-            decision=request.decision, extra_round=extra)
+            decision=decision, extra_round=extra)
         prepared = call.prepare(
             call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
                              round_instructions=prompt.round_instructions(context_), output_schema=str(schema_path),
@@ -296,7 +308,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                      "the budget is spent, so the next oah review refuses until round_attempts is raised."))
         return Result(code, 1, message + budget, lines=[f"run folder: {prepared.run_dir}"], warnings=warnings,
                       run_dir=prepared.run_dir)
-    decision = rounds.decide(output, s)
+    judged = rounds.decide(output, s)
     independent = authors.independence(engines, ENGINE)
     receipt = {
         "schema": receipts.SCHEMA, "kind": "receipt", "task": task, "round": number, "series_round": s.series_round,
@@ -313,9 +325,9 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         "author_engines": sorted(set(engines)), "authorship": [{"commit": sha, "engine": engine} for sha, engine in commits],
         "independent": independent, "verdict": output.verdict, "summary": output.summary,
         "findings": [finding.to_json() for finding in output.findings],
-        "classes": [item.to_json() for item in output.classes], "outcome": decision.outcome,
-        "follow_ups": list(decision.follow_ups), "decision_stop_reason": decision.stop_reason,
-        "decision": {"text": request.decision, "after": s.latest.name if s.latest else None} if request.decision else None,
+        "classes": [item.to_json() for item in output.classes], "outcome": judged.outcome,
+        "follow_ups": list(judged.follow_ups), "decision_stop_reason": judged.stop_reason,
+        "decision": {"text": decision, "after": s.latest.name if s.latest else None} if decision else None,
         "extra_round": extra, "history": s.history_items(), "history_digest": s.history_digest(),
         "canary_verified": True, "canary_scope": canary.LIMIT, "db_impact": db.line, "db_query": db.query,
         "critical_paths": context.critical(changed, conf.critical_paths), "stripped": list(context_.stripped),
@@ -326,11 +338,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     name = f"R{number}.json"
     digest = receipts.publish(state, task, name, receipt, summary={
         "round": number, "series_round": s.series_round, "base": span.base, "head": span.head,
-        "verdict": output.verdict, "outcome": decision.outcome})
-    code = OUTCOME_CODES[decision.outcome]
+        "verdict": output.verdict, "outcome": judged.outcome})
+    code = OUTCOME_CODES[judged.outcome]
     receipts.log_round(state, task, {"event": "finish", **where, "counted": True, "code": code, "receipt": name,
-                                     "outcome": decision.outcome})
-    return Result(code, 0 if decision.outcome == "converged" else 1, _headline(code, receipt, task),
+                                     "outcome": judged.outcome})
+    return Result(code, 0 if judged.outcome == "converged" else 1, _headline(code, receipt, task),
                   lines=_lines(receipt, digest, name, conf, task), warnings=warnings,
                   receipt_path=receipts.review_dir(state, task) / name, receipt=receipt, run_dir=prepared.run_dir)
 

@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import secrets as token_source
+import shutil
 import subprocess
 import sys
 import unittest
@@ -36,6 +37,11 @@ RULES = [{"id": "test-identity", "engine": "codex", "cli_versions": ["*"], "mode
 def git(repo: pathlib.Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
                           env=git_env()).stdout.strip()
+
+
+def same(path: str | os.PathLike) -> str:
+    """A path for comparing on every OS (the snapshot is gone, so samefile cannot be used)."""
+    return os.path.normcase(os.path.normpath(os.fspath(path)))
 
 
 def toml_list(argv: list[str]) -> str:
@@ -201,6 +207,21 @@ class SeriesTest(unittest.TestCase):
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual(project.receipt(2)["decision"]["text"], "R1-F2 was fixed by hand in the same commit")
 
+    def test_review_uses_the_lease_worktree(self):
+        project = Project(self)
+        Store(project.state).release(task="t1", agent="claude", reason="move to another worktree", force=False)
+        other = make_tmp_dir(self) / "other"
+        git(project.repo, "worktree", "add", "-q", "-b", "feat2", str(other))
+        head = git_commit(other, {"src/app.py": "print('in the other worktree')\n"}, "work" + CLAUDE_TRAILER)
+        Store(project.state).start(task="t1", agent="claude", scope=("src", ".oah/tasks/t1"), note="moved",
+                                   ttl_hours=1, info=repo_info(other), intent=project.binding)
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(project.receipt(1)["head"], head)
+        shutil.rmtree(other)
+        error = project.refused("OAH_WORKTREE_UNRESOLVED")
+        self.assertIn("oah release --task t1", str(error))
+
     def test_rebased_task_starts_a_new_series(self):
         project = Project(self)
         project.queue({"findings": [bug()]})
@@ -240,6 +261,25 @@ class DecisionTest(unittest.TestCase):
         self.assertEqual(project.receipt(3)["decision"]["text"], "try one more correction of the cache")
         events = (project.state / "events.jsonl").read_text(encoding="utf-8")
         self.assertIn("try one more correction of the cache", events)
+
+    def test_decision_is_remembered_for_the_round(self):
+        project = Project(self)
+        project.queue({"findings": [bug()]}, {"raw": "not json"}, {})
+        project.review()
+        project.commit({"src/app.py": "print('fixed by hand')\n"})
+        self.assertEqual(project.review(decision="fixed by hand").code, "OAH_REVIEW_OUTPUT_INVALID")
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(project.receipt(2)["decision"]["text"], "fixed by hand")
+        self.assertIn("fixed by hand", project.calls()[2]["prompt"])
+
+    def test_decision_without_a_stop_is_recorded_with_a_warning(self):
+        project = Project(self)
+        result = project.review(decision="nothing was pending")
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertTrue(any(item.startswith("OAH_REVIEW_DECISION_UNUSED") for item in result.warnings),
+                        result.warnings)
+        self.assertEqual(project.receipt(1)["decision"]["text"], "nothing was pending")
 
     def test_reminted_class_definition_of_attempted_class_stops(self):
         project = Project(self)
@@ -468,10 +508,10 @@ class SnapshotRoundTest(unittest.TestCase):
         self.assertNotIn(call["canary"], call["prompt"])
         cwd = pathlib.Path(call["cwd"])
         self.assertFalse(cwd.exists(), "the snapshot is removed after the round")
-        self.assertNotEqual(cwd.resolve(), project.repo.resolve())
+        self.assertNotEqual(same(cwd), same(project.repo))
         argv = call["argv"][2:]
         self.assertEqual(argv[argv.index("-s") + 1], "read-only")
-        self.assertEqual(pathlib.Path(argv[argv.index("-C") + 1]), cwd)
+        self.assertEqual(same(argv[argv.index("-C") + 1]), same(cwd))
         for flag in ("--ephemeral", "--ignore-user-config", "--ignore-rules", "--output-schema"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[-1], "-")
@@ -482,12 +522,13 @@ class SnapshotRoundTest(unittest.TestCase):
             self.assertNotIn(name, env)
         self.assertEqual(env["CODEX_HOME"], str(project.home))
         self.assertEqual(call["remotes"], "")
-        self.assertTrue(pathlib.Path(call["probe"]).resolve().is_relative_to(cwd.resolve()), call["probe"])
+        self.assertTrue(same(call["probe"]).startswith(same(cwd) + os.sep), call["probe"])
         self.assertFalse((project.repo / "probe.txt").exists())
         self.assertEqual(git(project.repo, "status", "--porcelain", "--untracked-files=all"), before)
         for text in [call["prompt"], *env.values()]:
             self.assertNotIn(str(project.repo), text)
         self.assertEqual(project.receipt(1)["stripped"], sorted(stripped))
+        self.assertEqual(call["schema_digest"], project.receipt(1)["output_schema_sha256"])
         self.assertEqual(list(project.temp_root.iterdir()), [])
 
     def test_snapshot_removed_after_failed_round(self):

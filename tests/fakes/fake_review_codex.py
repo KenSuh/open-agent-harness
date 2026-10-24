@@ -11,10 +11,12 @@ record_dir) uses steps[k]; past the end it approves with no findings. A step may
   intent_return   replaces the INTENT and AC lines
   exit            the exit code (default 0)
 Every call is recorded as call-<k>.json: argv, cwd, env, prompt, files (relative, without .git), remotes
-(`git remote -v`), canary (the value read) and probe (the file a write attempt created).
+(`git remote -v`), canary (the value read), probe (the file a write attempt created) and
+schema_digest (of the --output-schema file).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -128,9 +130,11 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         probed = f"refused: {exc}"
     remotes = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True).stdout
+    schema = pathlib.Path(options.get("--output-schema", ""))
+    schema_digest = "sha256:" + hashlib.sha256(schema.read_bytes()).hexdigest() if schema.is_file() else None
     record = {"argv": argv, "cwd": str(cwd), "env": dict(os.environ), "prompt": prompt,
               "files": [name for name in files_under(cwd) if name != "probe.txt"], "remotes": remotes,
-              "canary": canary, "probe": probed, "schema": options.get("--output-schema")}
+              "canary": canary, "probe": probed, "schema_digest": schema_digest}
     (record_dir / f"call-{number:03d}.json").write_text(json.dumps(record), encoding="utf-8")
     message = step["raw"] if "raw" in step else build(prompt, step, canary)
     if "-o" in options:

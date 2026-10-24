@@ -8,12 +8,12 @@ Series
     the index problems, the attempt problems, and attempt commits that are not in the reviewed history.
 Gate, before any paid call
     `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems (no decision overrides them), returns
-    `"converged"` when the latest receipt converged at this head, raises `OAH_REVIEW_NEEDS_DECISION` for a
-    pending decision stop or for P0/P1 findings of a changes-requested receipt without a finished
-    correction attempt (both overridable with `--decision`), `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds`
-    unless `--extra-round`, and `OAH_REVIEW_ATTEMPTS_EXHAUSTED` once `round_attempts` calls of this round
-    did not count. A decision stop is pending after a needs-decision receipt, or after an uncounted call
-    that stopped for a decision, until a later call of the round starts with a decision.
+    `"converged"` when the latest receipt converged at this head, raises `OAH_REVIEW_NEEDS_DECISION` while
+    the round waits for a decision (`waiting`: a needs-decision receipt, P0/P1 findings of a changes-requested
+    receipt without a finished correction attempt, or an uncounted call that stopped for a decision),
+    `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and `OAH_REVIEW_ATTEMPTS_EXHAUSTED`
+    once `round_attempts` calls of this round did not count. A call that starts with `--decision` settles the
+    wait for the rest of its round (`round_decision`), until a later call stops for a decision again.
 Check, after the run
     `check(...)`: the canary line (`OAH_REVIEW_CANARY_MISSING`), the base/head and DB-impact echoes
     (`OAH_REVIEW_OUTPUT_INVALID`), the INTENT and AC lines (`OAH_INTENT_RETURN_INVALID`), then every class
@@ -114,20 +114,6 @@ def series(records: Records, log: Sequence[dict], base: str, *, head: str,
                   log=tuple(line for line in log if line.get("base") == base))
 
 
-def _pending_stop(s: Series) -> str | None:
-    latest = s.latest
-    stop = None
-    if latest is not None and latest.record.get("outcome") == "needs-decision":
-        stop = f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}"
-    for line in s.round_lines():
-        if line.get("event") == "start" and line.get("decision"):
-            stop = None
-        elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
-            stop = (f"the last reviewer call of round {s.series_round} did not count and stopped for a decision: "
-                    f"{line.get('message', '')}")
-    return stop
-
-
 def _uncorrected(s: Series, latest: Entry) -> list[str]:
     covered = {finding for attempt in s.attempts if attempt.terminal
                and attempt.source_receipt_digest == latest.digest for finding in attempt.finding_ids}
@@ -135,9 +121,45 @@ def _uncorrected(s: Series, latest: Entry) -> list[str]:
             if item.get("severity") in BLOCKING and item["finding_id"] not in covered]
 
 
+def waiting(s: Series) -> str | None:
+    """Why the next call of this round needs a --decision, or None.
+
+    A needs-decision receipt, or P0/P1 findings of a changes-requested receipt without a finished correction
+    attempt, wait for a decision; a call of this round that started with one settles it, and an uncounted call
+    that stopped for a decision waits again."""
+    latest = s.latest
+    reason = None
+    if latest is not None and latest.record.get("outcome") == "needs-decision":
+        reason = (f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}. "
+                  "Decide how to continue")
+    elif latest is not None and latest.record.get("outcome") == "changes-requested":
+        missing = _uncorrected(s, latest)
+        if missing:
+            reason = (f"{latest.name} requested changes, but no finished correction attempt is recorded for "
+                      f"{', '.join(missing)}, so a recurrence could not be recognized. Record the corrections (oah "
+                      "fix records its own; manual corrections need the same records), or decide to go on without")
+    for line in s.round_lines():
+        if line.get("event") == "start" and line.get("decision"):
+            reason = None
+        elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
+            reason = (f"the last reviewer call of round {s.series_round} did not count and stopped for a decision: "
+                      f"{line.get('message', '')}")
+    return reason
+
+
+def round_decision(s: Series) -> str | None:
+    """The decision an earlier call of this round started with, while it still settles the round."""
+    decision = None
+    for line in s.round_lines():
+        if line.get("event") == "start" and line.get("decision"):
+            decision = line["decision"]
+        elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
+            decision = None
+    return decision
+
+
 def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings) -> str | None:
     """Refuse before any paid call; `"converged"` means this head is already approved."""
-    retry = f'oah review --task {s.task} --decision "<what you decided>"'
     if s.problems:
         raise ReviewError(NEEDS_DECISION, "the review history of this series is incomplete or was changed, so "
                           "recurrence cannot be judged and nothing was launched:\n- " + "\n- ".join(s.problems) +
@@ -146,17 +168,10 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
     latest = s.latest
     if latest is not None and latest.record.get("outcome") == CONVERGED and latest.record.get("head") == head:
         return CONVERGED
-    stop = _pending_stop(s)
-    if stop is not None and decision is None:
-        raise ReviewError(NEEDS_DECISION, f"{stop}. Nothing was launched. Decide how to continue, then run {retry}; "
-                          "the decision is recorded")
-    if latest is not None and latest.record.get("outcome") == "changes-requested" and decision is None:
-        missing = _uncorrected(s, latest)
-        if missing:
-            raise ReviewError(NEEDS_DECISION, f"{latest.name} requested changes, but no finished correction attempt "
-                              f"is recorded for {', '.join(missing)}, so a recurrence could not be recognized and "
-                              "nothing was launched. Record the corrections (oah fix records its own; manual "
-                              f"corrections need the same records), or run {retry}")
+    reason = waiting(s)
+    if reason is not None and decision is None:
+        raise ReviewError(NEEDS_DECISION, f"{reason}. Nothing was launched. Run oah review --task {s.task} "
+                          '--decision "<what you decided>" to continue; the decision is recorded')
     if settings.max_rounds is not None and len(s.receipts) >= settings.max_rounds and not extra_round:
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this series has {len(s.receipts)} counted rounds, the "
                           f"[review] max_rounds limit, so nothing was launched. Run oah review --task {s.task} "
