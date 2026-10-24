@@ -116,16 +116,23 @@ def _check_intent(root: pathlib.Path, lease) -> oah_intent.Binding:
                           f"is {state}: {reason}. Nothing was launched. Restore {binding.source} as it was bound, or "
                           f"raise its Revision, accept it and rebind with oah start --task {lease.task} --agent "
                           f"{lease.agent} --packet {binding.source}; then run oah review again")
-    shown = run_git(root, "show", f"HEAD:{binding.source}")
-    try:
-        committed = oah_intent.parse(shown.stdout).digest if shown.returncode == 0 else None
-    except oah_intent.IntentInvalid:
-        committed = None
-    if committed != binding.digest:
-        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"{binding.source} is not committed at HEAD as bound "
-                          f"({binding.line()}); the reviewer reads the committed packet, so commit it, then run oah "
-                          "review again")
+    committed_conditions(root, "HEAD", binding)
     return binding
+
+
+def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Binding) -> tuple[tuple[str, str], ...]:
+    """The success conditions of the bound packet as committed at `rev`; it must match the binding."""
+    shown = run_git(root, "show", f"{rev}:{binding.source}")
+    try:
+        parsed = oah_intent.parse(shown.stdout) if shown.returncode == 0 else None
+    except oah_intent.IntentInvalid:
+        parsed = None
+    if parsed is None or parsed.digest != binding.digest:
+        where = rev if rev == "HEAD" else rev[:12]
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"{binding.source} is not committed at {where} as bound "
+                          f"({binding.line()}); the reviewer reads the committed packet, so commit it as bound, then "
+                          "run oah review again")
+    return parsed.conditions
 
 
 def _is_ancestor(root: pathlib.Path, commit: str, head: str) -> bool:
@@ -237,8 +244,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     engines = [engine for _sha, engine in commits]
     changed = context.changed_files(root, span.base, span.head)
     db = context.db_impact(changed, data, span.head, configured(root))
-    committed = run_git(root, "show", f"HEAD:{binding.source}").stdout
-    conditions = oah_intent.parse(committed).conditions
+    conditions = committed_conditions(root, span.head, binding)
     number, attempt = s.next_number, sum(1 for line in s.round_lines() if line.get("event") == "start") + 1
     tools = call_cli.intent_tools()
     started = dt.datetime.now(dt.timezone.utc)
@@ -376,6 +382,8 @@ def _lines(receipt: dict, digest: str, name: str, conf: review_settings.ReviewSe
              f"reviewer: codex {reviewer['cli_version']} sha256 {reviewer['cli_sha256'][:12]} · model "
              f"{reviewer['model']} · effort {reviewer['effort']} (header {reviewer['header_check']}, {verified})",
              label, f"canary: verified — {canary.LIMIT}", receipt["db_impact"]]
+    if receipt["critical_paths"]:
+        lines.append(f"critical paths changed: {', '.join(receipt['critical_paths'])}")
     lines += [f"{item['finding_id']} {item['severity']} {item['axis']} {item['location']} — {item['title']}"
               for item in receipt["findings"]]
     if (receipt["outcome"] == "changes-requested" and conf.max_rounds is not None

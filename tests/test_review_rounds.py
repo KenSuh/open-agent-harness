@@ -602,6 +602,31 @@ class PromptRoundTest(unittest.TestCase):
         self.assertEqual(project.review().code, "OAH_REVIEW_OUTPUT_INVALID")
 
 
+class CommittedIntentTest(unittest.TestCase):
+    def test_conditions_come_from_the_reviewed_commit(self):
+        project = Project(self)
+        reviewed = project.head
+        self.assertEqual([ident for ident, _ in runner.committed_conditions(project.repo, reviewed, project.binding)],
+                         ["AC1", "AC2"])
+        moved = PACKET.replace("Revision: 1", "Revision: 2").replace("- AC2: errors say what to do next\n", "")
+        project.commit({".oah/tasks/t1/PACKET.md": moved.encode("utf-8")}, "change the goal")
+        with self.assertRaises(ReviewError) as caught:
+            runner.committed_conditions(project.repo, project.head, project.binding)
+        self.assertEqual(caught.exception.code, "OAH_INTENT_NOT_CURRENT")
+        self.assertIn(project.head[:12], str(caught.exception))
+        self.assertEqual(len(runner.committed_conditions(project.repo, reviewed, project.binding)), 2)
+
+    def test_critical_paths_are_named_in_the_prompt_receipt_and_output(self):
+        project = Project(self)
+        project.commit({".github/workflows/ci.yml": "on: pull_request\n"})
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(project.receipt(1)["critical_paths"], [".github/workflows/ci.yml"])
+        self.assertIn("critical paths changed: .github/workflows/ci.yml", result.lines)
+        self.assertIn("Critical paths changed (review them with extra care): .github/workflows/ci.yml",
+                      project.calls()[0]["prompt"])
+
+
 class ReceiptTest(unittest.TestCase):
     FIELDS = {"task", "round", "base", "head", "intent_digest", "reviewer", "author_engines", "independent", "verdict",
               "findings", "history_digest", "decision_stop_reason", "canary_verified", "prompt_sha256",
