@@ -16,19 +16,41 @@ from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import receipts
 from tests.helpers import git_commit
-from tests.test_review_rounds import FAKE_REVIEWER, Project, bug, git, toml_list
+from tests.test_review_rounds import FAKE_REVIEWER, RULES, Project, bug, git, toml_list
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
 
-def oah(project: Project, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
+def cli_argv(*args: str, rules: list | None = RULES) -> list[str]:
+    if rules is None:
+        return [sys.executable, "-m", "oah", *args]
+    # Supply the fake engine's known normalization through the real runner's injection point.
+    bootstrap = ("import functools, json, runpy, sys; from oah.review import runner; "
+                 "runner.review = functools.partial(runner.review, rules=json.loads(sys.argv.pop(1))); "
+                 "runpy.run_module('oah', run_name='__main__')")
+    return [sys.executable, "-c", bootstrap, json.dumps(rules), *args]
+
+
+def oah(project: Project, *args: str, env_extra: dict | None = None,
+        rules: list | None = RULES) -> subprocess.CompletedProcess:
     env = dict(project.env, PYTHONPATH=SRC)
     env.update(env_extra or {})
-    return subprocess.run([sys.executable, "-m", "oah", *args], cwd=project.repo, capture_output=True, text=True,
+    return subprocess.run(cli_argv(*args, rules=rules), cwd=project.repo, capture_output=True, text=True,
                           encoding="utf-8", env=env, timeout=600)
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_unknown_normalization_does_not_count(self):
+        project = Project(self, remote=True)
+        done = oah(project, "review", "--task", "t1", "--json", rules=None)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        result = json.loads(done.stdout)
+        self.assertEqual(result["code"], "OAH_REVIEW_EFFORT_UNVERIFIED")
+        self.assertIsNone(result["receipt"])
+        self.assertIsNone(result["receipt_path"])
+        self.assertEqual(receipts.load(project.state, "t1").entries, ())
+        self.assertEqual(project.round_log()[-1]["counted"], False)
+
     def test_binary_pin_executes_the_caller_script_from_another_worktree(self):
         for relative_executable in (False, True):
             with self.subTest(relative_executable=relative_executable):
@@ -51,8 +73,8 @@ class CliTest(unittest.TestCase):
                 project.commit({"tools/reviewer.py": task_copy})
                 env = dict(project.env, PYTHONPATH=SRC)
                 env["PATH"] = str(pathlib.Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-                done = subprocess.run([sys.executable, "-m", "oah", "review", "--task", "t1", "--base",
-                                       project.base, "--json"], cwd=caller, capture_output=True, text=True,
+                done = subprocess.run(cli_argv("review", "--task", "t1", "--base", project.base, "--json"),
+                                      cwd=caller, capture_output=True, text=True,
                                       encoding="utf-8", env=env, timeout=600)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 result = json.loads(done.stdout)

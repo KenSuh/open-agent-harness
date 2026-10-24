@@ -400,14 +400,14 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                             for class_id, tried in s.attempted().items()),
             decision=decision, stopped=stopped if decision else None, extra_round=extra,
             impact=impact, impact_rows=impact_rows)
+        launch_env = reviewer_env(env)
         prepared = call.prepare(
             call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
                              round_instructions=redact(prompt.round_instructions(context_)), output_schema=str(schema_path),
                              ephemeral=True, isolated=True, timeout_s=request.timeout_s,
                              output_last_message=str(final_path)),
             call_settings, root=snap.tree, state_dir=state,
-            env={name: value for name, value in env.items()
-                 if name.upper() not in ("OPENAI_API_KEY", "CODEX_API_KEY")},
+            env=launch_env,
             footer=tools.footer, has_footer=tools.has_footer,
             parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
         warnings.extend(prepared.warnings)
@@ -424,7 +424,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             Store(state).log(task=task, agent=lease.agent,
                              message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
         try:
-            run = call.execute(prepared, base_env=reviewer_env(env), rules=rules, redact=redact)
+            run = call.execute(prepared, base_env=launch_env, rules=rules, redact=redact)
         except BaseException as exc:
             receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
                                              "code": getattr(exc, "code", type(exc).__name__),
@@ -452,6 +452,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             message = (f"{code}: the reviewer did not finish ({run.get('error')}), so this round does not count. "
                        "If sign-in is missing, use codex login (including codex login --with-api-key); the reviewer "
                        "never receives CODEX_API_KEY or OPENAI_API_KEY environment variables. Then retry oah review.")
+    elif run.get("effort_verified") is not True:
+        code = "OAH_REVIEW_EFFORT_UNVERIFIED"
+        message = (f"{code}: the reviewer's effort could not be verified, so this round does not count; "
+                   "check the run's header and normalization basis, fix the CLI or normalization rules, "
+                   "then retry oah review.")
     else:
         try:
             if output_error is not None:

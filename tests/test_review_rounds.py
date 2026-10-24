@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from oah import briefs, call, call_cli, intent
 from oah.engines.effort import EngineError
@@ -627,21 +628,31 @@ class ValidationTest(unittest.TestCase):
     def test_engine_failure_does_not_count(self):
         self.uncounted({"exit": 3}, "OAH_REVIEW_ENGINE_FAILED")
 
-    def test_unverified_effort_counts_but_is_labelled(self):
-        project = Project(self)
-        project.queue({"header_effort": "-"})
-        result = project.review()
-        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
-        reviewer = project.receipt(1)["reviewer"]
-        self.assertEqual((reviewer["header_check"], reviewer["effort_verified"]), ("unverified", False))
-        project = Project(self)
-        project.review(rules=[])
-        reviewer = project.receipt(1)["reviewer"]
-        self.assertEqual((reviewer["header_check"], reviewer["effort_verified"]), ("match", False))
-        self.assertEqual(reviewer["resolved_inference_effort"], "unverified")
-        project = Project(self)
-        project.review()
-        self.assertIs(project.receipt(1)["reviewer"]["effort_verified"], True)
+    def test_unverified_effort_does_not_count_or_cache(self):
+        for step, rules, header_check in (({"header_effort": "-"}, RULES, "unverified"),
+                                          ({"header_effort": "not readable"}, RULES, "unverified"),
+                                          ({}, [], "match")):
+            with self.subTest(step=step, rules=rules):
+                project = Project(self, remote=True)
+                project.queue(step, step, {})
+                for attempt in (1, 2):
+                    result = project.review(rules=rules)
+                    self.assertEqual((result.code, result.exit_code), ("OAH_REVIEW_EFFORT_UNVERIFIED", 1),
+                                     result.message)
+                    self.assertIsNone(result.receipt)
+                    self.assertIsNone(result.receipt_path)
+                    self.assertFalse((project.folder() / "R1.json").exists())
+                    self.assertFalse((project.folder() / "index.jsonl").exists())
+                    self.assertEqual(receipts.load(project.state, "t1").entries, ())
+                    run = json.loads((pathlib.Path(result.run_dir) / "result.json").read_text(encoding="utf-8"))
+                    self.assertEqual((run["header_check"], run["effort_verified"]), (header_check, False))
+                    finish = project.round_log()[-1]
+                    self.assertEqual((finish["round"], finish["attempt"], finish["counted"], finish["code"]),
+                                     (1, attempt, False, result.code))
+                self.assertEqual(len(project.calls()), 2, "an unverified approval must never be cached")
+                project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED")
+                self.assertEqual(project.review(extra_attempt=True).code, "OAH_REVIEW_CONVERGED")
+                self.assertIs(project.receipt(1)["reviewer"]["effort_verified"], True)
 
 
 class BudgetTest(unittest.TestCase):
@@ -688,6 +699,35 @@ class BudgetTest(unittest.TestCase):
 
 
 class SnapshotRoundTest(unittest.TestCase):
+    def test_every_reviewer_launch_uses_the_allowlisted_environment(self):
+        project = Project(self, remote=True)
+        excluded = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN", "NODE_OPTIONS", "OPENAI_API_KEY", "CODEX_API_KEY",
+                    "anthropic_api_key", "github_token", "node_options", "openai_api_key", "codex_api_key",
+                    "OpenAI_Api_Key", "Codex_Api_Key", "OAH_PROBE_PRIVATE", "PYTHONPATH")
+        project.env.update({name: token_source.token_hex(16) for name in excluded})
+        launches = []
+        popen = subprocess.Popen
+
+        def capture(argv, *args, **kwargs):
+            if str(FAKE_REVIEWER) in argv:
+                launches.append((list(argv), dict(kwargs.get("env", {}))))
+            return popen(argv, *args, **kwargs)
+
+        with mock.patch.object(subprocess, "Popen", side_effect=capture):
+            result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual(len(launches), 2)
+        self.assertIn("--version", launches[0][0])
+        self.assertIn("exec", launches[1][0])
+        for argv, env in launches:
+            with self.subTest(probe="--version" in argv):
+                expected = runner.reviewer_env(project.env)
+                if "exec" in argv:
+                    expected.update(OAH_WORKER="1", OAH_TASK="t1", OAH_RUN_ID=project.calls()[0]["env"]["OAH_RUN_ID"])
+                self.assertEqual(sorted(env), sorted(expected))
+                self.assertTrue(all(env[name] == value for name, value in expected.items()))
+                self.assertFalse({name.upper() for name in excluded} & {name.upper() for name in env})
+
     def test_noncanonical_json_credentials_are_redacted_after_decoding(self):
         for channel in ("summary", "finding", "invalid-value", "invalid-key"):
             with self.subTest(channel=channel):
