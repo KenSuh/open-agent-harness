@@ -14,10 +14,10 @@ Section 13 separates what the owner decided from what the builder decided.
 <!-- OAH_INTENT:BEGIN -->
 ## Intent
 Intent-ID: open-agent-harness
-Revision: 3
+Revision: 4
 Status: accepted
 ### Problem
-A beginner who starts programming with AI gets two strong tools, Claude Code and Codex CLI. They get none of the working environment that makes the two reliable together:
+A developer doing production-grade work with AI gets two strong tools, Claude Code and Codex CLI. They get none of the working environment that makes the two reliable together:
 - shared leases;
 - stage routing;
 - evidence gates;
@@ -26,13 +26,15 @@ A beginner who starts programming with AI gets two strong tools, Claude Code and
 - an impact map;
 - skills and models that stay current.
 
-The owner built that environment by hand for one machine; a beginner cannot.
+The owner built that environment by hand for one machine; others would have to rebuild it themselves.
 ### Desired outcome
-On macOS or Windows, one install command and `oah init` build and run that environment for the beginner automatically, the same way the owner's harness works:
+On macOS or Windows, one install command and `oah init` build and run that environment in a new or existing project automatically, the same way the owner's harness works:
 - Claude Code implements first.
 - Codex reviews, corrects and re-reviews.
 - The wiki, impact map, gates and hooks are created and kept current.
 - Models and skills follow upstream updates.
+
+The result is the discipline of an enterprise review process (verifiable reviews, evidence bound to the exact head, checked landings) running locally, without a server.
 
 Nothing paid or irreversible happens without the user's explicit confirmation.
 ### Success conditions
@@ -41,7 +43,7 @@ Nothing paid or irreversible happens without the user's explicit confirmation.
 - AC3: After `oah init`, the project has the rules block, tier agents, an Obsidian-compatible wiki, a fresh impact map, gate templates and the hooks the user accepted.
   - The defaults match the owner's workflow: Claude initial implementation, then Codex review, correction and re-review.
   - While work continues, the impact map and the wiki stay fresh automatically. They refresh on commit, merge and task steps, and their log, index and hygiene are maintained.
-- AC4: Following the guided first task in `examples/hello-oah`, the beginner sees the whole loop finish: packet, preflight, lease, Claude implementation, gates, Codex review and fix, re-review, finish. Every step's result is explained in plain Korean or English.
+- AC4: On the user's first task in their own project (or in `examples/hello-oah`), the user sees the whole loop finish: packet, preflight, lease, Claude implementation, gates, Codex review and fix, re-review, finish. Every step's result is explained in plain Korean or English.
 - AC5: When a newer model or a validated skill update is available, the next task after oah's update check uses it without manual steps, and oah shows what changed, when and why. The model check runs before every launch; the skill check runs at least daily by default. A model or skill the user pinned is never changed silently.
 - AC6: Every decision prompt says what will happen and what it costs. Nothing paid or irreversible happens without the user's explicit confirmation: purchases, account changes, pushes, merges and global file edits.
 - AC7: The repository holds no private data from the owner's harness and no credentials of any kind (API keys, tokens, passwords), enforced by the scans of A17. Every bundled third-party item shows its source, version and license.
@@ -50,7 +52,9 @@ Nothing paid or irreversible happens without the user's explicit confirmation.
 - The owner's private harness is never a runtime dependency. `oah` follows it through fresh ports (A16).
 - Third-party pieces are linked, depended on, or vendored only where their license permits it (A13).
 ### Non-goals
-- Teams, servers, a web UI or remote telemetry.
+- A team server, a web UI or remote telemetry. A small team uses `oah` per developer and repository.
+- Enterprise administration: single sign-on, a central audit log or organization policy management.
+- Teaching programming or git. `oah` assumes the user knows git, branches and pull requests.
 - Linux as a supported OS. It may work, but it is not tested.
 ### Open questions
 - None.
@@ -60,7 +64,12 @@ Nothing paid or irreversible happens without the user's explicit confirmation.
 (2026-10-23) follows the owner's product vision, quoted verbatim: «우리 하네스를 그대로 초보 사용자가 본인 처음 AI를
 통해 프로그래밍 할 때 자동으로 본인 하네스 환경이 우리 환경 처럼 구축되고 진행되도록 하는 깃 오픈 소스를 만들고 싶은거야».
 AC3 and AC7 carry the two additions recommended with the acceptance. Revision 3 (2026-10-23) qualifies
-AC5 by the update check, as the owner decided after review.
+AC5 by the update check, as the owner decided after review. Revision 4 (2026-10-24) changes who it serves, as
+the owner decided: «설명을 엔터프라이즈급 개발 진행하는 분들에게 도움이되는 부분으로 가볍게쓸 초보자하고 우리 하네스하고는
+안맞지 않아?». It takes the recommended wording: developers and small teams doing production-grade work get
+enterprise-grade review discipline locally; `oah` is not an enterprise administration product and not a
+first programming tool. Later sections that still say "beginner" (6.5, the amendment
+history, OB) keep their history; lane P9 rewrites the user-facing docs and README for this audience.
 
 **GitHub is optional.** The worked example runs fully local in a fresh `git init` repository. A push and a
 PR are the optional last step: `oah` prints the `gh pr create` command when `gh` and a remote exist,
@@ -70,8 +79,12 @@ and `oah review summary` prints the PR body.
 final scan. The install docs cover a clone (works now) and a pinned-release bootstrap without git
 (after it is public, 6.5). Publishing to PyPI is a later owner decision.
 
-**Who it serves.** One person with one repository, beginners first. It needs at least one of Claude Code
-or Codex, ideally both. It is not for teams or servers.
+**Who it serves.** Developers and small teams doing production-grade work with Claude Code and Codex:
+long-lived codebases, changes that are costly to get wrong (data, permissions, billing), and several
+agents working on one repository. They want verifiable reviews and evidence before code lands. It runs
+per developer and repository, needs at least one of Claude Code or Codex (ideally both), and assumes git
+and pull-request fluency. The installer and guided `oah init` make the start easy; they are a convenience,
+not a promise to teach programming.
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -84,7 +97,7 @@ or Codex, ideally both. It is not for teams or servers.
 - Preflight before work starts.
 - A per-project knowledge wiki, a graph (graphify) and a code impact map.
 - Reviewer trust ideas that generalize: round tracking, canary, sanitized snapshot, honest independence label.
-- Beginner onboarding that builds this environment automatically (6.5).
+- Guided onboarding that builds this environment automatically (6.5).
 - Skills and models that are selected, updated and used automatically (A9, A10, A14, A15).
 
 **Non-goals for v1.**
@@ -95,7 +108,7 @@ or Codex, ideally both. It is not for teams or servers.
 - Re-implementing what Claude Code or Codex already do, such as sandboxes, sign-in and subagents.
 
 **Anti-goals (failure even if it "works").**
-- A beginner has to read a long manual before the first useful run.
+- A new user has to read a long manual before the first useful run.
 - The kit installs, changes or deletes anything global without asking: shell profiles, global agent
   settings, hooks.
 - Private data from the source leaks into this repository.
@@ -112,7 +125,7 @@ or Codex, ideally both. It is not for teams or servers.
   Windows PowerShell 5.1.
 - **Runtime.** Python ≥ 3.11, standard library only (`tomllib` needs 3.11). There are no third-party
   runtime dependencies. Node.js is needed only for unlazy's checker.
-- **Beginner first.** There is one install command per OS. Every error says what to run next. Every
+- **Easy start.** There is one install command per OS. Every error says what to run next. Every
   optional feature is opt-in. Kit-cache skill updates are part of the guided defaults and may be disabled (A15).
 - **Privacy.** The repository holds no personal paths, names, emails, product names, keys or vault material
   (section 10).
