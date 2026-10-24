@@ -92,8 +92,17 @@ def reviewer_env(env: Mapping[str, str]) -> dict[str, str]:
     """The allowlisted environment a reviewer starts from; `oah.call` adds the worker variables."""
     if os.name == "nt":
         keep = {name.upper() for name in KEEP_ENV}
-        return {key: value for key, value in env.items() if key.upper() in keep}
-    return {key: value for key, value in env.items() if key in KEEP_ENV}
+        kept = {key: value for key, value in env.items() if key.upper() in keep}
+    else:
+        kept = {key: value for key, value in env.items() if key in KEEP_ENV}
+    # The other entries are OS/CLI/certificate paths and locale/terminal settings, not auth values.
+    # Refuse '@' conservatively, including scheme-less proxies and entries in NO_PROXY lists.
+    if any("@" in value for key, value in kept.items()
+           if key.upper() in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")):
+        raise ReviewError("OAH_REVIEW_PROXY_CREDENTIALS", "proxy userinfo is not allowed in the reviewer "
+                          "environment; use a credential-free proxy or Codex's own configuration, then retry "
+                          "oah review")
+    return kept
 
 
 def credential_redactor(env: Mapping[str, str]) -> Callable[[str], str]:
@@ -331,6 +340,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
            span: context.Range, keychain, temp_root: pathlib.Path | None, rules: Sequence[Mapping] | None,
            ensure_impact: Callable | None) -> Result:
     task = request.task
+    launch_env = reviewer_env(env)  # refuse proxy credentials before impact, probes or retained runs
     redact = credential_redactor(env)
     packet = call.read_packet(root, root / binding.source, parse_intent=oah_intent.parse,
                               read_source=oah_intent.read_source)
@@ -343,7 +353,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                    settings=conf, extra_attempt=request.extra_attempt, binding=binding) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
-                      f"{span.head}; nothing was launched", receipt=latest.record,
+                      f"{span.head}; nothing was launched",
+                      lines=_lines(latest.record, latest.digest, latest.name, conf, task), receipt=latest.record,
                       receipt_path=receipts.review_dir(state, task) / latest.name)
     extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
     extra_attempt = request.extra_attempt
@@ -400,7 +411,6 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                             for class_id, tried in s.attempted().items()),
             decision=decision, stopped=stopped if decision else None, extra_round=extra,
             impact=impact, impact_rows=impact_rows)
-        launch_env = reviewer_env(env)
         prepared = call.prepare(
             call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
                              round_instructions=redact(prompt.round_instructions(context_)), output_schema=str(schema_path),
@@ -452,11 +462,6 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             message = (f"{code}: the reviewer did not finish ({run.get('error')}), so this round does not count. "
                        "If sign-in is missing, use codex login (including codex login --with-api-key); the reviewer "
                        "never receives CODEX_API_KEY or OPENAI_API_KEY environment variables. Then retry oah review.")
-    elif run.get("effort_verified") is not True:
-        code = "OAH_REVIEW_EFFORT_UNVERIFIED"
-        message = (f"{code}: the reviewer's effort could not be verified, so this round does not count; "
-                   "check the run's header and normalization basis, fix the CLI or normalization rules, "
-                   "then retry oah review.")
     else:
         try:
             if output_error is not None:
@@ -545,6 +550,8 @@ def _lines(receipt: dict, digest: str, name: str, conf: review_settings.ReviewSe
     lines = [f"receipt: {name} {digest}",
              f"reviewer: codex {reviewer['cli_version']} sha256 {reviewer['cli_sha256'][:12]} · model "
              f"{reviewer['model']} · effort {reviewer['effort']} (header {reviewer['header_check']}, {verified})",
+             f"OAH_REVIEW_EFFORT: normalization basis: {reviewer['normalization_basis']}; inspect the receipt "
+             "for the recorded effort checks",
              label, f"canary: verified — {canary.LIMIT}", receipt["db_impact"]]
     if receipt["critical_paths"]:
         lines.append(f"critical paths changed: {', '.join(receipt['critical_paths'])}")

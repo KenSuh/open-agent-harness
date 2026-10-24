@@ -75,6 +75,31 @@ def _git(hooks: pathlib.Path, *args: str, cwd: pathlib.Path | None = None, timeo
     return result.stdout
 
 
+def _tracked_paths(tree: pathlib.Path, entries: Iterable[str]) -> list[str]:
+    """Check committed links before stripping paths, including Windows' plain-file link checkout."""
+    paths = []
+    root = tree.resolve()
+    for entry in entries:
+        if not entry:
+            continue
+        info, name = entry.split("\t", 1)
+        paths.append(name)
+        if not info.startswith("120000 "):
+            continue
+        path = tree / name
+        try:
+            target = (path.resolve() if path.is_symlink() else
+                      (path.parent / os.fsdecode(path.read_bytes())).resolve())
+            safe = target.is_relative_to(root) and not target.is_dir()
+        except (OSError, ValueError, RuntimeError):
+            safe = False
+        if not safe:
+            raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", "a tracked symbolic link names a directory, leaves "
+                              "the snapshot or cannot be resolved safely; replace it with regular committed "
+                              "source, then run oah review again")
+    return paths
+
+
 def _strip(tree: pathlib.Path, paths: Iterable[str]) -> None:
     roots: set[pathlib.Path] = set()
     for path in paths:
@@ -128,7 +153,8 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
             raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", f"the snapshot is at {found}, not the reviewed head {head}")
         _git(hooks, "cat-file", "-e", f"{base}^{{commit}}", cwd=tree)
         _git(hooks, "remote", "remove", "origin", cwd=tree)
-        removed = stripped(path for path in _git(hooks, "ls-files", "-z", cwd=tree).split("\0") if path)
+        paths = _tracked_paths(tree, _git(hooks, "ls-files", "--stage", "-z", cwd=tree).split("\0"))
+        removed = stripped(paths)
         _strip(tree, removed)
         yield Snapshot(tree=tree, head=head, stripped=tuple(removed))
     finally:

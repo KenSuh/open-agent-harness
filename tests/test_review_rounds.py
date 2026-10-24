@@ -628,31 +628,24 @@ class ValidationTest(unittest.TestCase):
     def test_engine_failure_does_not_count(self):
         self.uncounted({"exit": 3}, "OAH_REVIEW_ENGINE_FAILED")
 
-    def test_unverified_effort_does_not_count_or_cache(self):
+    def test_unverified_effort_counts_and_caches_with_honest_metadata(self):
         for step, rules, header_check in (({"header_effort": "-"}, RULES, "unverified"),
                                           ({"header_effort": "not readable"}, RULES, "unverified"),
                                           ({}, [], "match")):
             with self.subTest(step=step, rules=rules):
                 project = Project(self, remote=True)
-                project.queue(step, step, {})
-                for attempt in (1, 2):
-                    result = project.review(rules=rules)
-                    self.assertEqual((result.code, result.exit_code), ("OAH_REVIEW_EFFORT_UNVERIFIED", 1),
-                                     result.message)
-                    self.assertIsNone(result.receipt)
-                    self.assertIsNone(result.receipt_path)
-                    self.assertFalse((project.folder() / "R1.json").exists())
-                    self.assertFalse((project.folder() / "index.jsonl").exists())
-                    self.assertEqual(receipts.load(project.state, "t1").entries, ())
-                    run = json.loads((pathlib.Path(result.run_dir) / "result.json").read_text(encoding="utf-8"))
-                    self.assertEqual((run["header_check"], run["effort_verified"]), (header_check, False))
-                    finish = project.round_log()[-1]
-                    self.assertEqual((finish["round"], finish["attempt"], finish["counted"], finish["code"]),
-                                     (1, attempt, False, result.code))
-                self.assertEqual(len(project.calls()), 2, "an unverified approval must never be cached")
-                project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED")
-                self.assertEqual(project.review(extra_attempt=True).code, "OAH_REVIEW_CONVERGED")
-                self.assertIs(project.receipt(1)["reviewer"]["effort_verified"], True)
+                project.queue(step)
+                result = project.review(rules=rules)
+                self.assertEqual((result.code, result.exit_code), ("OAH_REVIEW_CONVERGED", 0), result.message)
+                reviewer = project.receipt(1)["reviewer"]
+                self.assertEqual((reviewer["header_check"], reviewer["effort_verified"]), (header_check, False))
+                self.assertEqual(reviewer["resolved_inference_effort"], "unverified")
+                self.assertTrue(reviewer["normalization_basis"].startswith("unverified:"))
+                self.assertIn("effort unverified", "\n".join(result.lines))
+                self.assertIn(reviewer["normalization_basis"], "\n".join(result.lines))
+                self.assertTrue(project.round_log()[-1]["counted"])
+                self.assertEqual(project.review(rules=rules).code, "OAH_REVIEW_CONVERGED")
+                self.assertEqual(len(project.calls()), 1)
 
 
 class BudgetTest(unittest.TestCase):
@@ -699,6 +692,49 @@ class BudgetTest(unittest.TestCase):
 
 
 class SnapshotRoundTest(unittest.TestCase):
+    def test_proxy_userinfo_refuses_before_probes_or_echoes(self):
+        for channel in ("stdout", "stderr", "summary"):
+            with self.subTest(channel=channel):
+                project = Project(self, remote=True)
+                password = token_source.token_hex(24)
+                proxy = f"http://user:{password}@proxy.invalid:8080"
+                project.env["HTTPS_PROXY"] = proxy
+                project.queue({channel: "{env:HTTPS_PROXY}"})
+                launches = []
+                popen = subprocess.Popen
+
+                def observe(argv, *args, **kwargs):
+                    if str(FAKE_REVIEWER) in argv:
+                        launches.append(list(argv))
+                    return popen(argv, *args, **kwargs)
+
+                with mock.patch("subprocess.Popen", side_effect=observe):
+                    error = project.refused("OAH_REVIEW_PROXY_CREDENTIALS")
+                self.assertEqual(launches, [], "even a version probe must refuse proxy userinfo")
+                self.assertEqual(receipts.load(project.state, "t1").entries, ())
+                self.assertEqual(project.round_log(), [])
+                self.assertFalse(list((project.state / "runs").rglob("result.json")))
+                self.assertFalse(proxy in str(error))
+                for path in project.state.rglob("*"):
+                    if path.is_file():
+                        self.assertNotIn(password.encode(), path.read_bytes())
+
+    def test_directory_symlink_refuses_before_reviewer_dispatch(self):
+        project = Project(self, remote=True, files={"AGENTS.md": "committed instructions\n",
+                                                  ".codex/config.toml": "committed = true\n"})
+        try:
+            (project.repo / "source-link").symlink_to(project.repo, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlinks are unavailable")
+        git(project.repo, "config", "core.symlinks", "true")
+        project.commit({})
+        # Live instruction bytes must never be reachable through the snapshot alias.
+        (project.repo / ".codex/live-only").write_bytes(b"live untracked instructions\r\n")
+        project.refused("OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual(project.round_log(), [])
+        self.assertEqual(list(project.temp_root.iterdir()), [])
+        self.assertEqual((project.repo / ".codex/live-only").read_bytes(), b"live untracked instructions\r\n")
+
     def test_every_reviewer_launch_uses_the_allowlisted_environment(self):
         project = Project(self, remote=True)
         excluded = ("ANTHROPIC_API_KEY", "GITHUB_TOKEN", "NODE_OPTIONS", "OPENAI_API_KEY", "CODEX_API_KEY",

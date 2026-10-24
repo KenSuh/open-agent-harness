@@ -16,40 +16,54 @@ from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import receipts
 from tests.helpers import git_commit
-from tests.test_review_rounds import FAKE_REVIEWER, RULES, Project, bug, git, toml_list
+from tests.test_review_rounds import FAKE_REVIEWER, Project, bug, git, toml_list
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
 
-def cli_argv(*args: str, rules: list | None = RULES) -> list[str]:
-    if rules is None:
-        return [sys.executable, "-m", "oah", *args]
-    # Supply the fake engine's known normalization through the real runner's injection point.
-    bootstrap = ("import functools, json, runpy, sys; from oah.review import runner; "
-                 "runner.review = functools.partial(runner.review, rules=json.loads(sys.argv.pop(1))); "
-                 "runpy.run_module('oah', run_name='__main__')")
-    return [sys.executable, "-c", bootstrap, json.dumps(rules), *args]
+def cli_argv(*args: str) -> list[str]:
+    return [sys.executable, "-m", "oah", *args]
 
 
-def oah(project: Project, *args: str, env_extra: dict | None = None,
-        rules: list | None = RULES) -> subprocess.CompletedProcess:
+def oah(project: Project, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
     env = dict(project.env, PYTHONPATH=SRC)
     env.update(env_extra or {})
-    return subprocess.run(cli_argv(*args, rules=rules), cwd=project.repo, capture_output=True, text=True,
+    return subprocess.run(cli_argv(*args), cwd=project.repo, capture_output=True, text=True,
                           encoding="utf-8", env=env, timeout=600)
 
 
 class CliTest(unittest.TestCase):
-    def test_cli_unknown_normalization_does_not_count(self):
+    def test_cli_unknown_normalization_counts_and_caches_convergence(self):
         project = Project(self, remote=True)
-        done = oah(project, "review", "--task", "t1", "--json", rules=None)
-        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        done = oah(project, "review", "--task", "t1", "--json")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         result = json.loads(done.stdout)
-        self.assertEqual(result["code"], "OAH_REVIEW_EFFORT_UNVERIFIED")
-        self.assertIsNone(result["receipt"])
-        self.assertIsNone(result["receipt_path"])
+        self.assertEqual(result["code"], "OAH_REVIEW_CONVERGED")
+        reviewer = result["receipt"]["reviewer"]
+        self.assertIs(reviewer["effort_verified"], False)
+        self.assertEqual(reviewer["header_check"], "match")
+        self.assertEqual(reviewer["resolved_inference_effort"], "unverified")
+        self.assertIn("no normalization rule", reviewer["normalization_basis"])
+        self.assertTrue(project.round_log()[-1]["counted"])
+        self.assertEqual(len(receipts.load(project.state, "t1").entries), 1)
+        done = oah(project, "review", "--task", "t1")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("effort unverified", done.stdout)
+        self.assertIn(reviewer["normalization_basis"], done.stdout)
+        self.assertEqual(len(project.calls()), 1)
+
+    def test_cli_mismatch_and_downgrade_spend_attempts_without_counting(self):
+        project = Project(self, remote=True)
+        project.queue({"header_effort": "low"}, {"header_effort": "ultra"})
+        for code in ("OAH_EFFORT_DOWNGRADED", "OAH_EFFORT_MISMATCH"):
+            done = oah(project, "review", "--task", "t1", "--tier", "high", "--json")
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            result = json.loads(done.stdout)
+            self.assertEqual(result["code"], code)
+            self.assertIsNone(result["receipt"])
+            self.assertFalse(project.round_log()[-1]["counted"])
         self.assertEqual(receipts.load(project.state, "t1").entries, ())
-        self.assertEqual(project.round_log()[-1]["counted"], False)
+        self.refused(project, "OAH_REVIEW_ATTEMPTS_EXHAUSTED")
 
     def test_binary_pin_executes_the_caller_script_from_another_worktree(self):
         for relative_executable in (False, True):

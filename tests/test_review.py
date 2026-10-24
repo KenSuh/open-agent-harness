@@ -357,6 +357,68 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(list(temp_root.iterdir()), [])
         self.assertEqual(git(worktree, "status", "--porcelain"), "")
 
+    def test_snapshot_refuses_directory_and_escaping_symlinks(self):
+        for target_kind in ("worktree", "internal-directory", "external-file", "dangling-external"):
+            with self.subTest(target_kind=target_kind):
+                repo, base, _ = self.repo_with_history()
+                external = make_tmp_dir(self)
+                (external / "AGENTS.md").write_bytes(b"live external instructions\r\n")
+                (external / ".codex").mkdir()
+                (external / ".codex/config.toml").write_bytes(b"live = true\r\n")
+                target = {"worktree": str(repo), "internal-directory": "src",
+                          "external-file": str(external / "AGENTS.md"),
+                          "dangling-external": str(external / "missing")}[target_kind]
+                try:
+                    (repo / "source-link").symlink_to(target, target_is_directory=target_kind in
+                                                      ("worktree", "internal-directory"))
+                except OSError:
+                    self.skipTest("symlinks are unavailable")
+                # Record the link mode even when Windows Git defaults to plain-file checkout.
+                git(repo, "config", "core.symlinks", "true")
+                git(repo, "add", "source-link")
+                head = git_commit(repo, {}, "add source link")
+                temp_root = make_tmp_dir(self)
+                with self.assertRaises(ReviewError) as caught:
+                    with snapshot.make(repo, head, base=base, temp_root=temp_root):
+                        pass
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
+                self.assertEqual(list(temp_root.iterdir()), [])
+                self.assertEqual((external / "AGENTS.md").read_bytes(), b"live external instructions\r\n")
+                self.assertEqual((external / ".codex/config.toml").read_bytes(), b"live = true\r\n")
+                self.assertTrue((repo / "source-link").is_symlink())
+
+    def test_snapshot_checks_git_link_mode_without_native_symlinks(self):
+        from unittest import mock
+
+        repo, base, _ = self.repo_with_history()
+        # core.symlinks=false checks this exact blob out as a regular file on any OS.
+        (repo / "source-link").write_bytes(b"src")
+        blob = git(repo, "hash-object", "-w", "source-link")
+        git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},source-link")
+        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "add directory link")
+        head = git(repo, "rev-parse", "HEAD")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.symlinks",
+                                          "GIT_CONFIG_VALUE_0": "false"}):
+            with self.assertRaises(ReviewError) as caught:
+                with snapshot.make(repo, head, base=base):
+                    pass
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertEqual((repo / "source-link").read_bytes(), b"src")
+
+    def test_snapshot_preserves_internal_file_symlinks(self):
+        repo, base, _ = self.repo_with_history()
+        try:
+            (repo / "source-link").symlink_to("src/app.py")
+        except OSError:
+            self.skipTest("symlinks are unavailable")
+        head = git_commit(repo, {}, "add internal file link")
+        with snapshot.make(repo, head, base=base) as snap:
+            link = snap.tree / "source-link"
+            if link.is_symlink():
+                self.assertEqual(link.read_bytes(), b"print('hi')\n")
+            else:  # native Windows Git may check links out as plain files
+                self.assertEqual(link.read_bytes(), b"src/app.py")
+
     def test_strip_is_case_insensitive_at_every_depth(self):
         repo = make_git_repo(self)
         base = git_commit(repo, {"README.md": "base\n"})
@@ -769,6 +831,32 @@ class EnvTest(unittest.TestCase):
                  "OAH_PROBE_PRIVATE": "v"}
         kept = runner.reviewer_env(given)
         self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8"})
+
+    def test_reviewer_env_refuses_proxy_userinfo_without_echoing_it(self):
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                     "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            for value in ("http://user:password@proxy.invalid:8080", "user@proxy.invalid:1080",
+                          "socks5://user:p%40ss@proxy.invalid", "localhost,user@proxy.invalid"):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(ReviewError) as caught:
+                        runner.reviewer_env({name: value})
+                    self.assertEqual(caught.exception.code, "OAH_REVIEW_PROXY_CREDENTIALS")
+                    self.assertNotIn(value, str(caught.exception))
+                    self.assertIn("credential-free proxy", str(caught.exception))
+                    self.assertIn("Codex", str(caught.exception))
+
+    def test_reviewer_env_passes_credential_free_proxies(self):
+        given = {"HTTP_PROXY": "http://proxy.invalid:8080", "https_proxy": "proxy.invalid:8443",
+                 "ALL_PROXY": "socks5://[::1]:1080", "no_proxy": "localhost,127.0.0.1,.example.invalid"}
+        self.assertEqual(runner.reviewer_env(given), given)
+
+    @unittest.skipUnless(os.name == "nt", "Windows environment names ignore letter case")
+    def test_windows_mixed_case_proxy_userinfo_refuses(self):
+        for name in ("Http_Proxy", "Https_Proxy", "All_Proxy", "No_Proxy"):
+            with self.subTest(name=name):
+                with self.assertRaises(ReviewError) as caught:
+                    runner.reviewer_env({name: "http://user:password@proxy.invalid"})
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_PROXY_CREDENTIALS")
 
     def test_reviewer_env_excludes_credentials_in_any_case(self):
         names = ("OPENAI_API_KEY", "CODEX_API_KEY", "openai_api_key", "codex_api_key",
