@@ -372,3 +372,14 @@ def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetim
 def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
     """The round-attempt log; a torn or invalid log raises StateCorrupt (never repaired)."""
     return read_jsonl(_path(state, task, ROUNDS_NAME))
+
+
+def lock_path(state: pathlib.Path, task: str, base: str) -> pathlib.Path:
+    """The per-series lock file, `reviews/<task>/.locks/<base>.lock`."""
+    if not SHA_RE.fullmatch(base or ""):
+        raise ReviewError("OAH_REVIEW_BASE_INVALID", f"the series base {base!r} is not a full commit SHA")
+    review_dir(state, task)
+    try:
+        return _contained_path(state, "reviews", task, ".locks", f"{base}.lock")
+    except RunError as exc:
+        raise ReviewError(exc.code, str(exc).split(": ", 1)[1]) from None

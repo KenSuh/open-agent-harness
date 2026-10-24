@@ -6,10 +6,12 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import unittest
 
 from oah.config import ConfigError
-from oah.review import ReviewError, authors, canary, context, prompt, receipts, schema, settings, snapshot
+from oah.review import (ReviewError, authors, canary, context, prompt, receipts, runner, schema, settings,
+                        snapshot)
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
@@ -645,6 +647,37 @@ class PromptTest(unittest.TestCase):
         resumed = prompt.round_instructions(self.context(decision="fix the parser again", extra_round=True))
         self.assertIn("fix the parser again", resumed)
         self.assertIn("--extra-round", resumed)
+
+
+class EnvTest(unittest.TestCase):
+    def test_reviewer_env_keeps_only_the_allowlist(self):
+        given = {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8",
+                 "OPENAI_API_KEY": "k", "ANTHROPIC_API_KEY": "a", "GITHUB_TOKEN": "t", "OAH_STATE_DIR": "s",
+                 "OAH_WORKER": "0", "PWD": "w", "CLAUDE_CONFIG_DIR": "d", "OAH_PROBE_PRIVATE": "v"}
+        kept = runner.reviewer_env(given)
+        self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8"})
+
+    @unittest.skipUnless(os.name == "nt", "Windows environment names ignore letter case")
+    def test_reviewer_env_ignores_case_on_windows(self):
+        kept = runner.reviewer_env({"Path": "p", "SystemRoot": "r", "UserProfile": "u", "OpenAI_Api_Key": "k"})
+        self.assertEqual(kept, {"Path": "p", "SystemRoot": "r", "UserProfile": "u"})
+
+    def test_reviewer_binary_is_the_script_after_an_interpreter(self):
+        folder = make_tmp_dir(self)
+        script = folder / "codex.js"
+        script.write_bytes(b"console.log('codex')\n")
+        native = folder / "codex"
+        native.write_bytes(b"\x7fELF fake\n")
+        expected = hashlib.sha256(script.read_bytes()).hexdigest()
+        self.assertEqual(runner.reviewer_binary([sys.executable, str(script), "--flag"]),
+                         (os.path.realpath(script), expected))
+        self.assertEqual(runner.reviewer_binary([str(folder / "node.exe"), str(script)]),
+                         (os.path.realpath(script), expected))
+        self.assertEqual(runner.reviewer_binary([str(native), "--profile", "x"]),
+                         (os.path.realpath(native), hashlib.sha256(native.read_bytes()).hexdigest()))
+        with self.assertRaises(ReviewError) as caught:
+            runner.reviewer_binary([str(folder / "missing")])
+        self.assertEqual(caught.exception.code, "OAH_ENGINE_MISSING")
 
 if __name__ == "__main__":
     unittest.main()

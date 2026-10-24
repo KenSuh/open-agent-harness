@@ -49,6 +49,7 @@ from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_ru
 from oah.engines.proc import run_command
 
 WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
+ISOLATED_CODEX_FLAGS = ("--ignore-user-config", "--ignore-rules")  # review rounds (PLAN 5.9 step 6)
 WAIT_LIMIT_S = 540.0
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
@@ -445,6 +446,7 @@ class CallRequest:
     refresh_models: bool = False
     skills: tuple[tuple[str, str], ...] = ()
     no_rerank: bool = False  # the brief turns the re-ranker off (--no-rerank)
+    isolated: bool = False  # Codex ignores the user's config.toml and execpolicy rules (oah review)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -616,6 +618,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                                    effort=resolution.launch_effort,
                                    output_last_message=str(run.file_path("last-message.md")),
                                    output_schema=request.output_schema, ephemeral=request.ephemeral)
+        if request.isolated:
+            argv[-1:-1] = ISOLATED_CODEX_FLAGS  # before the stdin marker
     else:
         section = settings.engines["claude"]
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
