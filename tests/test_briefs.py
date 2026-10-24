@@ -1,4 +1,4 @@
-# 작업 지시서 검사 — 고정 배치(작업자 줄·서문·의도 구획·라운드 지시·검증 꼬리말·의도 꼬리말), 구현·수정에만 리스 명령, 꼬리말 표시 줄 규칙·중복·누락을 본다.
+# 작업 지시서 검사 — 고정 배치·발주자 리스 사용·꼬리말 표시 줄 규칙·중복·누락을 본다.
 from __future__ import annotations
 
 import importlib.util
@@ -110,23 +110,30 @@ class LeaseCommandTest(unittest.TestCase):
         self._native_round_trip([shell, "-NoProfile", "-NonInteractive", "-Command"],
                                 "& $env:OAH_TEST_PYTHON $env:OAH_TEST_SCRIPT exec ")
 
-    def test_lease_command_only_for_implementation_and_correction(self):
+    def test_workers_use_the_dispatchers_lease_in_every_stage(self):
         command = lease_command("p3b", "claude", ".oah/tasks/p3b/PACKET.md")
         self.assertEqual(command, "oah start --task p3b --agent claude --packet .oah/tasks/p3b/PACKET.md")
-        for stage in ("initial", "correction"):
+        for stage in ("initial", "correction", "review"):
             text = brief(stage)
-            self.assertIn(command, text)
-            self.assertIn("binds INTENT p3b@r1 " + BINDING.digest, text)
-            self.assertIn("`Agent-Engine: claude`", text)
+            self.assertNotIn("oah start", text)
+            self.assertNotIn("oah renew", text)
+            self.assertNotIn("oah finish", text)
+            self.assertIn("lease belongs to the dispatcher", text)
+            self.assertIn("never start, renew or finish a lease", text)
+            self.assertIn("INTENT p3b@r1 " + BINDING.digest, text)
+            if stage != "review":
+                self.assertIn("`Agent-Engine: claude`", text)
         self.assertIn("`Agent-Engine: codex`", brief("correction", engine="codex"))
         review = brief("review", engine="codex")
         self.assertNotIn("Agent-Engine", review)
         self.assertNotIn("oah start", review)
         self.assertNotIn("--packet", review)
 
-    def test_without_packet_implementation_still_gets_a_scope_lease(self):
+    def test_without_packet_worker_still_uses_dispatchers_scope(self):
         text = brief(intent_section=None, binding=None, packet_source=None)
-        self.assertIn("oah start --task p3b --agent claude --scope src/oah/call.py --scope tests/test_call.py", text)
+        self.assertNotIn("oah start", text)
+        self.assertIn("lease belongs to the dispatcher", text)
+        self.assertIn("Scope: src/oah/call.py, tests/test_call.py", text)
 
 
 class FooterTest(unittest.TestCase):

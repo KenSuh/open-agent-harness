@@ -2,17 +2,16 @@
 """Worker briefs with one fixed layout (C2):
 
 1. the worker line (A6): the first line says this is a dispatched worker and to skip session entry;
-2. the preamble: task, stage, engine, scope, rules, packet, the lease command, skills, return format; with a
+2. the preamble: task, stage, engine, scope, rules, packet, dispatcher lease, skills, return format; with a
    `skills_block` (the selection with a reason per skill and its `rerank=` status) it ends the preamble;
 3. the intent section, verbatim (A7);
 4. the round instructions;
 5. the verify footer (`VERIFY_FOOTER`, the verify-what-changed rule);
 6. the intent footer, last.
 
-Only implementation and correction briefs carry a lease command and the `Agent-Engine: <engine>` commit
-trailer (5.9); with a packet the lease command is the exact
-`oah start --packet <source>` command and names the binding it will create (C1). Review briefs never
-carry one. A footer counts only when its marker is a whole line at line start (C4); the intent
+Workers use the dispatcher's existing lease and never start, renew or finish one. Only implementation
+and correction briefs carry the `Agent-Engine: <engine>` commit trailer (5.9). A footer counts only
+when its marker is a whole line at line start (C4); the intent
 footer and its `has_footer` test come from `oah.intent` and are passed in. `deliver` reuses a stored
 brief or spec: it appends the canonical footer, keeps one already canonical footer, and otherwise
 refuses with `OAH_FOOTER_NOT_APPENDED` (C3). `strip_intent_footer` removes exactly one intent footer at
@@ -89,7 +88,7 @@ def _lf(text: str) -> str:
 
 
 def lease_command(task: str, engine: str, packet_source: str) -> str:
-    """The exact command that takes this task's lease and binds its intent."""
+    """The dispatcher's command to take this task's lease and bind its intent, before calling workers."""
     return f"oah start --task {shell_word(task)} --agent {shell_word(engine)} --packet {shell_word(packet_source)}"
 
 
@@ -128,6 +127,14 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
     bullet then names `skill_ids` and points at the block."""
     marker = _marker(footer, has_footer)
     footer = _lf(footer)
+    if stage in LEASE_STAGES:
+        # Preserve the existing argument checks even though workers no longer receive a lease command.
+        if packet_source and binding is not None:
+            for value in (task, engine, packet_source):
+                shell_word(value)
+        elif scope:
+            for value in (task, engine, *scope):
+                shell_word(value)
     scope_text = ", ".join(scope) if scope else (
         "(empty: OAH_SCOPE_EMPTY, no paths were declared; stop and ask the lead for a scope before editing)")
     lines = [WORKER_LINE.format(run_id=run_id, task=task), "", "## Brief",
@@ -138,14 +145,11 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
              f"- Packet: {packet_source or 'none'}"]
     if os.name == "nt":
         lines.append("- Shell: run the commands in this brief in PowerShell.")
-    if stage in LEASE_STAGES:
-        if packet_source and binding is not None:
-            lines.append(f"- Lease: before editing, run exactly `{lease_command(task, engine, packet_source)}`. "
-                         f"It binds INTENT {binding.id}@r{binding.revision} {binding.digest}.")
-        elif scope:
-            scopes = " ".join(f"--scope {shell_word(path)}" for path in scope)
-            lines.append(f"- Lease: before editing, run exactly `oah start --task {shell_word(task)} --agent "
-                         f"{shell_word(engine)} {scopes}`.")
+    lines.append("- Lease: the lease belongs to the dispatcher. Work only inside the scope above; never start, "
+                 "renew or finish a lease. Return your changes and evidence to the dispatcher, who checks "
+                 "scope and gates at finish.")
+    if binding is not None:
+        lines.append(f"- Binding: INTENT {binding.id}@r{binding.revision} {binding.digest}.")
     if stage in LEASE_STAGES:
         lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
     if skills_block is not None:

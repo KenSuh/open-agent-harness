@@ -81,11 +81,18 @@ class Lease:
         return Binding.from_json(self.intent) if self.intent is not None else None
 
     def to_json(self) -> dict:
+        """Persistence record, including the internal generation used to detect lease changes."""
         data = dataclasses.asdict(self)
         if data["intent"] is None:
             del data["intent"]  # an unbound lease keeps the record shape it always had
         if data["generation"] == 0:
             del data["generation"]  # records written before generations remain compatible
+        return data
+
+    def public_json(self) -> dict:
+        """Public lease output; generation is only a persistence and concurrency detail."""
+        data = self.to_json()
+        data.pop("generation", None)
         return data
 
     @classmethod

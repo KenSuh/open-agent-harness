@@ -112,7 +112,8 @@ class LexicalTest(unittest.TestCase):
 
     def test_grep_reads_ref_not_worktree(self):
         repo = make_git_repo(self)
-        first = git_commit(repo, {"a b/doc.md": "see x.py here\r\nnothing\n", "x.py": "x\n"})
+        first = git_commit(repo, {"a b/doc.md": b"see x.py here\r\nnothing\n", "x.py": "x\n"})
+        self.assertEqual((repo / "a b/doc.md").read_bytes(), b"see x.py here\r\nnothing\n")
         git_commit(repo, {"a b/doc.md": "nothing\n"})
         (repo / "late.md").write_text("x.py uncommitted\n", encoding="utf-8")
         self.assertEqual(lexical.grep(repo, first, ["x.py"]), [("a b/doc.md", 1, "see x.py here")])

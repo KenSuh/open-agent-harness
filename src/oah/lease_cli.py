@@ -173,7 +173,7 @@ def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     scope = normalize_scope(args.scope, info.root)
     lease = store.start(task=args.task, agent=args.agent, scope=scope, note=args.note, ttl_hours=args.ttl_hours,
                         info=info, gates=gates)
-    print(json.dumps(lease.to_json(), indent=2, ensure_ascii=True) if args.json
+    print(json.dumps(lease.public_json(), indent=2, ensure_ascii=True) if args.json
           else f"OAH_LEASE_STARTED {_summary(lease)}")
     return EXIT_OK
 
@@ -194,7 +194,7 @@ def _start_packet(args: argparse.Namespace, info: RepoInfo, store: Store, gates:
         line = f"{word[action]} task={lease.task} {named} expires={lease.expires_at}"
     for warning in warnings:
         print(warning, file=sys.stderr)
-    print(json.dumps(lease.to_json(), indent=2, ensure_ascii=True) if args.json else line)
+    print(json.dumps(lease.public_json(), indent=2, ensure_ascii=True) if args.json else line)
     return EXIT_OK
 
 
@@ -219,7 +219,7 @@ def _status(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     entries = store.snapshot()
     states = [_intent_state(lease) for lease, _stale in entries]
     if args.json:
-        print(json.dumps({"leases": [dict(lease.to_json(), stale=stale, intent_state=state, intent_reason=reason)
+        print(json.dumps({"leases": [dict(lease.public_json(), stale=stale, intent_state=state, intent_reason=reason)
                                      for (lease, stale), (state, reason) in zip(entries, states)]},
                          indent=2, ensure_ascii=True))
         return EXIT_OK

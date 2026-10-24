@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import sys
@@ -65,7 +66,7 @@ class Repo:
     def write_packet(self, text: str, task: str = "t1") -> pathlib.Path:
         path = self.path(task)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text.encode("utf-8"))
         return path
 
     def start_packet(self, task: str = "t1", *extra: str) -> subprocess.CompletedProcess:
@@ -90,6 +91,48 @@ class Repo:
 class StartPacketTest(unittest.TestCase):
     def setUp(self):
         self.repo = Repo(self)
+
+    def test_packet_helper_preserves_exact_line_endings(self):
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                text = packet_text().replace("\n", newline)
+                path = self.repo.write_packet(text)
+                self.assertEqual(path.read_bytes(), text.encode("utf-8"))
+                self.assertEqual(intent.read_source(path), text)
+                self.assertEqual(intent.parse(text).digest, intent.parse(packet_text()).digest)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows newline translation")
+    def test_crlf_packet_helper_binds_on_windows(self):
+        text = packet_text().replace("\n", "\r\n")
+        path = self.repo.write_packet(text)
+        self.assertNotIn(b"\r\r\n", path.read_bytes())
+        self.assertEqual(path.read_bytes(), text.encode("utf-8"))
+        self.assertEqual(self.repo.start_packet().returncode, 0)
+        self.assertEqual(self.repo.status()["t1"]["intent_state"], "current")
+
+    def test_initial_worker_uses_existing_lease_without_mutating_it(self):
+        self.repo.write_packet(packet_text())
+        self.assertEqual(self.repo.start_packet().returncode, 0)
+        common = self.repo.root / ".git" / "oah"
+        before = (common / "leases.json").read_bytes()
+        events = self.repo.events()
+        text = briefs.build(run_id="initial-worker", task="t1", stage="initial", engine="claude",
+                            scope=["src"], intent_section=packet_text().split("## Scope", 1)[0],
+                            binding=intent.parse(packet_text()), packet_source=PACKET.format(task="t1"),
+                            round_instructions="Update src/app.py and return the evidence.",
+                            footer=intent.FOOTER, has_footer=intent.has_footer)
+        for command in re.findall(r"`(oah (?:start|renew|finish) [^`]+)`", text):
+            self.repo.ok(*shlex.split(command)[1:])
+        self.assertEqual((common / "leases.json").read_bytes(), before)
+        self.assertEqual(self.repo.events(), events)
+        self.assertNotRegex(text, r"\boah (?:start|renew|finish)\b")
+        self.assertIn("lease belongs to the dispatcher", text)
+        self.assertIn("Scope: src", text)
+        subprocess.run([sys.executable, "-c", "from pathlib import Path; Path('src/app.py').write_bytes(b'x = 2\\n')"],
+                       cwd=self.repo.root, env=self.repo.env, check=True, timeout=120)
+        self.assertEqual(self.repo.status()["t1"]["agent"], "claude")
+        self.repo.ok("finish", "--task", "t1", "--agent", "claude", "--summary", "worker completed",
+                     "--return", "-", stdin=self.repo.returned())
 
     def test_start_packet_binds_in_the_same_command(self):
         text = packet_text()
@@ -209,7 +252,7 @@ class StartPacketTest(unittest.TestCase):
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_LEASE_CONFLICT"), refused.stderr)
 
-    def test_delivered_lease_command_gives_current(self):
+    def test_dispatcher_lease_command_gives_current(self):
         source = PACKET.format(task="t1")
         self.repo.write_packet(packet_text())
         command = briefs.lease_command("t1", "claude", source)
@@ -220,6 +263,27 @@ class StartPacketTest(unittest.TestCase):
 
 
 class StatusTest(unittest.TestCase):
+    def test_public_json_omits_generation_for_new_renewed_and_rebound_leases(self):
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                repo = Repo(self)
+                repo.write_packet(packet_text())
+                args = ("--packet", PACKET.format(task="t1")) if bound else ("--scope", "src")
+                started = json.loads(repo.ok("start", "--task", "t1", "--agent", "claude", *args,
+                                             "--json").stdout)
+                self.assertNotIn("generation", started)
+                state = repo.root / ".git" / "oah" / "leases.json"
+                self.assertEqual(json.loads(state.read_bytes())["leases"][0]["generation"], 1)
+                self.assertNotIn("generation", repo.status()["t1"])
+                repo.ok("renew", "--task", "t1", "--agent", "claude")
+                self.assertEqual(json.loads(state.read_bytes())["leases"][0]["generation"], 2)
+                self.assertNotIn("generation", repo.status()["t1"])
+                rebound = json.loads(repo.ok("start", "--task", "t1", "--agent", "claude", "--packet",
+                                             PACKET.format(task="t1"), "--json").stdout)
+                self.assertNotIn("generation", rebound)
+                self.assertEqual(json.loads(state.read_bytes())["leases"][0]["generation"], 3)
+                self.assertNotIn("generation", repo.status()["t1"])
+
     def test_task_commands_read_the_custom_bound_source(self):
         repo = Repo(self)
         custom = repo.root / "plans" / "T1.md"
@@ -573,13 +637,13 @@ class EndToEndTest(unittest.TestCase):
              "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "max")]}]}),
             encoding="utf-8")
         fake_codex = [sys.executable, str(FAKES / "fake_codex.py")]
-        (repo.root / ".oah").mkdir()
-        (repo.root / ".oah" / "config.toml").write_text(f"[engines.codex]\ncommand = {toml_list(fake_codex)}\n",
-                                                        encoding="utf-8")
+        git_commit(repo.root, {".oah/config.toml": f"[engines.codex]\ncommand = {toml_list(fake_codex)}\n"},
+                   "configure local engine")
         record = make_tmp_dir(self) / "record.json"
         repo.env.update(CODEX_HOME=str(codex_home), FAKE_RECORD=str(record))
         path = repo.write_packet(packet_text().replace("\n", "\r\n"))
-        repo.ok("start", "--task", "t1", "--agent", "claude", "--packet", PACKET.format(task="t1"))
+        repo.ok("start", "--task", "t1", "--agent", "claude", "--packet", PACKET.format(task="t1"),
+                "--scope", "README.md")
         called = repo.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low", "--json")
         self.assertEqual(called.returncode, 0, called.stderr)
         self.assertIn("OAH_SKILLS selected=test-driven-development,receiving-code-review "
@@ -601,8 +665,20 @@ class EndToEndTest(unittest.TestCase):
                       skills)
         self.assertIn("  - why: code changes are written test-first (kind implementation, stage correction)", skills)
         self.assertIn("  - why: corrections check each review finding before acting on it (stage correction)", skills)
-        self.assertIn("- Lease: before editing, run exactly `oah start --task t1 --agent codex --packet "
-                      ".oah/tasks/t1/PACKET.md`", text)
+        state = pathlib.Path(common) / "oah" / "leases.json"
+        before, events = state.read_bytes(), repo.events()
+        for command in re.findall(r"`(oah (?:start|renew|finish) [^`]+)`", text):
+            repo.ok(*shlex.split(command)[1:])
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual(repo.events(), events)
+        self.assertNotRegex(text, r"\boah (?:start|renew|finish)\b")
+        self.assertIn("lease belongs to the dispatcher", text)
+        self.assertIn("Scope: src, README.md", text)
+        subprocess.run([sys.executable, "-c", "from pathlib import Path; Path('src/app.py').write_bytes(b'x = 2\\n')"],
+                       cwd=repo.root, env=repo.env, check=True, timeout=120)
+        self.assertEqual(repo.status()["t1"]["agent"], "claude")
+        repo.ok("finish", "--task", "t1", "--agent", "claude", "--summary", "correction completed",
+                "--return", "-", stdin=repo.returned())
 
     def test_packet_new_and_preflight_never_fetch_for_impact(self):
         repo = Repo(self)

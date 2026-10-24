@@ -593,7 +593,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         instructions = "\n\n".join(part for part in (content, instructions) if part)
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
-                        scope=list(scope), intent_section=section, binding=intent,
+                        scope=list(checked_lease.scope) if checked_lease is not None else list(scope),
+                        intent_section=section, binding=intent,
                         packet_source=packet.source if packet else None,
                         round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer,
                         skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,

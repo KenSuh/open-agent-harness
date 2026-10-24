@@ -319,13 +319,14 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual((packet["tier_source"], packet["tier"], packet["axes"]), ("packet", "high", None))
         prompt = find_run(project.state, packet["run_id"]).prompt_path.read_text(encoding="utf-8")
         self.assertIn(SECTION, prompt)
-        self.assertIn("Scope: src/a.py", prompt)
+        self.assertIn("Scope: .oah/tasks/t1", prompt)  # the lease still limits this worker's writes
         self.assertNotIn("oah start", prompt)
         correction = project.run(stage="correction")
         prompt = find_run(project.state, correction["run_id"]).prompt_path.read_text(encoding="utf-8")
         self.assertEqual(correction["tier_source"], "rules")
-        self.assertIn("oah start --task t1 --agent codex --packet .oah/tasks/t1/PACKET.md", prompt)
-        self.assertIn("binds INTENT t1@r2 sha256:", prompt)
+        self.assertNotIn("oah start", prompt)
+        self.assertIn("lease belongs to the dispatcher", prompt)
+        self.assertIn("Binding: INTENT t1@r2 sha256:", prompt)
 
     def test_rules_use_lease_scope_and_risk_paths(self):
         project = Project(self)
@@ -414,7 +415,7 @@ class IntentLineageTest(unittest.TestCase):
         data = project.run(stage="correction", tier="low", packet=renamed / source.name)
         self.assertEqual(data["status"], "finished")
         self.assertEqual(call.dispatch_binding(project.state, "t1")["source"], "my-packets/PACKET.md")
-        self.assertIn("--packet my-packets/PACKET.md", project.recorded()["stdin"])
+        self.assertIn("Packet: my-packets/PACKET.md", project.recorded()["stdin"])
 
     def test_stored_brief_delivers_source_intent_bytes_on_stdin(self):
         project = Project(self)
@@ -497,8 +498,8 @@ class IntentLineageTest(unittest.TestCase):
         project.run(stage="review", tier="low", packet=custom)
         data = project.run(stage="correction", tier="low")
         prompt = find_run(project.state, data["run_id"]).prompt_path.read_text(encoding="utf-8")
-        self.assertIn("--packet plans/T1.md", prompt)
-        self.assertIn("Scope: docs/x.md", prompt)
+        self.assertIn("Packet: plans/T1.md", prompt)
+        self.assertIn("Scope: .oah/tasks/t1", prompt)
         custom.unlink()
         with self.assertRaises(EngineError) as ctx:
             project.prepare(stage="correction", tier="low")
