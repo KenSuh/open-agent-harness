@@ -492,7 +492,8 @@ class SnapshotRoundTest(unittest.TestCase):
                     ".agents/skills/x/SKILL.md": "x\n", "docs/AGENTS.override.md": "x\n"}
         project = Project(self, files=stripped)
         probe_value = "probe-" + token_source.token_hex(4)
-        project.env.update({"OPENAI_API_KEY": "fake-" + token_source.token_hex(8), "OAH_PROBE_PRIVATE": probe_value})
+        project.env.update({"OPENAI_API_KEY": "fake-" + token_source.token_hex(8), "OAH_PROBE_PRIVATE": probe_value,
+                            "ANTHROPIC_API_KEY": "fake-" + token_source.token_hex(8)})
         before = git(project.repo, "status", "--porcelain", "--untracked-files=all")
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
@@ -518,8 +519,9 @@ class SnapshotRoundTest(unittest.TestCase):
         env = call["env"]
         self.assertEqual((env["OAH_WORKER"], env["OAH_TASK"]), ("1", "t1"))
         self.assertRegex(env["OAH_RUN_ID"], r"^r\d{8}T\d{6}Z-[0-9a-f]{8}$")
-        for name in ("OPENAI_API_KEY", "OAH_STATE_DIR", "OAH_PROBE_PRIVATE", "PWD"):
+        for name in ("ANTHROPIC_API_KEY", "OAH_STATE_DIR", "OAH_PROBE_PRIVATE", "PWD"):
             self.assertNotIn(name, env)
+        self.assertEqual(env["OPENAI_API_KEY"], project.env["OPENAI_API_KEY"])  # Codex's own sign-in variable
         self.assertEqual(env["CODEX_HOME"], str(project.home))
         self.assertEqual(call["remotes"], "")
         self.assertTrue(same(call["probe"]).startswith(same(cwd) + os.sep), call["probe"])
@@ -625,6 +627,37 @@ class CommittedIntentTest(unittest.TestCase):
         self.assertIn("critical paths changed: .github/workflows/ci.yml", result.lines)
         self.assertIn("Critical paths changed (review them with extra care): .github/workflows/ci.yml",
                       project.calls()[0]["prompt"])
+
+
+class ConfigTest(unittest.TestCase):
+    def config_text(self, project: Project) -> str:
+        return (project.repo / ".oah" / "config.toml").read_text(encoding="utf-8")
+
+    def test_reviewer_config_comes_from_the_base(self):
+        project = Project(self)
+        hostile = re.sub(r"command = \[.*\]", 'command = ["no-such-reviewer"]', self.config_text(project))
+        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 0\ncritical_paths = []\n'
+        project.commit({".oah/config.toml": hostile}, "reconfigure the reviewer")
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        receipt = project.receipt(1)
+        self.assertEqual(receipt["reviewer"]["cli_path"], os.path.realpath(FAKE_REVIEWER))
+        self.assertIn(".oah/config.toml", receipt["critical_paths"])
+        self.assertTrue(any(item.startswith("OAH_REVIEW_CONFIG_CHANGED") for item in result.warnings), result.warnings)
+
+    def test_changed_base_selection_needs_an_explicit_base(self):
+        project = Project(self)
+        git(project.repo, "branch", "trunk", project.base)
+        project.commit({".oah/config.toml": self.config_text(project) + '[preflight]\ndefault_branch = "trunk"\n'})
+        error = project.refused("OAH_REVIEW_BASE_INVALID")
+        self.assertIn("--base", str(error))
+        result = project.review(base=project.base)
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+
+    def test_default_branch_must_be_a_branch_name(self):
+        project = Project(self, config='[preflight]\ndefault_branch = "main~1"\n')
+        error = project.refused("OAH_CONFIG_INVALID")
+        self.assertIn("default_branch", str(error))
 
 
 class ReceiptTest(unittest.TestCase):

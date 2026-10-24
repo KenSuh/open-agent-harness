@@ -6,7 +6,11 @@
 - `round_attempts`: how many dispatched attempts one round may use when they do not count (invalid output,
   missing canary, effort mismatch, engine failure). Default 2.
 - `codex_sha256`: pin the reviewer CLI file's sha256 (`sha256:` prefix optional). Empty means not pinned.
-- `critical_paths`: globs whose changes the prompt (and `oah review summary`) call out.
+- `critical_paths`: globs whose changes the prompt (and `oah review summary`) call out. The defaults include
+  `.oah/config.toml`, because it configures the review itself.
+
+`oah review` reads these from the configuration committed at the review base, so the reviewed change cannot
+configure its own review (`from_config`); `load(root)` reads a worktree's file.
 """
 from __future__ import annotations
 
@@ -15,14 +19,15 @@ import pathlib
 import re
 from typing import Mapping
 
-from oah.config import ConfigError, load_config
+from oah.config import Config, ConfigError, load_config
 
 DEFAULTS: dict[str, object] = {
     "max_rounds": None,
     "round_attempts": 2,
     "codex_sha256": "",
     "critical_paths": [".github/workflows/**", "**/AGENTS.md", "**/AGENTS.override.md", "**/CLAUDE.md",
-                       "**/CLAUDE.local.md", "**/.claude/**", "**/.codex/**", "**/.agents/**", "**/migrations/**"],
+                       "**/CLAUDE.local.md", "**/.claude/**", "**/.codex/**", "**/.agents/**", "**/migrations/**",
+                       ".oah/config.toml"],
 }
 _HEX = re.compile(r"[0-9a-f]{64}")
 
@@ -63,6 +68,9 @@ def from_section(section: Mapping[str, object], where: str = ".oah/config.toml")
                           critical_paths=tuple(paths))
 
 
+def from_config(config: Config) -> ReviewSettings:
+    return from_section(config.section("review", DEFAULTS), config.where)
+
+
 def load(root: pathlib.Path) -> ReviewSettings:
-    config = load_config(pathlib.Path(root))
-    return from_section(config.section("review", DEFAULTS), str(config.path or ".oah/config.toml"))
+    return from_config(load_config(pathlib.Path(root)))

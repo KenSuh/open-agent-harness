@@ -146,17 +146,23 @@ class CliTest(unittest.TestCase):
         self.assertFalse((project.state / "reviews").exists())
 
     def test_cli_config_problems_exit_69(self):
-        project = Project(self)
-        config = project.repo / ".oah" / "config.toml"
-        project.commit({".oah/config.toml": config.read_text(encoding="utf-8") + "[review]\nmax_rounds = 0\n"})
+        project = Project(self, config="[review]\nmax_rounds = 0\n")
         message = self.refused(project, "OAH_CONFIG_INVALID", exit_code=69)
         self.assertIn("max_rounds", message)
+        self.assertIn("review base", message)
 
     def test_cli_engine_must_be_codex(self):
-        project = Project(self)
-        config = project.repo / ".oah" / "config.toml"
-        project.commit({".oah/config.toml": config.read_text(encoding="utf-8") + '[stages]\nreview = "claude"\n'})
+        project = Project(self, config='[stages]\nreview = "claude"\n')
         self.refused(project, "OAH_REVIEW_ENGINE_UNSUPPORTED")
+
+    def test_cli_timeout_must_be_a_positive_number(self):
+        project = Project(self)
+        for value in ("0", "-1", "inf", "nan", "soon"):
+            with self.subTest(value=value):
+                done = oah(project, "review", "--task", "t1", f"--timeout-seconds={value}")
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertIn("--timeout-seconds", done.stderr)
+        self.assertEqual(project.calls(), [])
 
 
 if __name__ == "__main__":

@@ -2,15 +2,23 @@
 """One `oah review` invocation (PLAN 5.9): at most one paid reviewer call.
 
 Order of refusals, all before any call: dispatched workers; a task without a bound lease or whose intent is
-not current, or whose bound packet is not committed at HEAD (`OAH_INTENT_NOT_CURRENT`); a review stage other
-than Codex; the range (`context.resolve`); a dirty tracked tree; a busy series; an impact map that cannot be
+not current, or whose bound packet is not committed at HEAD (`OAH_INTENT_NOT_CURRENT`); the range
+(`context.resolve`); a dirty tracked tree; a change that edits the base-choosing `[preflight]` settings without
+an explicit `--base`; a review stage other than Codex; a busy series or task; an impact map that cannot be
 refreshed (`OAH_IMPACT_STALE`); the series gate (`rounds.gate`); a reviewer CLI that does not match
-`[review] codex_sha256`.
+`[review] codex_sha256` (the resolved CLI entry file: for an npm install that is the JavaScript launcher, not the
+native program it starts).
+
+The reviewed change never configures its own review: `[stages]`, `[engines]`, `[models]` and `[review]` come
+from `.oah/config.toml` as committed at the base (`config_at`). A change to that file is a critical path and a
+warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs
 the reviewer in the snapshot: stage `review` (read-only), `--output-schema`, `--ephemeral`, the user's Codex
-config and rules ignored, and an allowlisted environment plus the worker variables. The snapshot is removed
-as soon as the reviewer exits. A validated round publishes `R<n>.json` and its index line; every other call
+config and rules ignored, and an allowlisted environment plus the worker variables. Codex's own sign-in
+variables (`CODEX_API_KEY`, `OPENAI_API_KEY`) pass through, so API-key sign-in works; Codex's default shell
+policy keeps variables named like keys from the model's commands. The snapshot is removed as soon as the
+reviewer exits. A validated round publishes `R<n>.json` and its index line; every other call
 is an uncounted attempt in `rounds.jsonl`.
 """
 from __future__ import annotations
@@ -24,21 +32,23 @@ from typing import Callable, Mapping, Sequence
 
 from oah import call, call_cli, models, preflight
 from oah import intent as oah_intent
-from oah.config import load_config
+from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
+from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
-from oah.paths import repo_info, run_git, state_dir
+from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
 from oah.review import ReviewError, authors, canary, context, prompt, receipts, rounds, schema, snapshot
 from oah.review import settings as review_settings
 
 ENGINE = "codex"
+CONFIG_PATH = ".oah/config.toml"
 INTERPRETERS = ("python", "pythonw", "py", "node", "nodejs")
 KEEP_ENV = ("PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "CODEX_HOME", "TMPDIR", "TEMP", "TMP",
             "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
             "LANG", "LC_ALL", "LC_CTYPE", "TERM", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
             "http_proxy", "https_proxy", "no_proxy", "all_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
-            "NODE_EXTRA_CA_CERTS")
+            "NODE_EXTRA_CA_CERTS", "CODEX_API_KEY", "OPENAI_API_KEY")
 OUTCOME_CODES = {"converged": "OAH_REVIEW_CONVERGED", "changes-requested": "OAH_REVIEW_CHANGES_REQUESTED",
                  "needs-decision": rounds.NEEDS_DECISION}
 
@@ -135,6 +145,25 @@ def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Bindi
     return parsed.conditions
 
 
+def config_at(root: pathlib.Path, rev: str) -> Config:
+    """`.oah/config.toml` as committed at `rev`; a commit without the file reads as empty."""
+    label = f"{CONFIG_PATH} at the review base {rev[:12]}"
+    if run_git(root, "cat-file", "-e", f"{rev}:{CONFIG_PATH}").returncode != 0:
+        return Config(path=None, raw={}, label=label)
+    result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{CONFIG_PATH}"],
+                         timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
+    if result.timed_out or result.returncode != 0:
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git could not read {label} ({result.stderr.strip() or 'no output'}); "
+                          "check the repository and retry")
+    return parse_config(result.stdout.encode("latin-1"), label=label)
+
+
+def _call_settings(config: Config) -> call.Settings:
+    return call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
+                                   config.section("engines", call.ENGINE_DEFAULTS),
+                                   config.section("models", models.DEFAULTS))
+
+
 def _is_ancestor(root: pathlib.Path, commit: str, head: str) -> bool:
     return run_git(root, "merge-base", "--is-ancestor", commit, head).returncode == 0
 
@@ -158,20 +187,24 @@ def review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keych
                           f'{request.task} --agent {lease.agent} --reason "worktree removed", then start the lease '
                           "again in the task's worktree")
     binding = _check_intent(root, lease)
-    conf = review_settings.load(root)
-    call_settings = call_cli.load_settings(root)
-    if call_settings.stages.get("review") != ENGINE:
-        raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {call_settings.stages.get('review')!r}; "
-                          "oah review runs Codex (structured output, ephemeral, ignored user config). Set [stages] "
-                          'review = "codex" in .oah/config.toml and install Codex')
-    found = load_config(root).section("preflight", preflight.DEFAULTS)
-    span = context.resolve(root, request.base, remote=str(found["remote"] or ""),
-                           branch=str(found["default_branch"] or ""))
+    chosen = _base_settings(load_config(root))
+    span = context.resolve(root, request.base, remote=chosen[0], branch=chosen[1])
     dirty = context.tracked_dirty(root)
     if dirty:
         listed = ", ".join(dirty[:10]) + (f" and {len(dirty) - 10} more" if len(dirty) > 10 else "")
         raise ReviewError("OAH_REVIEW_DIRTY_TREE", f"tracked files have uncommitted changes ({listed}); a review "
                           "reads a commit, so commit or stash them, then run oah review again")
+    based = config_at(root, span.base)
+    if request.base is None and _base_settings(based) != chosen:
+        raise ReviewError("OAH_REVIEW_BASE_INVALID", "this change edits [preflight] remote or default_branch in "
+                          f"{CONFIG_PATH}, which choose the review base; nothing was launched. Pass --base with the "
+                          "commit this work started from")
+    conf = review_settings.from_config(based)
+    call_settings = _call_settings(based)
+    if call_settings.stages.get("review") != ENGINE:
+        raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {call_settings.stages.get('review')!r} "
+                          f"in {based.where}; oah review runs Codex (structured output, ephemeral, ignored user "
+                          'config). Set [stages] review = "codex" in .oah/config.toml and install Codex')
     lock = StateLock(receipts.lock_path(state, request.task, span.base), timeout=0)
     try:
         lock.__enter__()
@@ -184,6 +217,11 @@ def review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keych
                       ensure_impact=ensure_impact)
     finally:
         lock.__exit__(None, None, None)
+
+
+def _base_settings(config: Config) -> tuple[str, str]:
+    found = config.section("preflight", preflight.DEFAULTS)
+    return str(found["remote"] or ""), str(found["default_branch"] or "")
 
 
 def _impact(root: pathlib.Path, env: Mapping[str, str], ensure_impact: Callable | None, head: str):
@@ -243,6 +281,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     commits = authors.commit_engines(root, span.base, span.head)
     engines = [engine for _sha, engine in commits]
     changed = context.changed_files(root, span.base, span.head)
+    critical = context.critical(changed, conf.critical_paths)
+    if CONFIG_PATH in changed:
+        critical = sorted({*critical, CONFIG_PATH})
+        warnings.append(f"OAH_REVIEW_CONFIG_CHANGED: this change edits {CONFIG_PATH}; the review uses the "
+                        "configuration committed at the base, and the reviewer is asked to check the change")
     db = context.db_impact(changed, data, span.head, configured(root))
     conditions = committed_conditions(root, span.head, binding)
     number, attempt = s.next_number, sum(1 for line in s.round_lines() if line.get("event") == "start") + 1
@@ -255,7 +298,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         context_ = prompt.PromptContext(
             task=task, number=number, series_round=s.series_round, base=span.base, head=span.head,
             scope=tuple(lease.scope), conditions=conditions, diff_stat=context.diff_stat(root, span.base, span.head),
-            critical=tuple(context.critical(changed, conf.critical_paths)), stripped=snap.stripped, db=db,
+            critical=tuple(critical), stripped=snap.stripped, db=db,
             history=tuple(prompt.HistoryItem(entry.kind, entry.name, entry.digest,
                                              receipts.canonical(entry.record).decode("utf-8")) for entry in s.history),
             history_digest=s.history_digest(),
@@ -336,7 +379,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         "decision": {"text": decision, "after": s.latest.name if s.latest else None} if decision else None,
         "extra_round": extra, "history": s.history_items(), "history_digest": s.history_digest(),
         "canary_verified": True, "canary_scope": canary.LIMIT, "db_impact": db.line, "db_query": db.query,
-        "critical_paths": context.critical(changed, conf.critical_paths), "stripped": list(context_.stripped),
+        "critical_paths": list(critical), "stripped": list(context_.stripped),
         "intent_return": output.intent_return, "evidence": output.evidence,
         "prompt_sha256": receipts.digest(prepared.run.prompt_path.read_bytes()), "output_sha256": receipts.digest(raw),
         "output_schema_sha256": receipts.digest(schema.text().encode("utf-8")),

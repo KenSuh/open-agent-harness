@@ -82,6 +82,24 @@ class SettingsTest(unittest.TestCase):
                 self.assertIn(caught.exception.code, ("OAH_CONFIG_INVALID", "OAH_CONFIG_UNKNOWN_KEY"))
 
 
+    def test_config_from_commit_bytes_names_its_source(self):
+        from oah.config import parse_config
+
+        config = parse_config(b"[review]\nmax_rounds = 0\n", label=".oah/config.toml at the review base abc123")
+        self.assertIsNone(config.path)
+        with self.assertRaises(ConfigError) as caught:
+            settings.from_config(config)
+        self.assertIn(".oah/config.toml at the review base abc123", str(caught.exception))
+        self.assertEqual(settings.from_config(parse_config(b"", label="x")).round_attempts, 2)
+        for data, word in ((b"\xff\xfe", "not UTF-8"), (b"[review\n", "not valid TOML")):
+            with self.subTest(word=word):
+                with self.assertRaises(ConfigError) as caught:
+                    parse_config(data, label="the base config")
+                self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+                self.assertIn(f"the base config is {word}", str(caught.exception))
+        self.assertIn(".oah/config.toml", settings.DEFAULTS["critical_paths"])
+
+
 class RecordsTest(unittest.TestCase):
     def setUp(self):
         self.state = make_tmp_dir(self) / "state"
@@ -652,10 +670,12 @@ class PromptTest(unittest.TestCase):
 class EnvTest(unittest.TestCase):
     def test_reviewer_env_keeps_only_the_allowlist(self):
         given = {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8",
-                 "OPENAI_API_KEY": "k", "ANTHROPIC_API_KEY": "a", "GITHUB_TOKEN": "t", "OAH_STATE_DIR": "s",
-                 "OAH_WORKER": "0", "PWD": "w", "CLAUDE_CONFIG_DIR": "d", "OAH_PROBE_PRIVATE": "v"}
+                 "OPENAI_API_KEY": "k", "CODEX_API_KEY": "c2", "ANTHROPIC_API_KEY": "a", "GITHUB_TOKEN": "t",
+                 "OAH_STATE_DIR": "s", "OAH_WORKER": "0", "PWD": "w", "CLAUDE_CONFIG_DIR": "d",
+                 "OAH_PROBE_PRIVATE": "v"}
         kept = runner.reviewer_env(given)
-        self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8"})
+        self.assertEqual(kept, {"PATH": "p", "HOME": "h", "CODEX_HOME": "c", "https_proxy": "x", "LANG": "C.UTF-8",
+                                "OPENAI_API_KEY": "k", "CODEX_API_KEY": "c2"})
 
     @unittest.skipUnless(os.name == "nt", "Windows environment names ignore letter case")
     def test_reviewer_env_ignores_case_on_windows(self):

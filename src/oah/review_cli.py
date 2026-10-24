@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pathlib
 import sys
@@ -23,6 +24,16 @@ ENVIRONMENT_CODES = frozenset({"OAH_REVIEW_SNAPSHOT_FAILED", "OAH_REVIEW_GIT_FAI
                                "OAH_RUN_PATH_UNSAFE", *call_cli.ENVIRONMENT_CODES})
 
 
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} must be a number of seconds above 0")
+    return value
+
+
 def register(commands: argparse._SubParsersAction) -> None:
     parser = commands.add_parser("review", help="run one Codex review round of a task's committed work and record "
                                                 "its receipt")
@@ -34,7 +45,7 @@ def register(commands: argparse._SubParsersAction) -> None:
                         help="continue a series that stopped for a decision; say what you decided (recorded)")
     parser.add_argument("--tier", choices=routing.TIERS,
                         help="the reviewer's tier (default: the packet's plan, else scored from the task)")
-    parser.add_argument("--timeout-seconds", type=float,
+    parser.add_argument("--timeout-seconds", type=_seconds,
                         help="stop the reviewer after this many seconds (default: the tier's timeout_min)")
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
 

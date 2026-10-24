@@ -3,8 +3,8 @@
 
 `resolve(root, base_arg)` returns full SHAs: the head is HEAD, and the base is `--base` (which must be an
 ancestor of HEAD) or the merge-base of HEAD with the default branch. The default branch is found locally,
-without a fetch: `[preflight] default_branch` (on the configured or `origin` remote, then locally), else the
-remote's HEAD branch, `main` or `master` on that remote, then local `main` or `master`.
+without a fetch: `[preflight] default_branch` (a plain branch name, on the configured or `origin` remote, then
+locally), else the remote's HEAD branch, `main` or `master` on that remote, then local `main` or `master`.
 
 Everything else reads the fixed head, never the refreshed default branch (A23): the diff stat and changed
 files of base..head, the configured critical paths among them, and the DB impact. A change touches DB
@@ -56,6 +56,10 @@ def _commit(root: pathlib.Path, rev: str) -> str | None:
 
 
 def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
+    if branch and (branch.startswith("-") or branch == "@" or "@{" in branch
+                   or _git(root, "check-ref-format", "--branch", branch, ok=(0, 1, 128))[0]):
+        raise ReviewError("OAH_CONFIG_INVALID", f"[preflight] default_branch {branch!r} is not a branch name; set it "
+                          "to the name of the default branch (such as main) in .oah/config.toml")
     remotes = _git(root, "remote")[1].split()
     chosen = remote if remote in remotes else "origin" if "origin" in remotes else (
         remotes[0] if len(remotes) == 1 else None)
