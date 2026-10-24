@@ -37,7 +37,12 @@ def _seconds(text: str) -> float:
 def register(commands: argparse._SubParsersAction) -> None:
     parser = commands.add_parser("review", help="run one Codex review round of a task's committed work and record "
                                                 "its receipt")
-    parser.add_argument("--task", required=True, help="the task whose lease, packet and branch are reviewed")
+    actions = parser.add_subparsers(dest="review_action", metavar="{summary}")
+    summary = actions.add_parser("summary", help="print a PR-ready block from the task's review receipts")
+    summary.add_argument("--task", required=True, help="the task whose receipts are summarized")
+    summary.add_argument("--json", action="store_true", help="print the summary as JSON (with the block as markdown)")
+    # Required for a round; checked in run() so that `oah review summary --task T` parses.
+    parser.add_argument("--task", help="the task whose lease, packet and branch are reviewed (required)")
     parser.add_argument("--base", help="review against this commit (default: the merge-base with the default branch)")
     parser.add_argument("--extra-round", action="store_true",
                         help="run one round beyond [review] max_rounds (recorded in the receipt and the events)")
@@ -61,9 +66,44 @@ def _refused(exc: BaseException, as_json: bool) -> int:
     return exit_code
 
 
+def _environment(exc: BaseException, as_json: bool) -> int:
+    print(exc, file=sys.stderr)
+    if as_json:
+        print(json.dumps({"code": getattr(exc, "code", type(exc).__name__), "exit_code": EXIT_ENVIRONMENT,
+                          "message": str(exc)}, indent=2, ensure_ascii=False))
+    return EXIT_ENVIRONMENT
+
+
+def _summary(args: argparse.Namespace) -> int:
+    from oah.config import ConfigError
+    from oah.paths import repo_info, state_dir
+    from oah.review import summary
+
+    try:
+        info = repo_info(pathlib.Path.cwd())
+        built = summary.build(info.root, state_dir(info, os.environ), args.task, env=os.environ)
+    except (summary.SummaryError, ReviewError) as exc:
+        return _refused(exc, args.json)
+    except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
+        return _environment(exc, args.json)
+    except OSError as exc:
+        return _environment(StorageError(pathlib.Path(exc.filename or "."), exc), args.json)
+    if args.json:
+        print(json.dumps(built.to_json(), indent=2, ensure_ascii=False))
+    else:
+        print(built.render(), end="")
+    return EXIT_OK
+
+
 def run(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
 
+    if getattr(args, "review_action", None) == "summary":
+        return _summary(args)
+    if args.task is None:
+        print("OAH_USAGE: oah review needs --task TASK (or run oah review summary --task TASK for the summary)",
+              file=sys.stderr)
+        return EXIT_USAGE
     if args.decision is not None and not args.decision.strip():
         print("OAH_USAGE: --decision needs the decision in words; say what you decided", file=sys.stderr)
         return EXIT_USAGE
