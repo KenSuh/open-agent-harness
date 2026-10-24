@@ -33,8 +33,9 @@ def oah(project: FixProject, *args: str, env_extra: dict | None = None) -> subpr
                           encoding="utf-8", env=env, timeout=600)
 
 
-def start_oah(project: FixProject, *args: str, code: str | None = None) -> subprocess.Popen:
-    env = dict(project.env, PYTHONPATH=SRC)
+def start_oah(project: FixProject, *args: str, code: str | None = None,
+              env_extra: dict | None = None) -> subprocess.Popen:
+    env = dict(project.env, PYTHONPATH=SRC, **(env_extra or {}))
     argv = [sys.executable, "-c", code, *args] if code else [sys.executable, "-m", "oah", *args]
     return subprocess.Popen(argv, cwd=project.repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -169,7 +170,10 @@ class CliTest(unittest.TestCase):
         project = FixProject(self)
         project.changes_requested()
         project.queue_fix({"hang": True}, {"write": FIXED})
-        process = start_oah(project, "fix", "--task", "t1", "--tier", "high")
+        temp = project.work / "killed-temp"  # a killed process cannot remove its scratch folder; keep it here
+        temp.mkdir()
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high",
+                            env_extra={"TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)})
         pid_file = project.fix_dir / "pid-000.txt"
         try:
             self.assertTrue(wait_for(pid_file), "the corrector must start")
@@ -182,6 +186,7 @@ class CliTest(unittest.TestCase):
         while call._alive(pid) and time.monotonic() < deadline:
             time.sleep(0.05)  # Windows closes the corrector's job with its killed parent
         self.assertFalse(call._alive(pid))
+        self.assertEqual(len(list(temp.glob("oah-fix-*"))), 1, "the scratch folder stayed in the given temp folder")
         self.assertEqual(names(project), ["R1.json", "A1-start.json"])
         done = oah(project, "review", "--task", "t1", "--tier", "high")
         self.assertEqual(done.returncode, 1)
@@ -192,6 +197,11 @@ class CliTest(unittest.TestCase):
         self.assertTrue(done.stderr.startswith("OAH_FIX_ATTEMPT_UNFINISHED:"), done.stderr)
         done = oah(project, "fix", "--abort", "--task", "t1", "--json")
         self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (0, "OAH_FIX_ABORTED"), done.stderr)
+        self.assertIn("its run was last running", project.record("A1-outcome.json")["evidence"])
+        run_id = project.record("A1-start.json")["run_id"]
+        run = json.loads((project.state / "runs" / "t1" / run_id / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(run["status"], "lost")
+        self.assertTrue(run["error"].startswith("OAH_RUN_LOST:"), run["error"])
         done = oah(project, "fix", "--abort", "--task", "t1")
         self.assertEqual(done.returncode, 1)
         self.assertTrue(done.stderr.startswith("OAH_FIX_NOTHING_TO_ABORT:"), done.stderr)

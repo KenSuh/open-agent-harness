@@ -31,7 +31,8 @@ engine, unless `engine` names who replaced its changes (recorded).
 `applied` outcome and head binding. It starts from the newest bound result on the source receipt that HEAD
 contains, else from the reviewed head.
 
-`abort(task, ...)` records `aborted` for attempts whose `oah fix` stopped without an outcome (a hard kill).
+`abort(task, ...)` records `aborted` for attempts whose `oah fix` stopped without an outcome (a hard kill), and
+marks such an attempt's run `lost`, as `oah wait` does for a runner that died.
 
 Round instructions
     `round_instructions(...)` fills `templates/review/correction.md`: the source receipt, the findings with
@@ -997,12 +998,13 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
         with _held_signals():
             for attempt in unfinished:
                 start = h.start(attempt)
-                status = "unknown"
+                run, status = None, "unknown"
                 if isinstance(start.get("run_id"), str):
                     try:
-                        status = runs.find_run(t.state, start["run_id"]).read().get("status", "unknown")
+                        run = runs.find_run(t.state, start["run_id"])
+                        status = run.read().get("status", "unknown")
                     except runs.RunError:
-                        status = "missing"
+                        run, status = None, "missing"
                 evidence = (f"recorded by oah fix --abort: the oah fix that started {attempt.attempt_id} stopped without "
                             f"recording an outcome (killed or crashed); its run was last {status}")
                 fields = {"outcome": "aborted", "after_head": None, "evidence": redact(evidence), "finished_at": _iso()}
@@ -1013,6 +1015,11 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                           "attempt_id": attempt.attempt_id, **fields}
                 published.append({"name": name, "digest": receipts.publish(t.state, t.name, name, record,
                                                                            summary={"outcome": "aborted"})})
+                if run is not None and status not in runs.TERMINAL:
+                    # The task lock proves the oah fix that ran it is gone, as oah wait concludes from a dead pid.
+                    run.result(status="lost", error="OAH_RUN_LOST: the oah fix that ran this correction stopped "
+                                                    "without recording a result; oah fix --abort recorded its attempt "
+                                                    "as aborted")
         ids = _ids(item.attempt_id for item in unfinished)
         Store(t.state).log(task=t.name, agent=t.lease.agent, message=f"fix {ids}: recorded as aborted (oah fix --abort)")
     return Result("OAH_FIX_ABORTED", 0, f"OAH_FIX_ABORTED: {ids} {'is' if len(unfinished) == 1 else 'are'} recorded "
