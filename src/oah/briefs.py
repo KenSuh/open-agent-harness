@@ -222,10 +222,16 @@ def reusable_content(stored: str, *, stage: str, footer: str, has_footer: HasFoo
         section = raw_section(body)
         if section is not None:
             body = body.replace(section, "", 1)
-    if re.search(r"\boah\s+(?:start|renew|finish)\b", body):
-        raise BriefError("OAH_BRIEF_STALE", "the reusable worker instructions carry a lease command; "
-                         "remove that command from the spec and retry the call; workers use the dispatcher's lease")
     return body.strip("\r\n")
+
+
+def reusable_warnings(content: str) -> list[str]:
+    """Warn about legacy lease instructions; the lease CLI enforces the worker restriction."""
+    if re.search(r"\boah(?:\.exe)?\s+(?:start|renew|finish)\b", content, re.IGNORECASE):
+        return ["OAH_WORKER_LEASE_COMMAND: the reusable worker instructions carry a lease command; "
+                "remove that command from the spec; workers use the dispatcher's lease and the CLI refuses "
+                "worker start, renew and finish commands"]
+    return []
 
 
 def strip_intent_footer(brief: str, *, footer: str, has_footer: HasFooter) -> str:

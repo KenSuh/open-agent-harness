@@ -132,7 +132,7 @@ class RunFolderTest(unittest.TestCase):
                 path = project.packet(newline=newline)
                 self.assertEqual(path.read_bytes(), SECTION.replace("\n", newline).encode("utf-8"))
 
-    def test_legacy_spec_lease_commands_refuse_in_every_stage(self):
+    def test_legacy_spec_lease_commands_warn_in_every_stage(self):
         project = Project(self)
         spec = project.repo / "legacy-spec.md"
         for stage, engine in (("initial", "claude"), ("correction", "codex"), ("review", "codex")):
@@ -141,10 +141,25 @@ class RunFolderTest(unittest.TestCase):
                     spec.write_bytes((f"Before proceeding, run `oah {command} --task t1`.\n" + SECTION).encode("utf-8"))
                     code, _, err = run_cli(project, "call", engine, "--stage", stage, "--task", "t1",
                                            "--tier", "low", "--brief-file", str(spec))
-                    self.assertEqual(code, 1, err)
-                    self.assertIn("OAH_BRIEF_STALE", err)
+                    self.assertEqual(code, 0, err)
+                    self.assertIn("OAH_WORKER_LEASE_COMMAND", err)
                     self.assertIn("remove", err)
-                    self.assertFalse(project.record.exists())
+                    self.assertIn(f"oah {command}", project.recorded()["stdin"])
+
+    def test_windows_spec_lease_commands_warn_in_every_stage(self):
+        project = Project(self)
+        spec = project.repo / "windows-spec.md"
+        for stage, engine in (("initial", "claude"), ("correction", "codex"), ("review", "codex")):
+            for executable in ("oah.exe", "OAH.EXE", "OaH.ExE"):
+                for command in ("start", "renew", "finish"):
+                    with self.subTest(stage=stage, executable=executable, command=command):
+                        instruction = f"Run `{executable} {command} --task t1`.\n"
+                        spec.write_bytes((instruction + SECTION).encode("utf-8"))
+                        code, _, err = run_cli(project, "call", engine, "--stage", stage, "--task", "t1",
+                                               "--tier", "low", "--brief-file", str(spec))
+                        self.assertEqual(code, 0, err)
+                        self.assertIn("OAH_WORKER_LEASE_COMMAND", err)
+                        self.assertIn(instruction, project.recorded()["stdin"])
 
     def test_stored_spec_gets_the_current_worker_envelope(self):
         project = Project(self)
@@ -174,11 +189,11 @@ class RunFolderTest(unittest.TestCase):
         self.assertIn("Review the current diff.", prompt)
         self.assertEqual(prompt.count(VERIFY_MARKER), 1)
 
-    def test_stored_review_spec_with_lease_instruction_refuses(self):
+    def test_stored_review_spec_with_lease_instruction_warns(self):
         project = Project(self)
-        with self.assertRaises(BriefError):
-            project.prepare(tier="low", stored_brief="Run oah start --task old --agent claude before reviewing.\n"
-                            + SECTION)
+        prepared = project.prepare(tier="low", stored_brief="Run oah start --task old --agent claude before reviewing.\n"
+                                   + SECTION)
+        self.assertTrue(any(warning.startswith("OAH_WORKER_LEASE_COMMAND") for warning in prepared.warnings))
         self.assertFalse(project.record.exists())
 
     def test_refresh_failure_keeps_launch_version_separate_from_catalog(self):
@@ -729,6 +744,58 @@ class LeaseBindingTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), real_packet().encode("utf-8"))
         prepared = self.prepare()
         self.assertIn(raw_section(real_packet()).encode("utf-8"), prepared.run.prompt_path.read_bytes())
+
+    def test_dispatched_worker_finish_is_refused_and_dispatcher_lease_survives(self):
+        self.bind()
+        prepared = self.prepare()
+        returned = Store(self.project.state).inspect("t1").binding().line() + "\nAC1: met — checked\n"
+        command = [sys.executable, "-m", "oah", "finish", "--task", "t1", "--agent", "claude",
+                   "--summary", "worker tried finish", "--return", "-", "--allow-out-of-scope"]
+        worker = ("import json, subprocess, sys; sys.stdin.read(); "
+                  f"result = subprocess.run({command!r}, input={returned!r}, capture_output=True, "
+                  "text=True, encoding='utf-8'); "
+                  "print(json.dumps({'code': result.returncode, 'out': result.stdout, 'err': result.stderr}))")
+        prepared = call.dataclasses.replace(prepared, argv=(sys.executable, "-c", worker))
+        paths = [self.project.state / name for name in ("leases.json", "events.jsonl")]
+        before = [path.read_bytes() for path in paths]
+        env = dict(self.project.env, PYTHONPATH=str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+        result = call.execute(prepared, base_env=env)
+        self.assertEqual(result["status"], "finished", result)
+        child = json.loads(prepared.run.stdout_path.read_text(encoding="utf-8"))
+        self.assertEqual(child["code"], 1, child)
+        self.assertTrue(child["err"].startswith("OAH_WORKER_LEASE_REFUSED"), child)
+        self.assertEqual([path.read_bytes() for path in paths], before)
+        self.assertEqual(Store(self.project.state).inspect("t1").agent, "claude")
+
+    def test_mutating_dispatch_accepts_case_alias_of_leased_directory(self):
+        self.bind()
+        alias = self.project.repo.with_name(self.project.repo.name.upper())
+        if not alias.is_dir() or not os.path.samefile(alias, self.project.repo):
+            self.skipTest("this filesystem does not provide a case alias")
+        for stage, engine in (("initial", "claude"), ("correction", "codex")):
+            with self.subTest(stage=stage):
+                request = call.CallRequest(engine=engine, stage=stage, task="t1", tier="low")
+                prepared = call.prepare(request, self.project.settings(), root=alias, state_dir=self.project.state,
+                                        env=self.project.env, footer=intent.FOOTER, has_footer=intent.has_footer,
+                                        keychain=NoKeychain())
+                self.assertEqual(call.execute(prepared, base_env=self.project.env)["status"], "finished")
+
+    def test_mutating_dispatch_refuses_distinct_case_named_directories(self):
+        self.bind()
+        other = self.project.repo.with_name(self.project.repo.name.upper())
+        if other.exists():
+            self.skipTest("this filesystem does not support distinct case names")
+        add_worktree(self.project.repo, other, "case-distinct")
+        target = other / ".oah/tasks/t1/PACKET.md"
+        target.parent.mkdir(parents=True)
+        target.write_bytes((self.project.repo / ".oah/tasks/t1/PACKET.md").read_bytes())
+        self.assertFalse(os.path.samefile(other, self.project.repo))
+        request = call.CallRequest(engine="codex", stage="correction", task="t1", tier="low")
+        with self.assertRaises(EngineError) as caught:
+            call.prepare(request, self.project.settings(), root=other, state_dir=self.project.state,
+                         env=self.project.env, footer=intent.FOOTER, has_footer=intent.has_footer)
+        self.assertEqual(caught.exception.code, "OAH_WORKTREE_LEASE_MISMATCH")
+        self.assertEqual(self.project.runs(), [])
 
     def test_mutating_prepare_refuses_a_sibling_with_the_same_intent(self):
         path = self.bind()

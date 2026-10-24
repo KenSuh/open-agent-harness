@@ -37,6 +37,41 @@ class LeaseCliTest(unittest.TestCase):
             args += ["--scope", entry]
         return oah(self.repo, *args, *extra)
 
+    def test_worker_lifecycle_refuses_before_creating_state(self):
+        for command, extra in (("start", ("--scope", "src")), ("renew", ()),
+                               ("finish", ("--summary", "done"))):
+            with self.subTest(command=command):
+                refused = oah(self.repo, command, "--task", "t1", "--agent", "claude", *extra,
+                              env_extra={"OAH_WORKER": "1"})
+                self.assertEqual(refused.returncode, 1, refused.stderr)
+                self.assertTrue(refused.stderr.startswith("OAH_WORKER_LEASE_REFUSED"), refused.stderr)
+                self.assertIn("dispatcher", refused.stderr)
+                self.assertFalse((self.repo / ".git" / "oah").exists())
+
+    def test_worker_lifecycle_preserves_lease_through_real_cli_entry_points(self):
+        self.assertEqual(self.start().returncode, 0)
+        state = self.repo / ".git" / "oah"
+        before = {path.relative_to(state): path.read_bytes() for path in state.rglob("*") if path.is_file()}
+        entries = (("-m", "oah"), (str(pathlib.Path(SRC) / "oah" / "__main__.py"),),
+                   ("-c", "from oah.cli import main; raise SystemExit(main())"))
+        for entry in entries:
+            for command, extra in (("start", ("--scope", "src")),
+                                   ("start", ("--packet", "missing.md")),
+                                   ("renew", ("--scope", "repo")),
+                                   ("finish", ("--summary", "done", "--return", "missing.md"))):
+                with self.subTest(entry=entry, command=command, extra=extra):
+                    refused = subprocess.run([sys.executable, *entry, command, "--task", "t1", "--agent",
+                                              "claude", *extra], cwd=self.repo, capture_output=True, text=True,
+                                             encoding="utf-8", timeout=60,
+                                             env=dict(os.environ, PYTHONPATH=SRC, OAH_WORKER="1"))
+                    self.assertEqual(refused.returncode, 1, refused.stderr)
+                    self.assertTrue(refused.stderr.startswith("OAH_WORKER_LEASE_REFUSED"), refused.stderr)
+                    self.assertEqual({path.relative_to(state): path.read_bytes() for path in state.rglob("*")
+                                      if path.is_file()}, before)
+        status = oah(self.repo, "status", "--json", env_extra={"OAH_WORKER": "1"})
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(len(json.loads(status.stdout)["leases"]), 1)
+
     def test_start_status_finish_round_trip(self):
         started = self.start("t1", "claude", "src")
         self.assertEqual(started.returncode, 0, started.stderr)

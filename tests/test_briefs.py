@@ -14,6 +14,7 @@ from unittest import mock
 
 from oah.briefs import (VERIFY_FOOTER, VERIFY_MARKER, BriefError, build, deliver, has_intent_footer, intent_footer,
                         lease_command, raw_section, reusable_content, strip_intent_footer)
+from oah import briefs
 from oah.briefs import shell_word
 from tests.helpers import make_tmp_dir
 
@@ -73,16 +74,20 @@ class LayoutTest(unittest.TestCase):
 
 
 class LeaseCommandTest(unittest.TestCase):
-    def test_reusable_plain_and_generated_specs_refuse_all_lease_commands(self):
+    def test_reusable_plain_and_generated_specs_warn_about_lease_commands(self):
         for stage in ("initial", "correction", "review"):
-            for command in ("start", "renew", "finish"):
-                instruction = f"Run `oah {command} --task p3b` before returning.\n"
-                for stored in (instruction + SECTION, brief(round_instructions=instruction)):
-                    with self.subTest(stage=stage, command=command, generated=stored.startswith("You are")):
-                        with self.assertRaises(BriefError) as caught:
-                            reusable_content(stored, stage=stage, footer=FOOTER, has_footer=has_footer)
-                        self.assertEqual(caught.exception.code, "OAH_BRIEF_STALE")
-                        self.assertIn("remove", str(caught.exception))
+            for executable in ("oah", "oah.exe", "OAH.EXE", "OaH.ExE"):
+                for command in ("start", "renew", "finish"):
+                    instruction = f"Run `{executable} {command} --task p3b` before returning.\n"
+                    for stored in (instruction + SECTION, brief(round_instructions=instruction)):
+                        with self.subTest(stage=stage, executable=executable, command=command,
+                                          generated=stored.startswith("You are")):
+                            content = reusable_content(stored, stage=stage, footer=FOOTER, has_footer=has_footer)
+                            self.assertIn(instruction.strip(), content)
+                            warnings = briefs.reusable_warnings(content)
+                            self.assertEqual(len(warnings), 1)
+                            self.assertTrue(warnings[0].startswith("OAH_WORKER_LEASE_COMMAND"))
+                            self.assertIn("remove", warnings[0])
 
     def test_unsafe_command_values_are_refused_before_building(self):
         words = ["a'b", 'a"b', "x’;Write-Output-INJECTED", "a‘b", "a“b", "a”b", "$x", "`x`",

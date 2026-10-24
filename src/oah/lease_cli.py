@@ -162,7 +162,14 @@ def _bindable(args: argparse.Namespace, info: RepoInfo) -> tuple[intent.Binding,
     return result.intent.bind(source), normalize_scope([*result.scope, *explicit], info.root), warnings
 
 
+def _refuse_worker_lease() -> None:
+    if os.environ.get("OAH_WORKER") == "1":
+        raise LeaseError("OAH_WORKER_LEASE_REFUSED", "dispatched workers use the dispatcher's lease; "
+                         "return your work to the dispatcher so it can manage the lease")
+
+
 def _start(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
+    _refuse_worker_lease()
     if not args.scope and not args.packet:
         print("OAH_USAGE: oah start needs --scope PATH (repeat for more, or 'repo') or --packet PATH",
               file=sys.stderr)
@@ -208,6 +215,7 @@ def _intent_state(lease: Lease) -> tuple[str, str]:
 
 
 def _renew(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
+    _refuse_worker_lease()
     scope = normalize_scope(args.scope, info.root) if args.scope else None
     gates = _ledger_paths(args.gates, info) or None
     lease = store.renew(task=args.task, agent=args.agent, ttl_hours=args.ttl_hours, scope=scope, gates=gates)
@@ -366,6 +374,7 @@ def _check_intent(args: argparse.Namespace, lease: Lease) -> dict | None:
 
 
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
+    _refuse_worker_lease()
     lease = store.inspect(args.task)
     intent_report = _check_intent(args, lease)
     # The task's ledgers and summary are gate artifacts written by oah and unlazy, not changes to the scope.

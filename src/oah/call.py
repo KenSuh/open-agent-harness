@@ -325,10 +325,15 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
     if lease.expired(utc_now()):
         raise EngineError("OAH_LEASE_CHANGED", "the checked lease expired; start a new lease with "
                           "oah start --packet and run oah call again")
-    if stage != "review" and root.resolve() != pathlib.Path(lease.worktree).resolve():
-        raise EngineError("OAH_WORKTREE_LEASE_MISMATCH", "a mutating worker must run in the dispatcher's leased "
-                          f"worktree ({lease.worktree}). Nothing was launched. Run oah call again with "
-                          "--worktree set to that exact path")
+    if stage != "review":
+        try:
+            same_worktree = os.path.samefile(root, lease.worktree)
+        except OSError:
+            same_worktree = False
+        if not same_worktree:
+            raise EngineError("OAH_WORKTREE_LEASE_MISMATCH", "a mutating worker must run in the dispatcher's leased "
+                              f"worktree ({lease.worktree}). Nothing was launched. Run oah call again with "
+                              "--worktree set to that exact path")
     check_lease_binding(lease)
     # A read-only review may use another tree; its intent must still match the lease.
     check_lease_binding(dataclasses.replace(lease, worktree=str(root)))
@@ -595,6 +600,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     if stored is not None:
         section = section if section is not None else briefs.raw_section(stored)
         content = briefs.reusable_content(stored, stage=request.stage, footer=footer, has_footer=has_footer)
+        warnings.extend(briefs.reusable_warnings(content))
         instructions = "\n\n".join(part for part in (content, instructions) if part)
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
