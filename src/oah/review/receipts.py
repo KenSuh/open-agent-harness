@@ -14,13 +14,23 @@ Reading
     `load` re-reads every indexed file and compares its digest. Unreadable or torn indexes, missing files,
     digest or identity mismatches, receipts out of order and record files missing from the index are
     returned as `problems`; callers stop with `OAH_REVIEW_NEEDS_DECISION`.
-Correction attempts
-    `attempts` merges each attempt's records into the 5.9 view `{attempt_id, source_receipt_digest,
-    finding_ids, class_ids, before_head, after_head, outcome, evidence}`. The start record names the source
-    receipt (name and digest), its finding ids and exactly their class ids, and `before_head`. The outcome is
-    one of `OUTCOMES`, with `after_head` (a full SHA, or null when nothing was committed). A head-binding
-    record may follow only an `applied` outcome with a null `after_head`. An attempt without an outcome is
-    unfinished, and an applied attempt without a bound commit is incomplete: both are problems.
+Record format (`schema: 1`; every record also has `kind`, `task` and, for attempts, `attempt_id` = `A<k>`)
+    - receipt (`R<n>.json`, `round` = n): full SHAs `base` and `head`, `series_round`, `verdict`, `outcome`
+      (`RECEIPT_OUTCOMES`), `findings[]` (each with `finding_id`, `class_id` and a P0-P3 `severity`) and
+      `classes[]` (each with `class_id`, `mechanism` and `rule`); `oah.review.runner` writes the other fields.
+    - attempt start: exactly `source_receipt` (a receipt name), `source_receipt_digest`, `finding_ids[]` and
+      `class_ids[]` (non-empty, each id once; the class ids are exactly the classes of those findings in the
+      source receipt), `before_head`, `engine` (`claude`, `codex` or `human`), `manual` (true or false) and
+      `started_at`.
+    - attempt outcome: exactly `outcome` (`OUTCOMES`), `after_head` (present; a full SHA only for `applied`,
+      otherwise null), `evidence` (non-empty) and `finished_at`.
+    - attempt head binding, only after an `applied` outcome whose `after_head` is null: exactly `after_head`,
+      `evidence` and `bound_at`.
+    - attempt records may also carry `run_id`; no other field is accepted.
+    `publish` refuses records and index summaries that break this format. `load` reports such records as
+    problems, and `attempts` merges each attempt into the 5.9 view `{attempt_id, source_receipt_digest,
+    finding_ids, class_ids, before_head, after_head, outcome, evidence}`. An attempt without an outcome is
+    unfinished, and an applied attempt without a new bound commit is incomplete: both are problems.
 Round log
     `rounds.jsonl` records the start and finish of every dispatched round attempt. It is not history; the
     attempt budget and sticky decision stops are read from it.
@@ -48,6 +58,16 @@ ROUNDS_NAME = "rounds.jsonl"
 KINDS = ("receipt", "attempt-start", "attempt-outcome", "attempt-head")
 OUTCOMES = ("applied", "no-change", "failed", "aborted")
 SUMMARY_FIELDS = ("round", "series_round", "base", "head", "verdict", "outcome")
+RECEIPT_OUTCOMES = ("converged", "changes-requested", "needs-decision")
+ENGINES = ("claude", "codex", "human")
+_ATTEMPT_KEYS = {
+    "attempt-start": frozenset({"schema", "kind", "task", "attempt_id", "source_receipt", "source_receipt_digest",
+                                "finding_ids", "class_ids", "before_head", "engine", "manual", "started_at"}),
+    "attempt-outcome": frozenset({"schema", "kind", "task", "attempt_id", "outcome", "after_head", "evidence",
+                                  "finished_at"}),
+    "attempt-head": frozenset({"schema", "kind", "task", "attempt_id", "after_head", "evidence", "bound_at"}),
+}
+_OPTIONAL_KEYS = frozenset({"run_id"})
 SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _RECEIPT_NAME = re.compile(r"R([1-9][0-9]{0,8})\.json")
@@ -103,7 +123,89 @@ def parse_name(name: str) -> tuple[str, int | str]:
     raise ValueError(f"{name!r} is not a review record name (R<n>.json or A<k>-start|outcome|head.json)")
 
 
-def _identity_problem(name: str, kind: str, ident: int | str, record: object, task: str) -> str | None:
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _sha(value: object) -> bool:
+    return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+
+
+def _ids(field: str, value: object) -> str | None:
+    if not isinstance(value, list) or not value or not all(_text(item) for item in value):
+        return f"{field} must be a non-empty list of ids"
+    twice = sorted({item for item in value if value.count(item) > 1})
+    return f"{field} lists {', '.join(twice)} twice" if twice else None
+
+
+def _receipt_shape(record: dict) -> str | None:
+    from oah.review.schema import SEVERITIES, VERDICTS
+
+    if not (_sha(record.get("base")) and _sha(record.get("head"))):
+        return "base and head must be full commit SHAs"
+    rounds = record.get("series_round")
+    if not (isinstance(rounds, int) and not isinstance(rounds, bool) and rounds >= 1):
+        return "series_round must be a round number"
+    if record.get("verdict") not in VERDICTS:
+        return f"verdict {record.get('verdict')!r} is not one of {', '.join(VERDICTS)}"
+    if record.get("outcome") not in RECEIPT_OUTCOMES:
+        return f"outcome {record.get('outcome')!r} is not one of {', '.join(RECEIPT_OUTCOMES)}"
+    findings, classes = record.get("findings"), record.get("classes")
+    if not isinstance(findings, list) or not isinstance(classes, list):
+        return "findings and classes must be lists"
+    for item in findings:
+        if not (isinstance(item, dict) and _text(item.get("finding_id")) and _text(item.get("class_id"))
+                and item.get("severity") in SEVERITIES):
+            return f"finding {item!r} needs a finding_id, a class_id and a P0-P3 severity"
+    for item in classes:
+        if not (isinstance(item, dict) and all(_text(item.get(key)) for key in ("class_id", "mechanism", "rule"))):
+            return f"class {item!r} needs a class_id, a mechanism and a rule"
+    return None
+
+
+def _attempt_shape(kind: str, record: dict) -> str | None:
+    keys = _ATTEMPT_KEYS[kind]
+    missing, extra = sorted(keys - set(record)), sorted(set(record) - keys - _OPTIONAL_KEYS)
+    if missing:
+        return f"it misses {', '.join(missing)}"
+    if extra:
+        return f"it has unknown fields {', '.join(extra)}"
+    if "run_id" in record and not _text(record["run_id"]):
+        return "run_id must be text"
+    if kind == "attempt-start":
+        if not (isinstance(record["source_receipt"], str) and _RECEIPT_NAME.fullmatch(record["source_receipt"])):
+            return "source_receipt must name a receipt such as R1.json"
+        if not (isinstance(record["source_receipt_digest"], str) and DIGEST_RE.fullmatch(record["source_receipt_digest"])):
+            return "source_receipt_digest must be a sha256: digest"
+        problem = _ids("finding_ids", record["finding_ids"]) or _ids("class_ids", record["class_ids"])
+        if problem:
+            return problem
+        if not _sha(record["before_head"]):
+            return "before_head must be a full commit SHA"
+        if record["engine"] not in ENGINES:
+            return f"engine {record['engine']!r} is not one of {', '.join(ENGINES)}"
+        if not isinstance(record["manual"], bool):
+            return "manual must be true or false"
+        return None if _text(record["started_at"]) else "started_at must be a time"
+    if kind == "attempt-outcome":
+        if record["outcome"] not in OUTCOMES:
+            return f"outcome {record['outcome']!r} is not one of {', '.join(OUTCOMES)}"
+        after = record["after_head"]
+        if after is not None and not _sha(after):
+            return "after_head must be a full commit SHA or null"
+        if after is not None and record["outcome"] != "applied":
+            return f"after_head must be null for outcome {record['outcome']}; only applied ends at a commit"
+        if not _text(record["evidence"]):
+            return "evidence must be non-empty text"
+        return None if _text(record["finished_at"]) else "finished_at must be a time"
+    if not _sha(record["after_head"]):
+        return "after_head must be a full commit SHA"
+    if not _text(record["evidence"]):
+        return "evidence must be non-empty text"
+    return None if _text(record["bound_at"]) else "bound_at must be a time"
+
+
+def _record_problem(name: str, kind: str, ident: int | str, record: object, task: str) -> str | None:
     if not isinstance(record, dict):
         return f"{name} is not a JSON object"
     if record.get("kind") != kind:
@@ -114,6 +216,17 @@ def _identity_problem(name: str, kind: str, ident: int | str, record: object, ta
         return f"{name} holds round {record.get('round')!r}, not {ident}"
     if kind != "receipt" and record.get("attempt_id") != ident:
         return f"{name} holds attempt {record.get('attempt_id')!r}, not {ident}"
+    if record.get("schema") != SCHEMA:
+        return f"{name} has schema {record.get('schema')!r}, not {SCHEMA}"
+    why = _receipt_shape(record) if kind == "receipt" else _attempt_shape(kind, record)
+    return f"{name} is not a valid {kind} record: {why}" if why else None
+
+
+def _summary_problem(name: str, line: Mapping, record: Mapping) -> str | None:
+    for field in SUMMARY_FIELDS:
+        if field in line and line[field] != record.get(field):
+            return (f"{INDEX_NAME} says {field} {line[field]!r} for {name}, but the record says "
+                    f"{record.get(field)!r}")
     return None
 
 
@@ -125,11 +238,13 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
     except ValueError as exc:
         raise ReviewError("OAH_REVIEW_RECORD_INVALID", str(exc)) from None
     folder = review_dir(state, task)
-    problem = _identity_problem(name, kind, ident, dict(record) if isinstance(record, Mapping) else record, task)
+    problem = _record_problem(name, kind, ident, dict(record) if isinstance(record, Mapping) else record, task)
     extra = dict(summary or {})
     unknown = sorted(set(extra) - set(SUMMARY_FIELDS))
     if problem is None and unknown:
         problem = f"unknown index fields {', '.join(unknown)}"
+    if problem is None:
+        problem = _summary_problem(name, extra, record)
     if problem is not None:
         raise ReviewError("OAH_REVIEW_RECORD_INVALID", f"{problem}; nothing was written")
     data = canonical(record)
@@ -232,7 +347,7 @@ def load(state: pathlib.Path, task: str) -> Records:
         except (UnicodeDecodeError, ValueError):
             problems.append(f"{name} is not UTF-8 JSON")
             continue
-        problem = _identity_problem(name, kind, ident, record, task)
+        problem = _record_problem(name, kind, ident, record, task) or _summary_problem(name, line, record)
         if problem is not None:
             problems.append(problem)
             continue
@@ -342,6 +457,9 @@ def _merge(attempt_id: str, items: list[Entry], receipts: Mapping[str, Entry]) -
     if fields.get("outcome") == "applied" and after is None:
         problems.append(f"{attempt_id} applied changes but no commit is bound to it; commit the result and record "
                         "its head binding, then review again")
+    elif fields.get("outcome") == "applied" and after == fields.get("before_head"):
+        problems.append(f"{attempt_id} is applied, but its after_head is its before_head {after}; an applied "
+                        "correction ends at a new commit")
     return Attempt(attempt_id=attempt_id, after_head=after, evidence="; ".join(evidence) or None,
                    names=tuple(entry.name for entry in items), digests=tuple(entry.digest for entry in items),
                    problems=tuple(problems), **fields)
@@ -372,6 +490,15 @@ def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetim
 def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
     """The round-attempt log; a torn or invalid log raises StateCorrupt (never repaired)."""
     return read_jsonl(_path(state, task, ROUNDS_NAME))
+
+
+def task_lock_path(state: pathlib.Path, task: str) -> pathlib.Path:
+    """The task-wide lock: receipt numbers are per task, so one round of a task runs at a time."""
+    review_dir(state, task)
+    try:
+        return _contained_path(state, "reviews", task, ".locks", "task.lock")
+    except RunError as exc:
+        raise ReviewError(exc.code, str(exc).split(": ", 1)[1]) from None
 
 
 def lock_path(state: pathlib.Path, task: str, base: str) -> pathlib.Path:

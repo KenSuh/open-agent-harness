@@ -25,7 +25,8 @@ def receipt_record(number: int, *, task: str = "t1", base: str = SHA_A, head: st
     classes = classes if classes is not None else [
         {"class_id": f"R{number}-C1", "mechanism": "m", "rule": "r"}]
     return {"schema": 1, "kind": "receipt", "task": task, "round": number, "series_round": number,
-            "base": base, "head": head, "findings": findings, "classes": classes}
+            "base": base, "head": head, "findings": findings, "classes": classes, "verdict": "request_changes",
+            "outcome": "changes-requested"}
 
 
 def attempt_start(number: int, source: str, digest: str, *, findings=("R1-F1",), classes=("R1-C1",),
@@ -113,15 +114,15 @@ class RecordsTest(unittest.TestCase):
 
     def test_publish_is_exclusive_and_indexed(self):
         digest = receipts.publish(self.state, "t1", "R1.json", receipt_record(1),
-                                  summary={"round": 1, "base": SHA_A, "head": SHA_B, "verdict": "approve",
-                                           "outcome": "converged"})
+                                  summary={"round": 1, "base": SHA_A, "head": SHA_B, "verdict": "request_changes",
+                                           "outcome": "changes-requested"})
         data = (self.folder() / "R1.json").read_bytes()
         self.assertEqual(digest, "sha256:" + hashlib.sha256(data).hexdigest())
         self.assertEqual(json.loads(data.decode("utf-8")), receipt_record(1))
         self.assertTrue(data.endswith(b"}\n"))
         [line] = self.index_lines()
         self.assertEqual((line["kind"], line["name"], line["digest"], line["round"], line["outcome"]),
-                         ("receipt", "R1.json", digest, 1, "converged"))
+                         ("receipt", "R1.json", digest, 1, "changes-requested"))
         self.assertRegex(line["recorded_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
         with self.assertRaises(receipts.ReviewError) as caught:
             receipts.publish(self.state, "t1", "R1.json", receipt_record(1, head=SHA_C))
@@ -134,16 +135,51 @@ class RecordsTest(unittest.TestCase):
                          [("receipt", "R1.json", digest)])
 
     def test_publish_refuses_mismatched_names_and_unsafe_tasks(self):
-        for name, record in (("R2.json", receipt_record(1)), ("R1.json", dict(receipt_record(1), task="t2")),
-                             ("A1-start.json", receipt_record(1)), ("x.json", receipt_record(1))):
-            with self.subTest(name=name):
+        for name, record, summary in (("R2.json", receipt_record(1), None),
+                                      ("R1.json", dict(receipt_record(1), task="t2"), None),
+                                      ("A1-start.json", receipt_record(1), None), ("x.json", receipt_record(1), None),
+                                      ("R1.json", receipt_record(1), {"outcome": "converged"}),
+                                      ("R1.json", dict(receipt_record(1), schema=2), None),
+                                      ("R1.json", dict(receipt_record(1), findings=[{"finding_id": "R1-F1"}]), None)):
+            with self.subTest(name=name, summary=summary):
                 with self.assertRaises(receipts.ReviewError) as caught:
-                    receipts.publish(self.state, "t1", name, record)
+                    receipts.publish(self.state, "t1", name, record, summary=summary)
                 self.assertEqual(caught.exception.code, "OAH_REVIEW_RECORD_INVALID")
         with self.assertRaises(Exception) as caught:
             receipts.publish(self.state, "../t1", "R1.json", receipt_record(1, task="../t1"))
         self.assertEqual(getattr(caught.exception, "code", None), "OAH_TASK_INVALID")
         self.assertFalse((self.state / "reviews").exists() and any((self.state / "reviews").iterdir()))
+
+    def test_malformed_but_indexed_receipts_are_history_problems(self):
+        cases = {
+            "finding without class": dict(receipt_record(1), findings=[{"finding_id": "R1-F1", "severity": "P1"}]),
+            "unknown severity": dict(receipt_record(1), findings=[{"finding_id": "R1-F1", "class_id": "R1-C1",
+                                                                   "severity": "P9"}]),
+            "class without rule": dict(receipt_record(1), classes=[{"class_id": "R1-C1", "mechanism": "m"}]),
+            "unknown outcome": dict(receipt_record(1), outcome="done"),
+            "short base": dict(receipt_record(1), base="abc"),
+            "other schema": dict(receipt_record(1), schema=2),
+        }
+        for label, record in cases.items():
+            with self.subTest(label=label):
+                state = make_tmp_dir(self) / "state"
+                folder = state / "reviews" / "t1"
+                folder.mkdir(parents=True)
+                data = receipts.canonical(record)
+                (folder / "R1.json").write_bytes(data)
+                (folder / "index.jsonl").write_text(json.dumps({"kind": "receipt", "name": "R1.json",
+                                                                "digest": receipts.digest(data),
+                                                                "recorded_at": "x"}) + "\n", encoding="utf-8")
+                problems = receipts.load(state, "t1").problems
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("R1.json", problems[0])
+        state = make_tmp_dir(self) / "state"
+        receipts.publish(state, "t1", "R1.json", receipt_record(1), summary={"outcome": "changes-requested"})
+        index = state / "reviews" / "t1" / "index.jsonl"
+        index.write_text(index.read_text(encoding="utf-8").replace('"changes-requested"', '"converged"'),
+                         encoding="utf-8")
+        problems = receipts.load(state, "t1").problems
+        self.assertTrue(any("outcome" in problem and "index" in problem for problem in problems), problems)
 
     def test_digest_mismatch_is_invalid_history(self):
         receipts.publish(self.state, "t1", "R1.json", receipt_record(1))
@@ -228,18 +264,56 @@ class RecordsTest(unittest.TestCase):
                                 ("A1-outcome.json", lambda d: attempt_outcome(1, "done"))],
             "short before head": [("A1-start.json", lambda d: dict(attempt_start(1, "R1.json", d), before_head="abc")),
                                   ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "other schema": [("A1-start.json", lambda d: dict(attempt_start(1, "R1.json", d), schema=2)),
+                             ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "no after_head key": [("A1-start.json", lambda d: attempt_start(1, "R1.json", d)),
+                                  ("A1-outcome.json", lambda d: {key: value for key, value in
+                                                                 attempt_outcome(1, "failed").items()
+                                                                 if key != "after_head"})],
+            "after_head on a failure": [("A1-start.json", lambda d: attempt_start(1, "R1.json", d)),
+                                        ("A1-outcome.json", lambda d: attempt_outcome(1, "failed", SHA_C))],
+            "applied without a new commit": [("A1-start.json", lambda d: attempt_start(1, "R1.json", d)),
+                                             ("A1-outcome.json", lambda d: attempt_outcome(1, "applied", SHA_B))],
+            "duplicate finding": [("A1-start.json", lambda d: attempt_start(1, "R1.json", d,
+                                                                            findings=("R1-F1", "R1-F1"))),
+                                  ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "manual not a flag": [("A1-start.json", lambda d: dict(attempt_start(1, "R1.json", d), manual="no")),
+                                  ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "unknown engine": [("A1-start.json", lambda d: dict(attempt_start(1, "R1.json", d), engine="gpt")),
+                               ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "empty evidence": [("A1-start.json", lambda d: attempt_start(1, "R1.json", d)),
+                               ("A1-outcome.json", lambda d: dict(attempt_outcome(1, "failed"), evidence=""))],
+            "no start time": [("A1-start.json", lambda d: {key: value for key, value in
+                                                            attempt_start(1, "R1.json", d).items()
+                                                            if key != "started_at"}),
+                              ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
+            "unknown field": [("A1-start.json", lambda d: dict(attempt_start(1, "R1.json", d), notes="x")),
+                              ("A1-outcome.json", lambda d: attempt_outcome(1, "failed"))],
         }
         expected = {"outcome before start": "start", "outcome without start": "start",
                     "unknown source receipt": "source receipt", "foreign finding": "R9-F1",
                     "classes differ from findings": "class", "unfinished": "unfinished",
                     "applied but not bound": "commit", "head after no-change": "head",
-                    "unknown outcome": "outcome", "short before head": "before_head"}
+                    "unknown outcome": "outcome", "short before head": "before_head", "other schema": "schema",
+                    "no after_head key": "after_head", "after_head on a failure": "after_head",
+                    "applied without a new commit": "after_head", "duplicate finding": "twice",
+                    "manual not a flag": "manual", "unknown engine": "engine", "empty evidence": "evidence",
+                    "no start time": "started_at", "unknown field": "notes"}
         for label, steps in cases.items():
             with self.subTest(label=label):
                 state = make_tmp_dir(self) / "state"
                 source = receipts.publish(state, "t1", "R1.json", receipt_record(1, findings=two_findings, classes=[]))
+                folder = state / "reviews" / "t1"
                 for name, build in steps:
-                    receipts.publish(state, "t1", name, build(source))
+                    try:
+                        receipts.publish(state, "t1", name, build(source))
+                    except receipts.ReviewError as exc:  # publish refuses malformed records; plant them by hand
+                        data = receipts.canonical(build(source))
+                        (folder / name).write_bytes(data)
+                        with open(folder / "index.jsonl", "a", encoding="utf-8") as handle:
+                            handle.write(json.dumps({"kind": receipts.parse_name(name)[0], "name": name,
+                                                     "digest": receipts.digest(data), "recorded_at": "x"}) + "\n")
+                        self.assertEqual(exc.code, "OAH_REVIEW_RECORD_INVALID")
                 records = receipts.load(state, "t1")
                 problems = list(records.problems) + [p for a in receipts.attempts(records) for p in a.problems]
                 self.assertTrue(problems, label)
@@ -419,6 +493,10 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(parsed.findings[1].prior_refs[0].class_id, "R1-C1")
         self.assertEqual([item.class_id for item in parsed.classes], ["R2-C1"])
         self.assertEqual(parsed.findings[0].to_json(), finding(2))
+
+    def test_parse_survives_deep_nesting(self):
+        with self.assertRaises(schema.OutputInvalid):
+            schema.parse(b"[" * 200000, number=1)
 
     def test_parse_rejects_shape_errors(self):
         good = output(1, verdict="request_changes", findings=[finding(1)])
@@ -636,8 +714,9 @@ class PromptTest(unittest.TestCase):
                                           entities=("db_table:w",), rows=("link db db/1.sql:1 db_table:w create",)),
                       history=(prompt.HistoryItem("receipt", "R1.json", "sha256:" + "1" * 64, '{"round": 1}\n'),
                                prompt.HistoryItem("attempt-start", "A1-start.json", "sha256:" + "2" * 64, "{}\n")),
-                      history_digest="sha256:" + "3" * 64, attempted=(("R1-C1", "A1", "applied"),),
-                      decision=None, extra_round=False)
+                      history_digest="sha256:" + "3" * 64,
+                      attempted=(prompt.AttemptedClass("R1-C1", (("A1", "applied"),), "stale cache", "invalidate"),),
+                      decision=None, stopped=None, extra_round=False)
         values.update(fields)
         return prompt.PromptContext(**values)
 
@@ -662,9 +741,15 @@ class PromptTest(unittest.TestCase):
                                                        history_digest=receipts.history_digest([])))
         self.assertIn("explicitly empty", first)
         self.assertIn(receipts.history_digest([]), first)
-        resumed = prompt.round_instructions(self.context(decision="fix the parser again", extra_round=True))
+        self.assertIn("R1-C1 (mechanism: stale cache; rule: invalidate): correction attempt A1 (applied)", text)
+        resumed = prompt.round_instructions(self.context(decision="fix the parser again", extra_round=True,
+                                                         stopped="R2.json stopped the series for a decision"))
         self.assertIn("fix the parser again", resumed)
+        self.assertIn("R2.json stopped the series for a decision", resumed)
         self.assertIn("--extra-round", resumed)
+        noted = prompt.round_instructions(self.context(decision="look at the parser first"))
+        self.assertIn("look at the parser first", noted)
+        self.assertNotIn("stopped", noted)
 
 
 class EnvTest(unittest.TestCase):

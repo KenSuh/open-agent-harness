@@ -24,6 +24,14 @@ class HistoryItem:
 
 
 @dataclasses.dataclass(frozen=True)
+class AttemptedClass:
+    class_id: str
+    attempts: tuple[tuple[str, str], ...]  # (attempt id, outcome)
+    mechanism: str
+    rule: str
+
+
+@dataclasses.dataclass(frozen=True)
 class PromptContext:
     task: str
     number: int
@@ -38,8 +46,9 @@ class PromptContext:
     db: DbImpact
     history: tuple[HistoryItem, ...]
     history_digest: str
-    attempted: tuple[tuple[str, str, str], ...]  # (class id, attempt id, outcome)
+    attempted: tuple[AttemptedClass, ...]
     decision: str | None
+    stopped: str | None  # why the series waited for the decision, or None when it did not
     extra_round: bool
 
 
@@ -63,9 +72,11 @@ def round_instructions(ctx: PromptContext) -> str:
         "snapshot, which is checked out at the head. The snapshot has no remote. This review is read-only: change "
         "no file.",
     ]
-    if ctx.decision is not None:
-        parts.append("### The user's decision\nThe previous round of this series stopped for a decision. The user "
-                     f"decided, in their own words: {ctx.decision}")
+    if ctx.decision is not None and ctx.stopped is not None:
+        parts.append(f"### The user's decision\nThe series waited for a decision: {ctx.stopped}. The user decided, in "
+                     f"their own words: {ctx.decision}")
+    elif ctx.decision is not None:
+        parts.append(f"### A note from the user\n{ctx.decision}")
     if ctx.extra_round:
         parts.append("### Extra round\nThis round runs beyond the series' configured [review] max_rounds because the "
                      "user asked for it with --extra-round.")
@@ -100,12 +111,15 @@ def round_instructions(ctx: PromptContext) -> str:
         history = ("This is the first round of the series: its history is explicitly empty "
                    f"(history digest {ctx.history_digest}).")
     if ctx.attempted:
-        tried = "\n".join(f"- {class_id}: correction attempt {attempt} ({outcome})"
-                          for class_id, attempt, outcome in ctx.attempted)
-        history += ("\n\nClasses a correction already tried to fix. A finding in one of these classes is a "
+        tried = "\n".join(
+            f"- {item.class_id} (mechanism: {item.mechanism}; rule: {item.rule}): "
+            + ("correction attempt " if len(item.attempts) == 1 else "correction attempts ")
+            + ", ".join(f"{attempt} ({outcome})" for attempt, outcome in item.attempts) for item in ctx.attempted)
+        history += ("\n\nClasses a correction of this task already tried to fix, in this series or an earlier one. "
+                    "Reuse the class id for a finding with the same mechanism and rule; such a finding is a "
                     f"recurrence, whatever its wording:\n{tried}")
     else:
-        history += "\n\nNo correction attempt is recorded for this series."
+        history += "\n\nNo correction attempt is recorded for this task."
     parts.append(f"### History of this series\n{history}")
     parts.append(
         "### How to report\n"

@@ -15,6 +15,7 @@ import unittest
 from oah import briefs, intent
 from oah.impact.errors import ImpactError
 from oah.lease import Store
+from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import ReviewError, receipts, runner
 from oah.secrets import NoKeychain
@@ -127,14 +128,15 @@ class Project:
 
     def attempt(self, number: int, finding_ids: list[str], class_ids: list[str], *, outcome: str = "applied",
                 after_head: str | None = None, start_only: bool = False) -> str:
-        """Record a correction attempt the way lane P6b will (start and outcome records)."""
+        """Record a correction attempt the way lane P6b will (start and outcome records); it starts from the
+        head R<number> reviewed."""
         records = receipts.load(self.state, "t1")
         attempt_id = f"A{len(receipts.attempts(records)) + 1}"
         receipts.publish(self.state, "t1", f"{attempt_id}-start.json", {
             "schema": 1, "kind": "attempt-start", "task": "t1", "attempt_id": attempt_id,
             "source_receipt": f"R{number}.json", "source_receipt_digest": self.receipt_digest(number),
-            "finding_ids": finding_ids, "class_ids": class_ids, "before_head": self.head, "engine": "codex",
-            "manual": False, "started_at": "2026-10-24T00:00:00Z"})
+            "finding_ids": finding_ids, "class_ids": class_ids, "before_head": self.receipt(number)["head"],
+            "engine": "codex", "manual": False, "started_at": "2026-10-24T00:00:00Z"})
         if not start_only:
             receipts.publish(self.state, "t1", f"{attempt_id}-outcome.json", {
                 "schema": 1, "kind": "attempt-outcome", "task": "t1", "attempt_id": attempt_id, "outcome": outcome,
@@ -226,6 +228,7 @@ class SeriesTest(unittest.TestCase):
         project = Project(self)
         project.queue({"findings": [bug()]})
         project.review()
+        project.correct(1)
         git(project.repo, "checkout", "-q", "main")
         git_commit(project.repo, {"NOTES.md": "main moved\n"}, "main")
         git(project.repo, "checkout", "-q", "feat")
@@ -364,12 +367,8 @@ class DecisionTest(unittest.TestCase):
         def unbound(project):
             project.attempt(1, ["R1-F1"], ["R1-C1"], outcome="applied", after_head=None)
 
-        def rewritten(project):
-            project.attempt(1, ["R1-F1"], ["R1-C1"], after_head="f" * 40)
-
         for label, damage, word in (("unfinished", unfinished, "unfinished"), ("tampered", tampered, "digest"),
-                                    ("unindexed", unindexed, "R2.json"), ("unbound", unbound, "commit"),
-                                    ("rewritten", rewritten, "not in the reviewed history")):
+                                    ("unindexed", unindexed, "R2.json"), ("unbound", unbound, "commit")):
             with self.subTest(label=label):
                 project = Project(self)
                 project.queue({"findings": [bug()]})
@@ -380,6 +379,60 @@ class DecisionTest(unittest.TestCase):
                 self.assertIn(word, str(error))
                 error = project.refused("OAH_REVIEW_NEEDS_DECISION", decision="go on anyway")
                 self.assertIn(word, str(error))
+
+    def test_rewritten_correction_needs_a_decision_once(self):
+        project = Project(self)
+        project.queue({"findings": [bug()]}, {"findings": [bug()]}, {})
+        project.review()
+        project.correct(1)
+        git(project.repo, "-c", "user.name=Someone", "-c", "user.email=1234+someone@users.noreply.github.com",
+            "commit", "-q", "--amend", "-m", "fix, squashed\n\nAgent-Engine: codex")
+        project.head = git(project.repo, "rev-parse", "HEAD")
+        error = project.refused("OAH_REVIEW_NEEDS_DECISION")
+        self.assertIn("not in the reviewed history", str(error))
+        self.assertIn("--decision", str(error))
+        result = project.review(decision="the amend keeps the correction")
+        self.assertEqual(result.code, "OAH_REVIEW_CHANGES_REQUESTED", result.message)
+        project.correct(2)
+        self.assertEqual(project.review().code, "OAH_REVIEW_CONVERGED")
+
+    def test_new_base_does_not_clear_a_pending_decision(self):
+        project = Project(self)
+        first = project.head
+        project.commit({"src/more.py": "x = 2\n"})
+        project.queue({"findings": [bug(fix_kind="design")]}, {})
+        self.assertEqual(project.review().code, "OAH_REVIEW_NEEDS_DECISION")
+        error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=first)
+        self.assertIn("R1.json", str(error))
+        result = project.review(base=first, decision="review only the second commit")
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertEqual((project.receipt(2)["base"], project.receipt(2)["series_round"]), (first, 1))
+
+    def test_attempted_class_from_an_earlier_series_still_stops(self):
+        project = Project(self)
+        project.queue({"findings": [bug()]},
+                      {"findings": [{"finding_id": "R2-F1", "class_id": "R1-C1", "severity": "P1"}]})
+        project.review()
+        project.correct(1)
+        git(project.repo, "checkout", "-q", "main")
+        git_commit(project.repo, {"NOTES.md": "main moved\n"}, "main")
+        git(project.repo, "checkout", "-q", "feat")
+        git(project.repo, "-c", "user.name=Someone", "-c", "user.email=1234+someone@users.noreply.github.com",
+            "rebase", "-q", "main")
+        project.head = git(project.repo, "rev-parse", "HEAD")
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
+        receipt = project.receipt(2)
+        self.assertEqual(receipt["series_round"], 1)
+        self.assertIn("R1-C1", receipt["decision_stop_reason"])
+        self.assertIn("R1-C1 (mechanism: mechanism of R1-C1", project.calls()[1]["prompt"])
+
+    def test_another_review_of_the_task_is_running(self):
+        project = Project(self)
+        with StateLock(receipts.task_lock_path(project.state, "t1")):
+            error = project.refused("OAH_REVIEW_SERIES_BUSY")
+        self.assertIn("task t1", str(error))
+        self.assertEqual(project.review().code, "OAH_REVIEW_CONVERGED")
 
     def test_max_rounds_and_extra_round(self):
         project = Project(self, config="[review]\nmax_rounds = 2\n")
@@ -586,7 +639,8 @@ class PromptRoundTest(unittest.TestCase):
                          ["R1.json", f"{attempt}-start.json", f"{attempt}-outcome.json"])
         self.assertEqual(receipt["history_digest"], receipts.history_digest(receipt["history"]))
         self.assertIn(receipt["history_digest"], prompt)
-        self.assertIn("R1-C1: correction attempt A1 (applied)", prompt)
+        self.assertIn("R1-C1 (mechanism: mechanism of R1-C1; rule: rule of R1-C1): correction attempt A1 (applied)",
+                      prompt)
 
     def test_db_change_carries_query_and_graph_identity(self):
         project = Project(self, files={"db/migrations/001_init.sql": "CREATE TABLE widgets (id int);\n"})

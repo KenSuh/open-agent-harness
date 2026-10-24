@@ -3,17 +3,22 @@
 
 Series
     `series(records, log, base, head=..., is_ancestor=...)` keeps the receipts whose `base` is the series
-    base, the correction attempts whose source receipt is one of them (plus attempts no receipt explains),
-    their records in index order as the history, and the round-log lines of this base. History problems are
-    the index problems, the attempt problems, and attempt commits that are not in the reviewed history.
+    base, the correction attempts on them, those records in index order as the series history, and the
+    round-log lines of this base. Three things are task-wide, so a new base never clears them: the class
+    definitions and attempted classes (a class tried in an earlier series is still tried), and the latest
+    receipt the waits below look at. History problems (index and record problems, broken attempts) block
+    every series and no decision overrides them. Ambiguities are not problems: when a correction on the
+    series' latest receipt no longer descends from that receipt's head or is not in the reviewed history
+    (an amend, squash or rebase), the user decides.
 Gate, before any paid call
-    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems (no decision overrides them), returns
-    `"converged"` when the latest receipt converged at this head, raises `OAH_REVIEW_NEEDS_DECISION` while
-    the round waits for a decision (`waiting`: a needs-decision receipt, P0/P1 findings of a changes-requested
-    receipt without a finished correction attempt, or an uncounted call that stopped for a decision),
-    `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and `OAH_REVIEW_ATTEMPTS_EXHAUSTED`
-    once `round_attempts` calls of this round did not count. A call that starts with `--decision` settles the
-    wait for the rest of its round (`round_decision`), until a later call stops for a decision again.
+    `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems, returns `"converged"` when the
+    series' latest receipt converged at this head, raises `OAH_REVIEW_NEEDS_DECISION` while the round waits
+    for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
+    findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
+    decision), `OAH_REVIEW_ROUNDS_EXHAUSTED` at `max_rounds` unless `--extra-round`, and
+    `OAH_REVIEW_ATTEMPTS_EXHAUSTED` once `round_attempts` calls of this round did not count. A call that
+    starts with `--decision` settles the wait for the rest of its round (`round_decision`), until a later
+    call stops for a decision again.
 Check, after the run
     `check(...)`: the canary line (`OAH_REVIEW_CANARY_MISSING`), the base/head and DB-impact echoes
     (`OAH_REVIEW_OUTPUT_INVALID`), the INTENT and AC lines (`OAH_INTENT_RETURN_INVALID`), then every class
@@ -45,12 +50,15 @@ CONVERGED = "converged"
 class Series:
     task: str
     base: str
-    receipts: tuple[Entry, ...]
-    attempts: tuple[Attempt, ...]
+    receipts: tuple[Entry, ...]  # this series
+    attempts: tuple[Attempt, ...]  # on this series' receipts
     history: tuple[Entry, ...]
     problems: tuple[str, ...]
+    ambiguities: tuple[str, ...]
     next_number: int
     log: tuple[dict, ...]
+    task_receipts: tuple[Entry, ...] = ()
+    task_attempts: tuple[Attempt, ...] = ()
 
     @property
     def series_round(self) -> int:
@@ -60,6 +68,10 @@ class Series:
     def latest(self) -> Entry | None:
         return self.receipts[-1] if self.receipts else None
 
+    @property
+    def task_latest(self) -> Entry | None:
+        return self.task_receipts[-1] if self.task_receipts else None
+
     def history_items(self) -> list[dict]:
         return [{"kind": entry.kind, "name": entry.name, "digest": entry.digest} for entry in self.history]
 
@@ -67,16 +79,17 @@ class Series:
         return history_digest(self.history_items())
 
     def classes(self) -> dict[str, dict]:
+        """Every class the task's receipts define, by id."""
         found: dict[str, dict] = {}
-        for entry in self.receipts:
+        for entry in self.task_receipts:
             for item in entry.record.get("classes", []):
                 found.setdefault(item["class_id"], item)
         return found
 
     def attempted(self) -> dict[str, list[tuple[str, str]]]:
-        """Class id → (attempt id, outcome) of every finished correction attempt that tried it."""
+        """Class id → (attempt id, outcome) of every finished correction attempt of the task that tried it."""
         found: dict[str, list[tuple[str, str]]] = {}
-        for attempt in self.attempts:
+        for attempt in self.task_attempts:
             if attempt.terminal:
                 for class_id in attempt.class_ids:
                     found.setdefault(class_id, []).append((attempt.attempt_id, attempt.outcome))
@@ -95,51 +108,62 @@ class Decision:
 
 def series(records: Records, log: Sequence[dict], base: str, *, head: str,
            is_ancestor: Callable[[str, str], bool]) -> Series:
-    mine = tuple(entry for entry in records.receipts() if entry.record.get("base") == base)
+    everything = tuple(records.receipts())
+    mine = tuple(entry for entry in everything if entry.record.get("base") == base)
     digests = {entry.digest for entry in mine}
-    known = {entry.digest for entry in records.receipts()}
-    chosen = tuple(attempt for attempt in read_attempts(records)
-                   if attempt.source_receipt_digest in digests or attempt.source_receipt_digest not in known)
+    all_attempts = tuple(read_attempts(records))
+    chosen = tuple(attempt for attempt in all_attempts if attempt.source_receipt_digest in digests)
     names = {entry.name for entry in mine} | {name for attempt in chosen for name in attempt.names}
-    problems = list(records.problems)
+    problems = list(records.problems) + [problem for attempt in all_attempts for problem in attempt.problems]
+    ambiguities: list[str] = []
+    latest = mine[-1] if mine else None
     for attempt in chosen:
-        problems += attempt.problems
+        if latest is None or attempt.source_receipt_digest != latest.digest or attempt.problems:
+            continue  # corrections reviewed by a later round are settled history
+        reviewed = latest.record["head"]
+        if not is_ancestor(reviewed, attempt.before_head):
+            ambiguities.append(f"{attempt.attempt_id} started from {attempt.before_head}, which does not descend from "
+                               f"the head {reviewed} that {latest.name} reviewed")
         for label, commit in (("before_head", attempt.before_head), ("after_head", attempt.after_head)):
             if isinstance(commit, str) and SHA_RE.fullmatch(commit) and not is_ancestor(commit, head):
-                problems.append(f"{attempt.attempt_id}: its {label} {commit} is not in the reviewed history (HEAD "
-                                f"{head}); the branch was rewritten after the correction, so the evidence is ambiguous")
+                ambiguities.append(f"{attempt.attempt_id}: its {label} {commit} is not in the reviewed history "
+                                   f"(HEAD {head}); the branch was rewritten (amend, squash or rebase) after the "
+                                   "correction")
     return Series(task=records.task, base=base, receipts=mine, attempts=chosen,
                   history=tuple(entry for entry in records.entries if entry.name in names),
-                  problems=tuple(problems), next_number=len(records.receipts()) + 1,
-                  log=tuple(line for line in log if line.get("base") == base))
+                  problems=tuple(problems), ambiguities=tuple(ambiguities), next_number=len(everything) + 1,
+                  log=tuple(line for line in log if line.get("base") == base), task_receipts=everything,
+                  task_attempts=all_attempts)
 
 
 def _uncorrected(s: Series, latest: Entry) -> list[str]:
-    covered = {finding for attempt in s.attempts if attempt.terminal
+    covered = {finding for attempt in s.task_attempts if attempt.terminal
                and attempt.source_receipt_digest == latest.digest for finding in attempt.finding_ids}
     return [item["finding_id"] for item in latest.record.get("findings", [])
             if item.get("severity") in BLOCKING and item["finding_id"] not in covered]
 
 
-def waiting(s: Series) -> str | None:
+def waiting(s: Series, *, settled: bool = True) -> str | None:
     """Why the next call of this round needs a --decision, or None.
 
-    A needs-decision receipt, or P0/P1 findings of a changes-requested receipt without a finished correction
-    attempt, wait for a decision; a call of this round that started with one settles it, and an uncounted call
-    that stopped for a decision waits again."""
-    latest = s.latest
+    The task's latest receipt may wait (it stopped for a decision, or requested changes whose P0/P1 findings
+    have no finished correction attempt), and so may an ambiguity of this series. A call of this round that
+    started with a decision settles the wait (unless `settled` is False), and an uncounted call that stopped
+    for a decision waits again."""
+    latest = s.task_latest
     reason = None
     if latest is not None and latest.record.get("outcome") == "needs-decision":
-        reason = (f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}. "
-                  "Decide how to continue")
-    elif latest is not None and latest.record.get("outcome") == "changes-requested":
-        missing = _uncorrected(s, latest)
-        if missing:
-            reason = (f"{latest.name} requested changes, but no finished correction attempt is recorded for "
-                      f"{', '.join(missing)}, so a recurrence could not be recognized. Record the corrections (oah "
-                      "fix records its own; manual corrections need the same records), or decide to go on without")
+        reason = f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}"
+    elif latest is not None and latest.record.get("outcome") == "changes-requested" and _uncorrected(s, latest):
+        reason = (f"{latest.name} requested changes, but no finished correction attempt is recorded for "
+                  f"{', '.join(_uncorrected(s, latest))}, so a recurrence could not be recognized. Record the "
+                  "corrections (oah fix records its own; manual corrections need the same records), or decide to go "
+                  "on without")
+    if reason is None and s.ambiguities:
+        reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
+                  "rewritten commits still carry the corrections")
     for line in s.round_lines():
-        if line.get("event") == "start" and line.get("decision"):
+        if line.get("event") == "start" and line.get("decision") and settled:
             reason = None
         elif line.get("event") == "finish" and not line.get("counted") and line.get("code") == NEEDS_DECISION:
             reason = (f"the last reviewer call of round {s.series_round} did not count and stopped for a decision: "

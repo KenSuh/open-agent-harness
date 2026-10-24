@@ -205,18 +205,27 @@ def review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keych
         raise ReviewError("OAH_REVIEW_ENGINE_UNSUPPORTED", f"[stages] review is {call_settings.stages.get('review')!r} "
                           f"in {based.where}; oah review runs Codex (structured output, ephemeral, ignored user "
                           'config). Set [stages] review = "codex" in .oah/config.toml and install Codex')
-    lock = StateLock(receipts.lock_path(state, request.task, span.base), timeout=0)
+    series_lock = StateLock(receipts.lock_path(state, request.task, span.base), timeout=0)
+    task_lock = StateLock(receipts.task_lock_path(state, request.task), timeout=0)
     try:
-        lock.__enter__()
+        series_lock.__enter__()
     except LockTimeout:
         raise ReviewError("OAH_REVIEW_SERIES_BUSY", f"another oah review of task {request.task} against base "
                           f"{span.base[:12]} is running; wait for it to finish, then run oah review again") from None
     try:
-        return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
-                      call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root, rules=rules,
-                      ensure_impact=ensure_impact)
+        try:
+            task_lock.__enter__()
+        except LockTimeout:
+            raise ReviewError("OAH_REVIEW_SERIES_BUSY", f"another oah review of task {request.task} is running "
+                              "against another base; wait for it to finish, then run oah review again") from None
+        try:
+            return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
+                          call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
+                          rules=rules, ensure_impact=ensure_impact)
+        finally:
+            task_lock.__exit__(None, None, None)
     finally:
-        lock.__exit__(None, None, None)
+        series_lock.__exit__(None, None, None)
 
 
 def _base_settings(config: Config) -> tuple[str, str]:
@@ -265,7 +274,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                       receipt_path=receipts.review_dir(state, task) / latest.name)
     extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
     warnings: list[str] = []
-    if request.decision is not None and rounds.waiting(s) is None:
+    stopped = rounds.waiting(s, settled=False)
+    if request.decision is not None and stopped is None:
         warnings.append("OAH_REVIEW_DECISION_UNUSED: no decision was pending for this round; your note is recorded "
                         "with it anyway")
     if request.extra_round and not extra:
@@ -302,9 +312,11 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             history=tuple(prompt.HistoryItem(entry.kind, entry.name, entry.digest,
                                              receipts.canonical(entry.record).decode("utf-8")) for entry in s.history),
             history_digest=s.history_digest(),
-            attempted=tuple((class_id, attempt_id, outcome) for class_id, tried in s.attempted().items()
-                            for attempt_id, outcome in tried),
-            decision=decision, extra_round=extra)
+            attempted=tuple(prompt.AttemptedClass(class_id, tuple(tried),
+                                                  s.classes().get(class_id, {}).get("mechanism", "(not recorded)"),
+                                                  s.classes().get(class_id, {}).get("rule", "(not recorded)"))
+                            for class_id, tried in s.attempted().items()),
+            decision=decision, stopped=stopped if decision else None, extra_round=extra)
         prepared = call.prepare(
             call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
                              round_instructions=prompt.round_instructions(context_), output_schema=str(schema_path),

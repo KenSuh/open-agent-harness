@@ -190,8 +190,8 @@ def parse(raw: bytes, *, number: int) -> Output:
         raise OutputInvalid(["the final message is not UTF-8 text"]) from None
     try:
         data = json.loads(decoded)
-    except ValueError as exc:
-        raise OutputInvalid([f"the final message is not one JSON object ({exc})"]) from None
+    except (ValueError, RecursionError) as exc:  # nesting deep enough to exhaust the parser is invalid too
+        raise OutputInvalid([f"the final message is not one JSON object ({type(exc).__name__}: {exc})"]) from None
     problems = shape_problems(data)
     if problems:
         raise OutputInvalid(problems)
