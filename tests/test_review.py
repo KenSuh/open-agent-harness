@@ -9,7 +9,7 @@ import subprocess
 import unittest
 
 from oah.config import ConfigError
-from oah.review import ReviewError, canary, receipts, schema, settings, snapshot
+from oah.review import ReviewError, authors, canary, context, prompt, receipts, schema, settings, snapshot
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SHA_A, SHA_B, SHA_C = "a" * 40, "b" * 40, "c" * 40
@@ -468,6 +468,183 @@ class SchemaTest(unittest.TestCase):
                     schema.parse(encoded(output(3, verdict="request_changes", findings=[finding(3)], classes=classes)),
                                  number=3)
                 self.assertTrue(any("class" in problem for problem in caught.exception.problems), label)
+
+
+class AuthorsTest(unittest.TestCase):
+    def test_engine_from_trailers(self):
+        repo = make_git_repo(self)
+        base = git_commit(repo, {"README.md": "base\n"})
+        claude_line = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+        messages = {
+            "claude": "work\n\nAgent-Engine: claude",
+            "codex": "work\n\nAgent-Engine: Codex",
+            "human": "work\n\nagent-engine: human",
+            "co-author": f"work\n\n{claude_line}",
+            "codex over co-author": f"fix\n\nAgent-Engine: codex\n{claude_line}",
+            "unknown value": "work\n\nAgent-Engine: gpt",
+            "two values": "work\n\nAgent-Engine: claude\nAgent-Engine: codex",
+            "none": "work",
+            "other co-author": "work\n\nCo-Authored-By: Claudette <someone@example.com>",
+            "not a trailer": "work\n\nAgent-Engine: codex\n\nthe last paragraph is prose",
+        }
+        expected = {"claude": "claude", "codex": "codex", "human": "human", "co-author": "claude",
+                    "codex over co-author": "codex", "unknown value": "unknown", "two values": "unknown",
+                    "none": "unknown", "other co-author": "unknown", "not a trailer": "unknown"}
+        made = {}
+        for number, (label, message) in enumerate(messages.items()):
+            made[git_commit(repo, {f"f{number}.txt": label}, message=message)] = label
+        head = git(repo, "rev-parse", "HEAD")
+        found = authors.commit_engines(repo, base, head)
+        self.assertEqual(len(found), len(messages))
+        for sha, engine in found:
+            with self.subTest(label=made[sha]):
+                self.assertEqual(engine, expected[made[sha]])
+
+    def test_independence_labels(self):
+        cases = [(["claude", "claude"], True), (["claude", "codex"], False), (["claude", "unknown"], "unknown"),
+                 (["codex", "unknown"], False), (["human"], True), ([], "unknown")]
+        for engines, label in cases:
+            with self.subTest(engines=engines):
+                self.assertEqual(authors.independence(engines, "codex"), label)
+
+
+class ContextTest(unittest.TestCase):
+    def history(self) -> tuple[pathlib.Path, dict]:
+        """main: c1 c2 → feat: c3 c4; main then gains c5."""
+        repo = make_git_repo(self)
+        commits = {"c1": git_commit(repo, {"a.txt": "1\n"}), "c2": git_commit(repo, {"a.txt": "2\n"})}
+        git(repo, "checkout", "-q", "-b", "feat")
+        commits["c3"] = git_commit(repo, {"b.txt": "3\n"})
+        commits["c4"] = git_commit(repo, {"b.txt": "4\n"})
+        git(repo, "checkout", "-q", "main")
+        commits["c5"] = git_commit(repo, {"a.txt": "5\n"})
+        git(repo, "checkout", "-q", "feat")
+        return repo, commits
+
+    def test_default_base_is_merge_base(self):
+        repo, c = self.history()
+        found = context.resolve(repo, None)
+        self.assertEqual((found.base, found.head), (c["c2"], c["c4"]))
+        self.assertIn("refs/heads/main", found.base_label)
+        self.assertEqual(context.resolve(repo, c["c1"][:10]).base, c["c1"])
+        remote = make_tmp_dir(self) / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+        git(repo, "remote", "add", "origin", str(remote))
+        git(repo, "push", "-q", "origin", "main")
+        git(repo, "fetch", "-q", "origin")
+        git(repo, "remote", "set-head", "origin", "main")
+        git(repo, "branch", "-D", "main")
+        found = context.resolve(repo, None)
+        self.assertEqual(found.base, c["c2"])
+        self.assertIn("refs/remotes/origin/main", found.base_label)
+        (repo / ".oah").mkdir()
+        for label, base in (("not an ancestor", c["c5"]), ("not a commit", "no-such-rev"), ("option", "--all")):
+            with self.subTest(label=label):
+                with self.assertRaises(ReviewError) as caught:
+                    context.resolve(repo, base)
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_BASE_INVALID")
+
+    def test_nothing_to_review_and_missing_default_branch(self):
+        repo, c = self.history()
+        git(repo, "checkout", "-q", "main")
+        with self.assertRaises(ReviewError) as caught:
+            context.resolve(repo, None)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_NOTHING_TO_REVIEW")
+        git(repo, "checkout", "-q", "-b", "work")
+        git(repo, "branch", "-D", "main")
+        with self.assertRaises(ReviewError) as caught:
+            context.resolve(repo, None)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_BASE_INVALID")
+        self.assertIn("--base", str(caught.exception))
+        self.assertEqual(context.resolve(repo, c["c1"], branch="feat").base, c["c1"])
+        found = context.resolve(repo, None, branch="feat")
+        self.assertEqual(found.base, c["c2"])
+
+    def test_tracked_dirty_ignores_untracked_files(self):
+        repo, _c = self.history()
+        (repo / "new.txt").write_text("untracked\n", encoding="utf-8")
+        self.assertEqual(context.tracked_dirty(repo), [])
+        (repo / "b.txt").write_text("changed\n", encoding="utf-8")
+        self.assertEqual(context.tracked_dirty(repo), ["b.txt"])
+        git(repo, "add", "new.txt")
+        self.assertEqual(context.tracked_dirty(repo), ["b.txt", "new.txt"])
+
+    def test_changes_diff_stat_and_critical_paths(self):
+        repo = make_git_repo(self)
+        base = git_commit(repo, {"README.md": "base\n"})
+        head = git_commit(repo, {".github/workflows/ci.yml": "on: push\n", "db/migrations/002.sql": "select 1;\n",
+                                 "docs/Claude.md": "x\n", "src/app.py": "print(1)\n"})
+        changed = context.changed_files(repo, base, head)
+        self.assertEqual(changed, [".github/workflows/ci.yml", "db/migrations/002.sql", "docs/Claude.md", "src/app.py"])
+        self.assertIn("4 files changed", context.diff_stat(repo, base, head))
+        self.assertEqual(context.critical(changed, settings.DEFAULTS["critical_paths"]),
+                         [".github/workflows/ci.yml", "db/migrations/002.sql", "docs/Claude.md"])
+
+    def test_db_impact_line_for_touched_entities(self):
+        from oah.impact import mapstore
+        from oah.impact.defaults import configured
+
+        repo = make_git_repo(self)
+        base = git_commit(repo, {"db/migrations/001_init.sql": "CREATE TABLE widgets (id int);\n",
+                                 "src/app.py": "print('start')\n", "README.md": "x\n"})
+        head = git_commit(repo, {"src/app.py": "print('start')\nrows = query('select id from widgets')\n"})
+        env = dict(os.environ, OAH_STATE_DIR=str(make_tmp_dir(self) / "state"))
+        mapstore.ensure_fresh(repo, env=env)
+        _info, data = mapstore.fresh_map(repo, refresh=False, env=env)
+        found = context.db_impact(context.changed_files(repo, base, head), data, head, configured(repo))
+        self.assertEqual(found.entities, ("db_table:widgets",))
+        self.assertEqual(found.query, "oah impact db_table:widgets")
+        self.assertRegex(found.line, rf"^db-impact: commit={head} graph=[0-9a-f]{{64}} output=[0-9a-f]{{64}}$")
+        self.assertTrue(any("src/app.py" in row for row in found.rows), found.rows)
+        untouched = context.db_impact(["README.md"], data, head, configured(repo))
+        self.assertEqual((untouched.line, untouched.query, untouched.entities), (context.NOT_TOUCHED, None, ()))
+        plain = make_git_repo(self)
+        git_commit(plain, {"README.md": "x\n"})
+        mapstore.ensure_fresh(plain, env=env)
+        _info, empty = mapstore.fresh_map(plain, refresh=False, env=env)
+        self.assertEqual(context.db_impact(["README.md"], empty, head, configured(plain)).line,
+                         "db-impact: unavailable (no SQL migrations found)")
+
+
+class PromptTest(unittest.TestCase):
+    def context(self, **fields) -> prompt.PromptContext:
+        values = dict(task="t1", number=3, series_round=2, base=SHA_A, head=SHA_B, scope=("src", "tests"),
+                      conditions=(("AC1", "the report lists every file"), ("AC2", "errors say what to do")),
+                      diff_stat=" src/app.py | 2 +-\n 1 file changed", critical=(".github/workflows/ci.yml",),
+                      stripped=("AGENTS.md", ".claude/settings.json"),
+                      db=context.DbImpact(line="db-impact: commit=x graph=y output=z", query="oah impact db_table:w",
+                                          entities=("db_table:w",), rows=("link db db/1.sql:1 db_table:w create",)),
+                      history=(prompt.HistoryItem("receipt", "R1.json", "sha256:" + "1" * 64, '{"round": 1}\n'),
+                               prompt.HistoryItem("attempt-start", "A1-start.json", "sha256:" + "2" * 64, "{}\n")),
+                      history_digest="sha256:" + "3" * 64, attempted=(("R1-C1", "A1", "applied"),),
+                      decision=None, extra_round=False)
+        values.update(fields)
+        return prompt.PromptContext(**values)
+
+    def test_prompt_parts_and_exclusions(self):
+        import re
+
+        text = prompt.round_instructions(self.context())
+        for part in ("- Round: R3", f"- Base: {SHA_A}", f"- Head: {SHA_B}", f"git diff {SHA_A} {SHA_B}",
+                     " src/app.py | 2 +-", ".github/workflows/ci.yml", "AGENTS.md", ".claude/settings.json",
+                     f"git show {SHA_B}:<path>", "untrusted", "db-impact: commit=x graph=y output=z",
+                     "oah impact db_table:w", "R1.json", "sha256:" + "1" * 64, "A1-start.json", "sha256:" + "3" * 64,
+                     "R1-C1", "- AC1: the report lists every file", "- AC2: errors say what to do", "R3-F1", "R3-C1",
+                     "REVIEWED-TREE-CANARY: <value>", ".oah-review-canary", "src, tests"):
+            with self.subTest(part=part):
+                self.assertIn(part, text)
+        for axis in schema.AXES:
+            self.assertIn(axis, text)
+        self.assertIsNone(re.search(r"\boah(?:\.exe)?\s+(?:start|renew|finish)\b", text))
+        self.assertEqual([line for line in text.splitlines() if line.startswith("db-impact:")],
+                         ["db-impact: commit=x graph=y output=z"])
+        first = prompt.round_instructions(self.context(number=1, series_round=1, history=(), attempted=(),
+                                                       history_digest=receipts.history_digest([])))
+        self.assertIn("explicitly empty", first)
+        self.assertIn(receipts.history_digest([]), first)
+        resumed = prompt.round_instructions(self.context(decision="fix the parser again", extra_round=True))
+        self.assertIn("fix the parser again", resumed)
+        self.assertIn("--extra-round", resumed)
 
 if __name__ == "__main__":
     unittest.main()
