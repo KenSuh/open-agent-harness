@@ -1,4 +1,4 @@
-# 리뷰 명령 모듈 — oah review 의 인자, 결과 줄과 JSON 출력, 거부 코드별 종료 코드(0 수렴, 1 그 밖, 2 사용법, 69 환경)를 맡는다.
+# 리뷰 명령 모듈 — oah review 와 oah review summary 의 인자, 결과 줄과 JSON 출력, 거부 코드별 종료 코드(0 수렴, 1 그 밖, 2 사용법, 69 환경)를 맡는다.
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,7 @@ from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
 from oah.lease import LeaseError
 from oah.lockfile import LockTimeout
-from oah.paths import GitMissing, NotARepo
+from oah.paths import GitMissing, NotARepo, repo_info, state_dir
 from oah.review import ReviewError, runner
 from oah.runs import RunError
 
@@ -76,7 +76,6 @@ def _environment(exc: BaseException, as_json: bool) -> int:
 
 def _summary(args: argparse.Namespace) -> int:
     from oah.config import ConfigError
-    from oah.paths import repo_info, state_dir
     from oah.review import summary
 
     try:
