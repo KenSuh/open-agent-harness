@@ -14,18 +14,25 @@ COMMAND_MODULE_ATTRIBUTES = ("register", "COMMANDS", "run")
 class _RootParser(argparse.ArgumentParser):
     def parse_known_args(self, args=None, namespace=None):
         argv = list(sys.argv[1:] if args is None else args)
-        # Stop at the first registered command, so another command's value "land"
+        # Stop at the first registered command, so another command's value "land" or "fix"
         # cannot change its parser's established diagnostics.
         commands = next((action.choices for action in self._actions
                          if isinstance(action, argparse._SubParsersAction)), {})
         command = next((arg for arg in argv if arg in commands), None)
         self._landing = command == "land"
+        self._fixing = command == "fix"
         self._landing_json = "--json" in argv
-        if self._landing and any(arg not in ("-h", "--help", "--version") for arg in argv[:argv.index("land")]):
+        if (self._landing or self._fixing) and any(
+                arg not in ("-h", "--help", "--version") for arg in argv[:argv.index(command)]):
             self.error("")
         return super().parse_known_args(argv, namespace)
 
     def error(self, message):
+        if getattr(self, "_fixing", False):
+            from oah.fix_cli import EXIT_USAGE, _usage_error
+
+            _usage_error(self._landing_json)
+            self.exit(EXIT_USAGE)
         if getattr(self, "_landing", False):
             from oah.land_cli import EXIT_USAGE, USAGE_MESSAGE, _done
 

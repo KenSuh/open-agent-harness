@@ -84,6 +84,36 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_argument_errors_use_fixed_diagnostics_in_text_and_json(self):
+        project = FixProject(self)
+        marker = "account-" + token_source.token_hex(12)
+        key = "s" + "k-" + token_source.token_hex(20)
+        cases = (("--timeout-seconds", marker), ("--timeout-seconds", key),
+                 ("--timeout-seconds", "nan"), ("--timeout-seconds", "inf"),
+                 ("--timeout-seconds", "-1"), ("--engine", marker), ("--tier", key),
+                 ("--" + key,), (marker,), ("--timeout-seconds",), ("--bind", "--manual"),
+                 ("--manual",), ("--engine", "claude"))
+        for as_json in (False, True):
+            for args in cases:
+                for prefix in ((), ("--" + marker,)):
+                    with self.subTest(as_json=as_json, args=args, prefix=prefix):
+                        done = oah(project, *prefix, "fix", "--task", "t1", *args,
+                                   *(("--json",) if as_json else ()))
+                        self.assertEqual(done.returncode, 2)
+                        self.assertNotIn(marker, done.stdout + done.stderr)
+                        self.assertNotIn(key, done.stdout + done.stderr)
+                        expected = ("OAH_USAGE: the correction arguments are invalid; run oah fix --help "
+                                    "and retry with the required options.")
+                        self.assertEqual(done.stderr.strip(), expected)
+                        if as_json:
+                            saved = json.loads(done.stdout)
+                            self.assertEqual((saved["code"], saved["exit_code"], saved["message"]),
+                                             ("OAH_USAGE", 2, expected))
+                        else:
+                            self.assertEqual(done.stdout, "")
+        self.assertEqual(project.fix_calls(), [])
+        self.assertEqual(project.names(), [])
+
     def test_all_correction_scenario_outputs_omit_runtime_scope_marker(self):
         scenarios = ("applied", "no-change", "failed", "bind", "manual", "abort", "refused",
                      "sensitive-lease", "sensitive-packet")

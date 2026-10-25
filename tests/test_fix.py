@@ -520,6 +520,105 @@ class RefusalTest(unittest.TestCase):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_ignored_nested_repository_metadata_is_user_owned_too(self):
+        project = FixProject(self, files={".gitignore": "private/\n"})
+        project.changes_requested()
+        nested = project.repo / "private/nested"
+        nested.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "--initial-branch=main", str(nested)],
+                       check=True, capture_output=True)
+        git_commit(nested, {"README.md": b"nested\n"}, "nested")
+        name = "private/nested/.git/user-data"
+        (project.repo / name).write_bytes(b"user bytes\r\n")
+        project.queue_fix({"write": {name: "other bytes\r\n"}})
+        result = project.fix()
+        self.assertEqual((result.outcome, result.commands), ("failed", []))
+        self.assertNotIn(name, json.dumps(result.to_json()))
+        self.assertTrue(any("OAH_FIX_USER_FILES_CHANGED" in warning for warning in result.warnings))
+
+    def test_ignored_fingerprints_detect_same_size_edits_and_mode_changes(self):
+        for change in ("bytes", "mode"):
+            with self.subTest(change=change):
+                if change == "mode" and os.name == "nt":
+                    continue  # Windows chmod exposes only the read-only bit, not POSIX permissions.
+                project = FixProject(self, files={".gitignore": "src/private/\n"})
+                project.changes_requested()
+                name = "src/private/user.txt"
+                path = project.repo / name
+                path.parent.mkdir()
+                path.write_bytes(b"before\r\n")
+                if os.name != "nt":
+                    path.chmod(0o644)
+                info = path.stat()
+                project.queue_fix({"write": {**FIXED, **({name: "edited\r\n"} if change == "bytes" else {})},
+                                   "chmod": {name: 0o600} if change == "mode" else {}})
+                execute = call.execute
+
+                def keep_timestamp(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=keep_timestamp):
+                    result = project.fix()
+                self.assertEqual(path.stat().st_size, info.st_size)
+                self.assertEqual((result.outcome, result.commands), ("failed", []))
+                self.assertIn("OAH_FIX_USER_FILES_CHANGED", result.message)
+                self.assertFalse(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                self.assertIn(b"+print('fixed')", patch)
+                self.assertNotIn(b"before\r\n", patch)
+                self.assertNotIn(name.encode("ascii"), patch)
+
+    def test_ignored_user_file_changes_fail_without_retaining_their_names_or_bytes(self):
+        for change in ("overwrite", "delete", "create", "unchanged"):
+            for secret_side in ("old", "new"):
+                with self.subTest(change=change, secret_side=secret_side):
+                    project = FixProject(self, files={".gitignore": "private/\n"})
+                    project.changes_requested()
+                    name = "private/account-" + token_source.token_hex(12) + ".env"
+                    path = project.repo / name
+                    path.parent.mkdir()
+                    key = "s" + "k-" + token_source.token_hex(20)
+                    old = (key if secret_side == "old" else "user bytes") + "\r\n"
+                    new = (key if secret_side == "new" else "other bytes") + "\r\n"
+                    if change != "create":
+                        path.write_bytes(old.encode("utf-8"))
+                    writes = ({name: None if change == "delete" else new} if change != "unchanged" else {})
+                    project.queue_fix({"write": writes})
+                    result = project.fix()
+                    if change == "unchanged":
+                        self.assertEqual(result.outcome, "no-change")
+                        continue
+                    self.assertEqual((result.outcome, result.commands, result.next_command), ("failed", [], None))
+                    self.assertTrue(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
+                    self.assertTrue(any("OAH_FIX_USER_FILES_CHANGED" in warning for warning in result.warnings))
+                    self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
+                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    self.assertIn(b"withheld", patch)
+                    self.assertNotIn(b"user bytes", patch)
+                    self.assertNotIn(b"other bytes", patch)
+                    SecretTest.assert_private(self, project, [key, name], json.dumps(result.to_json()))
+
+    def test_outcome_and_file_diagnostics_use_positions_for_unrecognized_account_names(self):
+        for exit_code in (0, 3):
+            with self.subTest(exit_code=exit_code):
+                project = FixProject(self)
+                project.changes_requested()
+                account = "account-" + token_source.token_hex(12)
+                name = f"src/{account}.txt"
+                project.queue_fix({"write": {name: "correction\n"}, "exit": exit_code})
+                result = project.fix()
+                self.assertEqual(result.outcome, "applied" if exit_code == 0 else "failed")
+                outcome = project.record("A1-outcome.json")
+                self.assertNotIn(account, json.dumps(outcome))
+                self.assertIn("[file 1]", outcome["evidence"])
+                self.assertNotIn(account, result.message)
+                for line in result.lines:
+                    if line.startswith("changed files:"):
+                        self.assertNotIn(account, line)
+                        self.assertIn("[file 1]", line)
+
     def test_all_index_mutations_fail_even_when_worktree_matches_baseline(self):
         for change in ("blob", "addition", "removal", "mode", "conflict", "assume-unchanged", "skip-worktree"):
             with self.subTest(change=change):
@@ -658,7 +757,8 @@ class WorkerTest(unittest.TestCase):
                     result = project.fix()
                     self.assertNotEqual(result.outcome, "no-change")
                     self.assertIn(name, "\n".join(result.lines))
-                    self.assertIn(name, project.record("A1-outcome.json")["evidence"])
+                    self.assertNotIn(name, project.record("A1-outcome.json")["evidence"])
+                    self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
                     patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
                     self.assertIn(b"-user's original\r\n", patch)
                     if content is not None:
@@ -978,7 +1078,8 @@ class OutcomeTest(unittest.TestCase):
                 [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
                 self.assertTrue(attempt.terminal)
                 if label == "non-zero exit":
-                    self.assertIn("src/app.py", result.message, "changes a failed run left behind are named")
+                    self.assertNotIn("src/app.py", result.message)
+                    self.assertIn("[file 1]", result.message, "failed-run diagnostics use positions only")
                     self.assertEqual(result.commands, [])
 
     def test_interrupted_correction_stops_the_corrector_and_records_aborted(self):

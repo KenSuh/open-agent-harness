@@ -13,6 +13,7 @@ from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.journal import PendingTransaction
 from oah.lease import LeaseError
+from oah.land_cli import _LandParser
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo
 from oah.review import ReviewError, fix
@@ -30,15 +31,33 @@ def _seconds(text: str) -> float:
     try:
         value = float(text)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+        raise argparse.ArgumentTypeError("timeout must be a number of seconds above 0") from None
     if not math.isfinite(value) or value <= 0:
-        raise argparse.ArgumentTypeError(f"{text!r} must be a number of seconds above 0")
+        raise argparse.ArgumentTypeError("timeout must be a number of seconds above 0")
     return value
 
 
+def _usage_error(as_json: bool) -> int:
+    code, message = fix._error_diagnostic(ReviewError("OAH_USAGE", ""))
+    return _report(code, EXIT_USAGE, message, as_json)
+
+
+class _FixParser(_LandParser):
+    """Reuse land's token-consuming boundary with the correction diagnostic catalog."""
+
+    def error(self, message):
+        _usage_error(self._as_json)
+        self.exit(EXIT_USAGE)
+
+
 def register(commands: argparse._SubParsersAction) -> None:
-    parser = commands.add_parser("fix", help="run one Codex correction of the latest review's findings, or record "
-                                             "and bind a correction so the next review counts it")
+    parser_class = commands._parser_class
+    try:
+        commands._parser_class = _FixParser
+        parser = commands.add_parser("fix", help="run one Codex correction of the latest review's findings, or record "
+                                                 "and bind a correction so the next review counts it")
+    finally:
+        commands._parser_class = parser_class
     parser.add_argument("--task", required=True, help="the task whose latest review is corrected")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--bind", action="store_true",
@@ -90,8 +109,7 @@ def run(args: argparse.Namespace) -> int:
 
     problem = _usage(args)
     if problem is not None:
-        print(f"OAH_USAGE: {problem}", file=sys.stderr)
-        return EXIT_USAGE
+        return _usage_error(args.json)
     cwd, env, findings = pathlib.Path.cwd(), os.environ, tuple(args.findings or ())
     try:
         if args.bind:

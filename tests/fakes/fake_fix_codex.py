@@ -8,6 +8,7 @@ A `workspace-write` `exec` (a correction) follows the fix script, JSON {"record_
 "steps": [step, ...]}. Correction call k (counted by start markers in record_dir) uses steps[k], or {} past
 the end. A step may set:
   write          {path: text, or null to delete}, relative to the -C directory
+  chmod          {path: integer mode}, for ignored-file permission accounting
   stage          paths to stage before applying restore (an intentional sandbox violation for accounting tests)
   index_commands argument lists for git update-index, also intentional violations
   restore        {path: text, or null to delete}, after staging, to exercise hidden index-only changes
@@ -170,6 +171,8 @@ def main(argv: list[str]) -> int:
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content.encode("utf-8"))
+    for name, mode in step.get("chmod", {}).items():
+        (cwd / name).chmod(mode)
     if step.get("commit"):
         subprocess.run(["git", "-C", str(cwd), "add", "-A"], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(cwd), *IDENTITY, "commit", "-q", "-m", "fake corrector commit"], check=True,

@@ -61,6 +61,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 from oah import briefs, call, call_cli, runs
 from oah import intent as oah_intent
 from oah.atomic import StateCorrupt, read_json, write_json_atomic, write_text_atomic
+from oah.engines.effort import BEHAVIOUR_CHANGING, ORDINARY
 from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
@@ -174,7 +175,7 @@ _WARNING_DIAGNOSTICS = {
                             "files with git restore -- <path>; recover preexisting untracked files from your own "
                             "backup and inspect new files before deleting them, or widen the scope with "
                             "oah renew --scope.",
-    "OAH_FIX_USER_FILES_CHANGED": "Codex modified or deleted {count} preexisting untracked file(s): {positions}. "
+    "OAH_FIX_USER_FILES_CHANGED": "Codex changed {count} user-owned or ignored file(s): {positions}. "
                                   "Review correction.patch and restore or keep them yourself; these files are "
                                   "excluded from automatic staging guidance.",
     "OAH_FIX_INTENT_CHANGED": "after the correction the bound intent is {state}. Restore the bound packet before "
@@ -527,6 +528,38 @@ def _untracked(root: pathlib.Path) -> list[str]:
     return _names(root, "ls-files", "--others", "--exclude-standard", "-z")
 
 
+def _ignored(root: pathlib.Path) -> list[str]:
+    listed = [os.fsdecode(name) for name in _git_bytes(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split(b"\0") if name]
+    found = set(listed)
+
+    def unreadable(_error):
+        raise ReviewError("OAH_FIX_GIT_FAILED", _ERROR_DIAGNOSTICS["OAH_FIX_GIT_FAILED"])
+
+    # Git collapses nested repositories to a directory; their ignored metadata is user-owned too.
+    for name in listed:
+        path = root / name
+        if not path.is_symlink() and path.is_dir():
+            for parent, directories, files in os.walk(path, followlinks=False, onerror=unreadable):
+                found.update((pathlib.Path(parent) / child).relative_to(root).as_posix()
+                             for child in (*directories, *files))
+    return sorted(found)
+
+
+def _ignored_state(root: pathlib.Path, names: Iterable[str]) -> dict[str, tuple[int, int, str] | None]:
+    """Fingerprint ignored user files using raw bytes, full modes and sizes, never Git conversion."""
+    found = {}
+    for name in names:
+        snapshot = _file_snapshot(root, name)
+        try:
+            mode = (root / name).lstat().st_mode if snapshot is not None else None
+        except FileNotFoundError:
+            mode = None
+        found[name] = ((mode, len(snapshot[1]), receipts.digest(snapshot[1]))
+                       if mode is not None else None)
+    return found
+
+
 def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str,
                 redact: Callable[[str], str]) -> None:
     dirty = _path_labels(_tracked_dirty(t.root), redact)
@@ -818,8 +851,7 @@ def _has_credential(text: str, redact: Callable[[str], str]) -> bool:
 
 
 def _path_labels(names: Iterable[str], redact: Callable[[str], str]) -> list[str]:
-    return [f"[file {position}]" if _has_credential(name, redact) else name
-            for position, name in enumerate(names, 1)]
+    return [f"[file {position}]" for position, _name in enumerate(names, 1)]
 
 
 def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
@@ -966,7 +998,9 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
-        untracked = {name: _file_snapshot(t.root, name) for name in _untracked(t.root)}
+        ignored = _ignored(t.root)
+        untracked = {name: _file_snapshot(t.root, name) for name in (*_untracked(t.root), *ignored)}
+        ignored_baseline = _ignored_state(t.root, ignored)
         # Compare discovery with checkout bytes, so an untouched CRLF/encoded file stays unchanged.
         baseline = {name: _file_snapshot(t.root, name) for name in _tree_files(t.root, before)}
         instructions = round_instructions(
@@ -993,7 +1027,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=read_source,
                 keychain=keychain)
             attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
-                               baseline=baseline, index_baseline=_index_state(t.root))
+                               baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
             return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1014,6 +1048,7 @@ class _Attempt:
     ended: bool = False
     baseline: Mapping[str, tuple[int, bytes] | None] | None = None
     index_baseline: Mapping[str, tuple[bytes, ...]] = dataclasses.field(default_factory=dict)
+    ignored_baseline: Mapping[str, tuple[int, int, str] | None] = dataclasses.field(default_factory=dict)
 
     @property
     def finding_ids(self) -> list[str]:
@@ -1075,6 +1110,15 @@ class _Attempt:
 
     def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id
+        launch_effort = run.get("launch_effort")
+        if launch_effort not in (*ORDINARY, *BEHAVIOUR_CHANGING):
+            launch_effort = "unverified"
+        header = run.get("header_check")
+        if header not in ("match", "downgraded", "mismatch"):
+            header = "unverified"
+        verified = "verified" if run.get("effort_verified") is True else "unverified"
+        effort = f"effort {launch_effort} (header {header}, {verified})"
+        status = run.get("status") if run.get("status") in runs.TERMINAL else "unverified"
         head = _head(root)
         index = _index_state(root)
         changed_index = sorted(name for name in index.keys() | self.index_baseline.keys()
@@ -1086,7 +1130,6 @@ class _Attempt:
                       "commit guidance were withheld. Restore the index and inspect the worktree before retrying")
             if head != self.before:
                 reason += f"; HEAD moved from {self.before} to {head}"
-            effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')})"
             patch = reason + "\n"
             write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
             write_json_atomic(self.prepared.run.file_path("correction.json"), {
@@ -1095,9 +1138,15 @@ class _Attempt:
                 "changes_sha256": receipts.digest(patch.encode("utf-8")), "commands": [], "out_of_scope": []})
             return _Judged("failed", reason, reason, _Changes(positions, ()), patch, effort, [], [], [], "", head)
         changes = _changes(root, self.before, untracked, baseline=self.baseline)
+        ignored_state = _ignored_state(root, sorted(self.ignored_baseline.keys() | set(_ignored(root))))
+        ignored_changes = {name for name, snapshot in ignored_state.items()
+                           if snapshot != self.ignored_baseline.get(name)}
+        changes = _Changes(changes.tracked, changes.new,
+                           tuple(dict.fromkeys((*changes.user, *sorted(ignored_changes)))))
         sensitive_paths = any(_has_credential(name, self.redact) for name in changes.files)
         sensitive, unsupported, captured = _scan_files(root, self.before, changes, untracked, self.redact)
-        withheld = {**sensitive, **unsupported}
+        ignored_positions = {name: f"[file {n}]" for n, name in enumerate(changes.files, 1) if name in ignored_changes}
+        withheld = {**sensitive, **unsupported, **ignored_positions}
         safe_changes = _Changes(*(tuple(name for name in group if name not in withheld)
                                    for group in (changes.tracked, changes.new, changes.user)))
         raw = (b"" if sensitive_paths or unsupported else
@@ -1106,6 +1155,11 @@ class _Attempt:
             raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw "
                     "filenames or file contents contain a credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
+        ignored_reason = (f"OAH_FIX_USER_FILES_CHANGED: diff withheld for {_ids(list(ignored_positions.values()))} "
+                          "because ignored user files changed; all commit guidance was withheld. Inspect the "
+                          "worktree and restore or keep those files yourself before retrying oah fix")
+        if ignored_positions:
+            raw += (ignored_reason + "\n").encode("utf-8")
         unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
                               "because submodules, gitlinks or symlinks leaving the worktree cannot be scanned as "
                               "ordinary files; all commit "
@@ -1124,10 +1178,9 @@ class _Attempt:
                  self.redact(raw.decode("utf-8", errors="replace")))
         digest = receipts.digest(raw)
         message = ""  # Final-message output is streamed with stdout; no worker text is retained.
-        verified = "verified" if run.get("effort_verified") is True else "unverified"
-        effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')}, {verified})"
         files = changes.files
-        named = _ids(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
+        positions = _path_labels(files, self.redact)
+        named = _ids(positions[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
         # Reconstruct the diagnostic from an approved code, never a saved module error's text.
         error_code = str(run.get("error") or "").partition(":")[0]
         _code, error = _error_diagnostic(ReviewError(error_code, ""))
@@ -1135,10 +1188,10 @@ class _Attempt:
             outcome = "failed"
             reason = (f"HEAD moved from {self.before} to {head} during the run, so its result cannot be attributed to "
                       f"{self.attempt_id}")
-            evidence = f"codex run {rid} ended ({run.get('status')}), but {reason}"
-        elif run.get("status") != "finished":
+            evidence = f"codex run {rid} ended ({status}), but {reason}"
+        elif status != "finished":
             outcome, reason = "failed", error
-            evidence = f"codex run {rid} {run.get('status')}: {error}; {effort}"
+            evidence = f"codex run {rid} {status}: {error}; {effort}"
         elif files:
             outcome, reason = "applied", None
             evidence = f"codex run {rid} finished and changed {len(files)} file(s): {named}; changes {digest}; {effort}"
@@ -1149,6 +1202,9 @@ class _Attempt:
             outcome = "failed"
             reason = ("Codex changed preexisting untracked files owned by the user; automatic commit guidance was "
                       "withheld. Inspect correction.patch and restore or keep those files yourself before retrying")
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
+        if ignored_positions:
+            outcome, reason = "failed", ignored_reason
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "applied" and sensitive_paths:
             outcome = "failed"
@@ -1204,10 +1260,7 @@ class _Attempt:
                      for name in judged.unquoted]
         lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
         if judged.changes.files:
-            lines.append("changed files: " + _ids(judged.changes.tracked + tuple(f"{name} (new)"
-                                                                                    for name in judged.changes.new)
-                                                  + tuple(f"{name} (preexisting untracked)"
-                                                          for name in judged.changes.user)))
+            lines.append("changed files: " + _ids(list(positions.values())))
             shown = judged.patch.splitlines()
             lines += shown[:DIFF_LINES]
             if len(shown) > DIFF_LINES:
@@ -1234,10 +1287,11 @@ class _Attempt:
                 left = (f" Codex cannot commit in its sandbox, so something else moved HEAD; see git log "
                         f"{self.before[:12]}..HEAD and decide what to keep before you go on.")
             elif judged.changes.user:
-                left = (f" It changed user-owned untracked files ({_ids(judged.changes.user[:20])}); inspect "
+                listed = _ids([positions[name] for name in judged.changes.user[:20]])
+                left = (f" It changed user-owned or ignored files ({listed}); inspect "
                         "correction.patch and recover them from your own backup or keep them yourself before retrying.")
             elif judged.changes.files:
-                left = (f" It left changes in the worktree ({_ids(judged.changes.files[:20])}); inspect them with git "
+                left = (f" It left changes in the worktree ({_ids(list(positions.values())[:20])}); inspect them with git "
                         f"diff, then discard them (git restore --source=HEAD --staged --worktree -- . and delete the "
                         f"new files) before you run oah fix again.")
             else:
