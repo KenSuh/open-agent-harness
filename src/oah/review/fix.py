@@ -544,11 +544,35 @@ def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int,
                     tuple(name for name in _untracked(root) if name not in untracked), user)
 
 
+def _sensitive_files(root: pathlib.Path, before: str, changes: _Changes,
+                     untracked: Mapping[str, tuple[int, bytes] | None],
+                     redact: Callable[[str], str]) -> dict[str, str]:
+    """Scan both raw sides of every changed file before asking Git or difflib to build a diff."""
+    found = {}
+    for position, name in enumerate(changes.files, 1):
+        current = _file_snapshot(root, name)
+        data = [current[1]] if current else []
+        if name in untracked:
+            old = untracked[name]
+            if old:
+                data.append(old[1])
+        else:
+            entries = _git_bytes(root, "ls-tree", "-z", before, "--", f":(literal){name}")
+            for entry in entries.split(b"\0"):
+                if entry:
+                    _mode, kind, oid = entry.split(b"\t", 1)[0].split()
+                    if kind == b"blob":
+                        data.append(_git_bytes(root, "cat-file", "blob", oid.decode("ascii")))
+        if any(redact(text) != text for text in (raw.decode("utf-8", errors="replace") for raw in data)):
+            found[name] = f"[file {position}]"
+    return found
+
+
 def _patch(root: pathlib.Path, before: str, changes: _Changes,
            untracked: Mapping[str, tuple[int, bytes] | None],
            redact: Callable[[str], str] | None = None) -> bytes:
-    parts = [_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", before, "--", ".",
-                        *(f":(exclude,literal){name}" for name in changes.user))]
+    parts = ([_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", before, "--",
+                         *(f":(literal){name}" for name in changes.tracked))] if changes.tracked else [])
     for name in changes.new:
         parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--",
                                 "/dev/null", name, ok=(0, 1)))
@@ -698,9 +722,10 @@ class _Attempt:
     def _left_behind(self, untracked: Mapping[str, tuple[int, bytes] | None]) -> str:
         try:
             files = _changes(self.t.root, self.before, untracked).files
-        except ReviewError:
+            return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
+        except BaseException:
+            # Optional diagnostics must never prevent the attempt's terminal record.
             return "; oah could not list the changes it left in the worktree"
-        return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
 
     def run(self, *, launch_env, rules, final: pathlib.Path,
             untracked: Mapping[str, tuple[int, bytes] | None]) -> Result:
@@ -720,9 +745,10 @@ class _Attempt:
             with call._correction_cleanup():
                 run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
             judged = self._judge(run, final, untracked)
+            result = self._result(judged)
             with _held_signals() as held:
                 self._end(judged.outcome, judged.evidence)
-            result = self._result(judged)
+            result.records = list(self.published)
             if held:
                 result.warnings.append(f"{INTERRUPTED}: a stop signal arrived during terminal publication; the outcome "
                                        f"of {self.attempt_id} is durable. Inspect the worktree before continuing")
@@ -736,7 +762,7 @@ class _Attempt:
                     self._end("aborted", f"codex run {self.run_id} was interrupted ({str(exc) or 'Ctrl-C'}) and oah "
                                          f"stopped its process tree{self._left_behind(untracked)}")
                 else:
-                    self._end("failed", f"codex run {self.run_id} did not complete: {str(exc)[:300]}"
+                    self._end("failed", f"codex run {self.run_id} did not complete: {self.redact(str(exc))[:300]}"
                                         f"{self._left_behind(untracked)}")
             if interrupted:
                 raise FixInterrupted(f"{self.attempt_id} was interrupted and recorded as aborted; oah stopped Codex. "
@@ -753,7 +779,19 @@ class _Attempt:
         head = _head(root)
         changes = _changes(root, self.before, untracked)
         sensitive_paths = any(self.redact(name) != name for name in changes.files)
-        raw = _patch(root, self.before, changes, untracked, self.redact)
+        sensitive = _sensitive_files(root, self.before, changes, untracked, self.redact)
+        safe_changes = _Changes(*(tuple(name for name in group if name not in sensitive)
+                                   for group in (changes.tracked, changes.new, changes.user)))
+        raw = b"" if sensitive_paths else _patch(root, self.before, safe_changes, untracked)
+        if sensitive:
+            raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw file "
+                    "contents contain a runtime credential; remove credentials or restore the affected files "
+                    "before retrying oah fix\n").encode("utf-8")
+        beyond = outside(self.t.lease.scope, changes.files)
+        beyond = [sensitive.get(name, name) for name in beyond]
+        # Withheld files are identified only by their positions in every retained or printed artifact.
+        changes = _Changes(*(tuple(sensitive.get(name, name) for name in group)
+                              for group in (changes.tracked, changes.new, changes.user)))
         # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
         patch = ("OAH_FIX_SENSITIVE_PATH: diff withheld because a filename contains a runtime credential; "
                  "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
@@ -792,6 +830,12 @@ class _Attempt:
             reason = ("OAH_FIX_SENSITIVE_PATH: a changed filename contains a runtime credential; commit guidance "
                       "was withheld. Rename or discard the affected files, then run oah fix again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
+        if sensitive:
+            outcome = "failed"
+            reason = (f"OAH_FIX_SENSITIVE_CONTENT: raw contents of {_ids(list(sensitive.values()))} contain a runtime "
+                      "credential; their diffs and all commit guidance were withheld. Remove credentials or "
+                      "restore the affected files before retrying oah fix")
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "failed" and files:
             evidence += f"; it left {len(files)} changed file(s) in the worktree: {named}"
         commands, unquoted = (commit_commands(task=self.t.name, attempt_id=self.attempt_id,
@@ -803,7 +847,6 @@ class _Attempt:
             reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a runtime credential and was withheld; "
                       "remove sensitive commit metadata before correcting again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
-        beyond = outside(self.t.lease.scope, files)
         write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
         write_json_atomic(self.prepared.run.file_path("correction.json"), _redacted({
             "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,

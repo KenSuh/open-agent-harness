@@ -83,6 +83,30 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_withholds_raw_multiline_credentials_in_text_and_json(self):
+        for as_json in (False, True):
+            for name in ("src/app.py", "src/new.txt"):
+                with self.subTest(as_json=as_json, name=name):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                    project.queue_fix({"write": {name: key + "\n"}})
+                    args = ("--json",) if as_json else ()
+                    done = oah(project, "fix", "--task", "t1", "--tier", "high", *args,
+                               env_extra={"OPENAI_API_KEY": key})
+                    artifacts = [done.stdout.encode("utf-8"), done.stderr.encode("utf-8")]
+                    artifacts += [path.read_bytes() for path in project.state.rglob("*") if path.is_file()]
+                    for data in artifacts:
+                        for line in key.splitlines():
+                            self.assertFalse(line.encode("utf-8") in data, "a credential line reached CLI output or state")
+                    self.assertEqual(done.returncode, 1)
+                    self.assertIn("withheld", done.stdout)
+                    self.assertNotIn("git add", done.stdout + done.stderr)
+                    self.assertNotIn("git commit", done.stdout + done.stderr)
+                    self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                    if as_json:
+                        self.assertEqual(json.loads(done.stdout)["commands"], [])
+
     @unittest.skipUnless(os.name == "nt", "native Windows console signal handlers")
     def test_cli_windows_sigbreak_at_attempt_context_transitions(self):
         for point in ("after-start", "before-inspection"):

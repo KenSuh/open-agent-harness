@@ -633,6 +633,90 @@ class WorkerTest(unittest.TestCase):
 
 
 class OutcomeTest(unittest.TestCase):
+    def stop_before_popen_returns(self, stop):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True})
+        popen = subprocess.Popen
+        children = []
+
+        def interrupted(argv, *args, **kwargs):
+            child = popen(argv, *args, **kwargs)
+            if str(FAKE_FIX) in argv and "exec" in argv:
+                children.append(child)
+                signal.raise_signal(stop)  # native creation succeeded, but the caller has no reference yet
+            return child
+
+        from oah.engines.proc import kill_tree
+
+        try:
+            with default_sigint(), mock.patch.object(subprocess, "Popen", side_effect=interrupted):
+                with self.assertRaises(fix.FixInterrupted):
+                    project.fix(timeout_s=120)
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].poll(), "the worker survived an aborted attempt")
+            self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
+            self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    kill_tree(child)
+                child.communicate(timeout=10)
+
+    def test_sigint_before_popen_returns_stops_the_worker(self):
+        self.stop_before_popen_returns(signal.SIGINT)
+
+    @unittest.skipIf(os.name == "nt", "POSIX SIGTERM handler")
+    def test_sigterm_before_popen_returns_stops_the_worker(self):
+        self.stop_before_popen_returns(signal.SIGTERM)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows suspended worker and job ownership")
+    def test_windows_sigbreak_before_popen_returns_stops_the_worker(self):
+        self.stop_before_popen_returns(signal.SIGBREAK)
+
+    def test_repeated_git_inspection_errors_still_publish_a_terminal_outcome(self):
+        for interrupt in (False, True):
+            with self.subTest(interrupt=interrupt):
+                project = FixProject(self)
+                project.changes_requested()
+                project.queue_fix({"write": FIXED})
+                run_git = fix.run_git
+                inspecting = False
+
+                def fail_inspection(root, *args, **kwargs):
+                    if inspecting:
+                        raise PermissionError("git inspection unavailable")
+                    return run_git(root, *args, **kwargs)
+
+                execute = call.execute
+
+                def dispatched(*args, **kwargs):
+                    nonlocal inspecting
+                    result = execute(*args, **kwargs)
+                    inspecting = True
+                    if interrupt:
+                        raise KeyboardInterrupt("stop after dispatch")
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched), \
+                        mock.patch.object(fix, "run_git", side_effect=fail_inspection):
+                    with self.assertRaises((fix.FixInterrupted, ReviewError)):
+                        project.fix()
+                self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
+                outcome = project.record("A1-outcome.json")
+                self.assertEqual(outcome["outcome"], "aborted" if interrupt else "failed")
+                self.assertIn("could not list", outcome["evidence"])
+
+    def test_result_diagnostic_failure_is_settled_as_failed(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        with mock.patch.object(fix._Attempt, "_result", side_effect=PermissionError("diagnostic unavailable")):
+            with self.assertRaises(ReviewError):
+                project.fix()
+        self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+
     def completed_tree_stops_before_inspection(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1021,6 +1105,52 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_raw_multiline_credentials_withhold_every_affected_file_diff(self):
+        for channel in ("tracked", "new", "staged", "deleted", "replaced", "user"):
+            with self.subTest(channel=channel):
+                project = FixProject(self)
+                key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                name = "src/private.txt"
+                if channel in ("tracked", "deleted", "replaced"):
+                    project.commit({name: key + "\n" if channel != "tracked" else "before\n"})
+                project.changes_requested()
+                project.env["OPENAI_API_KEY"] = key
+                if channel == "user":
+                    (project.repo / name).write_bytes((key + "\n").encode("utf-8"))
+                content = None if channel == "deleted" else "replacement\n" if channel in ("replaced", "user") else key + "\n"
+                project.queue_fix({"write": {name: content, **FIXED}})
+                execute = call.execute
+
+                def dispatched(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    if channel == "staged":
+                        git(project.repo, "add", "--", name)
+                    return result
+
+                built = []
+                git_bytes = fix._git_bytes
+
+                def capture(root, *args, **kwargs):
+                    result = git_bytes(root, *args, **kwargs)
+                    if args[0] == "diff":
+                        built.append(result)
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched), \
+                        mock.patch.object(fix, "_git_bytes", side_effect=capture):
+                    result = project.fix()
+                self.assertEqual((result.outcome, result.commands), ("failed", []))
+                self.assertIsNone(result.next_command)
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                self.assertNotIn(name, json.dumps(result.to_json()), "identify a withheld file by position only")
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                self.assertIn("withheld", patch)
+                self.assertIn("src/app.py", patch, "safe changed files remain reviewable")
+                for raw in built:
+                    for line in key.splitlines():
+                        self.assertFalse(line.encode("utf-8") in raw, "Git built a diff containing credential content")
+
     def test_untracked_snapshots_never_retain_credentials(self):
         for sensitive_name in (False, True):
             with self.subTest(sensitive_name=sensitive_name):
@@ -1037,7 +1167,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual((result.outcome, result.commands), ("failed", []))
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
-                self.assertIn("withheld" if sensitive_name else "[REDACTED]", patch)
+                self.assertIn("withheld", patch)
 
     def launches(self) -> tuple[list, object]:
         found: list = []
@@ -1114,12 +1244,13 @@ class SecretTest(unittest.TestCase):
                     step[channel] = echoed
                 project.queue_fix(step)
                 result = project.fix()
-                expected = "OAH_FIX_FAILED" if channel == "header_effort" else "OAH_FIX_APPLIED"
+                expected = "OAH_FIX_FAILED" if channel in ("header_effort", "file") else "OAH_FIX_APPLIED"
                 self.assertEqual(result.code, expected, result.message)
                 self.assert_private(project, keys, json.dumps(result.to_json()), result.message, *result.lines,
                                     *result.warnings)
                 if channel == "file":
-                    self.assertIn("[REDACTED]", "\n".join(result.lines))
+                    self.assertIn("withheld", "\n".join(result.lines))
+                    self.assertEqual(result.commands, [])
 
     def test_credential_filenames_never_reach_metadata_or_executable_guidance(self):
         for channel in ("new", "tracked", "out of scope", "unquotable", "encoded", "failed"):

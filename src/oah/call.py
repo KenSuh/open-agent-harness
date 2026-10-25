@@ -37,8 +37,10 @@ import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -738,6 +740,29 @@ def _correction_cleanup():
         _CORRECTION_CLEANUP.reset(token)
 
 
+@contextmanager
+def _deferred_creation_signals():
+    """Defer installed stop handlers until Popen and Windows job assignment return ownership."""
+    pending = []
+    saved = {}
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                handler = signal.getsignal(number)
+                if callable(handler):
+                    saved[number] = handler
+                    signal.signal(number, lambda signum, frame: pending.append((signum, frame)))
+    try:
+        yield
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
+        if pending:
+            number, frame = pending[0]
+            saved[number](number, frame)
+
+
 def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
     from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
@@ -753,20 +778,21 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     child = None
     try:
         with dispatch_guard(prepared):
-            try:
-                child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
-            except OSError as exc:
-                # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
-                raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
-                                                 "Check the executable path and permissions, then retry") from None
-            if job is not None:
+            with _deferred_creation_signals():
                 try:
-                    job.start(child)
-                except BaseException:
-                    child.kill()
-                    child.communicate(timeout=REAP_SECONDS)
-                    raise
+                    child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, cwd=prepared.cwd, env=dict(env), **options)
+                except OSError as exc:
+                    # Windows omits the executable; keep spawn errors out of the lease's state-I/O wrapper.
+                    raise subprocess.SubprocessError(f"cannot launch {prepared.argv[0]}: {exc}. "
+                                                     "Check the executable path and permissions, then retry") from None
+                if job is not None:
+                    try:
+                        job.start(child)
+                    except BaseException:
+                        child.kill()
+                        child.communicate(timeout=REAP_SECONDS)
+                        raise
         data, deadline = prompt.encode("utf-8"), time.monotonic() + prepared.timeout_s
         while True:
             try:
