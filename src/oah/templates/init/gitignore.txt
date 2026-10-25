@@ -1,0 +1,10 @@
+# oah gate ledgers record local paths and command output; the committed summary is GATES.summary.md.
+.oah/tasks/*/GATES.md
+# Local secret files: keep keys in your environment or OS keychain, never in the repository.
+.env
+.env.*
+*.pem
+*.key
+.oah/secrets*
+# Claude Code's local settings: local MCP approvals and oah's local hooks.
+.claude/settings.local.json

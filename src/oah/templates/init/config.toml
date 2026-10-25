@@ -1,0 +1,44 @@
+# oah project settings, written by `oah init`. Edit freely: `oah init` never replaces this file
+# without --force. A key you leave out uses oah's built-in default.
+
+# Which engine does each stage: Claude Code implements first; Codex reviews, corrects and re-reviews.
+[stages]
+initial = "claude"
+review = "codex"
+correction = "codex"
+
+[engines.claude]
+command = ["claude"]
+# Strongest first. These are Claude Code's own aliases, so new models arrive without edits here.
+quality_order = ["opus", "sonnet", "haiku"]
+
+# Difficulty tiers: model = "" follows quality_order (low takes the last, medium the second, high and
+# max the first); a model name pins that tier.
+[engines.claude.tiers]
+low = { model = "", effort = "low", timeout_min = 15 }
+medium = { model = "", effort = "medium", timeout_min = 30 }
+high = { model = "", effort = "high", timeout_min = 60 }
+max = { model = "", effort = "max", timeout_min = 90 }
+
+[engines.codex]
+command = ["codex"]
+# Empty: the model your Codex configuration uses, or a newer one Codex marks as its default.
+quality_order = []
+
+# "highest" is the highest reasoning effort the resolved model supports.
+[engines.codex.tiers]
+low = { model = "", effort = "low", timeout_min = 15 }
+medium = { model = "", effort = "medium", timeout_min = 30 }
+high = { model = "", effort = "high", timeout_min = 60 }
+max = { model = "", effort = "highest", timeout_min = 90 }
+
+[preflight]
+# The branch work lands on ({{BRANCH_HOW}}). Change it if your default branch has another name.
+default_branch = {{DEFAULT_BRANCH}}
+
+[skills]
+# Keep oah's own skill cache (in its state folder) current, checked at most once per interval.
+# Your project's skill folders never change on their own: `oah skills update --project` does that.
+auto_update = {{AUTO_UPDATE}}
+update_interval_days = 1
+{{RERANK}}

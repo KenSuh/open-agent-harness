@@ -1,0 +1,7 @@
+
+# The TypeSafe Jev re-ranker is off: you answered no in `oah init` on {{DATE}}. A key alone never turns
+# it on. To turn it on, set enabled = true and provider = "typesafe" here, and rerank = true under
+# [impact]; it then sends candidate names and short descriptions to TypeSafe, which may charge for it.
+[rerank]
+enabled = false
+provider = ""

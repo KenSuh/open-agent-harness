@@ -1,0 +1,13 @@
+# Files graphify leaves out of the knowledge graph; written by `oah init --with-graph`.
+# The wiki log and its archives change with every task (`oah wiki maintain`).
+{{WIKI_DIR}}/log.md
+{{WIKI_DIR}}/log_archive_*.md
+# Gate ledgers hold local paths and command output.
+.oah/tasks/*/GATES.md
+# Build outputs, dependencies and graphify's own output.
+build/
+dist/
+node_modules/
+__pycache__/
+.venv/
+graphify-out/
