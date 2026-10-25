@@ -875,6 +875,70 @@ class AssessTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    def test_complete_git_configuration_is_pinned_across_scopes_and_origins(self):
+        repo = make_git_repo(self)
+        work = make_tmp_dir(self)
+        git(repo, "config", "extensions.worktreeConfig", "true")
+        for scope in ("local", "worktree", "global", "system", "include"):
+            with self.subTest(scope=scope):
+                env = git_env()
+                config = work / (scope + ".gitconfig")
+                config.write_bytes(b"[http]\n\tproxy = first\n")
+                if scope in ("global", "system"):
+                    env[f"GIT_CONFIG_{scope.upper()}"] = str(config)
+                elif scope == "include":
+                    git(repo, "config", "include.path", str(config))
+                else:
+                    config = repo / ".git" / ("config.worktree" if scope == "worktree" else "config")
+                    git(repo, "config", f"--{scope}", "http.proxy", "first")
+                context = land._GitContext(repo, env)
+                self.assertTrue(context.unchanged(env))
+                before = config.read_bytes()
+                # Different invalid UTF-8 bytes must not collapse to the same decoded replacement character.
+                previous_digest = context.transport
+                for value in (b"second", b"\xff", b"\xfe"):
+                    config.write_bytes(before + b"\n[http]\n\tproxy = " + value + b"\n")
+                    self.assertFalse(context.unchanged(env))
+                    current_digest = land._transport(repo, context.env)
+                    self.assertNotEqual(previous_digest, current_digest)
+                    previous_digest = current_digest
+                config.write_bytes(before)
+                self.assertTrue(context.unchanged(env))
+                if scope == "include":
+                    # Equal values from a different origin still change the identity.
+                    other = work / "other.gitconfig"
+                    other.write_bytes(before)
+                    git(repo, "config", "include.path", str(other))
+                    self.assertFalse(context.unchanged(env))
+                    git(repo, "config", "--unset", "include.path")
+
+    def test_all_git_and_case_variant_proxy_environment_values_are_pinned(self):
+        repo = make_git_repo(self)
+        env = git_env()
+        names = ["GIT_PROXY_COMMAND", "GIT_HTTP_PROXY_AUTHMETHOD", "GIT_AUTHOR_NAME", "GIT_FUTURE_ROUTING"]
+        for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            names.extend((name, name.upper(), name.title()))
+        for name in names:
+            with self.subTest(name=name):
+                original = {key: value for key, value in env.items() if key.upper() != name.upper()}
+                context = land._GitContext(repo, original)
+                self.assertTrue(context.unchanged(original))
+                first = dict(original, **{name: secrets.token_hex(24)})
+                self.assertFalse(context.unchanged(first))
+                context = land._GitContext(repo, first)
+                self.assertTrue(context.unchanged(first))
+                self.assertFalse(context.unchanged(dict(first, **{name: secrets.token_hex(24)})))
+                self.assertFalse(context.unchanged(original))
+
+    @unittest.skipUnless(os.name == "nt", "Windows environment keys are case-insensitive")
+    def test_windows_proxy_environment_key_casing_keeps_the_effective_identity(self):
+        repo = make_git_repo(self)
+        env = {key: value for key, value in git_env().items() if key.upper() != "HTTP_PROXY"}
+        private = secrets.token_hex(24)
+        context = land._GitContext(repo, dict(env, http_proxy=private))
+        self.assertTrue(context.unchanged(dict(env, HTTP_PROXY=private)))
+        self.assertFalse(context.unchanged(dict(env, hTtP_pRoXy=secrets.token_hex(24))))
+
     @unittest.skipUnless(os.name == "nt", "Windows environment keys are case-insensitive")
     def test_windows_transport_environment_keys_are_case_insensitive(self):
         project = LandProject(self)

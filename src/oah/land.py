@@ -129,19 +129,17 @@ def _raw_history(root: pathlib.Path, env: Mapping[str, str]) -> None:
 
 
 def _transport(root: pathlib.Path, env: Mapping[str, str]) -> str:
-    """Pin SSH values and their effective scopes/origins, privately; never persist command text."""
-    result = run_command([*git_argv(), "-C", str(root), "config", "--null", "--show-scope", "--show-origin",
-                          "--get-regexp", r"^(core\.sshcommand|ssh\.variant)$"], timeout=GH_TIMEOUT, env=env)
-    if result.returncode not in (0, 1) or result.timed_out:
+    """Pin all effective git configuration and transport environment; expose only the digest."""
+    # Latin-1 preserves every output byte, including non-UTF-8 config values, for hashing only.
+    result = run_command([*git_argv(), "-C", str(root), "config", "--list", "--show-scope", "--show-origin",
+                          "-z"], timeout=GH_TIMEOUT, env=env, encoding="latin-1")
+    if result.returncode != 0 or result.timed_out:
         raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED", "git transport configuration could not be checked; "
                         "fix the git configuration and run oah land again")
     inherited = {key: value for key, value in env.items()
-                 if key.upper().startswith(("GIT_SSH", "GIT_CONFIG_")) or key.upper() == "GIT_CONFIG_PARAMETERS"}
-    entries = result.stdout.split("\0")[:-1]
-    for index in range(1, len(entries), 3):
-        if entries[index].startswith("file:"):
-            entries[index] = "file:" + str((root / entries[index][5:]).resolve())
-    return hashlib.sha256(json.dumps([inherited, entries], sort_keys=True).encode("utf-8")).hexdigest()
+                 if key.upper().startswith("GIT_")
+                 or key.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+    return hashlib.sha256(json.dumps([inherited, result.stdout], sort_keys=True).encode("utf-8")).hexdigest()
 
 
 class _GitContext:
@@ -157,7 +155,6 @@ class _GitContext:
         self.root = root
         self.original = _git_environment(env)
         _raw_history(root, self.original)
-        self.transport = _transport(root, self.original)
         objects = run_command([*git_argv(), "-C", str(root), "rev-parse", "--path-format=absolute",
                                "--git-path", "objects"], timeout=GH_TIMEOUT, env=self.original)
         git_dir = run_command([*git_argv(), "-C", str(root), "rev-parse", "--absolute-git-dir"],
@@ -173,6 +170,7 @@ class _GitContext:
         self.env = {**self.original, "GIT_OBJECT_DIRECTORY": str(self.source / "objects"),
                     "GIT_ALTERNATE_OBJECT_DIRECTORIES": alternates,
                     "GIT_DIR": git_dir.stdout.strip(), "GIT_WORK_TREE": str(root)}
+        self.transport = _transport(root, self.env)
 
     def __del__(self):
         if hasattr(self, "_temporary"):
@@ -183,6 +181,9 @@ class _GitContext:
 
     def unchanged(self, env):
         current = _git_environment(env)
+        # Reuse the assessment's pinned checkout and private objects, just as every transport does.
+        for key in ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_DIR", "GIT_WORK_TREE"):
+            current[key] = self.env[key]
         _raw_history(self.root, current)
         return _transport(self.root, current) == self.transport
 
@@ -291,6 +292,7 @@ class Assessment:
                 "default_branch": self.fetched, "base": self.base,
                 "changed": [_reference(path, position) for position, path in enumerate(self.changed, 1)],
                 "commits": self.commits, "impact": dict(self.impact) if self.impact else None,
+                "git_context": self._git.transport if self._git else None,
                 "required_checks": _required_json(self.required),
                 "checks": [check.to_json() for check in self.checks], "ready": self.ready, "code": self.code,
                 "warnings": ["OAH_LAND_IMPACT_WARNING: impact reported a warning; inspect the impact configuration"
@@ -1143,12 +1145,17 @@ def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) 
 
     git_context = assessment._git
     try:
-        if git_context is None or pathlib.Path(root).resolve() != git_context.root or not git_context.unchanged(env):
+        if git_context is None or pathlib.Path(root).resolve() != git_context.root:
             return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
                           "the destination or git transport changed; run oah land --merge and confirm again")
         with _git_environment_scope(git_context.original):
             state = state_dir(repo_info(root), git_context.original)
             with StateLock(_state_path(state, ".lock")):
+                if (assessment._destination is None
+                        or _destination(root, assessment.remote, git_context.env) != assessment._destination
+                        or not git_context.unchanged(env)):
+                    return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
+                                  "the destination or git transport changed; run oah land --merge and confirm again")
                 refusal = _revalidate_local(root, assessment, git_context.original)
                 if refusal is not None:
                     return Pushed(False, refusal.code, refusal.message)
@@ -1225,6 +1232,7 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
             "task": _reference(assessment.task), "head": assessment.head,
             "remote": _reference(assessment.remote), "branch": _reference(assessment.branch),
             "default_branch": assessment.fetched, "base": assessment.base,
+            "git_context": assessment._git.transport if assessment._git else None,
             "impact_result": assessment.impact["result"] if assessment.impact else None,
             "required_checks": _required_json(assessment.required),
             "checks": [{"name": check.name, "state": check.state, "code": check.code} for check in assessment.checks],

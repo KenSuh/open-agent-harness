@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pathlib
 import shlex
 import subprocess
 import sys
@@ -34,6 +35,91 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the git proxy executable fixture uses a POSIX shebang")
+    def test_git_proxy_rerouting_during_confirmation_updates_neither_repository(self):
+        project = LandProject(self)
+        other = project.work / "other.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                       check=True, env=git_env())
+        driver = pathlib.Path(str(project.remote) + ".proxy.py")
+        other_driver = pathlib.Path(str(other) + ".proxy.py")
+        script = (f"#!{sys.executable}\n"
+            "# 로컬 Git 프록시 시험 — 네트워크 없이 요청을 실제 bare 저장소 서비스에 연결한다.\n"
+            "import os, subprocess, sys\n"
+            "def read_exact(size):\n"
+            "    data = b''\n"
+            "    while len(data) < size:\n"
+            "        part = os.read(0, size - len(data))\n"
+            "        if not part:\n"
+            "            sys.exit(1)\n"
+            "        data += part\n"
+            "    return data\n"
+            "request = read_exact(int(read_exact(4), 16) - 4)\n"
+            "service = request.split(b' ', 1)[0].decode('ascii').removeprefix('git-')\n"
+            "env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}\n"
+            "sys.exit(subprocess.run(['git', service, sys.argv[0].removesuffix('.proxy.py')], env=env).returncode)\n"
+        ).encode("utf-8")
+        for proxy in (driver, other_driver):
+            proxy.write_bytes(script)
+            proxy.chmod(0o755)
+        git(project.repo, "remote", "set-url", "origin", "git://oah-proxy.invalid/fixture")
+        git(project.repo, "config", "core.gitProxy", str(driver))
+        confirmed = []
+
+        def reroute(_prompt):
+            confirmed.append(True)
+            git(project.repo, "config", "core.gitProxy", str(other_driver))
+            return "y\n"
+
+        done = land_command(project, "--merge", "--task", "t1", "--json", interactive=True, ask=reroute)
+        self.assertTrue(confirmed, done.stdout + done.stderr)
+        self.assertEqual(project.remote_main(), project.base)
+        self.assertEqual(git(other, "rev-parse", "main"), project.base)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        body = json.loads(done.stdout)
+        self.assertEqual(body["code"], "OAH_LAND_DESTINATION_CHANGED")
+        self.assertRegex(body["assessment"]["git_context"], r"^[0-9a-f]{64}$")
+        self.assertEqual(records(project)[-1]["git_context"], body["assessment"]["git_context"])
+        emitted = done.stdout + done.stderr + json.dumps(records(project))
+        for private in (str(project.remote), str(other), str(driver), "oah-proxy.invalid"):
+            self.assertNotIn(private, emitted)
+
+    def test_non_ssh_config_changes_during_confirmation_refuse_privately(self):
+        for setting in ("core.gitProxy", "http.proxy", "http.https://example.invalid/.proxy", "http.noProxy"):
+            with self.subTest(setting=setting):
+                project = LandProject(self)
+                other = project.work / "other.git"
+                subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                               check=True, env=git_env())
+                private = secrets.token_hex(24)
+
+                def reroute(_prompt):
+                    git(project.repo, "config", setting, private)
+                    return "y\n"
+
+                done = land_command(project, "--merge", "--task", "t1", "--json", interactive=True, ask=reroute)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["code"], "OAH_LAND_DESTINATION_CHANGED")
+                self.assertEqual(project.remote_main(), project.base)
+                self.assertEqual(git(other, "rev-parse", "main"), project.base)
+                self.assertNotIn(private, done.stdout + done.stderr + json.dumps(records(project)))
+
+    def test_proxy_environment_changes_during_confirmation_refuse_privately(self):
+        project = LandProject(self)
+        for setting in ("GIT_PROXY_COMMAND", "http_proxy", "HTTPS_PROXY", "All_Proxy", "nO_pRoXy"):
+            with self.subTest(setting=setting):
+                private = secrets.token_hex(24)
+
+                def reroute(_prompt):
+                    os.environ[setting] = private
+                    return "y\n"
+
+                done = land_command(project, "--merge", "--task", "t1", "--json", interactive=True, ask=reroute)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["code"], "OAH_LAND_DESTINATION_CHANGED")
+                self.assertEqual(project.remote_main(), project.base)
+                self.assertNotIn(private, done.stdout + done.stderr + json.dumps(records(project)))
+
     def test_ssh_transport_changes_during_confirmation_refuse(self):
         for setting in ("GIT_SSH", "GIT_SSH_COMMAND", "core.sshCommand"):
             with self.subTest(setting=setting):
