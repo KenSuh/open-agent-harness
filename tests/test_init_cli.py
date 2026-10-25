@@ -600,6 +600,48 @@ class NoOverwriteTest(unittest.TestCase):
 
 
 class CorrectionC3Test(unittest.TestCase):
+    def test_linked_config_refuses_even_with_force_without_displaying_its_bytes(self):
+        repo = committed_repo(self)
+        outside = make_tmp_dir(self)
+        secret = "fake-" + token_source.token_hex(20)
+        (outside / "config.toml").write_bytes(('# ' + secret + '\n').encode("ascii"))
+        directory_alias(outside, repo / ".oah")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", *flags())
+        self.assertEqual(code, 69, out + err)
+        self.assertIn("OAH_INIT_PATH_UNSAFE", err)
+        self.assertNotIn(secret, out + err)
+        self.assertFalse((repo / "AGENTS.md").exists())
+
+    @unittest.skipIf(os.name == "nt", "file symlinks need Windows developer privileges")
+    def test_ci_manifest_link_is_not_read_by_init(self):
+        repo = committed_repo(self)
+        outside = make_tmp_dir(self) / "private.json"
+        secret = "fake-" + token_source.token_hex(20)
+        outside.write_bytes(json.dumps({"scripts": {"test": "echo " + secret}}).encode("ascii"))
+        (repo / "package.json").symlink_to(outside)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(ci=True))
+        self.assertEqual(code, 69, out + err)
+        self.assertIn("OAH_INIT_PATH_UNSAFE", err)
+        self.assertNotIn(secret, out + err)
+        self.assertFalse((repo / ".github/workflows/oah-ci.yml").exists())
+
+    def test_root_negation_in_an_empty_nested_folder_leaves_init_incomplete(self):
+        for folder in ("docs", "empty/deeper", "docs/wiki/templates"):
+            with self.subTest(folder=folder):
+                repo = committed_repo(self)
+                if folder != "docs/wiki/templates":  # this directory must be visited after init creates it
+                    (repo / folder).mkdir(parents=True)
+                original = init.add_gitignore_entries(None, unlazy_copy=False) + (
+                    "!" + folder + "/*.key\n").encode("ascii")
+                (repo / ".gitignore").write_bytes(original)
+                code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("OAH_INIT_IGNORE_UNPROTECTED: required pattern *.key", out)
+                self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
+                self.assertEqual((repo / ".gitignore").read_bytes(), original)
+                self.assertTrue((repo / folder).is_dir())
+                self.assertFalse(list((repo / folder).glob("*.key")))
+
     def test_required_ignore_negations_leave_init_incomplete(self):
         patterns = [entry for _comment, entries in init._gitignore_groups(False) for entry in entries]
         for pattern in patterns:

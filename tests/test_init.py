@@ -505,6 +505,71 @@ class RulesStepTest(unittest.TestCase):
         with self.assertRaises(rules.RulesError):
             init.plan_rules(self.repo, lang=None)
 
+    @unittest.skipIf(os.name == "nt", "file symlinks need Windows developer privileges")
+    def test_linked_local_rules_never_enter_agents(self):
+        outside = make_tmp_dir(self) / "private.txt"
+        secret = ("fake-" + token_source.token_hex(20)).encode("ascii")
+        outside.write_bytes(secret)
+        (self.repo / ".oah").mkdir()
+        (self.repo / rules.LOCAL_RULES).symlink_to(outside)
+        with self.assertRaises(init.InitError) as caught:
+            init._sync_rules(self.repo, init.plan_rules(self.repo, lang=None))
+        self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+        self.assertNotIn(secret.decode("ascii"), str(caught.exception))
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
+    def test_local_rules_parent_link_is_rejected(self):
+        outside = make_tmp_dir(self)
+        (outside / "rules.local.md").write_bytes(b"private source\r\n")
+        directory_alias(outside, self.repo / ".oah")
+        with self.assertRaises(init.InitError):
+            init.plan_rules(self.repo, lang=None)
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction path semantics")
+    def test_windows_local_rules_parent_junction_is_rejected(self):
+        self.test_local_rules_parent_link_is_rejected()
+
+    def test_rules_planning_reads_nothing_through_path_read_bytes(self):
+        (self.repo / ".oah").mkdir()
+        (self.repo / rules.LOCAL_RULES).write_bytes(b"Use tabs.\r\n")
+        (self.repo / "AGENTS.md").write_bytes(b"# Project\r\n")
+        (self.repo / "CLAUDE.md").write_bytes(b"# Claude\r\n")
+        # Landed pure rendering stays real; user reads must use init's pinned handles.
+        real_read = pathlib.Path.read_bytes
+
+        def read(path):
+            if path.is_relative_to(self.repo):
+                self.fail("unprotected user-file read")
+            return real_read(path)
+
+        with mock.patch.object(pathlib.Path, "read_bytes", read):
+            step = init.plan_rules(self.repo, lang=None)
+        self.assertIn(b"Use tabs.\r\n", step.planned.agents_after)
+
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor-relative no-follow race")
+    def test_read_refuses_a_local_rules_link_created_during_open(self):
+        (self.repo / ".oah").mkdir()
+        local = self.repo / rules.LOCAL_RULES
+        local.write_bytes(b"Use tabs.\r\n")
+        outside = make_tmp_dir(self) / "secret"
+        outside.write_bytes(("fake-" + token_source.token_hex(20)).encode("ascii"))
+        real_open = os.open
+        swapped = False
+
+        def swap(name, flags, *args, **kwargs):
+            nonlocal swapped
+            if name == "rules.local.md" and not swapped:
+                swapped = True
+                local.unlink()
+                local.symlink_to(outside)
+            return real_open(name, flags, *args, **kwargs)
+
+        with mock.patch.object(os, "open", side_effect=swap), self.assertRaises(init.InitError):
+            init.plan_rules(self.repo, lang=None)
+        self.assertTrue(swapped)
+        self.assertFalse((self.repo / "AGENTS.md").exists())
+
     def test_aside_rules_section_added_once(self):
         self.assertEqual(init.add_aside_rules(self.repo, lang="en"), "added")
         local = self.repo / ".oah" / "rules.local.md"
@@ -582,7 +647,7 @@ class HookStepTest(unittest.TestCase):
         self.assertIn(f"replaces {len(original)} bytes (sha256 {hashlib.sha256(original).hexdigest()})", step.note)
         self.assertEqual(path.read_bytes(), original)
 
-    def test_local_settings_backup_is_ignored_before_install(self):
+    def test_local_settings_backup_is_outside_the_worktree(self):
         path = self.repo / init.CLAUDE_SETTINGS
         path.parent.mkdir()
         secret = "fake-" + token_source.token_hex(20)
@@ -596,7 +661,116 @@ class HookStepTest(unittest.TestCase):
         self.assertEqual(git("check-ignore", backup, cwd=self.repo), backup)
         git("add", "-A", cwd=self.repo)
         self.assertNotIn(backup, git("ls-files", cwd=self.repo).splitlines())
-        self.assertEqual((self.repo / backup).read_bytes(), original)
+        self.assertFalse((self.repo / backup).exists())
+        backups = list((repo_info(self.repo).common_dir / "oah/backups").glob("*/*"))
+        self.assertEqual([item.read_bytes() for item in backups], [original])
+
+    def test_forced_hook_backup_never_enters_the_worktree_or_index(self):
+        git("config", "core.hooksPath", ".githooks", cwd=self.repo)
+        path = self.repo / ".githooks/pre-push"
+        path.parent.mkdir()
+        secret = ("fake-" + token_source.token_hex(20)).encode("ascii")
+        original = b"#!/bin/sh\r\n# " + secret + b"\r\n"
+        path.write_bytes(original)
+        ignore = self.repo / ".gitignore"
+        ignore.write_bytes(ignore.read_bytes() + b".githooks/pre-push\n")
+        step = self.steps(force=True)["pre-push"]
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual((installed, problems), (["pre-push"], []))
+        self.assertFalse(path.with_name(path.name + hooks.BACKUP_SUFFIX).exists())
+        backups = list((repo_info(self.repo).common_dir / "oah/backups").glob("*/*"))
+        self.assertEqual([backup.read_bytes() for backup in backups], [original])
+        git("add", "-A", cwd=self.repo)
+        self.assertFalse(any(".oah.bak" in name for name in git("ls-files", cwd=self.repo).splitlines()))
+        self.assertNotIn(secret.decode("ascii"), repr(step))
+
+    def test_hook_backup_refuses_a_linked_state_folder(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\r\n# private fixture\r\n"
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        outside = make_tmp_dir(self)
+        directory_alias(outside, repo_info(self.repo).common_dir / "oah")
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual(installed, [])
+        self.assertTrue(problems)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_forced_hook_keeps_the_landed_legacy_backup_refusal(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        path.write_bytes(b"#!/bin/sh\r\n# foreign fixture\r\n")
+        path.with_name(path.name + hooks.BACKUP_SUFFIX).write_bytes(b"legacy fixture\r\n")
+        step = self.steps(force=True)["pre-push"]
+        self.assertEqual(step.action, "refused")
+        self.assertIn("OAH_HOOK_BACKUP_EXISTS", step.note)
+
+    def test_hook_conflict_reports_the_private_backup_position_and_digest(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\r\n# foreign fixture\r\n"
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        flush = os.fsync
+
+        def edit(fd):
+            flush(fd)
+            path.write_bytes(b"#!/bin/sh\r\n# concurrent edit\r\n")
+
+        with mock.patch.object(os, "fsync", side_effect=edit):
+            installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual(installed, [])
+        self.assertIn(step.backup, "\n".join(problems))
+        self.assertIn(hashlib.sha256(original).hexdigest(), "\n".join(problems))
+        self.assertEqual((repo_info(self.repo).common_dir / "oah/backups" / step.backup).read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_hook_backup_refuses_a_public_run_directory(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\n# private fixture\n"
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        destination = repo_info(self.repo).common_dir / "oah/backups" / step.backup
+        destination.parent.mkdir(parents=True, mode=0o755)
+        destination.parent.chmod(0o755)
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual(installed, [])
+        self.assertTrue(problems)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(destination.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_private_settings_and_staging_keep_private_modes(self):
+        path = self.repo / init.CLAUDE_SETTINGS
+        path.parent.mkdir()
+        original = b'{"env":{"PRIVATE_VALUE":"fixture"}}\r\n'
+        path.write_bytes(original)
+        path.chmod(0o600)
+        steps = list(self.steps().values())
+        opened = []
+        real_open = os.open
+
+        def record(name, flags, mode=0o777, **kwargs):
+            fd = real_open(name, flags, mode, **kwargs)
+            if flags & os.O_CREAT:
+                opened.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            return fd
+
+        old_umask = os.umask(0o022)
+        try:
+            with mock.patch.object(os, "open", side_effect=record):
+                installed, problems = init.install_hooks(self.repo, steps, force=False)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(problems, [])
+        self.assertIn("stop", installed)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertTrue(opened)
+        self.assertEqual(set(opened), {0o600})
+        backups = list((repo_info(self.repo).common_dir / "oah/backups").glob("*/*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(backups[0].parent.stat().st_mode), 0o700)
 
     def test_hooks_refuse_missing_backup_ignore_or_a_linked_backup(self):
         steps = list(self.steps().values())
@@ -776,7 +950,19 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
         backup = self.target.with_name("unlazy.oah.bak")
-        self.assertTrue((backup / "scripts" / "gate-check.mjs").is_file())
+        self.assertFalse(backup.exists())
+        backups = list((repo_info(self.repo).common_dir / "oah/backups").glob("*/*"))
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / "scripts" / "gate-check.mjs").is_file())
+
+    def test_project_pin_verification_rejects_linked_script_sources(self):
+        outside = make_tmp_dir(self)
+        (outside / "gate-check.mjs").write_bytes(("fake-" + token_source.token_hex(20)).encode("ascii"))
+        self.target.mkdir(parents=True)
+        directory_alias(outside, self.target / "scripts")
+        with self.assertRaises(init.InitError) as caught:
+            self.plan()
+        self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
 
     def test_failed_replacement_puts_the_old_copy_back(self):
         make_unlazy(self.target)
@@ -796,6 +982,30 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
         self.assertEqual(script.read_bytes(), b"// concurrent\r\n")
         self.assertFalse(self.target.with_name("unlazy.oah.bak").exists())
+
+    def test_replacement_tree_reads_refuse_a_swapped_ancestor(self):
+        make_unlazy(self.target)
+        outside = make_tmp_dir(self)
+        external = outside / "skills/unlazy/scripts/gate-check.mjs"
+        external.parent.mkdir(parents=True)
+        external.write_bytes(("fake-" + token_source.token_hex(20)).encode("ascii"))
+        script = self.target / "scripts/gate-check.mjs"
+        real_stat = pathlib.Path.stat
+        swapped = False
+
+        def swap(path, *args, **kwargs):
+            nonlocal swapped
+            result = real_stat(path, *args, **kwargs)
+            if path == script and not swapped:
+                swapped = True
+                (self.repo / ".agents").rename(self.repo / "saved-agents")
+                directory_alias(outside, self.repo / ".agents")
+            return result
+
+        # Hash real files, but redirect an ancestor between metadata and the content read.
+        with mock.patch.object(pathlib.Path, "stat", swap), self.assertRaises(init.InitError):
+            init._tree_digest(self.target, root=self.repo)
+        self.assertTrue(swapped)
 
     def test_install_refuses_parent_linked_during_clone(self):
         step = self.plan()
