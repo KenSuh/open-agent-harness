@@ -44,12 +44,14 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime as dt
+import difflib
 import json
 import os
 import pathlib
 import re
 import shutil
 import signal
+import stat
 import tempfile
 import threading
 from importlib import resources
@@ -184,15 +186,20 @@ def _held_signals() -> Iterator[list[int]]:
 
 @contextlib.contextmanager
 def _stop_signals() -> Iterator[None]:
-    """While Codex runs, a stop signal (SIGTERM, SIGHUP; SIGBREAK on Windows) stops it the way Ctrl-C does."""
+    """Protect the whole attempt; keep repeated signals from interrupting tree cleanup."""
+    stopping = False
+
     def stop(signum, _frame):
-        raise KeyboardInterrupt(f"signal {signum}")
+        nonlocal stopping
+        if not stopping:
+            stopping = True
+            raise KeyboardInterrupt(f"signal {signum}")
 
     saved: dict[int, object] = {}
     if threading.current_thread() is threading.main_thread():
-        for number in _STOP_SIGNALS:
+        for number in (signal.SIGINT, *_STOP_SIGNALS):
             try:
-                if signal.getsignal(number) is signal.SIG_DFL:
+                if signal.getsignal(number) not in (signal.SIG_IGN, None):
                     saved[number] = signal.signal(number, stop)
             except (OSError, ValueError):
                 continue
@@ -506,23 +513,63 @@ def _git_bytes(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,)) -> by
 class _Changes:
     tracked: tuple[str, ...]  # changed, added in the index, or deleted, against the start head
     new: tuple[str, ...]  # untracked files that did not exist before the run
+    user: tuple[str, ...] = ()  # preexisting untracked files changed by the run; never staged automatically
 
     @property
     def files(self) -> list[str]:
-        return list(self.tracked) + [name for name in self.new if name not in self.tracked]
+        return list(dict.fromkeys((*self.tracked, *self.new, *self.user)))
 
 
-def _changes(root: pathlib.Path, before: str, untracked: Sequence[str]) -> _Changes:
+def _file_snapshot(root: pathlib.Path, name: str) -> tuple[int, bytes] | None:
+    """Keep user-owned bytes in memory only, without following a file symlink."""
+    path = root / name
+    try:
+        info = path.lstat()
+        kind = stat.S_IFMT(info.st_mode)
+        data = (os.fsencode(os.readlink(path)) if stat.S_ISLNK(info.st_mode) else
+                path.read_bytes() if stat.S_ISREG(info.st_mode) else b"")
+        return kind | (info.st_mode & 0o111), data
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ReviewError("OAH_FIX_GIT_FAILED", f"cannot inspect untracked file {name!r}: {exc}; check its permissions "
+                          "and retry oah fix") from None
+
+
+def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int, bytes] | None]) -> _Changes:
     tracked = _names(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", before, "--")
-    earlier = set(untracked)
-    return _Changes(tuple(tracked), tuple(name for name in _untracked(root) if name not in earlier))
+    user = tuple(name for name, snapshot in untracked.items()
+                 if name in tracked or _file_snapshot(root, name) != snapshot)
+    return _Changes(tuple(name for name in tracked if name not in untracked),
+                    tuple(name for name in _untracked(root) if name not in untracked), user)
 
 
-def _patch(root: pathlib.Path, before: str, changes: _Changes) -> bytes:
-    parts = [_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", before, "--")]
+def _patch(root: pathlib.Path, before: str, changes: _Changes,
+           untracked: Mapping[str, tuple[int, bytes] | None],
+           redact: Callable[[str], str] | None = None) -> bytes:
+    parts = [_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", before, "--", ".",
+                        *(f":(exclude,literal){name}" for name in changes.user))]
     for name in changes.new:
         parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--",
                                 "/dev/null", name, ok=(0, 1)))
+    for name in changes.user:
+        old, new = untracked[name], _file_snapshot(root, name)
+        before_data, after_data = old[1] if old else b"", new[1] if new else b""
+        parts.append(f"diff --git {json.dumps('a/' + name)} {json.dumps('b/' + name)}\n".encode("utf-8"))
+        if old is None or new is None or old[0] != new[0]:
+            parts.append(f"file mode {old[0] if old else 'absent'} -> {new[0] if new else 'absent'}\n".encode("ascii"))
+        if b"\0" in before_data or b"\0" in after_data:
+            parts.append(b"Binary files differ\n")
+        else:
+            if redact is not None:
+                # Redact whole file text before diff prefixes can split a multiline credential.
+                before_data = redact(before_data.decode("utf-8", errors="replace")).encode("utf-8")
+                after_data = redact(after_data.decode("utf-8", errors="replace")).encode("utf-8")
+            for line in difflib.diff_bytes(difflib.unified_diff, before_data.splitlines(keepends=True),
+                                          after_data.splitlines(keepends=True),
+                                          fromfile=os.fsencode("a/" + name) if old else b"/dev/null",
+                                          tofile=os.fsencode("b/" + name) if new else b"/dev/null"):
+                parts.append(line if line.endswith(b"\n") else line + b"\n\\ No newline at end of file\n")
     return b"".join(parts)
 
 
@@ -591,7 +638,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
-        untracked = _untracked(t.root)
+        untracked = {name: _file_snapshot(t.root, name) for name in _untracked(t.root)}
         instructions = round_instructions(
             task=t.name, attempt_id=attempt_id, receipt=receipt.name.removesuffix(".json"),
             receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
@@ -648,14 +695,20 @@ class _Attempt:
                                   "finished_at": _iso(), "run_id": self.run_id}, {"outcome": outcome})
         self.ended = True
 
-    def _left_behind(self, untracked: Sequence[str]) -> str:
+    def _left_behind(self, untracked: Mapping[str, tuple[int, bytes] | None]) -> str:
         try:
             files = _changes(self.t.root, self.before, untracked).files
         except ReviewError:
             return "; oah could not list the changes it left in the worktree"
         return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
 
-    def run(self, *, launch_env, rules, final: pathlib.Path, untracked: Sequence[str]) -> Result:
+    def run(self, *, launch_env, rules, final: pathlib.Path,
+            untracked: Mapping[str, tuple[int, bytes] | None]) -> Result:
+        with _stop_signals():
+            return self._run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
+
+    def _run(self, *, launch_env, rules, final: pathlib.Path,
+             untracked: Mapping[str, tuple[int, bytes] | None]) -> Result:
         start = {"source_receipt": self.receipt.name, "source_receipt_digest": self.receipt.digest,
                  "finding_ids": self.finding_ids, "class_ids": self.class_ids, "before_head": self.before,
                  "engine": ENGINE, "manual": False, "started_at": _iso(), "run_id": self.run_id}
@@ -663,15 +716,17 @@ class _Attempt:
             with _held_signals() as held:
                 self._publish("start", start)
             if held:
-                with _held_signals():
-                    self._end("aborted", f"oah fix was interrupted while it recorded the start of {self.attempt_id}; "
-                                         f"codex run {self.run_id} was never launched")
-                raise FixInterrupted(f"{self.attempt_id} was recorded as aborted before Codex started; nothing was "
-                                     f"launched. Run oah fix --task {self.t.name} again when you are ready")
-            with _stop_signals():
+                raise KeyboardInterrupt("stop signal while recording the start; Codex was never launched")
+            with call._correction_cleanup():
                 run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
-        except FixInterrupted:
-            raise
+            judged = self._judge(run, final, untracked)
+            with _held_signals() as held:
+                self._end(judged.outcome, judged.evidence)
+            result = self._result(judged)
+            if held:
+                result.warnings.append(f"{INTERRUPTED}: a stop signal arrived during terminal publication; the outcome "
+                                       f"of {self.attempt_id} is durable. Inspect the worktree before continuing")
+            return result
         except BaseException as exc:
             if not self.published or self.ended:
                 raise
@@ -692,26 +747,13 @@ class _Attempt:
             text = text[len(code) + 2:] if text.startswith(code + ": ") else text
             raise ReviewError(code, f"{text}. {self.attempt_id} was recorded as failed; fix the cause, then run oah "
                               f"fix --task {self.t.name} again") from None
-        with _held_signals() as held:
-            try:
-                judged = self._judge(run, final, untracked)
-            except Exception as exc:
-                self._end("failed", f"codex run {self.run_id} ended ({run.get('status')}), but oah could not inspect "
-                                    f"the worktree: {str(exc)[:300]}")
-                raise
-            self._end(judged.outcome, judged.evidence)
-        result = self._result(judged)
-        if held:
-            result.warnings.append(f"{INTERRUPTED}: a stop signal arrived after Codex finished; the outcome of "
-                                   f"{self.attempt_id} was recorded first")
-        return result
 
-    def _judge(self, run: dict, final: pathlib.Path, untracked: Sequence[str]) -> "_Judged":
+    def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id
         head = _head(root)
         changes = _changes(root, self.before, untracked)
         sensitive_paths = any(self.redact(name) != name for name in changes.files)
-        raw = _patch(root, self.before, changes)
+        raw = _patch(root, self.before, changes, untracked, self.redact)
         # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
         patch = ("OAH_FIX_SENSITIVE_PATH: diff withheld because a filename contains a runtime credential; "
                  "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
@@ -740,6 +782,11 @@ class _Attempt:
         else:
             outcome, reason = "no-change", None
             evidence = f"codex run {rid} finished without changing any file; {effort}"
+        if outcome == "applied" and changes.user:
+            outcome = "failed"
+            reason = ("Codex changed preexisting untracked files owned by the user; automatic commit guidance was "
+                      "withheld. Inspect correction.patch and restore or keep those files yourself before retrying")
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "applied" and sensitive_paths:
             outcome = "failed"
             reason = ("OAH_FIX_SENSITIVE_PATH: a changed filename contains a runtime credential; commit guidance "
@@ -760,7 +807,8 @@ class _Attempt:
         write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
         write_json_atomic(self.prepared.run.file_path("correction.json"), _redacted({
             "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,
-            "changed": list(changes.tracked), "new_files": list(changes.new), "changes_sha256": digest,
+            "changed": list(changes.tracked), "new_files": list(changes.new), "user_files": list(changes.user),
+            "changes_sha256": digest,
             "commands": commands, "out_of_scope": beyond}, self.redact))
         return _Judged(outcome, evidence, reason, changes, patch, effort, commands, unquoted, beyond, message, head)
 
@@ -769,8 +817,13 @@ class _Attempt:
         warnings: list[str] = []
         if judged.beyond:
             warnings.append(f"OAH_FIX_OUT_OF_SCOPE: Codex changed files outside the scope {_ids(t.lease.scope)} of "
-                            f"task {t.name}: {_ids(judged.beyond)}. Restore them (git restore -- <path>, or delete new "
-                            "files) before you commit, or widen the scope with oah renew --scope")
+                            f"task {t.name}: {_ids(judged.beyond)}. Restore tracked files with git restore -- <path>; "
+                            "recover preexisting untracked files from your own backup and inspect new files before "
+                            "deleting them, or widen the scope with oah renew --scope")
+        if judged.changes.user:
+            warnings.append("OAH_FIX_USER_FILES_CHANGED: Codex modified or deleted preexisting untracked files: "
+                            f"{_ids(judged.changes.user)}. Review correction.patch and restore or keep them yourself; "
+                            "these files are excluded from automatic staging guidance")
         found, reason = oah_intent.explain_binding(self.binding, t.root)
         if found != "current":
             warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent {self.binding.source} is "
@@ -786,7 +839,9 @@ class _Attempt:
         lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
         if judged.changes.files:
             lines.append("changed files: " + _ids(judged.changes.tracked + tuple(f"{name} (new)"
-                                                                                    for name in judged.changes.new)))
+                                                                                    for name in judged.changes.new)
+                                                  + tuple(f"{name} (preexisting untracked)"
+                                                          for name in judged.changes.user)))
             shown = judged.patch.splitlines()
             lines += shown[:DIFF_LINES]
             if len(shown) > DIFF_LINES:
@@ -812,6 +867,9 @@ class _Attempt:
             if judged.head != self.before:
                 left = (f" Codex cannot commit in its sandbox, so something else moved HEAD; see git log "
                         f"{self.before[:12]}..HEAD and decide what to keep before you go on.")
+            elif judged.changes.user:
+                left = (f" It changed user-owned untracked files ({_ids(judged.changes.user[:20])}); inspect "
+                        "correction.patch and recover them from your own backup or keep them yourself before retrying.")
             elif judged.changes.files:
                 left = (f" It left changes in the worktree ({_ids(judged.changes.files[:20])}); inspect them with git "
                         f"diff, then discard them (git restore --source=HEAD --staged --worktree -- . and delete the "

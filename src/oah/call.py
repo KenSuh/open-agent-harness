@@ -41,6 +41,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable, Mapping, Sequence
 
 import oah.intent as oah_intent
@@ -54,6 +55,7 @@ WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
 ISOLATED_CODEX_FLAGS = ("--ignore-user-config", "--ignore-rules")  # review rounds (PLAN 5.9 step 6)
 WAIT_LIMIT_S = 540.0
 POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a running worker is polled
+_CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
@@ -726,6 +728,16 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                       exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
 
 
+@contextmanager
+def _correction_cleanup():
+    """Opt `oah fix` into stopping descendants before post-run accounting; ordinary calls stay unchanged."""
+    token = _CORRECTION_CLEANUP.set(True)
+    try:
+        yield
+    finally:
+        _CORRECTION_CLEANUP.reset(token)
+
+
 def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
     from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
@@ -770,6 +782,9 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 except subprocess.TimeoutExpired:
                     out, err = b"", b""
                 return RunResult(None, decode_output(out), decode_output(err), True)
+        if _CORRECTION_CLEANUP.get():
+            # A completed correction must leave no owned descendants changing the tree during accounting.
+            kill_tree(child)
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     except BaseException:
         # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.

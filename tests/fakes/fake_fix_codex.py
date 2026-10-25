@@ -11,6 +11,7 @@ the end. A step may set:
   commit         true: commit everything with git itself, which Codex's read-only .git forbids
   hang           true: write pid-<k>.txt in record_dir before reading the brief, then sleep until killed
   exit_with_descendant true: exit while a descendant keeps stdout/stderr open
+  spawn_descendant true: leave a descendant with closed output pipes after a normal return
   probe_lease    true: run `oah renew`, `oah finish` and `oah fix --bind` as this worker and record the results
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   last_message   the final message; default: a line, then the INTENT and AC lines read from the brief
@@ -144,6 +145,15 @@ def main(argv: list[str]) -> int:
         subprocess.Popen([sys.executable, __file__, "--descendant", str(record_dir / "descendant.txt")],
                          stdin=subprocess.DEVNULL)
         os._exit(0)
+    if step.get("spawn_descendant"):
+        pid_file = record_dir / "descendant.txt"
+        subprocess.Popen([sys.executable, __file__, "--descendant", str(pid_file)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("fake descendant did not start")
+            time.sleep(0.01)
     if step.get("hang"):
         while True:
             time.sleep(1)

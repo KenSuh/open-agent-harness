@@ -186,6 +186,26 @@ def interrupt_when(path: pathlib.Path) -> threading.Thread:
 
 
 class CallSeamTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX calls retain their landed descendant behavior")
+    def test_plain_call_retains_its_descendant_behavior(self):
+        project = FixProject(self)
+        project.queue_fix({"spawn_descendant": True})
+        prepared = self.prepare(project)
+        pid_file = project.fix_dir / "descendant.txt"
+        try:
+            run = call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+            self.assertEqual(run["status"], "finished")
+            heartbeat = pid_file.with_suffix(".heartbeat")
+            before = heartbeat.read_bytes()
+            time.sleep(0.2)
+            self.assertNotEqual(heartbeat.read_bytes(), before)
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def prepare(self, project: FixProject, **fields) -> call.Prepared:
         tools = call_cli.intent_tools()
         return call.prepare(call.CallRequest(engine="codex", stage="correction", task="t1", tier="high", **fields),
@@ -465,6 +485,63 @@ class RefusalTest(unittest.TestCase):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_corrector_staging_a_user_file_withholds_commit_guidance(self):
+        project = FixProject(self)
+        project.changes_requested()
+        name = "src/notes.txt"
+        (project.repo / name).write_bytes(b"user's original\n")
+        project.queue_fix({"write": {name: "overwritten\n", **FIXED}})
+        execute = call.execute
+
+        def staged(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            git(project.repo, "add", "--", name)
+            return result
+
+        with mock.patch.object(call, "execute", side_effect=staged):
+            result = project.fix()
+        self.assertEqual((result.outcome, result.commands), ("failed", []))
+        self.assertIn("preexisting untracked", "\n".join(result.lines))
+        self.assertIn("-user's original", "\n".join(result.lines))
+
+    def test_preexisting_untracked_bytes_are_compared_even_with_unchanged_metadata(self):
+        project = FixProject(self)
+        path = project.repo / "src/notes.txt"
+        path.write_bytes(b"old\x00\r\n")
+        snapshot = {"src/notes.txt": fix._file_snapshot(project.repo, "src/notes.txt")}
+        info = path.stat()
+        path.write_bytes(b"new\x00\r\n")
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        changes = fix._changes(project.repo, project.head, snapshot)
+        self.assertEqual(changes.user, ("src/notes.txt",))
+        self.assertEqual(changes.new, ())
+        self.assertIn(b"Binary files differ", fix._patch(project.repo, project.head, changes, snapshot))
+
+    def test_preexisting_untracked_modifications_and_deletions_are_reported(self):
+        for name in ("src/notes.txt", "outside/notes.txt"):
+            for content in ("overwritten\n", None):
+                with self.subTest(name=name, content=content):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    path = project.repo / name
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_bytes(b"user's original\r\n")
+                    project.queue_fix({"write": {name: content}})
+                    result = project.fix()
+                    self.assertNotEqual(result.outcome, "no-change")
+                    self.assertIn(name, "\n".join(result.lines))
+                    self.assertIn(name, project.record("A1-outcome.json")["evidence"])
+                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    self.assertIn(b"-user's original\r\n", patch)
+                    if content is not None:
+                        self.assertIn(b"+overwritten\n", patch)
+                    self.assertFalse(any(name in command for command in result.commands))
+                    self.assertEqual(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings),
+                                     name.startswith("outside/"))
+                    saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                    self.assertIn(name, saved["user_files"])
+                    self.assertNotIn(name, saved["new_files"])
+
     def test_correction_runs_as_a_worker_in_the_leased_worktree(self):
         project = FixProject(self)
         project.changes_requested()
@@ -556,6 +633,55 @@ class WorkerTest(unittest.TestCase):
 
 
 class OutcomeTest(unittest.TestCase):
+    def completed_tree_stops_before_inspection(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"spawn_descendant": True})
+        heartbeat = project.fix_dir / "descendant.heartbeat"
+
+        def inspect(*_args):
+            self.assertTrue(heartbeat.exists())
+            time.sleep(0.1)  # allow Windows job termination to finish
+            before = heartbeat.read_bytes()
+            time.sleep(0.2)
+            self.assertEqual(heartbeat.read_bytes(), before, "the corrector's descendant is still writing")
+            raise KeyboardInterrupt("after the corrector exited")
+
+        with mock.patch.object(fix._Attempt, "_judge", side_effect=inspect):
+            try:
+                with self.assertRaises(fix.FixInterrupted):
+                    project.fix()
+            finally:
+                pid_file = project.fix_dir / "descendant.txt"
+                if os.name != "nt" and pid_file.exists():
+                    try:
+                        os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process group cleanup")
+    def test_completed_corrector_tree_stops_before_inspection(self):
+        self.completed_tree_stops_before_inspection()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows job cleanup")
+    def test_windows_completed_corrector_tree_stops_before_inspection(self):
+        self.completed_tree_stops_before_inspection()
+
+    def test_exception_during_post_run_inspection_settles_the_attempt(self):
+        for exception in (KeyboardInterrupt, SystemExit, RuntimeError):
+            with self.subTest(exception=exception):
+                project = FixProject(self)
+                project.changes_requested()
+                project.queue_fix({"write": FIXED})
+                with mock.patch.object(fix._Attempt, "_judge", side_effect=exception("inspection stopped")):
+                    with self.assertRaises(BaseException) as caught:
+                        project.fix()
+                self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
+                self.assertIsInstance(caught.exception, (fix.FixInterrupted, ReviewError))
+                self.assertEqual(project.record("A1-outcome.json")["outcome"],
+                                 "aborted" if exception is KeyboardInterrupt else "failed")
+
     def outcome_names(self, project: FixProject) -> list[str]:
         return [name for name in project.names() if name.startswith("A")]
 
@@ -895,6 +1021,24 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_untracked_snapshots_never_retain_credentials(self):
+        for sensitive_name in (False, True):
+            with self.subTest(sensitive_name=sensitive_name):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16)
+                if not sensitive_name:
+                    key += "\ncontinuation-" + token_source.token_hex(16)
+                project.env["OPENAI_API_KEY"] = key
+                name = "src/" + (key if sensitive_name else "notes.txt")
+                (project.repo / name).write_bytes((key + "\r\n").encode("utf-8"))
+                project.queue_fix({"write": {name: "overwritten\n"}})
+                result = project.fix()
+                self.assertEqual((result.outcome, result.commands), ("failed", []))
+                self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                self.assertIn("withheld" if sensitive_name else "[REDACTED]", patch)
+
     def launches(self) -> tuple[list, object]:
         found: list = []
         popen = subprocess.Popen

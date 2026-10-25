@@ -25,6 +25,37 @@ SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 # Python keeps a SIG_IGN that a background test runner passes through exec, so the helper resets it.
 SIGINT_MAIN = ("import signal, sys; signal.signal(signal.SIGINT, signal.default_int_handler); "
                "from oah.cli import main; raise SystemExit(main(sys.argv[1:]))")
+TRANSITION_MAIN = '''
+import contextlib, os, pathlib, signal, sys
+from oah.cli import main
+from oah.review import fix
+signal.signal(signal.SIGINT, signal.default_int_handler)
+point = os.environ["OAH_FIX_TEST_POINT"]
+number = getattr(signal, os.environ["OAH_FIX_TEST_SIGNAL"])
+held_signals = fix._held_signals
+judge = fix._Attempt._judge
+fired = False
+def send_stop():
+    if os.name == "nt":
+        signal.raise_signal(number)
+    else:
+        os.kill(os.getpid(), number)
+@contextlib.contextmanager
+def held():
+    global fired
+    with held_signals() as pending:
+        yield pending
+    if point == "after-start" and not fired:
+        fired = True
+        send_stop()
+def inspect(self, *args, **kwargs):
+    if point == "before-inspection":
+        send_stop()
+    return judge(self, *args, **kwargs)
+fix._held_signals = held
+fix._Attempt._judge = inspect
+raise SystemExit(main(sys.argv[1:]))
+'''
 
 
 def oah(project: FixProject, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
@@ -52,6 +83,39 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "native Windows console signal handlers")
+    def test_cli_windows_sigbreak_at_attempt_context_transitions(self):
+        for point in ("after-start", "before-inspection"):
+            with self.subTest(point=point):
+                project = FixProject(self)
+                project.changes_requested()
+                project.queue_fix({"write": FIXED})
+                process = start_oah(project, "fix", "--task", "t1", "--tier", "high", code=TRANSITION_MAIN,
+                                    env_extra={"OAH_FIX_TEST_POINT": point, "OAH_FIX_TEST_SIGNAL": "SIGBREAK"})
+                out, err = process.communicate(timeout=60)
+                self.assertEqual(names(project), ["R1.json", "A1-start.json", "A1-outcome.json"],
+                                 (process.returncode, out, err))
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+                self.assertEqual(process.returncode, 130, err)
+
+    @unittest.skipIf(os.name == "nt", "POSIX stop signals to a subprocess")
+    def test_cli_stop_signals_at_attempt_context_transitions(self):
+        for point in ("after-start", "before-inspection"):
+            for stop in ("SIGINT", "SIGTERM", "SIGHUP"):
+                with self.subTest(point=point, stop=stop):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    project.queue_fix({"write": FIXED})
+                    process = start_oah(project, "fix", "--task", "t1", "--tier", "high", code=TRANSITION_MAIN,
+                                        env_extra={"OAH_FIX_TEST_POINT": point, "OAH_FIX_TEST_SIGNAL": stop})
+                    out, err = process.communicate(timeout=60)
+                    self.assertEqual(names(project), ["R1.json", "A1-start.json", "A1-outcome.json"],
+                                     (process.returncode, out, err))
+                    self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+                    self.assertEqual(process.returncode, 130, err)
+                    if point == "after-start":
+                        self.assertEqual(project.fix_calls(), [])
+
     def test_cli_withholds_sensitive_filename_commands_in_text_and_json(self):
         for as_json in (False, True):
             with self.subTest(as_json=as_json):
