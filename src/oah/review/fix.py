@@ -99,6 +99,8 @@ _ERROR_DIAGNOSTICS = {
     "OAH_FIX_ENGINE_UNSUPPORTED": "correction requires Codex; configure that engine or record Claude's work "
                                   "with oah fix --manual --engine claude --task <task>.",
     "OAH_FIX_PROXY_CREDENTIALS": "proxy userinfo is forbidden; configure a credential-free proxy, then retry.",
+    "OAH_FIX_SENSITIVE_SCOPE": "scope metadata contains a credential; remove it from the lease and packet "
+                               "scope before retrying oah fix.",
     "OAH_FIX_BUSY": "another correction or review is running; wait for it to finish, then retry.",
     "OAH_FIX_ATTEMPT_UNFINISHED": "an attempt is unfinished; inspect the worktree, then run "
                                  "oah fix --abort --task <task>.",
@@ -165,6 +167,20 @@ _ERROR_DIAGNOSTICS = {
     "OAH_NOT_A_REPO": "no repository is available; run oah fix inside the leased Git worktree.",
     "OAH_GIT_MISSING": "Git is unavailable; install Git and retry in the leased worktree.",
     "OAH_USAGE": "the correction arguments are invalid; run oah fix --help and retry with the required options.",
+}
+
+_WARNING_DIAGNOSTICS = {
+    "OAH_FIX_OUT_OF_SCOPE": "Codex changed {count} file(s) outside the lease scope: {positions}. Restore tracked "
+                            "files with git restore -- <path>; recover preexisting untracked files from your own "
+                            "backup and inspect new files before deleting them, or widen the scope with "
+                            "oah renew --scope.",
+    "OAH_FIX_USER_FILES_CHANGED": "Codex modified or deleted {count} preexisting untracked file(s): {positions}. "
+                                  "Review correction.patch and restore or keep them yourself; these files are "
+                                  "excluded from automatic staging guidance.",
+    "OAH_FIX_INTENT_CHANGED": "after the correction the bound intent is {state}. Restore the bound packet before "
+                              "you commit; a changed goal needs a new revision, never an edit by a correction.",
+    "OAH_FIX_UNQUOTABLE_PATH": "{positions} cannot be written safely for every shell; add it to the commit "
+                              "yourself with git add.",
 }
 
 
@@ -922,6 +938,8 @@ def correct(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
 
 def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) -> Result:
     t = _task(request.task, cwd, env, LAUNCHED)
+    if any(_has_credential(value, redact) for value in t.lease.scope):
+        raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
     binding = _check_intent(t, LAUNCHED)
     settings = call_cli.load_settings(t.root)
     stage = settings.stages.get(STAGE)
@@ -956,6 +974,14 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
             findings=findings, classes=classes)
         tools = call_cli.intent_tools()
+
+        def read_source(path: pathlib.Path) -> str:
+            text = _committed_reader(t.root)(path)
+            packet = call.read_packet(t.root, path, parse_intent=tools.parse, read_source=lambda _path: text)
+            if any(_has_credential(value, redact) for value in packet.scope):
+                raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
+            return text
+
         scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-fix-", dir=temp_root))
         try:
             final = scratch / "last-message.md"
@@ -964,7 +990,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                                  round_instructions=redact(instructions), timeout_s=request.timeout_s,
                                  ephemeral=True, retain_worker_text=False),
                 settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
-                has_footer=tools.has_footer, parse_intent=tools.parse, read_source=_committed_reader(t.root),
+                has_footer=tools.has_footer, parse_intent=tools.parse, read_source=read_source,
                 keychain=keychain)
             attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
                                baseline=baseline, index_baseline=_index_state(t.root))
@@ -1160,22 +1186,22 @@ class _Attempt:
     def _result(self, judged: "_Judged") -> Result:
         t, ids, receipt = self.t, _ids(self.finding_ids), self.receipt.name.removesuffix(".json")
         warnings: list[str] = []
+        positions = {name: f"[file {n}]" for n, name in enumerate(judged.changes.files, 1)}
         if judged.beyond:
-            warnings.append(f"OAH_FIX_OUT_OF_SCOPE: Codex changed files outside the scope {_ids(t.lease.scope)} of "
-                            f"task {t.name}: {_ids(judged.beyond)}. Restore tracked files with git restore -- <path>; "
-                            "recover preexisting untracked files from your own backup and inspect new files before "
-                            "deleting them, or widen the scope with oah renew --scope")
+            code = "OAH_FIX_OUT_OF_SCOPE"
+            warnings.append(f"{code}: " + _WARNING_DIAGNOSTICS[code].format(
+                count=len(judged.beyond), positions=_ids([positions[name] for name in judged.beyond])))
         if judged.changes.user:
-            warnings.append("OAH_FIX_USER_FILES_CHANGED: Codex modified or deleted preexisting untracked files: "
-                            f"{_ids(judged.changes.user)}. Review correction.patch and restore or keep them yourself; "
-                            "these files are excluded from automatic staging guidance")
+            code = "OAH_FIX_USER_FILES_CHANGED"
+            warnings.append(f"{code}: " + _WARNING_DIAGNOSTICS[code].format(
+                count=len(judged.changes.user), positions=_ids([positions[name] for name in judged.changes.user])))
         found = oah_intent.binding_state(self.binding, t.root)
         if found != "current":
-            warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent is {found}. "
-                            "Restore the bound packet before you commit; "
-                            "a changed goal needs a new revision, never an edit by a correction")
-        warnings += [f"OAH_FIX_UNQUOTABLE_PATH: {name!r} cannot be written safely for every shell; add it to the "
-                     "commit yourself with git add" for name in judged.unquoted]
+            code = "OAH_FIX_INTENT_CHANGED"
+            warnings.append(f"{code}: " + _WARNING_DIAGNOSTICS[code].format(state=found))
+        code = "OAH_FIX_UNQUOTABLE_PATH"
+        warnings += [f"{code}: " + _WARNING_DIAGNOSTICS[code].format(positions=positions[name])
+                     for name in judged.unquoted]
         lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
         if judged.changes.files:
             lines.append("changed files: " + _ids(judged.changes.tracked + tuple(f"{name} (new)"

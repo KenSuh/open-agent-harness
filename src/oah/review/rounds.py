@@ -161,11 +161,21 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
     have no finished correction attempt), and so may an ambiguity of this series. A call of this round that
     started with a decision settles the wait (unless `settled` is False), and an uncounted call that stopped
     for a decision waits again."""
+    return _waiting(s, settled=settled, include_uncorrected=True)
+
+
+def decision_stop(s: Series) -> str | None:
+    """The review decision gate, excluding only the missing-correction wait that `oah fix` resolves."""
+    return _waiting(s, settled=True, include_uncorrected=False)
+
+
+def _waiting(s: Series, *, settled: bool, include_uncorrected: bool) -> str | None:
     latest = s.task_latest
     reason = None
     if latest is not None and latest.record.get("outcome") == "needs-decision":
         reason = f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}"
-    elif latest is not None and latest.record.get("outcome") == "changes-requested" and _uncorrected(s, latest):
+    elif (include_uncorrected and latest is not None and latest.record.get("outcome") == "changes-requested"
+          and _uncorrected(s, latest)):
         reason = (f"{latest.name} requested changes, but no finished correction attempt is recorded for "
                   f"{', '.join(_uncorrected(s, latest))}, so a recurrence could not be recognized. Record the "
                   "corrections (oah fix records its own; record a committed manual correction with oah fix --manual "
@@ -174,14 +184,6 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
         reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
                   "rewritten commits still carry the corrections")
     return _logged_decision_stop(s, reason, settled=settled)
-
-
-def decision_stop(s: Series) -> str | None:
-    """Task-wide decision stops only; missing corrections are work for `oah fix`, not a decision stop."""
-    latest = s.task_latest
-    reason = (f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}"
-              if latest is not None and latest.record.get("outcome") == "needs-decision" else None)
-    return _logged_decision_stop(s, reason, settled=True)
 
 
 def _logged_decision_stop(s: Series, reason: str | None, *, settled: bool) -> str | None:

@@ -742,8 +742,10 @@ class WorkerTest(unittest.TestCase):
         result = project.fix()
         self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
         scope = next(warning for warning in result.warnings if warning.startswith("OAH_FIX_OUT_OF_SCOPE"))
-        self.assertIn("docs/notes.md", scope)
-        self.assertNotIn("src/app.py", scope)
+        self.assertIn("1 file(s)", scope)
+        self.assertIn("[file 3]", scope)
+        for value in (*project.lease.scope, "t1", "docs/notes.md", "src/app.py"):
+            self.assertNotIn(value, scope)
         changed = next(warning for warning in result.warnings if warning.startswith("OAH_FIX_INTENT_CHANGED"))
         self.assertIn("stale", changed)
         self.assertIn("Restore the bound packet", changed)
@@ -1190,6 +1192,33 @@ class BindTest(unittest.TestCase):
 
 
 class ManualTest(unittest.TestCase):
+    def test_rewritten_bound_correction_blocks_fix_and_manual_until_decision(self):
+        for operation in ("fix", "manual"):
+            with self.subTest(operation=operation):
+                project = FixProject(self)
+                project.changes_requested(bug(1), bug(2))
+                project.queue_fix({"write": FIXED})
+                first = project.fix(findings=("R1-F1",))
+                self.assertEqual(first.code, "OAH_FIX_APPLIED", first.message)
+                original = project.run_commands(first.commands)
+                self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
+                git(project.repo, "commit", "-q", "--amend", "-m", "rewritten correction" + HUMAN_TRAILER)
+                project.head = git(project.repo, "rev-parse", "HEAD")
+                self.assertNotEqual(project.head, original)
+                action = project.fix if operation == "fix" else lambda: project.manual("human")
+                # Check correction before review logs a stop: ancestry alone must refuse it.
+                project.refused("OAH_FIX_NOT_REQUESTED", action)
+                project.refused("OAH_REVIEW_NEEDS_DECISION", project.review)
+                project.refused("OAH_FIX_NOT_REQUESTED", action)
+                # A decision attached to this receipt settles the same gate, even if the
+                # subsequent reviewer fails without publishing another receipt.
+                project.queue({"exit": 3})
+                self.assertEqual(project.review(decision="the rewritten commit keeps the correction").code,
+                                 "OAH_REVIEW_ENGINE_FAILED")
+                result = action()
+                self.assertEqual(result.code, "OAH_FIX_NO_CHANGE" if operation == "fix" else "OAH_FIX_RECORDED",
+                                 result.message)
+
     def test_process_filter_installed_before_preflight_is_never_started(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1384,6 +1413,15 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_packet_scope_is_checked_against_credentials_removed_from_worker_env(self):
+        project = FixProject(self)
+        project.changes_requested()
+        marker = token_source.token_hex(20)
+        project.env["OPENAI_API_KEY"] = marker
+        project.commit({".oah/tasks/t1/PACKET.md": (PACKET + f"- {marker}\n").encode("utf-8")})
+        error = project.refused("OAH_FIX_SENSITIVE_SCOPE", project.fix)
+        self.assertNotIn(marker, str(error))
+
     def test_exception_text_never_reaches_correction_records_or_diagnostics(self):
         for point in ("inspection", "launch", "interrupt", "prepare", "dispatch", "unknown-code"):
             with self.subTest(point=point):

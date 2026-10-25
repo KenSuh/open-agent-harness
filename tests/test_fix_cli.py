@@ -84,6 +84,65 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_all_correction_scenario_outputs_omit_runtime_scope_marker(self):
+        scenarios = ("applied", "no-change", "failed", "bind", "manual", "abort", "refused",
+                     "sensitive-lease", "sensitive-packet")
+        for as_json in (False, True):
+            for scenario in scenarios:
+                with self.subTest(as_json=as_json, scenario=scenario):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    marker = ("s" + "k-" if scenario.startswith("sensitive-") else "scope-") + token_source.token_hex(20)
+                    self.assertFalse(any(marker in value for value in project.env.values()))
+                    args = []
+                    if scenario == "bind":
+                        project.queue_fix({"write": FIXED})
+                        project.run_commands(project.fix().commands)
+                        args = ["--bind"]
+                    elif scenario == "manual":
+                        project.commit(FIXED, trailer="\n\nAgent-Engine: human")
+                        args = ["--manual", "--engine", "human"]
+                    elif scenario == "abort":
+                        record = {"schema": 1, "kind": "attempt-start", "task": "t1", "attempt_id": "A1",
+                                  "source_receipt": "R1.json", "source_receipt_digest": project.receipt_digest(1),
+                                  "finding_ids": ["R1-F1"], "class_ids": ["R1-C1"], "before_head": project.head,
+                                  "engine": "codex", "manual": False, "started_at": "2026-10-25T00:00:00Z"}
+                        receipts.publish(project.state, "t1", "A1-start.json", record)
+                        args = ["--abort"]
+                    elif scenario == "refused":
+                        (project.repo / "src/app.py").write_bytes(b"dirty\n")
+                    else:
+                        project.queue_fix({"write": {"outside/notes.txt": "notes\n"},
+                                           "exit": 3 if scenario == "failed" else 0}
+                                          if scenario != "no-change" else {})
+                    if scenario == "sensitive-packet":
+                        project.commit({".oah/tasks/t1/PACKET.md": (PACKET + f"- {marker}\n").encode("utf-8")})
+                    else:
+                        Store(project.state).renew(task="t1", agent="claude", ttl_hours=1,
+                                                   scope=(*project.lease.scope, marker))
+                    before = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+                    done = oah(project, "fix", "--task", "t1", *args, *(("--json",) if as_json else ()))
+                    outputs = [done.stdout, done.stderr]
+                    if as_json:
+                        outputs.append(json.dumps(json.loads(done.stdout), ensure_ascii=False))
+                    self.assertFalse(any(marker in output for output in outputs),
+                                     "scope metadata reached a text or JSON output")
+                    if scenario.startswith("sensitive-"):
+                        self.assertEqual(done.returncode, 1)
+                        self.assertIn("OAH_FIX_SENSITIVE_SCOPE", done.stderr)
+                        self.assertEqual(project.fix_calls(), [])
+                        self.assertEqual(project.names(), ["R1.json"])
+                        retained = [path.read_bytes() for path in project.state.rglob("*")
+                                    if path.is_file() and before.get(path) != path.read_bytes()]
+                        self.assertFalse(any(marker.encode("utf-8") in data for data in retained),
+                                         "credential-bearing scope reached new correction state")
+                    else:
+                        expected = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
+                                    "failed": "OAH_FIX_FAILED", "bind": "OAH_FIX_BOUND",
+                                    "manual": "OAH_FIX_RECORDED", "abort": "OAH_FIX_ABORTED",
+                                    "refused": "OAH_FIX_DIRTY_TREE"}[scenario]
+                        self.assertIn(expected, done.stdout + done.stderr)
+
     def test_cli_plan_diagnostics_omit_every_packet_field_in_text_and_json(self):
         fields = ("stage", "engine", "tier", "axes-stage", "kind", "intensity", "reasoning", "risk", "Status")
         for as_json in (False, True):
