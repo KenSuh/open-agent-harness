@@ -363,6 +363,51 @@ class WriteFilesTest(unittest.TestCase):
         return init.plan_files(self.repo, config=self.config, wiki_dir="docs/wiki", agents={}, graph=False,
                                unlazy_copy=False, force=force, today=TODAY)
 
+    def test_wiki_private_state_lock_publication_and_reentry(self):
+        # Exercise the complete private-parent -> publish -> writable lock -> journal sequence.
+        for _ in range(2):
+            with init._wiki_session(self.repo, self.wiki) as check:
+                check()
+                self.assertTrue(self.wiki.lock_path.is_file())
+                self.assertFalse(self.wiki.journal_path.exists())
+                init._private_state_directory(self.wiki.state)
+        with self.wiki.session():
+            pass  # The landed writer must be able to acquire the very same lock afterward.
+
+    def test_private_state_does_not_disguise_a_programming_error(self):
+        with mock.patch.object(unlazy, "_verify_state_ancestry", side_effect=TypeError("wrong argument")):
+            with self.assertRaises(TypeError):
+                init._private_state_directory(self.repo)
+
+    def test_wiki_opens_the_lock_without_reading_its_bytes(self):
+        read = init._current
+
+        def current(root, relative, folder):
+            self.assertNotEqual(relative, ".lock", "a shared writable lock must be opened directly")
+            return read(root, relative, folder)
+
+        with mock.patch.object(init, "_current", side_effect=current):
+            # Start with an existing lock so the only open is the shared writable lock open.
+            unlazy._private_makedirs(self.wiki.state)
+            self.wiki.lock_path.write_bytes(b"")
+            with init._wiki_session(self.repo, self.wiki) as check:
+                check()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows lock identity and sharing")
+    def test_windows_wiki_lock_uses_handle_identity_and_denies_replacement(self):
+        with init._wiki_session(self.repo, self.wiki) as check:
+            fd = init._windows_read_fd(self.wiki.lock_path, writable=True)
+            try:
+                first = init._windows_file_identity(fd)
+                check()
+                self.assertEqual(init._windows_file_identity(fd), first)
+                with self.assertRaises(PermissionError):
+                    self.wiki.lock_path.rename(self.wiki.lock_path.with_name("moved-lock"))
+                with self.assertRaises(PermissionError):
+                    self.wiki.state.rename(self.wiki.state.with_name("moved-state"))
+            finally:
+                os.close(fd)
+
     def test_wiki_refuses_committable_state_before_any_publication(self):
         wiki = Wiki(self.repo, WikiSettings(), self.repo / "unplanned-state")
         with self.assertRaises(init.InitError) as caught:
@@ -739,6 +784,62 @@ class RulesStepTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_frozen_windows_dacl_compares_permissions_without_inheritance_bookkeeping(self):
+        before = "O:OWD:AI(D;ID;GX;;;WD)(A;ID;FA;;;OW)"
+        frozen = "O:OWD:PAI(D;;GX;;;WD)(A;;FA;;;OW)"
+        self.assertTrue(init._windows_security_matches(frozen, before))
+        for changed in (frozen.replace("D:PAI", "D:AI"), frozen.replace("(D;;GX;;;WD)", ""),
+                        frozen + "(A;;FR;;;WD)", frozen.replace("GX", "GW"), frozen.replace("O:OW", "O:WD"),
+                        frozen.replace("D;;", "D;IO;"), frozen.replace("A;;", "A;OICI;")):
+            with self.subTest(changed=changed):
+                self.assertFalse(init._windows_security_matches(changed, before))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows descriptor DACL updates")
+    def test_windows_staging_dacl_is_protected_through_the_held_handle(self):
+        with init._parents(self.repo, "published") as parent:
+            with init._file_staging(self.repo / "published", parent) as (temp, folder):
+                sid = unlazy._windows_user_sid()
+                expected = f"O:{sid}D:P(A;;FA;;;{sid})"
+                self.assertTrue(init._windows_security_matches(
+                    unlazy._windows_security_descriptor(temp.parent), expected))
+                fd = init._private_file(temp, folder)
+                try:
+                    self.assertTrue(init._windows_security_matches(unlazy._windows_security_descriptor(temp), expected))
+                    # A descriptor update must copy and protect the effective DACL, including denials.
+                    denied = f"O:{sid}D:P(D;;CC;;;WD)(A;;FA;;;{sid})"
+                    init._windows_file_security(temp, denied, fd=fd)
+                    self.assertTrue(init._windows_security_matches(unlazy._windows_security_descriptor(temp), denied))
+                finally:
+                    os.close(fd)
+                    temp.unlink()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows inherited target DACL preservation")
+    def test_windows_replacement_freezes_the_existing_effective_dacl(self):
+        parent = self.repo / "settings"
+        parent.mkdir()
+        subprocess.run(["icacls.exe", str(parent), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, capture_output=True)
+        path = parent / "local.json"
+        before = b'{"setting":"before"}\r\n'
+        after = b'{"setting":"after"}\r\n'
+        path.write_bytes(before)
+        original = unlazy._windows_security_descriptor(path)
+        self.assertTrue("ID" in original, "the fixture must have inherited ACEs")
+        self.assertTrue(init._publish(self.repo, "settings/local.json", after, before))
+        self.assertEqual(path.read_bytes(), after)
+        self.assertTrue(init._windows_security_matches(unlazy._windows_security_descriptor(path), original))
+
+    def test_publication_preserves_exact_bytes_for_replacement_and_private_backup(self):
+        path = self.repo / "settings"
+        before = b"private fixture\r\n\x00no final newline"
+        path.write_bytes(before)
+        common = repo_info(self.repo).common_dir
+        self.assertTrue(init._publish(common, "oah/backups/run/1", before, private=True))
+        after = before + b"\r\noah addition\r\n"
+        self.assertTrue(init._publish(self.repo, path.name, after, before))
+        self.assertEqual(path.read_bytes(), after)
+        self.assertEqual((common / "oah/backups/run/1").read_bytes(), before)
+
     def test_publication_creates_empty_files_only_in_private_staging_directory(self):
         create = init._private_file
         observed = []

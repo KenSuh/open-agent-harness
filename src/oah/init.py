@@ -447,7 +447,7 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
                     raise OSError("state grants access to another account")
         elif stat.S_IMODE(path.lstat().st_mode) != 0o700:
             raise OSError("state directory is not owner-only")
-    except (OSError, unlazy.UnlazyError, ValueError, TypeError, AttributeError):
+    except (OSError, unlazy.UnlazyError):
         raise InitError("OAH_INIT_STATE_UNSAFE", "private Git state permissions cannot be verified. Restrict "
                         "the state directory to your account, then rerun oah init", EXIT_ENVIRONMENT) from None
 
@@ -482,7 +482,9 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
                         unlazy._private_directory(path)
                 else:
                     path.mkdir(exist_ok=True)
-            handle = create(str(path), 0x80, 1, None, 3, 0x02200000, None)
+            # Attribute-only opens do not participate in Windows share-access checks. Include
+            # FILE_LIST_DIRECTORY so omitting FILE_SHARE_DELETE actually prevents replacement.
+            handle = create(str(path), 0x81, 1, None, 3, 0x02200000, None)
             if handle == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
             handles.append(handle)
@@ -588,6 +590,21 @@ def _windows_read_fd(path: pathlib.Path, *, writable: bool = False) -> int:
     return fd  # fd now owns the Windows handle.
 
 
+def _windows_file_identity(fd: int) -> bytes:
+    """Use one native identity representation, independent of Python/CRT stat differences."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    info = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandleEx
+    info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    info.restype = wintypes.BOOL
+    identity = (ctypes.c_ubyte * 24)()  # FILE_ID_INFO: volume serial and 128-bit file id
+    if not info(msvcrt.get_osfhandle(fd), 18, identity, ctypes.sizeof(identity)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bytes(identity)
+
+
 def _read_user(root: pathlib.Path, relative: str) -> bytes | None:
     """Read only worktree-local regular files, without creating missing parent directories."""
     relative = _relative(relative)
@@ -674,7 +691,7 @@ def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: b
     close = kernel.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    handle = create(str(path), 0x80 | (0x10000 if delete else 0) | (0x40000 if security else 0), 7 if allow_swap else 1,
+    handle = create(str(path), 0x81 | (0x10000 if delete else 0) | (0x40000 if security else 0), 7 if allow_swap else 1,
                     None, 3, 0x02200000, None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -745,6 +762,24 @@ def _macos_file_acl(fd: int, value: bytes | None = None) -> bytes:
         libc.acl_free(acl)
 
 
+def _windows_security_matches(actual: str, expected: str) -> bool:
+    """Require a protected DACL with the same owner and ordered effective ACEs.
+
+    Freezing inheritance can change AI/AR control bits and inherited-ACE provenance (ID),
+    without changing any grant or denial. No other ACE flag, right or principal is ignored.
+    """
+    pattern = r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))"
+    found, wanted = re.fullmatch(pattern, actual), re.fullmatch(pattern, expected)
+    if found is None or wanted is None or "P" not in found[2] or found[1] != wanted[1]:
+        return False
+
+    def effective(aces: str) -> str:
+        return re.sub(r"(\([^;()]+;)((?:OI|CI|NP|IO|ID|SA|FA)*)(;)",
+                      lambda match: match[1] + match[2].replace("ID", "") + match[3], aces)
+
+    return effective(found[3]) == effective(wanted[3])
+
+
 def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool = False,
                            fd: int | None = None, handle: int | None = None) -> int | None:
     """Create an empty owner-only staging file, or freeze the target's effective DACL on it."""
@@ -763,12 +798,22 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
         raise OSError("cannot prepare file security")
     try:
         if not create:
-            setter = advapi.SetKernelObjectSecurity
-            setter.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p)
-            setter.restype = wintypes.BOOL
+            get_dacl = advapi.GetSecurityDescriptorDacl
+            get_dacl.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
+                                ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL))
+            get_dacl.restype = wintypes.BOOL
+            present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
+            if (not get_dacl(security, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted))
+                    or not present.value or not dacl.value):
+                raise OSError("cannot read replacement DACL")
+            setter = advapi.SetSecurityInfo
+            setter.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
+                               ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+            setter.restype = wintypes.DWORD
             # Protect the copied effective ACEs from the destination parent's inherited grants.
+            # Use the file-object API for DACL/protection updates on the held handle.
             held = handle if handle is not None else msvcrt.get_osfhandle(fd) if fd is not None else None
-            if held is None or not setter(held, 0x80000004, security):
+            if held is None or setter(held, 1, 0x80000004, None, None, dacl, None) != 0:
                 raise OSError("cannot preserve file security")
             return None
 
@@ -805,7 +850,7 @@ def _private_file(temp: pathlib.Path, folder: int | None) -> int:
         if os.name == "nt":
             actual = unlazy._windows_security_descriptor(temp)
             unlazy._verify_windows_dacl(actual, sid, snapshot=True, directory=False, protected=True)
-            if actual != expected:
+            if not _windows_security_matches(actual, expected):
                 raise OSError("staging security differs from owner-only DACL")
         elif sys.platform == "darwin":
             if unlazy._macos_mount_flags(temp) & 0x00200000:  # MNT_IGNORE_OWNERSHIP
@@ -836,7 +881,7 @@ def _file_staging(path: pathlib.Path, folder: int | None):
                 sid = unlazy._windows_user_sid()
                 expected = f"O:{sid}D:P(A;;FA;;;{sid})"
                 _windows_file_security(directory, expected, handle=handle)
-                if unlazy._windows_security_descriptor(directory) != expected:
+                if not _windows_security_matches(unlazy._windows_security_descriptor(directory), expected):
                     raise OSError("staging directory DACL differs")
                 yield directory / "file.tmp", None
         else:
@@ -919,8 +964,7 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                                     raise OSError("replacement ACL changed")
                         elif restrictions is not None:
                             _windows_file_security(temp, restrictions[1], fd=handle.fileno())
-                            expected = restrictions[1].replace("D:", "D:P", 1).replace("D:PP", "D:P", 1)
-                            if unlazy._windows_security_descriptor(temp) != expected:
+                            if not _windows_security_matches(unlazy._windows_security_descriptor(temp), restrictions[1]):
                                 raise OSError("replacement DACL changed")
                         os.fsync(handle.fileno())
                     current = _current(root, relative, folder)
@@ -1089,21 +1133,35 @@ def _wiki_session(root: pathlib.Path, wiki):
     try:
         with _parents(anchor, (state.relative_to(anchor) / ".init-state").as_posix(),
                       private_from=private_from) as folder:
-            # Lock creation also goes through the one publication boundary; never replace a lock.
-            if _current(state, ".lock", folder) is None and not _publish(state, ".lock", b""):
-                raise OSError("wiki lock changed")
-            fd = (_windows_read_fd(state / ".lock", writable=True) if os.name == "nt" else
-                  os.open(".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+            def open_lock() -> int:
+                return (_windows_read_fd(state / ".lock", writable=True) if os.name == "nt" else
+                        os.open(".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+
+            # Read-only share modes conflict with the landed writer's open Windows lock. Open it
+            # read/write directly, without reading its bytes; only a missing lock is published.
+            try:
+                fd = open_lock()
+            except FileNotFoundError:
+                if not _publish(state, ".lock", b""):
+                    raise OSError("wiki lock changed")
+                fd = open_lock()
             lock = StateLock(state / ".lock", timeout=wiki.lock_timeout)
             lock._fd = fd
-            held = os.fstat(fd)
 
             def check() -> None:
                 if _linked(anchor, (state.relative_to(anchor) / ".lock").as_posix()) is not None:
                     raise OSError("wiki lock redirected")
-                actual = (state / ".lock").lstat()
-                if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
-                    raise OSError("wiki lock replaced")
+                if os.name == "nt":
+                    current_fd = _windows_read_fd(state / ".lock", writable=True)
+                    try:
+                        if _windows_file_identity(current_fd) != held:
+                            raise OSError("wiki lock replaced")
+                    finally:
+                        os.close(current_fd)
+                else:
+                    actual = (state / ".lock").lstat()
+                    if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+                        raise OSError("wiki lock replaced")
                 if folder is not None:
                     actual, pinned = state.lstat(), os.fstat(folder)
                     if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
@@ -1111,6 +1169,7 @@ def _wiki_session(root: pathlib.Path, wiki):
 
             acquired = False
             try:
+                held = _windows_file_identity(fd) if os.name == "nt" else os.fstat(fd)
                 check()
                 deadline = time.monotonic() + lock.timeout
                 while not _try_lock(fd):
