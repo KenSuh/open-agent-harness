@@ -140,6 +140,34 @@ class DiscoveryTest(unittest.TestCase):
 class PlanFirstTest(unittest.TestCase):
     """AC1: the full plan comes first; --dry-run prints it and writes, installs and runs nothing."""
 
+    def test_dry_run_refuses_project_redirection_during_discovery(self):
+        repo = committed_repo(self)
+        tools = FakeTools()
+        machine = make_machine(self, tools)
+        source = pathlib.Path(machine.unlazy_source)
+        candidate = repo / init.UNLAZY_PROJECT
+        candidate.parent.mkdir(parents=True)
+        linked = init._linked
+        redirected = False
+
+        def redirect(root, name):
+            nonlocal redirected
+            result = linked(root, name)
+            if not redirected and name == ".claude/skills/unlazy":
+                redirected = True
+                directory_alias(source, candidate)
+            return result
+
+        before = snapshot(source)
+        with mock.patch.object(init, "_linked", side_effect=redirect):
+            code, out, err = run_init(repo, machine, "--dry-run", *flags(unlazy=True))
+        self.assertEqual(code, 69, out + err)
+        self.assertIn("OAH_INIT_PATH_UNSAFE", err)
+        self.assertNotIn(str(source), out + err)
+        self.assertEqual(snapshot(source), before)
+        self.assertFalse((repo / ".git/oah").exists())
+        self.assertEqual((tools.installs, tools.status_calls, machine.ask.prompts), ([], [], []))
+
     def test_dry_run_prints_plan_and_changes_nothing(self):
         repo = committed_repo(self)
         tools = FakeTools(present=set(ALL_TOOLS) - {"gh"})
