@@ -957,9 +957,11 @@ print(json.dumps({"state": result.state, "commit": result.commit, "files": sorte
         attempts = []
         original = defaultbranch._fetch
 
+        # The hook holds the ref transaction for 30 seconds, so a 5-second limit always times out while leaving
+        # a slow Windows runner enough time to start Git and its hook.
         def fetch(generation, *args, **kwargs):
             attempts.append(generation)
-            return original(generation, *args[:-1], 0.5, **kwargs)
+            return original(generation, *args[:-1], 5.0, **kwargs)
 
         for _ in range(3):
             with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}), \
