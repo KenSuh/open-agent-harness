@@ -8,7 +8,7 @@ import sys
 
 from oah import init
 from oah.atomic import StateCorrupt, StorageError
-from oah.config import ConfigError, load_config
+from oah.config import ConfigError
 from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, repo_info
@@ -77,7 +77,7 @@ def _init(args: argparse.Namespace, machine: init.Machine) -> int:
     root = repo_info(pathlib.Path.cwd()).root
     given = {question.key: getattr(args, question.key) for question in init.QUESTIONS}
     try:
-        existing = load_config(root)
+        existing = init._load_config(root)
     except ConfigError:
         if not args.force:
             raise
