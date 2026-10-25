@@ -30,8 +30,10 @@ branch or worktree name into exactly one worktree before any intent is read.
 """
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import datetime as dt
+import hashlib
 import importlib
 import json
 import os
@@ -455,6 +457,7 @@ class CallRequest:
     no_rerank: bool = False  # the brief turns the re-ranker off (--no-rerank)
     isolated: bool = False  # Codex ignores the user's config.toml and execpolicy rules (oah review)
     output_last_message: str | None = None  # review filters temporary output before retaining it
+    retain_worker_text: bool = True  # oah fix streams output without creating logs or a last-message file
 
 
 @dataclasses.dataclass(frozen=True)
@@ -472,6 +475,7 @@ class Prepared:
     launch_effort: str
     cli_version: str | None
     warnings: tuple[str, ...]
+    retain_worker_text: bool = True
 
     @property
     def run(self) -> runs.Run:
@@ -628,6 +632,10 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                                    output_schema=request.output_schema, ephemeral=request.ephemeral)
         if request.isolated:
             argv[-1:-1] = ISOLATED_CODEX_FLAGS  # before the stdin marker
+        if not request.retain_worker_text:
+            # Codex already streams its final message to stdout; never request a second copy on disk.
+            output = next(i for i in reversed(range(len(argv))) if argv[i] == "-o")
+            del argv[output:output + 2]
     else:
         section = settings.engines["claude"]
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
@@ -652,7 +660,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
     return Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
                     stage=request.stage, argv=tuple(argv), cwd=str(root), timeout_s=timeout_s,
                     env_additions=additions, model=resolution.model, launch_effort=resolution.launch_effort,
-                    cli_version=resolution.cli_version, warnings=tuple(warnings))
+                    cli_version=resolution.cli_version, warnings=tuple(warnings),
+                    retain_worker_text=request.retain_worker_text)
 
 
 def _iso(moment: dt.datetime) -> str:
@@ -694,25 +703,35 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
     prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
-    run.file_path("last-message.md")
+    if prepared.retain_worker_text:
+        run.file_path("last-message.md")
     try:
         result = _run_prepared(prepared, env, prompt)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        run.write_logs("", "")
+        if prepared.retain_worker_text:
+            run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                           error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
     except (KeyboardInterrupt, SystemExit):
         # _run_prepared already stopped the process tree; never leave the run looking alive.
-        run.write_logs("", "")
+        if prepared.retain_worker_text:
+            run.write_logs("", "")
         run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                    error="OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
                          "tree was stopped; call the engine again when you are ready")
         raise
     finished = dt.datetime.now(dt.timezone.utc)
-    stdout, stderr = clean(result.stdout), clean(result.stderr)
-    run.write_logs(stdout, stderr)
+    if prepared.retain_worker_text:
+        run.write_logs(clean(result.stdout), clean(result.stderr))
     # Validate the actual header first: redaction must never turn a mismatch into an unreadable header.
     fields = _effort_fields(prepared, result.stdout, result.stderr, load_rules() if rules is None else rules)
+    if not prepared.retain_worker_text:
+        # Persist typed observations only, never arbitrary header text (including an unknown effort label).
+        from oah.engines.effort import ORDINARY, BEHAVIOUR_CHANGING
+        if fields.get("header_effort") not in (*ORDINARY, *BEHAVIOUR_CHANGING, prepared.launch_effort):
+            fields["header_effort"] = runs.UNVERIFIED
+            fields["normalization_basis"] = "unverified: the header effort is unknown"
+        fields["worker_output"] = result.worker_output
     fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
     if result.timed_out:
         status, error = "timed_out", (f"OAH_RUN_TIMEOUT: the engine ran longer than {prepared.timeout_s:g} s and its "
@@ -720,6 +739,9 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     elif result.returncode != 0:
         status, error = "failed", (f"OAH_ENGINE_FAILED: {prepared.engine} exited with {result.returncode}; read "
                                    f"{run.stderr_path}")
+        if not prepared.retain_worker_text:
+            error = (f"OAH_ENGINE_FAILED: {prepared.engine} exited with {result.returncode}; inspect the live "
+                     "terminal output and retry the correction")
     elif fields.get("header_code"):
         status, error = "failed", (f"{fields['header_code']}: the engine reported effort {fields['header_effort']} "
                                    f"(normalized {fields['resolved_inference_effort']}) for launch effort "
@@ -763,6 +785,93 @@ def _deferred_creation_signals():
             saved[number](number, frame)
 
 
+@dataclasses.dataclass(frozen=True)
+class _StreamedResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    worker_output: dict
+
+
+def _stream_correction(child, prepared: Prepared, prompt: str):
+    """Drain both pipes live, hashing exact bytes; stderr stays in memory only for A1 verification."""
+    from oah.engines.proc import REAP_SECONDS, kill_tree
+
+    streams = {name: {"bytes": 0, "sha256": hashlib.sha256()} for name in ("stdout", "stderr")}
+    header = bytearray()
+    terminal_lock = threading.Lock()
+    failed = []
+
+    def drain(name, pipe):
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        try:
+            while data := pipe.read1(65536):
+                streams[name]["bytes"] += len(data)
+                streams[name]["sha256"].update(data)
+                if name == "stderr":
+                    header.extend(data)
+                # Both channels go to the live diagnostic stream, leaving CLI JSON on stdout intact.
+                with terminal_lock:
+                    try:
+                        sys.stderr.write(decoder.decode(data))
+                        sys.stderr.flush()
+                    except (OSError, ValueError):
+                        failed.append(True)  # Keep draining until the dispatcher stops the owned tree.
+            with terminal_lock:
+                try:
+                    sys.stderr.write(decoder.decode(b"", final=True))
+                    sys.stderr.flush()
+                except (OSError, ValueError):
+                    failed.append(True)
+        except (OSError, ValueError):
+            failed.append(True)
+        finally:
+            pipe.close()
+
+    def feed():
+        try:
+            child.stdin.write(prompt.encode("utf-8"))
+            child.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=drain, args=(name, getattr(child, name)), daemon=True)
+               for name in streams]
+    writer = threading.Thread(target=feed, daemon=True)
+    started = []
+    timed_out = False
+    try:
+        for thread in (*readers, writer):
+            thread.start()
+            started.append(thread)
+        deadline = time.monotonic() + prepared.timeout_s
+        while child.poll() is None:
+            if failed:
+                raise subprocess.SubprocessError("OAH_FIX_STREAM_FAILED: output pipe failed; retry the correction")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                child.wait(timeout=min(POLL_SECONDS, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        # Also stop descendants that outlived their launcher or still hold either output pipe open.
+        kill_tree(child)
+        child.wait(timeout=REAP_SECONDS)
+        for thread in started:
+            thread.join(timeout=REAP_SECONDS)
+        output = {name: {"bytes": item["bytes"], "sha256": item["sha256"].hexdigest()}
+                  for name, item in streams.items()}
+        prepared.run.result(worker_output=output)
+    if failed or any(thread.is_alive() for thread in started):
+        raise subprocess.SubprocessError("OAH_FIX_STREAM_FAILED: output pipe failed; retry the correction")
+    return _StreamedResult(None if timed_out else child.returncode, "", header.decode("utf-8", errors="replace"),
+                           timed_out, output)
+
+
 def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
     from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
@@ -793,6 +902,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                         child.kill()
                         child.communicate(timeout=REAP_SECONDS)
                         raise
+        if not prepared.retain_worker_text:
+            return _stream_correction(child, prepared, prompt)
         data, deadline = prompt.encode("utf-8"), time.monotonic() + prepared.timeout_s
         while True:
             try:

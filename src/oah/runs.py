@@ -41,7 +41,7 @@ RESULT_FIELDS = (
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
     "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
-    "launcher",
+    "launcher", "worker_output",
 )
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import _thread
 import contextlib
+import hashlib
+import io
 import json
 import os
 import pathlib
@@ -98,10 +100,12 @@ class FixProject:
                              temp_root=self.temp_root, rules=RULES)
 
     def fix(self, *, cwd: pathlib.Path | None = None, env: dict | None = None, rules: list | None = None,
-            **fields) -> fix.Result:
+            terminal: io.StringIO | None = None, **fields) -> fix.Result:
         fields.setdefault("tier", "high")
-        return fix.correct(fix.Request(task="t1", **fields), cwd=cwd or self.repo, env=self.env if env is None else env,
-                           keychain=NoKeychain(), rules=RULES if rules is None else rules, temp_root=self.temp_root)
+        with contextlib.redirect_stderr(terminal if terminal is not None else io.StringIO()):
+            return fix.correct(fix.Request(task="t1", **fields), cwd=cwd or self.repo,
+                               env=self.env if env is None else env, keychain=NoKeychain(),
+                               rules=RULES if rules is None else rules, temp_root=self.temp_root)
 
     def bind(self, **fields) -> fix.Result:
         return fix.bind("t1", cwd=self.repo, env=self.env, **fields)
@@ -488,7 +492,46 @@ class RefusalTest(unittest.TestCase):
 
 
 class WorkerTest(unittest.TestCase):
-    def test_unchanged_checkout_conversion_is_not_a_correction(self):
+    def test_all_index_mutations_fail_even_when_worktree_matches_baseline(self):
+        for change in ("blob", "addition", "removal", "mode", "conflict"):
+            with self.subTest(change=change):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                project.env["OPENAI_API_KEY"] = key
+                name = "src/app.py" if change != "addition" else "src/added.txt"
+                step = {}
+                if change in ("blob", "addition"):
+                    step = {"write": {name: key}, "stage": [name],
+                            "restore": {name: "print('v1')\n" if change == "blob" else None}}
+                elif change == "removal":
+                    step = {"index_commands": [["--force-remove", name]]}
+                elif change == "mode":
+                    step = {"index_commands": [["--chmod=+x", name]]}
+                else:
+                    oid = git(project.repo, "rev-parse", "HEAD:src/app.py")
+                    # A real unmerged index with the same stage-0 blob still has extra entries.
+                    execute = call.execute
+                    def conflict(*args, **kwargs):
+                        result = execute(*args, **kwargs)
+                        subprocess.run(["git", "-C", str(project.repo), "update-index", "--index-info"],
+                                       input=(f"0 {'0' * 40}\t{name}\n100644 {oid} 1\t{name}\n"
+                                              f"100644 {oid} 2\t{name}\n").encode("ascii"),
+                                       check=True, capture_output=True)
+                        return result
+                project.queue_fix(step)
+                with (mock.patch.object(call, "execute", side_effect=conflict) if change == "conflict"
+                      else contextlib.nullcontext()):
+                    result = project.fix()
+                self.assertEqual((result.outcome, result.commands), ("failed", []), result.message)
+                self.assertIn("OAH_FIX_INDEX_CHANGED", result.message)
+                self.assertIn("[file ", json.dumps(result.to_json()))
+                self.assertNotIn(name, json.dumps(result.to_json()), "index paths are position-only")
+                self.assertIsNone(result.next_command)
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                SecretTest.assert_private(self, project, [key, *key.splitlines()], json.dumps(result.to_json()))
+
+    def test_checkout_conversion_refuses_until_the_raw_tree_is_clean(self):
         project = FixProject(self, attributes=None)
         project.changes_requested()
         git(project.repo, "config", "core.autocrlf", "true")
@@ -496,9 +539,17 @@ class WorkerTest(unittest.TestCase):
         packet.unlink()
         git(project.repo, "checkout", "--", ".oah/tasks/t1/PACKET.md")
         self.assertIn(b"\r\n", packet.read_bytes())
-        result = project.fix()
-        self.assertEqual((result.outcome, result.commands), ("no-change", []))
-        self.assertEqual((pathlib.Path(result.run_dir) / "correction.patch").read_bytes(), b"")
+        project.refused("OAH_FIX_DIRTY_TREE", project.fix)
+
+    def test_cleanliness_respects_core_filemode_without_ignoring_index_modes(self):
+        project = FixProject(self)
+        project.changes_requested()
+        git(project.repo, "config", "core.filemode", "false")
+        path = project.repo / "src/app.py"
+        path.chmod(path.stat().st_mode | 0o111)
+        self.assertEqual(project.fix().outcome, "no-change")
+        git(project.repo, "update-index", "--chmod=+x", "src/app.py")
+        project.refused("OAH_FIX_DIRTY_TREE", project.fix)
 
     def test_corrector_staging_a_user_file_withholds_commit_guidance(self):
         project = FixProject(self)
@@ -516,8 +567,8 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(call, "execute", side_effect=staged):
             result = project.fix()
         self.assertEqual((result.outcome, result.commands), ("failed", []))
-        self.assertIn("preexisting untracked", "\n".join(result.lines))
-        self.assertIn("-user's original", "\n".join(result.lines))
+        self.assertIn("OAH_FIX_INDEX_CHANGED", result.message)
+        self.assertNotIn(name, json.dumps(result.to_json()))
 
     def test_preexisting_untracked_bytes_are_compared_even_with_unchanged_metadata(self):
         project = FixProject(self)
@@ -572,8 +623,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(argv[:1], ["exec"])
         self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
         self.assertTrue(os.path.samefile(argv[argv.index("-C") + 1], project.repo))
-        self.assertFalse(pathlib.Path(argv[argv.index("-o") + 1]).is_relative_to(project.state),
-                         "the corrector never writes its raw final message into retained state")
+        self.assertNotIn("-o", argv, "the corrector streams its final message without creating a file")
+        self.assertIn("--ephemeral", argv, "Codex must not retain its own correction session text")
         env = record["env"]
         self.assertEqual((env["OAH_WORKER"], env["OAH_TASK"], env["OAH_RUN_ID"]),
                          ("1", "t1", pathlib.Path(result.run_dir).name))
@@ -601,6 +652,9 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn(b"\r\n", packet.read_bytes())
                     self.assertEqual(git(project.repo, "status", "--porcelain"), "")
                 project.changes_requested(bug(1), bug(2, severity="P0"), bug(3, severity="P2"))
+                if autocrlf:
+                    project.refused("OAH_FIX_DIRTY_TREE", project.fix)
+                    packet.write_bytes(fix._git_bytes(project.repo, "cat-file", "blob", "HEAD:.oah/tasks/t1/PACKET.md"))
                 project.queue_fix({"write": FIXED})
                 result = project.fix()
                 self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
@@ -648,6 +702,24 @@ class WorkerTest(unittest.TestCase):
 
 
 class OutcomeTest(unittest.TestCase):
+    def test_closed_terminal_stops_the_worker_and_records_failed(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True})
+        terminal = io.StringIO()
+        terminal.close()
+        result = project.fix(terminal=terminal, timeout_s=3)
+        self.assertEqual(result.outcome, "failed")
+        folder = pathlib.Path(result.run_dir)
+        run = json.loads((folder / "result.json").read_bytes())
+        self.assertEqual(run["status"], "failed", "a closed terminal stops the worker before its timeout")
+        self.assertIn("OAH_FIX_STREAM_FAILED", run["error"])
+        pid = int((project.fix_dir / "pid-000.txt").read_bytes())
+        self.assertFalse(call._alive(pid))
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+        for name in ("stdout.log", "stderr.log", "last-message.md"):
+            self.assertFalse((folder / name).exists())
+
     def stop_before_popen_returns(self, stop):
         project = FixProject(self)
         project.changes_requested()
@@ -1021,6 +1093,66 @@ class BindTest(unittest.TestCase):
 
 
 class ManualTest(unittest.TestCase):
+    def test_process_filter_installed_before_preflight_is_never_started(self):
+        project = FixProject(self)
+        project.changes_requested()
+        marker = project.work / "process-filter-ran"
+        driver = project.work / "process-filter.py"
+        driver.write_bytes(b"import pathlib, sys\npathlib.Path(sys.argv[1]).write_bytes(b'ran')\n")
+        command = " ".join('"' + p.as_posix() + '"' for p in (pathlib.Path(sys.executable), driver, marker))
+        git(project.repo, "config", "filter.trap.process", command)
+        git(project.repo, "config", "filter.trap.required", "true")
+        (project.repo / ".git/info/attributes").write_bytes(b"src/app.py filter=trap\n")
+        path = project.repo / "src/app.py"
+        path.write_bytes(b"print('dirty')\n")
+        project.refused("OAH_FIX_DIRTY_TREE", project.fix)
+        self.assertFalse(marker.exists(), "even dirty-tree refusal must be conversion-free")
+
+    def test_uncounted_task_decision_stop_blocks_fix_and_manual_until_settled(self):
+        project = FixProject(self)
+        project.changes_requested()
+        other_base = project.head
+        project.commit({"src/other.py": "pass\n"})
+        project.queue({"findings": [bug(prior_refs=[{"round": 1, "receipt_digest": "sha256:" + "0" * 64,
+                                                    "finding_id": "R1-F1", "class_id": "R1-C1"}])]})
+        stopped = project.review(decision="inspect another review", base=other_base)
+        self.assertEqual(stopped.code, "OAH_REVIEW_NEEDS_DECISION", stopped.message)
+        self.assertEqual(project.names(), ["R1.json"], "the stop did not count a receipt")
+        project.refused("OAH_FIX_NOT_REQUESTED", project.fix)
+        project.commit(FIXED, trailer=HUMAN_TRAILER)
+        project.refused("OAH_FIX_NOT_REQUESTED", project.manual, "human")
+        project.queue({"exit": 3})
+        self.assertEqual(project.review(decision="correct R1 then retry").code, "OAH_REVIEW_ENGINE_FAILED")
+        self.assertEqual(project.manual("human").code, "OAH_FIX_RECORDED")
+
+    def test_filters_never_run_in_fix_preflight_bind_or_manual(self):
+        for operation in ("fix", "bind", "manual"):
+            with self.subTest(operation=operation):
+                project = FixProject(self)
+                project.changes_requested()
+                if operation == "bind":
+                    project.queue_fix({"write": FIXED})
+                    project.run_commands(project.fix().commands)
+                elif operation == "manual":
+                    project.commit(FIXED, trailer=HUMAN_TRAILER)
+                marker = project.work / "filter-ran"
+                driver = project.work / "filter.py"
+                driver.write_bytes(b"import pathlib, sys\npathlib.Path(sys.argv[1]).write_bytes(b'ran')\n"
+                                   b"sys.stdout.buffer.write(sys.stdin.buffer.read())\n")
+                command = " ".join('"' + p.as_posix() + '"' for p in (pathlib.Path(sys.executable), driver, marker))
+                git(project.repo, "config", "filter.trap.clean", command)
+                (project.repo / ".git/info/attributes").write_bytes(b"src/app.py filter=trap\n")
+                path = project.repo / "src/app.py"
+                path.write_bytes(path.read_bytes())
+                os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+                if operation == "fix":
+                    self.assertEqual(project.fix().outcome, "no-change")
+                elif operation == "bind":
+                    self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
+                else:
+                    self.assertEqual(project.manual("human").code, "OAH_FIX_RECORDED")
+                self.assertFalse(marker.exists(), "correction cleanliness must never run Git filters")
+
     def test_manual_correction_counts_like_a_codex_attempt(self):
         project = FixProject(self)
         project.changes_requested(bug(1), bug(2))
@@ -1155,6 +1287,31 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_diff_prefixed_worker_streams_are_live_but_never_retained(self):
+        for channel in ("stdout", "stderr", "last_message"):
+            with self.subTest(channel=channel):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                project.env["OPENAI_API_KEY"] = key
+                text = "+" + key.replace("\n", "\n+") + "\n"
+                project.queue_fix({"write": FIXED, "last_message": "", channel: text})
+                terminal = io.StringIO()
+                result = project.fix(terminal=terminal)
+                self.assertEqual(result.outcome, "applied", result.message)
+                self.assertTrue(text in terminal.getvalue(), "worker output must stream live")
+                self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                folder = pathlib.Path(result.run_dir)
+                for name in ("stdout.log", "stderr.log", "last-message.md"):
+                    self.assertFalse((folder / name).exists(), "corrector text must never be written")
+                run = json.loads((folder / "result.json").read_bytes())
+                stream = run["worker_output"]["stdout" if channel == "last_message" else channel]
+                self.assertGreaterEqual(stream["bytes"], len(text.encode("utf-8")))
+                self.assertRegex(stream["sha256"], r"^[0-9a-f]{64}$")
+                if channel == "stdout":
+                    expected = (text + "fake correction done\n").encode("utf-8")
+                    self.assertEqual(stream, {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()})
+
     def test_patch_uses_raw_bytes_without_git_content_conversion(self):
         for conversion in ("clean", "process", "textconv", "encoding", "eol", "ident"):
             with self.subTest(conversion=conversion):
@@ -1402,7 +1559,9 @@ class SecretTest(unittest.TestCase):
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 self.assertNotIn(name, json.dumps(result.to_json()), "unsupported changes are named by position only")
                 patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
-                self.assertIn("OAH_FIX_UNSUPPORTED_SUBMODULE", patch)
+                expected = ("OAH_FIX_INDEX_CHANGED" if change in ("deleted", "added", "untracked", "index-only")
+                            else "OAH_FIX_UNSUPPORTED_SUBMODULE")
+                self.assertIn(expected, patch)
                 self.assertIn("[file ", patch)
                 self.assertNotIn("diff --git", patch, "a submodule change withholds the whole diff")
                 self.assertEqual(built, [], "no content diff is built for an unsupported attempt")
@@ -1448,7 +1607,11 @@ class SecretTest(unittest.TestCase):
                 self.assertNotIn(name, json.dumps(result.to_json()), "identify a withheld file by position only")
                 patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
                 self.assertIn("withheld", patch)
-                self.assertIn("src/app.py", patch, "safe changed files remain reviewable")
+                if channel == "staged":
+                    self.assertIn("OAH_FIX_INDEX_CHANGED", patch)
+                    self.assertNotIn("diff --git", patch)
+                else:
+                    self.assertIn("src/app.py", patch, "safe changed files remain reviewable")
                 for raw in built:
                     for line in key.splitlines():
                         self.assertFalse(line.encode("utf-8") in raw, "Git built a diff containing credential content")

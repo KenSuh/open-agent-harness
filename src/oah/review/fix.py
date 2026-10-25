@@ -65,7 +65,7 @@ from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
 from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
-from oah.review import ReviewError, authors, context, receipts, runner
+from oah.review import ReviewError, authors, receipts, rounds, runner
 from oah.review.schema import BLOCKING
 from oah.scope import outside
 
@@ -372,6 +372,12 @@ def _source(t: _Task, h: _History, nothing: str) -> receipts.Entry:
         raise ReviewError("OAH_FIX_NOTHING_TO_FIX", f"task {t.name} has no review receipt yet, so there are no findings "
                           f"to correct. {nothing}. Run oah review --task {t.name} first")
     latest = found[-1]
+    history = rounds.series(h.records, receipts.read_round_log(t.state, t.name), latest.record["base"],
+                            head=_head(t.root), is_ancestor=lambda a, b: _is_ancestor(t.root, a, b))
+    stopped = rounds.decision_stop(history)
+    if stopped:
+        raise ReviewError("OAH_FIX_NOT_REQUESTED", f"task {t.name} is waiting for a decision: {stopped}. {nothing}. "
+                          f'Decide how to continue, then run oah review --task {t.name} --decision "<what you decided>"')
     outcome = latest.record["outcome"]
     if outcome == "converged":
         raise ReviewError("OAH_FIX_NOT_REQUESTED", f"{latest.name} converged (the review approved head "
@@ -413,7 +419,7 @@ def _untracked(root: pathlib.Path) -> list[str]:
 
 
 def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str) -> None:
-    dirty = context.tracked_dirty(t.root)
+    dirty = _tracked_dirty(t.root)
     if dirty:
         listed = _ids(dirty[:10]) + (f" and {len(dirty) - 10} more" if len(dirty) > 10 else "")
         raise ReviewError("OAH_FIX_DIRTY_TREE", f"tracked files have uncommitted changes ({listed}). {nothing}. A "
@@ -575,6 +581,47 @@ def _index_files(root: pathlib.Path) -> dict[str, tuple[int, str]]:
             mode, oid, _stage = metadata.split()
             found[os.fsdecode(name)] = int(mode, 8), oid.decode("ascii")
     return found
+
+
+def _index_state(root: pathlib.Path) -> dict[str, tuple[bytes, ...]]:
+    """Include every stage, mode and object id, without refreshing the index or invoking filters."""
+    found: dict[str, list[bytes]] = {}
+    for entry in _git_bytes(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if entry:
+            metadata, name = entry.split(b"\t", 1)
+            found.setdefault(os.fsdecode(name), []).append(metadata)
+    return {name: tuple(entries) for name, entries in found.items()}
+
+
+def _tracked_dirty(root: pathlib.Path) -> list[str]:
+    """Compare tree/index identities and raw file bytes; Git never converts working-tree content."""
+    tree, index = _tree_files(root, "HEAD"), _index_files(root)
+    stages = _index_state(root)
+    filemode = _git_bytes(root, "config", "--bool", "core.filemode", ok=(0, 1)).strip() != b"false"
+
+    def git_mode(mode):
+        # Git tracks the owner executable bit on regular files; symlink permission bits are irrelevant.
+        kind = stat.S_IFMT(mode)
+        return kind | (0o111 if filemode and stat.S_ISREG(mode) and mode & stat.S_IXUSR else 0)
+
+    dirty = []
+    for name in sorted(tree.keys() | index.keys()):
+        if tree.get(name) != index.get(name) or len(stages.get(name, ())) != 1 or not stages[name][0].endswith(b" 0"):
+            dirty.append(name)
+            continue
+        if tree[name][0] == 0o160000:
+            nested = root / name
+            if (not nested.is_dir() or nested.is_symlink() or not nested.resolve().is_relative_to(root.resolve())
+                    or _head(nested) != tree[name][1]
+                    or _tracked_dirty(nested)):
+                dirty.append(name)
+            continue
+        old, current = _blob_snapshot(root, tree[name]), _file_snapshot(root, name)
+        if old and current:
+            old, current = (git_mode(old[0]), old[1]), (git_mode(current[0]), current[1])
+        if old != current:
+            dirty.append(name)
+    return dirty
 
 
 def _blob_snapshot(root: pathlib.Path, entry: tuple[int, str] | None) -> tuple[int, bytes] | None:
@@ -750,12 +797,12 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             prepared = call.prepare(
                 call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                  round_instructions=redact(instructions), timeout_s=request.timeout_s,
-                                 output_last_message=str(final)),
+                                 ephemeral=True, retain_worker_text=False),
                 settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=_committed_reader(t.root),
                 keychain=keychain)
             attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
-                               baseline=baseline)
+                               baseline=baseline, index_baseline=_index_state(t.root))
             return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -775,6 +822,7 @@ class _Attempt:
     published: list[dict] = dataclasses.field(default_factory=list)
     ended: bool = False
     baseline: Mapping[str, tuple[int, bytes] | None] | None = None
+    index_baseline: Mapping[str, tuple[bytes, ...]] = dataclasses.field(default_factory=dict)
 
     @property
     def finding_ids(self) -> list[str]:
@@ -799,6 +847,9 @@ class _Attempt:
 
     def _left_behind(self, untracked: Mapping[str, tuple[int, bytes] | None]) -> str:
         try:
+            index = _index_state(self.t.root)
+            if index != self.index_baseline:
+                return "; index entries changed; restore the index and inspect the worktree before retrying"
             files = _changes(self.t.root, self.before, untracked, baseline=self.baseline).files
             return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
         except BaseException:
@@ -855,6 +906,24 @@ class _Attempt:
     def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id
         head = _head(root)
+        index = _index_state(root)
+        changed_index = sorted(name for name in index.keys() | self.index_baseline.keys()
+                               if index.get(name) != self.index_baseline.get(name))
+        if changed_index:
+            # No index blob or path may reach a diff, diagnostic or staging command on this path.
+            positions = tuple(f"[file {n}]" for n in range(1, len(changed_index) + 1))
+            reason = (f"OAH_FIX_INDEX_CHANGED: the corrector changed index entries {_ids(positions)}; diff and "
+                      "commit guidance were withheld. Restore the index and inspect the worktree before retrying")
+            if head != self.before:
+                reason += f"; HEAD moved from {self.before} to {head}"
+            effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')})"
+            patch = reason + "\n"
+            write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
+            write_json_atomic(self.prepared.run.file_path("correction.json"), {
+                "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
+                "changed": list(positions), "new_files": [], "user_files": [],
+                "changes_sha256": receipts.digest(patch.encode("utf-8")), "commands": [], "out_of_scope": []})
+            return _Judged("failed", reason, reason, _Changes(positions, ()), patch, effort, [], [], [], "", head)
         changes = _changes(root, self.before, untracked, baseline=self.baseline)
         sensitive_paths = any(self.redact(name) != name for name in changes.files)
         sensitive, unsupported, captured = _scan_files(root, self.before, changes, untracked, self.redact)
@@ -883,10 +952,7 @@ class _Attempt:
                  "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
                  self.redact(raw.decode("utf-8", errors="replace")))
         digest = receipts.digest(raw)
-        last = runs._contained_path(final.parent, final.name)
-        message = self.redact(last.read_bytes().decode("utf-8", errors="replace")) if last.is_file() else ""
-        if message:
-            write_text_atomic(self.prepared.run.file_path("last-message.md"), message)
+        message = ""  # Final-message output is streamed with stdout; no worker text is retained.
         verified = "verified" if run.get("effort_verified") is True else "unverified"
         effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')}, {verified})"
         files = changes.files
@@ -961,11 +1027,6 @@ class _Attempt:
             warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent {self.binding.source} is "
                             f"{found} ({reason}). Restore it with git restore -- {self.binding.source} before you commit; "
                             "a changed goal needs a new revision, never an edit by a correction")
-        problems = oah_intent.check_return(judged.message, self.binding) if judged.outcome != "failed" else []
-        if problems:
-            warnings.append("OAH_FIX_RETURN_INVALID: the corrector's return does not match the bound intent: "
-                            + "; ".join(item.message for item in problems) + ". Read its last message in the run "
-                            "folder before you rely on it")
         warnings += [f"OAH_FIX_UNQUOTABLE_PATH: {name!r} cannot be written safely for every shell; add it to the "
                      "commit yourself with git add" for name in judged.unquoted]
         lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
@@ -1106,7 +1167,7 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
             raise ReviewError("OAH_FIX_HEAD_UNRELATED", f"HEAD {head} does not descend from {before}, where "
                               f"{attempt.attempt_id} started (the branch was switched or rewritten). {RECORDED}. Check "
                               "out the branch that holds the committed correction, then run oah fix --bind again")
-        dirty = context.tracked_dirty(t.root)
+        dirty = _tracked_dirty(t.root)
         untracked = set(_untracked(t.root))
         left = [name for name in saved.get("new_files") or [] if name in untracked]
         if dirty or left:

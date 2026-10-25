@@ -8,6 +8,9 @@ A `workspace-write` `exec` (a correction) follows the fix script, JSON {"record_
 "steps": [step, ...]}. Correction call k (counted by start markers in record_dir) uses steps[k], or {} past
 the end. A step may set:
   write          {path: text, or null to delete}, relative to the -C directory
+  stage          paths to stage before applying restore (an intentional sandbox violation for accounting tests)
+  index_commands argument lists for git update-index, also intentional violations
+  restore        {path: text, or null to delete}, after staging, to exercise hidden index-only changes
   commit         true: commit everything with git itself, which Codex's read-only .git forbids
   hang           true: write pid-<k>.txt in record_dir before reading the brief, then sleep until killed
   exit_with_descendant true: exit while a descendant keeps stdout/stderr open
@@ -169,11 +172,23 @@ def main(argv: list[str]) -> int:
         subprocess.run(["git", "-C", str(cwd), "add", "-A"], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(cwd), *IDENTITY, "commit", "-q", "-m", "fake corrector commit"], check=True,
                        capture_output=True)
+    if step.get("stage"):
+        subprocess.run(["git", "-C", str(cwd), "add", "--", *step["stage"]], check=True, capture_output=True)
+    for args in step.get("index_commands", []):
+        subprocess.run(["git", "-C", str(cwd), "update-index", *args], check=True, capture_output=True)
+    for name, content in step.get("restore", {}).items():
+        target = cwd / name
+        if content is None:
+            target.unlink()
+        else:
+            target.write_bytes(content.encode("utf-8"))
     if "-o" in options:
         pathlib.Path(options["-o"]).write_text(step.get("last_message", default_message(prompt)), encoding="utf-8")
+    else:
+        sys.stdout.buffer.write(step.get("last_message", default_message(prompt)).encode("utf-8"))
     sys.stdout.buffer.write(step.get("stdout", "").encode("utf-8"))
     sys.stderr.buffer.write(step.get("stderr", "").encode("utf-8"))
-    print("fake correction done")
+    sys.stdout.buffer.write(b"fake correction done\n")
     return int(step.get("exit", 0))
 
 

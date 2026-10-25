@@ -173,6 +173,19 @@ def waiting(s: Series, *, settled: bool = True) -> str | None:
     if reason is None and s.ambiguities:
         reason = ("the correction history is ambiguous: " + "; ".join(s.ambiguities) + ". Decide whether the "
                   "rewritten commits still carry the corrections")
+    return _logged_decision_stop(s, reason, settled=settled)
+
+
+def decision_stop(s: Series) -> str | None:
+    """Task-wide decision stops only; missing corrections are work for `oah fix`, not a decision stop."""
+    latest = s.task_latest
+    reason = (f"{latest.name} stopped the series for a decision: {latest.record.get('decision_stop_reason')}"
+              if latest is not None and latest.record.get("outcome") == "needs-decision" else None)
+    return _logged_decision_stop(s, reason, settled=True)
+
+
+def _logged_decision_stop(s: Series, reason: str | None, *, settled: bool) -> str | None:
+    """Share the landed ordering and settlement rules with correction selection."""
     pending = None
     for line in s.log:
         # A recorded decision settles earlier logged stops across bases. Its target is checked

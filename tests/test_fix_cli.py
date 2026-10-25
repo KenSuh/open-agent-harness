@@ -10,6 +10,7 @@ import secrets as token_source
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 
@@ -83,6 +84,43 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_streams_before_exit_and_retains_only_digests_on_timeout(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True})
+        prior = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high", "--json",
+                            "--timeout-seconds", "3")
+        seen = []
+        reader = threading.Thread(target=lambda: seen.append(process.stderr.readline()), daemon=True)
+        try:
+            reader.start()
+            reader.join(timeout=10)
+            self.assertFalse(reader.is_alive(), "the first worker line must stream while it is still running")
+            self.assertIn(b"OpenAI Codex", seen[0])
+            self.assertIsNone(process.poll(), "the worker output must be visible before timeout")
+            run_id = project.record("A1-start.json")["run_id"]
+            folder = project.state / "runs" / "t1" / run_id
+            for name in ("stdout.log", "stderr.log", "last-message.md"):
+                self.assertFalse((folder / name).exists())
+            out, err = process.communicate(timeout=30)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+            reader.join(timeout=5)
+        result = json.loads(out)
+        self.assertEqual((result["outcome"], result["commands"]), ("failed", []))
+        run = json.loads((folder / "result.json").read_bytes())
+        self.assertEqual(run["status"], "timed_out")
+        self.assertGreater(run["worker_output"]["stderr"]["bytes"], 0)
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+        for path in project.state.rglob("*"):
+            if path.is_file():
+                data = path.read_bytes()
+                if data != prior.get(path):
+                    self.assertNotIn(b"OpenAI Codex v0.163.0 (fake)", data)
+
     def test_cli_withholds_raw_multiline_credentials_in_text_and_json(self):
         for as_json in (False, True):
             for name in ("src/app.py", "src/new.txt"):
