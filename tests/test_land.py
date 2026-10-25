@@ -241,6 +241,26 @@ class AssessTest(unittest.TestCase):
                 project.ci(raw=raw)
                 self.assertFalse(project.assess().ready)
 
+    def test_ci_malformed_totals_preserve_same_page_failures(self):
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(16)
+        for total in (None, True, -1, "1", [], {}):
+            for failed in (False, True):
+                with self.subTest(total=total, failed=failed):
+                    project.ci([{"name": private, "status": "completed",
+                                 "conclusion": "failure" if failed else "success"}], total_count=total)
+                    result = project.assess()
+                    checked = result.check("ci")
+                    self.assertFalse(result.ready, describe(result))
+                    self.assertEqual(checked.code, "OAH_LAND_CI_FAILED" if failed else "OAH_LAND_CI_PENDING")
+                    self.assertIn("incomplete", checked.message)
+                    if failed:
+                        self.assertIn("1 CI check run(s) failed", checked.message)
+                        self.assertIn("positions 1", checked.message)
+                    land.record(project.state, result, "check", None)
+                    raw = (project.state / "land/t1/records.jsonl").read_text(encoding="utf-8")
+                    self.assertNotIn(private, describe(result) + json.dumps(result.to_json()) + raw)
+
     def test_ci_duplicate_ids_refuse_and_preserve_observed_failures(self):
         project = LandProject(self)
         for count in (2, 101):
@@ -334,6 +354,55 @@ class AssessTest(unittest.TestCase):
                 self.assertFalse(result.ready, describe(result))
                 self.assertNotIn(str(other), json.dumps(result.to_json()))
                 self.assertEqual(project.remote_main(), project.base)
+
+    def test_url_named_remote_indirection_refuses_before_assessment_or_push(self):
+        for after_assessment in (False, True):
+            with self.subTest(after_assessment=after_assessment):
+                project = LandProject(self)
+                result = project.assess() if after_assessment else None
+                other = project.work / ("private-" + secrets.token_hex(12) + ".git")
+                subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                               check=True, env=git_env())
+                git(project.repo, "config", f"remote.{project.remote}.url", str(project.remote))
+                git(project.repo, "config", f"remote.{project.remote}.pushurl", str(other))
+                if after_assessment:
+                    self.assertTrue(result.ready, describe(result))
+                    with project.patched(), self.assertRaises(land.LandError) as caught:
+                        land.push(project.repo, result, env=dict(project.env))
+                    self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+                    shown = str(caught.exception)
+                else:
+                    result = project.assess()
+                    self.assertFalse(result.ready, describe(result))
+                    shown = describe(result) + json.dumps(result.to_json())
+                self.assertIn("remote names without", shown)
+                self.assertNotIn(str(other), shown)
+                self.assertNotIn(str(project.remote), shown)
+                self.assertEqual(project.remote_main(), project.base)
+                self.assertEqual(git(other, "rev-parse", "main"), project.base)
+
+    def test_simple_remote_checks_effective_urls_and_matching_rewrites(self):
+        project = LandProject(self)
+        for name in ("url:remote", "path/remote"):
+            with self.subTest(name=name):
+                git(project.repo, "config", f"remote.{name}.url", str(project.remote))
+                with project.patched(), self.assertRaises(land.LandError) as caught:
+                    land._destination(project.repo, "origin", project.env)
+                self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+                git(project.repo, "config", "--remove-section", f"remote.{name}")
+        git(project.repo, "config", "remote.origin.pushurl", str(project.remote))
+        for key in ("insteadOf", "pushInsteadOf"):
+            with self.subTest(key=key):
+                config_key = f"url.{project.work / 'other.git'}.{key}"
+                # A rewrite unrelated to this remote must not change its destination.
+                git(project.repo, "config", config_key, "unrelated:")
+                with project.patched():
+                    self.assertEqual(land._destination(project.repo, "origin", project.env),
+                                     (str(project.remote), str(project.remote)))
+                git(project.repo, "config", config_key, str(project.remote))
+                with project.patched(), self.assertRaises(land.LandError):
+                    land._destination(project.repo, "origin", project.env)
+                git(project.repo, "config", "--unset", config_key)
 
     def test_ci_uses_assessed_destination_over_gh_repo_and_default(self):
         project = LandProject(self)
@@ -613,6 +682,19 @@ class AssessTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the remote-name assertion hook is a POSIX shell script")
+    def test_push_uses_the_verified_remote_name(self):
+        project = LandProject(self)
+        hook = project.repo / ".git/hooks/pre-push"
+        hook.write_bytes(b'#!/bin/sh\n[ "$1" = origin ]\n')
+        hook.chmod(0o755)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertTrue(pushed.landed, pushed.message)
+        self.assertEqual(project.remote_main(), project.head)
+
     def test_push_follow_tags_never_publishes_unconfirmed_tags(self):
         for rejected in (False, True):
             with self.subTest(rejected=rejected):

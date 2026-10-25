@@ -24,7 +24,8 @@ EXCEPTION_MESSAGES = {
     "OAH_LAND_NOTHING_TO_LAND": "there is no commit to land; commit the work and get it reviewed before oah land",
     "OAH_LAND_NOT_READY": "a push needs passing landing checks; run oah land --merge again",
     "OAH_LAND_DESTINATION_CHANGED": "the destination changed; run oah land --merge and confirm again",
-    "OAH_LAND_DESTINATION_UNSUPPORTED": "the destination is ambiguous; configure one literal remote URL and retry",
+    "OAH_LAND_DESTINATION_UNSUPPORTED": "landing needs a simple remote; configure one identical fetch and push URL, "
+                                        "remove matching URL rewrites, use remote names without ':' or '/', and retry",
     "OAH_TASK_INVALID": "the task name is invalid; choose a valid task name and run oah land again",
     "OAH_REVIEW_GIT_FAILED": "git could not read landing evidence; check the repository and run oah land again",
     "OAH_RUN_PATH_UNSAFE": "landing state contains an unsafe path; remove linked state paths and run oah land again",

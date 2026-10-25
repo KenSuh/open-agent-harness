@@ -32,6 +32,20 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    def test_url_named_remote_added_during_confirmation_refuses_without_disclosure(self):
+        project = LandProject(self)
+
+        def confirm(_prompt):
+            git(project.repo, "config", f"remote.{project.remote}.pushurl", str(project.work / "other.git"))
+            return "y\n"
+
+        done = land_command(project, "--merge", "--task", "t1", interactive=True, ask=confirm)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("OAH_LAND_DESTINATION_UNSUPPORTED", done.stderr)
+        self.assertIn("remote names without", done.stderr)
+        self.assertNotIn(str(project.remote), done.stdout + done.stderr)
+        self.assertEqual(project.remote_main(), project.base)
+
     def test_required_gate_labels_and_paths_are_private_in_all_exports(self):
         private = "account-" + secrets.token_hex(16)
         target = f"src/{private}/app.py"

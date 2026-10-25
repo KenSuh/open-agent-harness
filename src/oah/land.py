@@ -36,7 +36,7 @@ The changed paths are `F..HEAD` when HEAD contains F (exactly what lands). Other
 from the merge-base with the local default ref to HEAD.
 
 `push(root, assessment, env=...)` revalidates local authorization under the state lock, then runs
-`git push --porcelain --no-follow-tags --force-with-lease=refs/heads/<branch>:<F> <verified-destination>
+`git push --porcelain --no-follow-tags --force-with-lease=refs/heads/<branch>:<F> <verified-remote-name>
 <HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step.
 After a failed push, a fresh fetch checks whether the remote history contains HEAD; failed verification leaves
 the outcome explicitly uncertain.
@@ -485,17 +485,17 @@ def _newly_affected(their_rows: Sequence, here: Sequence[tuple], there: Sequence
 
 
 def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tuple[str, str]:
-    """One literal destination shared by the isolated fetch and push; never export its URL.
+    """One simple remote shared by the isolated fetch and named push; never export its URL.
 
-    URL rewrites are deliberately unsupported. In particular the mirror does not load local
-    rewrites, whereas a push normally does. Refusing them avoids two different identities.
+    Matching URL rewrites and URL-like remote names are unsupported: the isolated mirror and
+    the checkout must resolve the destination identically without remote-name indirection.
     """
     from oah.impact import mapstore
 
     def refuse():
         raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED",
-                        "landing needs one identical fetch and push destination without URL rewrites; configure "
-                        "one literal remote URL and at most one identical push URL, then run oah land again")
+                        "landing needs a simple remote; configure one identical fetch and push URL, remove "
+                        "matching URL rewrites, and use remote names without ':' or '/', then run oah land again")
 
     def config(args, config_env):
         result = run_command([*git_argv(), "-C", str(root), "config", "--null", *args],
@@ -507,13 +507,23 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
     isolated = mapstore._isolated_git_env()
     destinations = []
     for config_env in (isolated, env):
-        if config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], config_env):
+        names = [entry[len("remote."):].rsplit(".", 1)[0]
+                 for entry in config(["--name-only", "--get-regexp", r"^remote\..*\."], config_env)]
+        if any(":" in name or "/" in name for name in names):
             refuse()
         urls = config(["--get-all", f"remote.{remote}.url"], config_env)
         pushes = config(["--get-all", f"remote.{remote}.pushurl"], config_env)
         if len(urls) != 1 or not urls[0] or (pushes and pushes != urls):
             refuse()
         stored = urls[0]
+        rewrites = config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], config_env)
+        if any(stored.startswith(entry.partition("\n")[2]) for entry in rewrites):
+            refuse()
+        for options in (("--all",), ("--push", "--all")):
+            result = run_command([*git_argv(), "-C", str(root), "remote", "get-url", *options, "--", remote],
+                                 timeout=GH_TIMEOUT, env=dict(config_env))
+            if result.timed_out or result.returncode != 0 or result.stdout.splitlines() != [stored]:
+                refuse()
         url = stored
         if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
             url = str((root / pathlib.Path(url).expanduser()).resolve())
@@ -607,7 +617,9 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
                                  newly=_newly_affected(their_rows, here, there),
                                  commits=_count(root, fetched, head) if contains else 0, warnings=warnings,
                                  destination=destination)
-    except (ImpactError, ReviewError, LandError):
+    except LandError as exc:
+        return _Reassessment(False, str(exc), warnings=warnings)
+    except (ImpactError, ReviewError):
         return _Reassessment(False, f"impact could not be reassessed against the fetched default branch; check the "
                                     f"destination and run oah impact refresh, {retry}", warnings=warnings)
 
@@ -737,9 +749,9 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
             return runs, f"gh exited {result.returncode}"
         try:
             data = json.loads(result.stdout)
-            total, items = data["total_count"], data["check_runs"]
-            if (type(total) is not int or total < 0 or not isinstance(items, list)
-                    or len(items) > GH_PER_PAGE):
+            items = data["check_runs"]
+            total = data.get("total_count")
+            if not isinstance(items, list):
                 raise TypeError
         except (ValueError, KeyError, TypeError):
             return runs, "gh did not return valid check-run JSON"
@@ -762,6 +774,9 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                 identities.add(identifier)
         if invalid:
             return runs, "gh returned invalid check runs"
+        # Validate each run before the envelope so bad metadata cannot erase a known failure.
+        if type(total) is not int or total < 0 or len(items) > GH_PER_PAGE:
+            return runs, "gh did not return valid check-run JSON"
         if expected_total is None:
             expected_total = total
         if total != expected_total or len(items) != min(GH_PER_PAGE, total - seen):
@@ -996,13 +1011,13 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
     settings = configured(root)
     ref = f"refs/heads/{assessment.branch}"
     where = _destination_text(assessment.remote, assessment.branch)
-    # Literal destinations can contain credentials. Disable URL/curl tracing, including
-    # configured trace2 targets, before handing the destination to git or its children.
+    # Resolved URLs can contain credentials. Disable URL/curl tracing, including
+    # configured trace2 targets, before handing the remote name to git or its children.
     push_env = {key: value for key, value in env.items()
                 if not key.upper().startswith("GIT_TRACE") and key.upper() != "GIT_CURL_VERBOSE"}
     push_env.update(PUSH_ENV, GIT_TRACE="0", GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
     result = run_command([*git_argv(), "-C", str(root), "push", "--porcelain", "--no-follow-tags",
-                          f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment._destination[1],
+                          f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment.remote,
                           f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env=push_env)
     if result.returncode == 0 and not result.timed_out:
         return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head} (a fast-forward from "
