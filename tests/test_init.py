@@ -518,5 +518,98 @@ class MapStepTest(unittest.TestCase):
         self.assertEqual(init.refresh_map(repo, {})[0], "refreshed")
 
 
+
+class Replies:
+    """A scripted `ask`: returns the next reply (None means end of input) and records each prompt."""
+
+    def __init__(self, *replies: str | None) -> None:
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str | None:
+        self.prompts.append(prompt)
+        return self.replies.pop(0) if self.replies else None
+
+
+ALL_KEYS = ("agents", "hooks", "unlazy", "graph", "ci", "orca", "aside", "jev", "skill_updates")
+
+
+class AnswersTest(unittest.TestCase):
+    def resolve(self, given: dict, *, ask=None, recorded=None, interactive=True, dry_run=False):
+        lines: list[str] = []
+        ask = ask or Replies()
+        answers = init.resolve_answers(given, recorded=recorded, interactive=interactive, dry_run=dry_run,
+                                       ask=ask, out=lines.append)
+        return answers, ask, "\n".join(lines)
+
+    def test_questions_and_flags(self):
+        self.assertEqual(tuple(question.key for question in init.QUESTIONS), ALL_KEYS)
+        flags = {question.key: (question.flag_yes, question.flag_no) for question in init.QUESTIONS}
+        self.assertEqual(flags["agents"], ("--with-agents", "--without-agents"))
+        self.assertEqual(flags["skill_updates"], ("--with-skill-updates", "--without-skill-updates"))
+
+    def test_flags_answer_without_asking(self):
+        given = {key: key in ("agents", "jev") for key in ALL_KEYS}
+        answers, ask, _ = self.resolve(given, interactive=False)
+        self.assertEqual(ask.prompts, [])
+        self.assertEqual({key: (answer.value, answer.source) for key, answer in answers.items()},
+                         {key: (key in ("agents", "jev"), "flag") for key in ALL_KEYS})
+
+    def test_enter_takes_the_default(self):
+        answers, ask, _ = self.resolve({}, ask=Replies("", "", "", "", "", "", "", "n", ""))
+        self.assertEqual(len(ask.prompts), 9)
+        self.assertEqual({key: answer.value for key, answer in answers.items()},
+                         {"agents": True, "hooks": True, "unlazy": True, "graph": False, "ci": False, "orca": False,
+                          "aside": False, "jev": False, "skill_updates": True})
+        self.assertEqual({answer.source for answer in answers.values()}, {"asked"})
+
+    def test_invalid_answer_asks_again(self):
+        given = {key: True for key in ALL_KEYS if key != "graph"}
+        answers, ask, out = self.resolve(given, ask=Replies("maybe", "YES"))
+        self.assertTrue(answers["graph"].value)
+        self.assertEqual(len(ask.prompts), 2)
+        self.assertIn("y or n", out)
+
+    def test_jev_question_requires_typed_answer(self):
+        given = {key: False for key in ALL_KEYS if key != "jev"}
+        answers, ask, out = self.resolve(given, ask=Replies("", "y"))
+        self.assertEqual(answers["jev"], init.Answer(True, "asked"))
+        self.assertEqual(len(ask.prompts), 2)
+        lowered = (out + ask.prompts[0]).lower()
+        for words in ("recommended", "charge", "200 characters", "never adds or drops", "typesafe_api_key"):
+            self.assertIn(words, lowered)
+
+    def test_recorded_answers_come_from_existing_config(self):
+        given = {key: True for key in ALL_KEYS if key not in ("jev", "skill_updates")}
+        answers, ask, _ = self.resolve(given, recorded={"jev": False, "skill_updates": True}, interactive=False)
+        self.assertEqual(ask.prompts, [])
+        self.assertEqual((answers["jev"], answers["skill_updates"]),
+                         (init.Answer(False, "config"), init.Answer(True, "config")))
+
+    def test_noninteractive_refusal_lists_missing_flags(self):
+        ask = Replies("y")
+        with self.assertRaises(init.InitError) as caught:
+            self.resolve({"agents": True, "hooks": False}, ask=ask, interactive=False)
+        self.assertEqual((caught.exception.code, caught.exception.exit_code), ("OAH_INIT_ANSWERS_REQUIRED", 2))
+        message = str(caught.exception)
+        for key in ALL_KEYS[2:]:
+            flag = key.replace("_", "-")
+            self.assertIn(f"--with-{flag} or --without-{flag}", message)
+        self.assertNotIn("--with-agents", message)
+        self.assertEqual(ask.prompts, [])
+
+    def test_dry_run_uses_defaults_without_asking(self):
+        answers, ask, _ = self.resolve({"ci": True}, interactive=False, dry_run=True)
+        self.assertEqual(ask.prompts, [])
+        self.assertEqual(answers["ci"], init.Answer(True, "flag"))
+        self.assertEqual(answers["jev"], init.Answer(False, "default"))
+        self.assertEqual(answers["agents"], init.Answer(True, "default"))
+
+    def test_end_of_input_refuses(self):
+        with self.assertRaises(init.InitError) as caught:
+            self.resolve({}, ask=Replies("y", None))
+        self.assertEqual(caught.exception.code, "OAH_INIT_NO_ANSWER")
+
+
 if __name__ == "__main__":
     unittest.main()
