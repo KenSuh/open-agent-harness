@@ -16,7 +16,6 @@ from unittest import mock
 from oah import init, init_cli, unlazy
 from oah.cli import build_parser, command_modules, main
 from oah.impact import mapstore
-from oah.paths import repo_info, state_dir
 from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
