@@ -488,6 +488,18 @@ class RefusalTest(unittest.TestCase):
 
 
 class WorkerTest(unittest.TestCase):
+    def test_unchanged_checkout_conversion_is_not_a_correction(self):
+        project = FixProject(self, attributes=None)
+        project.changes_requested()
+        git(project.repo, "config", "core.autocrlf", "true")
+        packet = project.repo / ".oah/tasks/t1/PACKET.md"
+        packet.unlink()
+        git(project.repo, "checkout", "--", ".oah/tasks/t1/PACKET.md")
+        self.assertIn(b"\r\n", packet.read_bytes())
+        result = project.fix()
+        self.assertEqual((result.outcome, result.commands), ("no-change", []))
+        self.assertEqual((pathlib.Path(result.run_dir) / "correction.patch").read_bytes(), b"")
+
     def test_corrector_staging_a_user_file_withholds_commit_guidance(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1143,6 +1155,160 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_patch_uses_raw_bytes_without_git_content_conversion(self):
+        for conversion in ("clean", "process", "textconv", "encoding", "eol", "ident"):
+            with self.subTest(conversion=conversion):
+                name = "src/converted.txt"
+                old = b"old $Id$\n"
+                project = FixProject(self, files={name: old})
+                project.changes_requested()
+                key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                project.env["OPENAI_API_KEY"] = key
+                marker = project.work / "conversion-ran"
+                payload = project.work / "payload"
+                payload.write_bytes((key + "\n").encode("utf-8"))
+                driver = project.work / "conversion.py"
+                # A process filter speaks Git's pkt-line protocol; other drivers read ordinary stdin.
+                driver.write_bytes(
+                    b"import pathlib, sys\n"
+                    b"pathlib.Path(sys.argv[1]).write_bytes(b'ran')\n"
+                    b"data = pathlib.Path(sys.argv[2]).read_bytes()\n"
+                    b"if sys.argv[3] != 'process':\n"
+                    b"    sys.stdin.buffer.read()\n"
+                    b"    sys.stdout.buffer.write(data)\n"
+                    b"    sys.exit(0)\n"
+                    b"def read():\n"
+                    b"    result = []\n"
+                    b"    while True:\n"
+                    b"        size = sys.stdin.buffer.read(4)\n"
+                    b"        if not size: raise EOFError\n"
+                    b"        size = int(size, 16)\n"
+                    b"        if not size: return result\n"
+                    b"        result.append(sys.stdin.buffer.read(size - 4))\n"
+                    b"def write(parts):\n"
+                    b"    for part in parts:\n"
+                    b"        sys.stdout.buffer.write(('%04x' % (len(part) + 4)).encode('ascii') + part)\n"
+                    b"    sys.stdout.buffer.write(b'0000')\n"
+                    b"    sys.stdout.buffer.flush()\n"
+                    b"read()\nwrite([b'git-filter-server\\n', b'version=2\\n'])\n"
+                    b"read()\nwrite([b'capability=clean\\n', b'capability=smudge\\n'])\n"
+                    b"try:\n"
+                    b"    while True:\n"
+                    b"        read()\n        read()\n"
+                    b"        write([b'status=success\\n'])\n        write([data])\n        write([])\n"
+                    b"except EOFError:\n    pass\n")
+                command = " ".join('"' + path.as_posix() + '"' for path in
+                                   (pathlib.Path(sys.executable), driver, marker, payload)) + " " + conversion
+                new = (b"old $Id$\r\n" if conversion == "eol" else
+                       b"old $Id: expanded-id $\n" if conversion == "ident" else
+                       "new $Id$\n".encode("utf-16-le") if conversion == "encoding" else b"new $Id$\n")
+                project.queue_fix({"write": {name: "temporary\n", **FIXED}})
+                execute = call.execute
+
+                def dispatched(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    (project.repo / name).write_bytes(new)
+                    attribute = {"clean": "filter=custom", "process": "filter=custom", "textconv": "diff=custom",
+                                 "encoding": "working-tree-encoding=UTF-16LE", "eol": "text eol=lf",
+                                 "ident": "ident"}[conversion]
+                    (project.repo / ".git/info/attributes").write_bytes((name + " " + attribute + "\n").encode("ascii"))
+                    if conversion in ("clean", "process"):
+                        git(project.repo, "config", "filter.custom." + conversion, command)
+                        git(project.repo, "config", "filter.custom.required", "true")
+                    elif conversion == "textconv":
+                        git(project.repo, "config", "diff.custom.textconv", command)
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched):
+                    result = project.fix()
+                self.assertEqual(result.outcome, "applied", result.message)
+                self.assertFalse(marker.exists(), "change discovery and patch generation must not run conversions")
+                self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                if conversion == "encoding":
+                    self.assertIn(f"binary, {len(new)} bytes".encode("ascii"), patch)
+                else:
+                    self.assertIn(b"-" + old, patch)
+                    self.assertIn(b"+" + new, patch)
+
+    def test_patch_uses_the_same_bytes_that_passed_the_scan(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+        project.env["OPENAI_API_KEY"] = key
+        scan = fix._scan_files
+
+        def scanned(*args, **kwargs):
+            result = scan(*args, **kwargs)
+            (project.repo / "src/app.py").write_bytes((key + "\n").encode("utf-8"))
+            return result
+
+        with mock.patch.object(fix, "_scan_files", side_effect=scanned):
+            result = project.fix()
+        self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+        patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+        self.assertIn(b"+print('fixed')", patch)
+
+    def test_binary_and_undecodable_sides_are_size_markers_only(self):
+        for old, new in ((b"old\x00secret\n", b"new\x00secret\n"), (b"old\xff\n", b"new\xfe\n")):
+            with self.subTest(old=old):
+                project = FixProject(self, files={"src/data": old})
+                project.changes_requested()
+                project.queue_fix({"write": {"src/data": "temporary\n"}})
+                execute = call.execute
+
+                def dispatched(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    (project.repo / "src/data").write_bytes(new)
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched):
+                    result = project.fix()
+                self.assertEqual(result.outcome, "applied", result.message)
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                for data in (old, new):
+                    self.assertIn(f"binary, {len(data)} bytes".encode("ascii"), patch)
+                    self.assertNotIn(data, patch)
+
+    @unittest.skipUnless(os.name != "nt", "POSIX symlinks; Windows requires symlink privileges")
+    def test_external_symlinks_are_withheld_by_position(self):
+        for side in ("old", "new", "parent"):
+            with self.subTest(side=side):
+                project = FixProject(self)
+                name = "src/link" if side != "parent" else "src/app.py"
+                target = project.work / "outside"
+                target.mkdir()
+                (target / "app.py").write_bytes(b"outside contents\n")
+                project.changes_requested()
+                if side == "old":
+                    (project.repo / name).symlink_to(target / "app.py")
+                    project.commit({})
+                project.queue_fix({"write": FIXED})
+                execute = call.execute
+
+                def dispatched(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    path = project.repo / name
+                    if side == "old":
+                        path.unlink()
+                    elif side == "new":
+                        path.symlink_to(target / "app.py")
+                    else:
+                        path.unlink()
+                        path.parent.rmdir()
+                        path.parent.symlink_to(target, target_is_directory=True)
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched):
+                    result = project.fix()
+                self.assertEqual((result.outcome, result.commands), ("failed", []))
+                self.assertIsNone(result.next_command)
+                self.assertNotIn(name, json.dumps(result.to_json()))
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                self.assertNotIn(b"outside contents", patch)
+                self.assertIn(b"[file ", patch)
+
     def test_file_diffs_disable_submodule_expansion_and_user_diff_drivers(self):
         project = FixProject(self, attributes="* -text\n*.py diff=custom\n")
         project.changes_requested()
@@ -1170,13 +1336,10 @@ class SecretTest(unittest.TestCase):
         patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
         self.assertIn(b"+print('fixed')", patch)
         self.assertIn(b"+NEW = 1", patch)
-        self.assertEqual(len(built), 2, "both tracked and new files use the same diff protections")
-        for args in built:
-            for option in ("--submodule=short", "--no-ext-diff", "--no-textconv"):
-                self.assertIn(option, args)
+        self.assertEqual(built, [], "Git must never build correction diff content")
 
     def test_submodule_changes_fail_closed_before_building_a_diff(self):
-        for change in ("dirty", "ignored", "deleted", "added", "untracked", "index-only"):
+        for change in ("dirty", "ignored", "deleted", "added", "untracked", "index-only", "head-only"):
             with self.subTest(change=change):
                 project = FixProject(self)
                 source = make_git_repo(self)
@@ -1218,6 +1381,10 @@ class SecretTest(unittest.TestCase):
                     elif change == "index-only":
                         oid = git(source, "rev-parse", "HEAD")
                         git(project.repo, "update-index", "--add", "--cacheinfo", f"160000,{oid},{name}")
+                    elif change == "head-only":
+                        subprocess.run(["git", "-C", str(project.repo / name), "-c", "commit.gpgsign=false", "commit",
+                                        "-q", "--allow-empty", "-m", "move nested HEAD without changing its files"],
+                                       env=git_env(), check=True, capture_output=True)
                     return result
 
                 def capture(root, *args, **kwargs):

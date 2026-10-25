@@ -45,6 +45,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import difflib
+import hashlib
 import json
 import os
 import pathlib
@@ -77,7 +78,6 @@ OUTCOME_CODES = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
 PLACEHOLDERS = ("TASK", "ATTEMPT", "RECEIPT", "RECEIPT_DIGEST", "BASE", "REVIEWED", "HEAD", "FINDINGS", "CLASSES")
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
-_DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--no-renames", "--submodule=short", "--ignore-submodules=none")
 _STOP_SIGNALS = tuple(getattr(signal, name) for name in (("SIGBREAK",) if os.name == "nt" else ("SIGTERM", "SIGHUP"))
                       if hasattr(signal, name))
 LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
@@ -525,24 +525,74 @@ def _file_snapshot(root: pathlib.Path, name: str) -> tuple[int, bytes] | None:
     """Keep user-owned bytes in memory only, without following a file symlink."""
     path = root / name
     try:
+        # A replaced parent directory must not make even discovery read outside the worktree.
+        if not path.parent.resolve().is_relative_to(root.resolve()):
+            return stat.S_IFDIR, b""
         info = path.lstat()
         kind = stat.S_IFMT(info.st_mode)
         data = (os.fsencode(os.readlink(path)) if stat.S_ISLNK(info.st_mode) else
                 path.read_bytes() if stat.S_ISREG(info.st_mode) else b"")
+        if stat.S_ISDIR(info.st_mode):
+            # Detect dirty nested repositories without invoking their filters or following their links.
+            digest = hashlib.sha256()
+            if (path / ".git").exists():
+                for args in (("rev-parse", "--verify", "HEAD"), ("ls-files", "--stage", "-z")):
+                    digest.update(_git_bytes(path, *args))
+            for child in sorted(path.rglob("*")):
+                relative = child.relative_to(path)
+                if ".git" in relative.parts:
+                    continue
+                snapshot = (_file_snapshot(root, child.relative_to(root).as_posix())
+                            if child.is_symlink() or not child.is_dir() else None)
+                if snapshot is not None:
+                    for part in (os.fsencode(relative), str(snapshot[0]).encode("ascii"), snapshot[1]):
+                        digest.update(len(part).to_bytes(8, "big"))
+                        digest.update(part)
+            data = digest.digest()
         return kind | (info.st_mode & 0o111), data
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise ReviewError("OAH_FIX_GIT_FAILED", f"cannot inspect untracked file {name!r}: {exc}; check its permissions "
+        raise ReviewError("OAH_FIX_GIT_FAILED", f"cannot inspect file {name!r}: {exc}; check its permissions "
                           "and retry oah fix") from None
 
 
-def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int, bytes] | None]) -> _Changes:
-    tracked = _names(root, "diff", *_DIFF_OPTIONS, "--name-only", "-z", before, "--")
-    # A newly staged gitlink with no checked-out directory vanishes from the combined worktree diff.
-    staged = _names(root, "diff", "--cached", *_DIFF_OPTIONS, "--raw", "-z", before, "--")
-    for metadata, name in zip(staged[::2], staged[1::2]):
-        if "160000" in metadata[1:].split()[:2] and name not in tracked:
+def _tree_files(root: pathlib.Path, before: str) -> dict[str, tuple[int, str]]:
+    found = {}
+    for entry in _git_bytes(root, "ls-tree", "-r", "-z", before).split(b"\0"):
+        if entry:
+            metadata, name = entry.split(b"\t", 1)
+            mode, _kind, oid = metadata.split()
+            found[os.fsdecode(name)] = int(mode, 8), oid.decode("ascii")
+    return found
+
+
+def _index_files(root: pathlib.Path) -> dict[str, tuple[int, str]]:
+    found = {}
+    for entry in _git_bytes(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if entry:
+            metadata, name = entry.split(b"\t", 1)
+            mode, oid, _stage = metadata.split()
+            found[os.fsdecode(name)] = int(mode, 8), oid.decode("ascii")
+    return found
+
+
+def _blob_snapshot(root: pathlib.Path, entry: tuple[int, str] | None) -> tuple[int, bytes] | None:
+    if entry is None:
+        return None
+    mode, oid = entry
+    kind = stat.S_IFMT(mode)
+    return kind | (mode & 0o111), (_git_bytes(root, "cat-file", "blob", oid) if kind != 0o160000 else b"")
+
+
+def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int, bytes] | None], *,
+             baseline: Mapping[str, tuple[int, bytes] | None] | None = None) -> _Changes:
+    tree, index = _tree_files(root, before), _index_files(root)
+    tracked = []
+    for name in sorted(tree.keys() | index.keys() | (baseline.keys() if baseline is not None else set())):
+        old = baseline.get(name) if baseline is not None else _blob_snapshot(root, tree.get(name))
+        gitlink = any(entry and entry[0] == 0o160000 for entry in (tree.get(name), index.get(name)))
+        if old != _file_snapshot(root, name) or (gitlink and tree.get(name) != index.get(name)):
             tracked.append(name)
     user = tuple(name for name, snapshot in untracked.items()
                  if name in tracked or _file_snapshot(root, name) != snapshot)
@@ -552,62 +602,64 @@ def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int,
 
 def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
                 untracked: Mapping[str, tuple[int, bytes] | None],
-                redact: Callable[[str], str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Scan raw sides before diffing; submodules and gitlinks cannot be scanned as ordinary files."""
-    found, unsupported = {}, {}
+                redact: Callable[[str], str]) -> tuple[dict[str, str], dict[str, str], dict]:
+    """Capture and scan both raw sides once; only these bytes may enter the patch."""
+    found, unsupported, captured = {}, {}, {}
+    tree, index = _tree_files(root, before), _index_files(root)
     for position, name in enumerate(changes.files, 1):
         current = _file_snapshot(root, name)
         if current and stat.S_ISDIR(current[0]):
             unsupported[name] = f"[file {position}]"
-        index = _git_bytes(root, "ls-files", "--stage", "-z", "--", f":(literal){name}")
-        if any(entry.startswith(b"160000 ") for entry in index.split(b"\0")):
+        if any(entry and entry[0] == 0o160000 for entry in (tree.get(name), index.get(name))):
             unsupported[name] = f"[file {position}]"
-        data = [current[1]] if current else []
-        if name in untracked:
-            old = untracked[name]
-            if old:
-                data.append(old[1])
-                if stat.S_ISDIR(old[0]):
-                    unsupported[name] = f"[file {position}]"
-        else:
-            entries = _git_bytes(root, "ls-tree", "-z", before, "--", f":(literal){name}")
-            for entry in entries.split(b"\0"):
-                if entry:
-                    _mode, kind, oid = entry.split(b"\t", 1)[0].split()
-                    if kind == b"commit":
+        old = untracked[name] if name in untracked else _blob_snapshot(root, tree.get(name))
+        for side in (old, current):
+            if side and stat.S_ISDIR(side[0]):
+                unsupported[name] = f"[file {position}]"
+            if side and stat.S_ISLNK(side[0]):
+                try:
+                    target = (root / name).parent / os.fsdecode(side[1])
+                    if not target.resolve().is_relative_to(root.resolve()):
                         unsupported[name] = f"[file {position}]"
-                    elif kind == b"blob":
-                        data.append(_git_bytes(root, "cat-file", "blob", oid.decode("ascii")))
+                except (OSError, ValueError, RuntimeError):
+                    unsupported[name] = f"[file {position}]"
+        data = [side[1] for side in (old, current) if side]
         if any(redact(text) != text for text in (raw.decode("utf-8", errors="replace") for raw in data)):
             found[name] = f"[file {position}]"
-    return found, unsupported
+        if name not in found and name not in unsupported:
+            captured[name] = old, current
+    return found, unsupported, captured
 
 
 def _patch(root: pathlib.Path, before: str, changes: _Changes,
            untracked: Mapping[str, tuple[int, bytes] | None],
-           redact: Callable[[str], str] | None = None) -> bytes:
-    parts = ([_git_bytes(root, "diff", "--no-color", *_DIFF_OPTIONS, before, "--",
-                         *(f":(literal){name}" for name in changes.tracked))] if changes.tracked else [])
-    for name in changes.new:
-        parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", *_DIFF_OPTIONS, "--",
-                                "/dev/null", name, ok=(0, 1)))
-    for name in changes.user:
-        old, new = untracked[name], _file_snapshot(root, name)
+           redact: Callable[[str], str] | None = None, *, captured: Mapping | None = None) -> bytes:
+    if captured is None:
+        sensitive, unsupported, captured = _scan_files(root, before, changes, untracked, redact or (lambda text: text))
+        if sensitive or unsupported:
+            raise ReviewError("OAH_FIX_UNSAFE_CONTENT", "diff inputs could not be safely scanned; restore the affected "
+                              "files before retrying oah fix")
+    parts = []
+    for name in changes.files:
+        old, new = captured[name]
         before_data, after_data = old[1] if old else b"", new[1] if new else b""
         parts.append(f"diff --git {json.dumps('a/' + name)} {json.dumps('b/' + name)}\n".encode("utf-8"))
         if old is None or new is None or old[0] != new[0]:
             parts.append(f"file mode {old[0] if old else 'absent'} -> {new[0] if new else 'absent'}\n".encode("ascii"))
-        if b"\0" in before_data or b"\0" in after_data:
-            parts.append(b"Binary files differ\n")
+        try:
+            before_data.decode("utf-8")
+            after_data.decode("utf-8")
+            binary = b"\0" in before_data or b"\0" in after_data
+        except UnicodeDecodeError:
+            binary = True
+        if binary:
+            parts.append(f"Binary files differ: old binary, {len(before_data)} bytes; "
+                         f"new binary, {len(after_data)} bytes\n".encode("ascii"))
         else:
-            if redact is not None:
-                # Redact whole file text before diff prefixes can split a multiline credential.
-                before_data = redact(before_data.decode("utf-8", errors="replace")).encode("utf-8")
-                after_data = redact(after_data.decode("utf-8", errors="replace")).encode("utf-8")
             for line in difflib.diff_bytes(difflib.unified_diff, before_data.splitlines(keepends=True),
                                           after_data.splitlines(keepends=True),
-                                          fromfile=os.fsencode("a/" + name) if old else b"/dev/null",
-                                          tofile=os.fsencode("b/" + name) if new else b"/dev/null"):
+                                          fromfile=json.dumps("a/" + name).encode("ascii") if old else b"/dev/null",
+                                          tofile=json.dumps("b/" + name).encode("ascii") if new else b"/dev/null"):
                 parts.append(line if line.endswith(b"\n") else line + b"\n\\ No newline at end of file\n")
     return b"".join(parts)
 
@@ -685,6 +737,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
         untracked = {name: _file_snapshot(t.root, name) for name in _untracked(t.root)}
+        # Compare discovery with checkout bytes, so an untouched CRLF/encoded file stays unchanged.
+        baseline = {name: _file_snapshot(t.root, name) for name in _tree_files(t.root, before)}
         instructions = round_instructions(
             task=t.name, attempt_id=attempt_id, receipt=receipt.name.removesuffix(".json"),
             receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
@@ -700,7 +754,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                 settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
                 has_footer=tools.has_footer, parse_intent=tools.parse, read_source=_committed_reader(t.root),
                 keychain=keychain)
-            attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact)
+            attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
+                               baseline=baseline)
             return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -719,6 +774,7 @@ class _Attempt:
     redact: Callable[[str], str]
     published: list[dict] = dataclasses.field(default_factory=list)
     ended: bool = False
+    baseline: Mapping[str, tuple[int, bytes] | None] | None = None
 
     @property
     def finding_ids(self) -> list[str]:
@@ -743,7 +799,7 @@ class _Attempt:
 
     def _left_behind(self, untracked: Mapping[str, tuple[int, bytes] | None]) -> str:
         try:
-            files = _changes(self.t.root, self.before, untracked).files
+            files = _changes(self.t.root, self.before, untracked, baseline=self.baseline).files
             return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
         except BaseException:
             # Optional diagnostics must never prevent the attempt's terminal record.
@@ -799,19 +855,21 @@ class _Attempt:
     def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id
         head = _head(root)
-        changes = _changes(root, self.before, untracked)
+        changes = _changes(root, self.before, untracked, baseline=self.baseline)
         sensitive_paths = any(self.redact(name) != name for name in changes.files)
-        sensitive, unsupported = _scan_files(root, self.before, changes, untracked, self.redact)
+        sensitive, unsupported, captured = _scan_files(root, self.before, changes, untracked, self.redact)
         withheld = {**sensitive, **unsupported}
         safe_changes = _Changes(*(tuple(name for name in group if name not in withheld)
                                    for group in (changes.tracked, changes.new, changes.user)))
-        raw = b"" if sensitive_paths or unsupported else _patch(root, self.before, safe_changes, untracked)
+        raw = (b"" if sensitive_paths or unsupported else
+               _patch(root, self.before, safe_changes, untracked, captured=captured))
         if sensitive:
             raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw file "
                     "contents contain a runtime credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
         unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
-                              "because submodule or gitlink changes cannot be scanned as ordinary files; all commit "
+                              "because submodules, gitlinks or symlinks leaving the worktree cannot be scanned as "
+                              "ordinary files; all commit "
                               "guidance was withheld. Restore those changes before retrying oah fix")
         if unsupported:
             raw += (unsupported_reason + "\n").encode("utf-8")
