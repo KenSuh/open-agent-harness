@@ -22,7 +22,7 @@ from oah.impact import defaults as impact_defaults
 from oah.impact import mapstore
 from oah.paths import repo_info, state_dir
 from oah.setup import companions
-from oah.wiki.base import WikiSettings
+from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.notes import parse_frontmatter
 from oah.wiki.store import Wiki
 from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir, make_unlazy
@@ -363,6 +363,132 @@ class WriteFilesTest(unittest.TestCase):
         return init.plan_files(self.repo, config=self.config, wiki_dir="docs/wiki", agents={}, graph=False,
                                unlazy_copy=False, force=force, today=TODAY)
 
+    def test_wiki_refuses_committable_state_before_any_publication(self):
+        wiki = Wiki(self.repo, WikiSettings(), self.repo / "unplanned-state")
+        with self.assertRaises(init.InitError) as caught:
+            init.write_files(self.repo, self.plan(), wiki=wiki)
+        self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+        self.assertFalse((self.repo / "unplanned-state").exists())
+        self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+
+    def test_wiki_state_uses_the_same_portable_path_grammar(self):
+        for name in ("NUL.txt", "folder:stream", "folder.", "folder ", "folder/../state"):
+            with self.subTest(name=name):
+                outside = make_tmp_dir(self)
+                wiki = Wiki(self.repo, WikiSettings(), outside / name)
+                with self.assertRaises(init.InitError) as caught:
+                    init.write_files(self.repo, self.plan(), wiki=wiki)
+                self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+
+    def test_wiki_refuses_redirected_state_directory(self):
+        unlazy._private_makedirs(self.wiki.state.parent)
+        outside = make_tmp_dir(self)
+        directory_alias(outside, self.wiki.state)
+        with self.assertRaises(init.InitError) as caught:
+            init.write_files(self.repo, self.plan(), wiki=self.wiki)
+        self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows state junction")
+    def test_windows_wiki_refuses_state_junction(self):
+        self.test_wiki_refuses_redirected_state_directory()
+
+    @unittest.skipIf(os.name == "nt", "POSIX final-component symlinks")
+    def test_wiki_refuses_linked_lock_or_journal(self):
+        for name in (".lock", "rollover-journal.json"):
+            with self.subTest(name=name):
+                unlazy._private_makedirs(self.wiki.state)
+                outside = make_tmp_dir(self) / "private"
+                private = ("private-" + token_source.token_hex(16)).encode("ascii")
+                outside.write_bytes(private)
+                link = self.wiki.state / name
+                link.symlink_to(outside)
+                try:
+                    with self.assertRaises(init.InitError) as caught:
+                        init.write_files(self.repo, self.plan(), wiki=self.wiki)
+                    self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+                    self.assertNotIn(private.decode("ascii"), str(caught.exception))
+                    self.assertEqual(outside.read_bytes(), private)
+                    self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+                finally:
+                    link.unlink()
+
+    def test_wiki_pending_journal_is_checked_without_disclosing_existing_bytes(self):
+        unlazy._private_makedirs(self.wiki.state)
+        identity = "private-" + token_source.token_hex(16)
+        self.wiki.journal_path.write_bytes(json.dumps({"phase": identity, "reason": identity}).encode("ascii"))
+        with self.assertRaises(WikiError) as caught:
+            init.write_files(self.repo, self.plan(), wiki=self.wiki)
+        self.assertEqual(caught.exception.code, "OAH_WIKI_RECOVERY_PENDING")
+        self.assertNotIn(identity, str(caught.exception))
+        self.assertFalse((self.repo / "docs/wiki").exists())
+
+    def test_wiki_uses_the_landed_cross_process_lock(self):
+        unlazy._private_makedirs(self.wiki.state)
+        script = ("import pathlib,sys; sys.path.insert(0,sys.argv[1]); "
+                  "from oah.wiki.store import Wiki; from oah.wiki.base import WikiSettings; "
+                  "wiki=Wiki(pathlib.Path(sys.argv[2]),WikiSettings(),pathlib.Path(sys.argv[3])); "
+                  "session=wiki.session(); session.__enter__(); print('ready',flush=True); "
+                  "sys.stdin.readline(); session.__exit__(None,None,None)")
+        process = subprocess.Popen([sys.executable, "-I", "-B", "-c", script,
+                                    str(pathlib.Path(init.__file__).parent.parent), str(self.repo),
+                                    str(self.wiki.state.parent)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline(), "ready\n")
+            self.wiki.lock_timeout = 0.05
+            with self.assertRaises(WikiError) as caught:
+                init.write_files(self.repo, self.plan(), wiki=self.wiki)
+            self.assertEqual(caught.exception.code, "OAH_WIKI_BUSY")
+            self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+        finally:
+            process.communicate("release\n", timeout=10)
+        self.assertEqual(process.returncode, 0)
+
+    @unittest.skipIf(os.name == "nt", "portable POSIX replacement permission rule")
+    def test_replacement_refuses_a_permission_change_during_staging(self):
+        path = self.repo / "private-settings"
+        before = b"preserved settings\r\n"
+        path.write_bytes(before)
+        path.chmod(0o600)
+        flush = os.fsync
+
+        def change_permissions(fd):
+            flush(fd)
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                path.chmod(0o400)
+
+        with mock.patch.object(os, "fsync", side_effect=change_permissions):
+            self.assertFalse(init._publish(self.repo, path.name, before + b"addition\r\n", before))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+
+    @unittest.skipIf(os.name == "nt", "POSIX state replacement while a directory is pinned")
+    def test_wiki_rechecks_state_after_lock_acquisition(self):
+        outside = make_tmp_dir(self)
+        acquire = init._try_lock
+        swapped = False
+
+        def swap(fd):
+            nonlocal swapped
+            acquired = acquire(fd)
+            if acquired and not swapped:
+                swapped = True
+                self.wiki.state.rename(self.wiki.state.with_name("wiki-saved"))
+                directory_alias(outside, self.wiki.state)
+            return acquired
+
+        with mock.patch.object(init, "_try_lock", side_effect=swap):
+            with self.assertRaises(init.InitError) as caught:
+                init.write_files(self.repo, self.plan(), wiki=self.wiki)
+        self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+        self.assertTrue(swapped)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((self.repo / init.CONFIG_PATH).exists())
+
     def test_write_files_creates_every_planned_file(self):
         changes = self.plan()
         written, problems = init.write_files(self.repo, changes, wiki=self.wiki)
@@ -613,6 +739,74 @@ class RulesStepTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS replacement ACLs")
+    def test_macos_settings_replacement_removes_inheritance_before_preserved_bytes(self):
+        self._settings_replacement_acl()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows replacement DACLs")
+    def test_windows_settings_replacement_removes_inheritance_before_preserved_bytes(self):
+        self._settings_replacement_acl()
+
+    def _settings_replacement_acl(self):
+        path = self.repo / init.CLAUDE_SETTINGS
+        path.parent.mkdir()
+        original = b'{"env":{"PRIVATE_VALUE":"fixture"}}\r\n'
+        if os.name == "nt":
+            subprocess.run(["icacls.exe", str(path.parent), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                           check=True, capture_output=True)
+        else:
+            subprocess.run(["/bin/chmod", "+a", "everyone allow read,readattr,readsecurity,file_inherit",
+                            str(path.parent)], check=True, capture_output=True)
+            self.addCleanup(subprocess.run, ["/bin/chmod", "-RN", str(path.parent)],
+                            check=True, capture_output=True)
+        path.write_bytes(original)
+        if os.name == "nt":
+            sid = unlazy._windows_user_sid()
+            subprocess.run(["icacls.exe", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
+                           check=True, capture_output=True)
+        else:
+            subprocess.run(["/bin/chmod", "-N", str(path)], check=True, capture_output=True)
+            # An explicit denial must survive as well as the owner-only mode.
+            subprocess.run(["/bin/chmod", "+a", "everyone deny execute", str(path)],
+                           check=True, capture_output=True)
+            path.chmod(0o600)
+        opened = os.fdopen
+        observed = []
+
+        def check_permissions(fd, mode, *args, **kwargs):
+            stream = opened(fd, mode, *args, **kwargs)
+            if mode == "wb":
+                # This callback runs before _publish can write the preserved settings bytes.
+                for temp in path.parent.glob(".*.tmp"):
+                    self.assertEqual(temp.stat().st_size, 0)
+                    if os.name == "nt":
+                        descriptor = unlazy._windows_security_descriptor(temp)
+                        self.assertIn("D:P", descriptor)
+                        self.assertFalse(";;;WD)" in descriptor or ";;;S-1-1-0)" in descriptor)
+                    else:
+                        acl = subprocess.run(["/bin/ls", "-lde", str(temp)], check=True,
+                                             capture_output=True).stdout.splitlines()
+                        self.assertEqual(len(acl), 1, "staging inherited an access grant")
+                        self.assertEqual(stat.S_IMODE(temp.stat().st_mode), 0o600)
+                    observed.append(temp)
+            return stream
+
+        with mock.patch.object(os, "fdopen", side_effect=check_permissions):
+            installed, problems = init.install_hooks(self.repo, list(self.steps().values()), force=False)
+        self.assertEqual(problems, [])
+        self.assertIn("stop", installed)
+        self.assertTrue(observed)
+        self.assertEqual(json.loads(path.read_bytes())["env"], {"PRIVATE_VALUE": "fixture"})
+        if os.name == "nt":
+            descriptor = unlazy._windows_security_descriptor(path)
+            self.assertIn("D:P", descriptor)
+            self.assertFalse(";;;WD)" in descriptor or ";;;S-1-1-0)" in descriptor)
+        else:
+            acl = subprocess.run(["/bin/ls", "-lde", str(path)], check=True, capture_output=True).stdout
+            self.assertIn(b"deny execute", acl)
+            self.assertNotIn(b"allow", acl)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
     def setUp(self):
         self.repo = make_git_repo(self)
         (self.repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
@@ -1032,6 +1226,51 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
+
+    def test_unlazy_never_records_the_callers_git_identity_or_publishes_unapproved_metadata(self):
+        identity = "private-" + token_source.token_hex(16)
+        email = identity + "@invalid"
+        configuration = make_tmp_dir(self) / "gitconfig"
+        configuration.write_bytes(f"[user]\n\tname = {identity}\n\temail = {email}\n".encode("ascii"))
+        environment = {"GIT_CONFIG_GLOBAL": str(configuration), "GIT_CONFIG_NOSYSTEM": "1",
+                       "GIT_AUTHOR_NAME": identity, "GIT_AUTHOR_EMAIL": email,
+                       "GIT_COMMITTER_NAME": identity, "GIT_COMMITTER_EMAIL": email}
+        with mock.patch.dict(os.environ, environment):
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertEqual(problem, "")
+        staging, = (repo_info(self.repo).common_dir / "oah/staging").iterdir()
+        for tree in (staging, self.target):
+            for path in tree.rglob("*"):
+                if path.is_file():
+                    self.assertFalse(identity.encode("ascii") in path.read_bytes(),
+                                     "Git recorded the caller's identity")
+            self.assertFalse((tree / ".git/logs").exists(), "unnecessary reflogs must be disabled")
+        metadata = {p.relative_to(self.target / ".git").as_posix()
+                    for p in (self.target / ".git").rglob("*") if p.is_file()}
+        self.assertEqual(metadata, {"HEAD", "config"})
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+
+    def test_every_unlazy_git_command_has_neutral_identity_and_environment(self):
+        run = init.proc.run_command
+        seen = []
+        identity = "private-" + token_source.token_hex(16)
+
+        def command(argv, **kwargs):
+            self.assertIn("user.name=oah", argv)
+            self.assertIn("user.email=oah@invalid", argv)
+            self.assertIn("core.logAllRefUpdates=false", argv)
+            self.assertFalse(any(key.upper().startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+                                 for key in kwargs["env"]))
+            seen.append(tuple(argv))
+            return run(argv, **kwargs)
+
+        with (mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": identity, "GIT_COMMITTER_EMAIL": identity}),
+              mock.patch.object(init.proc, "run_command", side_effect=command)):
+            self.assertEqual(init._verify_unlazy_pin(self.repo, self.source, self.pin), [])
+        self.assertEqual(len(seen), 2)
+        for argv in init.unlazy_commands(self.target, source=str(self.source), pin=self.pin):
+            for setting in ("user.name=oah", "user.email=oah@invalid", "core.logAllRefUpdates=false"):
+                self.assertIn(setting, argv)
 
     def test_clone_uses_private_git_state_and_publishes_only_file_bytes(self):
         common = repo_info(self.repo).common_dir
