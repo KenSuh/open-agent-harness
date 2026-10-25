@@ -55,7 +55,7 @@ def main(argv: list[str]) -> int:
         runs = script.get("other_runs", [])
     chunk = runs[(page - 1) * per_page: page * per_page]
     body = {"total_count": script.get("total_count", len(runs)), "check_runs": [
-        dict(run, head_sha=run.get("head_sha", sha), id=4000 + index,
+        dict(run, head_sha=run.get("head_sha", sha), id=run.get("id", 4000 + index),
              html_url=f"https://example.invalid/checks/{4000 + index}", app={"owner": {"login": "decoy-owner-login"}})
         for index, run in enumerate(chunk, start=(page - 1) * per_page)]}
     sys.stdout.write(json.dumps(body))

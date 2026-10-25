@@ -241,6 +241,47 @@ class AssessTest(unittest.TestCase):
                 project.ci(raw=raw)
                 self.assertFalse(project.assess().ready)
 
+    def test_ci_duplicate_ids_refuse_and_preserve_observed_failures(self):
+        project = LandProject(self)
+        for count in (2, 101):
+            project.ci([{"id": index, "status": "completed", "conclusion": "success"}
+                        for index in range(1, count + 1)])
+            complete = project.assess()
+            self.assertTrue(complete.ready, describe(complete))
+            self.assertEqual(complete.check("ci").detail, {"runs": count})
+            for failed_position in (None, 1, count):
+                with self.subTest(count=count, failed_position=failed_position):
+                    runs = [{"id": index, "status": "completed", "conclusion": "success"}
+                            for index in range(1, count + 1)]
+                    runs[-1]["id"] = count - 1
+                    if failed_position is not None:
+                        runs[failed_position - 1]["conclusion"] = "failure"
+                    project.ci(runs)
+                    result = project.assess()
+                    self.assertFalse(result.ready, describe(result))
+                    checked = result.check("ci")
+                    self.assertEqual(checked.code, "OAH_LAND_CI_FAILED" if failed_position is not None
+                                     else "OAH_LAND_CI_PENDING", describe(result))
+                    self.assertIn("incomplete", checked.message)
+                    if failed_position is not None:
+                        self.assertIn(f"positions {failed_position}", checked.message)
+
+    def test_ci_invalid_ids_refuse_without_disclosure(self):
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(16)
+        for identifier in (None, True, 0, -1, 1.5, private, [], {}):
+            with self.subTest(identifier=identifier):
+                project.ci([{"id": identifier, "name": private, "status": "completed", "conclusion": "success"}])
+                result = project.assess()
+                self.assertFalse(result.ready, describe(result))
+                self.assertEqual(result.check("ci").code, "OAH_LAND_CI_PENDING")
+                self.assertNotIn(private, describe(result) + json.dumps(result.to_json()))
+        project.ci(raw=json.dumps({"total_count": 1, "check_runs": [
+            {"head_sha": project.head, "status": "completed", "conclusion": "failure"}]}))
+        result = project.assess()
+        self.assertEqual(result.check("ci").code, "OAH_LAND_CI_FAILED")
+        self.assertIn("incomplete", result.check("ci").message)
+
     def test_fetched_ledger_settings_cannot_be_removed_or_relocated_by_head(self):
         for old_globs, new_globs, path in (
                 ('[".oah/tasks/*/GATES.md"]', '[]', ".oah/tasks/x/GATES.md"),
@@ -546,6 +587,29 @@ class AssessTest(unittest.TestCase):
         with self.assertRaises(land.LandError) as caught:
             project.assess()
         self.assertEqual(caught.exception.code, "OAH_LAND_WORKER_REFUSED")
+
+    def test_index_flags_refuse_even_when_status_is_clean_without_changing_index(self):
+        project = LandProject(self)
+        path = project.repo / "src/app.py"
+        committed = path.read_bytes()
+        for flags in (("--assume-unchanged",), ("--skip-worktree",),
+                      ("--assume-unchanged", "--skip-worktree")):
+            for changed in (False, True):
+                with self.subTest(flags=flags, changed=changed):
+                    for flag in flags:
+                        git(project.repo, "update-index", flag, "--", "src/app.py")
+                    path.write_bytes(b"print('hidden change')\n" if changed else committed)
+                    self.assertEqual(git(project.repo, "status", "--porcelain=v1", "--untracked-files=no"), "")
+                    index = project.repo / ".git/index"
+                    before = index.read_bytes()
+                    with self.assertRaises(land.LandError) as caught:
+                        project.assess()
+                    self.assertEqual(caught.exception.code, "OAH_LAND_DIRTY_TREE")
+                    self.assertEqual(index.read_bytes(), before)
+                    self.assertEqual(project.remote_main(), project.base)
+                    git(project.repo, "update-index", "--no-assume-unchanged", "--", "src/app.py")
+                    git(project.repo, "update-index", "--no-skip-worktree", "--", "src/app.py")
+                    path.write_bytes(committed)
 
 
 class PushTest(unittest.TestCase):

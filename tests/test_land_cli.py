@@ -176,6 +176,26 @@ class LandCliTest(unittest.TestCase):
                 if change == "review":
                     self.assertIn("OAH_LAND_REVIEW_REQUIRED", done.stderr)
 
+    def test_confirmation_rejects_new_index_flags_without_changing_index(self):
+        for flag in ("--assume-unchanged", "--skip-worktree"):
+            for output in ((), ("--json",)):
+                with self.subTest(flag=flag, output=output):
+                    project = LandProject(self)
+                    index = project.repo / ".git/index"
+                    before = []
+
+                    def answer(_prompt):
+                        git(project.repo, "update-index", flag, "--", "src/app.py")
+                        before.append(index.read_bytes())
+                        return "y\n"
+
+                    done = land_command(project, "--merge", "--task", "t1", *output,
+                                        interactive=True, ask=answer)
+                    self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                    self.assertIn("OAH_LAND_AUTHORIZATION_CHANGED", done.stderr)
+                    self.assertEqual(project.remote_main(), project.base)
+                    self.assertEqual(index.read_bytes(), before[0])
+
     @unittest.skipIf(os.name == "nt", "the pre-push hook fixture uses a POSIX shell")
     def test_push_hook_cannot_leak_oah_prefixed_stderr(self):
         import shlex

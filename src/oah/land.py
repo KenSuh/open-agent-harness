@@ -212,6 +212,15 @@ def _listed(paths: Sequence[str]) -> str:
         f" and {len(paths) - 10} more" if len(paths) > 10 else "")
 
 
+def _unsupported_index_flags(root: pathlib.Path) -> bool:
+    """Status can hide live changes with these flags; inspect them without changing the index."""
+    result = run_git(root, "ls-files", "--cached", "-v", "-z")
+    if result.returncode != 0 or result.timed_out:
+        raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect index flags; check the repository and retry")
+    # -v lowercases tags for assume-unchanged; S (or s) denotes skip-worktree.
+    return any(entry[:1] == "S" or entry[:1].islower() for entry in result.stdout.split("\0") if entry)
+
+
 def _untracked_inputs(root: pathlib.Path, declared: Sequence[str]) -> list[str]:
     """Untracked, non-ignored files that gate input manifests hash (generated gate outputs excepted)."""
     import fnmatch
@@ -707,6 +716,7 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                 env: Mapping[str, str], destination: str) -> tuple[list[dict], str | None]:
     """Validated enums and positions for head; read errors retain prior runs and never export gh's strings."""
     runs: list[dict] = []
+    identities: set[int] = set()
     seen = 0
     expected_total = None
     try:
@@ -745,13 +755,18 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
                 invalid = True
                 continue
             runs.append({"position": position, "status": status, "conclusion": conclusion})
+            identifier = item.get("id")
+            if type(identifier) is not int or identifier <= 0 or identifier in identities:
+                invalid = True
+            else:
+                identities.add(identifier)
         if invalid:
             return runs, "gh returned invalid check runs"
         if expected_total is None:
             expected_total = total
         if total != expected_total or len(items) != min(GH_PER_PAGE, total - seen):
             return runs, "check-run pagination was incomplete"
-        seen += len(items)
+        seen = len(identities)
         if seen == total:
             return runs, None
     return runs, "check-run pagination exceeded the supported limit; inspect all runs before landing"
@@ -814,6 +829,10 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
     if head is None:
         raise LandError("OAH_LAND_NOTHING_TO_LAND", "this repository has no commits yet; commit the work, get it "
                                                     "reviewed, then run oah land")
+    if _unsupported_index_flags(root):
+        raise LandError("OAH_LAND_DIRTY_TREE", "the index has assume-unchanged or skip-worktree flags that can hide "
+                        "changes; clear them with git update-index --no-assume-unchanged or --no-skip-worktree "
+                        "for the flagged files, commit any changes, then run oah land again")
     dirty = context.tracked_dirty(root)
     if dirty:
         raise LandError("OAH_LAND_DIRTY_TREE", f"tracked files have uncommitted changes ({_listed(dirty)}); landing "
@@ -920,7 +939,7 @@ def _revalidate_local(root: pathlib.Path, assessment: Assessment, env: Mapping[s
     state = state_dir(info, env)
     task, head = assessment.task, assessment.head
     lease = evidence.task_lease(state, task)
-    if (info.head != head or context.tracked_dirty(root)
+    if (info.head != head or _unsupported_index_flags(root) or context.tracked_dirty(root)
             or _untracked_inputs(root, lease.gates if lease else ())):
         return _failed("review", "OAH_LAND_AUTHORIZATION_CHANGED",
                        "the reviewed tree changed while awaiting confirmation; run oah land --merge again")
