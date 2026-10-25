@@ -475,7 +475,7 @@ class Prepared:
     launch_effort: str
     cli_version: str | None
     warnings: tuple[str, ...]
-    retain_worker_text: bool = True
+    retain_worker_text: bool = dataclasses.field(default=True, kw_only=True)
 
     @property
     def run(self) -> runs.Run:
@@ -483,6 +483,8 @@ class Prepared:
 
     def to_json(self) -> dict:
         data = dataclasses.asdict(self)
+        if self.retain_worker_text:
+            data.pop("retain_worker_text")  # Preserve the landed launch schema for ordinary calls and Orca.
         data["argv"] = list(self.argv)
         data["warnings"] = list(self.warnings)
         return data

@@ -156,9 +156,11 @@ class FixProject:
         return result
 
     def run_commands(self, commands: list[str]) -> str:
-        """Run the printed commit commands as a user would (POSIX shell words), and return the new HEAD."""
+        """Run the printed commands in their platform shell, and return the new HEAD."""
         for command in commands:
-            subprocess.run(shlex.split(command), cwd=self.repo, check=True, capture_output=True, env=git_env())
+            argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command + "; exit $LASTEXITCODE"]
+                    if os.name == "nt" else shlex.split(command))
+            subprocess.run(argv, cwd=self.repo, check=True, capture_output=True, env=git_env())
         self.head = git(self.repo, "rev-parse", "HEAD")
         return self.head
 
@@ -194,6 +196,19 @@ def interrupt_when(path: pathlib.Path) -> threading.Thread:
 
 
 class CallSeamTest(unittest.TestCase):
+    def test_landed_orca_launcher_imports_with_prepared_subclass(self):
+        result = subprocess.run([sys.executable, "-c", "import tests; from oah.launchers import orca"],
+                                capture_output=True, cwd=FAKES.parent.parent)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+
+    def test_prepared_keeps_the_landed_default_launch_schema(self):
+        for retain in (True, False):
+            with self.subTest(retain_worker_text=retain):
+                prepared = self.prepare(FixProject(self), retain_worker_text=retain)
+                saved = prepared.to_json()
+                self.assertEqual("retain_worker_text" in saved, not retain)
+                self.assertEqual(call.Prepared.from_json(saved), prepared)
+
     @unittest.skipIf(os.name == "nt", "POSIX calls retain their landed descendant behavior")
     def test_plain_call_retains_its_descendant_behavior(self):
         project = FixProject(self)
@@ -532,15 +547,47 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                 SecretTest.assert_private(self, project, [key, *key.splitlines()], json.dumps(result.to_json()))
 
-    def test_checkout_conversion_refuses_until_the_raw_tree_is_clean(self):
+    def test_fresh_autocrlf_checkout_is_clean_without_running_filters(self):
         project = FixProject(self, attributes=None)
+        git(project.repo, "push", "-q", "origin", "feat")
+        shutil.rmtree(project.repo)
+        subprocess.run(["git", "clone", "-c", "core.autocrlf=true", "-q", "-b", "feat",
+                        str(project.work / "remote.git"), str(project.repo)], check=True, capture_output=True)
         project.changes_requested()
-        git(project.repo, "config", "core.autocrlf", "true")
         packet = project.repo / ".oah/tasks/t1/PACKET.md"
-        packet.unlink()
-        git(project.repo, "checkout", "--", ".oah/tasks/t1/PACKET.md")
         self.assertIn(b"\r\n", packet.read_bytes())
+        self.assertEqual(fix._tracked_dirty(project.repo), [])
+        self.assertEqual(project.fix().outcome, "no-change")
+        path = project.repo / "src/app.py"
+        info = path.stat()
+        path.write_bytes(path.read_bytes().replace(b"v1", b"v2"))
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
         project.refused("OAH_FIX_DIRTY_TREE", project.fix)
+
+    def test_cached_checkout_stats_accept_conversions_but_refuse_racy_filter_output(self):
+        name = "src/converted.txt"
+        project = FixProject(self, files={name: b"before\n"})
+        project.changes_requested()
+        driver, marker = project.work / "filter.py", project.work / "filter-ran"
+        driver.write_bytes(b"import pathlib, sys\npathlib.Path(sys.argv[1]).write_bytes(b'ran')\n"
+                           b"data = sys.stdin.buffer.read()\n"
+                           b"sys.stdout.buffer.write(data.upper() if sys.argv[2] == 'smudge' else data.lower())\n")
+        command = " ".join('"' + p.as_posix() + '"' for p in (pathlib.Path(sys.executable), driver, marker))
+        git(project.repo, "config", "filter.test.smudge", command + " smudge")
+        git(project.repo, "config", "filter.test.clean", command + " clean")
+        (project.repo / ".git/info/attributes").write_bytes((name + " filter=test\n").encode("ascii"))
+        path = project.repo / name
+        path.unlink()
+        git(project.repo, "checkout", "--", name)
+        self.assertEqual(path.read_bytes(), b"BEFORE\n")
+        marker.unlink()
+        index_path = project.repo / git(project.repo, "rev-parse", "--git-path", "index")
+        timestamp = path.stat().st_mtime_ns
+        os.utime(index_path, ns=(timestamp + 2_000_000_000,) * 2)
+        self.assertEqual(fix._tracked_dirty(project.repo), [])
+        os.utime(index_path, ns=(timestamp - 2_000_000_000,) * 2)
+        self.assertEqual(fix._tracked_dirty(project.repo), [name])
+        self.assertFalse(marker.exists(), "stat and racy checks must never start a content filter")
 
     def test_cleanliness_respects_core_filemode_without_ignoring_index_modes(self):
         project = FixProject(self)
@@ -653,9 +700,6 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn(b"\r\n", packet.read_bytes())
                     self.assertEqual(git(project.repo, "status", "--porcelain"), "")
                 project.changes_requested(bug(1), bug(2, severity="P0"), bug(3, severity="P2"))
-                if autocrlf:
-                    project.refused("OAH_FIX_DIRTY_TREE", project.fix)
-                    packet.write_bytes(fix._git_bytes(project.repo, "cat-file", "blob", "HEAD:.oah/tasks/t1/PACKET.md"))
                 project.queue_fix({"write": FIXED})
                 result = project.fix()
                 self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
@@ -994,7 +1038,7 @@ class BindTest(unittest.TestCase):
                 self.assertEqual(result.outcome, "applied", result.message)
                 for command in result.commands:
                     argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                             command + "; exit $LASTEXITCODE"] if powershell else
+                             command + "; exit $LASTEXITCODE"] if powershell or os.name == "nt" else
                             ["/bin/sh", "-c", command] if os.name != "nt" else shlex.split(command))
                     done = subprocess.run(argv, cwd=caller, env=git_env(), capture_output=True)
                     self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", errors="replace"))
@@ -1323,6 +1367,135 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_regression_source_contains_no_env_secret_assignments(self):
+        from tests.test_privacy_scan import load_scanner
+
+        hits = load_scanner().scan_text(pathlib.Path(__file__).read_text(encoding="utf-8"), [])
+        self.assertEqual([number for rule, number, _ in hits if rule == "env-secret"], [])
+
+    def test_crlf_multiline_credentials_are_scanned_on_both_raw_sides(self):
+        for channel in ("deleted", "replaced", "new", "user"):
+            for newline in ("\n", "\r\n"):
+                with self.subTest(channel=channel, environment_newline=repr(newline)):
+                    project = FixProject(self)
+                    key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                    name = "src/private.txt"
+                    raw = (key.replace("\n", "\r\n") + "\r\n").encode("utf-8")
+                    if channel in ("deleted", "replaced"):
+                        project.commit({name: raw})
+                        self.assertEqual(fix._git_bytes(project.repo, "cat-file", "blob", "HEAD:" + name), raw)
+                    project.changes_requested()
+                    project.env["OPENAI_API_KEY"] = key.replace("\n", newline)
+                    if channel == "user":
+                        (project.repo / name).write_bytes(raw)
+                    content = None if channel == "deleted" else raw.decode("utf-8") if channel == "new" else "safe\n"
+                    project.queue_fix({"write": {name: content, **FIXED}})
+                    result = project.fix()
+                    self.assertEqual((result.outcome, result.commands), ("failed", []))
+                    self.assertIsNone(result.next_command)
+                    self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                    self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    self.assertIn(b"[file ", patch)
+                    self.assertNotIn(name.encode("utf-8"), patch)
+                    self.assertIn(b"src/app.py", patch)
+
+    def test_unexported_credential_filenames_are_withheld_by_position(self):
+        for channel in ("new", "tracked", "deleted", "renamed-from", "renamed-to", "user", "user-deleted",
+                        "out-of-scope", "encoded", "failed", "env-secret"):
+            with self.subTest(channel=channel):
+                project = FixProject(self)
+                key = ("SERVICE_" + "TOK" + "EN=" if channel == "env-secret" else "s" + "k-") + token_source.token_hex(20)
+                name = ("outside/" if channel == "out-of-scope" else "src/") + key + ".txt"
+                if channel == "encoded":
+                    name += "-한글"
+                project.changes_requested()
+                if channel in ("tracked", "deleted", "renamed-from"):
+                    project.commit({name: b"harmless\n"})
+                elif channel == "renamed-to":
+                    project.commit({"src/original.txt": b"harmless\n"})
+                if channel in ("user", "user-deleted"):
+                    (project.repo / name).write_bytes(b"harmless\n")
+                writes = {**FIXED, name: None if channel in ("deleted", "renamed-from", "user-deleted") else "after\n"}
+                if channel == "renamed-from":
+                    writes["src/renamed.txt"] = "harmless\n"
+                elif channel == "renamed-to":
+                    writes.update({"src/original.txt": None, name: "harmless\n"})
+                self.assertFalse(any(key in value for value in project.env.values()))
+                project.queue_fix({"write": writes, "exit": 1 if channel == "failed" else 0})
+                terminal = io.StringIO()
+                result = project.fix(terminal=terminal)
+                self.assert_private(project, [key], json.dumps(result.to_json()), terminal.getvalue())
+                self.assertEqual((result.code, result.outcome, result.commands), ("OAH_FIX_FAILED", "failed", []))
+                self.assertIsNone(result.next_command)
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                self.assertIn("withheld", patch)
+                self.assertTrue(any(item.startswith("[file ") for field in ("changed", "new_files", "user_files")
+                                    for item in saved[field]))
+                project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
+
+    def test_unexported_credential_filenames_are_withheld_in_stop_diagnostics(self):
+        for exception in (KeyboardInterrupt, PermissionError):
+            with self.subTest(exception=exception.__name__):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "s" + "k-" + token_source.token_hex(20)
+                project.queue_fix({"write": {"src/" + key + ".txt": "harmless\n"}})
+                with mock.patch.object(fix._Attempt, "_judge", side_effect=exception("inspection stopped")):
+                    try:
+                        project.fix()
+                    except (fix.FixInterrupted, ReviewError) as error:
+                        self.assert_private(project, [key], str(error))
+                    else:
+                        self.fail("inspection must stop")
+                outcome = project.record("A1-outcome.json")
+                self.assertEqual(outcome["outcome"], "aborted" if exception is KeyboardInterrupt else "failed")
+                self.assertIn("[file ", outcome["evidence"])
+
+    def test_unexported_credential_filenames_are_withheld_in_dirty_tree_refusals(self):
+        for mode in ("correct", "manual", "bind"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                project.changes_requested()
+                if mode == "bind":
+                    project.queue_fix({"write": FIXED})
+                    self.assertEqual(project.fix().outcome, "applied")
+                key = "s" + "k-" + token_source.token_hex(20)
+                name = "src/" + key + ".txt"
+                project.commit({name: b"harmless\n"})
+                (project.repo / name).write_bytes(b"changed\n")
+                action = project.fix if mode == "correct" else project.bind if mode == "bind" else \
+                    lambda: project.manual("human")
+                error = project.refused("OAH_FIX_DIRTY_TREE", action)
+                self.assert_private(project, [key], str(error))
+                self.assertIn("[file ", str(error))
+
+    @unittest.skipUnless(os.name == "posix" and os.geteuid() != 0, "POSIX file read permissions")
+    def test_unexported_credential_filenames_are_withheld_in_file_read_errors(self):
+        project = FixProject(self)
+        project.changes_requested()
+        key = "s" + "k-" + token_source.token_hex(20)
+        name = "src/" + key + ".txt"
+        project.commit({name: b"before\n"})
+        project.queue_fix({"write": {name: "harmless\n"}})
+        judge = fix._Attempt._judge
+
+        def unreadable(attempt, *args, **kwargs):
+            target = project.repo / name
+            target.chmod(0)
+            try:
+                return judge(attempt, *args, **kwargs)
+            finally:
+                target.chmod(0o600)
+
+        with mock.patch.object(fix._Attempt, "_judge", unreadable), self.assertRaises(ReviewError) as caught:
+            project.fix()
+        self.assert_private(project, [key], str(caught.exception))
+        self.assertEqual(caught.exception.code, "OAH_FIX_GIT_FAILED")
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+
     def test_unexported_credential_patterns_withhold_raw_file_inputs(self):
         for pattern in ("key", "env-secret"):
             for channel in ("tracked", "new", "deleted", "replaced", "user", "utf16-le", "utf16-be", "binary"):
@@ -1582,6 +1755,11 @@ class SecretTest(unittest.TestCase):
 
                 if change not in ("added", "untracked", "index-only"):
                     add_submodule()
+                    nested = project.repo / name
+                    git(nested, "config", "core.autocrlf", "true")
+                    (nested / "private.txt").unlink()
+                    git(nested, "checkout", "--", "private.txt")
+                    self.assertEqual((nested / "private.txt").read_bytes(), b"before\r\n")
                     project.commit({}, "add submodule")
                 project.changes_requested()
                 git(project.repo, "config", "diff.submodule", "diff")
@@ -1828,6 +2006,18 @@ class SecretTest(unittest.TestCase):
         self.assertNotIn("git add", str(error), "do not print a redacted executable command")
         self.assertNotIn("git commit", str(error))
 
+    def test_bind_withholds_credential_shaped_filenames_in_older_saved_commands(self):
+        project = FixProject(self)
+        result = applied(self, project)
+        key = "s" + "k-" + token_source.token_hex(20)
+        manifest = pathlib.Path(result.run_dir) / "correction.json"
+        saved = json.loads(manifest.read_text(encoding="utf-8"))
+        saved["commands"] = ["git add -- src/" + key + ".txt"]
+        manifest.write_text(json.dumps(saved), encoding="utf-8")
+        error = project.refused("OAH_FIX_NOT_COMMITTED", project.bind)
+        self.assertFalse(key in str(error), "a credential-shaped filename reached saved command guidance")
+        self.assertNotIn("git add", str(error))
+
     def test_fix_exception_contains_no_credential(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1840,6 +2030,17 @@ class SecretTest(unittest.TestCase):
 
 
 class TemplateTest(unittest.TestCase):
+    def test_powershell_quotes_the_exact_worktree_argument(self):
+        root = pathlib.Path("/leased 'space $cash `tick !")
+        with mock.patch.object(fix.os, "name", "nt"):
+            commands, unquoted = fix.commit_commands(
+                task="t1", attempt_id="A1", receipt="R1", finding_ids=["R1-F1"],
+                changes=fix._Changes(("src/app.py",), ()), root=root)
+        self.assertEqual(unquoted, [])
+        self.assertEqual(commands[0], "git -C '/leased ''space $cash `tick !' add -u")
+        for command in commands:
+            self.assertTrue(command.startswith("git -C '/leased ''space $cash `tick !' "))
+
     def test_round_instructions_render_every_placeholder_once(self):
         finding = {"finding_id": "R1-F1", "class_id": "R1-C1", "severity": "P1", "axis": "quality",
                    "title": "keeps {{TASK}} literally\nacross lines", "detail": "a fence ``` and {{HEAD}} inside",

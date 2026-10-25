@@ -84,6 +84,29 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_withholds_unexported_credential_filenames_in_text_and_json(self):
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                project = FixProject(self)
+                project.changes_requested()
+                key = "s" + "k-" + token_source.token_hex(20)
+                self.assertFalse(any(key in value for value in project.env.values()))
+                project.queue_fix({"write": {"src/" + key + ".txt": "harmless\n"}})
+                args = ("--json",) if as_json else ()
+                done = oah(project, "fix", "--task", "t1", "--tier", "high", *args)
+                artifacts = [done.stdout.encode("utf-8"), done.stderr.encode("utf-8")]
+                artifacts += [path.read_bytes() for path in project.state.rglob("*") if path.is_file()]
+                self.assertFalse(any(key.encode("utf-8") in data for data in artifacts),
+                                 "a credential-shaped filename reached CLI output or state")
+                self.assertEqual(done.returncode, 1)
+                self.assertIn("withheld", done.stdout)
+                self.assertIn("[file ", done.stdout)
+                self.assertNotIn("git add", done.stdout + done.stderr)
+                self.assertNotIn("git commit", done.stdout + done.stderr)
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                if as_json:
+                    self.assertEqual(json.loads(done.stdout)["commands"], [])
+
     def test_cli_streams_before_exit_and_retains_only_digests_on_timeout(self):
         project = FixProject(self)
         project.changes_requested()

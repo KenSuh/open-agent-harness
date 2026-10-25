@@ -419,8 +419,9 @@ def _untracked(root: pathlib.Path) -> list[str]:
     return _names(root, "ls-files", "--others", "--exclude-standard", "-z")
 
 
-def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str) -> None:
-    dirty = _tracked_dirty(t.root)
+def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str,
+                redact: Callable[[str], str]) -> None:
+    dirty = _path_labels(_tracked_dirty(t.root), redact)
     if dirty:
         listed = _ids(dirty[:10]) + (f" and {len(dirty) - 10} more" if len(dirty) > 10 else "")
         raise ReviewError("OAH_FIX_DIRTY_TREE", f"tracked files have uncommitted changes ({listed}). {nothing}. A "
@@ -493,7 +494,11 @@ def _redacted(value, redact: Callable[[str], str]):
 
 def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]], Result]) -> Result:
     """Redact every output string; executable guidance is checked before it reaches this boundary."""
-    redact = runner.credential_redactor(env)
+    raw_redact = runner.credential_redactor(env)
+    folded_redact = runner.credential_redactor({name: value.replace("\r\n", "\n") for name, value in env.items()})
+
+    def redact(text: str) -> str:
+        return folded_redact(raw_redact(text))
     try:
         return Result(**_redacted(operation(redact).to_json(), redact))
     except BaseException as exc:
@@ -560,6 +565,9 @@ def _file_snapshot(root: pathlib.Path, name: str) -> tuple[int, bytes] | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
+        if _has_credential(name, lambda text: text):
+            raise ReviewError("OAH_FIX_GIT_FAILED", "cannot inspect a file with a credential-shaped name; rename "
+                              "or discard it before retrying oah fix") from None
         raise ReviewError("OAH_FIX_GIT_FAILED", f"cannot inspect file {name!r}: {exc}; check its permissions "
                           "and retry oah fix") from None
 
@@ -594,10 +602,56 @@ def _index_state(root: pathlib.Path) -> dict[str, tuple[bytes, ...]]:
     return {name: tuple(entries) for name, entries in found.items()}
 
 
+def _index_stat_matches(root: pathlib.Path) -> dict[str, bool]:
+    """Unchanged checkout stat entries, with a flag for timestamps safely older than the index.
+
+    --debug reads cached metadata without refreshing the index or running a content filter. Git for
+    Windows records second-resolution timestamps and no useful POSIX device/inode/owner identity.
+    """
+    index_path = root / os.fsdecode(_git_bytes(root, "rev-parse", "--git-path", "index").rstrip(b"\r\n"))
+    index_time = index_path.stat().st_mtime_ns
+    data = _git_bytes(root, "ls-files", "--debug", "-z")
+    pattern = re.compile(rb"  ctime: (\d+):(\d+)\n  mtime: (\d+):(\d+)\n"
+                         rb"  dev: (\d+)\tino: (\d+)\n  uid: (\d+)\tgid: (\d+)\n"
+                         rb"  size: (\d+)\tflags: ([0-9a-fA-F]+)\n")
+    found, position = {}, 0
+    while position < len(data):
+        end = data.find(b"\0", position)
+        if end < 0 or not (match := pattern.match(data, end + 1)):
+            return {}  # Unknown metadata never makes a raw mismatch clean.
+        name = os.fsdecode(data[position:end])
+        position = match.end()
+        csec, cnsec, msec, mnsec, dev, ino, uid, gid, size = map(int, match.groups()[:9])
+        if int(match[10], 16):
+            continue
+        path = root / name
+        if not path.parent.resolve().is_relative_to(root.resolve()):
+            continue
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size & 0xffffffff != size:
+            continue
+        # A zero nanosecond field can come from a Git build with second-resolution stat data.
+        def same_time(actual, seconds, nanos):
+            return actual == seconds * 1_000_000_000 + nanos if nanos else actual // 1_000_000_000 == seconds
+
+        if not (same_time(info.st_ctime_ns, csec, cnsec) and same_time(info.st_mtime_ns, msec, mnsec)):
+            continue
+        if os.name != "nt" and any(actual & 0xffffffff != saved for actual, saved in (
+                (info.st_dev, dev), (info.st_ino, ino), (info.st_uid, uid), (info.st_gid, gid))):
+            continue
+        found[name] = (msec * 1_000_000_000 + mnsec < index_time if mnsec else
+                       msec < index_time // 1_000_000_000)
+    return found
+
+
 def _tracked_dirty(root: pathlib.Path) -> list[str]:
-    """Compare tree/index identities and raw file bytes; Git never converts working-tree content."""
+    """Compare tree/index identities and raw bytes or unchanged checkout stats, without conversion."""
     tree, index = _tree_files(root, "HEAD"), _index_files(root)
     stages = _index_state(root)
+    checkout_stats = _index_stat_matches(root)
     filemode = _git_bytes(root, "config", "--bool", "core.filemode", ok=(0, 1)).strip() != b"false"
 
     def git_mode(mode):
@@ -621,6 +675,11 @@ def _tracked_dirty(root: pathlib.Path) -> list[str]:
         if old and current:
             old, current = (git_mode(old[0]), old[1]), (git_mode(current[0]), current[1])
         if old != current:
+            if old and current and old[0] == current[0] and name in checkout_stats:
+                # Racy entries need a content check. An exact CRLF checkout of an LF blob is safe
+                # even at coarse timestamp resolution; arbitrary filter output is never trusted here.
+                if checkout_stats[name] or (b"\r" not in old[1] and current[1].replace(b"\r\n", b"\n") == old[1]):
+                    continue
             dirty.append(name)
     return dirty
 
@@ -648,13 +707,27 @@ def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int,
                     tuple(name for name in _untracked(root) if name not in untracked), user)
 
 
+def _has_credential(text: str, redact: Callable[[str], str]) -> bool:
+    return any(redact(candidate) != candidate or any(pattern.search(candidate) for rule, pattern in CONTENT_RULES
+                                                    if rule in ("key", "env-secret"))
+               for candidate in (text, text.replace("\r\n", "\n")))
+
+
+def _path_labels(names: Iterable[str], redact: Callable[[str], str]) -> list[str]:
+    return [f"[file {position}]" if _has_credential(name, redact) else name
+            for position, name in enumerate(names, 1)]
+
+
 def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
                 untracked: Mapping[str, tuple[int, bytes] | None],
                 redact: Callable[[str], str]) -> tuple[dict[str, str], dict[str, str], dict]:
-    """Capture and scan both raw sides once; only these bytes may enter the patch."""
+    """Scan raw paths and capture both raw sides once; only scanned inputs may enter the patch."""
     found, unsupported, captured = {}, {}, {}
     tree, index = _tree_files(root, before), _index_files(root)
     for position, name in enumerate(changes.files, 1):
+        if _has_credential(name, redact):
+            found[name] = f"[file {position}]"
+            continue
         current = _file_snapshot(root, name)
         if current and stat.S_ISDIR(current[0]):
             unsupported[name] = f"[file {position}]"
@@ -674,8 +747,7 @@ def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
         data = [side[1] for side in (old, current) if side]
         texts = [raw.decode("utf-8", errors="replace") for raw in data]
         texts += [raw.decode("utf-16", errors="replace") for raw in data if raw.startswith(UTF16_BOMS)]
-        if any(redact(text) != text or any(pattern.search(text) for rule, pattern in CONTENT_RULES
-                                         if rule in ("key", "env-secret")) for text in texts):
+        if any(_has_credential(text, redact) for text in texts):
             found[name] = f"[file {position}]"
         if name not in found and name not in unsupported:
             captured[name] = old, current
@@ -734,8 +806,9 @@ def commit_commands(*, task: str, attempt_id: str, receipt: str, finding_ids: Se
         raise ReviewError("OAH_FIX_UNQUOTABLE_PATH", "the leased worktree directory contains control characters, so "
                           "commit commands were withheld; use a worktree path without control characters, inspect "
                           "the changes there and retry oah fix")
-    # Single quotes protect both shells' metacharacters; concatenate a double-quoted apostrophe when needed.
-    command = "git -C '" + directory.replace("'", "'\"'\"'") + "'"
+    # PowerShell escapes a single quote by doubling it; sh concatenates a quoted apostrophe.
+    quoted_directory = "'" + directory.replace("'", "''" if os.name == "nt" else "'\"'\"'") + "'"
+    command = "git -C " + quoted_directory
     commands = [command + " add -u"] if changes.tracked else []
     words, unquoted = [], []
     for name in changes.new:
@@ -782,7 +855,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         _check_history(t, h, LAUNCHED)
         receipt = _source(t, h, LAUNCHED)
         before = _head(t.root)
-        _check_tree(t, receipt, before, LAUNCHED)
+        _check_tree(t, receipt, before, LAUNCHED, redact)
         _check_review_intent(t, receipt, binding, LAUNCHED)
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
@@ -855,6 +928,7 @@ class _Attempt:
             if index != self.index_baseline:
                 return "; index entries changed; restore the index and inspect the worktree before retrying"
             files = _changes(self.t.root, self.before, untracked, baseline=self.baseline).files
+            files = _path_labels(files, self.redact)
             return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
         except BaseException:
             # Optional diagnostics must never prevent the attempt's terminal record.
@@ -929,7 +1003,7 @@ class _Attempt:
                 "changes_sha256": receipts.digest(patch.encode("utf-8")), "commands": [], "out_of_scope": []})
             return _Judged("failed", reason, reason, _Changes(positions, ()), patch, effort, [], [], [], "", head)
         changes = _changes(root, self.before, untracked, baseline=self.baseline)
-        sensitive_paths = any(self.redact(name) != name for name in changes.files)
+        sensitive_paths = any(_has_credential(name, self.redact) for name in changes.files)
         sensitive, unsupported, captured = _scan_files(root, self.before, changes, untracked, self.redact)
         withheld = {**sensitive, **unsupported}
         safe_changes = _Changes(*(tuple(name for name in group if name not in withheld)
@@ -937,8 +1011,8 @@ class _Attempt:
         raw = (b"" if sensitive_paths or unsupported else
                _patch(root, self.before, safe_changes, untracked, captured=captured))
         if sensitive:
-            raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw file "
-                    "contents contain a credential; remove credentials or restore the affected files "
+            raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw "
+                    "filenames or file contents contain a credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
         unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
                               "because submodules, gitlinks or symlinks leaving the worktree cannot be scanned as "
@@ -952,7 +1026,8 @@ class _Attempt:
         changes = _Changes(*(tuple(withheld.get(name, name) for name in group)
                               for group in (changes.tracked, changes.new, changes.user)))
         # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
-        patch = ("OAH_FIX_SENSITIVE_PATH: diff withheld because a filename contains a runtime credential; "
+        patch = (f"OAH_FIX_SENSITIVE_PATH: diff withheld for {_ids(list(sensitive.values()))} because a filename "
+                 "contains a credential; "
                  "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
                  self.redact(raw.decode("utf-8", errors="replace")))
         digest = receipts.digest(raw)
@@ -983,12 +1058,12 @@ class _Attempt:
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "applied" and sensitive_paths:
             outcome = "failed"
-            reason = ("OAH_FIX_SENSITIVE_PATH: a changed filename contains a runtime credential; commit guidance "
+            reason = ("OAH_FIX_SENSITIVE_PATH: a changed filename contains a credential; commit guidance "
                       "was withheld. Rename or discard the affected files, then run oah fix again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if sensitive:
             outcome = "failed"
-            reason = (f"OAH_FIX_SENSITIVE_CONTENT: raw contents of {_ids(list(sensitive.values()))} contain a "
+            reason = (f"OAH_FIX_SENSITIVE_CONTENT: raw filenames or contents of {_ids(list(sensitive.values()))} contain a "
                       "credential; their diffs and all commit guidance were withheld. Remove credentials or "
                       "restore the affected files before retrying oah fix")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
@@ -1001,9 +1076,9 @@ class _Attempt:
                                               receipt=self.receipt.name.removesuffix(".json"),
                                               finding_ids=self.finding_ids, changes=changes, root=root)
                               if outcome == "applied" else ([], []))
-        if any(self.redact(command) != command for command in commands):
+        if any(_has_credential(command, self.redact) for command in commands):
             outcome, commands = "failed", []
-            reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a runtime credential and was withheld; "
+            reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a credential and was withheld; "
                       "remove sensitive commit metadata before correcting again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
@@ -1160,7 +1235,7 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
         saved = _saved_correction(t, start)
         if head == before:
             commands = saved.get("commands") or []
-            if any(redact(command) != command for command in commands):
+            if any(_has_credential(command, redact) for command in commands):
                 commands = []  # Never turn a saved executable command into redacted guidance.
             shown = (" with:\n" + "\n".join(commands)) if commands else ""
             raise ReviewError("OAH_FIX_NOT_COMMITTED", f"{attempt.attempt_id} waits for its commit, but HEAD is still "
@@ -1175,7 +1250,7 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
         untracked = set(_untracked(t.root))
         left = [name for name in saved.get("new_files") or [] if name in untracked]
         if dirty or left:
-            listed = _ids(dirty[:10] + [f"{name} (new, not committed)" for name in left[:10]])
+            listed = _ids(_path_labels(dirty[:10] + [f"{name} (new, not committed)" for name in left[:10]], redact))
             raise ReviewError("OAH_FIX_DIRTY_TREE", f"the worktree still has uncommitted changes ({listed}). {RECORDED}. "
                               f"Commit what belongs to {attempt.attempt_id}'s correction and discard the rest, then "
                               f"run oah fix --bind --task {t.name} again")
@@ -1243,7 +1318,7 @@ def _manual(task: str, *, engine, cwd, env, findings, redact) -> Result:
         _check_history(t, h, RECORDED)
         receipt = _source(t, h, RECORDED)
         head = _head(t.root)
-        _check_tree(t, receipt, head, RECORDED)
+        _check_tree(t, receipt, head, RECORDED, redact)
         _check_review_intent(t, receipt, binding, RECORDED)
         chosen = _select(t, receipt, h, findings, RECORDED)
         class_ids, _classes_found = _classes(h, chosen)
