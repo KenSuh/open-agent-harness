@@ -17,7 +17,7 @@ from oah import init, init_cli, unlazy
 from oah.cli import build_parser, command_modules, main
 from oah.impact import mapstore
 from oah.paths import repo_info, state_dir
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 TODAY = dt.date(2026, 10, 25)
@@ -443,6 +443,46 @@ class NoOverwriteTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn('review = "codex"', (repo / ".oah" / "config.toml").read_text(encoding="utf-8"))
         self.assertTrue((repo / "docs/wiki/index.md").read_bytes().startswith(originals["docs/wiki/index.md"]))
+
+
+class BlockedTest(unittest.TestCase):
+    """A requested file or hook that init cannot write leaves the run incomplete, never silently done."""
+
+    def test_linked_claude_folder_blocks_agents_and_claude_hooks(self):
+        repo = committed_repo(self)
+        outside = make_tmp_dir(self) / "global-claude"
+        outside.mkdir()
+        directory_alias(outside, repo / ".claude")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(agents=True, hooks=True))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertIn("not written: .claude/agents/oah-low.md", out)
+        self.assertIn("hook stop was not installed", out)
+        token = last_line(out)
+        self.assertTrue(token.startswith("OAH_INIT_INCOMPLETE"), token)
+        self.assertIn("files", token)
+        self.assertIn("hooks", token)
+        self.assertIn("oah hook pre-push", (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8"))
+
+    def test_invalid_claude_settings_leave_hooks_pending(self):
+        repo = committed_repo(self)
+        settings = repo / ".claude" / "settings.local.json"
+        settings.parent.mkdir()
+        settings.write_text("{not json", encoding="utf-8")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(hooks=True))
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_HOOKS_SETTINGS_INVALID", out)
+        self.assertIn("pending=hooks", last_line(out))
+        self.assertEqual(settings.read_text(encoding="utf-8"), "{not json")
+
+    def test_ambiguous_ci_leaves_ci_pending(self):
+        repo = committed_repo(self)
+        git_commit(repo, {"go.mod": "module x\n", "package.json": '{"scripts": {"test": "jest"}}'})
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(ci=True))
+        self.assertEqual(code, 1, err)
+        self.assertIn("oah ci init", out)
+        self.assertIn("pending=ci", last_line(out))
+        self.assertFalse((repo / ".github").exists())
 
 
 class WhereTest(unittest.TestCase):
