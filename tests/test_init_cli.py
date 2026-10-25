@@ -834,6 +834,19 @@ class CorrectionC3Test(unittest.TestCase):
 class BlockedTest(unittest.TestCase):
     """A requested file or hook that init cannot write leaves the run incomplete, never silently done."""
 
+    def test_existing_unlazy_refusal_starts_with_code_and_preserves_directory(self):
+        repo = committed_repo(self)
+        target = repo / init.UNLAZY_PROJECT
+        target.mkdir(parents=True)
+        original = b"concurrent user directory\r\n\x00"
+        (target / "keep.bin").write_bytes(original)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", *flags(unlazy=True))
+        self.assertEqual(code, 1, err + out)
+        self.assertTrue(any(line.strip().startswith("OAH_INIT_UNLAZY_EXISTS:") for line in out.splitlines()), out)
+        self.assertIn("Remove it yourself, then rerun oah init --with-unlazy", out)
+        self.assertEqual((target / "keep.bin").read_bytes(), original)
+        self.assertFalse((repo / ".git/oah/backups").exists())
+
     def test_linked_claude_folder_blocks_agents_and_claude_hooks(self):
         repo = committed_repo(self)
         outside = make_tmp_dir(self) / "global-claude"

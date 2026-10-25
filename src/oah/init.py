@@ -417,6 +417,31 @@ def _wiki_dir(root: pathlib.Path, relative: str) -> str:
     return relative
 
 
+def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> None:
+    """Reuse unlazy's private creation/permission checks without exposing its path/SID diagnostics."""
+    try:
+        if create:
+            unlazy._private_directory(path)
+        unlazy._verify_snapshot_permissions(path)
+        if os.name == "nt":
+            # The landed verifier rejects foreign writes; private backups must also reject foreign reads.
+            descriptor = unlazy._windows_security_descriptor(path)
+            sid = unlazy._windows_user_sid()
+            unlazy._verify_windows_dacl(descriptor, sid, snapshot=True, protected=True)
+            owner = descriptor[2:descriptor.index("D:")]
+            if unlazy._windows_canonical_sid(owner) != sid:
+                raise OSError("state owner is not the current user")
+            for ace in re.findall(r"\(([^()]*)\)", descriptor):
+                fields = ace.split(";")  # Syntax has already been validated by the landed verifier.
+                if fields[0] == "A" and unlazy._windows_canonical_sid(fields[5]) not in (sid, "S-1-3-4"):
+                    raise OSError("state grants access to another account")
+        elif stat.S_IMODE(path.lstat().st_mode) != 0o700:
+            raise OSError("state directory is not owner-only")
+    except (OSError, unlazy.UnlazyError, ValueError, TypeError, AttributeError):
+        raise InitError("OAH_INIT_STATE_UNSAFE", "private Git state permissions cannot be verified. Restrict "
+                        "the state directory to your account, then rerun oah init", EXIT_ENVIRONMENT) from None
+
+
 @contextmanager
 def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False):
     """Pin non-reparse parents, denying write/delete sharing until publication finishes."""
@@ -440,7 +465,11 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
         for path in (*reversed(parent.parents), parent):
             # Ancestors of root exist; only project directories may be created.
             if create_parents and path.is_relative_to(root):
-                path.mkdir(mode=0o700 if private else 0o777, exist_ok=True)
+                if private:
+                    if not path.exists():
+                        unlazy._private_directory(path)
+                else:
+                    path.mkdir(exist_ok=True)
             handle = create(str(path), 0x80, 1, None, 3, 0x02200000, None)
             if handle == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -450,6 +479,8 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
                 raise ctypes.WinError(ctypes.get_last_error())
             if attributes[0] & 0x400 or not attributes[0] & 0x10:
                 raise OSError("linked or non-directory parent")
+            if private and path != root and path.is_relative_to(root):
+                _private_state_directory(path)
         yield
     finally:
         for handle in reversed(handles):
@@ -666,51 +697,20 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
              private: bool = False, source_root: pathlib.Path | None = None,
              source_identity: str = "") -> bool:
     """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
+    if source is not None:
+        return False  # No directory may be moved out of or into the worktree (owner M).
     root = pathlib.Path(root).absolute()
     try:
         relative = _relative(relative)
         with _parents(root, relative, private=private) as folder:
             path = root / relative
             name = path if folder is None else path.name
-            if source is not None:
-                # Directory moves are only for preserved backups outside the worktree. Installations
-                # publish captured file bytes; no source pathname may become a worktree directory.
-                if not private:
-                    return False
-                source_root = root if source_root is None else pathlib.Path(source_root).absolute()
-                source = _relative(source)
-                with _parents(source_root, source) as source_folder:
-                    source_path = source_root / source
-                    if (_current(root, relative, folder) is not None or _linked(source_root, source) is not None
-                            or _tree_digest(source_path, root=source_root) != source_digest):
-                        return False
-                    # Recheck both lexical parents after reading the source tree.
-                    _current(root, relative, folder)
-                    if source_folder is not None:
-                        actual, pinned = source_path.parent.stat(), os.fstat(source_folder)
-                        if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
-                            return False
-                    if _linked(source_root, source) is not None:
-                        return False
-                    if source_identity:
-                        with _pinned_directory(source_path, delete=os.name == "nt") as (handle, identity):
-                            if identity != source_identity:
-                                return False
-                            if os.name == "nt":
-                                _windows_move_directory(handle, path)
-                            else:
-                                _rename_exclusive(source_path.name, name, source_folder, folder)
-                    else:
-                        _rename_exclusive(source_path if source_folder is None else source_path.name, name,
-                                          source_folder, folder)
-                    if private and os.name != "nt":
-                        _private_tree(folder, name)
-                    if folder is not None:
-                        os.fsync(folder)
-                    return True
             if data is None:
                 # Reserve a new installation exclusively, without merging into a concurrent directory.
-                os.mkdir(name, 0o700, dir_fd=folder)
+                if private and os.name == "nt":
+                    _private_state_directory(path, create=True)
+                else:
+                    os.mkdir(name, 0o700, dir_fd=folder)
                 if folder is not None:
                     os.fsync(folder)
                 return True
@@ -749,19 +749,6 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     pass
     except (OSError, InitError):
         return False
-
-
-def _private_tree(parent: int, name: str) -> None:
-    """Restrict a moved backup tree without following any component (its run directory is already 0700)."""
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-    try:
-        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
-        os.fchmod(fd, 0o700 if directory else 0o600)
-        if directory:
-            for child in os.listdir(fd):
-                _private_tree(fd, child)
-    finally:
-        os.close(fd)
 
 
 def _publish_new(root: pathlib.Path, relative: str, data: bytes) -> bool:
@@ -888,6 +875,11 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
             write(change)
     wiki_changes = [change for change in pending if change.group == "wiki"]
     if wiki_changes:
+        if os.name == "nt":
+            # The landed wiki lock creates state parents. Establish the shared state root privately
+            # first, so later backup/staging checks never inherit a public directory created by init.
+            with _parents(_backup_root(root), "oah/.init-state", private=True):
+                pass
         with wiki.session():
             for change in wiki_changes:
                 write(change)
@@ -1277,12 +1269,17 @@ def install_hooks(root: pathlib.Path, steps: list[HookStep], *, force: bool) -> 
 
 @dataclasses.dataclass(frozen=True)
 class UnlazyStep:
-    action: str  # present | install | replace | blocked
+    action: str  # present | install | blocked (legacy replace plans are refused)
     folder: str = ""  # the copy discovery found, when there is one
     note: str = ""
-    aside: str = ""  # replace: the folder moved to the private Git state backup first
-    digest: str = ""  # planned identity of a copy to move aside
-    backup: str = ""  # planned run/position in Git state
+    aside: str = ""  # retained for compatibility; init never moves an existing copy
+    digest: str = ""
+    backup: str = ""
+
+
+def _unlazy_exists(relative: str) -> str:
+    return (f"OAH_INIT_UNLAZY_EXISTS: an existing directory at {relative} cannot be replaced. "
+            "Remove it yourself, then rerun oah init --with-unlazy")
 
 
 def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin) -> list[str]:
@@ -1320,13 +1317,7 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
             return UnlazyStep("blocked", note=f"{override} is set but names no unlazy ({reason}). Clear {override}, "
                                               "then run oah init --with-unlazy again")
         if target.exists() or target.is_symlink():
-            if force:
-                return UnlazyStep("replace", str(target), f"{UNLAZY_PROJECT} is not unlazy; init moves it to "
-                                                          "<git common dir>/oah/backups/<run>/unlazy first",
-                                  aside=str(target),
-                                  digest=_tree_digest(target, root=root), backup=f"{secrets.token_hex(16)}/unlazy")
-            return UnlazyStep("blocked", str(target), f"{UNLAZY_PROJECT} exists but is not unlazy. Move it away, or "
-                                                      "pass --force to move it aside")
+            return UnlazyStep("blocked", str(target), _unlazy_exists(UNLAZY_PROJECT))
         return UnlazyStep("install", note=f"downloads unlazy into {UNLAZY_PROJECT} at commit {short}")
     problems = _verify_unlazy_pin(root, folder, pin)
     if not problems:
@@ -1338,13 +1329,7 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
     project = {root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"}
     if folder in project:
         where = _shown_path(root, folder)
-        if force:
-            return UnlazyStep("replace", str(folder), f"the project copy {where} is not the pinned one ({why}); init "
-                                                      "moves it to <git common dir>/oah/backups/<run>/unlazy first",
-                              aside=str(folder),
-                              digest=_tree_digest(folder, root=root), backup=f"{secrets.token_hex(16)}/unlazy")
-        return UnlazyStep("blocked", str(folder), f"the project copy {where} is not the pinned one ({why}). Pass "
-                                                  "--force to move it aside and install the pinned copy")
+        return UnlazyStep("blocked", str(folder), _unlazy_exists(where))
     return UnlazyStep("install", str(folder), f"your copy at {folder} is not the pinned one ({why}); init installs "
                                               f"the pinned project copy into {UNLAZY_PROJECT}, which oah uses first")
 
@@ -1442,12 +1427,15 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                    pin: unlazy.Pin = unlazy.PIN, timeout: float = CLONE_TIMEOUT) -> str:
     """Clone and verify in private Git state, then publish the captured files individually.
 
-    Returns "" on success, else the problem. Clone/verification failures leave the old copy untouched;
-    after a successful backup publication, a later conflict leaves that backup for explicit recovery.
+    Returns "" on success, else the problem. Existing project directories require manual removal.
     Staging is retained for manual cleanup; init never recursively deletes a replaceable pathname."""
     root = pathlib.Path(root)
     try:
-        if step.action not in ("install", "replace"):
+        if step.action == "replace" or step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"):
+            relative = (".claude/skills/unlazy" if pathlib.Path(step.folder) == root / ".claude/skills/unlazy"
+                        else UNLAZY_PROJECT)
+            return _unlazy_exists(relative)
+        if step.action != "install":
             return "OAH_INIT_UNLAZY_FAILED: installation was not planned; remove any links and run oah init again"
         for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
             if _linked(root, relative) is not None:
@@ -1457,7 +1445,10 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
         staging_relative = f"oah/staging/{secrets.token_hex(16)}"
         staging = common / staging_relative
         with _parents(common, staging_relative, private=True) as parent:
-            os.mkdir(staging if parent is None else staging.name, 0o700, dir_fd=parent)
+            if os.name == "nt":
+                _private_state_directory(staging, create=True)
+            else:
+                os.mkdir(staging.name, 0o700, dir_fd=parent)
             with _pinned_directory(staging, allow_swap=True) as (_handle, identity):
                 try:
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
@@ -1490,18 +1481,6 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                 .hexdigest() != digest for name, digest in pin.files.items())):
                             raise OSError("captured installation does not match the pin")
                         _require_staging(staging, identity)
-                        if step.action == "replace":
-                            aside = pathlib.Path(step.aside)
-                            if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
-                                raise OSError("non-local replacement")
-                            relative = aside.relative_to(root).as_posix()
-                            if not step.backup:
-                                raise OSError("no backup was planned")
-                            backup = f"oah/backups/{step.backup}"
-                            if not _publish(common, backup, None, source=relative, source_root=root,
-                                            source_digest=step.digest, private=True):
-                                return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
-                                        "away and run oah init --with-unlazy --force again")
                         if not _publish(root, UNLAZY_PROJECT, None):
                             raise OSError("installation destination changed")
                         for name in directories:
@@ -2117,7 +2096,7 @@ def _apply_unlazy(plan: Plan, machine: Machine, outcome: Outcome, out) -> None:
     out("")
     out("unlazy:")
     if step.action == "blocked":
-        out(f"  unlazy: not installed: {step.note}")
+        out(f"  {step.note}" if step.note.startswith("OAH_") else f"  OAH_INIT_UNLAZY_FAILED: {step.note}")
         outcome.pending.append("unlazy")
         return
     out(f"  installing unlazy into {UNLAZY_PROJECT} from {machine.unlazy_source} ...")

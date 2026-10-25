@@ -764,6 +764,87 @@ class HookStepTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertFalse(destination.exists())
 
+    @unittest.skipIf(os.name == "nt", "portable POSIX owner-only refusal; Windows DACL cases below")
+    def test_private_state_adapter_refuses_existing_public_directory(self):
+        folder = make_tmp_dir(self) / "state"
+        folder.mkdir(mode=0o700)
+        folder.chmod(0o755)
+        with self.assertRaises(init.InitError) as caught:
+            init._private_state_directory(folder)
+        self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+        self.assertNotIn(str(folder), str(caught.exception))
+        self.assertIn("rerun", str(caught.exception))
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o755)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows protected owner-only DACL creation")
+    def test_windows_private_directories_do_not_inherit_public_access(self):
+        common = repo_info(self.repo).common_dir
+        subprocess.run(["icacls.exe", str(common), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, capture_output=True)
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\r\n# original hook\r\n"
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(installed, ["pre-push"])
+        destination = common / "oah/backups" / step.backup
+        self.assertEqual(destination.read_bytes(), original)
+        for directory in (common / "oah", common / "oah/backups", destination.parent):
+            descriptor = unlazy._windows_security_descriptor(directory)
+            self.assertTrue("D:P" in descriptor, "state DACL must be protected")
+            self.assertFalse(";;;WD)" in descriptor or ";;;S-1-1-0)" in descriptor,
+                             "state DACL must exclude public access")
+            init._private_state_directory(directory)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows existing private-state ACL refusal")
+    def test_windows_hook_backup_refuses_existing_inherited_public_acl(self):
+        common = repo_info(self.repo).common_dir
+        subprocess.run(["icacls.exe", str(common), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, capture_output=True)
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\r\n# keep original hook\r\n"
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        destination = common / "oah/backups" / step.backup
+        destination.parent.mkdir(parents=True)  # Ordinary mkdir inherits the permissive metadata ACL.
+        descriptor = unlazy._windows_security_descriptor(destination.parent)
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual(installed, [])
+        self.assertTrue(problems and problems[0].startswith("OAH_INIT_"), problems)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(destination.exists())
+        self.assertTrue(unlazy._windows_security_descriptor(destination.parent) == descriptor,
+                        "init must leave the inherited DACL unchanged")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows existing private-state ACL refusal")
+    def test_windows_hook_backup_refuses_existing_public_state_directories(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        original = b"#!/bin/sh\r\n# keep original hook\r\n"
+        path.write_bytes(original)
+        for position in ("oah", "backups", "run"):
+            with self.subTest(position=position):
+                self.repo = make_git_repo(self)
+                (self.repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
+                path = hooks.git_hook_path(self.repo, "pre-push")
+                path.write_bytes(original)
+                step = self.steps(force=True)["pre-push"]
+                common = repo_info(self.repo).common_dir
+                destination = common / "oah/backups" / step.backup
+                unlazy._private_makedirs(destination.parent)
+                directory = {"oah": common / "oah", "backups": common / "oah/backups",
+                             "run": destination.parent}[position]
+                subprocess.run(["icacls.exe", str(directory), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                               check=True, capture_output=True)
+                descriptor = unlazy._windows_security_descriptor(directory)
+                installed, problems = init.install_hooks(self.repo, [step], force=True)
+                self.assertEqual(installed, [])
+                self.assertTrue(problems and problems[0].startswith("OAH_INIT_"), problems)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertFalse(destination.exists())
+                self.assertTrue(unlazy._windows_security_descriptor(directory) == descriptor,
+                                "init must leave the existing DACL unchanged")
+
     @unittest.skipIf(os.name == "nt", "POSIX permission bits")
     def test_private_settings_and_staging_keep_private_modes(self):
         path = self.repo / init.CLAUDE_SETTINGS
@@ -1203,19 +1284,73 @@ class UnlazyStepTest(unittest.TestCase):
                 parent = self.target.parent
                 self.assertEqual(list(parent.iterdir()) if parent.exists() else [], [])
 
-    def test_incompatible_project_copy_needs_force(self):
+    def test_incompatible_project_copy_requires_manual_removal_even_with_force(self):
         make_unlazy(self.target)
-        self.assertEqual(self.plan().action, "blocked")
-        self.assertIn("--force", self.plan().note)
+        original = (self.target / "scripts/gate-check.mjs").read_bytes()
+        for force in (False, True):
+            with self.subTest(force=force):
+                step = self.plan(force=force)
+                self.assertEqual(step.action, "blocked")
+                self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
+                self.assertIn(init.UNLAZY_PROJECT, step.note)
+                self.assertIn("Remove", step.note)
+                self.assertIn("rerun", step.note)
+                self.assertFalse(step.backup)
+                problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+                self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+        self.assertEqual((self.target / "scripts/gate-check.mjs").read_bytes(), original)
+        self.assertFalse((repo_info(self.repo).common_dir / "oah").exists())
+
+    def test_non_unlazy_directory_requires_manual_removal_even_with_force(self):
+        self.target.mkdir(parents=True)
+        original = b"user directory\r\n\x00"
+        (self.target / "keep.bin").write_bytes(original)
         step = self.plan(force=True)
-        self.assertEqual(step.action, "replace")
-        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
-        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
-        backup = self.target.with_name("unlazy.oah.bak")
-        self.assertFalse(backup.exists())
-        backups = list((repo_info(self.repo).common_dir / "oah/backups").glob("*/*"))
-        self.assertEqual(len(backups), 1)
-        self.assertTrue((backups[0] / "scripts" / "gate-check.mjs").is_file())
+        self.assertEqual(step.action, "blocked")
+        self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
+        self.assertIn(init.UNLAZY_PROJECT, step.note)
+        self.assertFalse(step.backup)
+        self.assertEqual((self.target / "keep.bin").read_bytes(), original)
+
+    def test_claude_project_copy_requires_manual_removal(self):
+        target = self.repo / ".claude/skills/unlazy"
+        make_unlazy(target)
+        step = self.plan(force=True)
+        self.assertEqual(step.action, "blocked")
+        self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
+        self.assertIn(".claude/skills/unlazy", step.note)
+        self.assertFalse(step.backup)
+
+    def test_directory_source_publication_refuses_hash_then_regular_directory_swap(self):
+        make_unlazy(self.target)
+        digest = init._tree_digest(self.target, root=self.repo)
+        tree_digest = init._tree_digest
+        saved = self.target.with_name("saved")
+        original = (self.target / "scripts/gate-check.mjs").read_bytes()
+        replacement = b"concurrent user tree\r\n\x00"
+        swapped = False
+
+        def swap(path, **kwargs):
+            nonlocal swapped
+            result = tree_digest(path, **kwargs)
+            if path == self.target:
+                path.rename(saved)
+                path.mkdir(mode=0o755)
+                (path / "keep.bin").write_bytes(replacement)
+                swapped = True
+            return result
+
+        common = repo_info(self.repo).common_dir
+        with mock.patch.object(init, "_tree_digest", side_effect=swap):
+            published = init._publish(common, "oah/backups/run/unlazy", None, source=init.UNLAZY_PROJECT,
+                                      source_root=self.repo, source_digest=digest, private=True)
+        self.assertFalse(published)
+        self.assertFalse((common / "oah/backups/run/unlazy").exists())
+        if swapped:
+            self.assertEqual((self.target / "keep.bin").read_bytes(), replacement)
+            self.assertEqual((saved / "scripts/gate-check.mjs").read_bytes(), original)
+        else:  # Refusing before hashing/moving is the safer path.
+            self.assertEqual((self.target / "scripts/gate-check.mjs").read_bytes(), original)
 
     def test_project_pin_verification_rejects_linked_script_sources(self):
         outside = make_tmp_dir(self)
@@ -1226,14 +1361,15 @@ class UnlazyStepTest(unittest.TestCase):
             self.plan()
         self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
 
-    def test_failed_replacement_puts_the_old_copy_back(self):
+    def test_legacy_replacement_plan_is_refused_without_staging(self):
         make_unlazy(self.target)
-        bad = unlazy.Pin(commit="0" * 40, files=self.pin.files)
-        step = self.plan(force=True, pin=bad)
-        self.assertEqual(step.action, "replace")
-        self.assertTrue(init.install_unlazy(self.repo, step, source=str(self.source), pin=bad))
+        step = init.UnlazyStep("replace", str(self.target), aside=str(self.target),
+                               digest=init._tree_digest(self.target, root=self.repo), backup="run/unlazy")
+        problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_UNLAZY_EXISTS:"), problem)
         self.assertTrue((self.target / "scripts" / "gate-check.mjs").is_file())
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
+        self.assertFalse((repo_info(self.repo).common_dir / "oah").exists())
 
     def test_replacement_refuses_a_copy_edited_since_planning(self):
         make_unlazy(self.target)
@@ -1241,7 +1377,7 @@ class UnlazyStepTest(unittest.TestCase):
         script = self.target / "scripts/gate-check.mjs"
         script.write_bytes(b"// concurrent\r\n")
         problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
-        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertTrue(problem.startswith("OAH_INIT_UNLAZY_EXISTS:"), problem)
         self.assertEqual(script.read_bytes(), b"// concurrent\r\n")
         self.assertFalse(self.target.with_name("unlazy.oah.bak").exists())
 
@@ -1300,6 +1436,50 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(unlazy.verify_pin(staging, self.pin), [])
         # Retaining even read-only Git objects requires no pathname-based permission repair or deletion.
         self.assertTrue(any(path.is_file() for path in (staging / ".git/objects").rglob("*")))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows staging DACLs")
+    def test_windows_wiki_then_unlazy_keeps_state_private(self):
+        common = repo_info(self.repo).common_dir
+        subprocess.run(["icacls.exe", str(common), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, capture_output=True)
+        wiki = Wiki(self.repo, WikiSettings(), common / "oah")
+        change = init.FileChange("docs/wiki/index.md", "create", "wiki", b"# Wiki\r\n")
+        written, problems = init.write_files(self.repo, [change], wiki=wiki)
+        self.assertEqual(written, [change])
+        self.assertEqual(problems, [])
+        self.assertEqual(init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin), "")
+        init._private_state_directory(common / "oah")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows staging DACLs")
+    def test_windows_staging_is_private_under_permissive_git_metadata(self):
+        common = repo_info(self.repo).common_dir
+        subprocess.run(["icacls.exe", str(common), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, capture_output=True)
+        self.assertEqual(init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin), "")
+        staging, = (common / "oah/staging").iterdir()
+        for directory in (common / "oah", staging.parent, staging):
+            descriptor = unlazy._windows_security_descriptor(directory)
+            self.assertTrue("D:P" in descriptor, "state DACL must be protected")
+            self.assertFalse(";;;WD)" in descriptor or ";;;S-1-1-0)" in descriptor,
+                             "state DACL must exclude public access")
+            init._private_state_directory(directory)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows existing staging DACL refusal")
+    def test_windows_staging_refuses_existing_permissive_directory(self):
+        staging = repo_info(self.repo).common_dir / "oah/staging"
+        unlazy._private_makedirs(staging)
+        subprocess.run(["icacls.exe", str(staging), "/grant", "*S-1-1-0:(OI)(CI)F"],
+                       check=True, capture_output=True)
+        descriptor = unlazy._windows_security_descriptor(staging)
+        # External commands are fakes and must never run when staging permissions are unsafe.
+        with mock.patch.object(init, "run_command") as command:
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+        command.assert_not_called()
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(staging.iterdir()), [])
+        self.assertTrue(unlazy._windows_security_descriptor(staging) == descriptor,
+                        "init must leave the existing DACL unchanged")
 
     def test_override_must_be_cleared(self):
         empty = make_tmp_dir(self)
