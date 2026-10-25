@@ -2,9 +2,11 @@
 # CI 테스트 분할 실행기 — unittest 탐색 결과를 나눠 N개 조각 중 하나만 돌린다.
 """Run one shard of the unit tests: `python tools/test_shard.py INDEX COUNT [unittest options]`.
 
-Discovery suites go to exactly one shard, preserving nested packages and load_tests hooks.
-Suites are assigned greedily by test count, largest first, to the smallest shard so far.
-Ties follow discovery order, so every runner computes the same split.
+Discovery runs once, so nested packages and load_tests hooks shape the suite as usual. The suite is then cut into
+units, each the innermost suite that holds only test cases (normally one TestCase class), so one large module can
+spread over several shards while class fixtures stay together. Units are assigned greedily by test count, largest
+first, to the smallest shard so far; ties follow discovery order, and each shard runs its units in discovery order,
+so every runner computes the same split and a module's classes stay adjacent.
 """
 from __future__ import annotations
 
@@ -19,14 +21,28 @@ def shards(count: int, tests_dir: pathlib.Path = ROOT / "tests",
            loader: unittest.TestLoader | None = None) -> list[list[unittest.TestSuite]]:
     loader = loader if loader is not None else unittest.TestLoader()
     discovered = loader.discover(str(tests_dir), top_level_dir=str(tests_dir.parent))
-    suites = sorted(discovered, key=lambda suite: -suite.countTestCases())
-    groups: list[list[unittest.TestSuite]] = [[] for _ in range(count)]
+    units = list(_units(discovered))
+    order = sorted(range(len(units)), key=lambda i: (-units[i].countTestCases(), i))
+    placed: list[list[int]] = [[] for _ in range(count)]
     sizes = [0] * count
-    for suite in suites:
+    for unit in order:
         index = min(range(count), key=lambda i: (sizes[i], i))
-        groups[index].append(suite)
-        sizes[index] += suite.countTestCases()
-    return groups
+        placed[index].append(unit)
+        sizes[index] += units[unit].countTestCases()
+    return [[units[i] for i in sorted(group)] for group in placed]
+
+
+def _units(suite: unittest.TestSuite):
+    """Yield the innermost suites that hold only test cases; a lone test case becomes its own unit."""
+    children = list(suite)
+    if children and all(isinstance(child, unittest.TestCase) for child in children):
+        yield suite
+        return
+    for child in children:
+        if isinstance(child, unittest.TestCase):
+            yield unittest.TestSuite([child])
+        else:
+            yield from _units(child)
 
 
 def main(argv: list[str]) -> int:

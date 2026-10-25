@@ -157,6 +157,32 @@ class ShardTest(unittest.TestCase):
                     if name == "balance_fixture" or name.startswith("balance_fixture."):
                         del sys.modules[name]
 
+    def test_large_module_classes_spread_and_keep_discovery_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = pathlib.Path(tmp) / "class_fixture"
+            folder.mkdir()
+            (folder / "__init__.py").write_text("# 클래스 단위 분할 검사 패키지.\n", encoding="utf-8")
+            source = "# 큰 모듈 하나를 클래스 단위로 나누는 검사.\nimport unittest\n"
+            for name, count in (("First", 6), ("Second", 5), ("Third", 2)):
+                source += f"class {name}Test(unittest.TestCase):\n"
+                source += "".join(f"    def test_{i}(self): pass\n" for i in range(count))
+            (folder / "test_big.py").write_text(source, encoding="utf-8")
+            (folder / "test_small.py").write_text(
+                "# 작은 모듈.\nimport unittest\nclass SmallTest(unittest.TestCase):\n"
+                "    def test_0(self): pass\n    def test_1(self): pass\n", encoding="utf-8")
+            old_path = sys.path[:]
+            try:
+                groups = tool.shards(2, folder)
+                classes = [[suite._tests[0].__class__.__name__ for suite in group] for group in groups]
+                self.assertEqual(classes, [["FirstTest", "SmallTest"], ["SecondTest", "ThirdTest"]])
+                totals = [sum(suite.countTestCases() for suite in group) for group in groups]
+                self.assertEqual(totals, [8, 7])
+            finally:
+                sys.path[:] = old_path
+                for name in list(sys.modules):
+                    if name == "class_fixture" or name.startswith("class_fixture."):
+                        del sys.modules[name]
+
     def test_usage_errors_exit_2(self):
         for args in ([], ["0", "3"], ["4", "3"], ["x", "3"]):
             with self.subTest(args=args):
