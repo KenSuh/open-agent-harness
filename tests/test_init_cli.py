@@ -126,6 +126,7 @@ def snapshot(root: pathlib.Path, *, with_git: bool = True) -> dict[str, bytes]:
 
 
 def plan_block(text: str) -> str:
+    text = text.replace("\r\n", "\n")  # Native Windows console output carries CRLF even through a pipe.
     start = text.index("\nPlan for ")
     return text[start:text.index("\nEnd of plan.", start)]
 
@@ -286,6 +287,10 @@ class PlanFirstTest(unittest.TestCase):
 
 
 class DryRunSubprocessTest(unittest.TestCase):
+    def test_plan_block_compares_the_same_text_with_native_console_newlines(self):
+        text = "header\n\nPlan for repo:\nFiles:\n  create     .oah/config.toml\nEnd of plan.\n"
+        self.assertEqual(plan_block(text.replace("\n", "\r\n")), plan_block(text))
+
     def test_python_m_oah_init_dry_run(self):
         repo = committed_repo(self)
         before = snapshot(repo)
