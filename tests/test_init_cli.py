@@ -462,5 +462,51 @@ class WhereTest(unittest.TestCase):
         self.assertIsNone(mapstore.status(repo, env={})[0])
 
 
+
+class RefusalTest(unittest.TestCase):
+    """Refusals happen before anything is written, and say what to do next."""
+
+    def test_outside_a_repository_refuses(self):
+        plain = make_tmp_dir(self)
+        machine = make_machine(self, FakeTools())
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(plain.parent)}):
+            code, out, err = run_init(plain, machine, *flags())
+        self.assertEqual(code, 69)
+        self.assertIn("OAH_NOT_A_REPO", err)
+        self.assertIn("git init", err)
+        self.assertEqual(list(plain.iterdir()), [])
+
+    def test_invalid_config_needs_force(self):
+        repo = committed_repo(self)
+        config = repo / ".oah" / "config.toml"
+        config.parent.mkdir()
+        config.write_text("[stages\n", encoding="utf-8")
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 69)
+        self.assertIn("OAH_CONFIG_INVALID", err)
+        self.assertEqual(snapshot(repo), before)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", *flags())
+        self.assertEqual(code, 0, err)
+        self.assertIn('initial = "claude"', config.read_text(encoding="utf-8"))
+
+    def test_broken_rules_markers_refuse_before_writing(self):
+        repo = committed_repo(self)
+        (repo / "AGENTS.md").write_text("<!-- OAH:RULES:BEGIN v1 -->\nno end marker\n", encoding="utf-8")
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_RULES_MARKER_BROKEN", err)
+        self.assertEqual(snapshot(repo), before)
+
+    def test_end_of_input_during_questions_writes_nothing(self):
+        repo = committed_repo(self)
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools(), interactive=True, replies=("y",)))
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_INIT_NO_ANSWER", err)
+        self.assertEqual(snapshot(repo), before)
+
+
 if __name__ == "__main__":
     unittest.main()

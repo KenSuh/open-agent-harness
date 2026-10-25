@@ -51,6 +51,7 @@ WIKI_CONTENT = ("index.md", "log.md")  # the wiki's own content: kept, never rep
 GUIDE_SLUG, GUIDE_TITLE = "wiki-guide", "How this wiki works"
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 WRITES = ("create", "replace", "update")
+KEEP_NOTES = {CONFIG_PATH: "your settings stay as they are; --force rewrites them with oah's defaults"}
 TIER_WORK = {
     "low": "quick lookups, docs and short summaries",
     "medium": "routine implementation, refactors, research and reviews of one area",
@@ -85,7 +86,6 @@ class FileChange:
     data: bytes | None = None  # the bytes to write, for create, replace and update
     before: bytes | None = None  # the bytes found while planning
     note: str = ""
-
 
 
 # Questions -------------------------------------------------------------------------------------------
@@ -196,6 +196,7 @@ def resolve_answers(given: Mapping[str, bool | None], *, recorded: Mapping[str, 
         answers[question.key] = (Answer(bool(question.default), "default") if dry_run
                                  else Answer(_ask(question, ask, out), "asked"))
     return {question.key: answers[question.key] for question in QUESTIONS}
+
 
 # Templates -------------------------------------------------------------------------------------------
 
@@ -345,7 +346,8 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
         elif force:
             change = FileChange(path, "replace", group, data, before)
         else:
-            change = FileChange(path, "keep", group, None, before, "exists; pass --force to replace it")
+            change = FileChange(path, "keep", group, None, before,
+                                KEEP_NOTES.get(path, "exists; pass --force to replace it"))
         changes.append(change)
         return change
 
@@ -755,7 +757,6 @@ def origin_url(root: pathlib.Path) -> str | None:
     return (result.stdout.strip() or None) if result.returncode == 0 else None
 
 
-
 # The machine --------------------------------------------------------------------------------------------
 
 def _input(prompt: str) -> str | None:
@@ -817,7 +818,6 @@ class Plan:
     notes: tuple[str, ...]
     branch: str
     how: str
-    has_config: bool
     wiki: WikiSettings
     tools: tuple[Tool, ...]
     tool_steps: tuple[guide.Step, ...]
@@ -883,8 +883,9 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
             notes_found.append(f"{used} was not applied: .oah/config.toml already records this answer, and init "
                                "does not edit an existing config. Edit the file, or pass --force to rewrite it.")
     return Plan(
-        root=root, state=state_dir(repo_info(root), machine.env), answers=answers, notes=tuple(notes_found), branch=branch, how=how, has_config=has_config, wiki=wiki,
-        tools=tools, tool_steps=tuple(guide.plan_installs(statuses, os_name=machine.os_name, which=machine.which)),
+        root=root, state=state_dir(repo_info(root), machine.env), answers=answers, notes=tuple(notes_found),
+        branch=branch, how=how, wiki=wiki, tools=tools,
+        tool_steps=tuple(guide.plan_installs(statuses, os_name=machine.os_name, which=machine.which)),
         files=tuple(files), rules=plan_rules(root, lang=lang),
         hooks=tuple(plan_hooks(root, force=force)) if values["hooks"] else (), unlazy=unlazy_step,
         ci=plan_ci(root, force=force, oses=list(ci_section["os"]), test_command=ci_section["test_command"] or None)
@@ -915,7 +916,8 @@ def render_plan(plan: Plan) -> list[str]:
             sources.append(f"{label} ({', '.join(keys)})")
     lines += _wrap("  From: ", "; ".join(sources))
     lines += [f"  Note: {note}" for note in plan.notes]
-    lines += ["Tools (each one asks before it installs; --yes installs them all, except apps you did not choose):"]
+    lines.append("Tools (each installs only after you confirm it, or with --yes; an app you chose above needs no "
+                 "second answer):")
     if not plan.tool_steps:
         lines.append("  - every tool oah uses is installed")
     for step in plan.tool_steps:
@@ -976,7 +978,8 @@ def render_plan(plan: Plan) -> list[str]:
     lines.append("Settings:")
     lines.append(f"  default branch: {plan.branch} ({plan.how})")
     lines.append(f"  Jev re-ranker: {'on, with your consent' if jev else 'off'}")
-    lines.append(f"  skill updates: {'on, checked at most once a day' if plan.answers['skill_updates'].value else 'off'}")
+    updates = plan.answers["skill_updates"].value
+    lines.append(f"  skill updates: {'on, checked at most once a day' if updates else 'off'}")
     state, reason = plan.map
     action = plan.map_action
     lines.append("Impact map:")
@@ -1060,6 +1063,9 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
     if problems:
         outcome.pending.append("files")
     installed, problems = install_hooks(root, list(plan.hooks), force=force)
+    if installed or problems:
+        out("")
+        out("Hooks:")
     for kind in installed:
         out(f"  installed hook {kind}")
     for problem in problems:
@@ -1068,6 +1074,8 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
     if problems:
         outcome.pending.append("hooks")
     if plan.ci is not None and plan.ci.action in ("create", "replace"):
+        out("")
+        out("CI starter:")
         problem = write_ci(plan.ci)
         out(f"  {problem}" if problem else f"  wrote {ci.WORKFLOW_PATH}")
         if problem:
@@ -1093,6 +1101,8 @@ def _apply_unlazy(plan: Plan, machine: Machine, outcome: Outcome, out) -> None:
     step = plan.unlazy
     if step is None or step.action == "present":
         return
+    out("")
+    out("unlazy:")
     if step.action == "blocked":
         out(f"  unlazy: not installed: {step.note}")
         outcome.pending.append("unlazy")
