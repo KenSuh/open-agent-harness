@@ -66,7 +66,7 @@ TIER_WORK = {
     "high": "broad audits, migrations, security work, high-risk reviews and reasoning across many files",
     "max": "critical-risk work and the hardest reasoning",
 }
-NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # a clone never stops to ask
+NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # compatibility; not inherited by Git
 UNLAZY_GIT_OPTIONS = ("-c", "user.name=oah", "-c", "user.email=oah@invalid",
                       "-c", "core.logAllRefUpdates=false", "-c", "init.templateDir=",
                       "-c", "core.hooksPath=.git/oah-no-hooks")
@@ -649,7 +649,8 @@ def _rename_exclusive(source, target, source_folder: int | None, folder: int | N
 
 
 @contextmanager
-def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: bool = False):
+def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: bool = False,
+                      security: bool = False):
     """Hold the directory's identity; command pins also deny Windows write/delete sharing."""
     if os.name != "nt":
         handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -673,7 +674,7 @@ def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: b
     close = kernel.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    handle = create(str(path), 0x80 | (0x10000 if delete else 0), 7 if allow_swap else 1,
+    handle = create(str(path), 0x80 | (0x10000 if delete else 0) | (0x40000 if security else 0), 7 if allow_swap else 1,
                     None, 3, 0x02200000, None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -745,7 +746,7 @@ def _macos_file_acl(fd: int, value: bytes | None = None) -> bytes:
 
 
 def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool = False,
-                           fd: int | None = None) -> int | None:
+                           fd: int | None = None, handle: int | None = None) -> int | None:
     """Create an empty owner-only staging file, or freeze the target's effective DACL on it."""
     import ctypes
     import msvcrt
@@ -766,7 +767,8 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
             setter.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p)
             setter.restype = wintypes.BOOL
             # Protect the copied effective ACEs from the destination parent's inherited grants.
-            if fd is None or not setter(msvcrt.get_osfhandle(fd), 0x80000004, security):
+            held = handle if handle is not None else msvcrt.get_osfhandle(fd) if fd is not None else None
+            if held is None or not setter(held, 0x80000004, security):
                 raise OSError("cannot preserve file security")
             return None
 
@@ -808,7 +810,7 @@ def _private_file(temp: pathlib.Path, folder: int | None) -> int:
         elif sys.platform == "darwin":
             if unlazy._macos_mount_flags(temp) & 0x00200000:  # MNT_IGNORE_OWNERSHIP
                 raise OSError("staging volume does not enforce ownership")
-            unlazy._strip_snapshot_acls(temp)
+            _macos_file_acl(fd, b"")
             if _macos_file_acl(fd).strip() not in (b"", b"!#acl 1"):
                 raise OSError("staging ACL is not empty")
         if os.name != "nt" and stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
@@ -817,6 +819,41 @@ def _private_file(temp: pathlib.Path, folder: int | None) -> int:
     except BaseException:
         os.close(fd)
         raise
+
+
+@contextmanager
+def _file_staging(path: pathlib.Path, folder: int | None):
+    """Keep empty staging files under a private, pinned directory without inherited ACL entries."""
+    directory = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    name = directory if folder is None else directory.name
+    if os.name == "nt":
+        unlazy._private_directory(directory)
+    else:
+        os.mkdir(name, 0o700, dir_fd=folder)
+    try:
+        if os.name == "nt":
+            with _pinned_directory(directory, security=True) as (handle, _identity):
+                sid = unlazy._windows_user_sid()
+                expected = f"O:{sid}D:P(A;;FA;;;{sid})"
+                _windows_file_security(directory, expected, handle=handle)
+                if unlazy._windows_security_descriptor(directory) != expected:
+                    raise OSError("staging directory DACL differs")
+                yield directory / "file.tmp", None
+        else:
+            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+            try:
+                info = os.fstat(descriptor)
+                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise OSError("staging directory is not owner-only")
+                if sys.platform == "darwin":
+                    _macos_file_acl(descriptor, b"")
+                    if _macos_file_acl(descriptor).strip() not in (b"", b"!#acl 1"):
+                        raise OSError("staging directory ACL is not empty")
+                yield directory / "file.tmp", descriptor
+            finally:
+                os.close(descriptor)
+    finally:
+        os.rmdir(name, dir_fd=folder)  # Never recurse into a replaced directory.
 
 
 def _file_restrictions(root: pathlib.Path, relative: str, folder: int | None) -> tuple[int, bytes | str] | None:
@@ -863,51 +900,51 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                 if folder is not None:
                     os.fsync(folder)
                 return True
-            temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-            temporary = temp if folder is None else temp.name
-            try:
-                restrictions = _file_restrictions(root, relative, folder)
-                fd = _private_file(temp, folder)
-                with os.fdopen(fd, "wb") as handle:
-                    handle.write(data)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                    if os.name != "nt":
-                        mode = (restrictions[0] if restrictions is not None
-                                else 0o700 if executable else 0o600)
-                        os.fchmod(handle.fileno(), mode)
-                        if sys.platform == "darwin" and restrictions is not None:
-                            _macos_file_acl(handle.fileno(), restrictions[1])
-                            if _macos_file_acl(handle.fileno()) != restrictions[1]:
-                                raise OSError("replacement ACL changed")
-                    elif restrictions is not None:
-                        _windows_file_security(temp, restrictions[1], fd=handle.fileno())
-                        expected = restrictions[1].replace("D:", "D:P", 1).replace("D:PP", "D:P", 1)
-                        if unlazy._windows_security_descriptor(temp) != expected:
-                            raise OSError("replacement DACL changed")
-                    os.fsync(handle.fileno())
-                current = _current(root, relative, folder)
-                if ((current is None) != (before is None) or (current is not None and
-                        hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
-                    return False
-                if _file_restrictions(root, relative, folder) != restrictions:
-                    return False
-                if _current(root, relative, folder) != current:
-                    return False
-                if before is not None:
-                    os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
-                elif os.name == "nt":
-                    os.rename(temporary, name)  # Windows refuses an existing target.
-                else:
-                    os.link(temporary, name, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
-                if folder is not None:
-                    os.fsync(folder)
-                return True
-            finally:
+            with _file_staging(path, folder) as (temp, staging_folder):
+                temporary = temp if folder is None else temp.name
                 try:
-                    os.unlink(temporary, dir_fd=folder)
-                except FileNotFoundError:
-                    pass
+                    restrictions = _file_restrictions(root, relative, folder)
+                    fd = _private_file(temp, staging_folder)
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        if os.name != "nt":
+                            mode = (restrictions[0] if restrictions is not None
+                                    else 0o700 if executable else 0o600)
+                            os.fchmod(handle.fileno(), mode)
+                            if sys.platform == "darwin" and restrictions is not None:
+                                _macos_file_acl(handle.fileno(), restrictions[1])
+                                if _macos_file_acl(handle.fileno()) != restrictions[1]:
+                                    raise OSError("replacement ACL changed")
+                        elif restrictions is not None:
+                            _windows_file_security(temp, restrictions[1], fd=handle.fileno())
+                            expected = restrictions[1].replace("D:", "D:P", 1).replace("D:PP", "D:P", 1)
+                            if unlazy._windows_security_descriptor(temp) != expected:
+                                raise OSError("replacement DACL changed")
+                        os.fsync(handle.fileno())
+                    current = _current(root, relative, folder)
+                    if ((current is None) != (before is None) or (current is not None and
+                            hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
+                        return False
+                    if _file_restrictions(root, relative, folder) != restrictions:
+                        return False
+                    if _current(root, relative, folder) != current:
+                        return False
+                    if before is not None:
+                        os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
+                    elif os.name == "nt":
+                        os.rename(temporary, name)  # Windows refuses an existing target.
+                    else:
+                        os.link(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder, follow_symlinks=False)
+                    if folder is not None:
+                        os.fsync(folder)
+                    return True
+                finally:
+                    try:
+                        os.unlink(temporary, dir_fd=staging_folder)
+                    except FileNotFoundError:
+                        pass
     except (OSError, InitError, unlazy.UnlazyError):
         return False
 
@@ -1435,9 +1472,15 @@ def _hook_settings(before: bytes | None) -> tuple[str | None, dict]:
     return text, data
 
 
-def _backup_root(root: pathlib.Path) -> pathlib.Path:
+def _backup_root(root: pathlib.Path, *, env: Mapping[str, str] | None = None) -> pathlib.Path:
     """Only Git's own state folder may hold preserved user bytes; never honor an in-tree state override."""
-    common = repo_info(root).common_dir.absolute()
+    if env is None:
+        common = repo_info(root).common_dir.absolute()
+    else:
+        result = _unlazy_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", env=env)
+        if result.returncode != 0 or result.timed_out or not result.stdout.strip():
+            raise OSError("Git state could not be located")
+        common = pathlib.Path(result.stdout.strip()).absolute()
     # Refuse redirected Git metadata too, before handing its path to the publication function.
     if _linked(pathlib.Path(common.anchor), common.relative_to(common.anchor).as_posix()) is not None:
         raise OSError("linked Git state")
@@ -1520,8 +1563,10 @@ def _unlazy_exists(relative: str) -> str:
             "Remove it yourself, then rerun oah init --with-unlazy")
 
 
-def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin) -> list[str]:
+def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin, *,
+                       env: Mapping[str, str] | None = None) -> list[str]:
     """Adapt the landed pin check's project reads; external tool installations keep their landed check."""
+    env = _unlazy_environment() if env is None else env
     if not folder.is_relative_to(root):
         problems = []
         for relative, digest in pin.files.items():
@@ -1530,8 +1575,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
                     problems.append("a script differs from the pin")
             except OSError:
                 problems.append("a script is missing")
-        top = _unlazy_git(folder, "rev-parse", "--show-toplevel")
-        head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+        top = _unlazy_git(folder, "rev-parse", "--show-toplevel", env=env)
+        head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD", env=env)
         if (top.returncode != 0 or not top.stdout.strip()
                 or pathlib.Path(top.stdout.strip()).resolve() != folder.resolve()
                 or head.returncode != 0 or head.stdout.strip() != pin.commit):
@@ -1556,8 +1601,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
                 if data is None or hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() != digest:
                     problems.append("a script is missing or differs from the pin")
             check_directory()
-            top = _unlazy_git(folder, "rev-parse", "--show-toplevel")
-            head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+            top = _unlazy_git(folder, "rev-parse", "--show-toplevel", env=env)
+            head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD", env=env)
             check_directory()
             if (top.returncode != 0 or not top.stdout.strip()
                     or pathlib.Path(top.stdout.strip()).absolute() != folder.absolute()
@@ -1633,17 +1678,22 @@ def unlazy_commands(target: pathlib.Path, *, source: str, pin: unlazy.Pin) -> li
     if commands[0][:4] != ["git", "clone", "--quiet", unlazy.UPSTREAM_GIT]:
         raise RuntimeError("unlazy.install_commands no longer starts with the clone oah.init expects; update it")
     commands[0][3] = source
+    commands[0] = ["git", "-C", str(target), *commands[0][1:-1], "."]
+    commands[1][3:3] = ["--git-dir=.git", "--work-tree=."]
     return [[*git_argv(), *UNLAZY_GIT_OPTIONS, *argv[1:]] for argv in commands]
 
 
 def _unlazy_environment() -> dict[str, str]:
-    return {**{key: value for key, value in os.environ.items()
-               if not key.upper().startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}, **NETWORK_ENV}
+    """Snapshot only executable lookup, home, locale and temporary-directory settings."""
+    allowed = {"PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LANG", "LANGUAGE",
+               "TEMP", "TMP", "TMPDIR"}
+    return {key: os.environ[key] for key in os.environ
+            if key.upper() in allowed or key.upper().startswith("LC_")}
 
 
-def _unlazy_git(folder: pathlib.Path, *args: str) -> proc.RunResult:
+def _unlazy_git(folder: pathlib.Path, *args: str, env: Mapping[str, str] | None = None) -> proc.RunResult:
     return proc.run_command([*git_argv(), *UNLAZY_GIT_OPTIONS, "-C", str(folder), *args],
-                            timeout=30.0, env=_unlazy_environment())
+                            timeout=30.0, env=_unlazy_environment() if env is None else env)
 
 
 def _rename(source: pathlib.Path, target: pathlib.Path) -> None:
@@ -1735,6 +1785,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
     Returns "" on success, else the problem. Existing project directories require manual removal.
     Staging is retained for manual cleanup; init never recursively deletes a replaceable pathname."""
     root = pathlib.Path(root)
+    environment = _unlazy_environment()
     try:
         if step.action == "replace" or step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"):
             relative = (".claude/skills/unlazy" if pathlib.Path(step.folder) == root / ".claude/skills/unlazy"
@@ -1746,7 +1797,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
             if _linked(root, relative) is not None:
                 raise OSError("linked installation path")
         # Ignore OAH_STATE_DIR: external tree writers must stay in Git's own private metadata storage.
-        common = _backup_root(root)
+        common = _backup_root(root, env=environment)
         staging_relative = f"oah/staging/{secrets.token_hex(16)}"
         staging = common / staging_relative
         with _parents(common, staging_relative, private=True) as parent:
@@ -1759,7 +1810,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                 try:
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
                                                 strict=True):
-                        argv[-1 if operation == "clone" else len(git_argv()) + len(UNLAZY_GIT_OPTIONS) + 1] = "."
+                        argv[len(git_argv()) + len(UNLAZY_GIT_OPTIONS) + 1] = "."
                         _require_staging(staging, identity)
                         # The child reopens without following links, checks the held identity and fchdirs on
                         # POSIX. Windows also denies replacement throughout the external command.
@@ -1767,7 +1818,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                    "from oah.init import _staging_command; "
                                    "sys.exit(_staging_command(sys.argv[2], sys.argv[3], sys.argv[4:]))",
                                    str(pathlib.Path(__file__).resolve().parent.parent), str(staging), identity, *argv]
-                        result = run_command(command, timeout=timeout, env=_unlazy_environment())
+                        result = run_command(command, timeout=timeout, env=environment)
                         _require_staging(staging, identity)
                         if result.timed_out or result.returncode != 0:
                             detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
@@ -1776,7 +1827,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                     with _pinned_directory(staging) as (_verification_handle, actual):
                         if actual != identity:
                             raise OSError("staging directory changed")
-                        if _verify_unlazy_pin(staging, staging, pin):
+                        if _verify_unlazy_pin(staging, staging, pin, env=environment):
                             return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
                                     "source and pin, then run oah init --with-unlazy again. Nothing was installed")
                         files, directories = _staged_files(staging, _verification_handle)
@@ -1807,7 +1858,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                             if not _publish(root, f"{UNLAZY_PROJECT}/{name}", data, executable=executable):
                                 raise OSError("installation file changed")
                         _require_staging(staging, identity)
-                        if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin):
+                        if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin, env=environment):
                             raise OSError("published installation does not match the pin")
                         return ""
                 except (OSError, InitError):
