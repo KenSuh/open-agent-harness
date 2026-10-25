@@ -83,6 +83,116 @@ class FileChange:
     note: str = ""
 
 
+
+# Questions -------------------------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class Question:
+    key: str
+    title: str
+    what: str
+    prompt: str
+    default: bool | None  # what Enter means; None: the user must type y or n
+    recorded: bool = False  # the answer lives in .oah/config.toml, so it is asked only when init writes that file
+
+    @property
+    def flag_yes(self) -> str:
+        return f"--with-{self.key.replace('_', '-')}"
+
+    @property
+    def flag_no(self) -> str:
+        return f"--without-{self.key.replace('_', '-')}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Answer:
+    value: bool
+    source: str  # flag | asked | config | default
+
+
+QUESTIONS = (
+    Question("agents", "Tier agents", "Writes .claude/agents/oah-low, -medium, -high and -max.md: Claude Code "
+             "subagents whose model and effort follow the difficulty tier in .oah/config.toml.",
+             "Add the tier agents?", True),
+    Question("hooks", "Hooks", "Adds oah's hooks: the Claude Code Stop and SessionStart hooks in "
+             ".claude/settings.local.json, and the git pre-commit, post-commit, post-merge and pre-push hooks. "
+             "The plan shows each change first.", "Install the hooks?", True),
+    Question("unlazy", "unlazy, the gate checker", "Downloads unlazy from GitHub into .agents/skills/unlazy at the "
+             "commit oah is tested with, and checks its commit and file digests. Gates need it; it runs on "
+             "Node.js.", "Install unlazy?", True),
+    Question("graph", "Knowledge graph", "Writes .graphifyignore for graphify (install graphify with "
+             "`uv tool install graphifyy`); build the graph later with `oah graph update`.",
+             "Write .graphifyignore?", False),
+    Question("ci", "CI starter", "Writes .github/workflows/oah-ci.yml: your tests on GitHub Actions plus a secret "
+             "scan, shown in full first. Actions minutes on a private repository can cost money.",
+             "Write the CI starter?", False),
+    Question("orca", "Orca (optional app)", "Orca runs coding agents side by side in isolated git worktrees. "
+             "Installs the app from its official source and asks before each setup step.", "Set up Orca?", False),
+    Question("aside", "Aside (optional app)", "Aside is a browser with an AI agent that Claude Code and Codex use "
+             "for web tasks through MCP. Installs it from its official source and asks before each setup step.",
+             "Set up Aside?", False),
+    Question("jev", "TypeSafe Jev re-ranker (recommended)", "Jev re-orders the skills and impact results that oah's "
+             "fixed rules chose; it never adds or drops one. Cost: TypeSafe may charge for each request. Data sent: "
+             "the task kind, the query, and each candidate's name and description (up to 200 characters); for "
+             "difficulty advice, the four difficulty axes and the task summary (up to 500 characters). Your key is "
+             "read at run time from ${TYPESAFE_API_KEY} or the OS keychain; oah never asks for it or stores it, and "
+             "without it Jev stays off. Your answer is recorded in .oah/config.toml.",
+             "Turn on Jev? Yes is recommended. Type y or n:", None, recorded=True),
+    Question("skill_updates", "Skill updates", "Keeps oah's own skill cache current automatically, checked at most "
+             "once a day. Your project's skill folders never change on their own.",
+             "Turn on automatic skill updates?", True, recorded=True),
+)
+ASK_ATTEMPTS = 5
+
+
+def _ask(question: Question, ask, out) -> bool:
+    out("")
+    out(f"{question.title} ({question.flag_yes} or {question.flag_no})")
+    out(f"  {question.what}")
+    choices = "" if question.default is None else " [Y/n]" if question.default else " [y/N]"
+    for _attempt in range(ASK_ATTEMPTS):
+        reply = ask(f"  {question.prompt}{choices} ")
+        if reply is None:
+            raise InitError("OAH_INIT_NO_ANSWER", "the input ended before every question had an answer, so nothing "
+                            f"was changed. Run oah init again, or answer this one with {question.flag_yes} or "
+                            f"{question.flag_no}")
+        text = reply.strip().lower()
+        if text in ("y", "yes"):
+            return True
+        if text in ("n", "no"):
+            return False
+        if not text and question.default is not None:
+            return question.default
+        out("  Please type y or n.")
+    raise InitError("OAH_INIT_NO_ANSWER", f"no y or n for {question.title}, so nothing was changed. Run oah init "
+                    f"again, or pass {question.flag_yes} or {question.flag_no}")
+
+
+def resolve_answers(given: Mapping[str, bool | None], *, recorded: Mapping[str, bool] | None, interactive: bool,
+                    dry_run: bool, ask, out) -> dict[str, Answer]:
+    """One answer per question, in QUESTIONS order: the flag; for a recorded question, the existing config
+    (`recorded`, None when init writes the config); else the user's answer, or in a dry run the default
+    (Jev: off). A real run without a terminal refuses with OAH_INIT_ANSWERS_REQUIRED instead of guessing."""
+    answers: dict[str, Answer] = {}
+    open_questions = []
+    for question in QUESTIONS:
+        if question.recorded and recorded is not None:
+            answers[question.key] = Answer(bool(recorded[question.key]), "config")
+        elif given.get(question.key) is not None:
+            answers[question.key] = Answer(bool(given[question.key]), "flag")
+        else:
+            open_questions.append(question)
+    if open_questions and not interactive and not dry_run:
+        flags = "; ".join(f"{question.flag_yes} or {question.flag_no}" for question in open_questions)
+        raise InitError("OAH_INIT_ANSWERS_REQUIRED", "oah init has no terminal to ask in, and these questions have no "
+                        f"answer: {', '.join(question.title for question in open_questions)}. Nothing was changed. "
+                        f"Run it again with one flag for each: {flags}. `oah init --dry-run` shows the plan first.",
+                        EXIT_USAGE)
+    for question in open_questions:
+        answers[question.key] = (Answer(bool(question.default), "default") if dry_run
+                                 else Answer(_ask(question, ask, out), "asked"))
+    return {question.key: answers[question.key] for question in QUESTIONS}
+
 # Templates -------------------------------------------------------------------------------------------
 
 def _template(name: str, **values: str) -> str:
