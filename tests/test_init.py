@@ -1,9 +1,11 @@
 # 안내형 oah init 핵심 검사 — 설정 렌더링·섹션 검증, 기본 브랜치 감지, 티어 에이전트, .gitignore 항목, 파일 계획(유지·--force 교체·위키 내용 보호)과 쓰기를 본다.
 from __future__ import annotations
 
+import ast
 import contextlib
 import datetime as dt
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -784,6 +786,59 @@ class RulesStepTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_windows_security_opens_request_read_control_and_write_dac(self):
+        # Inspect the actual CreateFileW arguments without emulating native Windows APIs.
+        for function, opener, cases in (
+                (init._pinned_directory, "create", (
+                    ({"delete": False, "security": True}, 0x60081),
+                    ({"delete": True, "security": True}, 0x70081),
+                    ({"delete": False, "security": False}, 0x81))),
+                (init._windows_file_security, "opener", (({}, 0xC0060000),))):
+            tree = ast.parse(inspect.getsource(function))
+            calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == opener]
+            self.assertEqual(len(calls), 1)
+            expression = compile(ast.Expression(calls[0].args[1]), "<access mask>", "eval")
+            for variables, expected in cases:
+                with self.subTest(function=function.__name__, **variables):
+                    access = eval(expression, {"__builtins__": {}}, variables)
+                    self.assertEqual(access, expected)
+                    self.assertEqual(access & 0x80000, 0, "DACL changes do not set the owner")
+                    if variables.get("security", True):
+                        self.assertEqual(access & 0x60000, 0x60000, "READ_CONTROL | WRITE_DAC")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows security API error codes")
+    def test_windows_security_failures_keep_numeric_errors_without_paths(self):
+        import msvcrt
+
+        path = self.repo / "private-staging"
+        sid = unlazy._windows_user_sid()
+        descriptor = f"O:{sid}D:P(A;;FA;;;{sid})"
+        fd = init._windows_file_security(path, descriptor, create=True)
+        os.close(fd)
+        for operation, expected in (("convert", None), ("create", 80), ("fd", 5), ("handle", 5)):
+            with self.subTest(operation=operation):
+                with self.assertRaises(OSError) as caught:
+                    if operation == "convert":
+                        init._windows_file_security(path, "invalid descriptor", create=True)
+                    elif operation == "create":
+                        init._windows_file_security(path, descriptor, create=True)
+                    else:
+                        fd = init._windows_read_fd(path)  # No WRITE_DAC on this read-only handle.
+                        try:
+                            arguments = {"fd": fd} if operation == "fd" else {"handle": msvcrt.get_osfhandle(fd)}
+                            init._windows_file_security(path, descriptor, **arguments)
+                        finally:
+                            os.close(fd)
+                error = caught.exception
+                self.assertIsInstance(error.errno, int)
+                self.assertGreater(error.errno, 0)
+                if expected is not None:
+                    self.assertEqual(error.errno, expected)
+                self.assertIsNone(error.filename)
+                self.assertNotIn(str(path), str(error))
+                self.assertFalse(sid in str(error), "security error exposed an account identifier")
+
     def test_frozen_windows_dacl_compares_permissions_without_inheritance_bookkeeping(self):
         before = "O:OWD:AI(D;ID;GX;;;WD)(A;ID;FA;;;OW)"
         frozen = "O:OWD:PAI(D;;GX;;;WD)(A;;FA;;;OW)"
