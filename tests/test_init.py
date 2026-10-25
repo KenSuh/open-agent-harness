@@ -739,6 +739,60 @@ class RulesStepTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_publication_creates_empty_files_only_in_private_staging_directory(self):
+        create = init._private_file
+        observed = []
+        existing = sorted(p.name for p in self.repo.iterdir())
+
+        def private_file(temp, folder):
+            self.assertNotEqual(temp.parent, self.repo)
+            self.assertTrue(temp.parent.is_relative_to(self.repo))
+            if os.name == "nt":
+                descriptor = unlazy._windows_security_descriptor(temp.parent)
+                self.assertIn("D:P", descriptor)
+                self.assertNotIn(";OICI;", descriptor)
+            else:
+                self.assertEqual(stat.S_IMODE(os.fstat(folder).st_mode), 0o700)
+                if sys.platform == "darwin":
+                    self.assertIn(init._macos_file_acl(folder).strip(), (b"", b"!#acl 1"))
+            observed.append(temp)
+            return create(temp, folder)
+
+        with mock.patch.object(init, "_private_file", side_effect=private_file):
+            self.assertTrue(init._publish(self.repo, "published", b"known bytes\r\n"))
+        self.assertTrue(observed)
+        self.assertEqual((self.repo / "published").read_bytes(), b"known bytes\r\n")
+        self.assertEqual(sorted(p.name for p in self.repo.iterdir()), sorted([*existing, "published"]))
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS descriptor ACL race")
+    def test_macos_staging_path_replacement_preserves_unrelated_acls(self):
+        temp = self.repo / "empty-staging"
+        unrelated = self.repo / "unrelated"
+        unrelated.mkdir()
+        child = unrelated / "keep.bin"
+        child.write_bytes(b"unrelated bytes\r\n\x00")
+        subprocess.run(["/bin/chmod", "+a", "everyone deny execute", str(child)],
+                       check=True, capture_output=True)
+        acl = subprocess.run(["/bin/ls", "-lde", str(child)], check=True, capture_output=True).stdout.splitlines()[1:]
+        opener = os.open
+        saved = temp.with_name("held-staging")
+
+        def swap(path, flags, *args, **kwargs):
+            fd = opener(path, flags, *args, **kwargs)
+            if path == temp.name and flags & os.O_CREAT:
+                temp.rename(saved)
+                unrelated.rename(temp)
+            return fd
+
+        with init._parents(self.repo, temp.name) as folder:
+            with mock.patch.object(os, "open", side_effect=swap):
+                fd = init._private_file(temp, folder)
+            os.close(fd)
+        actual = subprocess.run(["/bin/ls", "-lde", str(temp / child.name)],
+                                check=True, capture_output=True).stdout.splitlines()[1:]
+        self.assertEqual(actual, acl)
+        self.assertEqual((temp / child.name).read_bytes(), b"unrelated bytes\r\n\x00")
+
     @unittest.skipUnless(sys.platform == "darwin", "native macOS replacement ACLs")
     def test_macos_settings_replacement_removes_inheritance_before_preserved_bytes(self):
         self._settings_replacement_acl()
@@ -777,7 +831,7 @@ class HookStepTest(unittest.TestCase):
             stream = opened(fd, mode, *args, **kwargs)
             if mode == "wb":
                 # This callback runs before _publish can write the preserved settings bytes.
-                for temp in path.parent.glob(".*.tmp"):
+                for temp in path.parent.glob(".*.tmp/file.tmp"):
                     self.assertEqual(temp.stat().st_size, 0)
                     if os.name == "nt":
                         descriptor = unlazy._windows_security_descriptor(temp)
@@ -1227,6 +1281,69 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
 
+    def test_unlazy_environment_is_an_allowlist_without_any_git_variables(self):
+        environment = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.home),
+                       "LANG": "C", "LC_ALL": "C", "TMPDIR": str(self.home),
+                       "GIT_DIR": "redirect", "GIT_WORK_TREE": "redirect", "GIT_INDEX_FILE": "redirect",
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+                       "GIT_CONFIG_VALUE_0": "redirect", "GIT_EXEC_PATH": "redirect",
+                       "GIT_CONFIG_PARAMETERS": "redirect", "GIT_CONFIG_GLOBAL": "redirect",
+                       "GIT_CONFIG_SYSTEM": "redirect", "GIT_ALTERNATE_OBJECT_DIRECTORIES": "redirect",
+                       "UNRELATED_SETTING": "discard"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            actual = init._unlazy_environment()
+        self.assertEqual(actual, {key: environment[key] for key in ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")})
+
+    def test_unlazy_git_redirectors_cannot_write_external_worktree_or_index(self):
+        latest = git_commit(self.source, {"scripts/gate-check.mjs": b"// latest checkout\r\n"})
+        outside = make_git_repo(self)
+        git("fetch", str(self.source), latest, cwd=outside)
+        git("checkout", "--detach", latest, cwd=outside)
+        index = outside / ".git/index"
+        original_index = index.read_bytes()
+        original_files = {p.relative_to(outside).as_posix(): p.read_bytes()
+                          for p in outside.rglob("*") if p.is_file()}
+        run = init.run_command
+        seen = []
+        hostile = {"GIT_WORK_TREE": str(outside), "GIT_INDEX_FILE": str(index),
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+                   "GIT_CONFIG_VALUE_0": str(outside)}
+
+        def command(argv, **kwargs):
+            seen.append(dict(kwargs["env"]))
+            result = run(argv, **kwargs)
+            os.environ.update(hostile)
+            os.environ["LC_ALL"] = "C"  # checkout must retain the original environment snapshot
+            return result
+
+        step = self.plan()
+        with (mock.patch.object(init, "run_command", side_effect=command),
+              mock.patch.object(init, "_unlazy_environment", wraps=init._unlazy_environment) as environment,
+              mock.patch.dict(os.environ)):
+            problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+        self.assertEqual(index.read_bytes(), original_index)
+        self.assertEqual({p.relative_to(outside).as_posix(): p.read_bytes()
+                          for p in outside.rglob("*") if p.is_file()}, original_files)
+        self.assertEqual(problem, "")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], seen[1])
+        self.assertEqual(environment.call_count, 1)
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+
+    def test_unlazy_inherited_redirectors_cannot_redirect_private_git_state(self):
+        outside = make_git_repo(self)
+        git_commit(outside, {"keep.bin": b"external bytes\r\n\x00"})
+        before = {p.relative_to(outside).as_posix(): p.read_bytes()
+                  for p in outside.rglob("*") if p.is_file()}
+        step = self.plan()
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(outside / ".git"), "GIT_WORK_TREE": str(outside),
+                                          "GIT_INDEX_FILE": str(outside / ".git/index")}):
+            problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+        self.assertTrue({p.relative_to(outside).as_posix(): p.read_bytes()
+                         for p in outside.rglob("*") if p.is_file()} == before, "external repository changed")
+        self.assertEqual(problem, "")
+        self.assertTrue((repo_info(self.repo).common_dir / "oah/staging").is_dir())
+
     def test_unlazy_never_records_the_callers_git_identity_or_publishes_unapproved_metadata(self):
         identity = "private-" + token_source.token_hex(16)
         email = identity + "@invalid"
@@ -1259,8 +1376,7 @@ class UnlazyStepTest(unittest.TestCase):
             self.assertIn("user.name=oah", argv)
             self.assertIn("user.email=oah@invalid", argv)
             self.assertIn("core.logAllRefUpdates=false", argv)
-            self.assertFalse(any(key.upper().startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
-                                 for key in kwargs["env"]))
+            self.assertFalse(any(key.upper().startswith("GIT_") for key in kwargs["env"]))
             seen.append(tuple(argv))
             return run(argv, **kwargs)
 
@@ -1271,6 +1387,10 @@ class UnlazyStepTest(unittest.TestCase):
         for argv in init.unlazy_commands(self.target, source=str(self.source), pin=self.pin):
             for setting in ("user.name=oah", "user.email=oah@invalid", "core.logAllRefUpdates=false"):
                 self.assertIn(setting, argv)
+            self.assertEqual(argv[argv.index("-C") + 1], str(self.target))
+            if "checkout" in argv:
+                self.assertIn("--git-dir=.git", argv)
+                self.assertIn("--work-tree=.", argv)
 
     def test_clone_uses_private_git_state_and_publishes_only_file_bytes(self):
         common = repo_info(self.repo).common_dir
@@ -1411,8 +1531,8 @@ class UnlazyStepTest(unittest.TestCase):
                                             "scripts/gate-check.mjs": hashlib.sha256(b"").hexdigest()})
         verify = init._verify_unlazy_pin
 
-        def verification(root, folder, expected):
-            problems = verify(root, folder, expected)
+        def verification(root, folder, expected, **kwargs):
+            problems = verify(root, folder, expected, **kwargs)
             if not problems:
                 (folder / "scripts/gate-check.mjs").unlink()
             return problems
