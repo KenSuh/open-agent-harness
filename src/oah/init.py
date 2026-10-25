@@ -673,6 +673,10 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
             path = root / relative
             name = path if folder is None else path.name
             if source is not None:
+                # Directory moves are only for preserved backups outside the worktree. Installations
+                # publish captured file bytes; no source pathname may become a worktree directory.
+                if not private:
+                    return False
                 source_root = root if source_root is None else pathlib.Path(source_root).absolute()
                 source = _relative(source)
                 with _parents(source_root, source) as source_folder:
@@ -704,6 +708,12 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     if folder is not None:
                         os.fsync(folder)
                     return True
+            if data is None:
+                # Reserve a new installation exclusively, without merging into a concurrent directory.
+                os.mkdir(name, 0o700, dir_fd=folder)
+                if folder is not None:
+                    os.fsync(folder)
+                return True
             temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
             temporary = temp if folder is None else temp.name
             try:
@@ -1360,17 +1370,6 @@ def _rename(source: pathlib.Path, target: pathlib.Path) -> None:
             time.sleep(0.05)
 
 
-def _remove_tree(path: pathlib.Path) -> None:
-    def writable(function, name, _error) -> None:
-        os.chmod(name, stat.S_IWRITE)  # git marks its object files read-only, which Windows refuses to delete
-        function(name)
-
-    if sys.version_info >= (3, 12):
-        shutil.rmtree(path, onexc=writable)
-    else:
-        shutil.rmtree(path, onerror=writable)
-
-
 def _staging_command(path: str, expected: str, argv: list[str]) -> int:
     """Child entry: bind Git's working directory before it can write, without a pathname race."""
     try:
@@ -1393,23 +1392,71 @@ def _require_staging(path: pathlib.Path, expected: str) -> None:
             raise OSError("staging directory changed")
 
 
+def _staged_files(path: pathlib.Path, handle: int) -> tuple[dict[str, tuple[bytes, bool]], list[str]]:
+    """Capture regular files and directory names from the held source; never reopen them at publication."""
+    files = {}
+    directories = []
+
+    def visit(folder: pathlib.Path, relative: str, descriptor: int) -> None:
+        names = sorted(os.listdir(descriptor) if os.name != "nt" else os.listdir(folder))
+        for name in names:
+            child = _relative(f"{relative}/{name}" if relative else name)
+            if os.name == "nt":
+                # The caller holds a non-reparse source handle denying write/delete sharing.
+                with _parents(path, child, create_parents=False):
+                    item = path / child
+                    if _is_link(item):
+                        raise OSError("linked staged entry")
+                    info = item.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        directories.append(child)
+                        with _pinned_directory(item) as (held, _identity):
+                            visit(item, child, held)
+                    elif stat.S_ISREG(info.st_mode):
+                        data = _read_user(path, child)
+                        if data is None:
+                            raise OSError("staged entry disappeared")
+                        files[child] = data, bool(info.st_mode & stat.S_IXUSR)
+                    else:
+                        raise OSError("non-regular staged entry")
+            else:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                try:
+                    info = os.fstat(fd)
+                    if stat.S_ISDIR(info.st_mode):
+                        directories.append(child)
+                        visit(folder / name, child, fd)
+                    elif stat.S_ISREG(info.st_mode):
+                        with os.fdopen(os.dup(fd), "rb") as stream:
+                            files[child] = stream.read(), bool(info.st_mode & stat.S_IXUSR)
+                    else:
+                        raise OSError("non-regular staged entry")
+                finally:
+                    os.close(fd)
+
+    visit(path, "", handle)
+    return files, directories
+
+
 def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy.UPSTREAM_GIT,
                    pin: unlazy.Pin = unlazy.PIN, timeout: float = CLONE_TIMEOUT) -> str:
-    """Clone into a staging folder, check out the pinned commit, verify it, then move it into place.
+    """Clone and verify in private Git state, then publish the captured files individually.
 
     Returns "" on success, else the problem. Clone/verification failures leave the old copy untouched;
-    after a successful backup publication, a later conflict leaves that backup for explicit recovery."""
+    after a successful backup publication, a later conflict leaves that backup for explicit recovery.
+    Staging is retained for manual cleanup; init never recursively deletes a replaceable pathname."""
     root = pathlib.Path(root)
-    staging_relative = f".unlazy-{secrets.token_hex(8)}.tmp"
-    staging = root / staging_relative
     try:
         if step.action not in ("install", "replace"):
             return "OAH_INIT_UNLAZY_FAILED: installation was not planned; remove any links and run oah init again"
         for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
             if _linked(root, relative) is not None:
                 raise OSError("linked installation path")
-        # The clone is isolated from mutable skill parents. Nothing is moved aside until it verifies.
-        with _parents(root, staging_relative) as parent:
+        # Ignore OAH_STATE_DIR: external tree writers must stay in Git's own private metadata storage.
+        common = _backup_root(root)
+        staging_relative = f"oah/staging/{secrets.token_hex(16)}"
+        staging = common / staging_relative
+        with _parents(common, staging_relative, private=True) as parent:
             os.mkdir(staging if parent is None else staging.name, 0o700, dir_fd=parent)
             with _pinned_directory(staging, allow_swap=True) as (_handle, identity):
                 try:
@@ -1432,32 +1479,50 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                     with _pinned_directory(staging) as (_verification_handle, actual):
                         if actual != identity:
                             raise OSError("staging directory changed")
-                        if _verify_unlazy_pin(root, staging, pin):
+                        if _verify_unlazy_pin(staging, staging, pin):
                             return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
                                     "source and pin, then run oah init --with-unlazy again. Nothing was installed")
-                        digest = _tree_digest(staging, root=root)
+                        files, directories = _staged_files(staging, _verification_handle)
+                        # Verify the bytes we will actually publish, including the detached checkout identity.
+                        if (files.get(".git/HEAD", (b"", False))[0].replace(b"\r\n", b"\n")
+                                != (pin.commit + "\n").encode("ascii") or any(
+                                name not in files or hashlib.sha256(files[name][0].replace(b"\r\n", b"\n"))
+                                .hexdigest() != digest for name, digest in pin.files.items())):
+                            raise OSError("captured installation does not match the pin")
                         _require_staging(staging, identity)
-                    if step.action == "replace":
-                        aside = pathlib.Path(step.aside)
-                        if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
-                            raise OSError("non-local replacement")
-                        relative = aside.relative_to(root).as_posix()
-                        if not step.backup:
-                            raise OSError("no backup was planned")
-                        backup = f"oah/backups/{step.backup}"
-                        if not _publish(_backup_root(root), backup, None, source=relative, source_root=root,
-                                        source_digest=step.digest, private=True):
-                            return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
-                                    "away and run oah init --with-unlazy --force again")
-                    if not _publish(root, UNLAZY_PROJECT, None, source=staging_relative, source_digest=digest,
-                                    source_identity=identity):
-                        return ("OAH_INIT_CHANGED: the unlazy destination changed; inspect the project copy and any "
-                                "private Git state backup, then run oah init --with-unlazy again")
-                    return ""
-                finally:
-                    if not _is_link(staging) and staging.exists():
+                        if step.action == "replace":
+                            aside = pathlib.Path(step.aside)
+                            if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
+                                raise OSError("non-local replacement")
+                            relative = aside.relative_to(root).as_posix()
+                            if not step.backup:
+                                raise OSError("no backup was planned")
+                            backup = f"oah/backups/{step.backup}"
+                            if not _publish(common, backup, None, source=relative, source_root=root,
+                                            source_digest=step.digest, private=True):
+                                return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
+                                        "away and run oah init --with-unlazy --force again")
+                        if not _publish(root, UNLAZY_PROJECT, None):
+                            raise OSError("installation destination changed")
+                        for name in directories:
+                            _require_staging(staging, identity)
+                            if not _publish(root, f"{UNLAZY_PROJECT}/{name}", None):
+                                raise OSError("installation directory changed")
+                        # The landed verifier needs a checkout of its own. Publish its detached HEAD last,
+                        # so a partial install cannot be discovered as the completed pinned checkout.
+                        for name in sorted(files, key=lambda name: (name == ".git/HEAD", name)):
+                            data, executable = files[name]
+                            _require_staging(staging, identity)
+                            if not _publish(root, f"{UNLAZY_PROJECT}/{name}", data, executable=executable):
+                                raise OSError("installation file changed")
                         _require_staging(staging, identity)
-                        _remove_tree(staging)
+                        if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin):
+                            raise OSError("published installation does not match the pin")
+                        return ""
+                except (OSError, InitError):
+                    return ("OAH_INIT_CHANGED: the unlazy source or destination changed; inspect the project copy "
+                            "and any private Git state backup. Staging remains in <git common dir>/oah/staging/ "
+                            "for manual cleanup; run oah init --with-unlazy again after resolving the conflict")
     except (OSError, InitError):
         return ("OAH_INIT_UNLAZY_FAILED: an installation path changed, is linked or cannot be written safely. "
                 "Remove links and check permissions, then run oah init --with-unlazy again")
@@ -1806,7 +1871,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         apps=apps, companion_steps=_companion_steps(apps, os_name=machine.companion_os, root=root) if apps else (),
         map=map_state(root, machine.env),
         unlazy_runs=tuple(" ".join(["git", *argv[len(git_argv()):]]) for argv in unlazy_commands(
-            pathlib.Path(UNLAZY_PROJECT), source=machine.unlazy_source, pin=machine.unlazy_pin))
+            pathlib.Path("<git common dir>/oah/staging/<run>"), source=machine.unlazy_source, pin=machine.unlazy_pin))
         if unlazy_step is not None and unlazy_step.action in ("install", "replace") else ())
 
 
@@ -1875,8 +1940,8 @@ def render_plan(plan: Plan) -> list[str]:
         for command in plan.unlazy_runs:
             lines.append(f"             runs: {command}")
         if plan.unlazy_runs:
-            lines.append("             (into a staging folder first; it moves into place only after the commit and "
-                         "file digests check out)")
+            lines.append("             (private 0700 Git state staging; verified files are published individually. "
+                         "Staging is retained in <git common dir>/oah/staging/ for manual cleanup)")
     lines.append("CI starter:")
     if plan.ci is None:
         lines.append("  not chosen; `oah ci init` writes it later")
