@@ -887,6 +887,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | 0x4} if job is not None else
                {"start_new_session": True})
     child = None
+    communicator = None
     try:
         with dispatch_guard(prepared):
             with _deferred_creation_signals():
@@ -906,21 +907,34 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                         raise
         if not prepared.retain_worker_text:
             return _stream_correction(child, prepared, prompt)
-        data, deadline = prompt.encode("utf-8"), time.monotonic() + prepared.timeout_s
-        while True:
+        output, errors = [], []
+        exchanged = threading.Event()
+
+        def exchange():
             try:
-                out, err = child.communicate(input=data, timeout=max(min(POLL_SECONDS, deadline - time.monotonic()), 0))
-                break
-            except subprocess.TimeoutExpired:
-                data = None  # the input was handed over; a retry must not send it again
-                if time.monotonic() < deadline:
-                    continue
+                output.append(child.communicate(input=prompt.encode("utf-8")))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                exchanged.set()
+
+        # A single communicate owns stdin through EOF. Retrying it after a polling timeout can
+        # stop POSIX stdin delivery mid-prompt; poll the communication thread instead.
+        deadline = time.monotonic() + prepared.timeout_s
+        communicator = threading.Thread(target=exchange, daemon=True)
+        communicator.start()
+        while not exchanged.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 kill_tree(child)
-                try:
-                    out, err = child.communicate(timeout=REAP_SECONDS)
-                except subprocess.TimeoutExpired:
-                    out, err = b"", b""
+                communicator.join(timeout=REAP_SECONDS)
+                out, err = output[0] if output else (b"", b"")
                 return RunResult(None, decode_output(out), decode_output(err), True)
+            exchanged.wait(timeout=min(POLL_SECONDS, remaining))
+        communicator.join(timeout=REAP_SECONDS)
+        if errors:
+            raise errors[0]
+        out, err = output[0]
         if _CORRECTION_CLEANUP.get():
             # A completed correction must leave no owned descendants changing the tree during accounting.
             kill_tree(child)
@@ -931,7 +945,10 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         if child is not None:
             kill_tree(child)
             try:
-                child.communicate(timeout=REAP_SECONDS)
+                if communicator is not None and communicator.ident is not None:
+                    communicator.join(timeout=REAP_SECONDS)
+                else:
+                    child.communicate(timeout=REAP_SECONDS)
             except Exception:
                 pass
         raise

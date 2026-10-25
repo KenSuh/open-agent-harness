@@ -19,6 +19,7 @@ the end. A step may set:
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   last_message   the final message; default: a line, then the INTENT and AC lines read from the brief
   sleep          seconds to wait after the header, before any change or output
+  stdin_delay    seconds to wait before reading the brief
   stdout, stderr extra output; {env:NAME} resolves in this process only
   exit           the exit code (default 0)
 Every correction call writes call-<k>.json: argv, cwd, env, prompt, the record names indexed in
@@ -125,6 +126,7 @@ def main(argv: list[str]) -> int:
     seen = indexed(script.get("state_dir"), task)
     if step.get("hang"):
         (record_dir / f"pid-{number:03d}.txt").write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(float(step.get("stdin_delay", 0)))
     prompt = sys.stdin.buffer.read().decode("utf-8")
     cwd = pathlib.Path(options.get("-C") or os.getcwd())
     probes = []

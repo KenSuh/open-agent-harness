@@ -303,6 +303,19 @@ class CallSeamTest(unittest.TestCase):
     def test_windows_interrupt_stops_descendant_after_launcher_exits(self):
         self.exited_launcher_interruption()
 
+    def test_polled_wait_delivers_large_prompt_to_delayed_reader(self):
+        for retain in (True, False):
+            with self.subTest(retain_worker_text=retain):
+                project = FixProject(self)
+                project.queue_fix({"stdin_delay": 0.8})
+                prepared = self.prepare(project, timeout_s=5, round_instructions="y" * 300_000 + "한글\r\n",
+                                        retain_worker_text=retain)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    run = call.execute(prepared, base_env=runner.reviewer_env(project.env), rules=RULES)
+                self.assertEqual((run["status"], run["exit_code"]), ("finished", 0), run.get("error"))
+                self.assertEqual(project.fix_calls()[0]["prompt"].encode("utf-8"),
+                                 prepared.run.prompt_path.read_bytes())
+
     def test_polled_wait_keeps_output_and_timeout(self):
         project = FixProject(self)
         output = "".join(f"line {number:06d} " + "x" * 60 + "\n" for number in range(4000))
@@ -731,7 +744,8 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("docs/notes.md", scope)
         self.assertNotIn("src/app.py", scope)
         changed = next(warning for warning in result.warnings if warning.startswith("OAH_FIX_INTENT_CHANGED"))
-        self.assertIn(".oah/tasks/t1/PACKET.md", changed)
+        self.assertIn("stale", changed)
+        self.assertIn("Restore the bound packet", changed)
 
     def test_a_corrector_that_commits_fails_the_attempt(self):
         project = FixProject(self)
@@ -1367,6 +1381,20 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_intent_preflight_exceptions_omit_packet_values(self):
+        for sensitive in (False, True):
+            for mode in ("automatic", "manual"):
+                with self.subTest(sensitive=sensitive, mode=mode):
+                    project = FixProject(self)
+                    value = ("s" + "k-" if sensitive else "untrusted-") + token_source.token_hex(20)
+                    self.assertFalse(any(value in item for item in project.env.values()))
+                    (project.repo / ".oah/tasks/t1/PACKET.md").write_bytes(
+                        PACKET.replace("Status: accepted", f"Status: {value}").encode("utf-8"))
+                    action = project.fix if mode == "automatic" else lambda: project.manual("human")
+                    error = project.refused("OAH_INTENT_NOT_CURRENT", action)
+                    self.assertIn("stale", str(error))
+                    self.assert_private(project, [value], str(error))
+
     def test_regression_source_contains_no_env_secret_assignments(self):
         from tests.test_privacy_scan import load_scanner
 

@@ -84,6 +84,51 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_intent_diagnostics_omit_packet_values_in_text_and_json(self):
+        for phase in ("preflight", "post-run"):
+            for as_json in (False, True):
+                for sensitive in (False, True):
+                    with self.subTest(phase=phase, as_json=as_json, sensitive=sensitive):
+                        project = FixProject(self)
+                        project.changes_requested()
+                        value = ("s" + "k-" if sensitive else "untrusted-") + token_source.token_hex(20)
+                        self.assertFalse(any(value in item for item in project.env.values()))
+                        source = ".oah/tasks/t1/PACKET.md"
+                        packet = PACKET.replace("Status: accepted", f"Status: {value}")
+                        if phase == "preflight":
+                            (project.repo / source).write_bytes(packet.encode("utf-8"))
+                        else:
+                            project.queue_fix({"write": {source: packet}})
+                        args = ("--json",) if as_json else ()
+                        done = oah(project, "fix", "--task", "t1", "--tier", "high", *args)
+                        diagnostic = "OAH_INTENT_NOT_CURRENT" if phase == "preflight" else "OAH_FIX_INTENT_CHANGED"
+                        self.assertIn(diagnostic, done.stderr)
+                        self.assertIn("stale", done.stderr)
+                        self.assertFalse(value in done.stderr, "a packet value reached a CLI diagnostic")
+                        result = json.loads(done.stdout) if as_json else None
+                        if phase == "preflight":
+                            self.assertEqual(done.returncode, 1)
+                            self.assertEqual(project.fix_calls(), [])
+                            self.assertEqual(names(project), ["R1.json"])
+                        else:
+                            self.assertEqual(done.returncode, 1 if sensitive else 0)
+                            self.assertEqual(project.record("A1-outcome.json")["outcome"],
+                                             "failed" if sensitive else "applied")
+                            if result is not None:
+                                self.assertFalse(any(value in warning for warning in result["warnings"]),
+                                                 "a packet value reached a JSON diagnostic")
+                            if sensitive:
+                                self.assertIn("withheld", done.stdout)
+                                self.assertNotIn("git add", done.stdout + done.stderr)
+                                self.assertNotIn("git commit", done.stdout + done.stderr)
+                                if result is not None:
+                                    self.assertEqual(result["commands"], [])
+                        if sensitive or phase == "preflight":
+                            artifacts = [done.stdout.encode("utf-8"), done.stderr.encode("utf-8")]
+                            artifacts += [path.read_bytes() for path in project.state.rglob("*") if path.is_file()]
+                            self.assertFalse(any(value.encode("utf-8") in data for data in artifacts),
+                                             "a packet value reached output or state")
+
     def test_cli_withholds_unexported_credential_filenames_in_text_and_json(self):
         for as_json in (False, True):
             with self.subTest(as_json=as_json):

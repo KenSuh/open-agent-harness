@@ -275,11 +275,11 @@ def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
         raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {t.name} has a lease without an intent binding (unbound), so "
                           f"there is no current intent to correct against. {nothing}. Bind the accepted packet with "
                           f"{rebind} (use your packet's path), then run the command again")
-    found, reason = oah_intent.explain_binding(binding, t.root)
+    found = oah_intent.binding_state(binding, t.root)
     if found != "current":
-        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {t.name} is bound to {binding.line()} and that intent is "
-                          f"{found}: {reason}. {nothing}. Restore {binding.source} as it was bound, or raise its "
-                          f"Revision, accept it and rebind with {rebind}; then run the command again")
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", f"the bound intent is {found}. {nothing}. Restore the bound "
+                          "packet as it was bound, or raise its Revision, accept it and rebind the lease with "
+                          "oah start --packet <packet>; then run the command again")
     try:
         committed = oah_intent.parse(_committed_reader(t.root)(oah_intent.source_path(binding, t.root)))
     except (oah_intent.SourceError, oah_intent.IntentInvalid):
@@ -1101,10 +1101,10 @@ class _Attempt:
             warnings.append("OAH_FIX_USER_FILES_CHANGED: Codex modified or deleted preexisting untracked files: "
                             f"{_ids(judged.changes.user)}. Review correction.patch and restore or keep them yourself; "
                             "these files are excluded from automatic staging guidance")
-        found, reason = oah_intent.explain_binding(self.binding, t.root)
+        found = oah_intent.binding_state(self.binding, t.root)
         if found != "current":
-            warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent {self.binding.source} is "
-                            f"{found} ({reason}). Restore it with git restore -- {self.binding.source} before you commit; "
+            warnings.append(f"OAH_FIX_INTENT_CHANGED: after the correction the bound intent is {found}. "
+                            "Restore the bound packet before you commit; "
                             "a changed goal needs a new revision, never an edit by a correction")
         warnings += [f"OAH_FIX_UNQUOTABLE_PATH: {name!r} cannot be written safely for every shell; add it to the "
                      "commit yourself with git add" for name in judged.unquoted]
