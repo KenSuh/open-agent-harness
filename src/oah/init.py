@@ -16,12 +16,24 @@ import json
 import os
 import pathlib
 import re
-from typing import Mapping
+import secrets
+import shutil
+import stat
+import sys
+import time
+from typing import Mapping, NamedTuple
 
-from oah import intent, models, routing
-from oah.atomic import write_text_atomic
+from oah import ci, hooks, intent, models, routing, rules, unlazy
+from oah.atomic import StateCorrupt, StorageError, write_text_atomic
+from oah.config import ConfigError
 from oah.engines.effort import EngineError
-from oah.paths import run_git
+from oah.engines.proc import run_command
+from oah.impact import mapstore
+from oah.impact.errors import ImpactError
+from oah.journal import PendingTransaction
+from oah.lockfile import LockTimeout
+from oah.paths import GitMissing, NotARepo, git_argv, run_git
+from oah.setup import companions
 from oah.wiki import notes
 from oah.wiki.base import WikiError, publish_new, read_bytes
 from oah.wiki.log import parse_log
@@ -43,6 +55,12 @@ TIER_WORK = {
     "high": "broad audits, migrations, security work, high-risk reviews and reasoning across many files",
     "max": "critical-risk work and the hardest reasoning",
 }
+NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # a clone never stops to ask
+CLONE_TIMEOUT = 600.0
+RENAME_RETRY_SECONDS = 2.0
+CLAUDE_SETTINGS = ".claude/settings.local.json"
+MAP_FAILURES = (ImpactError, ConfigError, LockTimeout, StateCorrupt, StorageError, GitMissing, NotARepo,
+                PendingTransaction, OSError)
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _PLAIN = re.compile(r"[A-Za-z0-9._-]+")
 _GUIDE_LINK = re.compile(r"\[\[" + GUIDE_SLUG + r"(?:[|#\]])")
@@ -307,3 +325,308 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
             for change in wiki_changes:
                 write(change)
     return written, problems
+
+
+# Managed blocks ----------------------------------------------------------------------------------------
+
+class RulesStep(NamedTuple):
+    lang: str
+    agents: str  # create | update | unchanged
+    claude: str  # create | update | unchanged
+    block_bytes: int
+
+
+def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
+    """What `rules.sync` would do to AGENTS.md and CLAUDE.md; raises rules.RulesError for broken markers."""
+    found = rules.plan(pathlib.Path(root), lang=lang)
+
+    def action(before: bytes | None, after: bytes) -> str:
+        return "create" if before is None else "unchanged" if before == after else "update"
+
+    return RulesStep(found.lang, action(found.agents_before, found.agents_after),
+                     action(found.claude_before, found.claude_after), found.block_bytes)
+
+
+def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
+    """Put the Aside web rules (A20) into .oah/rules.local.md once, so the rules block carries them.
+
+    Returns "added", "present" or "skipped: <why>". The file keeps its bytes and line ending."""
+    root = pathlib.Path(root)
+    relative = rules.LOCAL_RULES.as_posix()
+    link = _linked(root, relative)
+    if link is not None:
+        return f"skipped: {link} is a link; oah never writes through links"
+    path = root / relative
+    before = read_bytes(path)
+    text, eol = "", "\n"
+    if before is not None:
+        try:
+            text = before.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"skipped: {relative} is not UTF-8 text"
+        if any(line.rstrip() == companions.RULES_BEGIN for line in text.split("\n")):
+            return "present"
+        eol = eol_of(before).decode("ascii")
+    if text and not text.endswith("\n"):
+        text += eol
+    if text.strip() and not text.endswith(eol * 2):
+        text += eol
+    write_text_atomic(path, text + companions.rules_section(True, lang=lang).replace("\n", eol))
+    return "added"
+
+
+# Hooks -------------------------------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class HookStep:
+    kind: str
+    action: str  # install | installed | keep | refused | unavailable
+    diff: str = ""
+    path: str = ""
+    note: str = ""
+
+
+def _shown_path(root: pathlib.Path, path: pathlib.Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
+    """Every hook oah offers (PLAN 5.12) with the diff its install would make. Writes nothing."""
+    root = pathlib.Path(root)
+    steps = []
+    for kind in hooks.KINDS:
+        if not hooks.hook_available(kind):
+            steps.append(HookStep(kind, "unavailable", note=f"this oah version does not provide `oah hook {kind}` yet"))
+            continue
+        link = _linked(root, CLAUDE_SETTINGS) if kind in hooks.CLAUDE_KINDS else None
+        if link is not None:
+            steps.append(HookStep(kind, "refused", note=f"{link} is a link; oah never writes through links, which "
+                                                        "could reach your global Claude Code settings"))
+            continue
+        try:
+            change = hooks.install(kind, root, dry_run=True, force=force)
+        except hooks.HookError as exc:
+            if exc.code == "OAH_HOOK_FOREIGN":
+                steps.append(HookStep(kind, "keep", note="a hook oah did not write is there; pass --force to replace "
+                                                         "it (oah keeps it as a backup and puts it back on "
+                                                         f"`oah hooks uninstall {kind}`)"))
+            else:
+                steps.append(HookStep(kind, "refused", note=str(exc)))
+            continue
+        action = "installed" if change.action == "unchanged" else "install"
+        steps.append(HookStep(kind, action, change.diff, _shown_path(root, change.path)))
+    return steps
+
+
+def install_hooks(root: pathlib.Path, steps: list[HookStep], *, force: bool) -> tuple[list[str], list[str]]:
+    """Install the planned hooks; (installed kinds, problems)."""
+    root = pathlib.Path(root)
+    installed, problems = [], []
+    for step in steps:
+        if step.action != "install":
+            continue
+        if step.kind in hooks.CLAUDE_KINDS and _linked(root, CLAUDE_SETTINGS) is not None:
+            problems.append(f"OAH_INIT_CHANGED: {CLAUDE_SETTINGS} became a link after the plan was shown; "
+                            f"the {step.kind} hook was not installed")
+            continue
+        try:
+            change = hooks.install(step.kind, root, dry_run=False, force=force)
+        except hooks.HookError as exc:
+            problems.append(f"{exc} (the {step.kind} hook was not installed)")
+            continue
+        if change.action == "install":
+            installed.append(step.kind)
+    return installed, problems
+
+
+# unlazy -------------------------------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class UnlazyStep:
+    action: str  # present | install | replace | blocked
+    folder: str = ""  # the copy discovery found, when there is one
+    note: str = ""
+    aside: str = ""  # replace: the folder moved aside to <name>.oah.bak first
+
+
+def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Path, pin: unlazy.Pin,
+                force: bool) -> UnlazyStep:
+    """Whether the pinned unlazy (5.8) is in place, and what installing the project copy would do."""
+    root = pathlib.Path(root)
+    target = root / UNLAZY_PROJECT
+    folder, reason = unlazy.find_unlazy_dir(root, env, home)
+    override = unlazy.ENV_VAR if env.get(unlazy.ENV_VAR) else None
+    short = pin.commit[:12]
+    if folder is None:
+        if override:
+            return UnlazyStep("blocked", note=f"{override} is set but names no unlazy ({reason}). Clear {override}, "
+                                              "then run oah init --with-unlazy again")
+        if target.exists() or target.is_symlink():
+            if force:
+                return UnlazyStep("replace", str(target), f"{UNLAZY_PROJECT} is not unlazy; init moves it aside to "
+                                                          f"{UNLAZY_PROJECT}.oah.bak first", aside=str(target))
+            return UnlazyStep("blocked", str(target), f"{UNLAZY_PROJECT} exists but is not unlazy. Move it away, or "
+                                                      "pass --force to move it aside")
+        return UnlazyStep("install", note=f"downloads unlazy into {UNLAZY_PROJECT} at commit {short}")
+    problems = unlazy.verify_pin(folder, pin)
+    if not problems:
+        return UnlazyStep("present", str(folder), f"{folder} is the pinned commit {short}, with matching file digests")
+    why = "; ".join(problems)
+    if override:
+        return UnlazyStep("blocked", str(folder), f"{override} names {folder}, which is not the pinned unlazy ({why}). "
+                                                  f"Clear {override}, then run oah init --with-unlazy again")
+    project = {(root / ".agents" / "skills" / "unlazy").resolve(), (root / ".claude" / "skills" / "unlazy").resolve()}
+    if folder.resolve() in project:
+        where = _shown_path(root, folder)
+        if force:
+            return UnlazyStep("replace", str(folder), f"the project copy {where} is not the pinned one ({why}); init "
+                                                      f"moves it aside to {where}.oah.bak first", aside=str(folder))
+        return UnlazyStep("blocked", str(folder), f"the project copy {where} is not the pinned one ({why}). Pass "
+                                                  "--force to move it aside and install the pinned copy")
+    return UnlazyStep("install", str(folder), f"your copy at {folder} is not the pinned one ({why}); init installs "
+                                              f"the pinned project copy into {UNLAZY_PROJECT}, which oah uses first")
+
+
+def unlazy_commands(target: pathlib.Path, *, source: str, pin: unlazy.Pin) -> list[list[str]]:
+    """unlazy.install_commands with git resolved through oah.paths and the clone source swappable."""
+    commands = unlazy.install_commands(target, pin)
+    if commands[0][3] == unlazy.UPSTREAM_GIT:
+        commands[0][3] = source
+    return [[*git_argv(), *argv[1:]] for argv in commands]
+
+
+def _rename(source: pathlib.Path, target: pathlib.Path) -> None:
+    deadline = time.monotonic() + RENAME_RETRY_SECONDS
+    while True:
+        try:
+            os.rename(source, target)
+            return
+        except PermissionError:  # Windows: an indexer or antivirus holds a file for a moment
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _remove_tree(path: pathlib.Path) -> None:
+    def writable(function, name, _error) -> None:
+        os.chmod(name, stat.S_IWRITE)  # git marks its object files read-only, which Windows refuses to delete
+        function(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=writable)
+
+
+def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy.UPSTREAM_GIT,
+                   pin: unlazy.Pin = unlazy.PIN, timeout: float = CLONE_TIMEOUT) -> str:
+    """Clone into a staging folder, check out the pinned commit, verify it, then move it into place.
+
+    Returns "" on success, else the problem; a failure leaves no project copy behind and puts back a
+    copy that was moved aside."""
+    root = pathlib.Path(root)
+    target = root / UNLAZY_PROJECT
+    moved: tuple[pathlib.Path, pathlib.Path] | None = None
+    staging = target.parent / f".unlazy-{secrets.token_hex(4)}.tmp"
+    try:
+        if step.action == "replace":
+            aside = pathlib.Path(step.aside)
+            backup = aside.with_name(aside.name + ".oah.bak")
+            if backup.exists() or backup.is_symlink():
+                return (f"OAH_INIT_UNLAZY_FAILED: {_shown_path(root, backup)} already exists; move it away so nothing "
+                        "is lost, then run oah init --with-unlazy --force again")
+            _rename(aside, backup)
+            moved = (backup, aside)
+        if target.exists() or target.is_symlink():
+            return (f"OAH_INIT_UNLAZY_FAILED: {UNLAZY_PROJECT} appeared after the plan was shown; run oah init "
+                    "again to see the new plan")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for argv in unlazy_commands(staging, source=source, pin=pin):
+            result = run_command(argv, timeout=timeout, env={**os.environ, **NETWORK_ENV})
+            if result.timed_out or result.returncode != 0:
+                lines = result.stderr.strip().splitlines()
+                detail = lines[-1] if lines else ("timed out" if result.timed_out else f"exit code {result.returncode}")
+                return (f"OAH_INIT_UNLAZY_FAILED: git {argv[len(git_argv())]} failed ({detail}). Check your network "
+                        "and git, then run oah init --with-unlazy again")
+        problems = unlazy.verify_pin(staging, pin)
+        if problems:
+            return (f"OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy ({'; '.join(problems)}); "
+                    "nothing was installed")
+        _rename(staging, target)
+        moved = None
+        return ""
+    finally:
+        if staging.exists():
+            _remove_tree(staging)
+        if moved is not None and not moved[1].exists():
+            _rename(*moved)
+
+
+# The CI starter ------------------------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class CiStep:
+    action: str  # create | replace | keep | unchanged | skipped
+    text: str = ""
+    diff: str = ""
+    note: str = ""
+    plan: ci.CiPlan | None = None
+
+
+def plan_ci(root: pathlib.Path, *, force: bool, oses: list[str], test_command) -> CiStep:
+    """The starter workflow (A21) through oah.ci: shown in full, written only on the user's answer."""
+    try:
+        found = ci.plan(pathlib.Path(root), oses or None, test_command)
+    except ci.CiError as exc:
+        if exc.code == "OAH_CI_AMBIGUOUS":
+            return CiStep("skipped", note="this project matches several kinds of tests; run `oah ci init` to pick one")
+        return CiStep("skipped", note=str(exc))
+    if found.up_to_date:
+        return CiStep("unchanged", found.text, plan=found)
+    if found.existing is not None:
+        if force:
+            return CiStep("replace", found.text, found.diff, plan=found)
+        return CiStep("keep", found.text, found.diff, "it exists and differs; run `oah ci init` to review the "
+                                                      "difference, or pass --force", found)
+    note = "its 'Run tests (edit me)' step fails until you put your test command in it" if found.placeholder else ""
+    return CiStep("create", found.text, note=note, plan=found)
+
+
+def write_ci(step: CiStep) -> str:
+    """Write the planned workflow; "" on success, else the problem (the file changed since it was shown)."""
+    try:
+        ci.write(step.plan, confirm=True, overwrite=step.action == "replace")
+    except ci.CiError as exc:
+        return str(exc)
+    return ""
+
+
+# The impact map ------------------------------------------------------------------------------------------
+
+def map_state(root: pathlib.Path, env: Mapping[str, str]) -> tuple[str, str]:
+    """(missing | stale | fresh | unavailable, reason). Reads only."""
+    try:
+        info, reason = mapstore.status(pathlib.Path(root), env=env)
+    except MAP_FAILURES as exc:
+        return "unavailable", str(exc)
+    if info is None:
+        return "missing", reason
+    return info.action, reason
+
+
+def refresh_map(root: pathlib.Path, env: Mapping[str, str]) -> tuple[str, str]:
+    """Build or refresh the persisted worktree map (A11): (built | refreshed | fresh | unavailable, detail)."""
+    try:
+        info = mapstore.ensure_fresh(pathlib.Path(root), env=env)
+    except MAP_FAILURES as exc:
+        return "unavailable", str(exc)
+    return info.action, f"commit={info.commit[:12]} result={info.result_digest[:12]}"
+
+
+def origin_url(root: pathlib.Path) -> str | None:
+    """The origin remote's URL, used only to name the project for Orca. Never printed or stored."""
+    result = run_git(pathlib.Path(root), "remote", "get-url", "origin")
+    return (result.stdout.strip() or None) if result.returncode == 0 else None

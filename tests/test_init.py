@@ -8,14 +8,15 @@ import secrets as token_source
 import subprocess
 import unittest
 
-from oah import call, init, intent, models, preflight, rerank, skillsel
+from oah import call, hooks, init, intent, models, preflight, rerank, rules, skillsel, unlazy
 from oah.config import parse_config
 from oah.impact import defaults as impact_defaults
 from oah.paths import repo_info, state_dir
+from oah.setup import companions
 from oah.wiki.base import WikiSettings
 from oah.wiki.notes import parse_frontmatter
 from oah.wiki.store import Wiki
-from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir, make_unlazy
 
 TODAY = dt.date(2026, 10, 25)
 TIER_BEGIN = "<!-- OAH:TIER-RULES:BEGIN v1 -->"
@@ -326,6 +327,195 @@ class WriteFilesTest(unittest.TestCase):
         self.assertEqual(written, [])
         self.assertEqual(late.read_text(encoding="utf-8"), "[stages]\ninitial = \"claude\"\n")
         self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+
+
+
+class RulesStepTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+
+    def test_plan_rules_states(self):
+        step = init.plan_rules(self.repo, lang=None)
+        self.assertEqual((step.lang, step.agents, step.claude), ("en", "create", "create"))
+        rules.sync(self.repo)
+        self.assertEqual(init.plan_rules(self.repo, lang=None)[1:3], ("unchanged", "unchanged"))
+        self.assertEqual(init.plan_rules(self.repo, lang="ko")[:3], ("ko", "update", "unchanged"))
+        (self.repo / "AGENTS.md").write_text("# Mine\n", encoding="utf-8")
+        (self.repo / "CLAUDE.md").write_text("# Mine\n", encoding="utf-8")
+        self.assertEqual(init.plan_rules(self.repo, lang=None)[1:3], ("update", "update"))
+
+    def test_broken_markers_refuse(self):
+        (self.repo / "AGENTS.md").write_text(f"{rules.BEGIN}\nno end\n", encoding="utf-8")
+        with self.assertRaises(rules.RulesError):
+            init.plan_rules(self.repo, lang=None)
+
+    def test_aside_rules_section_added_once(self):
+        self.assertEqual(init.add_aside_rules(self.repo, lang="en"), "added")
+        local = self.repo / ".oah" / "rules.local.md"
+        self.assertEqual(local.read_text(encoding="utf-8").count(companions.RULES_BEGIN), 1)
+        self.assertEqual(init.add_aside_rules(self.repo, lang="en"), "present")
+        local.write_bytes(b"Use tabs.\r\nno final newline")
+        self.assertEqual(init.add_aside_rules(self.repo, lang="ko"), "added")
+        data = local.read_bytes()
+        self.assertTrue(data.startswith(b"Use tabs.\r\nno final newline\r\n"))
+        self.assertEqual(data.count(b"\n"), data.count(b"\r\n"))
+        rules.sync(self.repo)
+        agents = (self.repo / "AGENTS.md").read_text(encoding="utf-8")
+        block = agents[agents.index(rules.BEGIN):agents.index(rules.END)]
+        self.assertIn(companions.RULES_BEGIN, block)
+
+
+class HookStepTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+
+    def steps(self, force: bool = False) -> dict:
+        return {step.kind: step for step in init.plan_hooks(self.repo, force=force)}
+
+    def test_plan_hooks_shows_diffs_and_respects_foreign_hooks(self):
+        found = self.steps()
+        self.assertEqual(found["impact-hint"].action, "unavailable")
+        for kind in ("stop", "session-start", "pre-commit", "post-commit", "post-merge", "pre-push"):
+            self.assertEqual(found[kind].action, "install", kind)
+            self.assertIn(f"oah hook {kind}", found[kind].diff)
+        foreign = hooks.git_hook_path(self.repo, "pre-commit")
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+        found = self.steps()
+        self.assertEqual(found["pre-commit"].action, "keep")
+        self.assertIn("--force", found["pre-commit"].note)
+        self.assertEqual(self.steps(force=True)["pre-commit"].action, "install")
+        installed, problems = init.install_hooks(self.repo, list(found.values()), force=False)
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted(installed), ["post-commit", "post-merge", "pre-push", "session-start", "stop"])
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
+        again = self.steps()
+        self.assertEqual({kind: again[kind].action for kind in installed}, {kind: "installed" for kind in installed})
+
+    def test_claude_hooks_never_write_through_a_linked_folder(self):
+        outside = make_tmp_dir(self) / "global-claude"
+        outside.mkdir()
+        directory_alias(outside, self.repo / ".claude")
+        found = self.steps()
+        self.assertEqual((found["stop"].action, found["session-start"].action), ("refused", "refused"))
+        init.install_hooks(self.repo, list(found.values()), force=False)
+        self.assertEqual(list(outside.iterdir()), [])
+
+
+class UnlazyStepTest(unittest.TestCase):
+    FILES = {"scripts/gate-check.mjs": "// gate check\n", "scripts/lib/gates.mjs": "// gates\n"}
+
+    def setUp(self):
+        self.source = make_git_repo(self)
+        self.commit = git_commit(self.source, self.FILES, "unlazy")
+        self.pin = unlazy.Pin(commit=self.commit, files={rel: unlazy.file_digest(self.source / rel)
+                                                         for rel in self.FILES})
+        self.repo = make_git_repo(self)
+        self.home = make_tmp_dir(self) / "home"
+        self.home.mkdir()
+        self.target = self.repo / ".agents" / "skills" / "unlazy"
+
+    def plan(self, *, force: bool = False, env: dict | None = None, pin=None):
+        return init.plan_unlazy(self.repo, env=env or {}, home=self.home, pin=pin or self.pin, force=force)
+
+    def test_unlazy_install_from_local_source(self):
+        step = self.plan()
+        self.assertEqual(step.action, "install")
+        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+        self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
+        self.assertEqual(self.plan().action, "present")
+
+    def test_failed_install_leaves_nothing_behind(self):
+        for pin in (unlazy.Pin(commit="0" * 40, files=self.pin.files),
+                    unlazy.Pin(commit=self.commit, files={"scripts/gate-check.mjs": "0" * 64})):
+            with self.subTest(pin=pin):
+                problem = init.install_unlazy(self.repo, self.plan(pin=pin), source=str(self.source), pin=pin)
+                self.assertTrue(problem)
+                self.assertFalse(self.target.exists())
+                parent = self.target.parent
+                self.assertEqual(list(parent.iterdir()) if parent.exists() else [], [])
+
+    def test_incompatible_project_copy_needs_force(self):
+        make_unlazy(self.target)
+        self.assertEqual(self.plan().action, "blocked")
+        self.assertIn("--force", self.plan().note)
+        step = self.plan(force=True)
+        self.assertEqual(step.action, "replace")
+        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+        backup = self.target.with_name("unlazy.oah.bak")
+        self.assertTrue((backup / "scripts" / "gate-check.mjs").is_file())
+
+    def test_failed_replacement_puts_the_old_copy_back(self):
+        make_unlazy(self.target)
+        bad = unlazy.Pin(commit="0" * 40, files=self.pin.files)
+        step = self.plan(force=True, pin=bad)
+        self.assertEqual(step.action, "replace")
+        self.assertTrue(init.install_unlazy(self.repo, step, source=str(self.source), pin=bad))
+        self.assertTrue((self.target / "scripts" / "gate-check.mjs").is_file())
+        self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
+
+    def test_incompatible_user_copy_gets_a_project_copy(self):
+        make_unlazy(self.home / ".agents" / "skills" / "unlazy")
+        step = self.plan()
+        self.assertEqual(step.action, "install")
+        self.assertIn("not the pinned", step.note)
+
+    def test_override_must_be_cleared(self):
+        empty = make_tmp_dir(self)
+        self.assertEqual(self.plan(env={"OAH_UNLAZY_DIR": str(empty)}).action, "blocked")
+        make_unlazy(empty / "copy")
+        step = self.plan(env={"OAH_UNLAZY_DIR": str(empty / "copy")})
+        self.assertEqual(step.action, "blocked")
+        self.assertIn("OAH_UNLAZY_DIR", step.note)
+
+
+class CiStepTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        (self.repo / "go.mod").write_text("module x\n", encoding="utf-8")
+        self.target = self.repo / ".github" / "workflows" / "oah-ci.yml"
+
+    def test_plan_ci_states(self):
+        step = init.plan_ci(self.repo, force=False, oses=["linux"], test_command=None)
+        self.assertEqual(step.action, "create")
+        self.assertIn("go test ./...", step.text)
+        self.assertEqual(init.write_ci(step), "")
+        self.assertEqual(self.target.read_text(encoding="utf-8"), step.text)
+        self.assertEqual(init.plan_ci(self.repo, force=False, oses=["linux"], test_command=None).action, "unchanged")
+        self.target.write_text("name: mine\n", encoding="utf-8")
+        kept = init.plan_ci(self.repo, force=False, oses=["linux"], test_command=None)
+        self.assertEqual(kept.action, "keep")
+        self.assertIn("oah ci init", kept.note)
+        replaced = init.plan_ci(self.repo, force=True, oses=["linux"], test_command=None)
+        self.assertEqual(replaced.action, "replace")
+        self.assertIn("-name: mine", replaced.diff)
+        self.assertEqual(init.write_ci(replaced), "")
+        self.assertEqual(self.target.read_text(encoding="utf-8"), step.text)
+
+    def test_several_test_commands_are_skipped(self):
+        (self.repo / "package.json").write_text('{"scripts": {"test": "jest"}}', encoding="utf-8")
+        step = init.plan_ci(self.repo, force=False, oses=[], test_command=None)
+        self.assertEqual(step.action, "skipped")
+        self.assertIn("oah ci init", step.note)
+
+
+class MapStepTest(unittest.TestCase):
+    def test_map_state_and_refresh(self):
+        repo = make_git_repo(self)
+        state, reason = init.map_state(repo, {})
+        self.assertEqual(state, "unavailable")
+        self.assertIn("OAH_IMPACT_NO_COMMIT", reason)
+        self.assertEqual(init.refresh_map(repo, {})[0], "unavailable")
+        git_commit(repo, {"a.py": "print('a')\n"})
+        self.assertEqual(init.map_state(repo, {})[0], "missing")
+        self.assertEqual(init.refresh_map(repo, {})[0], "built")
+        self.assertEqual(init.map_state(repo, {})[0], "fresh")
+        self.assertEqual(init.refresh_map(repo, {})[0], "fresh")
+        git_commit(repo, {"b.py": "print('b')\n"})
+        self.assertEqual(init.map_state(repo, {})[0], "stale")
+        self.assertEqual(init.refresh_map(repo, {})[0], "refreshed")
 
 
 if __name__ == "__main__":
