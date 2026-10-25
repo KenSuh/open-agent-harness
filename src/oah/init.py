@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import difflib
+import fnmatch
 import hashlib
 import json
 import os
@@ -277,6 +278,57 @@ def add_gitignore_entries(data: bytes | None, *, unlazy_copy: bool) -> bytes | N
     if out.strip() and not out.endswith((eol * 2).encode("ascii")):
         out += eol.encode("ascii")
     return out + (eol.join(block) + eol).encode("utf-8")
+
+
+def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
+    """Ask Git about effective rules, probing required patterns and their existing/nested locations."""
+    index = run_git(root, "ls-files", "--stage", "-z")
+    if index.returncode != 0:
+        return ["OAH_INIT_IGNORE_UNVERIFIED: the index could not be checked. Check repository permissions, "
+                "then run oah init again"]
+    submodules = {row.partition("\t")[2] for row in index.stdout.split("\0") if row.startswith("160000 ")}
+    folders = {}
+
+    def walk_error(exc):
+        raise exc
+
+    try:
+        for folder, dirs, files in os.walk(root, onerror=walk_error, followlinks=False):
+            relative = pathlib.Path(folder).relative_to(root).as_posix()
+            if relative in submodules:
+                dirs[:] = []  # Git's indexed gitlinks, never an arbitrary .git-named entry
+                continue
+            dirs[:] = [name for name in dirs if name != ".git" and not _is_link(pathlib.Path(folder) / name)]
+            folders[relative] = (dirs[:], files)
+    except OSError:
+        return ["OAH_INIT_IGNORE_UNVERIFIED: ignore protection could not be checked. Check directory permissions, "
+                "then run oah init again"]
+
+    problems = []
+    for _comment, entries in _gitignore_groups(unlazy_copy):
+        for pattern in entries:
+            parent, _sep, leaf = pattern.rstrip("/").rpartition("/")
+            sample = pattern.replace("**/", "").replace("*", "oah-init-probe").rstrip("/")
+            probes = {sample + ("/oah-init-probe" if pattern.endswith("/") else "")}
+            for folder, (dirs, files) in folders.items():
+                path = pathlib.PurePosixPath(folder)
+                matches_parent = (folder == parent or (parent and (
+                    path.match(parent) and (parent.startswith("**/") or len(path.parts) == len(parent.split("/"))))))
+                if parent.startswith("**/") and folder == parent[3:]:
+                    matches_parent = True
+                if not parent or matches_parent:
+                    # Existing matching names also catch specific negations such as !production.key.
+                    for name in dirs + files:
+                        if fnmatch.fnmatchcase(name, leaf):
+                            probes.add((path / name).as_posix() + ("/oah-init-probe" if pattern.endswith("/") else ""))
+                    if matches_parent or (not parent and ".gitignore" in files):
+                        probes.add((path / leaf.replace("*", "oah-init-probe")).as_posix())
+            if any(run_git(root, "check-ignore", "--no-index", "-q", "--", probe).returncode != 0
+                   for probe in sorted(probes)):
+                problems.append(f"OAH_INIT_IGNORE_UNPROTECTED: required pattern {pattern} does not protect every "
+                                "checked path. Fix overriding negations in the root or nested .gitignore files, "
+                                "then run oah init again")
+    return problems
 
 
 # The default branch ----------------------------------------------------------------------------------
@@ -685,7 +737,9 @@ def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
 
 def _sync_rules(root: pathlib.Path, step: RulesStep) -> rules.SyncResult:
     """Keep rules' validation and formatting, publishing only the bytes the initial plan approved."""
-    found = step.planned if step.planned is not None else rules.plan(root, lang=step.lang)
+    found = step.planned
+    if found is None:
+        raise InitError("OAH_INIT_CHANGED", "no rules publication was planned; run oah init again")
     changed = []
     for name, before, after in (("AGENTS.md", found.agents_before, found.agents_after),
                                 ("CLAUDE.md", found.claude_before, found.claude_after)):
@@ -700,11 +754,16 @@ def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
     """Put the Aside web rules (A20) into .oah/rules.local.md once, so the rules block carries them.
 
     Returns "added", "present" or "skipped: <why>". The file keeps its bytes and line ending."""
-    root = pathlib.Path(root)
+    return _write_aside_local(pathlib.Path(root), _plan_aside_local(pathlib.Path(root), lang=lang))
+
+
+def _plan_aside_local(root: pathlib.Path, *, lang: str) -> FileChange:
+    """Capture the conditional local publication before confirmation, including its original bytes."""
     relative = rules.LOCAL_RULES.as_posix()
     link = _linked(root, relative)
     if link is not None:
-        return f"skipped: {link} is a link; oah never writes through links"
+        return FileChange(relative, "blocked", "rules", note="OAH_INIT_CHANGED: rules path is linked; "
+                          "remove the link and run oah init again")
     path = root / relative
     before = read_bytes(path)
     text, eol = "", "\n"
@@ -712,18 +771,49 @@ def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
         try:
             text = before.decode("utf-8")
         except UnicodeDecodeError:
-            return f"skipped: {relative} is not UTF-8 text"
+            return FileChange(relative, "blocked", "rules", note="OAH_INIT_CHANGED: local rules are not UTF-8; "
+                              "save them as UTF-8 and run oah init again")
         if any(line.rstrip() == companions.RULES_BEGIN for line in text.split("\n")):
-            return "present"
+            return FileChange(relative, "unchanged", "rules", before, before)
         eol = eol_of(before).decode("ascii")
     if text and not text.endswith("\n"):
         text += eol
     if text.strip() and not text.endswith(eol * 2):
         text += eol
     data = (text + companions.rules_section(True, lang=lang).replace("\n", eol)).encode("utf-8")
-    if not _publish(root, relative, data, before):
-        return "skipped: OAH_INIT_CHANGED: rules changed; run oah init again"
-    return "added"
+    return FileChange(relative, "create" if before is None else "update", "rules", data, before,
+                      _replacement_note(before))
+
+
+def _write_aside_local(root: pathlib.Path, change: FileChange) -> str:
+    if change.action == "blocked":
+        return "skipped: " + change.note
+    if change.action == "unchanged":
+        if _linked(root, change.path) is None and read_bytes(root / change.path) == change.before:
+            return "present"
+    elif _publish(root, change.path, change.data, change.before):
+        return "added"
+    return "skipped: OAH_INIT_CHANGED: rules changed; run oah init again"
+
+
+def _plan_aside(root: pathlib.Path, step: RulesStep) -> tuple[FileChange, RulesStep]:
+    local = _plan_aside_local(root, lang=step.lang)
+    if local.action in ("blocked", "unchanged"):
+        return local, step
+    found = step.planned
+    lines = found.agents_after.decode("utf-8").splitlines(keepends=True)
+    begin, end = rules.find_block(lines)
+    eol = "\r\n" if lines[begin].endswith("\r\n") else "\n"
+    block = rules.render_block(step.lang, local.data.decode("utf-8"), eol)
+    after = ("".join(lines[:begin]) + block + lines[end][len(lines[end].rstrip("\r\n")):] +
+             "".join(lines[end + 1:])).encode("utf-8")
+    size = len(block.encode("utf-8"))
+    if size >= rules.BLOCK_LIMIT or len(after) > rules.AGENTS_BUDGET:
+        raise rules.RulesError("OAH_RULES_BUDGET", "the Aside rules would exceed the rules budget. Shorten "
+                               ".oah/rules.local.md or AGENTS.md, then run oah init again")
+    planned = dataclasses.replace(found, agents_after=after, block_bytes=size)
+    action = "create" if found.agents_before is None else "unchanged" if found.agents_before == after else "update"
+    return local, RulesStep(step.lang, action, step.claude, size, planned)
 
 
 # Hooks -------------------------------------------------------------------------------------------------
@@ -1264,12 +1354,16 @@ class Plan:
     companion_steps: tuple[companions.CompanionStep, ...]
     map: tuple[str, str]  # map_state before anything is written
     unlazy_runs: tuple[str, ...] = ()  # the commands an unlazy install runs, as shown
+    aside_local: FileChange | None = None
+    aside_rules: RulesStep | None = None
 
     @property
     def changes(self) -> int:
         """Planned writes and installs; companion steps are checks that act only when something is missing."""
         count = sum(1 for change in self.files if change.action in WRITES)
-        count += (self.rules.agents != "unchanged") + (self.rules.claude != "unchanged")
+        rules_step = self.aside_rules or self.rules
+        count += (rules_step.agents != "unchanged") + (rules_step.claude != "unchanged")
+        count += int(self.aside_local is not None and self.aside_local.action in WRITES)
         count += sum(1 for step in self.hooks if step.action == "install")
         count += int(self.unlazy is not None and self.unlazy.action in ("install", "replace"))
         count += int(self.ci is not None and self.ci.action in ("create", "replace"))
@@ -1310,6 +1404,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         and pathlib.Path(unlazy_step.folder).resolve() == (root / UNLAZY_PROJECT).resolve()))
     files = plan_files(root, config=config, wiki_dir=wiki.dir, agents=agent_files(engines) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
+    rules_step = plan_rules(root, lang=lang)
+    aside_local, aside_rules = _plan_aside(root, rules_step) if "aside" in apps else (None, None)
     notes_found = []
     for question in QUESTIONS:
         answer, flag = answers[question.key], given.get(question.key)
@@ -1321,9 +1417,10 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         root=root, state=state_dir(repo_info(root), machine.env), answers=answers, notes=tuple(notes_found),
         branch=branch, how=how, wiki=wiki, tools=tools,
         tool_steps=tuple(guide.plan_installs(statuses, os_name=machine.os_name, which=machine.which)),
-        files=tuple(files), rules=plan_rules(root, lang=lang),
+        files=tuple(files), rules=rules_step, aside_local=aside_local, aside_rules=aside_rules,
         hooks=tuple(plan_hooks(root, force=force)) if values["hooks"] else (), unlazy=unlazy_step,
-        ci=plan_ci(root, force=force, oses=list(ci_section["os"]), test_command=ci_section["test_command"] or None)
+        # Existing command text is private (J/A17). Let CI detect its own command or use its fixed placeholder.
+        ci=plan_ci(root, force=force, oses=list(ci_section["os"]), test_command=None)
         if values["ci"] else None,
         apps=apps, companion_steps=_companion_steps(apps, os_name=machine.companion_os, root=root) if apps else (),
         map=map_state(root, machine.env),
@@ -1377,6 +1474,9 @@ def render_plan(plan: Plan) -> list[str]:
     lines += [_file_line(change) for change in plan.files if change.group == "gitignore"]
     if "aside" in plan.apps:
         lines.append(f"  if Aside gets registered, its web rules go into {rules.LOCAL_RULES} and the AGENTS.md block")
+        lines.append(_file_line(plan.aside_local))
+        lines.append(f"  {plan.aside_rules.agents:<10} AGENTS.md: conditional Aside block "
+                     f"({plan.aside_rules.block_bytes} bytes); original planned file required")
     lines.append("Hooks:")
     if not plan.answers["hooks"].value:
         lines.append("  none chosen; `oah hooks install <kind>` adds one later")
@@ -1491,7 +1591,9 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
                         if status.tool.required and status.tool.name in signed_out]
     written, problems = write_files(root, list(plan.files), wiki=Wiki(root, plan.wiki, plan.state))
     try:
-        synced = _sync_rules(root, plan.rules)
+        # Aside chooses between two preconfirmed alternatives after registration, publishing rules once.
+        synced = (_sync_rules(root, plan.rules) if "aside" not in plan.apps
+                  else rules.SyncResult(plan.rules.lang, (), 0, plan.rules.block_bytes))
     except InitError as exc:
         problems.append(str(exc))
         synced = rules.SyncResult(plan.rules.lang, (), 0, plan.rules.block_bytes)
@@ -1536,6 +1638,13 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
             outcome.changed += 1
     _apply_unlazy(plan, machine, outcome, out)
     _apply_companions(plan, machine, outcome, yes=yes, ask=ask, out=out)
+    unlazy_copy = plan.unlazy is not None and (plan.unlazy.action in ("install", "replace") or
+                                              pathlib.Path(plan.unlazy.folder) == root / UNLAZY_PROJECT)
+    problems = _ignore_problems(root, unlazy_copy=unlazy_copy)
+    for problem in problems:
+        out(problem)
+    if problems:
+        outcome.pending.append("gitignore")
     outcome.impact, outcome.impact_detail = refresh_map(root, machine.env)
     out("")
     if outcome.impact == "unavailable":
@@ -1587,14 +1696,25 @@ def _apply_companions(plan: Plan, machine: Machine, outcome: Outcome, *, yes: bo
         outcome.changed += sum(1 for item in outcomes if item.status == "done")
         if any(item.status not in companions.OK_STATUSES for item in outcomes):
             outcome.pending.append(app)
-    if companions.CompanionResult(found).aside_registered:
-        status = add_aside_rules(plan.root, lang=plan.rules.lang)
-        if status == "added":
-            synced = _sync_rules(plan.root, plan_rules(plan.root, lang=plan.rules.lang))
-            out(f"  added the Aside web rules to {rules.LOCAL_RULES} and the AGENTS.md block")
-            outcome.changed += 1 + len(synced.changed)
-        elif status != "present":
-            out(f"  the Aside web rules were {status}")
+    if "aside" in plan.apps:
+        step = plan.rules
+        if companions.CompanionResult(found).aside_registered:
+            status = _write_aside_local(plan.root, plan.aside_local)
+            if status not in ("added", "present"):
+                out(f"OAH_INIT_CHANGED: Aside rules were {status}; run oah init again to see the new plan")
+                outcome.pending.append("files")
+                return
+            outcome.changed += int(status == "added")
+            step = plan.aside_rules
+        try:
+            synced = _sync_rules(plan.root, step)
+        except InitError as exc:
+            out(str(exc))
+            outcome.pending.append("files")
+            return
+        for name in synced.changed:
+            out(f"  updated {name} (the planned rules)")
+        outcome.changed += len(synced.changed)
 
 
 def _run_orca_steps(steps, root: pathlib.Path, machine: Machine, *, ask, out):
