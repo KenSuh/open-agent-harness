@@ -16,6 +16,7 @@ from oah.review import ReviewError
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 COMMANDS = ("land",)
+USAGE_MESSAGE = "invalid landing arguments; run oah land --help for usage, then retry"
 ENVIRONMENT_CODES = frozenset({"OAH_REVIEW_GIT_FAILED", "OAH_RUN_PATH_UNSAFE"})
 EXCEPTION_MESSAGES = {
     "OAH_LAND_FAILED": "landing could not be checked; inspect the local setup and run oah land again",
@@ -25,7 +26,9 @@ EXCEPTION_MESSAGES = {
     "OAH_LAND_NOT_READY": "a push needs passing landing checks; run oah land --merge again",
     "OAH_LAND_DESTINATION_CHANGED": "the destination changed; run oah land --merge and confirm again",
     "OAH_LAND_DESTINATION_UNSUPPORTED": "landing needs a simple remote; configure one identical fetch and push URL, "
-                                        "remove matching URL rewrites, use remote names without ':' or '/', and retry",
+                                        "remove matching URL rewrites and unsupported remote settings (keep only "
+                                        "url, fetch, prune, tagOpt and mirror=false), use remote names without "
+                                        "':' or '/', and retry",
     "OAH_TASK_INVALID": "the task name is invalid; choose a valid task name and run oah land again",
     "OAH_REVIEW_GIT_FAILED": "git could not read landing evidence; check the repository and run oah land again",
     "OAH_RUN_PATH_UNSAFE": "landing state contains an unsafe path; remove linked state paths and run oah land again",
@@ -40,9 +43,30 @@ EXCEPTION_MESSAGES = {
 }
 
 
+class _LandParser(argparse.ArgumentParser):
+    """Consume landing errors here, before argparse can echo tokens at the root parser."""
+
+    def parse_known_args(self, args=None, namespace=None):
+        argv = list(sys.argv[1:] if args is None else args)
+        self._as_json = "--json" in argv
+        parsed, unknown = super().parse_known_args(argv, namespace)
+        if unknown:
+            self.error("")
+        return parsed, []
+
+    def error(self, message):
+        _done("OAH_USAGE", USAGE_MESSAGE, EXIT_USAGE, self._as_json)
+        self.exit(EXIT_USAGE)
+
+
 def register(commands: argparse._SubParsersAction) -> None:
-    parser = commands.add_parser("land", help="check that a task's exact reviewed head may land, or land it as a "
-                                              "fast-forward push after you confirm")
+    parser_class = commands._parser_class
+    try:
+        commands._parser_class = _LandParser
+        parser = commands.add_parser("land", help="check that a task's exact reviewed head may land, or land it as a "
+                                                  "fast-forward push after you confirm")
+    finally:
+        commands._parser_class = parser_class
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="run every landing check and push nothing")
     mode.add_argument("--merge", action="store_true",
@@ -149,8 +173,7 @@ def run(args: argparse.Namespace) -> int:
     from oah.impact.errors import ImpactError
 
     if args.confirm is not None and not args.merge:
-        print("OAH_USAGE: --confirm only applies to oah land --merge", file=sys.stderr)
-        return EXIT_USAGE
+        return _done("OAH_USAGE", USAGE_MESSAGE, EXIT_USAGE, args.json)
     env = os.environ
     mode = "merge" if args.merge else "check"
     try:

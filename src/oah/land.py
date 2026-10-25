@@ -487,17 +487,20 @@ def _newly_affected(their_rows: Sequence, here: Sequence[tuple], there: Sequence
 def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tuple[str, str]:
     """One simple remote shared by the isolated fetch and named push; never export its URL.
 
-    Matching URL rewrites and URL-like remote names are unsupported: the isolated mirror and
-    the checkout must resolve the destination identically without remote-name indirection.
+    Only destination-neutral remote settings are supported: the isolated mirror and
+    the checkout must resolve the destination identically without transport indirection.
     """
     from oah.impact import mapstore
 
     def refuse():
         raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED",
                         "landing needs a simple remote; configure one identical fetch and push URL, remove "
-                        "matching URL rewrites, and use remote names without ':' or '/', then run oah land again")
+                        "matching URL rewrites and unsupported remote settings (keep only url, fetch, prune, "
+                        "tagOpt and mirror=false), and use remote names without ':' or '/', then run oah land again")
 
     def config(args, config_env):
+        # GIT_CONFIG redirects only `git config`; the named push still reads normal scopes.
+        config_env = {key: value for key, value in config_env.items() if key.upper() != "GIT_CONFIG"}
         result = run_command([*git_argv(), "-C", str(root), "config", "--null", *args],
                              timeout=GH_TIMEOUT, env=dict(config_env))
         if result.timed_out or result.returncode not in (0, 1):
@@ -507,13 +510,16 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
     isolated = mapstore._isolated_git_env()
     destinations = []
     for config_env in (isolated, env):
-        names = [entry[len("remote."):].rsplit(".", 1)[0]
-                 for entry in config(["--name-only", "--get-regexp", r"^remote\..*\."], config_env)]
-        if any(":" in name or "/" in name for name in names):
+        for entry in config(["--name-only", "--get-regexp", r"^remote\..*\."], config_env):
+            name, key = entry[len("remote."):].rsplit(".", 1)
+            if (":" in name or "/" in name
+                    or (name == remote and key not in {"url", "fetch", "prune", "tagopt", "mirror"})):
+                refuse()
+        if any(value != "false" for value in config(["--type=bool", "--get-all", f"remote.{remote}.mirror"],
+                                                     config_env)):
             refuse()
         urls = config(["--get-all", f"remote.{remote}.url"], config_env)
-        pushes = config(["--get-all", f"remote.{remote}.pushurl"], config_env)
-        if len(urls) != 1 or not urls[0] or (pushes and pushes != urls):
+        if len(urls) != 1 or not urls[0]:
             refuse()
         stored = urls[0]
         rewrites = config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], config_env)

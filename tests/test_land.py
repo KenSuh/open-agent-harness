@@ -390,7 +390,9 @@ class AssessTest(unittest.TestCase):
                     land._destination(project.repo, "origin", project.env)
                 self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
                 git(project.repo, "config", "--remove-section", f"remote.{name}")
-        git(project.repo, "config", "remote.origin.pushurl", str(project.remote))
+        git(project.repo, "config", "remote.origin.prune", "true")
+        git(project.repo, "config", "remote.origin.tagOpt", "--no-tags")
+        git(project.repo, "config", "remote.origin.mirror", "false")
         for key in ("insteadOf", "pushInsteadOf"):
             with self.subTest(key=key):
                 config_key = f"url.{project.work / 'other.git'}.{key}"
@@ -403,6 +405,59 @@ class AssessTest(unittest.TestCase):
                 with project.patched(), self.assertRaises(land.LandError):
                     land._destination(project.repo, "origin", project.env)
                 git(project.repo, "config", "--unset", config_key)
+
+    def test_remote_config_allowlist_in_every_git_scope(self):
+        project = LandProject(self)
+        git(project.repo, "config", "extensions.worktreeConfig", "true")
+        keys = ("vcs", "receivepack", "uploadpack", "pushurl", "proxy", "push", "serveroption", "unknown",
+                "mirror")
+        for scope in ("local", "worktree", "global", "system", "include", "command", "parameters",
+                      "command-hidden", "parameters-hidden"):
+            for key in keys:
+                with self.subTest(scope=scope, key=key):
+                    env = dict(project.env)
+                    name = f"remote.origin.{key}"
+                    value = "true" if key == "mirror" else str(project.remote)
+                    config_file = project.work / "extra.gitconfig"
+                    config_file.write_bytes(b"")
+                    if scope in ("local", "worktree"):
+                        args = (f"--{scope}",)
+                    else:
+                        args = ("--file", str(config_file))
+                    git(project.repo, "config", *args, name, value)
+                    if scope in ("global", "system"):
+                        env[f"GIT_CONFIG_{scope.upper()}"] = str(config_file)
+                    elif scope == "include":
+                        git(project.repo, "config", "include.path", str(config_file))
+                    elif scope.startswith("command"):
+                        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=name, GIT_CONFIG_VALUE_0=value)
+                    elif scope.startswith("parameters"):
+                        env["GIT_CONFIG_PARAMETERS"] = f"'{name}'='{value}'"
+                    if scope.endswith("-hidden"):
+                        clean = project.work / "clean.gitconfig"
+                        clean.write_bytes(b"")
+                        git(project.repo, "config", "--file", str(clean), "remote.origin.url", str(project.remote))
+                        env["GIT_CONFIG"] = str(clean)
+                    try:
+                        with patch.dict(os.environ, env, clear=True), self.assertRaises(land.LandError) as caught:
+                            land._destination(project.repo, "origin", env)
+                        self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+                    finally:
+                        if scope in ("local", "worktree"):
+                            git(project.repo, "config", *args, "--unset", name)
+                        elif scope == "include":
+                            git(project.repo, "config", "--unset", "include.path")
+
+    def test_transport_settings_refuse_during_assessment(self):
+        project = LandProject(self)
+        for key, value in (("receivepack", "git-receive-pack"), ("vcs", "git")):
+            with self.subTest(key=key):
+                git(project.repo, "config", f"remote.origin.{key}", value)
+                result = project.assess()
+                self.assertFalse(result.ready, describe(result))
+                self.assertIn("OAH_LAND_DESTINATION_UNSUPPORTED", result.check("impact").message)
+                self.assertEqual(project.remote_main(), project.base)
+                git(project.repo, "config", "--unset", f"remote.origin.{key}")
 
     def test_ci_uses_assessed_destination_over_gh_repo_and_default(self):
         project = LandProject(self)

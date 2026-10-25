@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
+import subprocess
 import sys
 import secrets
 import unittest
@@ -11,7 +13,7 @@ from unittest.mock import patch
 
 from oah import land, land_cli
 from oah.cli import build_parser
-from tests.test_land import OTHER_LEDGER, LandProject, git
+from tests.test_land import OTHER_LEDGER, LandProject, git, git_env
 
 
 def land_command(project: LandProject, *args: str, stdin: str | None = None, interactive: bool = False,
@@ -32,6 +34,47 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the redirecting receive-pack command uses POSIX shell quoting")
+    def test_receivepack_cannot_redirect_the_confirmed_push(self):
+        for after_confirmation in (False, True):
+            with self.subTest(after_confirmation=after_confirmation):
+                project = LandProject(self)
+                other = project.work / ("private-" + secrets.token_hex(12) + ".git")
+                subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                               check=True, env=git_env())
+
+                def configure(_prompt=None):
+                    git(project.repo, "config", "remote.origin.receivepack",
+                        f"git-receive-pack {shlex.quote(str(other))} #")
+                    return "y\n"
+
+                if not after_confirmation:
+                    configure()
+                done = land_command(project, "--merge", "--task", "t1", "--json", interactive=True,
+                                    ask=configure if after_confirmation else lambda _: "y\n")
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(json.loads(done.stdout)["code"], "OAH_LAND_DESTINATION_UNSUPPORTED"
+                                 if after_confirmation else "OAH_LAND_IMPACT_STALE")
+                self.assertIn("OAH_LAND_DESTINATION_UNSUPPORTED", done.stderr)
+                self.assertEqual(project.remote_main(), project.base)
+                self.assertEqual(git(other, "rev-parse", "main"), project.base)
+                emitted = done.stdout + done.stderr + json.dumps(records(project))
+                self.assertFalse(str(other) in emitted, "receiver path entered landing output or records")
+
+    def test_remote_transport_settings_added_during_confirmation_refuse(self):
+        project = LandProject(self)
+        for key, value in (("receivepack", "git-receive-pack"), ("vcs", "git")):
+            with self.subTest(key=key):
+                def confirm(_prompt):
+                    git(project.repo, "config", f"remote.origin.{key}", value)
+                    return "y\n"
+
+                done = land_command(project, "--merge", "--task", "t1", interactive=True, ask=confirm)
+                self.assertEqual(done.returncode, 1)
+                self.assertIn("OAH_LAND_DESTINATION_UNSUPPORTED", done.stderr)
+                self.assertEqual(project.remote_main(), project.base)
+                git(project.repo, "config", "--unset", f"remote.origin.{key}")
+
     def test_url_named_remote_added_during_confirmation_refuses_without_disclosure(self):
         project = LandProject(self)
 
@@ -413,6 +456,34 @@ class LandCliTest(unittest.TestCase):
         bad = land_command(project, "--check", "--task", "../x")
         self.assertEqual(bad.returncode, 1)
         self.assertIn("OAH_TASK_INVALID", bad.stderr)
+
+    def test_argument_errors_use_fixed_text_and_json_without_credentials(self):
+        project = LandProject(self, ledger=None, receipt=False, finish=False)
+        private = "gh" + "p_" + secrets.token_hex(24)
+        errors = ((private,), ("--" + private,), ("--unknown=" + private,),
+                  ("--confirm",), ("--task",), ("--check=" + private,), ("--merge",),
+                  ("--confirm", private), ("--", private))
+        for flags in ((), ("--json",)):
+            expected = None
+            for error in errors:
+                with self.subTest(json=bool(flags), case=errors.index(error)):
+                    done = land_command(project, "--check", "--task", "t1", *flags, *error)
+                    emitted = done.stdout + done.stderr
+                    self.assertFalse(private in emitted, "credential entered argument-error output")
+                    self.assertEqual(done.returncode, 2)
+                    self.assertTrue(done.stderr.startswith("OAH_USAGE:"))
+                    self.assertIn("oah land --help", done.stderr)
+                    if expected is None:
+                        expected = (done.stdout, done.stderr)
+                    self.assertEqual((done.stdout, done.stderr), expected)
+                    if flags:
+                        body = json.loads(done.stdout)
+                        self.assertEqual(body["code"], "OAH_USAGE")
+                        self.assertEqual(body["exit_code"], 2)
+                        self.assertIsNone(body["assessment"])
+                    else:
+                        self.assertEqual(done.stdout, "")
+        self.assertEqual(records(project), [])
 
 
 if __name__ == "__main__":
