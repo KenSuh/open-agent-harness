@@ -35,9 +35,12 @@ class FixProject:
     """A task branch with a bound lease, reviewed and corrected by the fake engine processes."""
 
     def __init__(self, test: unittest.TestCase, *, config: str = "", files: dict | None = None,
-                 packet: str = PACKET, newline: str = "\n", attributes: str | None = "* -text\n") -> None:
+                 packet: str = PACKET, newline: str = "\n", attributes: str | None = "* -text\n",
+                 repo_name: str = "repo") -> None:
         self.test = test
         self.repo = make_git_repo(test)
+        if repo_name != self.repo.name:
+            self.repo = self.repo.rename(self.repo.with_name(repo_name))
         self.work = make_tmp_dir(test)
         self.state, self.home = self.work / "state", self.work / "codex-home"
         self.calls_dir, self.fix_dir, self.temp_root = self.work / "calls", self.work / "fix-calls", self.work / "temp"
@@ -883,6 +886,40 @@ def applied(test: unittest.TestCase, project: FixProject, step: dict | None = No
 
 
 class BindTest(unittest.TestCase):
+    def test_commit_guidance_runs_in_the_leased_worktree_from_any_caller(self):
+        self.assert_guidance_from_any_caller()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows PowerShell 5.1 command quoting")
+    def test_powershell_commit_guidance_runs_in_the_leased_worktree_from_any_caller(self):
+        self.assert_guidance_from_any_caller(powershell=True)
+
+    def assert_guidance_from_any_caller(self, *, powershell=False):
+        for location in ("subdirectory", "other-worktree"):
+            with self.subTest(location=location):
+                project = FixProject(self, repo_name="leased 'space $cash `tick !")
+                project.changes_requested()
+                other = project.work / "other"
+                git(project.repo, "worktree", "add", "-q", "--detach", str(other), project.base)
+                (other / "README.md").write_bytes(b"unrelated caller changes\n")
+                git(other, "add", "-u")
+                other_head, other_status = git(other, "rev-parse", "HEAD"), git(other, "status", "--porcelain")
+                caller = project.repo / ".oah/tasks/t1" if location == "subdirectory" else other
+                project.queue_fix({"write": {**FIXED, "README.md": "corrected root file\n", "src/new.py": "NEW = 1\n"}})
+                result = project.fix(cwd=caller)
+                self.assertEqual(result.outcome, "applied", result.message)
+                for command in result.commands:
+                    argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                             command + "; exit $LASTEXITCODE"] if powershell else
+                            ["/bin/sh", "-c", command] if os.name != "nt" else shlex.split(command))
+                    done = subprocess.run(argv, cwd=caller, env=git_env(), capture_output=True)
+                    self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", errors="replace"))
+                self.assertEqual(git(project.repo, "status", "--porcelain"), "")
+                self.assertEqual(git(project.repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines(),
+                                 ["README.md", "src/app.py", "src/new.py"])
+                self.assertEqual(git(other, "rev-parse", "HEAD"), other_head)
+                self.assertEqual(git(other, "status", "--porcelain"), other_status)
+                self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
+
     def test_applied_correction_shows_the_diff_and_the_commit_command(self):
         project = FixProject(self)
         (project.repo / "src/i.py").write_text("THE USER'S OWN UNTRACKED FILE\n", encoding="utf-8")
@@ -892,9 +929,10 @@ class BindTest(unittest.TestCase):
         for line in ("-print('v1')", "+print('fixed')", "+NEW = 1", "+ODD = 1", "+ID = 1"):
             self.assertIn(line, text)
         self.assertNotIn("THE USER'S OWN", text, "a file that was untracked before the run is not Codex's change")
+        command = f"git -C '{project.repo.as_posix()}'"
         self.assertEqual(result.commands, [
-            "git add -u", "git add -- ':(literal)src/[id].py' src/new.py ':(literal)src/odd name.py'",
-            'git commit -m "Correct R1-F1 of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
+            command + " add -u", command + " add -- ':(literal)src/[id].py' src/new.py ':(literal)src/odd name.py'",
+            command + ' commit -m "Correct R1-F1 of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
         self.assertEqual(result.next_command, "oah fix --bind --task t1")
         for command in (*result.commands, result.next_command):
             self.assertIn(command, result.lines)
@@ -1105,6 +1143,103 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_file_diffs_disable_submodule_expansion_and_user_diff_drivers(self):
+        project = FixProject(self, attributes="* -text\n*.py diff=custom\n")
+        project.changes_requested()
+        driver, marker = project.work / "diff-driver.py", project.work / "driver-ran"
+        driver.write_bytes(b"import pathlib, sys\npathlib.Path(sys.argv[1]).write_bytes(b'ran')\n"
+                           b"sys.stdout.buffer.write(b'unsafe driver output\\n')\n")
+        command = f'"{pathlib.Path(sys.executable).as_posix()}" "{driver.as_posix()}" "{marker.as_posix()}"'
+        for setting in ("diff.external", "diff.custom.command", "diff.custom.textconv"):
+            git(project.repo, "config", setting, command)
+        git(project.repo, "config", "diff.submodule", "diff")
+        project.queue_fix({"write": {**FIXED, "src/new.py": "NEW = 1\n"}})
+        built, git_bytes = [], fix._git_bytes
+
+        def capture(root, *args, **kwargs):
+            result = git_bytes(root, *args, **kwargs)
+            if args[0] == "diff":
+                built.append(args)
+            return result
+
+        with mock.patch.object(fix, "_git_bytes", side_effect=capture):
+            result = project.fix()
+        self.assertEqual(result.outcome, "applied", result.message)
+        self.assertFalse(marker.exists(), "neither external diff nor textconv drivers may run")
+        self.assertNotIn("unsafe driver output", json.dumps(result.to_json()))
+        patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+        self.assertIn(b"+print('fixed')", patch)
+        self.assertIn(b"+NEW = 1", patch)
+        self.assertEqual(len(built), 2, "both tracked and new files use the same diff protections")
+        for args in built:
+            for option in ("--submodule=short", "--no-ext-diff", "--no-textconv"):
+                self.assertIn(option, args)
+
+    def test_submodule_changes_fail_closed_before_building_a_diff(self):
+        for change in ("dirty", "ignored", "deleted", "added", "untracked", "index-only"):
+            with self.subTest(change=change):
+                project = FixProject(self)
+                source = make_git_repo(self)
+                git_commit(source, {"private.txt": b"before\n"})
+                remote = project.work / "nested.git"
+                git(source, "clone", "--bare", "-q", str(source), str(remote))
+                name = "src/nested"
+
+                def add_submodule():
+                    git(project.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(remote), name)
+
+                if change not in ("added", "untracked", "index-only"):
+                    add_submodule()
+                    project.commit({}, "add submodule")
+                project.changes_requested()
+                git(project.repo, "config", "diff.submodule", "diff")
+                if change == "ignored":
+                    git(project.repo, "config", "diff.ignoreSubmodules", "all")
+                    git(project.repo, "config", f"submodule.{name}.ignore", "all")
+                key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
+                project.env["OPENAI_API_KEY"] = key
+                writes = dict(FIXED)
+                if change in ("dirty", "ignored"):
+                    writes[f"{name}/private.txt"] = key + "\n"
+                project.queue_fix({"write": writes})
+                execute, git_bytes = call.execute, fix._git_bytes
+                built = []
+
+                def dispatched(*args, **kwargs):
+                    result = execute(*args, **kwargs)
+                    if change == "deleted":
+                        git(project.repo, "rm", "-q", "-f", "--", name)
+                    elif change in ("added", "untracked"):
+                        add_submodule()
+                        git_commit(project.repo / name, {"private.txt": (key + "\n").encode("utf-8")})
+                        git(project.repo, "add", "--", name)
+                        if change == "untracked":
+                            git(project.repo, "reset", "-q", "--", name)
+                    elif change == "index-only":
+                        oid = git(source, "rev-parse", "HEAD")
+                        git(project.repo, "update-index", "--add", "--cacheinfo", f"160000,{oid},{name}")
+                    return result
+
+                def capture(root, *args, **kwargs):
+                    result = git_bytes(root, *args, **kwargs)
+                    if args[0] == "diff":
+                        built.append((args, result))
+                    return result
+
+                with mock.patch.object(call, "execute", side_effect=dispatched), \
+                        mock.patch.object(fix, "_git_bytes", side_effect=capture):
+                    result = project.fix()
+                self.assertEqual((result.outcome, result.commands), ("failed", []))
+                self.assertIsNone(result.next_command)
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
+                self.assertNotIn(name, json.dumps(result.to_json()), "unsupported changes are named by position only")
+                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                self.assertIn("OAH_FIX_UNSUPPORTED_SUBMODULE", patch)
+                self.assertIn("[file ", patch)
+                self.assertNotIn("diff --git", patch, "a submodule change withholds the whole diff")
+                self.assertEqual(built, [], "no content diff is built for an unsupported attempt")
+
     def test_raw_multiline_credentials_withhold_every_affected_file_diff(self):
         for channel in ("tracked", "new", "staged", "deleted", "replaced", "user"):
             with self.subTest(channel=channel):
@@ -1331,20 +1466,22 @@ class TemplateTest(unittest.TestCase):
         new = ("-dash.py", "src/a b.py", "src/a,b.py", "src/new.py", "src/[id].py", "src/한글.py", "src/it's.py",
                "src/tab\there.py")
         commands, unquoted = fix.commit_commands(task="t1", attempt_id="A2", receipt="R3", finding_ids=["R3-F1", "R3-F2"],
-                                                 changes=fix._Changes(("src/app.py",), new))
+                                                 changes=fix._Changes(("src/app.py",), new), root=pathlib.Path("/worktree"))
         literal = [":(literal)-dash.py", ":(literal)src/a b.py", ":(literal)src/a,b.py", "src/new.py",
                    ":(literal)src/[id].py", ":(literal)src/한글.py"]
-        self.assertEqual(commands[0], "git add -u")
-        self.assertEqual(shlex.split(commands[1]), ["git", "add", "--", *literal])
-        self.assertEqual(commands[2], 'git commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
+        self.assertEqual(commands[0], "git -C '/worktree' add -u")
+        self.assertEqual(shlex.split(commands[1]), ["git", "-C", "/worktree", "add", "--", *literal])
+        self.assertEqual(commands[2], 'git -C \'/worktree\' commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
                                       '-m "Agent-Engine: codex"')
         self.assertEqual(unquoted, ["src/it's.py", "src/tab\there.py"])
         for command in commands:
             self.assertFalse(set(command) & set("$`!"), "nothing either shell would expand")
         many, _ = fix.commit_commands(task="t1", attempt_id="A1", receipt="R1",
-                                      finding_ids=[f"R1-F{k}" for k in range(1, 6)], changes=fix._Changes((), ("x.py",)))
-        self.assertEqual(many, ["git add -- x.py",
-                                'git commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
+                                      finding_ids=[f"R1-F{k}" for k in range(1, 6)], changes=fix._Changes((), ("x.py",)),
+                                      root=pathlib.Path("/worktree"))
+        self.assertEqual(many, ["git -C '/worktree' add -- x.py",
+                                'git -C \'/worktree\' commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" '
+                                '-m "Agent-Engine: codex"'])
 
 
 if __name__ == "__main__":

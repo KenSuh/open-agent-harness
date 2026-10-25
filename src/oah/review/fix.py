@@ -77,6 +77,7 @@ OUTCOME_CODES = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
 PLACEHOLDERS = ("TASK", "ATTEMPT", "RECEIPT", "RECEIPT_DIGEST", "BASE", "REVIEWED", "HEAD", "FINDINGS", "CLASSES")
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+_DIFF_OPTIONS = ("--no-ext-diff", "--no-textconv", "--no-renames", "--submodule=short", "--ignore-submodules=none")
 _STOP_SIGNALS = tuple(getattr(signal, name) for name in (("SIGBREAK",) if os.name == "nt" else ("SIGTERM", "SIGHUP"))
                       if hasattr(signal, name))
 LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
@@ -537,44 +538,58 @@ def _file_snapshot(root: pathlib.Path, name: str) -> tuple[int, bytes] | None:
 
 
 def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int, bytes] | None]) -> _Changes:
-    tracked = _names(root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", before, "--")
+    tracked = _names(root, "diff", *_DIFF_OPTIONS, "--name-only", "-z", before, "--")
+    # A newly staged gitlink with no checked-out directory vanishes from the combined worktree diff.
+    staged = _names(root, "diff", "--cached", *_DIFF_OPTIONS, "--raw", "-z", before, "--")
+    for metadata, name in zip(staged[::2], staged[1::2]):
+        if "160000" in metadata[1:].split()[:2] and name not in tracked:
+            tracked.append(name)
     user = tuple(name for name, snapshot in untracked.items()
                  if name in tracked or _file_snapshot(root, name) != snapshot)
     return _Changes(tuple(name for name in tracked if name not in untracked),
                     tuple(name for name in _untracked(root) if name not in untracked), user)
 
 
-def _sensitive_files(root: pathlib.Path, before: str, changes: _Changes,
-                     untracked: Mapping[str, tuple[int, bytes] | None],
-                     redact: Callable[[str], str]) -> dict[str, str]:
-    """Scan both raw sides of every changed file before asking Git or difflib to build a diff."""
-    found = {}
+def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
+                untracked: Mapping[str, tuple[int, bytes] | None],
+                redact: Callable[[str], str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Scan raw sides before diffing; submodules and gitlinks cannot be scanned as ordinary files."""
+    found, unsupported = {}, {}
     for position, name in enumerate(changes.files, 1):
         current = _file_snapshot(root, name)
+        if current and stat.S_ISDIR(current[0]):
+            unsupported[name] = f"[file {position}]"
+        index = _git_bytes(root, "ls-files", "--stage", "-z", "--", f":(literal){name}")
+        if any(entry.startswith(b"160000 ") for entry in index.split(b"\0")):
+            unsupported[name] = f"[file {position}]"
         data = [current[1]] if current else []
         if name in untracked:
             old = untracked[name]
             if old:
                 data.append(old[1])
+                if stat.S_ISDIR(old[0]):
+                    unsupported[name] = f"[file {position}]"
         else:
             entries = _git_bytes(root, "ls-tree", "-z", before, "--", f":(literal){name}")
             for entry in entries.split(b"\0"):
                 if entry:
                     _mode, kind, oid = entry.split(b"\t", 1)[0].split()
-                    if kind == b"blob":
+                    if kind == b"commit":
+                        unsupported[name] = f"[file {position}]"
+                    elif kind == b"blob":
                         data.append(_git_bytes(root, "cat-file", "blob", oid.decode("ascii")))
         if any(redact(text) != text for text in (raw.decode("utf-8", errors="replace") for raw in data)):
             found[name] = f"[file {position}]"
-    return found
+    return found, unsupported
 
 
 def _patch(root: pathlib.Path, before: str, changes: _Changes,
            untracked: Mapping[str, tuple[int, bytes] | None],
            redact: Callable[[str], str] | None = None) -> bytes:
-    parts = ([_git_bytes(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", before, "--",
+    parts = ([_git_bytes(root, "diff", "--no-color", *_DIFF_OPTIONS, before, "--",
                          *(f":(literal){name}" for name in changes.tracked))] if changes.tracked else [])
     for name in changes.new:
-        parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--",
+        parts.append(_git_bytes(root, "diff", "--no-index", "--no-color", *_DIFF_OPTIONS, "--",
                                 "/dev/null", name, ok=(0, 1)))
     for name in changes.user:
         old, new = untracked[name], _file_snapshot(root, name)
@@ -609,17 +624,24 @@ def _git_word(path: str) -> str | None:
 
 
 def commit_commands(*, task: str, attempt_id: str, receipt: str, finding_ids: Sequence[str],
-                    changes: _Changes) -> tuple[list[str], list[str]]:
+                    changes: _Changes, root: pathlib.Path) -> tuple[list[str], list[str]]:
     """The exact commands that commit a Codex correction, and the new files they could not name."""
-    commands = ["git add -u"] if changes.tracked else []
+    directory = root.as_posix()
+    if not directory.isprintable():
+        raise ReviewError("OAH_FIX_UNQUOTABLE_PATH", "the leased worktree directory contains control characters, so "
+                          "commit commands were withheld; use a worktree path without control characters, inspect "
+                          "the changes there and retry oah fix")
+    # Single quotes protect both shells' metacharacters; concatenate a double-quoted apostrophe when needed.
+    command = "git -C '" + directory.replace("'", "'\"'\"'") + "'"
+    commands = [command + " add -u"] if changes.tracked else []
     words, unquoted = [], []
     for name in changes.new:
         word = _git_word(name)
         (words if word else unquoted).append(word or name)
     if words:
-        commands.append("git add -- " + " ".join(words))
+        commands.append(command + " add -- " + " ".join(words))
     named = _ids(finding_ids) if len(finding_ids) <= 4 else f"{len(finding_ids)} findings"
-    commands.append(f'git commit -m "Correct {named} of {receipt} in task {task} (oah fix {attempt_id})" '
+    commands.append(f'{command} commit -m "Correct {named} of {receipt} in task {task} (oah fix {attempt_id})" '
                     '-m "Agent-Engine: codex"')
     return commands, unquoted
 
@@ -779,18 +801,24 @@ class _Attempt:
         head = _head(root)
         changes = _changes(root, self.before, untracked)
         sensitive_paths = any(self.redact(name) != name for name in changes.files)
-        sensitive = _sensitive_files(root, self.before, changes, untracked, self.redact)
-        safe_changes = _Changes(*(tuple(name for name in group if name not in sensitive)
+        sensitive, unsupported = _scan_files(root, self.before, changes, untracked, self.redact)
+        withheld = {**sensitive, **unsupported}
+        safe_changes = _Changes(*(tuple(name for name in group if name not in withheld)
                                    for group in (changes.tracked, changes.new, changes.user)))
-        raw = b"" if sensitive_paths else _patch(root, self.before, safe_changes, untracked)
+        raw = b"" if sensitive_paths or unsupported else _patch(root, self.before, safe_changes, untracked)
         if sensitive:
             raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw file "
                     "contents contain a runtime credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
+        unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
+                              "because submodule or gitlink changes cannot be scanned as ordinary files; all commit "
+                              "guidance was withheld. Restore those changes before retrying oah fix")
+        if unsupported:
+            raw += (unsupported_reason + "\n").encode("utf-8")
         beyond = outside(self.t.lease.scope, changes.files)
-        beyond = [sensitive.get(name, name) for name in beyond]
+        beyond = [withheld.get(name, name) for name in beyond]
         # Withheld files are identified only by their positions in every retained or printed artifact.
-        changes = _Changes(*(tuple(sensitive.get(name, name) for name in group)
+        changes = _Changes(*(tuple(withheld.get(name, name) for name in group)
                               for group in (changes.tracked, changes.new, changes.user)))
         # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
         patch = ("OAH_FIX_SENSITIVE_PATH: diff withheld because a filename contains a runtime credential; "
@@ -836,11 +864,14 @@ class _Attempt:
                       "credential; their diffs and all commit guidance were withheld. Remove credentials or "
                       "restore the affected files before retrying oah fix")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
+        if unsupported:
+            outcome, reason = "failed", unsupported_reason
+            evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if outcome == "failed" and files:
             evidence += f"; it left {len(files)} changed file(s) in the worktree: {named}"
         commands, unquoted = (commit_commands(task=self.t.name, attempt_id=self.attempt_id,
                                               receipt=self.receipt.name.removesuffix(".json"),
-                                              finding_ids=self.finding_ids, changes=changes)
+                                              finding_ids=self.finding_ids, changes=changes, root=root)
                               if outcome == "applied" else ([], []))
         if any(self.redact(command) != command for command in commands):
             outcome, commands = "failed", []
