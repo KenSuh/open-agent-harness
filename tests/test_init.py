@@ -279,7 +279,7 @@ class PlanFilesTest(unittest.TestCase):
         found = self.by_path(self.plan(force=True))
         for tier in ("low", "medium", "high", "max"):
             change = found[f".claude/agents/oah-{tier}.md"]
-            self.assertEqual(change.action, "keep")
+            self.assertEqual(change.action, "blocked")
             self.assertIn("link", change.note)
         self.assertEqual(list(outside.iterdir()), [])
 

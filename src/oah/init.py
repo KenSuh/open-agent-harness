@@ -3,10 +3,11 @@
 
 Every planned file is a `FileChange`: `create` (missing), `replace` (differs, and `--force` was given),
 `update` (managed content added in place: missing `.gitignore` entries, the guide's index line), `keep`
-(exists and stays as it is) or `unchanged` (already what init would write). The wiki's `index.md` and
-`log.md` are content: they are never replaced, not even with `--force`. Nothing is written through a
-link, which could reach a file outside the project. A file that changed after the plan was shown is
-skipped with `OAH_INIT_CHANGED`. Settings are parameters, so this module never reads the config itself.
+(exists and stays as it is), `unchanged` (already what init would write) or `blocked` (a link is on its
+path: nothing is written through a link, which could reach a file outside the project). The wiki's
+`index.md` and `log.md` are content: they are never replaced, not even with `--force`. A file that changed
+after the plan was shown is skipped with `OAH_INIT_CHANGED`. A blocked file, a refused hook or a skipped
+CI starter leaves the run incomplete. Settings are parameters, so this module never reads the config.
 """
 from __future__ import annotations
 
@@ -81,7 +82,7 @@ class InitError(Exception):
 @dataclasses.dataclass(frozen=True)
 class FileChange:
     path: str  # repository-relative, POSIX
-    action: str  # create | replace | update | keep | unchanged
+    action: str  # create | replace | update | keep | unchanged | blocked
     group: str  # config | templates | wiki | agents | graph | gitignore
     data: bytes | None = None  # the bytes to write, for create, replace and update
     before: bytes | None = None  # the bytes found while planning
@@ -336,7 +337,7 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
         before = read_bytes(root / path)
         link = _linked(root, path)
         if link is not None:
-            change = FileChange(path, "keep", group, None, before,
+            change = FileChange(path, "blocked", group, None, before,
                                 f"{link} is a link; oah never writes through links, which could reach files outside "
                                 "the project")
         elif before is None:
@@ -376,7 +377,7 @@ def _plan_wiki_content(root: pathlib.Path, path: str, fresh: bytes, guide_missin
     before = read_bytes(root / path)
     link = _linked(root, path)
     if link is not None:
-        return FileChange(path, "keep", "wiki", None, before, f"{link} is a link; oah never writes through links")
+        return FileChange(path, "blocked", "wiki", None, before, f"{link} is a link; oah never writes through links")
     if before is None:
         return FileChange(path, "create", "wiki", fresh)
     if before == fresh:
@@ -401,7 +402,8 @@ def _plan_wiki_content(root: pathlib.Path, path: str, fresh: bytes, guide_missin
 def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
     before = read_bytes(root / GITIGNORE)
     if _is_link(root / GITIGNORE):
-        return FileChange(GITIGNORE, "keep", "gitignore", None, before, "it is a link; oah never writes through links")
+        return FileChange(GITIGNORE, "blocked", "gitignore", None, before,
+                          "it is a link; oah never writes through links")
     try:
         data = add_gitignore_entries(before, unlazy_copy=unlazy_copy)
     except UnicodeDecodeError:
@@ -1057,12 +1059,19 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
         out(f"  {VERBS[change.action]} {change.path}")
     for name in synced.changed:
         out(f"  updated {name} (the oah rules block)" if name == "AGENTS.md" else f"  updated {name} (@AGENTS.md)")
+    blocked = [change for change in plan.files if change.action == "blocked"]
+    if blocked and not (written or problems or synced.changed):
+        out("")
+        out("Files:")
+    for change in blocked:
+        out(f"  not written: {change.path}: {change.note}")
     for problem in problems:
         out(f"  {problem}")
     outcome.changed += len(written) + len(synced.changed)
-    if problems:
+    if problems or blocked:
         outcome.pending.append("files")
     installed, problems = install_hooks(root, list(plan.hooks), force=force)
+    problems += [f"hook {step.kind} was not installed: {step.note}" for step in plan.hooks if step.action == "refused"]
     if installed or problems:
         out("")
         out("Hooks:")
@@ -1073,10 +1082,10 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
     outcome.changed += len(installed)
     if problems:
         outcome.pending.append("hooks")
-    if plan.ci is not None and plan.ci.action in ("create", "replace"):
+    if plan.ci is not None and plan.ci.action in ("create", "replace", "skipped"):
         out("")
         out("CI starter:")
-        problem = write_ci(plan.ci)
+        problem = write_ci(plan.ci) if plan.ci.action != "skipped" else f"not written: {plan.ci.note}"
         out(f"  {problem}" if problem else f"  wrote {ci.WORKFLOW_PATH}")
         if problem:
             outcome.pending.append("ci")
