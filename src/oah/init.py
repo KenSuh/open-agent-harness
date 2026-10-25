@@ -421,8 +421,13 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
     """Reuse unlazy's private creation/permission checks without exposing its path/SID diagnostics."""
     try:
         if create:
+            unlazy._verify_state_ancestry(path.parent)
             unlazy._private_directory(path)
-        unlazy._verify_snapshot_permissions(path)
+        # Shared state parents contain landed modules' files and retained Git checkouts. Prove this
+        # directory's ownership/ACLs and its ancestry without imposing snapshot modes on those siblings.
+        unlazy._verify_state_ancestry(path)
+        if os.name == "nt" or create:
+            unlazy._verify_snapshot_permissions(path)
         if os.name == "nt":
             # The landed verifier rejects foreign writes; private backups must also reject foreign reads.
             descriptor = unlazy._windows_security_descriptor(path)
@@ -497,16 +502,21 @@ def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, 
             yield None
         return
     handles = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    path = root
     try:
         for part in pathlib.PurePosixPath(relative).parts[:-1]:
+            path = path / part
             if create_parents:
                 try:
                     os.mkdir(part, 0o700 if private else 0o777, dir_fd=handles[-1])
                 except FileExistsError:
                     pass
             handles.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=handles[-1]))
-            if private and part != "oah" and stat.S_IMODE(os.fstat(handles[-1]).st_mode) != 0o700:
-                raise OSError("non-private backup directory")
+            if private:
+                _private_state_directory(path)
+                actual, pinned = path.lstat(), os.fstat(handles[-1])
+                if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                    raise OSError("private state directory changed")
         yield handles[-1]
     finally:
         for handle in reversed(handles):
@@ -711,6 +721,8 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     _private_state_directory(path, create=True)
                 else:
                     os.mkdir(name, 0o700, dir_fd=folder)
+                    if private:
+                        _private_state_directory(path)
                 if folder is not None:
                     os.fsync(folder)
                 return True
@@ -875,11 +887,10 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
             write(change)
     wiki_changes = [change for change in pending if change.group == "wiki"]
     if wiki_changes:
-        if os.name == "nt":
-            # The landed wiki lock creates state parents. Establish the shared state root privately
-            # first, so later backup/staging checks never inherit a public directory created by init.
-            with _parents(_backup_root(root), "oah/.init-state", private=True):
-                pass
+        # The landed wiki lock creates state parents. Establish the shared state root privately
+        # first, so later backup/staging checks never inherit a public directory created by init.
+        with _parents(_backup_root(root), "oah/.init-state", private=True):
+            pass
         with wiki.session():
             for change in wiki_changes:
                 write(change)
@@ -1286,30 +1297,72 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
     """Adapt the landed pin check's project reads; external tool installations keep their landed check."""
     if not folder.is_relative_to(root):
         return unlazy.verify_pin(folder, pin)
-    problems = []
-    for relative, digest in pin.files.items():
-        data = _read_user(root, (folder.relative_to(root) / relative).as_posix())
-        if data is None or hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() != digest:
-            problems.append("a script is missing or differs from the pin")
-    top = run_git(folder, "rev-parse", "--show-toplevel")
-    head = run_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
-    if (top.returncode != 0 or not top.stdout.strip()
-            or pathlib.Path(top.stdout.strip()).resolve() != folder.resolve()
-            or head.returncode != 0 or head.stdout.strip() != pin.commit):
-        problems.append("the checkout or commit does not match the pin")
-    return problems
+    relative_folder = folder.relative_to(root)
+    try:
+        with _parents(root, (relative_folder / ".init-pin").as_posix(), create_parents=False) as held:
+            original = folder.lstat()
+
+            def check_directory() -> None:
+                actual = folder.lstat()
+                pinned = os.fstat(held) if held is not None else original
+                if (_linked(root, relative_folder.as_posix()) is not None
+                        or (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino)):
+                    raise OSError("project installation changed")
+
+            check_directory()
+            problems = []
+            for relative, digest in pin.files.items():
+                data = _read_user(root, (relative_folder / relative).as_posix())
+                if data is None or hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() != digest:
+                    problems.append("a script is missing or differs from the pin")
+            check_directory()
+            top = run_git(folder, "rev-parse", "--show-toplevel")
+            head = run_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+            check_directory()
+            if (top.returncode != 0 or not top.stdout.strip()
+                    or pathlib.Path(top.stdout.strip()).absolute() != folder.absolute()
+                    or head.returncode != 0 or head.stdout.strip() != pin.commit):
+                problems.append("the checkout or commit does not match the pin")
+            return problems
+    except OSError:
+        raise InitError("OAH_INIT_PATH_UNSAFE", "a project unlazy path is linked, changed or unreadable. "
+                        "Remove links and junctions and check permissions, then run oah init again",
+                        EXIT_ENVIRONMENT) from None
+
+
+def _find_unlazy_dir(root: pathlib.Path, env: Mapping[str, str],
+                     home: pathlib.Path) -> tuple[pathlib.Path | None, str]:
+    """Keep discovery's lexical origin: project probes use the same pinned reads as verification."""
+    override = env.get(unlazy.ENV_VAR)
+    candidates = ([pathlib.Path(override)] if override else
+                  [base / relative for base in (root, home)
+                   for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy")])
+    for candidate in candidates:
+        folder = pathlib.Path(os.path.abspath(candidate))
+        if folder.is_relative_to(root):
+            # Never resolve a project path into an external installation, even during a dry run.
+            relative = (folder.relative_to(root) / "scripts/gate-check.mjs").as_posix()
+            present = _read_user(root, relative) is not None
+        else:
+            present = unlazy._is_unlazy(folder)
+            if present:
+                folder = folder.resolve()
+        if present:
+            return folder, f"from {unlazy.ENV_VAR}" if override else "found"
+    return None, (f"{unlazy.ENV_VAR} has no scripts/gate-check.mjs" if override else "unlazy not found")
 
 
 def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Path, pin: unlazy.Pin,
                 force: bool) -> UnlazyStep:
     """Whether the pinned unlazy (5.8) is in place, and what installing the project copy would do."""
-    root = pathlib.Path(root)
+    root = pathlib.Path(os.path.abspath(root))
     target = root / UNLAZY_PROJECT
     for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
         if _linked(root, relative) is not None:
-            return UnlazyStep("blocked", note="a project unlazy path is a link; remove the link, then run "
+            return UnlazyStep("blocked", note="OAH_INIT_PATH_UNSAFE: a project unlazy path is a link; remove "
+                                              "the link, then run "
                                               "oah init --with-unlazy again")
-    folder, reason = unlazy.find_unlazy_dir(root, env, home)
+    folder, reason = _find_unlazy_dir(root, env, home)
     override = unlazy.ENV_VAR if env.get(unlazy.ENV_VAR) else None
     short = pin.commit[:12]
     if folder is None:
@@ -1449,6 +1502,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                 _private_state_directory(staging, create=True)
             else:
                 os.mkdir(staging.name, 0o700, dir_fd=parent)
+                _private_state_directory(staging)
             with _pinned_directory(staging, allow_swap=True) as (_handle, identity):
                 try:
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),

@@ -776,6 +776,54 @@ class HookStepTest(unittest.TestCase):
         self.assertIn("rerun", str(caught.exception))
         self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o755)
 
+    @unittest.skipIf(os.name == "nt", "POSIX ancestry permissions")
+    def test_backup_refuses_writable_state_ancestor(self):
+        common = repo_info(self.repo).common_dir
+        common.chmod(0o777)
+        self.addCleanup(common.chmod, 0o755)
+        self.assertFalse(init._publish(common, "oah/backups/run/hook", b"private\r\n", private=True))
+        self.assertFalse((common / "oah/backups/run/hook").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS state ACLs")
+    def test_macos_backup_refuses_existing_acl_grants(self):
+        for position in ("oah", "backups", "run"):
+            with self.subTest(position=position):
+                repo = make_git_repo(self)
+                common = repo_info(repo).common_dir
+                destination = common / "oah/backups/run/hook"
+                unlazy._private_makedirs(destination.parent)
+                directory = {"oah": common / "oah", "backups": common / "oah/backups",
+                             "run": destination.parent}[position]
+                subprocess.run(["/bin/chmod", "+a", "everyone allow list,search,readattr,readsecurity",
+                                str(directory)], check=True, capture_output=True)
+                acl = subprocess.run(["/bin/ls", "-lde", str(directory)], check=True, capture_output=True).stdout
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+                self.assertFalse(init._publish(common, "oah/backups/run/hook", b"private\r\n", private=True))
+                self.assertFalse(destination.exists())
+                self.assertEqual(subprocess.run(["/bin/ls", "-lde", str(directory)], check=True,
+                                                capture_output=True).stdout, acl)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS inherited ACL refusal")
+    def test_macos_new_private_state_refuses_inherited_access(self):
+        parent = make_tmp_dir(self)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow list,search,file_inherit,directory_inherit",
+                        str(parent)], check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["/bin/chmod", "-RN", str(parent)], check=True, capture_output=True)
+        folder = parent / "state"
+        with self.assertRaises(init.InitError) as caught:
+            init._private_state_directory(folder, create=True)
+        self.assertEqual(caught.exception.code, "OAH_INIT_STATE_UNSAFE")
+        self.assertNotIn(str(parent), str(caught.exception))
+        self.assertFalse(folder.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS inherited backup ACL refusal")
+    def test_macos_backup_refuses_inherited_access_before_writing(self):
+        common = repo_info(self.repo).common_dir
+        subprocess.run(["/bin/chmod", "+a", "everyone allow list,search,file_inherit,directory_inherit",
+                        str(common)], check=True, capture_output=True)
+        self.assertFalse(init._publish(common, "oah/backups/run/hook", b"private\r\n", private=True))
+        self.assertFalse((common / "oah/backups/run/hook").exists())
+
     @unittest.skipUnless(os.name == "nt", "native Windows protected owner-only DACL creation")
     def test_windows_private_directories_do_not_inherit_public_access(self):
         common = repo_info(self.repo).common_dir
@@ -1247,10 +1295,107 @@ class UnlazyStepTest(unittest.TestCase):
                 directory_alias(outside, parent / "skills")
                 step = self.plan(force=True)
                 self.assertEqual(step.action, "blocked")
+                self.assertTrue(step.note.startswith("OAH_INIT_PATH_UNSAFE:"), step.note)
                 problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
                 self.assertTrue(problem)
                 self.assertTrue((outside / "unlazy/scripts/gate-check.mjs").is_file())
                 self.assertFalse((outside / "unlazy.oah.bak").exists())
+
+    def test_discovery_never_reclassifies_redirected_project_candidates(self):
+        for relative in (init.UNLAZY_PROJECT, ".claude/skills/unlazy"):
+            for component in ("copy", "ancestor"):
+                with self.subTest(relative=relative, component=component):
+                    self.repo = make_git_repo(self)
+                    candidate = self.repo / relative
+                    candidate.parent.mkdir(parents=True)
+                    linked = init._linked
+                    redirected = False
+
+                    def redirect(root, name):
+                        nonlocal redirected
+                        result = linked(root, name)
+                        if not redirected and name == ".claude/skills/unlazy":
+                            redirected = True
+                            if component == "copy":
+                                directory_alias(self.source, candidate)
+                            else:
+                                candidate.parent.rename(candidate.parent.with_name("saved"))
+                                outside = make_tmp_dir(self)
+                                directory_alias(self.source, outside / "unlazy")
+                                directory_alias(outside, candidate.parent)
+                        return result
+
+                    with mock.patch.object(init, "_linked", side_effect=redirect):
+                        with self.assertRaises(init.InitError) as caught:
+                            self.plan()
+                    self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+
+    def test_project_redirection_after_pinned_script_reads_still_refuses(self):
+        git("clone", "--quiet", str(self.source), str(self.target))
+        read = init._read_user
+        redirected = False
+        last = f"{init.UNLAZY_PROJECT}/{list(self.pin.files)[-1]}"
+
+        def redirect(root, relative):
+            nonlocal redirected
+            data = read(root, relative)
+            if not redirected and relative == last:
+                redirected = True
+                self.target.rename(self.target.with_name("saved"))
+                directory_alias(self.source, self.target)
+            return data
+
+        with mock.patch.object(init, "_read_user", side_effect=redirect):
+            with self.assertRaises(init.InitError) as caught:
+                self.plan()
+        self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+
+    def test_noncanonical_root_keeps_project_discovery_pinned(self):
+        (self.repo / "child").mkdir()
+        root = self.repo / "child" / ".."
+        self.target.parent.mkdir(parents=True)
+        linked = init._linked
+        redirected = False
+
+        def redirect(boundary, relative):
+            nonlocal redirected
+            result = linked(boundary, relative)
+            if not redirected and relative == ".claude/skills/unlazy":
+                redirected = True
+                directory_alias(self.source, self.target)
+            return result
+
+        with mock.patch.object(init, "_linked", side_effect=redirect):
+            with self.assertRaises(init.InitError) as caught:
+                init.plan_unlazy(root, env={}, home=self.home, pin=self.pin, force=False)
+        self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+
+    @unittest.skipIf(os.name == "nt", "POSIX ancestry permissions; native Windows cases below")
+    def test_staging_refuses_writable_state_ancestor_before_commands(self):
+        common = repo_info(self.repo).common_dir
+        common.chmod(0o777)
+        self.addCleanup(common.chmod, 0o755)
+        with mock.patch.object(init, "run_command") as command:
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+        command.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS staging ACL refusal")
+    def test_macos_staging_refuses_existing_acl_before_commands(self):
+        staging = repo_info(self.repo).common_dir / "oah/staging"
+        unlazy._private_makedirs(staging)
+        subprocess.run(["/bin/chmod", "+a", "everyone allow list,search,readattr,readsecurity",
+                        str(staging)], check=True, capture_output=True)
+        acl = subprocess.run(["/bin/ls", "-lde", str(staging)], check=True, capture_output=True).stdout
+        with mock.patch.object(init, "run_command") as command:
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+        command.assert_not_called()
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(staging.iterdir()), [])
+        self.assertEqual(subprocess.run(["/bin/ls", "-lde", str(staging)], check=True,
+                                        capture_output=True).stdout, acl)
 
     def test_install_revalidates_late_linked_parent(self):
         step = self.plan()
