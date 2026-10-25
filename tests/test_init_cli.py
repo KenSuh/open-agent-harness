@@ -24,6 +24,23 @@ ALL_TOOLS = ("git", "uv", "node", "npm", "npx", "claude", "codex", "graphify", "
 STATUS_MARKER = "STATUS-OUTPUT-MARKER-7f3a"  # what a sign-in status command printed; init must never show it
 
 
+class WikiStateBoundaryTest(unittest.TestCase):
+    def test_in_worktree_state_override_refuses_during_planning(self):
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                repo = committed_repo(self)
+                tools = FakeTools()
+                machine = make_machine(self, tools, env={"OAH_STATE_DIR": str(repo / "unplanned-state")})
+                before = snapshot(repo)
+                code, out, err = run_init(repo, machine, *flags(), *(["--dry-run"] if dry_run else []))
+                self.assertEqual(code, init.EXIT_ENVIRONMENT)
+                self.assertIn("OAH_INIT_STATE_UNSAFE", err)
+                self.assertEqual(snapshot(repo), before)
+                self.assertEqual(tools.installs, [])
+                self.assertEqual(tools.status_calls, [])
+                self.assertNotIn("End of plan.", out)
+
+
 class Replies:
     """A scripted `ask`: the next reply (None once they run out, like end of input), recording each prompt."""
 

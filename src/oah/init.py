@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import difflib
+import errno
 import fnmatch
 import hashlib
 import importlib
@@ -26,18 +27,19 @@ import shutil
 import stat
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Callable, Mapping, NamedTuple
 
 from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
 from oah.atomic import StateCorrupt, StorageError
 from oah.config import Config, ConfigError, parse_config
+from oah.engines import proc
 from oah.engines.effort import EngineError
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.impact import mapstore
 from oah.impact.errors import ImpactError
 from oah.journal import PendingTransaction
-from oah.lockfile import LockTimeout
+from oah.lockfile import LockTimeout, StateLock, _try_lock
 from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_dir
 from oah.setup import companions, guide
 from oah.setup.tools import Tool, catalog, display, os_name_for
@@ -65,6 +67,9 @@ TIER_WORK = {
     "max": "critical-risk work and the hardest reasoning",
 }
 NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # a clone never stops to ask
+UNLAZY_GIT_OPTIONS = ("-c", "user.name=oah", "-c", "user.email=oah@invalid",
+                      "-c", "core.logAllRefUpdates=false", "-c", "init.templateDir=",
+                      "-c", "core.hooksPath=.git/oah-no-hooks")
 CLONE_TIMEOUT = 600.0
 RENAME_RETRY_SECONDS = 2.0
 CLAUDE_SETTINGS = ".claude/settings.local.json"
@@ -448,7 +453,8 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
 
 
 @contextmanager
-def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False):
+def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
+                     private_from: pathlib.Path | None = None):
     """Pin non-reparse parents, denying write/delete sharing until publication finishes."""
     import ctypes
     from ctypes import wintypes
@@ -468,9 +474,10 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
     parent = (root / relative).absolute().parent
     try:
         for path in (*reversed(parent.parents), parent):
+            restricted = private or (private_from is not None and path.is_relative_to(private_from))
             # Ancestors of root exist; only project directories may be created.
             if create_parents and path.is_relative_to(root):
-                if private:
+                if restricted:
                     if not path.exists():
                         unlazy._private_directory(path)
                 else:
@@ -484,7 +491,7 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
                 raise ctypes.WinError(ctypes.get_last_error())
             if attributes[0] & 0x400 or not attributes[0] & 0x10:
                 raise OSError("linked or non-directory parent")
-            if private and path != root and path.is_relative_to(root):
+            if restricted and path != root and path.is_relative_to(root):
                 _private_state_directory(path)
         yield
     finally:
@@ -493,12 +500,14 @@ def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool 
 
 
 @contextmanager
-def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False):
+def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
+             private_from: pathlib.Path | None = None):
     """Keep every parent pinned until the caller has published and cleaned up."""
     if _linked(root, relative) is not None:
         raise OSError("linked publication path")
     if os.name == "nt":
-        with _windows_parents(root, relative, create_parents=create_parents, private=private):
+        with _windows_parents(root, relative, create_parents=create_parents, private=private,
+                              private_from=private_from):
             yield None
         return
     handles = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
@@ -506,13 +515,14 @@ def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, 
     try:
         for part in pathlib.PurePosixPath(relative).parts[:-1]:
             path = path / part
+            restricted = private or (private_from is not None and path.is_relative_to(private_from))
             if create_parents:
                 try:
-                    os.mkdir(part, 0o700 if private else 0o777, dir_fd=handles[-1])
+                    os.mkdir(part, 0o700 if restricted else 0o777, dir_fd=handles[-1])
                 except FileExistsError:
                     pass
             handles.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=handles[-1]))
-            if private:
+            if restricted:
                 _private_state_directory(path)
                 actual, pinned = path.lstat(), os.fstat(handles[-1])
                 if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
@@ -544,7 +554,7 @@ def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | N
         return handle.read()
 
 
-def _windows_read_fd(path: pathlib.Path) -> int:
+def _windows_read_fd(path: pathlib.Path, *, writable: bool = False) -> int:
     """Open the final component itself, rejecting reparse points before any byte is read."""
     import ctypes
     import msvcrt
@@ -561,7 +571,8 @@ def _windows_read_fd(path: pathlib.Path) -> int:
     close = kernel.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    handle = create(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
+    handle = create(str(path), 0xC0000000 if writable else 0x80000000, 3 if writable else 1,
+                    None, 3, 0x00200000, None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -570,7 +581,7 @@ def _windows_read_fd(path: pathlib.Path) -> int:
             raise ctypes.WinError(ctypes.get_last_error())
         if attributes[0] & (0x400 | 0x10):
             raise OSError("linked or non-file read target")
-        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        fd = msvcrt.open_osfhandle(handle, (os.O_RDWR if writable else os.O_RDONLY) | os.O_BINARY)
     except BaseException:
         close(handle)
         raise
@@ -702,6 +713,132 @@ def _windows_move_directory(handle: int, target: pathlib.Path) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _macos_file_acl(fd: int, value: bytes | None = None) -> bytes:
+    """Read/copy the effective extended ACL through a held file, never its pathname."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_get_fd.argtypes, libc.acl_get_fd.restype = (ctypes.c_int,), ctypes.c_void_p
+    libc.acl_from_text.argtypes, libc.acl_from_text.restype = (ctypes.c_char_p,), ctypes.c_void_p
+    libc.acl_init.argtypes, libc.acl_init.restype = (ctypes.c_int,), ctypes.c_void_p
+    libc.acl_to_text.argtypes, libc.acl_to_text.restype = (ctypes.c_void_p, ctypes.c_void_p), ctypes.c_void_p
+    libc.acl_set_fd.argtypes = (ctypes.c_int, ctypes.c_void_p)
+    libc.acl_free.argtypes = (ctypes.c_void_p,)
+    acl = (libc.acl_get_fd(fd) if value is None else
+           libc.acl_from_text(value) if value else libc.acl_init(0))
+    if not acl:
+        if value is None and ctypes.get_errno() == errno.ENOENT:
+            return b""
+        raise OSError("cannot read file ACL")
+    try:
+        if value is not None and libc.acl_set_fd(fd, acl):
+            raise OSError("cannot preserve file ACL")
+        text = libc.acl_to_text(acl, None)
+        if not text:
+            raise OSError("cannot verify file ACL")
+        try:
+            return ctypes.string_at(text)
+        finally:
+            libc.acl_free(text)
+    finally:
+        libc.acl_free(acl)
+
+
+def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool = False,
+                           fd: int | None = None) -> int | None:
+    """Create an empty owner-only staging file, or freeze the target's effective DACL on it."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p)
+    convert.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
+    security = ctypes.c_void_p()
+    if not convert(descriptor, 1, ctypes.byref(security), None):
+        raise OSError("cannot prepare file security")
+    try:
+        if not create:
+            setter = advapi.SetKernelObjectSecurity
+            setter.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p)
+            setter.restype = wintypes.BOOL
+            # Protect the copied effective ACEs from the destination parent's inherited grants.
+            if fd is None or not setter(msvcrt.get_osfhandle(fd), 0x80000004, security):
+                raise OSError("cannot preserve file security")
+            return None
+
+        class Attributes(ctypes.Structure):
+            _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
+
+        attributes = Attributes(ctypes.sizeof(Attributes), security, False)
+        opener = kernel.CreateFileW
+        opener.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Attributes),
+                           wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        opener.restype = wintypes.HANDLE
+        handle = opener(str(path), 0xC0040000, 1, ctypes.byref(attributes), 1, 0x00200000, None)
+        if handle == wintypes.HANDLE(-1).value:
+            raise OSError("cannot create private staging file")
+        try:
+            return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+        except BaseException:
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel.CloseHandle(handle)
+            raise
+    finally:
+        kernel.LocalFree(security)
+
+
+def _private_file(temp: pathlib.Path, folder: int | None) -> int:
+    """Establish and verify owner-only permissions before any preserved bytes reach staging."""
+    if os.name == "nt":
+        sid = unlazy._windows_user_sid()
+        expected = f"O:{sid}D:P(A;;FA;;;{sid})"
+        fd = _windows_file_security(temp, expected, create=True)
+    else:
+        fd = os.open(temp.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+    try:
+        if os.name == "nt":
+            actual = unlazy._windows_security_descriptor(temp)
+            unlazy._verify_windows_dacl(actual, sid, snapshot=True, directory=False, protected=True)
+            if actual != expected:
+                raise OSError("staging security differs from owner-only DACL")
+        elif sys.platform == "darwin":
+            if unlazy._macos_mount_flags(temp) & 0x00200000:  # MNT_IGNORE_OWNERSHIP
+                raise OSError("staging volume does not enforce ownership")
+            unlazy._strip_snapshot_acls(temp)
+            if _macos_file_acl(fd).strip() not in (b"", b"!#acl 1"):
+                raise OSError("staging ACL is not empty")
+        if os.name != "nt" and stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            raise OSError("staging mode is not owner-only")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _file_restrictions(root: pathlib.Path, relative: str, folder: int | None) -> tuple[int, bytes | str] | None:
+    path = root / relative
+    try:
+        fd = (_windows_read_fd(path) if os.name == "nt" else
+              os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("non-regular replacement")
+        if os.name != "nt" and info.st_uid != os.getuid():
+            raise OSError("replacement owner differs")
+        acl = (unlazy._windows_security_descriptor(path) if os.name == "nt" else
+               _macos_file_acl(fd) if sys.platform == "darwin" else b"")
+        return stat.S_IMODE(info.st_mode), acl
+    finally:
+        os.close(fd)
+
+
 def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: bytes | None = None, *,
              executable: bool = False, source: str | None = None, source_digest: str = "",
              private: bool = False, source_root: pathlib.Path | None = None,
@@ -729,20 +866,32 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
             temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
             temporary = temp if folder is None else temp.name
             try:
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
-                             0o600, dir_fd=folder)
+                restrictions = _file_restrictions(root, relative, folder)
+                fd = _private_file(temp, folder)
                 with os.fdopen(fd, "wb") as handle:
                     handle.write(data)
                     handle.flush()
+                    os.fsync(handle.fileno())
+                    if os.name != "nt":
+                        mode = (restrictions[0] if restrictions is not None
+                                else 0o700 if executable else 0o600)
+                        os.fchmod(handle.fileno(), mode)
+                        if sys.platform == "darwin" and restrictions is not None:
+                            _macos_file_acl(handle.fileno(), restrictions[1])
+                            if _macos_file_acl(handle.fileno()) != restrictions[1]:
+                                raise OSError("replacement ACL changed")
+                    elif restrictions is not None:
+                        _windows_file_security(temp, restrictions[1], fd=handle.fileno())
+                        expected = restrictions[1].replace("D:", "D:P", 1).replace("D:PP", "D:P", 1)
+                        if unlazy._windows_security_descriptor(temp) != expected:
+                            raise OSError("replacement DACL changed")
                     os.fsync(handle.fileno())
                 current = _current(root, relative, folder)
                 if ((current is None) != (before is None) or (current is not None and
                         hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
                     return False
-                if os.name != "nt":
-                    mode = (stat.S_IMODE(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
-                            if before is not None else 0o700 if executable else 0o600)
-                    os.chmod(temporary, mode, dir_fd=folder, follow_symlinks=False)
+                if _file_restrictions(root, relative, folder) != restrictions:
+                    return False
                 if _current(root, relative, folder) != current:
                     return False
                 if before is not None:
@@ -759,7 +908,7 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     os.unlink(temporary, dir_fd=folder)
                 except FileNotFoundError:
                     pass
-    except (OSError, InitError):
+    except (OSError, InitError, unlazy.UnlazyError):
         return False
 
 
@@ -867,6 +1016,88 @@ def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
     return FileChange(GITIGNORE, "update", "gitignore", data, before, f"append {added} lines so {what}")
 
 
+def _wiki_state_path(root: pathlib.Path, state: pathlib.Path) -> pathlib.Path:
+    """State is a planned destination, outside committable files and without redirected components."""
+    try:
+        root = pathlib.Path(root).absolute()
+        if ".." in state.parts:
+            raise OSError("traversing state path")
+        state = state.absolute()
+        common = _backup_root(root)
+        if state.is_relative_to(root) and not state.is_relative_to(common):
+            raise OSError("committable wiki state")
+        anchor = pathlib.Path(state.anchor)
+        relative = state.relative_to(anchor).as_posix()
+        if _relative(relative) != relative:
+            raise OSError("noncanonical wiki state path")
+        if any(_linked(anchor, relative + suffix) is not None
+               for suffix in ("", "/.lock", "/rollover-journal.json")):
+            raise OSError("redirected wiki state")
+        unlazy._verify_state_ancestry(state)
+        return state
+    except (OSError, unlazy.UnlazyError, InitError, ValueError):
+        raise InitError("OAH_INIT_STATE_UNSAFE", "wiki state is linked, inside the worktree or cannot be "
+                        "accessed safely. Set OAH_STATE_DIR to a private directory outside the worktree, "
+                        "remove state links and check permissions, then rerun oah init", EXIT_ENVIRONMENT) from None
+
+
+@contextmanager
+def _wiki_session(root: pathlib.Path, wiki):
+    """Adapt Wiki.session's lock/recovery protocol to pinned directory and file descriptors."""
+    state = _wiki_state_path(root, wiki.state)
+    anchor = pathlib.Path(state.anchor)
+    private_from = state.parent
+    while not private_from.parent.exists():
+        private_from = private_from.parent
+    try:
+        with _parents(anchor, (state.relative_to(anchor) / ".init-state").as_posix(),
+                      private_from=private_from) as folder:
+            # Lock creation also goes through the one publication boundary; never replace a lock.
+            if _current(state, ".lock", folder) is None and not _publish(state, ".lock", b""):
+                raise OSError("wiki lock changed")
+            fd = (_windows_read_fd(state / ".lock", writable=True) if os.name == "nt" else
+                  os.open(".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+            lock = StateLock(state / ".lock", timeout=wiki.lock_timeout)
+            lock._fd = fd
+            held = os.fstat(fd)
+
+            def check() -> None:
+                if _linked(anchor, (state.relative_to(anchor) / ".lock").as_posix()) is not None:
+                    raise OSError("wiki lock redirected")
+                actual = (state / ".lock").lstat()
+                if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+                    raise OSError("wiki lock replaced")
+                if folder is not None:
+                    actual, pinned = state.lstat(), os.fstat(folder)
+                    if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                        raise OSError("wiki state replaced")
+
+            acquired = False
+            try:
+                check()
+                deadline = time.monotonic() + lock.timeout
+                while not _try_lock(fd):
+                    if time.monotonic() >= deadline:
+                        raise WikiError("OAH_WIKI_BUSY", "another oah wiki command holds the wiki lock. "
+                                        "Wait for it to finish, then retry.")
+                    time.sleep(lock.poll)
+                acquired = True
+                check()
+                if _current(state, "rollover-journal.json", folder) is not None:
+                    raise WikiError("OAH_WIKI_RECOVERY_PENDING", "an interrupted wiki rollover needs recovery. "
+                                    "Run `oah wiki recover`, then retry oah init.", EXIT_ENVIRONMENT)
+                yield check
+            finally:
+                if acquired:
+                    lock.__exit__(None, None, None)
+                else:
+                    os.close(fd)
+    except (OSError, unlazy.UnlazyError):
+        raise InitError("OAH_INIT_STATE_UNSAFE", "wiki state changed or cannot be accessed safely. "
+                        "Remove state links, check private state permissions, then rerun oah init",
+                        EXIT_ENVIRONMENT) from None
+
+
 def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple[list[FileChange], list[str]]:
     """Write the planned creates, replacements and updates; (written, problems). Wiki files are written
     under the wiki lock. A path that changed since the plan is skipped with OAH_INIT_CHANGED."""
@@ -882,17 +1113,13 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
         written.append(change)
 
     pending = [change for change in changes if change.action in WRITES]
-    for change in pending:
-        if change.group != "wiki":
-            write(change)
     wiki_changes = [change for change in pending if change.group == "wiki"]
-    if wiki_changes:
-        # The landed wiki lock creates state parents. Establish the shared state root privately
-        # first, so later backup/staging checks never inherit a public directory created by init.
-        with _parents(_backup_root(root), "oah/.init-state", private=True):
-            pass
-        with wiki.session():
-            for change in wiki_changes:
+    with _wiki_session(root, wiki) if wiki_changes else nullcontext(lambda: None) as check:
+        for group in (False, True):
+            for change in pending:
+                if (change.group == "wiki") != group:
+                    continue
+                check()
                 write(change)
     return written, problems
 
@@ -1296,7 +1523,20 @@ def _unlazy_exists(relative: str) -> str:
 def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin) -> list[str]:
     """Adapt the landed pin check's project reads; external tool installations keep their landed check."""
     if not folder.is_relative_to(root):
-        return unlazy.verify_pin(folder, pin)
+        problems = []
+        for relative, digest in pin.files.items():
+            try:
+                if unlazy.file_digest(folder / relative) != digest:
+                    problems.append("a script differs from the pin")
+            except OSError:
+                problems.append("a script is missing")
+        top = _unlazy_git(folder, "rev-parse", "--show-toplevel")
+        head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+        if (top.returncode != 0 or not top.stdout.strip()
+                or pathlib.Path(top.stdout.strip()).resolve() != folder.resolve()
+                or head.returncode != 0 or head.stdout.strip() != pin.commit):
+            problems.append("the checkout or commit does not match the pin")
+        return problems
     relative_folder = folder.relative_to(root)
     try:
         with _parents(root, (relative_folder / ".init-pin").as_posix(), create_parents=False) as held:
@@ -1316,8 +1556,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
                 if data is None or hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() != digest:
                     problems.append("a script is missing or differs from the pin")
             check_directory()
-            top = run_git(folder, "rev-parse", "--show-toplevel")
-            head = run_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
+            top = _unlazy_git(folder, "rev-parse", "--show-toplevel")
+            head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD")
             check_directory()
             if (top.returncode != 0 or not top.stdout.strip()
                     or pathlib.Path(top.stdout.strip()).absolute() != folder.absolute()
@@ -1393,7 +1633,17 @@ def unlazy_commands(target: pathlib.Path, *, source: str, pin: unlazy.Pin) -> li
     if commands[0][:4] != ["git", "clone", "--quiet", unlazy.UPSTREAM_GIT]:
         raise RuntimeError("unlazy.install_commands no longer starts with the clone oah.init expects; update it")
     commands[0][3] = source
-    return [[*git_argv(), *argv[1:]] for argv in commands]
+    return [[*git_argv(), *UNLAZY_GIT_OPTIONS, *argv[1:]] for argv in commands]
+
+
+def _unlazy_environment() -> dict[str, str]:
+    return {**{key: value for key, value in os.environ.items()
+               if not key.upper().startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))}, **NETWORK_ENV}
+
+
+def _unlazy_git(folder: pathlib.Path, *args: str) -> proc.RunResult:
+    return proc.run_command([*git_argv(), *UNLAZY_GIT_OPTIONS, "-C", str(folder), *args],
+                            timeout=30.0, env=_unlazy_environment())
 
 
 def _rename(source: pathlib.Path, target: pathlib.Path) -> None:
@@ -1438,6 +1688,8 @@ def _staged_files(path: pathlib.Path, handle: int) -> tuple[dict[str, tuple[byte
     def visit(folder: pathlib.Path, relative: str, descriptor: int) -> None:
         names = sorted(os.listdir(descriptor) if os.name != "nt" else os.listdir(folder))
         for name in names:
+            if not relative and name == ".git":
+                continue  # No captured Git metadata is approved for publication.
             child = _relative(f"{relative}/{name}" if relative else name)
             if os.name == "nt":
                 # The caller holds a non-reparse source handle denying write/delete sharing.
@@ -1507,7 +1759,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                 try:
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
                                                 strict=True):
-                        argv[-1 if operation == "clone" else len(git_argv()) + 1] = "."
+                        argv[-1 if operation == "clone" else len(git_argv()) + len(UNLAZY_GIT_OPTIONS) + 1] = "."
                         _require_staging(staging, identity)
                         # The child reopens without following links, checks the held identity and fchdirs on
                         # POSIX. Windows also denies replacement throughout the external command.
@@ -1515,7 +1767,7 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                    "from oah.init import _staging_command; "
                                    "sys.exit(_staging_command(sys.argv[2], sys.argv[3], sys.argv[4:]))",
                                    str(pathlib.Path(__file__).resolve().parent.parent), str(staging), identity, *argv]
-                        result = run_command(command, timeout=timeout, env={**os.environ, **NETWORK_ENV})
+                        result = run_command(command, timeout=timeout, env=_unlazy_environment())
                         _require_staging(staging, identity)
                         if result.timed_out or result.returncode != 0:
                             detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
@@ -1528,6 +1780,12 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                             return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
                                     "source and pin, then run oah init --with-unlazy again. Nothing was installed")
                         files, directories = _staged_files(staging, _verification_handle)
+                        # The landed verifier only needs a detached HEAD and a recognizable checkout.
+                        # Never publish objects (commit authors), config/remotes, index, refs or reflogs.
+                        head = _read_user(staging, ".git/HEAD")
+                        files[".git/HEAD"] = head or b"", False
+                        files[".git/config"] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n", False
+                        directories += [".git", ".git/objects", ".git/refs"]
                         # Verify the bytes we will actually publish, including the detached checkout identity.
                         if (files.get(".git/HEAD", (b"", False))[0].replace(b"\r\n", b"\n")
                                 != (pin.commit + "\n").encode("ascii") or any(
@@ -1863,6 +2121,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     """Everything init would do, from read-only lookups. `existing` is the project's config, or None when
     --force replaces one that does not parse."""
     root = pathlib.Path(root)
+    state = _wiki_state_path(root, state_dir(repo_info(root), machine.env) / "wiki").parent
     values = {key: answer.value for key, answer in answers.items()}
     branch, how = default_branch(root)
     config = render_config(branch=branch, how=how, jev=values["jev"], skill_updates=values["skill_updates"],
@@ -1893,7 +2152,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
             notes_found.append(f"{used} was not applied: .oah/config.toml already records this answer, and init "
                                "does not edit an existing config. Edit the file, or pass --force to rewrite it.")
     return Plan(
-        root=root, state=state_dir(repo_info(root), machine.env), answers=answers, notes=tuple(notes_found),
+        root=root, state=state, answers=answers, notes=tuple(notes_found),
         branch=branch, how=how, wiki=wiki, tools=tools,
         tool_steps=tuple(guide.plan_installs(statuses, os_name=machine.os_name, which=machine.which)),
         files=tuple(files), rules=rules_step, aside_local=aside_local, aside_rules=aside_rules,
