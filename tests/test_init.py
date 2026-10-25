@@ -1,11 +1,15 @@
 # 안내형 oah init 핵심 검사 — 설정 렌더링·섹션 검증, 기본 브랜치 감지, 티어 에이전트, .gitignore 항목, 파일 계획(유지·--force 교체·위키 내용 보호)과 쓰기를 본다.
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import hashlib
+import io
 import json
 import os
 import pathlib
 import secrets as token_source
+import stat
 import subprocess
 import sys
 import unittest
@@ -15,6 +19,7 @@ from oah import call, hooks, init, intent, models, preflight, rerank, rules, ski
 from oah.config import parse_config
 from oah.engines.proc import Resolved, RunResult
 from oah.impact import defaults as impact_defaults
+from oah.impact import mapstore
 from oah.paths import repo_info, state_dir
 from oah.setup import companions
 from oah.wiki.base import WikiSettings
@@ -294,6 +299,31 @@ class PlanFilesTest(unittest.TestCase):
         self.assertIn("notes/wiki/log.md", found[".graphifyignore"].data.decode("utf-8"))
         self.assertIn("notes/wiki/templates/", found[".oah/templates/README.md"].data.decode("utf-8"))
 
+    def test_wiki_dir_rejects_escaping_and_windows_rooted_paths(self):
+        outside = make_tmp_dir(self)
+        (outside / "index.md").write_bytes(b"# Index\r\n\r\n## Notes\r\n")
+        for folder in (str(outside), "../outside", "docs/../../outside", "..\\outside", "C:outside",
+                       "C:/outside", "C:\\outside", "\\outside", "\\\\server\\share", ".", ""):
+            with self.subTest(folder=folder):
+                with self.assertRaises(init.InitError) as caught:
+                    init.plan_files(self.repo, config=self.config, wiki_dir=folder, agents={}, graph=False,
+                                    unlazy_copy=False, force=False, today=TODAY)
+                self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+        self.assertEqual((outside / "index.md").read_bytes(), b"# Index\r\n\r\n## Notes\r\n")
+
+    def test_wiki_dir_rejects_a_link_before_planning(self):
+        outside = make_tmp_dir(self)
+        directory_alias(outside, self.repo / "notes")
+        with self.assertRaises(init.InitError) as caught:
+            init.plan_files(self.repo, config=self.config, wiki_dir="notes/wiki", agents={}, graph=False,
+                            unlazy_copy=False, force=False, today=TODAY)
+        self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction path semantics")
+    def test_windows_wiki_dir_refuses_junction_before_planning(self):
+        self.test_wiki_dir_rejects_a_link_before_planning()
+
 
 class WriteFilesTest(unittest.TestCase):
     def setUp(self):
@@ -352,6 +382,30 @@ class WriteFilesTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((self.repo / ".oah").is_dir())
 
+    @unittest.skipUnless(os.name == "nt", "Windows publication handles")
+    def test_windows_updates_keep_parent_pinned_through_publication(self):
+        parent = self.repo / ".oah"
+        parent.mkdir()
+        target = parent / "config.toml"
+        target.write_bytes(b"before\r\n")
+        change = init.FileChange(init.CONFIG_PATH, "replace", "config", b"after\r\n", b"before\r\n")
+        flush = os.fsync
+        attempts = []
+
+        def swap(fd):
+            flush(fd)
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                result = subprocess.run([sys.executable, "-c", "import os, sys; os.rename(sys.argv[1], sys.argv[2])",
+                                         str(parent), str(self.repo / "moved")], capture_output=True)
+                attempts.append(result.returncode)
+
+        with mock.patch.object(os, "fsync", side_effect=swap):
+            written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
+        self.assertTrue(attempts and all(code != 0 for code in attempts))
+        self.assertEqual(problems, [])
+        self.assertEqual(written, [change])
+        self.assertEqual(target.read_bytes(), b"after\r\n")
+
     def test_replace_skips_a_file_edited_after_the_plan(self):
         late = self.repo / ".oah" / "config.toml"
         late.parent.mkdir(parents=True)
@@ -363,6 +417,72 @@ class WriteFilesTest(unittest.TestCase):
         self.assertEqual(written, [])
         self.assertEqual(late.read_text(encoding="utf-8"), "[stages]\ninitial = \"claude\"\n")
         self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+
+    def test_updates_recheck_target_after_temporary_file_is_flushed(self):
+        for action in ("update", "replace"):
+            with self.subTest(action=action):
+                target = self.repo / ".gitignore"
+                target.write_bytes(b"before\r\n")
+                change = init.FileChange(".gitignore", action, "gitignore", b"after\r\n", b"before\r\n")
+                flush = os.fsync
+                changed = False
+
+                def edit(fd):
+                    nonlocal changed
+                    flush(fd)
+                    if not changed and stat.S_ISREG(os.fstat(fd).st_mode):
+                        changed = True
+                        target.write_bytes(b"concurrent edit\r\n")
+
+                with mock.patch.object(os, "fsync", side_effect=edit):
+                    written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
+                self.assertTrue(changed)
+                self.assertEqual(written, [])
+                self.assertEqual(target.read_bytes(), b"concurrent edit\r\n")
+                self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+
+    @unittest.skipUnless(os.name != "nt", "POSIX parent replacement; Windows pins prevent the rename")
+    def test_updates_refuse_parent_swap_during_publication(self):
+        for action in ("update", "replace"):
+            with self.subTest(action=action):
+                parent = self.repo / ("parent-" + action)
+                parent.mkdir()
+                target = parent / "file.md"
+                target.write_bytes(b"before\n")
+                outside = make_tmp_dir(self)
+                (outside / "file.md").write_bytes(b"outside\n")
+                change = init.FileChange(f"{parent.name}/file.md", action, "templates", b"after\n", b"before\n")
+                flush = os.fsync
+                swapped = False
+
+                def swap(fd):
+                    nonlocal swapped
+                    flush(fd)
+                    if not swapped and stat.S_ISREG(os.fstat(fd).st_mode):
+                        swapped = True
+                        parent.rename(parent.with_name(parent.name + "-old"))
+                        directory_alias(outside, parent)
+
+                with mock.patch.object(os, "fsync", side_effect=swap):
+                    written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
+                self.assertTrue(swapped)
+                self.assertEqual((outside / "file.md").read_bytes(), b"outside\n")
+                self.assertEqual(written, [])
+                self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+
+    def test_publication_rejects_nonlocal_paths_for_every_action(self):
+        outside = make_tmp_dir(self) / "file.md"
+        outside.write_bytes(b"before\n")
+        for path in (str(outside), "../file.md", "C:relative.md", "C:/file.md", "..\\file.md", "\\file.md",
+                     "NUL.txt", "dir./file.md", "dir /file.md", "dir/file.md:stream"):
+            for action in ("create", "replace", "update"):
+                with self.subTest(path=path, action=action):
+                    change = init.FileChange(path, action, "templates", b"after\n",
+                                             None if action == "create" else b"before\n")
+                    written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
+                    self.assertEqual(written, [])
+                    self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+        self.assertEqual(outside.read_bytes(), b"before\n")
 
 
 
@@ -450,6 +570,18 @@ class HookStepTest(unittest.TestCase):
             self.assertNotIn("ANTHROPIC_API_KEY", step.diff)
         self.assertIn("oah hook stop", self.steps()["stop"].diff)
 
+    def test_forced_git_hook_diff_only_contains_canonical_additions(self):
+        secret = "fake-" + token_source.token_hex(20)
+        original = ("#!/bin/sh\r\n# Authorization: Bearer " + secret + "\r\n").encode("utf-8")
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        path.write_bytes(original)
+        step = self.steps(force=True)["pre-push"]
+        self.assertNotIn(secret, repr(step))
+        self.assertNotIn("Authorization", step.diff)
+        self.assertIn("oah hook pre-push", step.diff)
+        self.assertIn(f"replaces {len(original)} bytes (sha256 {hashlib.sha256(original).hexdigest()})", step.note)
+        self.assertEqual(path.read_bytes(), original)
+
     def test_local_settings_backup_is_ignored_before_install(self):
         path = self.repo / init.CLAUDE_SETTINGS
         path.parent.mkdir()
@@ -509,18 +641,43 @@ class HookStepTest(unittest.TestCase):
         git("config", "core.hooksPath", ".githooks", cwd=self.repo)
         self.assertEqual(self.steps()["pre-commit"].action, "install")
 
-    def test_linked_worktree_can_use_repository_hooks(self):
+    def test_linked_worktree_requires_project_local_hooks(self):
         git_commit(self.repo, {"README.md": "hello\n"})
         worktree = make_tmp_dir(self) / "linked"
         git("worktree", "add", "--detach", str(worktree), cwd=self.repo)
         steps = {step.kind: step for step in init.plan_hooks(worktree, force=False)}
+        self.assertEqual(steps["pre-commit"].action, "refused")
+        git("config", "core.hooksPath", ".githooks", cwd=worktree)
+        steps = {step.kind: step for step in init.plan_hooks(worktree, force=False)}
         self.assertEqual(steps["pre-commit"].action, "install")
+        installed, problems = init.install_hooks(worktree, list(steps.values()), force=False)
+        self.assertIn("pre-commit", installed)
+        self.assertFalse([p for p in problems if "pre-commit" in p])
 
     def test_project_local_hook_directory_cannot_be_a_link(self):
         outside = make_tmp_dir(self)
         directory_alias(outside, self.repo / ".githooks")
         git("config", "core.hooksPath", ".githooks", cwd=self.repo)
         self.assertEqual(self.steps(force=True)["pre-commit"].action, "refused")
+
+    def test_hooks_keep_a_concurrent_target_edit(self):
+        path = hooks.git_hook_path(self.repo, "pre-push")
+        step = self.steps()["pre-push"]
+        flush = os.fsync
+        changed = False
+
+        def edit(fd):
+            nonlocal changed
+            flush(fd)
+            if not changed and stat.S_ISREG(os.fstat(fd).st_mode):
+                changed = True
+                path.write_bytes(b"#!/bin/sh\n# concurrent\n")
+
+        with mock.patch.object(os, "fsync", side_effect=edit):
+            installed, problems = init.install_hooks(self.repo, [step], force=False)
+        self.assertEqual(installed, [])
+        self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+        self.assertEqual(path.read_bytes(), b"#!/bin/sh\n# concurrent\n")
 
 
 class UnlazyStepTest(unittest.TestCase):
@@ -546,6 +703,21 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
+
+    def test_failed_git_diagnostics_are_discarded(self):
+        secret = "fake-" + token_source.token_hex(20)
+        for timed_out, code in ((False, 128), (True, None)):
+            for operation in ("clone", "checkout"):
+                with self.subTest(timed_out=timed_out, operation=operation):
+                    result = RunResult(code, secret, "proxy Authorization: " + secret, timed_out)
+                    results = [result] if operation == "clone" else [RunResult(0, "", "", False), result]
+                    with mock.patch.object(init, "run_command", side_effect=results):
+                        problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+                    self.assertNotIn(secret, problem)
+                    self.assertIn("git " + operation, problem)
+                    self.assertIn(f"exit code {code}", problem)
+                    self.assertIn(f"timed out: {'yes' if timed_out else 'no'}", problem)
+                    self.assertFalse(self.target.exists())
 
     def test_linked_project_skill_parents_are_blocked_even_with_force(self):
         for directory in (".agents", ".claude"):
@@ -615,6 +787,35 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertTrue((self.target / "scripts" / "gate-check.mjs").is_file())
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
 
+    def test_replacement_refuses_a_copy_edited_since_planning(self):
+        make_unlazy(self.target)
+        step = self.plan(force=True)
+        script = self.target / "scripts/gate-check.mjs"
+        script.write_bytes(b"// concurrent\r\n")
+        problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertEqual(script.read_bytes(), b"// concurrent\r\n")
+        self.assertFalse(self.target.with_name("unlazy.oah.bak").exists())
+
+    def test_install_refuses_parent_linked_during_clone(self):
+        step = self.plan()
+        outside = make_tmp_dir(self)
+        run = init.run_command
+        linked = False
+
+        def clone(argv, **kwargs):
+            nonlocal linked
+            result = run(argv, **kwargs)
+            if not linked:
+                linked = True
+                directory_alias(outside, self.repo / ".agents")
+            return result
+
+        with mock.patch.object(init, "run_command", side_effect=clone):
+            problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_incompatible_user_copy_gets_a_project_copy(self):
         make_unlazy(self.home / ".agents" / "skills" / "unlazy")
         step = self.plan()
@@ -659,9 +860,29 @@ class CiStepTest(unittest.TestCase):
         self.assertIn("oah ci init", kept.note)
         replaced = init.plan_ci(self.repo, force=True, oses=["linux"], test_command=None)
         self.assertEqual(replaced.action, "replace")
-        self.assertIn("-name: mine", replaced.diff)
+        self.assertNotIn("name: mine", replaced.diff)
+        self.assertIn("replaces", replaced.note)
         self.assertEqual(init.write_ci(replaced), "")
         self.assertEqual(self.target.read_text(encoding="utf-8"), step.text)
+
+    def test_ci_rechecks_target_during_publication(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_bytes(b"name: before\r\n")
+        step = init.plan_ci(self.repo, force=True, oses=["linux"], test_command=None)
+        flush = os.fsync
+        changed = False
+
+        def edit(fd):
+            nonlocal changed
+            flush(fd)
+            if not changed and stat.S_ISREG(os.fstat(fd).st_mode):
+                changed = True
+                self.target.write_bytes(b"name: concurrent\r\n")
+
+        with mock.patch.object(os, "fsync", side_effect=edit):
+            problem = init.write_ci(step)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertEqual(self.target.read_bytes(), b"name: concurrent\r\n")
 
     def test_several_test_commands_are_skipped(self):
         (self.repo / "package.json").write_text('{"scripts": {"test": "jest"}}', encoding="utf-8")
@@ -671,6 +892,29 @@ class CiStepTest(unittest.TestCase):
 
 
 class MapStepTest(unittest.TestCase):
+    def test_map_git_diagnostics_never_reach_the_returned_reason(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {"a.py": "pass\n"})
+        secret = "fake-" + token_source.token_hex(20)
+        with mock.patch.object(mapstore, "run_command", return_value=RunResult(128, "", secret, False)):
+            for operation in (init.map_state, init.refresh_map):
+                state, reason = operation(repo, {})
+                self.assertEqual(state, "unavailable")
+                self.assertNotIn(secret, reason)
+
+    def test_external_runner_discards_stdout_stderr_and_exception_details(self):
+        secret = "fake-" + token_source.token_hex(20)
+        for timed_out, code in ((False, 0), (False, 2), (True, None)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(init, "resolve_command", return_value=
+                    Resolved((sys.executable,), "test", "native")), mock.patch.object(init, "run_command",
+                    return_value=RunResult(code, secret, secret, timed_out)):
+                result = init._quiet_run(("fake-installer",), operation="tool installation")
+            self.assertNotIn(secret, out.getvalue())
+            self.assertEqual(result, 0 if code == 0 and not timed_out else 1)
+            if result:
+                self.assertIn(f"exit code {code}; timed out: {'yes' if timed_out else 'no'}", out.getvalue())
+
     def test_map_state_and_refresh(self):
         repo = make_git_repo(self)
         state, reason = init.map_state(repo, {})

@@ -49,14 +49,23 @@ def register(commands: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> int:
     try:
         return _init(args, make_machine())
-    except (init.InitError, RulesError, WikiError) as exc:
+    except init.InitError as exc:
         print(exc, file=sys.stderr)
+        return exc.exit_code
+    except (RulesError, WikiError) as exc:
+        print(f"{exc.code}: project rules or wiki cannot be safely processed. Check their format and paths, "
+              "then run oah init again", file=sys.stderr)
         return exc.exit_code
     except (NotARepo, GitMissing) as exc:
         print(f"{exc}. Run oah init inside your project's git repository; `git init` starts one.", file=sys.stderr)
         return EXIT_ENVIRONMENT
-    except (ConfigError, LockTimeout, StateCorrupt, StorageError, PendingTransaction) as exc:
-        print(exc, file=sys.stderr)
+    except ConfigError as exc:
+        print(f"{exc.code}: the project configuration is invalid. Fix .oah/config.toml, then run oah init again",
+              file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    except (LockTimeout, StateCorrupt, StorageError, PendingTransaction, OSError):
+        print("OAH_INIT_STORAGE_UNAVAILABLE: project state cannot be safely accessed. Check permissions and "
+              "pending wiki recovery, then run oah init again", file=sys.stderr)
         return EXIT_ENVIRONMENT
     except KeyboardInterrupt:
         print("OAH_INIT_STOPPED: stopped. Run oah init again to finish; it changes only what is still missing.",
