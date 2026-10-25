@@ -569,6 +569,31 @@ class CliTest(unittest.TestCase):
     def test_cli_sigterm_records_aborted(self):
         self.interrupted(signal.SIGTERM)
 
+    @unittest.skipIf(os.name == "nt", "POSIX detached session and SIGTERM")
+    def test_cli_sigterm_stops_a_descendant_in_another_session(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"spawn_descendant": True, "detached_descendant": True, "hang": True})
+        pid_file = project.fix_dir / "descendant.txt"
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high", "--json")
+        try:
+            self.assertTrue(wait_for(pid_file))
+            process.send_signal(signal.SIGTERM)
+            out, err = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 130, err)
+            self.assertEqual(json.loads(out)["code"], "OAH_FIX_INTERRUPTED")
+            self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+            heartbeat = pid_file.with_suffix(".heartbeat")
+            stopped = heartbeat.read_bytes()
+            time.sleep(0.2)
+            self.assertEqual(heartbeat.read_bytes(), stopped, "the detached descendant survived SIGTERM cleanup")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+            if pid_file.exists():
+                reap(int(pid_file.read_bytes()))
+
     def test_cli_killed_fix_needs_abort(self):
         project = FixProject(self)
         project.changes_requested()

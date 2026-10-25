@@ -61,6 +61,7 @@ WAIT_LIMIT_S = 540.0
 POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a running worker is polled
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
+_CORRECTION_MODEL_WRITES = ContextVar("oah_correction_model_writes", default=None)
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
@@ -130,11 +131,43 @@ class Resolution:
     changes: tuple[dict, ...]
 
 
+class _CorrectionCatalog(models.Catalog):
+    """Use the landed catalog resolver, deferring its writes until preparation has passed every scan."""
+
+    def __init__(self, state_dir):
+        super().__init__(state_dir)
+        check = _CORRECTION_INPUT_CHECK.get()
+        # A save preserves other engines/tiers too; scan the entire original artifacts, not just the selection.
+        for path in (self.catalog_path, self.resolved_path, self.changes_path):
+            if path.exists():
+                text = path.read_bytes().decode("utf-8")
+                check(text)
+                # JSON escapes must not hide credentials that a later catalog save would decode.
+                values = text.splitlines() if path == self.changes_path else (text,)
+                for value in values:
+                    if value.strip():
+                        check(json.loads(value))
+
+    def _save(self, entry):
+        _CORRECTION_INPUT_CHECK.get()(dataclasses.asdict(entry))
+        _CORRECTION_MODEL_WRITES.get().append(lambda: super(_CorrectionCatalog, self)._save(entry))
+
+    def record_resolution(self, engine, tier, **fields):
+        _CORRECTION_INPUT_CHECK.get()((engine, tier, fields, self.resolved()))
+        _CORRECTION_MODEL_WRITES.get().append(
+            lambda: super(_CorrectionCatalog, self).record_resolution(engine, tier, **fields))
+        return []
+
+
+def _catalog(state_dir):
+    return (_CorrectionCatalog if _CORRECTION_INPUT_CHECK.get() is not None else models.Catalog)(state_dir)
+
+
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
                   refresh: bool = False, now: dt.datetime | None = None) -> tuple[list[str], models.Freshness]:
     """The engine's argv prefix and its catalog entry, after the freshness check that runs before every launch."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
-    freshness = models.Catalog(state_dir).ensure_fresh(engine, base=base, env=env,
+    freshness = _catalog(state_dir).ensure_fresh(engine, base=base, env=env,
                                                        ttl_hours=settings.models["ttl_hours"], refresh=refresh, now=now)
     return base, freshness
 
@@ -146,9 +179,12 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
     section = settings.engines[engine]
     tier_settings = section["tiers"][tier]
     base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
-    catalog = models.Catalog(state_dir)
+    catalog = _catalog(state_dir)
     entry = freshness.entry
     effective = codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is not None:
+        check((dataclasses.asdict(freshness), effective))
     model, source = models.map_tier(engine, tier, pin=tier_settings["model"], quality_order=section["quality_order"],
                                     entry=entry, effective=effective)
     info = entry.model(model) if entry else None
@@ -527,9 +563,11 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 def _correction_inputs(check):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
+    writes = _CORRECTION_MODEL_WRITES.set([])
     try:
         yield
     finally:
+        _CORRECTION_MODEL_WRITES.reset(writes)
         _CORRECTION_INPUT_CHECK.reset(token)
 
 
@@ -582,6 +620,9 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
 
     `keychain` is passed to the re-ranker's key lookup (`oah.secrets`); None means the OS keychain."""
     root = pathlib.Path(root)
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is not None:
+        check(dataclasses.asdict(settings))
     briefs.check_footer(footer, has_footer)
     warnings = list(routing.check_stage(request.engine, request.stage, settings.stages,
                                         override=request.override_stage))
@@ -648,6 +689,12 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         check(warnings)
         if selection[0] is not None:
             check(selection[0].to_record())
+        # No catalog/resolution/run write is allowed until all original preparation inputs pass.
+        changes = []
+        for write in _CORRECTION_MODEL_WRITES.get():
+            changes.extend(write() or ())
+        _CORRECTION_MODEL_WRITES.get().clear()
+        resolution = dataclasses.replace(resolution, changes=tuple(changes))
     run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
     try:
         return _finish_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
@@ -847,6 +894,157 @@ class _StreamFailed(subprocess.SubprocessError):
     code = "OAH_FIX_STREAM_FAILED"
 
 
+class _CleanupFailed(subprocess.SubprocessError):
+    code = "OAH_FIX_CLEANUP_FAILED"
+
+
+class _PosixTree:
+    """Remember reachable descendants across setsid/parent exit, without reading process command lines."""
+
+    def __init__(self, child):
+        self.child = child
+        self.owned = {}
+        self.stopped = threading.Event()
+        self.error = False
+        self.thread = None
+        self._scan(self._processes(), initial=True)
+        self.thread = threading.Thread(target=self._watch, daemon=True)
+        self.thread.start()
+
+    def _processes(self):
+        rows = {}
+        if sys.platform == "darwin":
+            import ctypes
+            import errno
+            import struct
+
+            # libproc's fixed proc_bsdinfo ABI supplies PPID, status and microsecond birth identity.
+            # Read neither argv nor environment; process names in the struct are never decoded.
+            api = getattr(self, "_api", None)
+            if api is None:
+                self._api = api = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+                api.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                            ctypes.c_void_p, ctypes.c_int)
+                api.proc_listchildpids.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+            pending = set(self.owned) | {self.child.pid}
+            seen = set()
+            while pending:
+                pid = pending.pop()
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                info = ctypes.create_string_buffer(136)
+                ctypes.set_errno(0)
+                if api.proc_pidinfo(pid, 3, 0, info, len(info)) != len(info):  # PROC_PIDTBSDINFO
+                    if ctypes.get_errno() not in (errno.ESRCH, errno.ENOENT):
+                        raise OSError  # Unreadable ownership metadata must not silently drop a live worker.
+                    continue  # exited/reaped between enumeration and inspection
+                parent = struct.unpack_from("=I", info, 16)[0]
+                status = {4: "T", 5: "Z"}.get(struct.unpack_from("=I", info, 4)[0], "R")
+                rows[pid] = (parent, status, struct.unpack_from("=QQ", info, 120))
+                size = api.proc_listchildpids(pid, None, 0)
+                if size < 0:
+                    raise OSError
+                while True:
+                    children = (ctypes.c_int * (size + 32))()
+                    used = api.proc_listchildpids(pid, children, ctypes.sizeof(children))
+                    if used < 0:
+                        raise OSError
+                    if used < len(children):
+                        pending.update(child for child in children[:used] if child)
+                        break
+                    size = used * 2
+            return rows
+        # Linux test/development hosts expose the same numeric metadata in procfs.
+        for directory in pathlib.Path("/proc").iterdir():
+            if directory.name.isdigit():
+                try:
+                    fields = (directory / "stat").read_bytes().rsplit(b") ", 1)[1].split()
+                    rows[int(directory.name)] = (int(fields[1]), fields[0].decode("ascii"), int(fields[19]))
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+        return rows
+
+    def _scan(self, rows, *, initial=False):
+        if initial and self.child.pid in rows:
+            self.owned[self.child.pid] = rows[self.child.pid][2]
+        live = {pid for pid, started in self.owned.items() if pid in rows and rows[pid][2] == started}
+        while True:
+            added = {pid for pid, (parent, _status, _started) in rows.items() if parent in live and pid not in live}
+            if not added:
+                return live
+            live.update(added)
+            self.owned.update((pid, rows[pid][2]) for pid in added)
+
+    def _watch(self):
+        while not self.stopped.wait(0.01):
+            try:
+                self._scan(self._processes())
+            except Exception:
+                self.error = True
+                return
+
+    def close(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join()
+
+    @staticmethod
+    def _signal(pids, number):
+        for pid in pids:
+            try:
+                os.kill(pid, number)
+            except ProcessLookupError:
+                pass
+
+    def kill(self):
+        from oah.engines.proc import REAP_SECONDS, kill_tree
+
+        self.close()
+        try:
+            # Freeze every reachable member before killing any parent, then enumerate again. This
+            # prevents a surviving parent from creating more children or orphaning known descendants.
+            deadline = time.monotonic() + REAP_SECONDS
+            while True:
+                rows = self._processes()
+                live = self._scan(rows)
+                active = {pid for pid in live if not rows[pid][1].startswith("Z")}
+                self._signal(active, signal.SIGSTOP)
+                if all("T" in rows[pid][1] for pid in active):
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
+            self._signal(active, signal.SIGKILL)
+            kill_tree(self.child)  # Also cover unobserved survivors in the original process group.
+            while True:
+                rows = self._processes()
+                active = {pid for pid in self._scan(rows) if not rows[pid][1].startswith("Z")}
+                if not active:
+                    break
+                self._signal(active, signal.SIGKILL)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError
+                time.sleep(0.01)
+            if self.error:
+                raise RuntimeError
+        except Exception:
+            # Even enumeration failure must first stop all the processes already owned.
+            kill_tree(self.child)
+            self._signal(self.owned, signal.SIGKILL)
+            raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: process-tree cleanup could not be verified; inspect "
+                                 "running workers and the worktree before retrying") from None
+
+
+def _kill_owned_tree(child):
+    from oah.engines.proc import kill_tree
+
+    tree = getattr(child, "_oah_posix_tree", None)
+    if tree is not None:
+        tree.kill()
+    else:
+        kill_tree(child)
+
+
 @dataclasses.dataclass(frozen=True)
 class _StreamedResult:
     returncode: int | None
@@ -858,7 +1056,7 @@ class _StreamedResult:
 
 def _stream_correction(child, prepared: Prepared, prompt: str):
     """Drain both pipes live, hashing exact bytes; stderr stays in memory only for A1 verification."""
-    from oah.engines.proc import REAP_SECONDS, kill_tree
+    from oah.engines.proc import REAP_SECONDS
 
     streams = {name: {"bytes": 0, "sha256": hashlib.sha256()} for name in ("stdout", "stderr")}
     header = bytearray()
@@ -921,7 +1119,7 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
                 pass
     finally:
         # Also stop descendants that outlived their launcher or still hold either output pipe open.
-        kill_tree(child)
+        _kill_owned_tree(child)
         child.wait(timeout=REAP_SECONDS)
         for thread in started:
             thread.join(timeout=REAP_SECONDS)
@@ -937,7 +1135,7 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
 def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     """Use proc's job/tree handling, holding the lease lock only through process creation and resume."""
     from oah.engines.proc import (REAP_SECONDS, RunResult, UnsupportedBatchShim, _WindowsJob, decode_output,
-                                  is_batch, kill_tree)
+                                  is_batch)
 
     if not prepared.argv:
         raise ValueError("empty command")
@@ -965,6 +1163,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                         child.kill()
                         child.communicate(timeout=REAP_SECONDS)
                         raise
+                else:
+                    child._oah_posix_tree = _PosixTree(child)
         if not prepared.retain_worker_text:
             return _stream_correction(child, prepared, prompt)
         output, errors = [], []
@@ -986,7 +1186,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         while not exchanged.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                kill_tree(child)
+                _kill_owned_tree(child)
                 communicator.join(timeout=REAP_SECONDS)
                 out, err = output[0] if output else (b"", b"")
                 return RunResult(None, decode_output(out), decode_output(err), True)
@@ -997,13 +1197,13 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         out, err = output[0]
         if _CORRECTION_CLEANUP.get():
             # A completed correction must leave no owned descendants changing the tree during accounting.
-            kill_tree(child)
+            _kill_owned_tree(child)
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     except BaseException:
         # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
         # An exited launcher can leave descendants holding the pipes and modifying the worktree.
         if child is not None:
-            kill_tree(child)
+            _kill_owned_tree(child)
             try:
                 if communicator is not None and communicator.ident is not None:
                     communicator.join(timeout=REAP_SECONDS)
@@ -1013,6 +1213,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 pass
         raise
     finally:
+        if child is not None and hasattr(child, "_oah_posix_tree"):
+            child._oah_posix_tree.close()
         if job is not None:
             job.close()
 

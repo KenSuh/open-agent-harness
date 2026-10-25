@@ -88,6 +88,10 @@ LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
 # Exception codes are data too: only these literal codes and sentences may cross an error boundary.
 _ERROR_DIAGNOSTICS = {
     "OAH_FIX_FAILED": "the correction failed; inspect the worktree and task records, then retry oah fix.",
+    "OAH_FIX_CLEANUP_FAILED": "process-tree cleanup could not be verified; inspect running workers and the "
+                              "worktree before retrying oah fix.",
+    "OAH_FIX_WORKTREE_CHANGED": "the worktree changed after cleanup and accounting; inspect and restore or keep "
+                                "the changes before retrying oah fix.",
     "OAH_FIX_INTERRUPTED": "the correction was interrupted; inspect the worktree and task records, then retry "
                            "oah fix or settle an unfinished attempt with oah fix --abort --task <task>.",
     "OAH_INTENT_NOT_CURRENT": "the intent is unbound, missing, stale or not committed as bound; accept and bind "
@@ -584,6 +588,15 @@ def _ignored_state(root: pathlib.Path, names: Iterable[str]) -> dict[str, tuple[
         found[name] = ((mode, len(snapshot[1]), receipts.digest(snapshot[1]))
                        if mode is not None else None)
     return found
+
+
+def _worktree_fingerprint(root: pathlib.Path) -> str:
+    """Hash raw tracked/user/ignored contents and modes plus HEAD/index, without content conversion."""
+    head = _head(root)
+    names = _user_files(root, (*_tree_files(root, head), *_untracked(root), *_ignored(root)))
+    data = (head, _index_state(root), _ignored_state(root, names))
+    # Index metadata contains raw byte fields. Hash those directly via a deterministic representation.
+    return receipts.digest(repr(data).encode("utf-8", errors="surrogateescape"))
 
 
 def _check_tree(t: _Task, receipt: receipts.Entry, head: str, nothing: str,
@@ -1124,16 +1137,27 @@ class _Attempt:
         start = {"source_receipt": self.receipt.name, "source_receipt_digest": self.receipt.digest,
                  "finding_ids": self.finding_ids, "class_ids": self.class_ids, "before_head": self.before,
                  "engine": ENGINE, "manual": False, "started_at": _iso(), "run_id": self.run_id}
+        fingerprint = None
         try:
             with _held_signals() as held:
                 self._publish("start", start)
             if held:
                 raise KeyboardInterrupt("stop signal while recording the start; Codex was never launched")
             with call._correction_cleanup():
-                run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
+                try:
+                    run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
+                except BaseException:
+                    # Inspection is best-effort on exceptions: terminal publication must still happen.
+                    try:
+                        fingerprint = _worktree_fingerprint(self.t.root)
+                    except Exception:
+                        pass
+                    raise
+            fingerprint = _worktree_fingerprint(self.t.root)
             judged = self._judge(run, final, untracked)
             result = self._result(judged)
             with _held_signals() as held:
+                self._check_fingerprint(fingerprint)
                 self._end(judged.outcome, judged.evidence)
             result.records = list(self.published)
             if held:
@@ -1144,12 +1168,35 @@ class _Attempt:
             if not self.published or self.ended:
                 raise
             interrupted = isinstance(exc, KeyboardInterrupt)
-            code, diagnostic = _error_diagnostic(exc)
             with _held_signals():
+                if fingerprint is not None:
+                    try:
+                        self._check_fingerprint(fingerprint)
+                    except ReviewError as changed:
+                        if changed.code == "OAH_FIX_WORKTREE_CHANGED":
+                            exc, interrupted = changed, False
+                    except Exception:
+                        pass
+                code, diagnostic = _error_diagnostic(exc)
                 self._end("aborted" if interrupted else "failed", diagnostic)
             if interrupted:
                 raise FixInterrupted(diagnostic[len(code) + 2:]) from None
             raise ReviewError(code, diagnostic[len(code) + 2:]) from None
+
+    def _check_fingerprint(self, expected: str) -> None:
+        if _worktree_fingerprint(self.t.root) != expected:
+            code = "OAH_FIX_WORKTREE_CHANGED"
+            diagnostic = f"{code}: " + _ERROR_DIAGNOSTICS[code]
+            # The captured patch/guidance no longer describe the final tree. Retain only fixed diagnostics.
+            try:
+                write_text_atomic(self.prepared.run.file_path("correction.patch"), diagnostic + "\n")
+                write_json_atomic(self.prepared.run.file_path("correction.json"), {
+                    "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
+                    "changed": [], "new_files": [], "user_files": [], "commands": [], "out_of_scope": [],
+                    "changes_sha256": receipts.digest(diagnostic.encode("utf-8"))})
+            except Exception:
+                pass  # Failed optional artifacts cannot prevent the terminal outcome.
+            raise ReviewError(code, _ERROR_DIAGNOSTICS[code])
 
     def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id

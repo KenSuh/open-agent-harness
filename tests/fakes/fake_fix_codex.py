@@ -16,6 +16,7 @@ the end. A step may set:
   hang           true: write pid-<k>.txt in record_dir before reading the brief, then sleep until killed
   exit_with_descendant true: exit while a descendant keeps stdout/stderr open
   spawn_descendant true: leave a descendant with closed output pipes after a normal return
+  detached_descendant true: that descendant starts a new POSIX session (a Windows process group)
   probe_lease    true: run `oah renew`, `oah finish` and `oah fix --bind` as this worker and record the results
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
   header_workdir the header's workdir label; default echoes -C (fixed labels isolate dispatcher output tests)
@@ -154,13 +155,17 @@ def main(argv: list[str]) -> int:
         os._exit(0)
     if step.get("spawn_descendant"):
         pid_file = record_dir / "descendant.txt"
+        detached = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else
+                    {"start_new_session": True}) if step.get("detached_descendant") else {}
         subprocess.Popen([sys.executable, __file__, "--descendant", str(pid_file)], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detached)
         deadline = time.monotonic() + 10
         while not pid_file.exists():
             if time.monotonic() >= deadline:
                 raise RuntimeError("fake descendant did not start")
             time.sleep(0.01)
+        if step.get("detached_descendant"):
+            time.sleep(0.3)  # Keep the parent alive while the detached descendant is reachable by PPID.
     if step.get("hang"):
         while True:
             time.sleep(1)

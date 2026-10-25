@@ -913,6 +913,87 @@ class WorkerTest(unittest.TestCase):
 
 
 class OutcomeTest(unittest.TestCase):
+    def detached_descendant_cleanup(self, *, interrupt=False):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"spawn_descendant": True, "detached_descendant": True, "hang": interrupt})
+        pid_file = project.fix_dir / "descendant.txt"
+        heartbeat = pid_file.with_suffix(".heartbeat")
+        judge, publish = fix._Attempt._judge, receipts.publish
+        checked = []
+
+        def stopped():
+            self.assertTrue(heartbeat.exists())
+            before = heartbeat.read_bytes()
+            time.sleep(0.2)
+            self.assertEqual(heartbeat.read_bytes(), before, "detached descendant survived cleanup")
+
+        def inspect(*args, **kwargs):
+            stopped()
+            checked.append("inspection")
+            return judge(*args, **kwargs)
+
+        def record(state, task, name, *args, **kwargs):
+            if name.endswith("-outcome.json"):
+                stopped()
+                checked.append("publication")
+            return publish(state, task, name, *args, **kwargs)
+
+        thread = None
+        try:
+            with default_sigint(), mock.patch.object(fix._Attempt, "_judge", autospec=True, side_effect=inspect), \
+                    mock.patch.object(receipts, "publish", side_effect=record):
+                if interrupt:
+                    thread = interrupt_when(pid_file)
+                    with self.assertRaises(fix.FixInterrupted):
+                        project.fix(timeout_s=10)
+                else:
+                    self.assertEqual(project.fix().outcome, "no-change")
+            self.assertEqual(checked, ["publication"] if interrupt else ["inspection", "publication"])
+            self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted" if interrupt else "no-change")
+        finally:
+            if thread is not None:
+                thread.join(5)
+            if os.name != "nt" and pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_bytes()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipIf(os.name == "nt", "POSIX detached session cleanup")
+    def test_detached_descendant_stops_before_accounting_and_publication(self):
+        self.detached_descendant_cleanup()
+
+    @unittest.skipIf(os.name == "nt", "POSIX detached session interruption")
+    def test_interruption_stops_detached_descendant_before_publication(self):
+        self.detached_descendant_cleanup(interrupt=True)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows process group inside the owned job")
+    def test_windows_new_process_group_stops_before_publication(self):
+        for interrupt in (False, True):
+            with self.subTest(interrupt=interrupt):
+                self.detached_descendant_cleanup(interrupt=interrupt)
+
+    def test_worktree_change_after_accounting_fails_before_terminal_publication(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        result = fix._Attempt._result
+
+        def change_after_accounting(*args, **kwargs):
+            rendered = result(*args, **kwargs)
+            (project.repo / "src/app.py").write_bytes(b"late mutation\n")
+            return rendered
+
+        with mock.patch.object(fix._Attempt, "_result", autospec=True, side_effect=change_after_accounting):
+            with self.assertRaises(ReviewError) as caught:
+                project.fix()
+        self.assertEqual(caught.exception.code, "OAH_FIX_WORKTREE_CHANGED")
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+        run_id = project.record("A1-start.json")["run_id"]
+        saved = json.loads(runs.find_run(project.state, run_id).file_path("correction.json").read_bytes())
+        self.assertEqual((saved["outcome"], saved["commands"]), ("failed", []))
+
     def test_closed_terminal_stops_the_worker_and_records_failed(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1563,6 +1644,67 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_rejected_model_metadata_leaves_the_complete_state_tree_unchanged(self):
+        for field in ("pin", "quality-order", "cache", "stored-catalog", "escaped-catalog", "escaped-changes",
+                      "stored-resolution", "effective", "resolution", "late-brief", "no-model-state"):
+            with self.subTest(field=field):
+                project = FixProject(self)
+                project.changes_requested()
+                marker = "s" + "k-" + token_source.token_hex(20)
+                config = (project.repo / ".oah/config.toml").read_text(encoding="utf-8")
+                if field == "pin":
+                    config += '\n[engines.codex.tiers.high]\nmodel = ' + json.dumps(marker) + '\n'
+                elif field == "quality-order":
+                    config += '\nquality_order = [' + json.dumps(marker) + ']\n'
+                elif field in ("cache", "effective", "late-brief"):
+                    # Force a real catalog refresh even though the preceding review populated it.
+                    catalog = project.state / "models/catalog.json"
+                    catalog.unlink()
+                    if field == "cache":
+                        cache = project.home / "models_cache.json"
+                        data = json.loads(cache.read_bytes())
+                        data["models"].append({"slug": marker, "supported_reasoning_levels": []})
+                        cache.write_bytes(json.dumps(data).encode("utf-8"))
+                    elif field == "effective":
+                        (project.home / "config.toml").write_bytes(('model = ' + json.dumps(marker) + '\n').encode())
+                else:
+                    if field in ("stored-catalog", "stored-resolution", "escaped-catalog"):
+                        path = project.state / ("models/resolved.json" if field == "stored-resolution" else "models/catalog.json")
+                        data = json.loads(path.read_bytes())
+                        data["unrelated"] = marker
+                        encoded = json.dumps(data)
+                        if field == "escaped-catalog":
+                            encoded = encoded.replace(marker, "".join(f"\\u{ord(c):04x}" for c in marker))
+                        path.write_bytes(encoded.encode("utf-8"))
+                    elif field == "escaped-changes":
+                        path = project.state / "models/changes.jsonl"
+                        with path.open("ab") as stream:
+                            encoded = json.dumps({"old": marker}).replace(
+                                marker, "".join(f"\\u{ord(c):04x}" for c in marker))
+                            stream.write((encoded + "\n").encode("utf-8"))
+                    elif field == "no-model-state":
+                        shutil.rmtree(project.state / "models")
+                if config != (project.repo / ".oah/config.toml").read_text(encoding="utf-8"):
+                    project.commit({".oah/config.toml": config})
+
+                def snapshot():
+                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                            for p in project.state.rglob("*")}
+
+                before = snapshot()
+                with contextlib.ExitStack() as stack:
+                    if field in ("late-brief", "no-model-state"):
+                        render = call._brief_text
+                        stack.enter_context(mock.patch.object(call, "_brief_text", side_effect=
+                            lambda *args, **kwargs: render(*args, **kwargs) + marker))
+                    elif field == "resolution":
+                        resolve = call.resolve_engine
+                        stack.enter_context(mock.patch.object(call, "resolve_engine", side_effect=
+                            lambda *args, **kwargs: call.dataclasses.replace(resolve(*args, **kwargs), model=marker)))
+                    error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.fix)
+                self.assertNotIn(marker, str(error))
+                self.assertEqual(snapshot(), before, "refusal must leave every state file and directory unchanged")
+
     def test_recovery_and_binding_notes_use_fixed_actor_metadata(self):
         for operation in ("abort", "bind-override"):
             with self.subTest(operation=operation):
@@ -1838,11 +1980,12 @@ class SecretTest(unittest.TestCase):
 
         def unreadable(attempt, *args, **kwargs):
             target = project.repo / name
+            mode = target.stat().st_mode
             target.chmod(0)
             try:
                 return judge(attempt, *args, **kwargs)
             finally:
-                target.chmod(0o600)
+                target.chmod(mode)
 
         with mock.patch.object(fix._Attempt, "_judge", unreadable), self.assertRaises(ReviewError) as caught:
             project.fix()
@@ -1994,17 +2137,29 @@ class SecretTest(unittest.TestCase):
         key = "runtime-" + token_source.token_hex(16) + "\ncontinuation-" + token_source.token_hex(16)
         project.env["OPENAI_API_KEY"] = key
         scan = fix._scan_files
+        patch, patches = fix._patch, []
 
         def scanned(*args, **kwargs):
             result = scan(*args, **kwargs)
             (project.repo / "src/app.py").write_bytes((key + "\n").encode("utf-8"))
             return result
 
-        with mock.patch.object(fix, "_scan_files", side_effect=scanned):
-            result = project.fix()
-        self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-        patch = (project.run_folder(result) / "correction.patch").read_bytes()
-        self.assertIn(b"+print('fixed')", patch)
+        def captured(*args, **kwargs):
+            data = patch(*args, **kwargs)
+            patches.append(data)
+            return data
+
+        with mock.patch.object(fix, "_scan_files", side_effect=scanned), \
+                mock.patch.object(fix, "_patch", side_effect=captured):
+            with self.assertRaises(ReviewError) as caught:
+                project.fix()
+        self.assertEqual(caught.exception.code, "OAH_FIX_WORKTREE_CHANGED")
+        self.assert_private(project, [key, *key.splitlines()], str(caught.exception))
+        self.assertIn(b"+print('fixed')", patches[0])
+        self.assertNotIn(key.encode("utf-8"), patches[0])
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+        run = runs.find_run(project.state, project.record("A1-start.json")["run_id"])
+        self.assertEqual(json.loads(run.file_path("correction.json").read_bytes())["commands"], [])
 
     def test_binary_and_undecodable_sides_are_size_markers_only(self):
         for old, new in ((b"old\x00secret\n", b"new\x00secret\n"), (b"old\xff\n", b"new\xfe\n")):
