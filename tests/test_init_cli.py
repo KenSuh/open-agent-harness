@@ -180,6 +180,51 @@ class PlanFirstTest(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", out + err)
         self.assertEqual(snapshot(repo), before)
 
+    def test_forced_dry_run_never_discloses_foreign_git_hook(self):
+        repo = committed_repo(self)
+        secret = "fake-" + token_source.token_hex(20)
+        path = repo / ".git/hooks/pre-push"
+        path.write_bytes(("#!/bin/sh\n# Authorization: Bearer " + secret + "\n").encode("utf-8"))
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", "--dry-run", *flags(hooks=True))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(secret, out + err)
+        self.assertIn("replaces", out)
+        self.assertIn("sha256", out)
+        self.assertIn("oah hook pre-push", out)
+        self.assertEqual(snapshot(repo), before)
+
+    def test_existing_config_diagnostics_do_not_echo_private_keys(self):
+        repo = committed_repo(self)
+        secret = "fake-" + token_source.token_hex(20)
+        path = repo / init.CONFIG_PATH
+        path.parent.mkdir()
+        path.write_bytes(("[wiki]\n" + json.dumps(secret) + " = true\n").encode("utf-8"))
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", *flags())
+        self.assertEqual(code, 69)
+        self.assertNotIn(secret, out + err)
+        self.assertIn("OAH_CONFIG_UNKNOWN_KEY", err)
+        self.assertEqual(snapshot(repo), before)
+
+    def test_existing_wiki_dir_cannot_escape_checkout(self):
+        repo = committed_repo(self)
+        outside = make_tmp_dir(self)
+        index = outside / "index.md"
+        index.write_bytes(b"# Index\r\n\r\n## Notes\r\n")
+        config = init.render_config(branch="main", how="", jev=False, skill_updates=False, today=TODAY)
+        config += "\n[wiki]\ndir = " + json.dumps(str(outside)) + "\n"
+        (repo / ".oah").mkdir()
+        (repo / init.CONFIG_PATH).write_bytes(config.encode("utf-8"))
+        before = snapshot(repo)
+        for extra in ((), ("--dry-run",)):
+            code, out, err = run_init(repo, make_machine(self, FakeTools()), *extra, *flags())
+            self.assertEqual(code, 69, out + err)
+            self.assertIn("OAH_INIT_PATH_UNSAFE", err)
+            self.assertEqual(index.read_bytes(), b"# Index\r\n\r\n## Notes\r\n")
+            self.assertFalse((outside / "wiki-guide.md").exists())
+            self.assertEqual(snapshot(repo), before)
+
     def test_windows_aside_plan_shows_every_installer_line_and_source(self):
         repo = committed_repo(self)
         machine = make_machine(self, FakeTools())
@@ -504,6 +549,24 @@ class HooksTest(unittest.TestCase):
 
 
 class NoOverwriteTest(unittest.TestCase):
+    def test_rules_preserve_an_edit_made_after_the_plan(self):
+        repo = committed_repo(self)
+        path = repo / "AGENTS.md"
+        path.write_bytes(b"# Before\r\n")
+        tools = FakeTools()
+        machine = make_machine(self, tools)
+        status = machine.status_runner
+
+        def edit(argv):
+            path.write_bytes(b"# Concurrent edit\r\n")
+            return status(argv)
+
+        machine.status_runner = edit
+        code, out, err = run_init(repo, machine, *flags())
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OAH_INIT_CHANGED", out)
+        self.assertEqual(path.read_bytes(), b"# Concurrent edit\r\n")
+
     """Existing files keep their user content; only managed blocks and missing entries change."""
 
     def test_existing_files_keep_user_content(self):

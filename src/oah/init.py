@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import difflib
+import hashlib
 import json
 import os
 import pathlib
@@ -27,7 +28,7 @@ from contextlib import contextmanager
 from typing import Callable, Mapping, NamedTuple
 
 from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
-from oah.atomic import StateCorrupt, StorageError, write_text_atomic
+from oah.atomic import StateCorrupt, StorageError
 from oah.config import Config, ConfigError, parse_config
 from oah.engines.effort import EngineError
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
@@ -39,7 +40,7 @@ from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_
 from oah.setup import companions, guide
 from oah.setup.tools import Tool, catalog, display, os_name_for
 from oah.wiki import notes
-from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings, publish_new, read_bytes
+from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings, read_bytes
 from oah.wiki.log import parse_log
 from oah.wiki.markdown import eol_of
 from oah.wiki.store import Wiki
@@ -72,6 +73,7 @@ MAP_FAILURES = (ImpactError, ConfigError, LockTimeout, StateCorrupt, StorageErro
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _PLAIN = re.compile(r"[A-Za-z0-9._-]+")
 _GUIDE_LINK = re.compile(r"\[\[" + GUIDE_SLUG + r"(?:[|#\]])")
+_WINDOWS_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])\Z", re.IGNORECASE)
 
 
 class InitError(Exception):
@@ -325,6 +327,28 @@ def _linked(root: pathlib.Path, relative: str) -> str | None:
     return None
 
 
+def _relative(relative: str) -> str:
+    """Use the same local path grammar on both supported platforms, before any filesystem lookup."""
+    relative = os.fspath(relative)
+    windows = pathlib.PureWindowsPath(relative)
+    parts = pathlib.PurePosixPath(relative.replace("\\", "/")).parts
+    if (not parts or windows.drive or windows.root or ".." in parts
+            or any(":" in part or part.endswith((" ", ".")) or "\x00" in part
+                   or _WINDOWS_DEVICE.fullmatch(part.partition(".")[0].rstrip(" ")) for part in parts)):
+        raise InitError("OAH_INIT_PATH_UNSAFE", "a destination is not a project-relative path. Set [wiki] dir "
+                        "to a folder inside this worktree, without a drive, root or '..', then run oah init again",
+                        EXIT_ENVIRONMENT)
+    return "/".join(parts)
+
+
+def _wiki_dir(root: pathlib.Path, relative: str) -> str:
+    relative = _relative(relative)
+    if _linked(root, relative) is not None:
+        raise InitError("OAH_INIT_PATH_UNSAFE", "[wiki] dir contains a link or junction. Choose a regular "
+                        "folder inside this worktree, then run oah init again", EXIT_ENVIRONMENT)
+    return relative
+
+
 @contextmanager
 def _windows_parents(root: pathlib.Path, relative: str):
     """Pin non-reparse parents, denying write/delete sharing until publication finishes."""
@@ -364,44 +388,153 @@ def _windows_parents(root: pathlib.Path, relative: str):
             close(handle)
 
 
-def _publish_new(root: pathlib.Path, relative: str, data: bytes) -> bool:
-    """Exclusive atomic publication: anchored dir fds on POSIX, pinned parents on Windows."""
+@contextmanager
+def _parents(root: pathlib.Path, relative: str):
+    """Keep every parent pinned until the caller has published and cleaned up."""
     if _linked(root, relative) is not None:
-        raise OSError("linked parent")
+        raise OSError("linked publication path")
     if os.name == "nt":
         with _windows_parents(root, relative):
-            return publish_new(root / relative, data)
-    parts = pathlib.PurePosixPath(relative).parts
-    if not parts or any(part in ("..", "/") for part in parts):
-        raise OSError("non-local publication path")
-    folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    temp = f".{parts[-1]}.{secrets.token_hex(8)}.tmp"
+            yield None
+        return
+    handles = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
     try:
-        for part in parts[:-1]:
+        for part in pathlib.PurePosixPath(relative).parts[:-1]:
             try:
-                os.mkdir(part, dir_fd=folder)
+                os.mkdir(part, dir_fd=handles[-1])
             except FileExistsError:
                 pass
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
-            os.close(folder)
-            folder = child
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666, dir_fd=folder)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temp, parts[-1], src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
-        except FileExistsError:
-            return False
-        os.fsync(folder)
-        return True
+            handles.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=handles[-1]))
+        yield handles[-1]
     finally:
-        try:
-            os.unlink(temp, dir_fd=folder)
-        except FileNotFoundError:
-            pass
-        os.close(folder)
+        for handle in reversed(handles):
+            os.close(handle)
+
+
+def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | None:
+    """Read a regular target through its pinned parent; never follow its final component."""
+    if _linked(root, relative) is not None:
+        raise OSError("linked publication path")
+    path = root / relative
+    if folder is not None:
+        parent = os.stat(path.parent, follow_symlinks=False)
+        pinned = os.fstat(folder)
+        if (parent.st_dev, parent.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise OSError("publication parent changed")
+    try:
+        fd = os.open(path if folder is None else path.name,
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), dir_fd=folder)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode) or _is_link(path):
+            raise OSError("non-regular publication target")
+        return handle.read()
+
+
+def _tree_digest(path: pathlib.Path) -> str:
+    """Identity of an installation being moved; linked entries are never eligible for publication."""
+    digest = hashlib.sha256()
+
+    def visit(item: pathlib.Path, name: str) -> None:
+        if _is_link(item):
+            raise OSError("linked installation entry")
+        info = item.stat(follow_symlinks=False)
+        digest.update(json.dumps([name, stat.S_IMODE(info.st_mode)], ensure_ascii=True).encode("ascii"))
+        if stat.S_ISDIR(info.st_mode):
+            digest.update(b"directory\0")
+            for child in sorted(item.iterdir()):
+                visit(child, name + "/" + child.name)
+        elif stat.S_ISREG(info.st_mode):
+            digest.update(hashlib.sha256(item.read_bytes()).digest())
+        else:
+            raise OSError("non-regular installation entry")
+
+    visit(path, "")
+    return digest.hexdigest()
+
+
+def _rename_exclusive(source, target, source_folder: int | None, folder: int | None) -> None:
+    """Atomic no-replace rename for installation directories (ordinary POSIX rename can clobber one)."""
+    if os.name == "nt":
+        _rename(source, target)  # Windows rename is exclusive; pinned parents keep both paths stable.
+        return
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = libc.renameatx_np if sys.platform == "darwin" else libc.renameat2
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(source_folder, os.fsencode(source), folder, os.fsencode(target),
+              4 if sys.platform == "darwin" else 1):  # RENAME_EXCL / RENAME_NOREPLACE
+        raise OSError(ctypes.get_errno(), "exclusive installation publication failed")
+
+
+def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: bytes | None = None, *,
+             executable: bool = False, source: str | None = None, source_digest: str = "") -> bool:
+    """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
+    root = pathlib.Path(root).absolute()
+    try:
+        relative = _relative(relative)
+        with _parents(root, relative) as folder:
+            path = root / relative
+            name = path if folder is None else path.name
+            if source is not None:
+                source = _relative(source)
+                with _parents(root, source) as source_folder:
+                    source_path = root / source
+                    if (_current(root, relative, folder) is not None or _linked(root, source) is not None
+                            or _tree_digest(source_path) != source_digest):
+                        return False
+                    # Recheck both lexical parents after reading the source tree.
+                    _current(root, relative, folder)
+                    if source_folder is not None:
+                        actual, pinned = source_path.parent.stat(), os.fstat(source_folder)
+                        if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                            return False
+                    if _linked(root, source) is not None:
+                        return False
+                    _rename_exclusive(source_path if source_folder is None else source_path.name, name,
+                                      source_folder, folder)
+                    if folder is not None:
+                        os.fsync(folder)
+                    return True
+            temp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+            temporary = temp if folder is None else temp.name
+            try:
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                             0o666, dir_fd=folder)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    if executable and os.name != "nt":
+                        os.fchmod(handle.fileno(), os.fstat(handle.fileno()).st_mode | 0o111)
+                    os.fsync(handle.fileno())
+                current = _current(root, relative, folder)
+                if ((current is None) != (before is None) or (current is not None and
+                        hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
+                    return False
+                if before is not None:
+                    os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+                elif os.name == "nt":
+                    os.rename(temporary, name)  # Windows refuses an existing target.
+                else:
+                    os.link(temporary, name, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
+                if folder is not None:
+                    os.fsync(folder)
+                return True
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+    except (OSError, InitError):
+        return False
+
+
+def _publish_new(root: pathlib.Path, relative: str, data: bytes) -> bool:
+    """Compatibility entry point for an exclusive create."""
+    return _publish(root, relative, data)
 
 
 def _wiki_path(wiki_dir: str, name: str) -> str:
@@ -412,9 +545,11 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
                unlazy_copy: bool, force: bool, today: dt.date) -> list[FileChange]:
     """Every file init manages, with what would happen to it. Reads only."""
     root = pathlib.Path(root)
+    wiki_dir = _wiki_dir(root, wiki_dir)
     changes: list[FileChange] = []
 
     def owned(path: str, data: bytes, group: str) -> FileChange:
+        path = _relative(path)
         before = read_bytes(root / path)
         link = _linked(root, path)
         if link is not None:
@@ -475,8 +610,9 @@ def _plan_wiki_content(root: pathlib.Path, path: str, fresh: bytes, guide_missin
     if path.endswith("/log.md"):
         try:
             parse_log(before, "log.md")
-        except WikiError as exc:
-            return FileChange(path, "keep", "wiki", None, before, f"{keep}; oah wiki commands refuse it: {exc}")
+        except WikiError:
+            return FileChange(path, "keep", "wiki", None, before,
+                              f"{keep}; its log format is invalid; repair it before running oah wiki commands")
     return FileChange(path, "keep", "wiki", None, before, keep)
 
 
@@ -508,23 +644,10 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
     problems: list[str] = []
 
     def write(change: FileChange) -> None:
-        path = root / change.path
-        if change.action == "create":
-            try:
-                created = _publish_new(root, change.path, change.data)
-            except OSError:
-                created = False
-            if created:
-                written.append(change)
-                return
-            problems.append(f"OAH_INIT_CHANGED: {change.path} or its parents changed or cannot be safely written, "
-                            "so init left it as it is. Run oah init again to see the new plan.")
-            return
-        if read_bytes(path) != change.before or _linked(root, change.path) is not None:
+        if not _publish(root, change.path, change.data, None if change.action == "create" else change.before):
             problems.append(f"OAH_INIT_CHANGED: {change.path} changed after the plan was shown, so init left it "
                             "as it is. Run oah init again to see the new plan.")
             return
-        write_text_atomic(path, change.data.decode("utf-8"))
         written.append(change)
 
     pending = [change for change in changes if change.action in WRITES]
@@ -546,6 +669,7 @@ class RulesStep(NamedTuple):
     agents: str  # create | update | unchanged
     claude: str  # create | update | unchanged
     block_bytes: int
+    planned: rules.Plan | None = None
 
 
 def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
@@ -556,7 +680,20 @@ def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
         return "create" if before is None else "unchanged" if before == after else "update"
 
     return RulesStep(found.lang, action(found.agents_before, found.agents_after),
-                     action(found.claude_before, found.claude_after), found.block_bytes)
+                     action(found.claude_before, found.claude_after), found.block_bytes, found)
+
+
+def _sync_rules(root: pathlib.Path, step: RulesStep) -> rules.SyncResult:
+    """Keep rules' validation and formatting, publishing only the bytes the initial plan approved."""
+    found = step.planned if step.planned is not None else rules.plan(root, lang=step.lang)
+    changed = []
+    for name, before, after in (("AGENTS.md", found.agents_before, found.agents_after),
+                                ("CLAUDE.md", found.claude_before, found.claude_after)):
+        if before != after:
+            if not _publish(root, name, after, before):
+                raise InitError("OAH_INIT_CHANGED", f"{name} changed; run oah init again to see the new plan")
+            changed.append(name)
+    return rules.SyncResult(found.lang, tuple(changed), len(found.agents_after), found.block_bytes)
 
 
 def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
@@ -583,7 +720,9 @@ def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
         text += eol
     if text.strip() and not text.endswith(eol * 2):
         text += eol
-    write_text_atomic(path, text + companions.rules_section(True, lang=lang).replace("\n", eol))
+    data = (text + companions.rules_section(True, lang=lang).replace("\n", eol)).encode("utf-8")
+    if not _publish(root, relative, data, before):
+        return "skipped: OAH_INIT_CHANGED: rules changed; run oah init again"
     return "added"
 
 
@@ -596,6 +735,8 @@ class HookStep:
     diff: str = ""
     path: str = ""
     note: str = ""
+    before: bytes | None = dataclasses.field(default=None, repr=False)
+    data: bytes | None = dataclasses.field(default=None, repr=False)
 
 
 def _shown_path(root: pathlib.Path, path: pathlib.Path) -> str:
@@ -623,16 +764,14 @@ def _local_settings_problem(root: pathlib.Path, *, require_ignored: bool) -> str
 
 def _git_hook_problem(root: pathlib.Path, kind: str) -> str:
     path = pathlib.Path(os.path.abspath(hooks.git_hook_path(root, kind)))
-    common = repo_info(root).common_dir
-    for base in (root, common / "hooks"):
-        try:
-            relative = path.relative_to(base).as_posix()
-        except ValueError:
-            continue
-        if not _is_link(base) and _linked(base, relative) is None:
+    try:
+        relative = _relative(path.relative_to(root).as_posix())
+        if not _is_link(root) and _linked(root, relative) is None:
             return ""
-    return ("OAH_INIT_HOOK_LOCATION_UNSAFE: git hooks must be inside this project or its repository hooks folder. "
-            "Unset the shared core.hooksPath or select a project-local folder, then run oah init again")
+    except (ValueError, InitError):
+        pass
+    return ("OAH_INIT_HOOK_LOCATION_UNSAFE: git hooks must be inside this worktree. Select a project-local folder "
+            "with `git config core.hooksPath .githooks`, then run oah init again")
 
 
 def _claude_hook_diff(kind: str) -> str:
@@ -645,10 +784,15 @@ def _claude_hook_diff(kind: str) -> str:
                                        fromfile="/dev/null", tofile=f"b/{CLAUDE_SETTINGS} (hook addition only)"))
 
 
+def _replacement_note(data: bytes | None) -> str:
+    return f"replaces {len(data)} bytes (sha256 {hashlib.sha256(data).hexdigest()})" if data is not None else ""
+
+
 def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
     """Every hook oah offers (PLAN 5.12) with the diff its install would make. Writes nothing."""
     root = pathlib.Path(root)
     steps = []
+    settings_before, settings_data = None, None
     for kind in hooks.KINDS:
         if not hooks.hook_available(kind):
             steps.append(HookStep(kind, "unavailable", note=f"this oah version does not provide `oah hook {kind}` yet"))
@@ -671,11 +815,31 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
                                                          "it (oah keeps it as a backup and puts it back on "
                                                          f"`oah hooks uninstall {kind}`)"))
             else:
-                steps.append(HookStep(kind, "refused", note=str(exc)))
+                steps.append(HookStep(kind, "refused", note=f"{exc.code}: the hook cannot be safely planned; "
+                                      "check its settings and backup, then run oah init again"))
             continue
         action = "installed" if change.action == "unchanged" else "install"
-        diff = _claude_hook_diff(kind) if kind in hooks.CLAUDE_KINDS and action == "install" else change.diff
-        steps.append(HookStep(kind, action, diff, _shown_path(root, change.path)))
+        diff, note, before, data = "", "", None, None
+        if action == "install":
+            before = read_bytes(change.path)
+            note = _replacement_note(before)
+            diff = (_claude_hook_diff(kind) if kind in hooks.CLAUDE_KINDS else "".join(difflib.unified_diff(
+                [], hooks.git_hook_text(kind).splitlines(keepends=True), fromfile="/dev/null",
+                tofile=f"b/{_shown_path(root, change.path)} (canonical hook only)")))
+            if kind in hooks.CLAUDE_KINDS:
+                if settings_data is None:
+                    settings_before, settings_data = hooks._load_settings(change.path)
+                event, matcher = hooks.CLAUDE_KINDS[kind]
+                group = {"matcher": matcher} if matcher else {}
+                group["hooks"] = [{"type": "command", "command": hooks.command_for(kind)}]
+                settings_data.setdefault("hooks", {}).setdefault(event, []).append(group)
+                data = hooks._render(settings_data, settings_before).encode("utf-8")
+                # Subsequent additions are planned against the preceding planned publication.
+                before = next((item.data for item in reversed(steps) if item.kind in hooks.CLAUDE_KINDS
+                               and item.action == "install"), before)
+            else:
+                data = hooks.git_hook_text(kind).encode("utf-8")
+        steps.append(HookStep(kind, action, diff, _shown_path(root, change.path), note, before, data))
     return steps
 
 
@@ -701,12 +865,29 @@ def install_hooks(root: pathlib.Path, steps: list[HookStep], *, force: bool) -> 
             if step.path != _shown_path(root, path):
                 problems.append(f"OAH_INIT_CHANGED: the {step.kind} hook destination changed; run oah init again")
                 continue
-            change = hooks.install(step.kind, root, dry_run=False, force=force)
+            base = root
+            relative = path.relative_to(base).as_posix()
+            backup = relative + hooks.BACKUP_SUFFIX
+            if step.before is not None:
+                if step.kind in hooks.GIT_KINDS and not force:
+                    problems.append("OAH_INIT_CHANGED: a foreign hook requires --force; run oah init again")
+                    continue
+                if read_bytes(base / backup) is None:
+                    if not _publish(base, backup, step.before, executable=step.kind in hooks.GIT_KINDS):
+                        problems.append("OAH_INIT_CHANGED: a hook backup changed; run oah init again")
+                        continue
+                elif step.kind in hooks.GIT_KINDS:
+                    problems.append("OAH_INIT_CHANGED: a hook backup appeared; move it away and run oah init again")
+                    continue
+            if step.data is None or not _publish(base, relative, step.data, step.before,
+                                                 executable=step.kind in hooks.GIT_KINDS):
+                problems.append(f"OAH_INIT_CHANGED: the {step.kind} hook changed; run oah init again")
+                continue
         except hooks.HookError as exc:
-            problems.append(f"{exc} (the {step.kind} hook was not installed)")
+            problems.append(f"{exc.code}: the {step.kind} hook was not installed; check its location and settings, "
+                            "then run oah init again")
             continue
-        if change.action == "install":
-            installed.append(step.kind)
+        installed.append(step.kind)
     return installed, problems
 
 
@@ -718,6 +899,7 @@ class UnlazyStep:
     folder: str = ""  # the copy discovery found, when there is one
     note: str = ""
     aside: str = ""  # replace: the folder moved aside to <name>.oah.bak first
+    digest: str = ""  # planned identity of a copy to move aside
 
 
 def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Path, pin: unlazy.Pin,
@@ -739,14 +921,15 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
         if target.exists() or target.is_symlink():
             if force:
                 return UnlazyStep("replace", str(target), f"{UNLAZY_PROJECT} is not unlazy; init moves it aside to "
-                                                          f"{UNLAZY_PROJECT}.oah.bak first", aside=str(target))
+                                                          f"{UNLAZY_PROJECT}.oah.bak first", aside=str(target),
+                                  digest=_tree_digest(target))
             return UnlazyStep("blocked", str(target), f"{UNLAZY_PROJECT} exists but is not unlazy. Move it away, or "
                                                       "pass --force to move it aside")
         return UnlazyStep("install", note=f"downloads unlazy into {UNLAZY_PROJECT} at commit {short}")
     problems = unlazy.verify_pin(folder, pin)
     if not problems:
         return UnlazyStep("present", str(folder), f"{folder} is the pinned commit {short}, with matching file digests")
-    why = "; ".join(problems)
+    why = "its commit or script digests do not match the pin"
     if override:
         return UnlazyStep("blocked", str(folder), f"{override} names {folder}, which is not the pinned unlazy ({why}). "
                                                   f"Clear {override}, then run oah init --with-unlazy again")
@@ -755,7 +938,8 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
         where = _shown_path(root, folder)
         if force:
             return UnlazyStep("replace", str(folder), f"the project copy {where} is not the pinned one ({why}); init "
-                                                      f"moves it aside to {where}.oah.bak first", aside=str(folder))
+                                                      f"moves it aside to {where}.oah.bak first", aside=str(folder),
+                              digest=_tree_digest(folder))
         return UnlazyStep("blocked", str(folder), f"the project copy {where} is not the pinned one ({why}). Pass "
                                                   "--force to move it aside and install the pinned copy")
     return UnlazyStep("install", str(folder), f"your copy at {folder} is not the pinned one ({why}); init installs "
@@ -798,68 +982,49 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                    pin: unlazy.Pin = unlazy.PIN, timeout: float = CLONE_TIMEOUT) -> str:
     """Clone into a staging folder, check out the pinned commit, verify it, then move it into place.
 
-    Returns "" on success, else the problem; a failure leaves no project copy behind and puts back a
-    copy that was moved aside."""
+    Returns "" on success, else the problem. Clone/verification failures leave the old copy untouched;
+    after a successful backup publication, a later conflict leaves that backup for explicit recovery."""
     root = pathlib.Path(root)
-    target = root / UNLAZY_PROJECT
-    moved: tuple[pathlib.Path, pathlib.Path] | None = None
-    staging = target.parent / f".unlazy-{secrets.token_hex(4)}.tmp"
-
-    def validate() -> None:
-        paths = [target, staging]
-        if step.action == "replace":
-            aside = pathlib.Path(step.aside)
-            if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
-                raise OSError("non-local replacement")
-            paths += [aside, aside.with_name(aside.name + ".oah.bak")]
-        for path in paths:
-            if _linked(root, path.relative_to(root).as_posix()) is not None:
-                raise OSError("linked installation path")
-
+    staging_relative = f".unlazy-{secrets.token_hex(8)}.tmp"
+    staging = root / staging_relative
     try:
         if step.action not in ("install", "replace"):
             return "OAH_INIT_UNLAZY_FAILED: installation was not planned; remove any links and run oah init again"
-        validate()
-        if step.action == "replace":
-            aside = pathlib.Path(step.aside)
-            backup = aside.with_name(aside.name + ".oah.bak")
-            if backup.exists() or backup.is_symlink():
-                return (f"OAH_INIT_UNLAZY_FAILED: {_shown_path(root, backup)} already exists; move it away so nothing "
-                        "is lost, then run oah init --with-unlazy --force again")
-            validate()
-            _rename(aside, backup)
-            moved = (backup, aside)
-        if target.exists() or target.is_symlink():
-            return (f"OAH_INIT_UNLAZY_FAILED: {UNLAZY_PROJECT} appeared after the plan was shown; run oah init "
-                    "again to see the new plan")
-        validate()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        for argv in unlazy_commands(staging, source=source, pin=pin):
-            validate()
-            result = run_command(argv, timeout=timeout, env={**os.environ, **NETWORK_ENV})
-            if result.timed_out or result.returncode != 0:
-                lines = result.stderr.strip().splitlines()
-                detail = lines[-1] if lines else ("timed out" if result.timed_out else f"exit code {result.returncode}")
-                return (f"OAH_INIT_UNLAZY_FAILED: git {argv[len(git_argv())]} failed ({detail}). Check your network "
-                        "and git, then run oah init --with-unlazy again")
-        validate()
-        problems = unlazy.verify_pin(staging, pin)
-        if problems:
-            return (f"OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy ({'; '.join(problems)}); "
-                    "nothing was installed")
-        validate()
-        _rename(staging, target)
-        moved = None
-        return ""
+        for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
+            if _linked(root, relative) is not None:
+                raise OSError("linked installation path")
+        # The clone is isolated from mutable skill parents. Nothing is moved aside until it verifies.
+        with _parents(root, staging_relative):
+            try:
+                for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
+                                            strict=True):
+                    result = run_command(argv, timeout=timeout, env={**os.environ, **NETWORK_ENV})
+                    if result.timed_out or result.returncode != 0:
+                        detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
+                        return (f"OAH_INIT_UNLAZY_FAILED: git {operation} failed ({detail}). Check your "
+                                "network and git, then run oah init --with-unlazy again")
+                if unlazy.verify_pin(staging, pin):
+                    return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
+                            "source and pin, then run oah init --with-unlazy again. Nothing was installed")
+                digest = _tree_digest(staging)
+                if step.action == "replace":
+                    aside = pathlib.Path(step.aside)
+                    if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
+                        raise OSError("non-local replacement")
+                    relative = aside.relative_to(root).as_posix()
+                    if not _publish(root, relative + ".oah.bak", None, source=relative, source_digest=step.digest):
+                        return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
+                                "away and run oah init --with-unlazy --force again")
+                if not _publish(root, UNLAZY_PROJECT, None, source=staging_relative, source_digest=digest):
+                    return ("OAH_INIT_CHANGED: the unlazy destination changed; inspect the project copy and any "
+                            ".oah.bak backup, then run oah init --with-unlazy again")
+                return ""
+            finally:
+                if not _is_link(staging) and staging.exists():
+                    _remove_tree(staging)
     except OSError:
         return ("OAH_INIT_UNLAZY_FAILED: an installation path changed, is linked or cannot be written safely. "
                 "Remove links and check permissions, then run oah init --with-unlazy again")
-    finally:
-        if _linked(root, staging.relative_to(root).as_posix()) is None and staging.exists():
-            _remove_tree(staging)
-        if moved is not None and all(_linked(root, path.relative_to(root).as_posix()) is None for path in moved) \
-                and not moved[1].exists():
-            _rename(*moved)
 
 
 # The CI starter ------------------------------------------------------------------------------------------
@@ -880,24 +1045,29 @@ def plan_ci(root: pathlib.Path, *, force: bool, oses: list[str], test_command) -
     except ci.CiError as exc:
         if exc.code == "OAH_CI_AMBIGUOUS":
             return CiStep("skipped", note="this project matches several kinds of tests; run `oah ci init` to pick one")
-        return CiStep("skipped", note=str(exc))
+        return CiStep("skipped", note=f"{exc.code}: the workflow cannot be safely planned; check its path and "
+                      "project configuration, then run oah ci init")
     if found.up_to_date:
         return CiStep("unchanged", found.text, plan=found)
     if found.existing is not None:
+        note = _replacement_note(found.existing.encode("utf-8"))
+        diff = "".join(difflib.unified_diff([], found.text.splitlines(keepends=True), fromfile="/dev/null",
+                                          tofile=f"b/{ci.WORKFLOW_PATH} (canonical workflow only)"))
         if force:
-            return CiStep("replace", found.text, found.diff, plan=found)
-        return CiStep("keep", found.text, found.diff, "it exists and differs; run `oah ci init` to review the "
-                                                      "difference, or pass --force", found)
+            return CiStep("replace", found.text, diff, note, found)
+        return CiStep("keep", found.text, diff, note + "; run `oah ci init` to review the change, or pass --force", found)
     note = "its 'Run tests (edit me)' step fails until you put your test command in it" if found.placeholder else ""
     return CiStep("create", found.text, note=note, plan=found)
 
 
 def write_ci(step: CiStep) -> str:
     """Write the planned workflow; "" on success, else the problem (the file changed since it was shown)."""
-    try:
-        ci.write(step.plan, confirm=True, overwrite=step.action == "replace")
-    except ci.CiError as exc:
-        return str(exc)
+    found = step.plan
+    if found is None or step.action not in ("create", "replace"):
+        return "OAH_INIT_CHANGED: no CI publication was planned; run oah init again"
+    before = found.existing.encode("utf-8") if found.existing is not None else None
+    if not _publish(found.root, ci.WORKFLOW_PATH, step.text.encode("utf-8"), before):
+        return "OAH_INIT_CHANGED: the CI workflow or its parents changed; run oah init again"
     return ""
 
 
@@ -908,7 +1078,7 @@ def map_state(root: pathlib.Path, env: Mapping[str, str]) -> tuple[str, str]:
     try:
         info, reason = mapstore.status(pathlib.Path(root), env=env)
     except MAP_FAILURES as exc:
-        return "unavailable", str(exc)
+        return "unavailable", _map_problem(exc)
     if info is None:
         return "missing", reason
     return info.action, reason
@@ -919,8 +1089,14 @@ def refresh_map(root: pathlib.Path, env: Mapping[str, str]) -> tuple[str, str]:
     try:
         info = mapstore.ensure_fresh(pathlib.Path(root), env=env)
     except MAP_FAILURES as exc:
-        return "unavailable", str(exc)
+        return "unavailable", _map_problem(exc)
     return info.action, f"commit={info.commit[:12]} result={info.result_digest[:12]}"
+
+
+def _map_problem(exc: Exception) -> str:
+    if getattr(exc, "code", None) == "OAH_IMPACT_NO_COMMIT":
+        return "OAH_IMPACT_NO_COMMIT: make a first commit, then run oah impact build."
+    return "OAH_INIT_IMPACT_UNAVAILABLE: impact map checking or building failed; run oah impact build to retry."
 
 
 def origin_url(root: pathlib.Path) -> str | None:
@@ -936,6 +1112,25 @@ def _input(prompt: str) -> str | None:
         return input(prompt)
     except EOFError:
         return None
+
+
+def _quiet_run(argv, *, operation: str, cwd: pathlib.Path | None = None) -> int:
+    """External installers never inherit output streams; report only fixed operation and result metadata."""
+    code, timed_out = None, False
+    try:
+        resolved = resolve_command(argv[0])
+        if resolved is not None:
+            result = run_command(resolved.argv + tuple(argv[1:]), timeout=CLONE_TIMEOUT,
+                                 cwd=str(cwd) if cwd is not None else None,
+                                 env=dict(os.environ, UV_NO_MODIFY_PATH="1"))
+            code, timed_out = result.returncode, result.timed_out
+    except (OSError, UnsupportedBatchShim):
+        pass
+    if code == 0 and not timed_out:
+        return 0
+    print(f"OAH_INIT_TOOL_FAILED: {operation} failed (exit code {code}; timed out: {'yes' if timed_out else 'no'}). "
+          "Check the tool in your own terminal, then run oah init again")
+    return 1
 
 
 @dataclasses.dataclass
@@ -959,8 +1154,9 @@ class Machine:
 
     @classmethod
     def real(cls) -> "Machine":
-        return cls(which=shutil.which, install_runner=guide.run_interactive, status_runner=guide.default_status_runner,
-                   refresh=guide.refresh_path, companion_runner=companions.default_runner,
+        return cls(which=shutil.which, install_runner=lambda argv: _quiet_run(argv, operation="tool installation"),
+                   status_runner=guide.default_status_runner, refresh=guide.refresh_path,
+                   companion_runner=lambda argv, cwd: _quiet_run(argv, operation="companion setup", cwd=cwd),
                    companion_probe=companion_probe, ask=_input,
                    interactive=sys.stdin is not None and sys.stdin.isatty(), env=os.environ, home=pathlib.Path.home(),
                    os_name=os_name_for(sys.platform), companion_os=companions.os_for(sys.platform),
@@ -1102,6 +1298,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     effective = existing if has_config and not force else parse_config(config)
     engines = effective.section("engines", call.ENGINE_DEFAULTS)
     wiki = WikiSettings.from_mapping(effective.section("wiki", WIKI_DEFAULTS))
+    wiki = dataclasses.replace(wiki, dir=_wiki_dir(root, wiki.dir))
     ci_section = effective.section("ci", ci.DEFAULTS)
     apps = tuple(app for app in companions.APPS if values[app])
     tools = tuple(tool for tool in catalog() if tool.name != "unlazy" and (not tool.optional or tool.name in apps))
@@ -1293,7 +1490,11 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
     outcome.pending += [f"{status.tool.name}:sign-in" for status in statuses
                         if status.tool.required and status.tool.name in signed_out]
     written, problems = write_files(root, list(plan.files), wiki=Wiki(root, plan.wiki, plan.state))
-    synced = rules.sync(root, lang=plan.rules.lang)
+    try:
+        synced = _sync_rules(root, plan.rules)
+    except InitError as exc:
+        problems.append(str(exc))
+        synced = rules.SyncResult(plan.rules.lang, (), 0, plan.rules.block_bytes)
     if written or problems or synced.changed:
         out("")
         out("Files:")
@@ -1389,7 +1590,7 @@ def _apply_companions(plan: Plan, machine: Machine, outcome: Outcome, *, yes: bo
     if companions.CompanionResult(found).aside_registered:
         status = add_aside_rules(plan.root, lang=plan.rules.lang)
         if status == "added":
-            synced = rules.sync(plan.root, lang=plan.rules.lang)
+            synced = _sync_rules(plan.root, plan_rules(plan.root, lang=plan.rules.lang))
             out(f"  added the Aside web rules to {rules.LOCAL_RULES} and the AGENTS.md block")
             outcome.changed += 1 + len(synced.changed)
         elif status != "present":
