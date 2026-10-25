@@ -691,7 +691,8 @@ def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: b
     close = kernel.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    handle = create(str(path), 0x81 | (0x10000 if delete else 0) | (0x40000 if security else 0), 7 if allow_swap else 1,
+    # Protected DACL updates read the current descriptor as well as writing it: READ_CONTROL | WRITE_DAC.
+    handle = create(str(path), 0x81 | (0x10000 if delete else 0) | (0x60000 if security else 0), 7 if allow_swap else 1,
                     None, 3, 0x02200000, None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -795,7 +796,7 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
     kernel.LocalFree.argtypes, kernel.LocalFree.restype = (ctypes.c_void_p,), ctypes.c_void_p
     security = ctypes.c_void_p()
     if not convert(descriptor, 1, ctypes.byref(security), None):
-        raise OSError("cannot prepare file security")
+        raise OSError(ctypes.get_last_error(), "cannot prepare file security")
     try:
         if not create:
             get_dacl = advapi.GetSecurityDescriptorDacl
@@ -803,8 +804,9 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
                                 ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL))
             get_dacl.restype = wintypes.BOOL
             present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
-            if (not get_dacl(security, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted))
-                    or not present.value or not dacl.value):
+            if not get_dacl(security, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)):
+                raise OSError(ctypes.get_last_error(), "cannot read replacement DACL")
+            if not present.value or not dacl.value:
                 raise OSError("cannot read replacement DACL")
             setter = advapi.SetSecurityInfo
             setter.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
@@ -813,8 +815,12 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
             # Protect the copied effective ACEs from the destination parent's inherited grants.
             # Use the file-object API for DACL/protection updates on the held handle.
             held = handle if handle is not None else msvcrt.get_osfhandle(fd) if fd is not None else None
-            if held is None or setter(held, 1, 0x80000004, None, None, dacl, None) != 0:
+            if held is None:
                 raise OSError("cannot preserve file security")
+            error = setter(held, 1, 0x80000004, None, None, dacl, None)
+            if error:
+                # SetSecurityInfo returns its error code directly; GetLastError may be unrelated.
+                raise OSError(error, "cannot preserve file security")
             return None
 
         class Attributes(ctypes.Structure):
@@ -825,9 +831,10 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
         opener.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Attributes),
                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
         opener.restype = wintypes.HANDLE
-        handle = opener(str(path), 0xC0040000, 1, ctypes.byref(attributes), 1, 0x00200000, None)
+        # The CRT fd retains this handle's READ_CONTROL | WRITE_DAC for later DACL copies.
+        handle = opener(str(path), 0xC0060000, 1, ctypes.byref(attributes), 1, 0x00200000, None)
         if handle == wintypes.HANDLE(-1).value:
-            raise OSError("cannot create private staging file")
+            raise OSError(ctypes.get_last_error(), "cannot create private staging file")
         try:
             return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
         except BaseException:
