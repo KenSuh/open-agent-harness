@@ -599,6 +599,180 @@ class NoOverwriteTest(unittest.TestCase):
         self.assertTrue((repo / "docs/wiki/index.md").read_bytes().startswith(originals["docs/wiki/index.md"]))
 
 
+class CorrectionC3Test(unittest.TestCase):
+    def test_required_ignore_negations_leave_init_incomplete(self):
+        patterns = [entry for _comment, entries in init._gitignore_groups(False) for entry in entries]
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                repo = committed_repo(self)
+                original = (init.add_gitignore_entries(None, unlazy_copy=False) +
+                            ("!" + pattern + "\n").encode("utf-8"))
+                (repo / ".gitignore").write_bytes(original)
+                code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("OAH_INIT_IGNORE_UNPROTECTED", out)
+                self.assertIn(pattern, out)
+                self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
+                self.assertEqual((repo / ".gitignore").read_bytes(), original)
+
+    def test_nested_ignore_negations_leave_init_incomplete(self):
+        cases = (("nested/.gitignore", b"!.env\n", ".env"),
+                 ("nested/.gitignore", b"!*.key\n", "*.key"),
+                 (".oah/tasks/real/.gitignore", b"!GATES.md\n", ".oah/tasks/*/GATES.md"),
+                 ("docs/wiki/.obsidian/.gitignore", b"!workspace*.json\n", "**/.obsidian/workspace*.json"))
+        for name, data, pattern in cases:
+            with self.subTest(name=name, pattern=pattern):
+                repo = committed_repo(self)
+                path = repo / name
+                path.parent.mkdir(parents=True)
+                path.write_bytes(data)
+                code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+                self.assertEqual(code, 1, out + err)
+                self.assertIn("OAH_INIT_IGNORE_UNPROTECTED", out)
+                self.assertIn(pattern, out)
+                self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
+                self.assertEqual(path.read_bytes(), data)
+
+    def test_ignore_verification_uses_rules_even_for_tracked_paths(self):
+        repo = committed_repo(self)
+        git_commit(repo, {".env": "# harmless tracked fixture\n"})
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("OAH_INIT_IGNORE_UNPROTECTED", out)
+
+    def test_ignore_verification_stays_in_the_parent_repository(self):
+        repo = committed_repo(self)
+        dependency = repo / "dependency"
+        subprocess.run(["git", "init", "-q", str(dependency)], check=True, env=git_env())
+        head = git_commit(dependency, {".gitignore": "!.env\n", "fixture.key": "# harmless fixture\n"})
+        subprocess.run(["git", "update-index", "--add", "--cacheinfo", "160000", head, "dependency"],
+                       cwd=repo, check=True, env=git_env())
+        (repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
+        self.assertEqual(init._ignore_problems(repo, unlazy_copy=False), [])
+
+    def test_a_git_named_file_cannot_hide_a_nested_ignore_conflict(self):
+        repo = committed_repo(self)
+        folder = repo / "nested"
+        folder.mkdir()
+        (folder / ".git").write_bytes(b"not a git repository\n")
+        (folder / ".gitignore").write_bytes(b"!.env\n")
+        (repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
+        problems = init._ignore_problems(repo, unlazy_copy=False)
+        self.assertTrue(any("required pattern .env " in problem for problem in problems), problems)
+
+    def test_existing_secret_name_negation_is_checked_without_reading_its_bytes(self):
+        repo = committed_repo(self)
+        path = repo / "nested/production.key"
+        path.parent.mkdir()
+        secret = ("fake-" + token_source.token_hex(20)).encode("utf-8")
+        path.write_bytes(secret)
+        (repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False) +
+                                         b"!nested/production.key\n")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 1, err + out)
+        self.assertIn("OAH_INIT_IGNORE_UNPROTECTED: required pattern *.key", out)
+        self.assertNotIn(secret.decode("utf-8"), out + err)
+        self.assertEqual(path.read_bytes(), secret)
+
+    def test_existing_ci_command_never_enters_plan_workflow_or_state(self):
+        for detected in (False, True):
+            with self.subTest(detected=detected):
+                repo = committed_repo(self)
+                secret = "fake-" + token_source.token_hex(20)
+                command = "private-test-runner --password=" + secret
+                config = repo / init.CONFIG_PATH
+                config.parent.mkdir()
+                config.write_bytes(('[ci]\ntest_command = ' + json.dumps(command) + '\n').encode("utf-8"))
+                if detected:
+                    (repo / "go.mod").write_bytes(b"module example.test/sample\n")
+                machine = make_machine(self, FakeTools())
+                before = snapshot(repo)
+                code, dry, err = run_init(repo, machine, "--dry-run", *flags(ci=True))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(snapshot(repo), before)
+                self.assertNotIn(command, dry + err)
+                self.assertNotIn(secret, dry + err)
+                code, out, err = run_init(repo, machine, *flags(ci=True))
+                self.assertEqual(code, 0, err + out)
+                self.assertEqual(plan_block(dry), plan_block(out))
+                workflow = (repo / ".github/workflows/oah-ci.yml").read_bytes()
+                if detected:
+                    self.assertIn(b"go test ./...", workflow)
+                else:
+                    self.assertIn(b"Run tests (edit me)", workflow)
+                for path, data in snapshot(repo).items():
+                    if path != init.CONFIG_PATH:
+                        self.assertNotIn(secret.encode("utf-8"), data, path)
+                self.assertNotIn(secret, out + err)
+                self.assertIn(command.encode("utf-8"), config.read_bytes())
+
+    def test_aside_preserves_rules_changed_after_confirmation(self):
+        for name in ("AGENTS.md", ".oah/rules.local.md"):
+            for existed in (False, True):
+                with self.subTest(name=name, existed=existed):
+                    repo = committed_repo(self)
+                    path = repo / name
+                    if existed:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b"# Original\r\n")
+                    machine = make_machine(self, FakeTools(present=(*ALL_TOOLS, "aside")))
+                    machine.companion_probe = lambda argv, cwd: 0
+                    status = machine.status_runner
+
+                    def edit(argv):
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b"# Concurrent edit\r\n")
+                        return status(argv)
+
+                    machine.status_runner = edit
+                    code, out, err = run_init(repo, machine, *flags(aside=True))
+                    self.assertEqual(code, 1, out + err)
+                    self.assertIn("OAH_INIT_CHANGED", out)
+                    self.assertEqual(path.read_bytes(), b"# Concurrent edit\r\n")
+                    self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
+
+    def test_aside_apply_uses_only_preconfirmed_publications(self):
+        repo = committed_repo(self)
+        machine = make_machine(self, FakeTools(present=(*ALL_TOOLS, "aside")))
+        machine.companion_probe = lambda argv, cwd: 0
+        given = {question.key: question.key == "aside" for question in init.QUESTIONS}
+        answers = {key: init.Answer(value, "flag") for key, value in given.items()}
+        plan = init.build_plan(repo, answers, given=given, machine=machine, lang=None, force=False, existing=None)
+        with mock.patch.object(init.rules, "plan", side_effect=AssertionError("apply must never replan")):
+            outcome = init.apply_plan(plan, machine, yes=False, force=False, out=lambda line: None)
+        self.assertEqual(outcome.pending, [])
+        from oah import rules
+        from oah.setup import companions
+        self.assertIn(companions.RULES_BEGIN, (repo / rules.LOCAL_RULES).read_text(encoding="utf-8"))
+        self.assertEqual(rules.check(repo), [])
+        before = snapshot(repo)
+        code, out, err = run_init(repo, machine, *flags(aside=True))
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual(snapshot(repo), before)
+        self.assertEqual(last_line(out), "OAH_INIT_UNCHANGED impact=fresh")
+
+    def test_conditional_aside_rules_match_landed_rules_with_existing_content(self):
+        from oah import rules
+        for eol in (b"\n", b"\r\n"):
+            with self.subTest(eol=eol):
+                repo = committed_repo(self)
+                local = repo / rules.LOCAL_RULES
+                local.parent.mkdir()
+                original = b"Use tabs." + eol + b"No final newline"
+                local.write_bytes(original)
+                (repo / "AGENTS.md").write_bytes(b"# Project" + eol)
+                rules.sync(repo, lang="ko")
+                agents = repo / "AGENTS.md"
+                agents.write_bytes(agents.read_bytes().rstrip(b"\r\n"))
+                machine = make_machine(self, FakeTools(present=(*ALL_TOOLS, "aside")))
+                machine.companion_probe = lambda argv, cwd: 0
+                code, out, err = run_init(repo, machine, *flags(aside=True))
+                self.assertEqual(code, 0, out + err)
+                self.assertTrue(local.read_bytes().startswith(original + eol))
+                self.assertFalse(agents.read_bytes().endswith(b"\n"))
+                self.assertEqual(rules.check(repo), [])
+
+
 class BlockedTest(unittest.TestCase):
     """A requested file or hook that init cannot write leaves the run incomplete, never silently done."""
 
