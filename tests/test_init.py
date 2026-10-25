@@ -263,6 +263,15 @@ class PlanFilesTest(unittest.TestCase):
         self.assertEqual((found["docs/wiki/index.md"].action, found["docs/wiki/log.md"].action), ("keep", "keep"))
         self.assertEqual(found["docs/wiki/wiki-guide.md"].action, "replace")
 
+    def test_is_link_detects_symlinks_and_junctions(self):
+        target = make_tmp_dir(self) / "target"
+        target.mkdir()
+        directory_alias(target, self.repo / "alias")
+        (self.repo / "plain").mkdir()
+        self.assertTrue(init._is_link(self.repo / "alias"))
+        self.assertFalse(init._is_link(self.repo / "plain"))
+        self.assertFalse(init._is_link(self.repo / "missing"))
+
     def test_never_writes_through_a_linked_folder(self):
         outside = make_tmp_dir(self) / "global-claude"
         outside.mkdir()

@@ -21,23 +21,25 @@ import shutil
 import stat
 import sys
 import time
-from typing import Mapping, NamedTuple
+from typing import Callable, Mapping, NamedTuple
 
-from oah import ci, hooks, intent, models, routing, rules, unlazy
+from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
 from oah.atomic import StateCorrupt, StorageError, write_text_atomic
-from oah.config import ConfigError
+from oah.config import Config, ConfigError, parse_config
 from oah.engines.effort import EngineError
 from oah.engines.proc import run_command
 from oah.impact import mapstore
 from oah.impact.errors import ImpactError
 from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
-from oah.paths import GitMissing, NotARepo, git_argv, run_git
-from oah.setup import companions
+from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_dir
+from oah.setup import companions, guide
+from oah.setup.tools import Tool, catalog, display, os_name_for
 from oah.wiki import notes
-from oah.wiki.base import WikiError, publish_new, read_bytes
+from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings, publish_new, read_bytes
 from oah.wiki.log import parse_log
 from oah.wiki.markdown import eol_of
+from oah.wiki.store import Wiki
 
 CONFIG_PATH = ".oah/config.toml"
 TEMPLATES_DIR = ".oah/templates"
@@ -59,6 +61,8 @@ NETWORK_ENV = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}  # a clon
 CLONE_TIMEOUT = 600.0
 RENAME_RETRY_SECONDS = 2.0
 CLAUDE_SETTINGS = ".claude/settings.local.json"
+LINK_REPARSE_TAGS = (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+                     getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))  # Windows symlinks and junctions
 MAP_FAILURES = (ImpactError, ConfigError, LockTimeout, StateCorrupt, StorageError, GitMissing, NotARepo,
                 PendingTransaction, OSError)
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
@@ -298,13 +302,21 @@ def default_branch(root: pathlib.Path) -> tuple[str, str]:
 
 # Planning and writing files --------------------------------------------------------------------------
 
+def _is_link(path: pathlib.Path) -> bool:
+    """A symlink, or on Windows a junction or symlink reparse point (os.path.isjunction needs Python 3.12)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0) in LINK_REPARSE_TAGS
+
+
 def _linked(root: pathlib.Path, relative: str) -> str | None:
     """The first existing link (symlink or junction) on the way from root to the file, if any."""
     current = root
     for part in pathlib.PurePosixPath(relative).parts:
         current = current / part
-        isjunction = getattr(os.path, "isjunction", None)
-        if current.is_symlink() or (isjunction is not None and isjunction(current)):
+        if _is_link(current):
             return current.relative_to(root).as_posix()
     return None
 
@@ -386,7 +398,7 @@ def _plan_wiki_content(root: pathlib.Path, path: str, fresh: bytes, guide_missin
 
 def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
     before = read_bytes(root / GITIGNORE)
-    if (root / GITIGNORE).is_symlink():
+    if _is_link(root / GITIGNORE):
         return FileChange(GITIGNORE, "keep", "gitignore", None, before, "it is a link; oah never writes through links")
     try:
         data = add_gitignore_entries(before, unlazy_copy=unlazy_copy)
@@ -396,10 +408,11 @@ def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
                           f"it is not UTF-8 text, so add these entries by hand: {', '.join(missing)}")
     if data is None:
         return FileChange(GITIGNORE, "unchanged", "gitignore", None, before)
+    what = "gate ledgers, Obsidian's UI state and local secret files stay out of git"
     if before is None:
-        return FileChange(GITIGNORE, "create", "gitignore", data)
+        return FileChange(GITIGNORE, "create", "gitignore", data, None, what)
     added = len(data.decode("utf-8").splitlines()) - len(before.decode("utf-8").splitlines())
-    return FileChange(GITIGNORE, "update", "gitignore", data, before, f"append {added} lines of missing entries")
+    return FileChange(GITIGNORE, "update", "gitignore", data, before, f"append {added} lines so {what}")
 
 
 def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple[list[FileChange], list[str]]:
@@ -740,3 +753,380 @@ def origin_url(root: pathlib.Path) -> str | None:
     """The origin remote's URL, used only to name the project for Orca. Never printed or stored."""
     result = run_git(pathlib.Path(root), "remote", "get-url", "origin")
     return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+
+# The machine --------------------------------------------------------------------------------------------
+
+def _input(prompt: str) -> str | None:
+    try:
+        return input(prompt)
+    except EOFError:
+        return None
+
+
+@dataclasses.dataclass
+class Machine:
+    """Everything init touches outside the project: tests swap each one for a fake."""
+    which: Callable[..., str | None]
+    install_runner: Callable[[tuple[str, ...]], int]
+    status_runner: Callable[[tuple[str, ...]], tuple[int | None, str]]
+    refresh: Callable[[], None]
+    companion_runner: Callable[[tuple[str, ...], pathlib.Path], int]
+    companion_probe: Callable[[tuple[str, ...], pathlib.Path], int | None]
+    ask: Callable[[str], str | None]
+    interactive: bool
+    env: Mapping[str, str]
+    home: pathlib.Path
+    os_name: str  # macos | windows: which official install commands the tool catalog offers
+    companion_os: str  # macos | windows | linux
+    today: dt.date
+    unlazy_source: str = unlazy.UPSTREAM_GIT
+    unlazy_pin: unlazy.Pin = unlazy.PIN
+
+    @classmethod
+    def real(cls) -> "Machine":
+        return cls(which=shutil.which, install_runner=guide.run_interactive, status_runner=guide.default_status_runner,
+                   refresh=guide.refresh_path, companion_runner=companions.default_runner,
+                   companion_probe=companions.default_probe, ask=_input,
+                   interactive=sys.stdin is not None and sys.stdin.isatty(), env=os.environ, home=pathlib.Path.home(),
+                   os_name=os_name_for(sys.platform), companion_os=companions.os_for(sys.platform),
+                   today=dt.date.today())
+
+
+def _no_answer(prompt: str) -> None:
+    """The `ask` of a run without a terminal: every question stays unanswered; stdin is never read."""
+    return None
+
+
+# The plan -----------------------------------------------------------------------------------------------
+
+def recorded_answers(config: Config) -> dict[str, bool]:
+    """The Jev and skill-update answers an existing .oah/config.toml records."""
+    chosen = config.section("rerank", rerank.DEFAULTS)
+    skills = config.section("skills", skillsel.config_defaults())
+    return {"jev": chosen["enabled"] is True and chosen["provider"] == "typesafe",
+            "skill_updates": skills["auto_update"] is True}
+
+
+@dataclasses.dataclass(frozen=True)
+class Plan:
+    root: pathlib.Path
+    state: pathlib.Path
+    answers: dict[str, Answer]
+    notes: tuple[str, ...]
+    branch: str
+    how: str
+    has_config: bool
+    wiki: WikiSettings
+    tools: tuple[Tool, ...]
+    tool_steps: tuple[guide.Step, ...]
+    files: tuple[FileChange, ...]
+    rules: RulesStep
+    hooks: tuple[HookStep, ...]
+    unlazy: UnlazyStep | None
+    ci: CiStep | None
+    apps: tuple[str, ...]
+    companion_steps: tuple[companions.CompanionStep, ...]
+    map: tuple[str, str]  # map_state before anything is written
+    unlazy_runs: tuple[str, ...] = ()  # the commands an unlazy install runs, as shown
+
+    @property
+    def changes(self) -> int:
+        """Planned writes and installs; companion steps are checks that act only when something is missing."""
+        count = sum(1 for change in self.files if change.action in WRITES)
+        count += (self.rules.agents != "unchanged") + (self.rules.claude != "unchanged")
+        count += sum(1 for step in self.hooks if step.action == "install")
+        count += int(self.unlazy is not None and self.unlazy.action in ("install", "replace"))
+        count += int(self.ci is not None and self.ci.action in ("create", "replace"))
+        return count + sum(1 for step in self.tool_steps if not step.manual)
+
+    @property
+    def map_action(self) -> str:
+        state, _reason = self.map
+        if state == "unavailable":
+            return "unavailable"
+        if state == "missing":
+            return "build"
+        return "refresh" if state == "stale" or self.changes else "fresh"
+
+
+def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping[str, bool | None], machine: Machine,
+               lang: str | None, force: bool, existing: Config | None) -> Plan:
+    """Everything init would do, from read-only lookups. `existing` is the project's config, or None when
+    --force replaces one that does not parse."""
+    root = pathlib.Path(root)
+    values = {key: answer.value for key, answer in answers.items()}
+    branch, how = default_branch(root)
+    config = render_config(branch=branch, how=how, jev=values["jev"], skill_updates=values["skill_updates"],
+                           today=machine.today).encode("utf-8")
+    has_config = existing is not None and existing.path is not None
+    effective = existing if has_config and not force else parse_config(config)
+    engines = effective.section("engines", call.ENGINE_DEFAULTS)
+    wiki = WikiSettings.from_mapping(effective.section("wiki", WIKI_DEFAULTS))
+    ci_section = effective.section("ci", ci.DEFAULTS)
+    apps = tuple(app for app in companions.APPS if values[app])
+    tools = tuple(tool for tool in catalog() if tool.name != "unlazy" and (not tool.optional or tool.name in apps))
+    statuses = guide.check_tools(tools, which=machine.which, env=machine.env, home=machine.home, repo_root=root)
+    unlazy_step = (plan_unlazy(root, env=machine.env, home=machine.home, pin=machine.unlazy_pin, force=force)
+                   if values["unlazy"] else None)
+    project_copy = str((root / UNLAZY_PROJECT).resolve())
+    unlazy_copy = unlazy_step is not None and (unlazy_step.action in ("install", "replace") or (
+        unlazy_step.action == "present" and str(pathlib.Path(unlazy_step.folder).resolve()) == project_copy))
+    files = plan_files(root, config=config, wiki_dir=wiki.dir, agents=agent_files(engines) if values["agents"] else {},
+                       graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
+    notes_found = []
+    for question in QUESTIONS:
+        answer, flag = answers[question.key], given.get(question.key)
+        if answer.source == "config" and flag is not None and flag != answer.value:
+            used = question.flag_yes if flag else question.flag_no
+            notes_found.append(f"{used} was not applied: .oah/config.toml already records this answer, and init "
+                               "does not edit an existing config. Edit the file, or pass --force to rewrite it.")
+    return Plan(
+        root=root, state=state_dir(repo_info(root), machine.env), answers=answers, notes=tuple(notes_found), branch=branch, how=how, has_config=has_config, wiki=wiki,
+        tools=tools, tool_steps=tuple(guide.plan_installs(statuses, os_name=machine.os_name, which=machine.which)),
+        files=tuple(files), rules=plan_rules(root, lang=lang),
+        hooks=tuple(plan_hooks(root, force=force)) if values["hooks"] else (), unlazy=unlazy_step,
+        ci=plan_ci(root, force=force, oses=list(ci_section["os"]), test_command=ci_section["test_command"] or None)
+        if values["ci"] else None,
+        apps=apps, companion_steps=tuple(companions.plan_steps(apps, os_name=machine.companion_os, project_root=root,
+                                                               remote_url=origin_url(root))) if apps else (),
+        map=map_state(root, machine.env),
+        unlazy_runs=tuple(" ".join(["git", *argv[len(git_argv()):]]) for argv in unlazy_commands(
+            pathlib.Path(UNLAZY_PROJECT), source=machine.unlazy_source, pin=machine.unlazy_pin))
+        if unlazy_step is not None and unlazy_step.action in ("install", "replace") else ())
+
+
+def _indented(text: str, prefix: str) -> list[str]:
+    return [f"{prefix}{line}" for line in text.rstrip("\n").split("\n")] if text else []
+
+
+def render_plan(plan: Plan) -> list[str]:
+    """The plan as printed, the same for --dry-run and a real run."""
+    lines = [f"Plan for {plan.root}:"]
+    names = {question.key: question.key.replace("_", "-") for question in QUESTIONS}
+    lines += _wrap("  Answers: ", ", ".join(f"{names[key]} {'yes' if answer.value else 'no'}"
+                                            for key, answer in plan.answers.items()))
+    sources = []
+    for source, label in (("flag", "your flags"), ("asked", "your answers"), ("config", ".oah/config.toml"),
+                          ("default", "defaults, which a real run asks about")):
+        keys = [names[key] for key, answer in plan.answers.items() if answer.source == source]
+        if keys:
+            sources.append(f"{label} ({', '.join(keys)})")
+    lines += _wrap("  From: ", "; ".join(sources))
+    lines += [f"  Note: {note}" for note in plan.notes]
+    lines += ["Tools (each one asks before it installs; --yes installs them all, except apps you did not choose):"]
+    if not plan.tool_steps:
+        lines.append("  - every tool oah uses is installed")
+    for step in plan.tool_steps:
+        how = (f"install it yourself from {step.url}" if step.manual else step.display)
+        lines.append(f"  - {step.tool.name} ({step.tool.requirement}: {step.tool.purpose}): {how}")
+        if step.note:
+            lines.append(f"      {step.note}")
+    lines.append("Sign-ins (each tool's own status command; oah never sees a password, key or token):")
+    for tool in plan.tools:
+        if tool.sign_in is not None:
+            status = display((tool.check[0],) + tool.sign_in.status_args)
+            lines.append(f"  - {tool.name}: checked with `{status}`; when you are signed out, init shows "
+                         f"`{tool.sign_in.login}` to run in your own terminal")
+    lines.append("Files:")
+    for change in plan.files:
+        if change.group != "gitignore":
+            lines.append(_file_line(change))
+    lines.append("Managed content (changed in place; everything else in these files stays as it is):")
+    for name, action in (("AGENTS.md", plan.rules.agents), ("CLAUDE.md", plan.rules.claude)):
+        what = (f"the oah rules block ({plan.rules.lang}, {plan.rules.block_bytes} bytes)" if name == "AGENTS.md"
+                else "the @AGENTS.md import line")
+        lines.append(f"  {action:<10} {name}: {what}")
+    lines += [_file_line(change) for change in plan.files if change.group == "gitignore"]
+    if "aside" in plan.apps:
+        lines.append(f"  if Aside gets registered, its web rules go into {rules.LOCAL_RULES} and the AGENTS.md block")
+    lines.append("Hooks:")
+    if not plan.answers["hooks"].value:
+        lines.append("  none chosen; `oah hooks install <kind>` adds one later")
+    for step in plan.hooks:
+        where = f" ({step.path})" if step.path else ""
+        lines.append(f"  {step.action:<10} {step.kind}{where}{': ' + step.note if step.note else ''}")
+        lines += _indented(step.diff, "             | ")
+    lines.append("unlazy:")
+    if plan.unlazy is None:
+        lines.append("  not chosen; gate commands need it (`oah init --with-unlazy` installs it later)")
+    else:
+        lines.append(f"  {plan.unlazy.action:<10} {plan.unlazy.note}")
+        for command in plan.unlazy_runs:
+            lines.append(f"             runs: {command}")
+        if plan.unlazy_runs:
+            lines.append("             (into a staging folder first; it moves into place only after the commit and "
+                         "file digests check out)")
+    lines.append("CI starter:")
+    if plan.ci is None:
+        lines.append("  not chosen; `oah ci init` writes it later")
+    else:
+        lines.append(f"  {plan.ci.action:<10} {ci.WORKFLOW_PATH}{': ' + plan.ci.note if plan.ci.note else ''}")
+        if plan.ci.action in ("create", "replace"):
+            lines += _indented(plan.ci.diff if plan.ci.action == "replace" else plan.ci.text, "             | ")
+    lines.append("Companion apps:")
+    if not plan.apps:
+        lines.append("  none chosen")
+    for number, step in enumerate(plan.companion_steps, 1):
+        label = " [global: changes files in your user folder]" if step.global_write else ""
+        action = f"runs `{step.display.splitlines()[0]}`" if step.argv is not None else f"you do it: {step.instruction}"
+        lines.append(f"  {number}. {step.app}: {step.title}{label}; asks first; {action}")
+    jev = plan.answers["jev"].value
+    lines.append("Settings:")
+    lines.append(f"  default branch: {plan.branch} ({plan.how})")
+    lines.append(f"  Jev re-ranker: {'on, with your consent' if jev else 'off'}")
+    lines.append(f"  skill updates: {'on, checked at most once a day' if plan.answers['skill_updates'].value else 'off'}")
+    state, reason = plan.map
+    action = plan.map_action
+    lines.append("Impact map:")
+    lines.append({"build": "  build the first map after everything above is written",
+                  "refresh": f"  refresh it after everything above is written ({reason})",
+                  "fresh": "  fresh; nothing to do",
+                  "unavailable": f"  unavailable: {reason} Init still finishes the rest."}[action])
+    return lines
+
+
+def _file_line(change: FileChange) -> str:
+    return f"  {change.action:<10} {change.path}{': ' + change.note if change.note else ''}"
+
+
+def _wrap(prefix: str, text: str, width: int = 110) -> list[str]:
+    words, lines, current = text.split(" "), [], prefix
+    for word in words:
+        if len(current) + len(word) > width and current.strip():
+            lines.append(current.rstrip())
+            current = " " * len(prefix)
+        current += word + " "
+    lines.append(current.rstrip())
+    return lines
+
+
+# Applying the plan --------------------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class Outcome:
+    changed: int = 0
+    pending: list[str] = dataclasses.field(default_factory=list)
+    impact: str = ""
+    impact_detail: str = ""
+
+
+def _confirm_tool(step: guide.Step, machine: Machine, yes: bool, out) -> bool:
+    if step.tool.optional:
+        return True  # the user chose this app with its own question
+    if yes:
+        return True
+    if not machine.interactive:
+        return False
+    out(f"Install {step.tool.name} ({step.tool.requirement}: {step.tool.purpose})?")
+    out(f"  This runs: {step.display}")
+    out(f"  Official page: {step.url}")
+    reply = machine.ask("  Install now? [y/N] ")
+    return reply is not None and reply.strip().lower() in ("y", "yes")
+
+
+def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> Outcome:
+    """Do the plan in order: tools, sign-ins, files, managed content, hooks, CI, unlazy, companion apps, map."""
+    root = plan.root
+    outcome = Outcome()
+    ask = machine.ask if machine.interactive else _no_answer
+    if plan.tool_steps:
+        out("")
+        out("Tools:")
+        results = guide.run_installs(plan.tool_steps, confirm=lambda step: _confirm_tool(step, machine, yes, out),
+                                     runner=machine.install_runner, refresh=machine.refresh, out=out)
+        outcome.changed += sum(1 for result in results if result.status == "installed")
+    statuses = guide.check_tools(plan.tools, which=machine.which, env=machine.env, home=machine.home, repo_root=root)
+    out("")
+    out("Sign-in:")
+    signed_out = guide.walk_sign_ins(statuses, status_runner=machine.status_runner,
+                                     interactive=machine.interactive and not yes, ask=ask, out=out)
+    outcome.pending += [status.tool.name for status in statuses if status.tool.required and not status.present]
+    outcome.pending += [f"{status.tool.name}:sign-in" for status in statuses
+                        if status.tool.required and status.tool.name in signed_out]
+    written, problems = write_files(root, list(plan.files), wiki=Wiki(root, plan.wiki, plan.state))
+    synced = rules.sync(root, lang=plan.rules.lang)
+    if written or problems or synced.changed:
+        out("")
+        out("Files:")
+    for change in written:
+        out(f"  {VERBS[change.action]} {change.path}")
+    for name in synced.changed:
+        out(f"  updated {name} (the oah rules block)" if name == "AGENTS.md" else f"  updated {name} (@AGENTS.md)")
+    for problem in problems:
+        out(f"  {problem}")
+    outcome.changed += len(written) + len(synced.changed)
+    if problems:
+        outcome.pending.append("files")
+    installed, problems = install_hooks(root, list(plan.hooks), force=force)
+    for kind in installed:
+        out(f"  installed hook {kind}")
+    for problem in problems:
+        out(f"  {problem}")
+    outcome.changed += len(installed)
+    if problems:
+        outcome.pending.append("hooks")
+    if plan.ci is not None and plan.ci.action in ("create", "replace"):
+        problem = write_ci(plan.ci)
+        out(f"  {problem}" if problem else f"  wrote {ci.WORKFLOW_PATH}")
+        if problem:
+            outcome.pending.append("ci")
+        else:
+            outcome.changed += 1
+    _apply_unlazy(plan, machine, outcome, out)
+    _apply_companions(plan, machine, outcome, yes=yes, ask=ask, out=out)
+    outcome.impact, outcome.impact_detail = refresh_map(root, machine.env)
+    out("")
+    if outcome.impact == "unavailable":
+        out(f"OAH_INIT_IMPACT_UNAVAILABLE: {outcome.impact_detail} The rest of init is done; once that is fixed, "
+            "build the map with `oah impact build`.")
+    else:
+        out(f"Impact map: {outcome.impact} ({outcome.impact_detail})")
+    return outcome
+
+
+VERBS = {"create": "created", "replace": "replaced", "update": "updated"}
+
+
+def _apply_unlazy(plan: Plan, machine: Machine, outcome: Outcome, out) -> None:
+    step = plan.unlazy
+    if step is None or step.action == "present":
+        return
+    if step.action == "blocked":
+        out(f"  unlazy: not installed: {step.note}")
+        outcome.pending.append("unlazy")
+        return
+    out(f"  installing unlazy into {UNLAZY_PROJECT} from {machine.unlazy_source} ...")
+    problem = install_unlazy(plan.root, step, source=machine.unlazy_source, pin=machine.unlazy_pin)
+    if problem:
+        out(f"  {problem}")
+        outcome.pending.append("unlazy")
+        return
+    out(f"  installed unlazy into {UNLAZY_PROJECT} at commit {machine.unlazy_pin.commit[:12]}, verified")
+    outcome.changed += 1
+
+
+def _apply_companions(plan: Plan, machine: Machine, outcome: Outcome, *, yes: bool, ask, out) -> None:
+    if not plan.companion_steps:
+        return
+    out("")
+    out("Companion apps:")
+    found = []
+    for app in plan.apps:
+        outcomes = companions.run_steps([step for step in plan.companion_steps if step.app == app],
+                                        project_root=plan.root, yes=yes, which=machine.which, ask=ask, out=out,
+                                        runner=machine.companion_runner, probe=machine.companion_probe,
+                                        refresh=machine.refresh)
+        found += outcomes
+        outcome.changed += sum(1 for item in outcomes if item.status == "done")
+        if any(item.status not in companions.OK_STATUSES for item in outcomes):
+            outcome.pending.append(app)
+    if companions.CompanionResult(found).aside_registered:
+        status = add_aside_rules(plan.root, lang=plan.rules.lang)
+        if status == "added":
+            synced = rules.sync(plan.root, lang=plan.rules.lang)
+            out(f"  added the Aside web rules to {rules.LOCAL_RULES} and the AGENTS.md block")
+            outcome.changed += 1 + len(synced.changed)
+        elif status != "present":
+            out(f"  the Aside web rules were {status}")
