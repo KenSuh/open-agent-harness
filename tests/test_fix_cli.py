@@ -84,6 +84,45 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_plan_diagnostics_omit_every_packet_field_in_text_and_json(self):
+        fields = ("stage", "engine", "tier", "axes-stage", "kind", "intensity", "reasoning", "risk", "Status")
+        for as_json in (False, True):
+            project = FixProject(self)
+            project.changes_requested()
+            for field in fields:
+                with self.subTest(as_json=as_json, field=field):
+                    value = "s" + "k-" + token_source.token_hex(20)
+                    self.assertFalse(any(value in item for item in project.env.values()))
+                    plan = {"stage": "correction", "engine": "codex", "tier": "high",
+                            "axes-stage": "correction", "kind": "implementation", "intensity": "low",
+                            "reasoning": "medium", "risk": "low"}
+                    plan[field] = value
+                    packet = PACKET + ("## Plan\n- {stage} -> {engine} -> {tier}\n"
+                                       "- {axes-stage}: kind={kind} intensity={intensity} "
+                                       "reasoning={reasoning} risk={risk}\n").format(**plan)
+                    if field == "Status":
+                        packet = packet.replace("Status: accepted", f"Status: {value}")
+                    source = ".oah/tasks/t1/PACKET.md"
+                    project.commit({source: packet.encode("utf-8")})
+                    done = oah(project, "fix", "--task", "t1", "--tier", "high",
+                               *(("--json",) if as_json else ()))
+                    artifacts = [done.stdout.encode("utf-8"), done.stderr.encode("utf-8")]
+                    artifacts += [path.read_bytes() for path in project.state.rglob("*") if path.is_file()]
+                    self.assertFalse(any(value.encode("utf-8") in data for data in artifacts),
+                                     "a packet field reached output or state")
+                    if field in ("kind", "intensity", "reasoning", "risk", "Status"):
+                        code = "OAH_INTENT_NOT_CURRENT" if field == "Status" else "OAH_RECOMMEND_INVALID"
+                        self.assertEqual(done.returncode, 1)
+                        expected = ("OAH_INTENT_NOT_CURRENT: the intent is unbound, missing, stale or not committed "
+                                    "as bound; accept and bind the committed packet with oah start, then retry.\n"
+                                    if field == "Status" else
+                                    "OAH_RECOMMEND_INVALID: the packet Plan has invalid difficulty axes; "
+                                    "correct its kind, intensity, reasoning and risk, then retry.\n")
+                        self.assertEqual(done.stderr, expected)
+                        if as_json:
+                            result = json.loads(done.stdout)
+                            self.assertEqual((result["code"], result["message"]), (code, expected.rstrip()))
+
     def test_cli_intent_diagnostics_omit_packet_values_in_text_and_json(self):
         for phase in ("preflight", "post-run"):
             for as_json in (False, True):
@@ -365,7 +404,7 @@ class CliTest(unittest.TestCase):
         pid = int(pid_file.read_text(encoding="utf-8"))
         self.addCleanup(reap, pid)
         self.assertEqual(process.returncode, 130, err.decode("utf-8", "replace"))
-        self.assertIn(b"OAH_FIX_INTERRUPTED: A1 was interrupted and recorded as aborted", err)
+        self.assertIn(b"OAH_FIX_INTERRUPTED: the correction was interrupted", err)
         self.assertFalse(call._alive(pid), "stopping oah fix stops the corrector")
         self.assertEqual(names(project), ["R1.json", "A1-start.json", "A1-outcome.json"])
         self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")

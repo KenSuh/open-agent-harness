@@ -371,8 +371,8 @@ def dispatch_guard(prepared: Prepared):
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
             yield
     except (LeaseError, EngineError) as exc:
-        error = EngineError(exc.code, str(exc).split(": ", 1)[1])
-        run.result(status="refused", error=str(error))  # the state lock has been released
+        error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
+        run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
         raise error from None
 
 
@@ -595,7 +595,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
                                tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
                                warnings=warnings, selection=selection, checked_lease=holder)
     except (EngineError, briefs.BriefError) as exc:
-        run.result(status="refused", error=str(exc), warnings=warnings)
+        run.result(status="refused", error=_recorded_error(exc, request.retain_worker_text), warnings=warnings)
         raise
 
 
@@ -695,6 +695,14 @@ def _effort_fields(prepared: Prepared, stdout: str, stderr: str, rules: Sequence
                 effort_verified=status == "match")
 
 
+def _recorded_error(exc: BaseException, retain_worker_text: bool) -> str:
+    if retain_worker_text:
+        return str(exc)
+    # Corrections share the CLI's fixed diagnostic vocabulary; ordinary calls keep their diagnostics.
+    from oah.review.fix import _error_diagnostic
+    return _error_diagnostic(exc)[1]
+
+
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
@@ -713,7 +721,8 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if prepared.retain_worker_text:
             run.write_logs("", "")
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
-                          error=clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}"))
+                          error=(clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}") if prepared.retain_worker_text else
+                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)))
     except (KeyboardInterrupt, SystemExit):
         # _run_prepared already stopped the process tree; never leave the run looking alive.
         if prepared.retain_worker_text:
@@ -787,6 +796,10 @@ def _deferred_creation_signals():
             saved[number](number, frame)
 
 
+class _StreamFailed(subprocess.SubprocessError):
+    code = "OAH_FIX_STREAM_FAILED"
+
+
 @dataclasses.dataclass(frozen=True)
 class _StreamedResult:
     returncode: int | None
@@ -850,7 +863,7 @@ def _stream_correction(child, prepared: Prepared, prompt: str):
         deadline = time.monotonic() + prepared.timeout_s
         while child.poll() is None:
             if failed:
-                raise subprocess.SubprocessError("OAH_FIX_STREAM_FAILED: output pipe failed; retry the correction")
+                raise _StreamFailed("OAH_FIX_STREAM_FAILED: output pipe failed; retry the correction")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True

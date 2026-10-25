@@ -83,6 +83,98 @@ _STOP_SIGNALS = tuple(getattr(signal, name) for name in (("SIGBREAK",) if os.nam
                       if hasattr(signal, name))
 LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
 
+# Exception codes are data too: only these literal codes and sentences may cross an error boundary.
+_ERROR_DIAGNOSTICS = {
+    "OAH_FIX_FAILED": "the correction failed; inspect the worktree and task records, then retry oah fix.",
+    "OAH_FIX_INTERRUPTED": "the correction was interrupted; inspect the worktree and task records, then retry "
+                           "oah fix or settle an unfinished attempt with oah fix --abort --task <task>.",
+    "OAH_INTENT_NOT_CURRENT": "the intent is unbound, missing, stale or not committed as bound; accept and bind "
+                              "the committed packet with oah start, then retry.",
+    "OAH_INTENT_SOURCE_MISMATCH": "the intent differs from the reviewed binding; run oah review --task <task> "
+                                  "for the accepted intent before correcting it.",
+    "OAH_RECOMMEND_INVALID": "the packet Plan has invalid difficulty axes; correct its kind, intensity, "
+                             "reasoning and risk, then retry.",
+    "OAH_FIX_WORKER_REFUSED": "dispatched workers cannot run corrections; return the work to the dispatcher "
+                              "to run oah fix.",
+    "OAH_FIX_ENGINE_UNSUPPORTED": "correction requires Codex; configure that engine or record Claude's work "
+                                  "with oah fix --manual --engine claude --task <task>.",
+    "OAH_FIX_PROXY_CREDENTIALS": "proxy userinfo is forbidden; configure a credential-free proxy, then retry.",
+    "OAH_FIX_BUSY": "another correction or review is running; wait for it to finish, then retry.",
+    "OAH_FIX_ATTEMPT_UNFINISHED": "an attempt is unfinished; inspect the worktree, then run "
+                                 "oah fix --abort --task <task>.",
+    "OAH_FIX_BIND_REQUIRED": "an applied correction needs binding; commit the correction, then run "
+                             "oah fix --bind --task <task>.",
+    "OAH_FIX_HISTORY_INVALID": "the correction history or its digests are invalid; restore the original "
+                               "task records before retrying.",
+    "OAH_FIX_NOTHING_TO_FIX": "no findings remain to correct; run oah review --task <task> for the next round.",
+    "OAH_FIX_NOT_REQUESTED": "the review has converged or needs a decision; inspect it and use "
+                             "oah review --decision before requesting another correction.",
+    "OAH_FIX_DIRTY_TREE": "the worktree or index contains uncommitted changes; inspect and commit or restore "
+                          "them before retrying.",
+    "OAH_FIX_HEAD_UNRELATED": "HEAD does not descend from the reviewed commit; return to the reviewed branch "
+                              "before retrying.",
+    "OAH_FIX_FINDING_UNKNOWN": "the selection is not a P0/P1 finding of the latest receipt; inspect that "
+                               "receipt and retry with its finding IDs.",
+    "OAH_FIX_NOTHING_TO_BIND": "no applied attempt awaits binding; run oah fix or record a manual correction.",
+    "OAH_FIX_NOT_COMMITTED": "the correction is not committed; inspect its saved guidance, commit with an "
+                             "Agent-Engine: codex trailer, then run oah fix --bind --task <task>.",
+    "OAH_FIX_MANIFEST_INVALID": "the correction manifest is invalid; restore its original run metadata, then "
+                                "rerun oah fix --bind --task <task>.",
+    "OAH_FIX_TRAILER_MISSING": "a correction commit has no known author engine; add its Agent-Engine trailer "
+                               "before retrying.",
+    "OAH_FIX_ENGINE_MISMATCH": "the commits do not match the correction engine; use an Agent-Engine: codex "
+                               "trailer or record the replacement author with --engine before retrying.",
+    "OAH_FIX_NOTHING_TO_ABORT": "no unfinished attempt remains; inspect the records and run "
+                               "oah fix --bind --task <task> if a committed correction awaits binding.",
+    "OAH_FIX_GIT_FAILED": "Git inspection failed; check Git access and the worktree, then retry.",
+    "OAH_REVIEW_GIT_FAILED": "review Git inspection failed; check Git access and the worktree, then retry.",
+    "OAH_REVIEW_RECORD_EXISTS": "a review record already exists; inspect the task history before retrying.",
+    "OAH_REVIEW_NEEDS_DECISION": "review needs a decision; inspect the task history and use oah review --decision.",
+    "OAH_WORKTREE_UNRESOLVED": "the leased worktree cannot be resolved; restore that worktree, then retry.",
+    "OAH_WORKTREE_LEASE_MISMATCH": "the worktree does not match the lease; retry in the leased worktree.",
+    "OAH_LEASE_CHANGED": "the dispatch lease changed; check oah status and bind the accepted packet before retrying.",
+    "OAH_UNSAFE_ARGUMENT": "a brief argument is unsafe; use simple task and packet paths, then retry.",
+    "OAH_FOOTER_NOT_APPENDED": "the brief footer is invalid; update oah and rebuild the packet before retrying.",
+    "OAH_PACKET_INTENT_INVALID": "the packet intent is invalid; correct and accept the intent before retrying.",
+    "OAH_PACKET_UNREADABLE": "the packet cannot be read; restore its committed source before retrying.",
+    "OAH_INTENT_SOURCE_UNREADABLE": "the intent source cannot be read; restore the accepted packet before retrying.",
+    "OAH_CONFIG_INVALID": "project configuration is invalid; correct .oah/config.toml before retrying.",
+    "OAH_CODEX_CONFIG_INVALID": "Codex configuration is invalid; repair its login and configuration before retrying.",
+    "OAH_ENGINE_MISSING": "Codex is unavailable; install it and sign in through its own CLI, then retry.",
+    "OAH_UNSUPPORTED_BATCH_SHIM": "the engine shim is unsupported; configure a native executable, then retry.",
+    "OAH_ENGINE_LAUNCH_FAILED": "Codex could not start; check the configured executable and permissions, then retry.",
+    "OAH_ENGINE_FAILED": "Codex failed; inspect the live terminal output and worktree before retrying.",
+    "OAH_RUN_TIMEOUT": "Codex timed out; inspect the worktree and increase the timeout or split the task before retrying.",
+    "OAH_RUN_INTERRUPTED": "the run was interrupted; inspect the worktree and task records before retrying.",
+    "OAH_RUN_PATH_UNSAFE": "the run path is unsafe; restore the original state directory before retrying.",
+    "OAH_RUN_LAUNCH_INVALID": "the saved launch is invalid; restore the original run metadata before retrying.",
+    "OAH_RUN_CORRUPT": "the run record is invalid; restore its original metadata before retrying.",
+    "OAH_RUN_NOT_FOUND": "the run record is missing; restore the original run folder before retrying.",
+    "OAH_TASK_INVALID": "the task identifier is invalid; use a simple task name and retry oah fix.",
+    "OAH_FIX_STREAM_FAILED": "the output stream failed; restore the terminal and inspect the worktree before retrying.",
+    "OAH_STATE_IO": "state storage failed; check storage permissions and available space before retrying.",
+    "OAH_STATE_CORRUPT": "state storage is invalid; restore the original state records before retrying.",
+    "OAH_STATE_PENDING": "a state transaction is pending; recover the state transaction before retrying.",
+    "OAH_STATE_LOCK_TIMEOUT": "state storage is busy; wait for the other operation to finish before retrying.",
+    "OAH_MODEL_UNRESOLVED": "the Codex model cannot be resolved; refresh the model catalog before retrying.",
+    "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
+    "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
+    "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",
+    "OAH_EFFORT_MISMATCH": "the observed effort differs from the requested effort; repair the Codex configuration before retrying.",
+    "OAH_EFFORT_DOWNGRADED": "the observed effort was downgraded; restore the requested Codex effort before retrying.",
+    "OAH_NOT_A_REPO": "no repository is available; run oah fix inside the leased Git worktree.",
+    "OAH_GIT_MISSING": "Git is unavailable; install Git and retry in the leased worktree.",
+    "OAH_USAGE": "the correction arguments are invalid; run oah fix --help and retry with the required options.",
+}
+
+
+def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
+    """Never format exception text, paths, class names or unapproved codes, even without exported keys."""
+    code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
+    if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
+        code = "OAH_STATE_IO" if isinstance(exc, OSError) else "OAH_FIX_FAILED"
+    return code, f"{code}: {_ERROR_DIAGNOSTICS[code]}"
+
 
 @dataclasses.dataclass(frozen=True)
 class Request:
@@ -493,7 +585,7 @@ def _redacted(value, redact: Callable[[str], str]):
 
 
 def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]], Result]) -> Result:
-    """Redact every output string; executable guidance is checked before it reaches this boundary."""
+    """Use fixed exception diagnostics; redact other strings after executable guidance has been checked."""
     raw_redact = runner.credential_redactor(env)
     folded_redact = runner.credential_redactor({name: value.replace("\r\n", "\n") for name, value in env.items()})
 
@@ -502,12 +594,8 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
     try:
         return Result(**_redacted(operation(redact).to_json(), redact))
     except BaseException as exc:
-        message = str(exc)
-        if redact(message) == message:
-            raise
-        code = getattr(exc, "code", "OAH_FIX_FAILED")
-        message = redact(message)
-        message = message[len(code) + 2:] if message.startswith(code + ": ") else message
+        code, diagnostic = _error_diagnostic(exc)
+        message = diagnostic[len(code) + 2:]
         safe = FixInterrupted(message) if isinstance(exc, KeyboardInterrupt) else ReviewError(code, message)
     raise safe from None
 
@@ -593,9 +681,9 @@ def _index_files(root: pathlib.Path) -> dict[str, tuple[int, str]]:
 
 
 def _index_state(root: pathlib.Path) -> dict[str, tuple[bytes, ...]]:
-    """Include every stage, mode and object id, without refreshing the index or invoking filters."""
+    """Include every stage, mode, object id and assume-unchanged/skip-worktree flag, without conversion."""
     found: dict[str, list[bytes]] = {}
-    for entry in _git_bytes(root, "ls-files", "--stage", "-z").split(b"\0"):
+    for entry in _git_bytes(root, "ls-files", "--stage", "-v", "-z").split(b"\0"):
         if entry:
             metadata, name = entry.split(b"\t", 1)
             found.setdefault(os.fsdecode(name), []).append(metadata)
@@ -922,18 +1010,6 @@ class _Attempt:
                                   "finished_at": _iso(), "run_id": self.run_id}, {"outcome": outcome})
         self.ended = True
 
-    def _left_behind(self, untracked: Mapping[str, tuple[int, bytes] | None]) -> str:
-        try:
-            index = _index_state(self.t.root)
-            if index != self.index_baseline:
-                return "; index entries changed; restore the index and inspect the worktree before retrying"
-            files = _changes(self.t.root, self.before, untracked, baseline=self.baseline).files
-            files = _path_labels(files, self.redact)
-            return f"; it left {len(files)} changed file(s) in the worktree: {_ids(files[:20])}" if files else ""
-        except BaseException:
-            # Optional diagnostics must never prevent the attempt's terminal record.
-            return "; oah could not list the changes it left in the worktree"
-
     def run(self, *, launch_env, rules, final: pathlib.Path,
             untracked: Mapping[str, tuple[int, bytes] | None]) -> Result:
         with _stop_signals():
@@ -964,22 +1040,12 @@ class _Attempt:
             if not self.published or self.ended:
                 raise
             interrupted = isinstance(exc, KeyboardInterrupt)
+            code, diagnostic = _error_diagnostic(exc)
             with _held_signals():
-                if interrupted:
-                    self._end("aborted", f"codex run {self.run_id} was interrupted ({str(exc) or 'Ctrl-C'}) and oah "
-                                         f"stopped its process tree{self._left_behind(untracked)}")
-                else:
-                    self._end("failed", f"codex run {self.run_id} did not complete: {self.redact(str(exc))[:300]}"
-                                        f"{self._left_behind(untracked)}")
+                self._end("aborted" if interrupted else "failed", diagnostic)
             if interrupted:
-                raise FixInterrupted(f"{self.attempt_id} was interrupted and recorded as aborted; oah stopped Codex. "
-                                     f"Check git status in {self.t.root} for changes it may have left, then run oah "
-                                     f"fix --task {self.t.name} again or correct the findings yourself") from None
-            code = getattr(exc, "code", "OAH_FIX_FAILED")
-            text = str(exc)
-            text = text[len(code) + 2:] if text.startswith(code + ": ") else text
-            raise ReviewError(code, f"{text}. {self.attempt_id} was recorded as failed; fix the cause, then run oah "
-                              f"fix --task {self.t.name} again") from None
+                raise FixInterrupted(diagnostic[len(code) + 2:]) from None
+            raise ReviewError(code, diagnostic[len(code) + 2:]) from None
 
     def _judge(self, run: dict, final: pathlib.Path, untracked: Mapping[str, tuple[int, bytes] | None]) -> "_Judged":
         root, rid = self.t.root, self.run_id
@@ -1036,7 +1102,9 @@ class _Attempt:
         effort = f"effort {run.get('launch_effort')} (header {run.get('header_check')}, {verified})"
         files = changes.files
         named = _ids(files[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
-        error = str(run.get("error") or run.get("status")).split("; ", 1)[0]
+        # Reconstruct the diagnostic from an approved code, never a saved module error's text.
+        error_code = str(run.get("error") or "").partition(":")[0]
+        _code, error = _error_diagnostic(ReviewError(error_code, ""))
         if head != self.before:
             outcome = "failed"
             reason = (f"HEAD moved from {self.before} to {head} during the run, so its result cannot be attributed to "

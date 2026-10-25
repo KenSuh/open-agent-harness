@@ -21,7 +21,9 @@ from oah.runs import RunError
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT, EXIT_INTERRUPTED = 0, 1, 2, 69, 130
 COMMANDS = ("fix",)
 ENVIRONMENT_CODES = frozenset({"OAH_FIX_GIT_FAILED", "OAH_REVIEW_GIT_FAILED", "OAH_REVIEW_RECORD_EXISTS",
-                               "OAH_RUN_PATH_UNSAFE", *call_cli.ENVIRONMENT_CODES})
+                               "OAH_RUN_PATH_UNSAFE", "OAH_STATE_IO", "OAH_STATE_CORRUPT", "OAH_STATE_PENDING",
+                               "OAH_STATE_LOCK_TIMEOUT", "OAH_NOT_A_REPO", "OAH_GIT_MISSING",
+                               *call_cli.ENVIRONMENT_CODES})
 
 
 def _seconds(text: str) -> float:
@@ -78,9 +80,9 @@ def _report(code: str, exit_code: int, message: str, as_json: bool) -> int:
 
 
 def _refused(exc: BaseException, as_json: bool) -> int:
-    code = getattr(exc, "code", "OAH_FIX_FAILED")
+    code, message = fix._error_diagnostic(exc)
     exit_code = EXIT_USAGE if code == "OAH_USAGE" else EXIT_ENVIRONMENT if code in ENVIRONMENT_CODES else EXIT_REFUSED
-    return _report(code, exit_code, str(exc), as_json)
+    return _report(code, exit_code, message, as_json)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -102,18 +104,21 @@ def run(args: argparse.Namespace) -> int:
             result = fix.correct(fix.Request(task=args.task, findings=findings, tier=args.tier,
                                              timeout_s=args.timeout_seconds), cwd=cwd, env=env)
     except fix.FixInterrupted as exc:
-        return _report(exc.code, EXIT_INTERRUPTED, exc.message, args.json)
+        code, message = fix._error_diagnostic(exc)
+        return _report(code, EXIT_INTERRUPTED, message, args.json)
     except KeyboardInterrupt:
-        return _report(fix.INTERRUPTED, EXIT_INTERRUPTED, f"{fix.INTERRUPTED}: oah fix was interrupted; whatever it "
-                       "recorded stays in the task's review records. Check git status in the worktree, then run the "
-                       "command again", args.json)
+        code, message = fix._error_diagnostic(KeyboardInterrupt())
+        return _report(code, EXIT_INTERRUPTED, message, args.json)
     except (ReviewError, EngineError, LeaseError, RunError, briefs.BriefError, routing.RoutingError) as exc:
         return _refused(exc, args.json)
     except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
-        return _report(getattr(exc, "code", type(exc).__name__), EXIT_ENVIRONMENT, str(exc), args.json)
+        code, message = fix._error_diagnostic(exc)
+        return _report(code, EXIT_ENVIRONMENT, message, args.json)
     except OSError as exc:
-        return _report(StorageError.code, EXIT_ENVIRONMENT, str(StorageError(pathlib.Path(exc.filename or "."), exc)),
-                       args.json)
+        code, message = fix._error_diagnostic(exc)
+        return _report(code, EXIT_ENVIRONMENT, message, args.json)
+    except Exception as exc:
+        return _refused(exc, args.json)
     for warning in result.warnings:
         print(warning, file=sys.stderr)
     if args.json:

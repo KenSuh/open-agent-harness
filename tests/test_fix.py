@@ -373,7 +373,7 @@ class RefusalTest(unittest.TestCase):
                     runs_before = sorted((project.state / "runs" / "t1").iterdir())
                     action = project.fix if mode == "automatic" else lambda: project.manual("human")
                     error = project.refused("OAH_INTENT_SOURCE_MISMATCH", action)
-                    self.assertIn("oah review --task t1", str(error))
+                    self.assertIn("oah review --task <task>", str(error))
                     self.assertEqual(sorted((project.state / "runs" / "t1").iterdir()), runs_before)
 
     def test_fix_refuses_every_non_current_intent_state(self):
@@ -411,8 +411,7 @@ class RefusalTest(unittest.TestCase):
                 project.changes_requested()
                 damage(project)
                 error = project.refused("OAH_INTENT_NOT_CURRENT", project.fix)
-                self.assertIn(word, str(error))
-                self.assertIn("Nothing was launched", str(error))
+                self.assertEqual(str(error), fix._error_diagnostic(error)[1])
                 project.refused("OAH_INTENT_NOT_CURRENT", project.manual, "human")
         project = FixProject(self)
         project.changes_requested()
@@ -422,7 +421,7 @@ class RefusalTest(unittest.TestCase):
     def test_fix_refuses_without_a_changes_requested_receipt(self):
         project = FixProject(self)
         error = project.refused("OAH_FIX_NOTHING_TO_FIX", project.fix)
-        self.assertIn("oah review --task t1", str(error))
+        self.assertIn("oah review --task <task>", str(error))
         project.queue({})
         self.assertEqual(project.review().code, "OAH_REVIEW_CONVERGED")
         error = project.refused("OAH_FIX_NOT_REQUESTED", project.fix)
@@ -440,8 +439,8 @@ class RefusalTest(unittest.TestCase):
         publish_start(project)
         for action, args in ((project.fix, ()), (project.manual, ("human",)), (project.bind, ())):
             error = project.refused("OAH_FIX_ATTEMPT_UNFINISHED", action, *args)
-            self.assertIn("A1", str(error))
-            self.assertIn("oah fix --abort --task t1", str(error))
+            self.assertNotIn("A1", str(error))
+            self.assertIn("oah fix --abort --task <task>", str(error))
         project = FixProject(self)
         project.changes_requested()
         project.queue_fix({"write": FIXED})
@@ -450,7 +449,7 @@ class RefusalTest(unittest.TestCase):
         for action, args in ((project.fix, ()), (project.manual, ("human",)), (project.abort, ())):
             code = "OAH_FIX_NOTHING_TO_ABORT" if action == project.abort else "OAH_FIX_BIND_REQUIRED"
             error = project.refused(code, action, *args)
-            self.assertIn("oah fix --bind --task t1", str(error))
+            self.assertIn("oah fix --bind --task <task>", str(error))
 
     def test_fix_refuses_changed_history(self):
         project = FixProject(self)
@@ -465,19 +464,19 @@ class RefusalTest(unittest.TestCase):
         project.changes_requested()
         (project.repo / "src/app.py").write_text("print('uncommitted')\n", encoding="utf-8")
         error = project.refused("OAH_FIX_DIRTY_TREE", project.fix)
-        self.assertIn("src/app.py", str(error))
+        self.assertNotIn("src/app.py", str(error))
         git(project.repo, "checkout", "-q", "--", "src/app.py")
         git(project.repo, "checkout", "-q", "-b", "elsewhere", project.base)
         project.commit({"src/other.py": "print('other')\n"})
         error = project.refused("OAH_FIX_HEAD_UNRELATED", project.fix)
-        self.assertIn(project.receipt(1)["head"], str(error))
+        self.assertNotIn(project.receipt(1)["head"], str(error))
 
     def test_fix_refuses_unknown_or_already_corrected_findings(self):
         project = FixProject(self)
         project.changes_requested(bug(1), bug(2), bug(3, severity="P2"))
         for chosen in (["R1-F9"], ["R1-F3"]):
             error = project.refused("OAH_FIX_FINDING_UNKNOWN", project.fix, findings=tuple(chosen))
-            self.assertIn(chosen[0], str(error))
+            self.assertNotIn(chosen[0], str(error))
         project.queue_fix({"write": FIXED}, {"write": {"src/app.py": "print('fixed twice')\n"}})
         first = project.fix(findings=("R1-F1",))
         self.assertEqual(first.code, "OAH_FIX_APPLIED", first.message)
@@ -491,9 +490,9 @@ class RefusalTest(unittest.TestCase):
         project.run_commands(second.commands)
         self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
         error = project.refused("OAH_FIX_NOTHING_TO_FIX", project.fix)
-        self.assertIn("A1", str(error))
-        self.assertIn("A2", str(error))
-        self.assertIn("oah review --task t1", str(error))
+        self.assertNotIn("A1", str(error))
+        self.assertNotIn("A2", str(error))
+        self.assertIn("oah review --task <task>", str(error))
 
     def test_fix_refuses_a_non_codex_correction_stage(self):
         project = FixProject(self, config='[stages]\ncorrection = "claude"\n')
@@ -517,12 +516,12 @@ class RefusalTest(unittest.TestCase):
             for action, args in ((project.fix, ()), (project.manual, ("human",)), (project.bind, ()),
                                  (project.abort, ())):
                 error = project.refused("OAH_FIX_BUSY", action, *args)
-                self.assertIn("t1", str(error))
+                self.assertIn("wait", str(error))
 
 
 class WorkerTest(unittest.TestCase):
     def test_all_index_mutations_fail_even_when_worktree_matches_baseline(self):
-        for change in ("blob", "addition", "removal", "mode", "conflict"):
+        for change in ("blob", "addition", "removal", "mode", "conflict", "assume-unchanged", "skip-worktree"):
             with self.subTest(change=change):
                 project = FixProject(self)
                 project.changes_requested()
@@ -537,6 +536,8 @@ class WorkerTest(unittest.TestCase):
                     step = {"index_commands": [["--force-remove", name]]}
                 elif change == "mode":
                     step = {"index_commands": [["--chmod=+x", name]]}
+                elif change in ("assume-unchanged", "skip-worktree"):
+                    step = {"index_commands": [["--" + change, name]], "write": FIXED}
                 else:
                     oid = git(project.repo, "rev-parse", "HEAD:src/app.py")
                     # A real unmerged index with the same stage-0 blob still has extra entries.
@@ -851,7 +852,8 @@ class OutcomeTest(unittest.TestCase):
                 self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
                 outcome = project.record("A1-outcome.json")
                 self.assertEqual(outcome["outcome"], "aborted" if interrupt else "failed")
-                self.assertIn("could not list", outcome["evidence"])
+                self.assertEqual(outcome["evidence"], fix._error_diagnostic(
+                    KeyboardInterrupt() if interrupt else PermissionError())[1])
 
     def test_result_diagnostic_failure_is_settled_as_failed(self):
         project = FixProject(self)
@@ -989,7 +991,7 @@ class OutcomeTest(unittest.TestCase):
             thread.join(5)
         self.assertIsInstance(caught.exception, KeyboardInterrupt)
         self.assertEqual(caught.exception.code, "OAH_FIX_INTERRUPTED")
-        self.assertIn("A1", caught.exception.message)
+        self.assertIn("task records", caught.exception.message)
         self.assertFalse(call._alive(int(pid_file.read_text(encoding="utf-8"))), "Ctrl-C stops the corrector")
         self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
         self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
@@ -1134,7 +1136,7 @@ class BindTest(unittest.TestCase):
                         saved[field] = value
                     path.write_bytes(json.dumps(saved).encode("utf-8"))
                 error = project.refused("OAH_FIX_MANIFEST_INVALID", project.bind)
-                self.assertIn("rerun oah fix --bind --task t1", str(error))
+                self.assertIn("rerun oah fix --bind --task <task>", str(error))
                 self.assertTrue((project.repo / "src/new.py").is_file())
                 [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
                 self.assertIsNone(attempt.after_head, "metadata loss must never complete the attempt")
@@ -1143,11 +1145,12 @@ class BindTest(unittest.TestCase):
         project = FixProject(self)
         applied(self, project, {"write": {"src/app.py": "print('fixed')\n", "src/new.py": "NEW = 1\n"}})
         error = project.refused("OAH_FIX_NOT_COMMITTED", project.bind)
-        self.assertIn('-m "Agent-Engine: codex"', str(error), "the refusal repeats the commit commands")
+        self.assertIn("Agent-Engine: codex", str(error))
+        self.assertNotIn("git commit", str(error), "exceptions carry fixed guidance only")
         git(project.repo, "add", "-u")
         git(project.repo, "commit", "-q", "-m", "the tracked part" + CLAUDE_TRAILER)
         error = project.refused("OAH_FIX_DIRTY_TREE", project.bind)
-        self.assertIn("src/new.py", str(error))
+        self.assertNotIn("src/new.py", str(error))
         git(project.repo, "add", "--", "src/new.py")
         git(project.repo, "commit", "-q", "-m", "the new file")
         project.refused("OAH_FIX_TRAILER_MISSING", project.bind)
@@ -1176,14 +1179,14 @@ class BindTest(unittest.TestCase):
             "schema": 1, "kind": "attempt-outcome", "task": "t1", "attempt_id": "A1", "outcome": "applied",
             "after_head": None, "evidence": "written by hand", "finished_at": "2026-10-24T00:01:00Z"})
         error = project.refused("OAH_FIX_HISTORY_INVALID", project.bind)
-        self.assertIn("no start record", str(error))
+        self.assertIn("history", str(error))
         project = FixProject(self)
         project.changes_requested()
         receipts.publish(project.state, "t1", "A1-head.json", {
             "schema": 1, "kind": "attempt-head", "task": "t1", "attempt_id": "A1", "after_head": project.head,
             "evidence": "written by hand", "bound_at": "2026-10-24T00:02:00Z"})
         error = project.refused("OAH_FIX_HISTORY_INVALID", project.abort)
-        self.assertIn("A1", str(error))
+        self.assertNotIn("A1", str(error))
 
 
 class ManualTest(unittest.TestCase):
@@ -1381,6 +1384,43 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_exception_text_never_reaches_correction_records_or_diagnostics(self):
+        for point in ("inspection", "launch", "interrupt", "prepare", "dispatch", "unknown-code"):
+            with self.subTest(point=point):
+                project = FixProject(self)
+                project.changes_requested()
+                project.queue_fix({"write": FIXED})
+                key = "s" + "k-" + token_source.token_hex(20)
+                self.assertFalse(any(key in value for value in project.env.values()))
+                if point == "prepare":
+                    target, name = call.briefs, "build"
+                    error = briefs.BriefError("OAH_UNSAFE_ARGUMENT", key)
+                elif point == "dispatch":
+                    target, name = call, "_check_dispatch_lease"
+                    check = call._check_dispatch_lease
+
+                    def fail_dispatch(*args, **kwargs):
+                        if (project.folder() / "A1-start.json").exists():
+                            raise call.EngineError("OAH_LEASE_CHANGED", key)
+                        return check(*args, **kwargs)
+
+                    error = fail_dispatch
+                else:
+                    target, name = (call, "_run_prepared") if point == "launch" else (fix._Attempt, "_judge")
+                    error = (KeyboardInterrupt(key) if point == "interrupt" else ReviewError(key, key)
+                             if point == "unknown-code" else PermissionError(key))
+                with mock.patch.object(target, name, side_effect=error):
+                    try:
+                        result = project.fix()
+                    except (fix.FixInterrupted, ReviewError) as exc:
+                        diagnostic = str(exc)
+                    else:
+                        diagnostic = json.dumps(result.to_json())
+                self.assert_private(project, [key], diagnostic)
+                if point != "prepare":
+                    self.assertEqual(project.record("A1-outcome.json")["outcome"],
+                                     "aborted" if point == "interrupt" else "failed")
+
     def test_intent_preflight_exceptions_omit_packet_values(self):
         for sensitive in (False, True):
             for mode in ("automatic", "manual"):
@@ -1480,7 +1520,8 @@ class SecretTest(unittest.TestCase):
                         self.fail("inspection must stop")
                 outcome = project.record("A1-outcome.json")
                 self.assertEqual(outcome["outcome"], "aborted" if exception is KeyboardInterrupt else "failed")
-                self.assertIn("[file ", outcome["evidence"])
+                self.assertEqual(outcome["evidence"], fix._error_diagnostic(
+                    KeyboardInterrupt() if exception is KeyboardInterrupt else PermissionError())[1])
 
     def test_unexported_credential_filenames_are_withheld_in_dirty_tree_refusals(self):
         for mode in ("correct", "manual", "bind"):
@@ -1498,7 +1539,7 @@ class SecretTest(unittest.TestCase):
                     lambda: project.manual("human")
                 error = project.refused("OAH_FIX_DIRTY_TREE", action)
                 self.assert_private(project, [key], str(error))
-                self.assertIn("[file ", str(error))
+                self.assertNotIn(name, str(error))
 
     @unittest.skipUnless(os.name == "posix" and os.geteuid() != 0, "POSIX file read permissions")
     def test_unexported_credential_filenames_are_withheld_in_file_read_errors(self):
@@ -2052,7 +2093,8 @@ class SecretTest(unittest.TestCase):
         key = "runtime-" + token_source.token_hex(24)
         project.env["OPENAI_API_KEY"] = key
         error = project.refused("OAH_FIX_FINDING_UNKNOWN", project.fix, findings=(key,))
-        self.assertIn("[REDACTED]", str(error))
+        self.assertEqual(str(error), "OAH_FIX_FINDING_UNKNOWN: the selection is not a P0/P1 finding of the "
+                         "latest receipt; inspect that receipt and retry with its finding IDs.")
         self.assertNotIn(key, str(error))
         self.assertIsNone(error.__context__)
 
