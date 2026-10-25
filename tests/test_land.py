@@ -468,6 +468,82 @@ class AssessTest(unittest.TestCase):
                     land._destination(project.repo, "origin", project.env)
                 git(project.repo, "config", "--unset", config_key)
 
+    def test_relative_remote_with_absolute_rewrite_cannot_select_another_default_branch(self):
+        project = LandProject(self)
+        other = project.work / "other.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(project.remote), str(other)],
+                       check=True, env=git_env())
+        for repository in (project.remote, other):
+            git(repository, "update-ref", "refs/heads/alternate", project.base)
+        git(other, "symbolic-ref", "HEAD", "refs/heads/alternate")
+        relative = os.path.relpath(project.remote, project.repo)
+        git(project.repo, "remote", "set-url", "origin", relative)
+        git(project.repo, "config", f"url.{other}.insteadOf", str(project.remote))
+        # Git's named destination stays on main; normalizing its URL selects alternate elsewhere.
+        self.assertIn("ref: refs/heads/main\tHEAD", git(project.repo, "ls-remote", "--symref", "origin", "HEAD"))
+        self.assertIn("ref: refs/heads/alternate\tHEAD",
+                      git(project.repo, "ls-remote", "--symref", str(project.remote), "HEAD"))
+        result = project.assess()
+        self.assertFalse(result.ready, describe(result))
+        shown = describe(result) + json.dumps(result.to_json())
+        self.assertIn("OAH_LAND_DESTINATION_UNSUPPORTED", shown)
+        self.assertIn("absolute", shown)
+        for private in (relative, str(project.remote), str(other)):
+            self.assertNotIn(private, shown)
+        for repository in (project.remote, other):
+            for branch in ("main", "alternate"):
+                self.assertEqual(git(repository, "rev-parse", branch), project.base)
+
+    def test_relative_remote_refuses_before_assessment_and_after_confirmation(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        for relative in ("remote.git", "./remote.git", "../remote.git",
+                         os.path.relpath(project.remote, project.repo)):
+            with self.subTest(relative=relative):
+                git(project.repo, "remote", "set-url", "origin", relative)
+                with project.patched(), self.assertRaises(land.LandError) as caught:
+                    land._destination(project.repo, "origin", project.env)
+                self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+                self.assertIn("absolute", str(caught.exception))
+                with project.patched(), self.assertRaises(land.LandError) as caught:
+                    land.push(project.repo, result, env=dict(project.env))
+                self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+                self.assertEqual(project.remote_main(), project.base)
+
+    @unittest.skipUnless(os.name == "nt", "Windows drive-relative and rooted paths are not absolute")
+    def test_windows_relative_remote_paths_refuse(self):
+        project = LandProject(self)
+        drive = project.remote.drive
+        for relative in (drive + "remote.git", "\\remote.git"):
+            with self.subTest(relative=relative):
+                git(project.repo, "remote", "set-url", "origin", relative)
+                with project.patched(), self.assertRaises(land.LandError) as caught:
+                    land._destination(project.repo, "origin", project.env)
+                self.assertEqual(caught.exception.code, "OAH_LAND_DESTINATION_UNSUPPORTED")
+
+    def test_discovery_fetch_and_push_use_the_verified_remote_name(self):
+        project = LandProject(self)
+        commands = []
+        original = land._GitContext.run
+
+        def observe(context, *args, **kwargs):
+            commands.append(args)
+            return original(context, *args, **kwargs)
+
+        with project.patched(), patch.object(land._GitContext, "run", observe):
+            result = land.assess(project.repo, "t1", env=dict(project.env), home=project.home)
+            self.assertTrue(result.ready, describe(result))
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertTrue(pushed.landed, pushed.message)
+        self.assertEqual(project.remote_main(), project.head)
+        for command in ("ls-remote", "fetch", "push"):
+            calls = [args for args in commands if args[0] == command]
+            self.assertTrue(calls, command)
+            for args in calls:
+                separator = "--" if command == "push" else "--end-of-options"
+                self.assertEqual(args[args.index(separator) + 1], "origin")
+
     def test_remote_config_allowlist_in_every_git_scope(self):
         project = LandProject(self)
         git(project.repo, "config", "extensions.worktreeConfig", "true")

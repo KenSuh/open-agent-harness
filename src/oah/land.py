@@ -197,7 +197,7 @@ class _GitContext:
         if remote is None or destination is None:
             return unavailable("no remote")
         timeout = float(settings["git_timeout"])
-        discovered = self.run("ls-remote", "--symref", "--end-of-options", destination[1], "HEAD", timeout=timeout)
+        discovered = self.run("ls-remote", "--symref", "--end-of-options", remote, "HEAD", timeout=timeout)
         if discovered.returncode != 0 or discovered.timed_out:
             return unavailable("fetch failed")
         branch = sha = None
@@ -212,10 +212,10 @@ class _GitContext:
             return unavailable("default branch lookup failed")
         fetched = self.run("fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
                            "--no-prune", "--no-auto-maintenance", "--no-write-commit-graph", "--refmap=",
-                           "--end-of-options", destination[1], f"refs/heads/{branch}", timeout=timeout)
+                           "--end-of-options", remote, f"refs/heads/{branch}", timeout=timeout)
         if fetched.returncode != 0 or fetched.timed_out:
             return unavailable("fetch failed")
-        confirmed = self.run("ls-remote", "--symref", "--end-of-options", destination[1], "HEAD", timeout=timeout)
+        confirmed = self.run("ls-remote", "--symref", "--end-of-options", remote, "HEAD", timeout=timeout)
         if (confirmed.returncode != 0 or confirmed.timed_out or confirmed.stdout != discovered.stdout):
             return unavailable("fetch failed")
         _raw_history(self.root, self.env)
@@ -632,7 +632,8 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
     """
     def refuse():
         raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED",
-                        "landing needs a simple remote; configure one identical fetch and push URL, remove "
+                        "landing needs a simple remote; configure one identical fetch and push URL using an "
+                        "absolute URL, scp-style address or absolute path, remove "
                         "matching URL rewrites and unsupported remote settings (keep only url, fetch, prune, "
                         "tagOpt and mirror=false), and use remote names without ':' or '/', then run oah land again")
 
@@ -657,6 +658,9 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
     if len(urls) != 1 or not urls[0]:
         refuse()
     stored = urls[0]
+    if not pathlib.Path(stored).is_absolute():
+        if not re.match(r"[^/\\]+:", stored) or (os.name == "nt" and pathlib.PureWindowsPath(stored).drive):
+            refuse()
     rewrites = config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], env)
     if any(stored.startswith(entry.partition("\n")[2]) for entry in rewrites):
         refuse()
@@ -665,10 +669,7 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
                              timeout=GH_TIMEOUT, env=dict(env))
         if result.timed_out or result.returncode != 0 or result.stdout.splitlines() != [stored]:
             refuse()
-    url = stored
-    if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
-        url = str((root / pathlib.Path(url).expanduser()).resolve())
-    return stored, url
+    return stored, stored
 
 
 def _gh_repository(destination: str) -> tuple[str, str]:
