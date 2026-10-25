@@ -17,7 +17,7 @@ unverified, and the first failure is the headline.
    on disk. Codes: `OAH_LAND_GATES_REQUIRED`, `OAH_LAND_GATES_UNMET`, `OAH_LAND_GATES_SUMMARY_MISSING`,
    `OAH_LAND_GATES_SUMMARY_STALE`.
 5. impact: the worktree map is fresh at HEAD. The remote's default branch was fetched in this run into oah's
-   private mirror; no user ref, object or configuration is written. The changed paths are assessed against both
+   private object store; no user ref, object or configuration is written. The changed paths are assessed against both
    maps, and the result digest is recorded. Offline mode, a failed fetch or unavailable impact is
    `OAH_LAND_IMPACT_STALE`.
 6. required-checks: these are the newly affected checks. Each is a gate in the ledgers committed at the fetched
@@ -52,9 +52,12 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
+import tempfile
 import urllib.parse
+from contextlib import contextmanager
 from typing import Mapping, Sequence
 
 from oah import intent as oah_intent
@@ -83,6 +86,140 @@ class LandError(Exception):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+def _git_environment(env: Mapping[str, str]) -> dict[str, str]:
+    result = {(key.upper() if os.name == "nt" else key): value for key, value in env.items()
+              if not key.upper().startswith("GIT_TRACE") and key.upper() not in ("GIT_CURL_VERBOSE", "GIT_CONFIG")}
+    result.update(PUSH_ENV, GIT_NO_REPLACE_OBJECTS="1", GIT_TRACE="0", GIT_TRACE2="0",
+                  GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
+    return result
+
+
+@contextmanager
+def _git_environment_scope(env):
+    """The synchronous CLI's landed readers also use this assessment's git environment."""
+    previous = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+
+def _raw_history(root: pathlib.Path, env: Mapping[str, str]) -> None:
+    def refuse():
+        raise LandError("OAH_LAND_HISTORY_UNSUPPORTED", "landing needs complete raw history; remove info/grafts "
+                        "and graft/shallow environment overrides, unshallow the repository, then run oah land again")
+
+    if "GIT_GRAFT_FILE" in env or "GIT_SHALLOW_FILE" in env:
+        refuse()
+
+    def text(*args):
+        result = run_command([*git_argv(), "-C", str(root), *args], timeout=GH_TIMEOUT, env=env)
+        if result.returncode != 0 or result.timed_out:
+            raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect history; check the repository and retry")
+        return result.stdout.strip()
+
+    grafts = pathlib.Path(text("rev-parse", "--path-format=absolute", "--git-path", "info/grafts"))
+    if os.path.lexists(grafts) or text("rev-parse", "--is-shallow-repository") != "false":
+        refuse()
+
+
+def _transport(root: pathlib.Path, env: Mapping[str, str]) -> str:
+    """Pin SSH values and their effective scopes/origins, privately; never persist command text."""
+    result = run_command([*git_argv(), "-C", str(root), "config", "--null", "--show-scope", "--show-origin",
+                          "--get-regexp", r"^(core\.sshcommand|ssh\.variant)$"], timeout=GH_TIMEOUT, env=env)
+    if result.returncode not in (0, 1) or result.timed_out:
+        raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED", "git transport configuration could not be checked; "
+                        "fix the git configuration and run oah land again")
+    inherited = {key: value for key, value in env.items()
+                 if key.upper().startswith(("GIT_SSH", "GIT_CONFIG_")) or key.upper() == "GIT_CONFIG_PARAMETERS"}
+    entries = result.stdout.split("\0")[:-1]
+    for index in range(1, len(entries), 3):
+        if entries[index].startswith("file:"):
+            entries[index] = "file:" + str((root / entries[index][5:]).resolve())
+    return hashlib.sha256(json.dumps([inherited, entries], sort_keys=True).encode("utf-8")).hexdigest()
+
+
+class _GitContext:
+    """One checkout/config/environment, with fetched objects quarantined outside the user's repository.
+
+    Fetch has no destination ref and never writes FETCH_HEAD. An alternate object directory makes the
+    checkout's reviewed objects visible alongside the fetched raw objects to ancestry, scan and push.
+    GIT_DIR and GIT_WORK_TREE stay pinned to the checkout. Both maps' object reads therefore retain
+    the same effective configuration; no transport runs from a separate bare repository.
+    """
+
+    def __init__(self, root: pathlib.Path, env: Mapping[str, str]):
+        self.root = root
+        self.original = _git_environment(env)
+        _raw_history(root, self.original)
+        self.transport = _transport(root, self.original)
+        objects = run_command([*git_argv(), "-C", str(root), "rev-parse", "--path-format=absolute",
+                               "--git-path", "objects"], timeout=GH_TIMEOUT, env=self.original)
+        git_dir = run_command([*git_argv(), "-C", str(root), "rev-parse", "--absolute-git-dir"],
+                              timeout=GH_TIMEOUT, env=self.original)
+        if objects.returncode != 0 or objects.timed_out or git_dir.returncode != 0 or git_dir.timed_out:
+            raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect objects; check the repository and retry")
+        self._temporary = tempfile.TemporaryDirectory(prefix="oah-land-", ignore_cleanup_errors=True)
+        self.source = pathlib.Path(self._temporary.name)
+        (self.source / "objects").mkdir()
+        alternates = json.dumps(objects.stdout.strip(), ensure_ascii=False)
+        if self.original.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+            alternates += os.pathsep + self.original["GIT_ALTERNATE_OBJECT_DIRECTORIES"]
+        self.env = {**self.original, "GIT_OBJECT_DIRECTORY": str(self.source / "objects"),
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES": alternates,
+                    "GIT_DIR": git_dir.stdout.strip(), "GIT_WORK_TREE": str(root)}
+
+    def __del__(self):
+        if hasattr(self, "_temporary"):
+            self._temporary.cleanup()
+
+    def run(self, *args, timeout=GH_TIMEOUT):
+        return run_command([*git_argv(), "-C", str(self.root), *args], timeout=timeout, env=self.env)
+
+    def unchanged(self, env):
+        current = _git_environment(env)
+        _raw_history(self.root, current)
+        return _transport(self.root, current) == self.transport
+
+    def fetch(self, remote, destination, settings, *, offline=False):
+        from oah.impact.defaultbranch import DefaultBranch, _valid
+
+        def unavailable(reason):
+            return DefaultBranch("unavailable", reason, remote, None, None)
+
+        if offline or not settings["refresh_default_branch"]:
+            return unavailable("offline" if offline else "refresh_default_branch=false")
+        if remote is None or destination is None:
+            return unavailable("no remote")
+        timeout = float(settings["git_timeout"])
+        discovered = self.run("ls-remote", "--symref", "--end-of-options", destination[1], "HEAD", timeout=timeout)
+        if discovered.returncode != 0 or discovered.timed_out:
+            return unavailable("fetch failed")
+        branch = sha = None
+        for line in discovered.stdout.splitlines():
+            symbolic = re.fullmatch(r"ref: refs/heads/(\S+)\tHEAD", line)
+            commit = re.fullmatch(r"([0-9a-f]{40}|[0-9a-f]{64})\tHEAD", line)
+            if symbolic and _valid(symbolic[1]):
+                branch = symbolic[1]
+            if commit:
+                sha = commit[1]
+        if branch is None or sha is None:
+            return unavailable("default branch lookup failed")
+        fetched = self.run("fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+                           "--no-prune", "--no-auto-maintenance", "--no-write-commit-graph", "--refmap=",
+                           "--end-of-options", destination[1], f"refs/heads/{branch}", timeout=timeout)
+        if fetched.returncode != 0 or fetched.timed_out:
+            return unavailable("fetch failed")
+        confirmed = self.run("ls-remote", "--symref", "--end-of-options", destination[1], "HEAD", timeout=timeout)
+        if (confirmed.returncode != 0 or confirmed.timed_out or confirmed.stdout != discovered.stdout):
+            return unavailable("fetch failed")
+        _raw_history(self.root, self.env)
+        return DefaultBranch("fresh", "", remote, branch, sha)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -129,6 +266,7 @@ class Assessment:
 
     _destination: tuple[str, str] | None = dataclasses.field(default=None, init=False, repr=False)
     _authorization: str | None = dataclasses.field(default=None, init=False, repr=False)
+    _git: _GitContext | None = dataclasses.field(default=None, init=False, repr=False)
 
     @property
     def ready(self) -> bool:
@@ -413,7 +551,9 @@ def _stale_message(branch) -> str:
 
 def _contains(root: pathlib.Path, commit: str, head: str) -> bool:
     """Whether HEAD contains commit; a commit absent from this repository is not in HEAD's history."""
-    return run_git(root, "merge-base", "--is-ancestor", commit, head).returncode == 0
+    result = run_command([*git_argv(), "-C", str(root), "merge-base", "--is-ancestor", commit, head],
+                         timeout=GH_TIMEOUT, env=_git_environment(os.environ))
+    return result.returncode == 0 and not result.timed_out
 
 
 def _count(root: pathlib.Path, base: str, head: str) -> int:
@@ -485,13 +625,11 @@ def _newly_affected(their_rows: Sequence, here: Sequence[tuple], there: Sequence
 
 
 def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tuple[str, str]:
-    """One simple remote shared by the isolated fetch and named push; never export its URL.
+    """One simple remote shared by the fetch and named push; never export its URL.
 
-    Only destination-neutral remote settings are supported: the isolated mirror and
-    the checkout must resolve the destination identically without transport indirection.
+    Only destination-neutral remote settings are supported; fetch and push resolve
+    the destination in the same checkout context without remote-specific indirection.
     """
-    from oah.impact import mapstore
-
     def refuse():
         raise LandError("OAH_LAND_DESTINATION_UNSUPPORTED",
                         "landing needs a simple remote; configure one identical fetch and push URL, remove "
@@ -507,36 +645,30 @@ def _destination(root: pathlib.Path, remote: str, env: Mapping[str, str]) -> tup
             refuse()
         return result.stdout.split("\0")[:-1] if result.returncode == 0 else []
 
-    isolated = mapstore._isolated_git_env()
-    destinations = []
-    for config_env in (isolated, env):
-        for entry in config(["--name-only", "--get-regexp", r"^remote\..*\."], config_env):
-            name, key = entry[len("remote."):].rsplit(".", 1)
-            if (":" in name or "/" in name
-                    or (name == remote and key not in {"url", "fetch", "prune", "tagopt", "mirror"})):
-                refuse()
-        if any(value != "false" for value in config(["--type=bool", "--get-all", f"remote.{remote}.mirror"],
-                                                     config_env)):
+    for entry in config(["--name-only", "--get-regexp", r"^remote\..*\."], env):
+        name, key = entry[len("remote."):].rsplit(".", 1)
+        if (":" in name or "/" in name
+                or (name == remote and key not in {"url", "fetch", "prune", "tagopt", "mirror"})):
             refuse()
-        urls = config(["--get-all", f"remote.{remote}.url"], config_env)
-        if len(urls) != 1 or not urls[0]:
-            refuse()
-        stored = urls[0]
-        rewrites = config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], config_env)
-        if any(stored.startswith(entry.partition("\n")[2]) for entry in rewrites):
-            refuse()
-        for options in (("--all",), ("--push", "--all")):
-            result = run_command([*git_argv(), "-C", str(root), "remote", "get-url", *options, "--", remote],
-                                 timeout=GH_TIMEOUT, env=dict(config_env))
-            if result.timed_out or result.returncode != 0 or result.stdout.splitlines() != [stored]:
-                refuse()
-        url = stored
-        if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
-            url = str((root / pathlib.Path(url).expanduser()).resolve())
-        destinations.append((stored, url))
-    if destinations[0] != destinations[1]:
+    if any(value != "false" for value in config(["--type=bool", "--get-all", f"remote.{remote}.mirror"],
+                                                 env)):
         refuse()
-    return destinations[0]
+    urls = config(["--get-all", f"remote.{remote}.url"], env)
+    if len(urls) != 1 or not urls[0]:
+        refuse()
+    stored = urls[0]
+    rewrites = config(["--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"], env)
+    if any(stored.startswith(entry.partition("\n")[2]) for entry in rewrites):
+        refuse()
+    for options in (("--all",), ("--push", "--all")):
+        result = run_command([*git_argv(), "-C", str(root), "remote", "get-url", *options, "--", remote],
+                             timeout=GH_TIMEOUT, env=dict(env))
+        if result.timed_out or result.returncode != 0 or result.stdout.splitlines() != [stored]:
+            refuse()
+    url = stored
+    if not pathlib.Path(url).is_absolute() and not re.match(r"[^/\\]+:", url):
+        url = str((root / pathlib.Path(url).expanduser()).resolve())
+    return stored, url
 
 
 def _gh_repository(destination: str) -> tuple[str, str]:
@@ -564,7 +696,8 @@ def _gh_repository(destination: str) -> tuple[str, str]:
     return f"{host}/{path}", host
 
 
-def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bool) -> _Reassessment:
+def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bool,
+              git_context: _GitContext) -> _Reassessment:
     from oah.config import CONFIG_RELATIVE_PATH, ConfigError, parse_config
     from oah.impact import defaultbranch, mapstore, query
     from oah.impact.defaults import DEFAULTS, configured
@@ -585,7 +718,8 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
     try:
         remote = defaultbranch.remote_for(root, float(settings["git_timeout"]))
         destination = _destination(root, remote, env) if remote else None
-        with defaultbranch._query_context(root, settings, offline=offline, env=env) as branch:
+        with mapstore._default_scope():
+            branch = git_context.fetch(remote, destination, settings, offline=offline)
             if branch.state != "fresh":
                 return _Reassessment(False, _stale_message(branch), remote=branch.remote, branch=branch.branch,
                                      warnings=warnings)
@@ -594,10 +728,10 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
             base = fetched if contains else _task_base(root, head)
             changed = context.changed_files(root, base, head) if base != head else []
             here = _ledger_gates(root, head, settings)
-            source = defaultbranch._snapshot_source(root, fetched, env)
+            source = root
             if (branch.remote != remote or destination is None
                     or _destination(root, remote, env) != destination
-                    or defaultbranch._source(source).get("url") != mapstore.digest(list(destination))):
+                    or not git_context.unchanged(env)):
                 raise LandError("OAH_LAND_DESTINATION_CHANGED",
                                 "the destination changed during assessment; run oah land again")
             try:
@@ -610,9 +744,7 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
             mine = _with_live_hits(root, dict(data), head, changed, settings)
             mine_rows = _rows(mine, changed, gates=[gate for gate, _ in here], graph=query.load_graph(root, settings),
                               settings=settings)
-            fetched_info, fetched_data = mapstore._ref_map(root, branch.ref, source=source, env=env,
-                                                          settings=fetched_settings, remote=branch.remote,
-                                                          commit=fetched)
+            fetched_info, fetched_data = mapstore.snapshot(source, fetched, settings=fetched_settings)
             theirs = _with_live_hits(source, fetched_data, fetched, changed, fetched_settings)
             their_rows = _rows(theirs, changed, gates=[gate for gate, _ in there], settings=fetched_settings)
             rows, found = query.merge_maps(mine_rows, their_rows)
@@ -837,6 +969,13 @@ def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destinat
 def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bool = False,
            home: pathlib.Path | None = None) -> Assessment:
     """Every landing check for the exact HEAD of root's worktree; preconditions raise LandError."""
+    with _git_environment_scope(_git_environment(env)):
+        git_context = _GitContext(repo_info(pathlib.Path(root)).root, env)
+    with _git_environment_scope(git_context.original):
+        return _assess(root, task, env=git_context.original, offline=offline, home=home, git_context=git_context)
+
+
+def _assess(root, task, *, env, offline, home, git_context):
     from oah.config import load_config
     from oah.gates.context import DEFAULTS as GATE_DEFAULTS
     from oah.review import context
@@ -868,6 +1007,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
                                                "remove them, run oah gates check <task> if a gate read them, then run "
                                                "oah land again")
     result = Assessment(task=task, head=head)
+    result._git = git_context
     result._authorization = authorization
     result.checks.append(_lease_check(state, root))
     binding, intent_check = _intent_check(root, task, head, lease)
@@ -877,7 +1017,8 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
     gate_settings = load_config(root).section("gates", GATE_DEFAULTS)
     tools, tools_error = _gate_tools(root, env, home)
     result.checks.append(_gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env))
-    reassessed = _reassess(root, head, env, offline)
+    with _git_environment_scope(git_context.env):
+        reassessed = _reassess(root, head, git_context.env, offline, git_context)
     result.remote, result.branch, result.warnings = reassessed.remote, reassessed.branch, reassessed.warnings
     result._destination = reassessed.destination
     if reassessed.ok:
@@ -893,7 +1034,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
         result.checks.append(_required_check(result, reassessed, seen, unread))
         forward = _fast_forward_check(head, reassessed)
         result.checks.append(forward)
-        result.checks.append(_scan_check(root, head, reassessed, env) if forward.state == PASSED
+        result.checks.append(_scan_check(root, head, reassessed, git_context.env) if forward.state == PASSED
                              else _skipped("scan", "the commits that would land are known only when HEAD fast-forwards "
                                                    "the fetched default branch"))
     else:
@@ -999,32 +1140,39 @@ def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) 
                                               "--merge")
     from oah.lockfile import StateLock
 
-    state = state_dir(repo_info(root), env)
-    with StateLock(_state_path(state, ".lock")):
-        refusal = _revalidate_local(root, assessment, env)
-        if refusal is not None:
-            return Pushed(False, refusal.code, refusal.message)
-        if assessment._destination is None or _destination(root, assessment.remote, env) != assessment._destination:
+    git_context = assessment._git
+    try:
+        if git_context is None or pathlib.Path(root).resolve() != git_context.root or not git_context.unchanged(env):
             return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
-                          "the destination changed after assessment; run oah land --merge and confirm again")
-        return _push_verified(root, assessment, env=env)
+                          "the destination or git transport changed; run oah land --merge and confirm again")
+        with _git_environment_scope(git_context.original):
+            state = state_dir(repo_info(root), git_context.original)
+            with StateLock(_state_path(state, ".lock")):
+                refusal = _revalidate_local(root, assessment, git_context.original)
+                if refusal is not None:
+                    return Pushed(False, refusal.code, refusal.message)
+                if (assessment._destination is None or not git_context.unchanged(env)
+                        or _destination(root, assessment.remote, git_context.env) != assessment._destination):
+                    return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
+                                  "the destination changed after assessment; run oah land --merge and confirm again")
+                with _git_environment_scope(git_context.env):
+                    return _push_verified(root, assessment, env=git_context.env)
+    except LandError as exc:
+        if exc.code != "OAH_LAND_HISTORY_UNSUPPORTED":
+            raise
+        return Pushed(False, exc.code, str(exc))
 
 
 def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
-    from oah.impact import defaultbranch, mapstore
     from oah.impact.defaults import configured
 
     settings = configured(root)
     ref = f"refs/heads/{assessment.branch}"
     where = _destination_text(assessment.remote, assessment.branch)
-    # Resolved URLs can contain credentials. Disable URL/curl tracing, including
-    # configured trace2 targets, before handing the remote name to git or its children.
-    push_env = {key: value for key, value in env.items()
-                if not key.upper().startswith("GIT_TRACE") and key.upper() != "GIT_CURL_VERBOSE"}
-    push_env.update(PUSH_ENV, GIT_TRACE="0", GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0")
-    result = run_command([*git_argv(), "-C", str(root), "push", "--porcelain", "--no-follow-tags",
-                          f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment.remote,
-                          f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env=push_env)
+    git_context = assessment._git
+    result = git_context.run("push", "--porcelain", "--no-follow-tags",
+                             f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment.remote,
+                             f"{assessment.head}:{ref}", timeout=float(settings["git_timeout"]))
     if result.returncode == 0 and not result.timed_out:
         return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head} (a fast-forward from "
                                                f"{assessment.fetched[:12]}); inspect the remote history", assessment.head)
@@ -1033,37 +1181,30 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
     from oah.lockfile import LockTimeout
 
     try:
-        # Keep this fetched generation leased until its history and identity have been checked.
-        with defaultbranch._query_context(root, settings, env=env) as after:
-            now = None
-            contains = None
-            if (after.state == "fresh" and after.remote == assessment.remote and after.branch == assessment.branch
-                    and _destination(root, assessment.remote, env) == assessment._destination):
-                source = defaultbranch._snapshot_source(root, after.commit, env)
-                if defaultbranch._source(source).get("url") == mapstore.digest(list(assessment._destination)):
-                    now = after.commit
-                    history = run_command([*git_argv(), "-C", str(source), "rev-list", now],
-                                          timeout=float(settings["git_timeout"]),
-                                          env=mapstore._isolated_git_env())
-                    if history.returncode == 0 and not history.timed_out:
-                        contains = assessment.head in history.stdout.splitlines()
-                        if not contains:
-                            shallow = run_git(source, "rev-parse", "--is-shallow-repository")
-                            if shallow.returncode != 0 or shallow.stdout.strip() != "false":
-                                contains = None
-            if contains is True:
-                return Pushed(True, "OAH_LAND_LANDED", f"{where} contains {assessment.head}, although git reported a "
-                              "problem after the update; inspect the remote history and hooks", now)
-            if contains is False and now != assessment.fetched:
-                return Pushed(False, "OAH_LAND_IMPACT_STALE",
-                              f"{where} moved to {now[:12]} while landing, and its history does not contain HEAD; "
-                              "nothing landed. Run oah land --check again: it fetches the new SHA, reassesses "
-                              "impact and requires the affected checks again", now)
-            if contains is False:
-                reason = _push_reason(result.stdout, result.stderr, ref, result.timed_out, result.returncode)
-                return Pushed(False, "OAH_LAND_PUSH_FAILED",
-                              f"git push did not update {where} ({reason}); nothing landed. Inspect git's hooks "
-                              "and remote permissions yourself, fix the refusal, then run oah land --merge again", now)
+        # This assessment owns the private object store through the final history read.
+        after = git_context.fetch(assessment.remote, assessment._destination, settings)
+        now = None
+        contains = None
+        if (after.state == "fresh" and after.remote == assessment.remote and after.branch == assessment.branch
+                and _destination(root, assessment.remote, env) == assessment._destination):
+            if git_context.unchanged(env):
+                now = after.commit
+                history = git_context.run("rev-list", now, timeout=float(settings["git_timeout"]))
+                if history.returncode == 0 and not history.timed_out:
+                    contains = assessment.head in history.stdout.splitlines()
+        if contains is True:
+            return Pushed(True, "OAH_LAND_LANDED", f"{where} contains {assessment.head}, although git reported a "
+                          "problem after the update; inspect the remote history and hooks", now)
+        if contains is False and now != assessment.fetched:
+            return Pushed(False, "OAH_LAND_IMPACT_STALE",
+                          f"{where} moved to {now[:12]} while landing, and its history does not contain HEAD; "
+                          "nothing landed. Run oah land --check again: it fetches the new SHA, reassesses "
+                          "impact and requires the affected checks again", now)
+        if contains is False:
+            reason = _push_reason(result.stdout, result.stderr, ref, result.timed_out, result.returncode)
+            return Pushed(False, "OAH_LAND_PUSH_FAILED",
+                          f"git push did not update {where} ({reason}); nothing landed. Inspect git's hooks "
+                          "and remote permissions yourself, fix the refusal, then run oah land --merge again", now)
     except (ImpactError, LandError, LockTimeout, StateCorrupt, OSError):
         pass  # A failed verification must never turn a possible acceptance into 'nothing landed'.
     return Pushed(None, "OAH_LAND_OUTCOME_UNCERTAIN",

@@ -25,6 +25,8 @@ EXCEPTION_MESSAGES = {
     "OAH_LAND_NOTHING_TO_LAND": "there is no commit to land; commit the work and get it reviewed before oah land",
     "OAH_LAND_NOT_READY": "a push needs passing landing checks; run oah land --merge again",
     "OAH_LAND_DESTINATION_CHANGED": "the destination changed; run oah land --merge and confirm again",
+    "OAH_LAND_HISTORY_UNSUPPORTED": "landing needs complete raw history; remove info/grafts and graft/shallow "
+                                    "environment overrides, unshallow the repository, then run oah land again",
     "OAH_LAND_DESTINATION_UNSUPPORTED": "landing needs a simple remote; configure one identical fetch and push URL, "
                                         "remove matching URL rewrites and unsupported remote settings (keep only "
                                         "url, fetch, prune, tagOpt and mirror=false), use remote names without "
@@ -174,12 +176,13 @@ def run(args: argparse.Namespace) -> int:
 
     if args.confirm is not None and not args.merge:
         return _done("OAH_USAGE", USAGE_MESSAGE, EXIT_USAGE, args.json)
-    env = os.environ
+    env = dict(os.environ)
     mode = "merge" if args.merge else "check"
     try:
-        info = repo_info(pathlib.Path.cwd())
-        state = state_dir(info, env)
-        assessment = land.assess(info.root, args.task, env=env, offline=args.offline)
+        with land._git_environment_scope(land._git_environment(env)):
+            info = repo_info(pathlib.Path.cwd())
+            state = state_dir(info, env)
+            assessment = land.assess(info.root, args.task, env=env, offline=args.offline)
         if not args.json:
             print("\n".join(_check_lines(assessment)))
         if not assessment.ready:
@@ -195,7 +198,7 @@ def run(args: argparse.Namespace) -> int:
             pushed = land.Pushed(False, *refusal)
             _record(state, assessment, mode, pushed)
             return _done(refusal[0], refusal[1], EXIT_REFUSED, args.json, assessment, pushed)
-        pushed = land.push(info.root, assessment, env=env)
+        pushed = land.push(info.root, assessment, env=dict(os.environ))
         _record(state, assessment, mode, pushed)
         return _done(pushed.code, pushed.message, EXIT_OK if pushed.landed else EXIT_REFUSED, args.json, assessment,
                      pushed)

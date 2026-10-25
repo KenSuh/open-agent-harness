@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import secrets
+import shlex
 import subprocess
 import sys
 import unittest
@@ -170,6 +171,67 @@ class LandProject:
 
 
 class AssessTest(unittest.TestCase):
+    def test_raw_ancestry_cannot_be_forged_by_grafts_or_replacements(self):
+        for mechanism in ("grafts", "replace", "shallow"):
+            with self.subTest(mechanism=mechanism):
+                project = LandProject(self)
+                moved = project.advance_main({"docs/landed.md": "keep this commit\n"})
+                git(project.repo, "fetch", "-q", "origin")
+                if mechanism == "replace":
+                    replacement = git(project.repo, "commit-tree", f"{project.head}^{{tree}}", "-p", moved,
+                                      "-m", "false parent")
+                    git(project.repo, "replace", project.head, replacement)
+                else:
+                    path = project.repo / ".git" / ("info/grafts" if mechanism == "grafts" else "shallow")
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_bytes((f"{project.head} {moved}\n" if mechanism == "grafts"
+                                      else f"{project.head}\n").encode("ascii"))
+                try:
+                    result = project.assess()
+                except land.LandError as exc:
+                    self.assertEqual(exc.code, "OAH_LAND_HISTORY_UNSUPPORTED")
+                else:
+                    self.assertFalse(result.ready, describe(result))
+                    with project.patched(), self.assertRaises(land.LandError) as caught:
+                        land.push(project.repo, result, env=dict(project.env))
+                    self.assertEqual(caught.exception.code, "OAH_LAND_NOT_READY")
+                self.assertEqual(project.remote_main(), moved)
+
+    def test_landing_fetch_keeps_user_refs_objects_and_impact_cache_unchanged(self):
+        from oah.impact import defaultbranch
+        from oah.impact.defaults import configured
+
+        project = LandProject(self)
+        with project.patched():
+            defaultbranch.refresh(project.repo, configured(project.repo), env=project.env)
+        before = {path.relative_to(project.repo / ".git"): path.read_bytes()
+                  for path in (project.repo / ".git").rglob("*") if path.is_file()
+                  and ("objects" in path.parts or "refs" in path.parts or path.name == "FETCH_HEAD")}
+        cache = {path: path.read_bytes() for path in (project.state / "impact").rglob("*.default-branch.json")}
+        moved = project.advance_main({"docs/new.md": "new default branch input\n"})
+        result = project.assess()
+        self.assertFalse(result.ready, describe(result))
+        self.assertEqual(result.fetched, moved)
+        after = {path.relative_to(project.repo / ".git"): path.read_bytes()
+                 for path in (project.repo / ".git").rglob("*") if path.is_file()
+                 and ("objects" in path.parts or "refs" in path.parts or path.name == "FETCH_HEAD")}
+        self.assertEqual(before, after)
+        self.assertTrue(cache)
+        self.assertEqual(cache, {path: path.read_bytes() for path in cache})
+
+    def test_history_environment_overrides_refuse_even_when_empty(self):
+        project = LandProject(self)
+        for name in ("GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"):
+            with self.subTest(name=name):
+                project.env[name] = ""
+                try:
+                    with self.assertRaises(land.LandError) as caught:
+                        project.assess()
+                    self.assertEqual(caught.exception.code, "OAH_LAND_HISTORY_UNSUPPORTED")
+                finally:
+                    project.env.pop(name)
+        self.assertEqual(project.remote_main(), project.base)
+
     def test_landing_fixtures_contain_no_private_literals(self):
         source = pathlib.Path(__file__).read_text(encoding="utf-8")
         self.assertEqual(load_scanner().scan_text(source, []), [])
@@ -737,6 +799,104 @@ class AssessTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows environment keys are case-insensitive")
+    def test_windows_transport_environment_keys_are_case_insensitive(self):
+        project = LandProject(self)
+        project.env.pop("GIT_SSH_COMMAND", None)
+        project.env["git_ssh_command"] = secrets.token_hex(24)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        project.env["git_ssh_command"] = secrets.token_hex(24)
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_DESTINATION_CHANGED"))
+        self.assertEqual(project.remote_main(), project.base)
+
+    @unittest.skipIf(os.name == "nt", "the SSH executable fixture uses a POSIX shebang")
+    def test_fetch_push_and_failure_refresh_use_the_same_ssh_transport(self):
+        for setting in ("GIT_SSH", "GIT_SSH_COMMAND", "core.sshCommand"):
+            for reject in (False, True):
+                with self.subTest(setting=setting, reject=reject):
+                    project = LandProject(self)
+                    driver = project.work / "ssh driver.py"
+                    log = project.work / "ssh.jsonl"
+                    driver.write_bytes((f"#!{sys.executable}\n"
+                        "# 로컬 Git 전송 시험 — SSH 네트워크 없이 실제 upload-pack/receive-pack 을 실행한다.\n"
+                        "import hashlib, json, os, shlex, subprocess, sys\n"
+                        "if '-G' in sys.argv:\n    sys.exit(0)\n"
+                        "service = shlex.split(sys.argv[-1])[0]\n"
+                        "transport = {k: v for k, v in os.environ.items() if k.startswith('GIT_SSH')}\n"
+                        "event = {'service': service,\n"
+                        "         'transport': hashlib.sha256(json.dumps(transport, sort_keys=True).encode()).hexdigest()}\n"
+                        "with open(os.environ['OAH_TEST_SSH_LOG'], 'a', encoding='utf-8') as out:\n"
+                        "    out.write(json.dumps(event) + '\\n')\n"
+                        "if service == 'git-receive-pack' and os.environ['OAH_TEST_SSH_REJECT'] == '1':\n"
+                        "    sys.exit(1)\n"
+                        "env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}\n"
+                        "sys.exit(subprocess.run(['git', service.removeprefix('git-'), os.environ['OAH_TEST_SSH_REPO']],\n"
+                        "                        env=env).returncode)\n").encode("utf-8"))
+                    driver.chmod(0o755)
+                    project.env.update(OAH_TEST_SSH_LOG=str(log), OAH_TEST_SSH_REPO=str(project.remote),
+                                       OAH_TEST_SSH_REJECT="1" if reject else "0")
+                    command = shlex.join([sys.executable, str(driver)])
+                    if setting == "core.sshCommand":
+                        git(project.repo, "config", setting, command)
+                    else:
+                        project.env[setting] = str(driver) if setting == "GIT_SSH" else command
+                    git(project.repo, "remote", "set-url", "origin", "ssh://oah-transport.invalid/fixture")
+                    result = project.assess()
+                    self.assertTrue(result.ready, describe(result))
+                    with project.patched():
+                        pushed = land.push(project.repo, result, env=dict(project.env))
+                    self.assertEqual(pushed.landed, not reject, pushed.message)
+                    self.assertEqual(project.remote_main(), project.base if reject else project.head)
+                    events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+                    services = [event["service"] for event in events]
+                    self.assertIn("git-upload-pack", services)
+                    self.assertIn("git-receive-pack", services)
+                    if reject:
+                        self.assertEqual(services[-1], "git-upload-pack")
+                    self.assertEqual(len({event["transport"] for event in events}), 1)
+
+    def test_history_mechanisms_added_after_assessment_refuse(self):
+        for filename in ("info/grafts", "shallow"):
+            with self.subTest(filename=filename):
+                project = LandProject(self)
+                result = project.assess()
+                self.assertTrue(result.ready, describe(result))
+                path = project.repo / ".git" / filename
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes((f"{project.head}\n").encode("ascii"))
+                with project.patched():
+                    pushed = land.push(project.repo, result, env=dict(project.env))
+                self.assertFalse(pushed.landed)
+                self.assertEqual(pushed.code, "OAH_LAND_HISTORY_UNSUPPORTED")
+                self.assertEqual(project.remote_main(), project.base)
+
+    def test_transport_environment_and_config_scope_are_pinned(self):
+        for setting in ("GIT_SSH", "GIT_SSH_COMMAND", "core.sshCommand", "scope"):
+            with self.subTest(setting=setting):
+                project = LandProject(self)
+                private = secrets.token_hex(24)
+                if setting == "scope":
+                    git(project.repo, "config", "core.sshCommand", private)
+                result = project.assess()
+                self.assertTrue(result.ready, describe(result))
+                if setting.startswith("GIT_"):
+                    project.env[setting] = private
+                elif setting == "scope":
+                    git(project.repo, "config", "--unset", "core.sshCommand")
+                    project.env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.sshCommand",
+                                       GIT_CONFIG_VALUE_0=private)
+                else:
+                    git(project.repo, "config", setting, private)
+                with project.patched():
+                    pushed = land.push(project.repo, result, env=dict(project.env))
+                self.assertFalse(pushed.landed)
+                self.assertEqual(pushed.code, "OAH_LAND_DESTINATION_CHANGED")
+                self.assertNotIn(private, pushed.message)
+                self.assertEqual(project.remote_main(), project.base)
+
     @unittest.skipIf(os.name == "nt", "the remote-name assertion hook is a POSIX shell script")
     def test_push_uses_the_verified_remote_name(self):
         project = LandProject(self)

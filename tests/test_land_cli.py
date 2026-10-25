@@ -34,6 +34,26 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    def test_ssh_transport_changes_during_confirmation_refuse(self):
+        for setting in ("GIT_SSH", "GIT_SSH_COMMAND", "core.sshCommand"):
+            with self.subTest(setting=setting):
+                project = LandProject(self)
+                private = secrets.token_hex(24)
+
+                def change_transport(_prompt):
+                    if setting.startswith("GIT_"):
+                        os.environ[setting] = private
+                    else:
+                        git(project.repo, "config", setting, private)
+                    return "y\n"
+
+                done = land_command(project, "--merge", "--task", "t1", "--json", interactive=True,
+                                    ask=change_transport)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["code"], "OAH_LAND_DESTINATION_CHANGED")
+                self.assertNotIn(private, done.stdout + done.stderr + json.dumps(records(project)))
+                self.assertEqual(project.remote_main(), project.base)
+
     @unittest.skipIf(os.name == "nt", "the redirecting receive-pack command uses POSIX shell quoting")
     def test_receivepack_cannot_redirect_the_confirmed_push(self):
         for after_confirmation in (False, True):
@@ -483,6 +503,26 @@ class LandCliTest(unittest.TestCase):
                         self.assertIsNone(body["assessment"])
                     else:
                         self.assertEqual(done.stdout, "")
+        self.assertEqual(records(project), [])
+
+    def test_root_argument_errors_use_fixed_landing_boundary(self):
+        project = LandProject(self, ledger=None, receipt=False, finish=False)
+        private = "gh" + "p_" + secrets.token_hex(24)
+        for flags in ((), ("--json",)):
+            for prefix in (("--private=" + private,), ("--private", private), (private,)):
+                with self.subTest(json=bool(flags), position=len(prefix)):
+                    done = project.oah(*prefix, "land", "--check", "--task", "t1", *flags)
+                    self.assertNotIn(private, done.stdout + done.stderr)
+                    self.assertEqual(done.returncode, 2)
+                    self.assertEqual(done.stderr, f"OAH_USAGE: {land_cli.USAGE_MESSAGE}\n")
+                    if flags:
+                        self.assertEqual(json.loads(done.stdout)["code"], "OAH_USAGE")
+                    else:
+                        self.assertEqual(done.stdout, "")
+        done = project.oah("--json", "--private=" + private, "land", "--check", "--task", "t1")
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(json.loads(done.stdout)["code"], "OAH_USAGE")
+        self.assertNotIn(private, done.stdout + done.stderr)
         self.assertEqual(records(project), [])
 
 
