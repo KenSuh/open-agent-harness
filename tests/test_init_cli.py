@@ -167,6 +167,33 @@ class PlanFirstTest(unittest.TestCase):
         self.assertEqual(plan_block(dry), plan_block(real))
         self.assertLess(real.index("End of plan."), real.index("created .oah/config.toml"))
 
+    def test_dry_run_hook_plan_never_discloses_settings_secrets(self):
+        repo = committed_repo(self)
+        secret = "fake-" + token_source.token_hex(20)
+        path = repo / init.CLAUDE_SETTINGS
+        path.parent.mkdir()
+        path.write_bytes(json.dumps({"env": {"ANTHROPIC_API_KEY": secret}}).encode("utf-8"))
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", *flags(hooks=True))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(secret, out + err)
+        self.assertNotIn("ANTHROPIC_API_KEY", out + err)
+        self.assertEqual(snapshot(repo), before)
+
+    def test_windows_aside_plan_shows_every_installer_line_and_source(self):
+        repo = committed_repo(self)
+        machine = make_machine(self, FakeTools())
+        machine.companion_os = machine.os_name = "windows"
+        code, out, err = run_init(repo, machine, "--dry-run", "--yes", *flags(aside=True))
+        self.assertEqual(code, 0, err)
+        from oah.setup import companions
+        installer = companions.plan_steps(["aside"], os_name="windows", project_root=repo, remote_url=None)[0]
+        plan = plan_block(out)
+        for line in installer.display.splitlines():
+            self.assertIn(line, plan)
+        self.assertIn(installer.source, plan)
+        self.assertEqual(machine.ask.prompts, [])
+
 
 class DryRunSubprocessTest(unittest.TestCase):
     def test_python_m_oah_init_dry_run(self):
@@ -312,6 +339,71 @@ class ToolsAndSignInTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
         self.assertIn("orca", last_line(out))
+
+    def test_yes_does_not_consent_to_companion_global_steps(self):
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                repo = committed_repo(self)
+                tools = FakeTools(present=(*ALL_TOOLS, "aside"))
+                def probe(argv, cwd):
+                    return 1 if "mcp" in argv else 0
+                machine = make_machine(self, tools, interactive=interactive, replies=("y", "n", "n"))
+                machine.companion_probe = probe
+                code, out, err = run_init(repo, machine, "--yes", *flags(aside=True))
+                self.assertEqual(tools.companion_runs, [])
+                self.assertEqual(code, 1, err + out)
+                if interactive:
+                    self.assertEqual(machine.ask.prompts.count("  Run it now? [y/N] "), 2)
+
+    def test_companion_global_steps_still_run_with_explicit_consent(self):
+        repo = committed_repo(self)
+        tools = FakeTools(present=(*ALL_TOOLS, "aside"))
+        machine = make_machine(self, tools, interactive=True, replies=("y", "y", "y"))
+        machine.companion_probe = lambda argv, cwd: 1 if "mcp" in argv else 0
+        code, out, err = run_init(repo, machine, "--yes", *flags(aside=True))
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual(tools.companion_runs, [
+            ("claude", "mcp", "add", "--scope", "user", "--transport", "stdio", "aside", "--", "aside", "mcp"),
+            ("codex", "mcp", "add", "aside", "--", "aside", "mcp")])
+
+    def test_repeated_orca_setup_checks_presence_before_mutation(self):
+        repo = committed_repo(self)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/example/sample.git"],
+                       cwd=repo, check=True, env=git_env())
+        tools = FakeTools(present=(*ALL_TOOLS, "orca"))
+        satisfied = set()
+        def probe(argv, cwd):
+            if tuple(argv[:3]) in (("orca", "skills", "installed"), ("orca", "project", "setups")):
+                return 0 if argv[1] in satisfied else 1
+            return 0
+        def run(argv, cwd):
+            tools.companion_runs.append(tuple(argv))
+            satisfied.add(argv[1])
+            return 0
+        machine = make_machine(self, tools, interactive=True, replies=("y", "y", "y", "y"))
+        machine.companion_probe = probe
+        machine.companion_runner = run
+        code, out, err = run_init(repo, machine, *flags(orca=True))
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual(len(tools.companion_runs), 2)
+        before = snapshot(repo)
+        code, out, err = run_init(repo, machine, *flags(orca=True))
+        self.assertEqual(code, 0, err + out)
+        self.assertEqual(len(tools.companion_runs), 2)
+        self.assertEqual(snapshot(repo), before)
+        self.assertEqual(last_line(out), "OAH_INIT_UNCHANGED impact=fresh")
+
+    def test_unverified_orca_presence_never_triggers_mutation(self):
+        repo = committed_repo(self)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/example/sample.git"],
+                       cwd=repo, check=True, env=git_env())
+        tools = FakeTools(present=(*ALL_TOOLS, "orca"))
+        machine = make_machine(self, tools, interactive=True, replies=("y", "y", "y"))
+        machine.companion_probe = lambda argv, cwd: 0 if "--version" in argv else 2
+        code, out, err = run_init(repo, machine, "--yes", *flags(orca=True))
+        self.assertEqual(code, 1, err + out)
+        self.assertIn("OAH_INIT_ORCA_UNVERIFIED", out)
+        self.assertEqual(tools.companion_runs, [])
 
     def test_sign_in_walk_uses_status_commands(self):
         repo = committed_repo(self)

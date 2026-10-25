@@ -8,3 +8,4 @@
 .oah/secrets*
 # Claude Code's local settings: local MCP approvals and oah's local hooks.
 .claude/settings.local.json
+.claude/settings.local.json.oah.bak

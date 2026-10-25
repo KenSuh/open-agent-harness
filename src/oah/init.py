@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import difflib
 import json
 import os
 import pathlib
@@ -22,13 +23,14 @@ import shutil
 import stat
 import sys
 import time
+from contextlib import contextmanager
 from typing import Callable, Mapping, NamedTuple
 
 from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
 from oah.atomic import StateCorrupt, StorageError, write_text_atomic
 from oah.config import Config, ConfigError, parse_config
 from oah.engines.effort import EngineError
-from oah.engines.proc import run_command
+from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.impact import mapstore
 from oah.impact.errors import ImpactError
 from oah.journal import PendingTransaction
@@ -323,6 +325,85 @@ def _linked(root: pathlib.Path, relative: str) -> str | None:
     return None
 
 
+@contextmanager
+def _windows_parents(root: pathlib.Path, relative: str):
+    """Pin non-reparse parents, denying write/delete sharing until publication finishes."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    info = kernel.GetFileInformationByHandleEx
+    info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    info.restype = wintypes.BOOL
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    handles = []
+    parent = (root / relative).absolute().parent
+    try:
+        for path in (*reversed(parent.parents), parent):
+            # Ancestors of root exist; only project directories may be created.
+            if path.is_relative_to(root):
+                path.mkdir(exist_ok=True)
+            handle = create(str(path), 0x80, 1, None, 3, 0x02200000, None)
+            if handle == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.append(handle)
+            attributes = (wintypes.DWORD * 2)()
+            if not info(handle, 9, attributes, ctypes.sizeof(attributes)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if attributes[0] & 0x400 or not attributes[0] & 0x10:
+                raise OSError("linked or non-directory parent")
+        yield
+    finally:
+        for handle in reversed(handles):
+            close(handle)
+
+
+def _publish_new(root: pathlib.Path, relative: str, data: bytes) -> bool:
+    """Exclusive atomic publication: anchored dir fds on POSIX, pinned parents on Windows."""
+    if _linked(root, relative) is not None:
+        raise OSError("linked parent")
+    if os.name == "nt":
+        with _windows_parents(root, relative):
+            return publish_new(root / relative, data)
+    parts = pathlib.PurePosixPath(relative).parts
+    if not parts or any(part in ("..", "/") for part in parts):
+        raise OSError("non-local publication path")
+    folder = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temp = f".{parts[-1]}.{secrets.token_hex(8)}.tmp"
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, dir_fd=folder)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+            os.close(folder)
+            folder = child
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666, dir_fd=folder)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp, parts[-1], src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
+        except FileExistsError:
+            return False
+        os.fsync(folder)
+        return True
+    finally:
+        try:
+            os.unlink(temp, dir_fd=folder)
+        except FileNotFoundError:
+            pass
+        os.close(folder)
+
+
 def _wiki_path(wiki_dir: str, name: str) -> str:
     return (pathlib.PurePosixPath(wiki_dir.replace("\\", "/")) / name).as_posix()
 
@@ -429,11 +510,15 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
     def write(change: FileChange) -> None:
         path = root / change.path
         if change.action == "create":
-            if publish_new(path, change.data):
+            try:
+                created = _publish_new(root, change.path, change.data)
+            except OSError:
+                created = False
+            if created:
                 written.append(change)
                 return
-            problems.append(f"OAH_INIT_CHANGED: {change.path} appeared after the plan was shown, so init left it "
-                            "as it is. Run oah init again to see the new plan.")
+            problems.append(f"OAH_INIT_CHANGED: {change.path} or its parents changed or cannot be safely written, "
+                            "so init left it as it is. Run oah init again to see the new plan.")
             return
         if read_bytes(path) != change.before or _linked(root, change.path) is not None:
             problems.append(f"OAH_INIT_CHANGED: {change.path} changed after the plan was shown, so init left it "
@@ -520,6 +605,46 @@ def _shown_path(root: pathlib.Path, path: pathlib.Path) -> str:
         return str(path)
 
 
+def _local_settings_problem(root: pathlib.Path, *, require_ignored: bool) -> str:
+    paths = (CLAUDE_SETTINGS, CLAUDE_SETTINGS + hooks.BACKUP_SUFFIX)
+    tracked = run_git(root, "ls-files", "-z", "--", *paths)
+    if tracked.returncode != 0 or tracked.stdout:
+        return ("OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings or their backup may be tracked. Remove them from "
+                "the index with git rm --cached, keep them ignored, then run oah init again")
+    for path in paths:
+        if _linked(root, path) is not None:
+            return "OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings or their backup is a link; remove the link and retry"
+        if require_ignored and run_git(root, "check-ignore", "-q", "--", path).returncode != 0:
+            return ("OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings and backups must both be ignored before hook "
+                    "installation. Add .claude/settings.local.json and .claude/settings.local.json.oah.bak to "
+                    ".gitignore, remove any overriding negation, then run oah init again")
+    return ""
+
+
+def _git_hook_problem(root: pathlib.Path, kind: str) -> str:
+    path = pathlib.Path(os.path.abspath(hooks.git_hook_path(root, kind)))
+    common = repo_info(root).common_dir
+    for base in (root, common / "hooks"):
+        try:
+            relative = path.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        if not _is_link(base) and _linked(base, relative) is None:
+            return ""
+    return ("OAH_INIT_HOOK_LOCATION_UNSAFE: git hooks must be inside this project or its repository hooks folder. "
+            "Unset the shared core.hooksPath or select a project-local folder, then run oah init again")
+
+
+def _claude_hook_diff(kind: str) -> str:
+    """Show only the known addition; existing settings, commands and matchers are private."""
+    event, matcher = hooks.CLAUDE_KINDS[kind]
+    group = {"matcher": matcher} if matcher else {}
+    group["hooks"] = [{"type": "command", "command": hooks.command_for(kind)}]
+    text = json.dumps({"hooks": {event: [group]}}, indent=2) + "\n"
+    return "".join(difflib.unified_diff([], text.splitlines(keepends=True),
+                                       fromfile="/dev/null", tofile=f"b/{CLAUDE_SETTINGS} (hook addition only)"))
+
+
 def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
     """Every hook oah offers (PLAN 5.12) with the diff its install would make. Writes nothing."""
     root = pathlib.Path(root)
@@ -534,6 +659,11 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
                                                         "could reach your global Claude Code settings"))
             continue
         try:
+            problem = (_local_settings_problem(root, require_ignored=False) if kind in hooks.CLAUDE_KINDS
+                       else _git_hook_problem(root, kind))
+            if problem:
+                steps.append(HookStep(kind, "refused", note=problem))
+                continue
             change = hooks.install(kind, root, dry_run=True, force=force)
         except hooks.HookError as exc:
             if exc.code == "OAH_HOOK_FOREIGN":
@@ -544,7 +674,8 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
                 steps.append(HookStep(kind, "refused", note=str(exc)))
             continue
         action = "installed" if change.action == "unchanged" else "install"
-        steps.append(HookStep(kind, action, change.diff, _shown_path(root, change.path)))
+        diff = _claude_hook_diff(kind) if kind in hooks.CLAUDE_KINDS and action == "install" else change.diff
+        steps.append(HookStep(kind, action, diff, _shown_path(root, change.path)))
     return steps
 
 
@@ -560,6 +691,16 @@ def install_hooks(root: pathlib.Path, steps: list[HookStep], *, force: bool) -> 
                             f"the {step.kind} hook was not installed")
             continue
         try:
+            problem = (_local_settings_problem(root, require_ignored=True) if step.kind in hooks.CLAUDE_KINDS
+                       else _git_hook_problem(root, step.kind))
+            if problem:
+                problems.append(problem)
+                continue
+            path = (root / CLAUDE_SETTINGS if step.kind in hooks.CLAUDE_KINDS
+                    else hooks.git_hook_path(root, step.kind))
+            if step.path != _shown_path(root, path):
+                problems.append(f"OAH_INIT_CHANGED: the {step.kind} hook destination changed; run oah init again")
+                continue
             change = hooks.install(step.kind, root, dry_run=False, force=force)
         except hooks.HookError as exc:
             problems.append(f"{exc} (the {step.kind} hook was not installed)")
@@ -584,6 +725,10 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
     """Whether the pinned unlazy (5.8) is in place, and what installing the project copy would do."""
     root = pathlib.Path(root)
     target = root / UNLAZY_PROJECT
+    for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
+        if _linked(root, relative) is not None:
+            return UnlazyStep("blocked", note="a project unlazy path is a link; remove the link, then run "
+                                              "oah init --with-unlazy again")
     folder, reason = unlazy.find_unlazy_dir(root, env, home)
     override = unlazy.ENV_VAR if env.get(unlazy.ENV_VAR) else None
     short = pin.commit[:12]
@@ -605,8 +750,8 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
     if override:
         return UnlazyStep("blocked", str(folder), f"{override} names {folder}, which is not the pinned unlazy ({why}). "
                                                   f"Clear {override}, then run oah init --with-unlazy again")
-    project = {(root / ".agents" / "skills" / "unlazy").resolve(), (root / ".claude" / "skills" / "unlazy").resolve()}
-    if folder.resolve() in project:
+    project = {root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"}
+    if folder in project:
         where = _shown_path(root, folder)
         if force:
             return UnlazyStep("replace", str(folder), f"the project copy {where} is not the pinned one ({why}); init "
@@ -659,37 +804,61 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
     target = root / UNLAZY_PROJECT
     moved: tuple[pathlib.Path, pathlib.Path] | None = None
     staging = target.parent / f".unlazy-{secrets.token_hex(4)}.tmp"
+
+    def validate() -> None:
+        paths = [target, staging]
+        if step.action == "replace":
+            aside = pathlib.Path(step.aside)
+            if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
+                raise OSError("non-local replacement")
+            paths += [aside, aside.with_name(aside.name + ".oah.bak")]
+        for path in paths:
+            if _linked(root, path.relative_to(root).as_posix()) is not None:
+                raise OSError("linked installation path")
+
     try:
+        if step.action not in ("install", "replace"):
+            return "OAH_INIT_UNLAZY_FAILED: installation was not planned; remove any links and run oah init again"
+        validate()
         if step.action == "replace":
             aside = pathlib.Path(step.aside)
             backup = aside.with_name(aside.name + ".oah.bak")
             if backup.exists() or backup.is_symlink():
                 return (f"OAH_INIT_UNLAZY_FAILED: {_shown_path(root, backup)} already exists; move it away so nothing "
                         "is lost, then run oah init --with-unlazy --force again")
+            validate()
             _rename(aside, backup)
             moved = (backup, aside)
         if target.exists() or target.is_symlink():
             return (f"OAH_INIT_UNLAZY_FAILED: {UNLAZY_PROJECT} appeared after the plan was shown; run oah init "
                     "again to see the new plan")
+        validate()
         target.parent.mkdir(parents=True, exist_ok=True)
         for argv in unlazy_commands(staging, source=source, pin=pin):
+            validate()
             result = run_command(argv, timeout=timeout, env={**os.environ, **NETWORK_ENV})
             if result.timed_out or result.returncode != 0:
                 lines = result.stderr.strip().splitlines()
                 detail = lines[-1] if lines else ("timed out" if result.timed_out else f"exit code {result.returncode}")
                 return (f"OAH_INIT_UNLAZY_FAILED: git {argv[len(git_argv())]} failed ({detail}). Check your network "
                         "and git, then run oah init --with-unlazy again")
+        validate()
         problems = unlazy.verify_pin(staging, pin)
         if problems:
             return (f"OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy ({'; '.join(problems)}); "
                     "nothing was installed")
+        validate()
         _rename(staging, target)
         moved = None
         return ""
+    except OSError:
+        return ("OAH_INIT_UNLAZY_FAILED: an installation path changed, is linked or cannot be written safely. "
+                "Remove links and check permissions, then run oah init --with-unlazy again")
     finally:
-        if staging.exists():
+        if _linked(root, staging.relative_to(root).as_posix()) is None and staging.exists():
             _remove_tree(staging)
-        if moved is not None and not moved[1].exists():
+        if moved is not None and all(_linked(root, path.relative_to(root).as_posix()) is None for path in moved) \
+                and not moved[1].exists():
             _rename(*moved)
 
 
@@ -792,7 +961,7 @@ class Machine:
     def real(cls) -> "Machine":
         return cls(which=shutil.which, install_runner=guide.run_interactive, status_runner=guide.default_status_runner,
                    refresh=guide.refresh_path, companion_runner=companions.default_runner,
-                   companion_probe=companions.default_probe, ask=_input,
+                   companion_probe=companion_probe, ask=_input,
                    interactive=sys.stdin is not None and sys.stdin.isatty(), env=os.environ, home=pathlib.Path.home(),
                    os_name=os_name_for(sys.platform), companion_os=companions.os_for(sys.platform),
                    today=dt.date.today())
@@ -804,6 +973,72 @@ def _no_answer(prompt: str) -> None:
 
 
 # The plan -----------------------------------------------------------------------------------------------
+
+def _companion_steps(apps, *, os_name: str, root: pathlib.Path) -> tuple[companions.CompanionStep, ...]:
+    steps = companions.plan_steps(apps, os_name=os_name, project_root=root, remote_url=origin_url(root))
+    found = []
+    for step in steps:
+        check = None
+        if step.key == "orca-skills":
+            check = ("orca", "skills", "installed", "--json")
+        elif step.key == "orca-project" and step.argv is not None:
+            project = step.argv[step.argv.index("--project") + 1]
+            check = ("orca", "project", "setups", "--project", project, "--host", "local", "--json")
+        if check is not None:
+            step = dataclasses.replace(step, skip_if=check, verify=check,
+                                       already="the requested Orca setup is already present")
+        found.append(step)
+    return tuple(found)
+
+
+def companion_probe(argv, cwd: pathlib.Path) -> int | None:
+    """Init's Orca presence checks: 0 present, 1 missing, 2 unverified; discard all tool output."""
+    if argv[:3] not in (("orca", "skills", "installed"), ("orca", "project", "setups")):
+        return companions.default_probe(argv, cwd)
+
+    def read(command):
+        try:
+            resolved = resolve_command(command[0])
+            if resolved is None:
+                return None
+            result = run_command(resolved.argv + tuple(command[1:]), timeout=companions.PROBE_TIMEOUT, cwd=str(cwd))
+            if result.returncode != 0 or result.timed_out:
+                return None
+            data = json.loads(result.stdout)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError, UnsupportedBatchShim):
+            return None
+
+    data = read(argv)
+    if data is None or data.get("ok") is not True or not isinstance(data.get("result"), dict):
+        return 2
+    if argv[1] == "skills":
+        bundled = read(("orca", "skills", "list", "--json"))
+        topics = bundled.get("topics") if bundled else None
+        installed = data["result"].get("skills")
+        if not isinstance(topics, list) or not topics or not isinstance(installed, list):
+            return 2
+        if any(not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"]
+               for row in (*topics, *installed)):
+            return 2
+        wanted = {row["name"] for row in topics}
+        return 0 if wanted <= {row["name"] for row in installed} else 1
+    setups = data["result"].get("setups")
+    if not isinstance(setups, list):
+        return 2
+    if not setups:
+        return 1
+    project = argv[argv.index("--project") + 1]
+    for row in setups:
+        if not isinstance(row, dict) or not all(isinstance(row.get(key), str)
+                                              for key in ("projectId", "hostId", "path", "setupState")):
+            return 2
+        if (row["projectId"].casefold() == project.casefold() and row["hostId"] == "local"
+                and os.path.normcase(os.path.abspath(row["path"])) == os.path.normcase(os.path.abspath(cwd))
+                and row["setupState"] == "ready"):
+            return 0
+    return 2  # a conflicting or unfinished registration needs a human; never replace it automatically
+
 
 def recorded_answers(config: Config) -> dict[str, bool]:
     """The Jev and skill-update answers an existing .oah/config.toml records."""
@@ -893,8 +1128,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         hooks=tuple(plan_hooks(root, force=force)) if values["hooks"] else (), unlazy=unlazy_step,
         ci=plan_ci(root, force=force, oses=list(ci_section["os"]), test_command=ci_section["test_command"] or None)
         if values["ci"] else None,
-        apps=apps, companion_steps=tuple(companions.plan_steps(apps, os_name=machine.companion_os, project_root=root,
-                                                               remote_url=origin_url(root))) if apps else (),
+        apps=apps, companion_steps=_companion_steps(apps, os_name=machine.companion_os, root=root) if apps else (),
         map=map_state(root, machine.env),
         unlazy_runs=tuple(" ".join(["git", *argv[len(git_argv()):]]) for argv in unlazy_commands(
             pathlib.Path(UNLAZY_PROJECT), source=machine.unlazy_source, pin=machine.unlazy_pin))
@@ -975,8 +1209,15 @@ def render_plan(plan: Plan) -> list[str]:
         lines.append("  none chosen")
     for number, step in enumerate(plan.companion_steps, 1):
         label = " [global: changes files in your user folder]" if step.global_write else ""
-        action = f"runs `{step.display.splitlines()[0]}`" if step.argv is not None else f"you do it: {step.instruction}"
-        lines.append(f"  {number}. {step.app}: {step.title}{label}; asks first; {action}")
+        lines.append(f"  {number}. {step.app}: {step.title}{label}; asks first")
+        if step.argv is not None:
+            lines += _indented(step.display, "       runs: ")
+        else:
+            lines.append(f"       you do it: {step.instruction}")
+        lines.append(f"       source: {step.source}")
+        if step.key in ("orca-skills", "orca-project") and step.skip_if is not None:
+            lines.append(f"       check first: {companions.show(step.skip_if)}; skip when already present; "
+                         "leave pending if unverified")
     jev = plan.answers["jev"].value
     lines.append("Settings:")
     lines.append(f"  default branch: {plan.branch} ({plan.how})")
@@ -1134,10 +1375,13 @@ def _apply_companions(plan: Plan, machine: Machine, outcome: Outcome, *, yes: bo
     out("Companion apps:")
     found = []
     for app in plan.apps:
-        outcomes = companions.run_steps([step for step in plan.companion_steps if step.app == app],
-                                        project_root=plan.root, yes=yes, which=machine.which, ask=ask, out=out,
-                                        runner=machine.companion_runner, probe=machine.companion_probe,
-                                        refresh=machine.refresh)
+        steps = [step for step in plan.companion_steps if step.app == app]
+        if app == "orca":
+            outcomes = _run_orca_steps(steps, plan.root, machine, ask=ask, out=out)
+        else:
+            outcomes = companions.run_steps(steps, project_root=plan.root, yes=False, which=machine.which,
+                                            ask=ask, out=out, runner=machine.companion_runner,
+                                            probe=machine.companion_probe, refresh=machine.refresh)
         found += outcomes
         outcome.changed += sum(1 for item in outcomes if item.status == "done")
         if any(item.status not in companions.OK_STATUSES for item in outcomes):
@@ -1150,3 +1394,33 @@ def _apply_companions(plan: Plan, machine: Machine, outcome: Outcome, *, yes: bo
             outcome.changed += 1 + len(synced.changed)
         elif status != "present":
             out(f"  the Aside web rules were {status}")
+
+
+def _run_orca_steps(steps, root: pathlib.Path, machine: Machine, *, ask, out):
+    """Add conservative presence checks without changing the landed companion setup contract."""
+    outcomes, statuses = [], {}
+    for step in steps:
+        if step.requires is not None and statuses.get(step.requires) not in ("done", "present"):
+            status = "blocked"
+        elif step.key in ("orca-skills", "orca-project") and step.skip_if is not None:
+            state = machine.companion_probe(step.skip_if, root)
+            if state == 0:
+                status = "present"
+            elif state != 1:
+                status = "pending"
+                out(f"OAH_INIT_ORCA_UNVERIFIED: cannot verify {step.key}; no change was made. Open Orca, "
+                    f"check `{companions.show(step.skip_if)}`, then run oah init again")
+            else:
+                status = ""  # definitely missing: the landed runner still asks for this command's consent
+        else:
+            status = ""
+        if status:
+            outcomes.append(companions.StepOutcome(step, status))
+        else:
+            # The check above is authoritative for this step; do not let a second unknown probe fall through.
+            run_step = dataclasses.replace(step, skip_if=None) if step.argv is not None else step
+            outcomes += companions.run_steps([run_step], project_root=root, yes=False, which=machine.which,
+                                             ask=ask, out=out, runner=machine.companion_runner,
+                                             probe=machine.companion_probe, refresh=machine.refresh)
+        statuses[step.key] = outcomes[-1].status
+    return outcomes
