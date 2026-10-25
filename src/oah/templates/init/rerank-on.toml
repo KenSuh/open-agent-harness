@@ -5,7 +5,8 @@
 # characters). Difficulty advice sends the four axes (kind, intensity, reasoning, risk) and the task
 # summary (up to 500 characters). TypeSafe may charge for each request.
 # The key is read at run time from ${TYPESAFE_API_KEY} or the OS keychain. Without it this stays off
-# and reports unused(no key). Never write the key in this file. Set enabled = false to stop.
+# and reports unused(no key). Never write the key in this file. To stop, set enabled = false here and
+# rerank = false under [impact].
 [rerank]
 enabled = true
 provider = "typesafe"
