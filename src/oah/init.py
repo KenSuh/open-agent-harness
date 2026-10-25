@@ -620,8 +620,9 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
 def unlazy_commands(target: pathlib.Path, *, source: str, pin: unlazy.Pin) -> list[list[str]]:
     """unlazy.install_commands with git resolved through oah.paths and the clone source swappable."""
     commands = unlazy.install_commands(target, pin)
-    if commands[0][3] == unlazy.UPSTREAM_GIT:
-        commands[0][3] = source
+    if commands[0][:4] != ["git", "clone", "--quiet", unlazy.UPSTREAM_GIT]:
+        raise RuntimeError("unlazy.install_commands no longer starts with the clone oah.init expects; update it")
+    commands[0][3] = source
     return [[*git_argv(), *argv[1:]] for argv in commands]
 
 
