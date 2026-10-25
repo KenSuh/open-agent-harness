@@ -1,5 +1,5 @@
 # oah init 명령 — 안내형 설정의 인자, 질문, 계획 출력, 최종 확인, 적용, 요약 줄과 종료 코드를 맡는다.
-"""init: set up this project for oah, guided: tools, sign-ins, rules, wiki, gates, hooks and the impact map."""
+"""init: guided project setup (tools, sign-ins, rules, wiki, gates, hooks, impact map)."""
 from __future__ import annotations
 
 import argparse
