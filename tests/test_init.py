@@ -471,6 +471,16 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(step.action, "install")
         self.assertIn("not the pinned", step.note)
 
+    def test_remove_tree_clears_read_only_files(self):
+        # git writes its object files read-only; Windows refuses to delete those without clearing the flag
+        folder = make_tmp_dir(self) / "clone"
+        (folder / "objects").mkdir(parents=True)
+        locked = folder / "objects" / "pack"
+        locked.write_text("x", encoding="utf-8")
+        locked.chmod(0o444)
+        init._remove_tree(folder)
+        self.assertFalse(folder.exists())
+
     def test_override_must_be_cleared(self):
         empty = make_tmp_dir(self)
         self.assertEqual(self.plan(env={"OAH_UNLAZY_DIR": str(empty)}).action, "blocked")
