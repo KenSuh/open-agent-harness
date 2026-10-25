@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
 import pathlib
 import secrets as token_source
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from oah import call, hooks, init, intent, models, preflight, rerank, rules, skillsel, unlazy
 from oah.config import parse_config
+from oah.engines.proc import Resolved, RunResult
 from oah.impact import defaults as impact_defaults
 from oah.paths import repo_info, state_dir
 from oah.setup import companions
@@ -161,7 +166,7 @@ class AgentFilesTest(unittest.TestCase):
 
 class GitignoreTest(unittest.TestCase):
     EXPECTED = (".oah/tasks/*/GATES.md", "**/.obsidian/workspace*.json", "**/.obsidian/workspace", ".env", ".env.*",
-                "*.pem", "*.key", ".oah/secrets*", ".claude/settings.local.json")
+                "*.pem", "*.key", ".oah/secrets*", ".claude/settings.local.json", ".claude/settings.local.json.oah.bak")
 
     def entries(self, data: bytes) -> list[str]:
         return [line.strip() for line in data.decode("utf-8").splitlines()
@@ -324,6 +329,29 @@ class WriteFilesTest(unittest.TestCase):
                             for problem in problems), problems)
         self.assertNotIn(".oah/config.toml", [change.path for change in written])
 
+    def test_creates_refuse_parents_linked_after_planning(self):
+        changes = self.plan()
+        changes.append(init.FileChange(".claude/agents/oah-low.md", "create", "agents", b"agent\n"))
+        outside = make_tmp_dir(self)
+        for name in (".oah", "docs", ".claude"):
+            directory_alias(outside, self.repo / name)
+        written, problems = init.write_files(self.repo, changes, wiki=self.wiki)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(any(change.path.startswith((".oah/", "docs/")) for change in written))
+        self.assertTrue(problems and all(p.startswith("OAH_INIT_CHANGED") for p in problems))
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_windows_create_refuses_late_junction(self):
+        self.test_creates_refuse_parents_linked_after_planning()
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory handle sharing")
+    def test_windows_publication_pins_parents_against_replacement(self):
+        with init._windows_parents(self.repo, init.CONFIG_PATH):
+            result = subprocess.run([sys.executable, "-c", "import os, sys; os.rename(sys.argv[1], sys.argv[2])",
+                                     str(self.repo / ".oah"), str(self.repo / "moved")], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((self.repo / ".oah").is_dir())
+
     def test_replace_skips_a_file_edited_after_the_plan(self):
         late = self.repo / ".oah" / "config.toml"
         late.parent.mkdir(parents=True)
@@ -376,6 +404,7 @@ class RulesStepTest(unittest.TestCase):
 class HookStepTest(unittest.TestCase):
     def setUp(self):
         self.repo = make_git_repo(self)
+        (self.repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
 
     def steps(self, force: bool = False) -> dict:
         return {step.kind: step for step in init.plan_hooks(self.repo, force=force)}
@@ -409,6 +438,90 @@ class HookStepTest(unittest.TestCase):
         init.install_hooks(self.repo, list(found.values()), force=False)
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_settings_diff_only_contains_oah_hooks(self):
+        secret = "fake-" + token_source.token_hex(20)
+        path = self.repo / init.CLAUDE_SETTINGS
+        path.parent.mkdir()
+        path.write_bytes(json.dumps({"env": {"ANTHROPIC_API_KEY": secret}, "hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": "echo " + secret}]}]}}
+        ).encode("utf-8"))
+        for step in self.steps().values():
+            self.assertNotIn(secret, str(step))
+            self.assertNotIn("ANTHROPIC_API_KEY", step.diff)
+        self.assertIn("oah hook stop", self.steps()["stop"].diff)
+
+    def test_local_settings_backup_is_ignored_before_install(self):
+        path = self.repo / init.CLAUDE_SETTINGS
+        path.parent.mkdir()
+        secret = "fake-" + token_source.token_hex(20)
+        original = json.dumps({"env": {"ANTHROPIC_API_KEY": secret}}).encode("utf-8")
+        path.write_bytes(original)
+        (self.repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False))
+        installed, problems = init.install_hooks(self.repo, list(self.steps().values()), force=False)
+        self.assertEqual(problems, [])
+        self.assertIn("stop", installed)
+        backup = init.CLAUDE_SETTINGS + hooks.BACKUP_SUFFIX
+        self.assertEqual(git("check-ignore", backup, cwd=self.repo), backup)
+        git("add", "-A", cwd=self.repo)
+        self.assertNotIn(backup, git("ls-files", cwd=self.repo).splitlines())
+        self.assertEqual((self.repo / backup).read_bytes(), original)
+
+    def test_hooks_refuse_missing_backup_ignore_or_a_linked_backup(self):
+        steps = list(self.steps().values())
+        ignore = self.repo / ".gitignore"
+        ignore.write_bytes(ignore.read_bytes() + b"!.claude/settings.local.json.oah.bak\n")
+        installed, problems = init.install_hooks(self.repo, steps, force=False)
+        self.assertNotIn("stop", installed)
+        self.assertTrue(any(p.startswith("OAH_INIT_HOOK_SETTINGS_UNSAFE") for p in problems))
+        self.assertFalse((self.repo / init.CLAUDE_SETTINGS).exists())
+
+    def test_hooks_refuse_tracked_settings_backup(self):
+        backup = init.CLAUDE_SETTINGS + hooks.BACKUP_SUFFIX
+        steps = list(self.steps().values())
+        (self.repo / backup).parent.mkdir(exist_ok=True)
+        (self.repo / backup).write_bytes(b"{}\n")
+        git("add", "-f", backup, cwd=self.repo)
+        installed, problems = init.install_hooks(self.repo, steps, force=False)
+        self.assertNotIn("stop", installed)
+        self.assertTrue(problems)
+        self.assertEqual(self.steps()["stop"].action, "refused")
+        self.assertFalse((self.repo / init.CLAUDE_SETTINGS).exists())
+
+    def test_git_hooks_refuse_shared_external_destination(self):
+        outside = make_tmp_dir(self)
+        git("config", "core.hooksPath", str(outside), cwd=self.repo)
+        steps = self.steps(force=True)
+        for kind in hooks.GIT_KINDS:
+            self.assertEqual(steps[kind].action, "refused")
+        init.install_hooks(self.repo, list(steps.values()), force=True)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_git_hooks_recheck_destination_after_planning(self):
+        steps = list(self.steps().values())
+        outside = make_tmp_dir(self)
+        git("config", "core.hooksPath", str(outside), cwd=self.repo)
+        installed, problems = init.install_hooks(self.repo, steps, force=False)
+        self.assertFalse(set(installed) & set(hooks.GIT_KINDS))
+        self.assertTrue(problems)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_project_local_custom_hooks_are_allowed(self):
+        git("config", "core.hooksPath", ".githooks", cwd=self.repo)
+        self.assertEqual(self.steps()["pre-commit"].action, "install")
+
+    def test_linked_worktree_can_use_repository_hooks(self):
+        git_commit(self.repo, {"README.md": "hello\n"})
+        worktree = make_tmp_dir(self) / "linked"
+        git("worktree", "add", "--detach", str(worktree), cwd=self.repo)
+        steps = {step.kind: step for step in init.plan_hooks(worktree, force=False)}
+        self.assertEqual(steps["pre-commit"].action, "install")
+
+    def test_project_local_hook_directory_cannot_be_a_link(self):
+        outside = make_tmp_dir(self)
+        directory_alias(outside, self.repo / ".githooks")
+        git("config", "core.hooksPath", ".githooks", cwd=self.repo)
+        self.assertEqual(self.steps(force=True)["pre-commit"].action, "refused")
+
 
 class UnlazyStepTest(unittest.TestCase):
     FILES = {"scripts/gate-check.mjs": "// gate check\n", "scripts/lib/gates.mjs": "// gates\n"}
@@ -433,6 +546,44 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
+
+    def test_linked_project_skill_parents_are_blocked_even_with_force(self):
+        for directory in (".agents", ".claude"):
+            with self.subTest(directory=directory):
+                self.repo = make_git_repo(self)
+                outside = make_tmp_dir(self)
+                make_unlazy(outside / "unlazy")
+                parent = self.repo / directory
+                parent.mkdir(exist_ok=True)
+                directory_alias(outside, parent / "skills")
+                step = self.plan(force=True)
+                self.assertEqual(step.action, "blocked")
+                problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin)
+                self.assertTrue(problem)
+                self.assertTrue((outside / "unlazy/scripts/gate-check.mjs").is_file())
+                self.assertFalse((outside / "unlazy.oah.bak").exists())
+
+    def test_install_revalidates_late_linked_parent(self):
+        step = self.plan()
+        outside = make_tmp_dir(self)
+        (self.repo / ".agents").mkdir()
+        directory_alias(outside, self.target.parent)
+        self.assertTrue(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin))
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_replacement_revalidates_late_linked_copy(self):
+        make_unlazy(self.target)
+        step = self.plan(force=True)
+        outside = make_tmp_dir(self) / "unlazy"
+        self.target.rename(outside)
+        directory_alias(outside, self.target)
+        self.assertTrue(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin))
+        self.assertTrue((outside / "scripts/gate-check.mjs").is_file())
+        self.assertFalse(outside.with_name("unlazy.oah.bak").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_windows_unlazy_refuses_junction(self):
+        self.test_install_revalidates_late_linked_parent()
 
     def test_failed_install_leaves_nothing_behind(self):
         for pin in (unlazy.Pin(commit="0" * 40, files=self.pin.files),
@@ -534,6 +685,40 @@ class MapStepTest(unittest.TestCase):
         git_commit(repo, {"b.py": "print('b')\n"})
         self.assertEqual(init.map_state(repo, {})[0], "stale")
         self.assertEqual(init.refresh_map(repo, {})[0], "refreshed")
+
+
+class OrcaProbeTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_git_repo(self)
+
+    def probe(self, argv, responses):
+        def run(command, **kwargs):
+            data = responses[tuple(command[1:])]
+            return RunResult(0, json.dumps(data), "", False)
+        with mock.patch.object(init, "resolve_command", return_value=Resolved(("orca",), "orca", "native")), \
+                mock.patch.object(init, "run_command", side_effect=run):
+            return init.companion_probe(argv, self.repo)
+
+    def test_guides_require_every_bundled_name(self):
+        argv = ("orca", "skills", "installed", "--json")
+        data = {("skills", "list", "--json"): {"topics": [{"name": "orca-cli"}, {"name": "computer-use"}]},
+                argv[1:]: {"ok": True, "result": {"skills": [{"name": "orca-cli"}]}}}
+        self.assertEqual(self.probe(argv, data), 1)
+        data[argv[1:]]["result"]["skills"].append({"name": "computer-use"})
+        self.assertEqual(self.probe(argv, data), 0)
+        data[argv[1:]] = {"ok": False, "error": {"message": "fake-" + token_source.token_hex(20)}}
+        self.assertEqual(self.probe(argv, data), 2)
+
+    def test_registration_requires_matching_project_host_path_and_ready_state(self):
+        argv = ("orca", "project", "setups", "--project", "github:example/sample", "--host", "local", "--json")
+        row = {"projectId": "github:example/sample", "hostId": "local", "path": str(self.repo),
+               "setupState": "ready"}
+        data = {argv[1:]: {"ok": True, "result": {"setups": [row]}}}
+        self.assertEqual(self.probe(argv, data), 0)
+        row["path"] = str(self.repo.parent)
+        self.assertEqual(self.probe(argv, data), 2)
+        data[argv[1:]]["result"]["setups"] = []
+        self.assertEqual(self.probe(argv, data), 1)
 
 
 
