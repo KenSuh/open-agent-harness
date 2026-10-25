@@ -60,7 +60,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
 from oah import briefs, call, call_cli, runs
 from oah import intent as oah_intent
-from oah.atomic import read_json, write_json_atomic, write_text_atomic
+from oah.atomic import StateCorrupt, read_json, write_json_atomic, write_text_atomic
 from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
@@ -68,6 +68,7 @@ from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
 from oah.review import ReviewError, authors, receipts, rounds, runner
 from oah.review.schema import BLOCKING
 from oah.scope import outside
+from oah.toolkit.checks import CONTENT_RULES, UTF16_BOMS
 
 ENGINE = "codex"
 STAGE = "correction"
@@ -671,7 +672,10 @@ def _scan_files(root: pathlib.Path, before: str, changes: _Changes,
                 except (OSError, ValueError, RuntimeError):
                     unsupported[name] = f"[file {position}]"
         data = [side[1] for side in (old, current) if side]
-        if any(redact(text) != text for text in (raw.decode("utf-8", errors="replace") for raw in data)):
+        texts = [raw.decode("utf-8", errors="replace") for raw in data]
+        texts += [raw.decode("utf-16", errors="replace") for raw in data if raw.startswith(UTF16_BOMS)]
+        if any(redact(text) != text or any(pattern.search(text) for rule, pattern in CONTENT_RULES
+                                         if rule in ("key", "env-secret")) for text in texts):
             found[name] = f"[file {position}]"
         if name not in found and name not in unsupported:
             captured[name] = old, current
@@ -934,7 +938,7 @@ class _Attempt:
                _patch(root, self.before, safe_changes, untracked, captured=captured))
         if sensitive:
             raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw file "
-                    "contents contain a runtime credential; remove credentials or restore the affected files "
+                    "contents contain a credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
         unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
                               "because submodules, gitlinks or symlinks leaving the worktree cannot be scanned as "
@@ -984,7 +988,7 @@ class _Attempt:
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
         if sensitive:
             outcome = "failed"
-            reason = (f"OAH_FIX_SENSITIVE_CONTENT: raw contents of {_ids(list(sensitive.values()))} contain a runtime "
+            reason = (f"OAH_FIX_SENSITIVE_CONTENT: raw contents of {_ids(list(sensitive.values()))} contain a "
                       "credential; their diffs and all commit guidance were withheld. Remove credentials or "
                       "restore the affected files before retrying oah fix")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
@@ -1196,15 +1200,29 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
 
 
 def _saved_correction(t: _Task, start: Mapping) -> dict:
-    """What `oah fix` saved about its change, or {} for a manual attempt or a missing run folder."""
+    """Require an automatic attempt's manifest; only manual attempts need no run metadata."""
+    if start.get("manual") is True:
+        return {}
     run_id = start.get("run_id")
-    if not isinstance(run_id, str):
-        return {}
+    saved = None
     try:
-        saved = read_json(runs.find_run(t.state, run_id).file_path("correction.json"), {})
-    except runs.RunError:
-        return {}
-    return saved if isinstance(saved, dict) else {}
+        if isinstance(run_id, str):
+            run = runs.find_run(t.state, run_id)
+            if run.task == t.name:
+                saved = read_json(run.file_path("correction.json"), None)
+    except (runs.RunError, StateCorrupt, OSError):
+        pass  # Never echo malformed metadata or storage exception text.
+    if (not isinstance(saved, dict) or saved.get("attempt_id") != start["attempt_id"]
+            or saved.get("before_head") != start["before_head"] or saved.get("outcome") != "applied"
+            or not isinstance(saved.get("changes_sha256"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", saved["changes_sha256"])
+            or any(not isinstance(saved.get(field), list)
+                   or any(not isinstance(item, str) or not item for item in saved[field])
+                   for field in ("changed", "new_files", "user_files", "commands", "out_of_scope"))):
+        raise ReviewError("OAH_FIX_MANIFEST_INVALID", f"the automatic correction manifest for {start['attempt_id']} "
+                          f"is missing or invalid. {RECORDED}. Restore the original run metadata, then rerun "
+                          f"oah fix --bind --task {t.name}; oah fix --abort settles only unfinished attempts")
+    return saved
 
 
 def record_manual(task: str, *, engine: str, cwd: pathlib.Path, env: Mapping[str, str],

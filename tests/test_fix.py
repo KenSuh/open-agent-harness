@@ -10,6 +10,7 @@ import os
 import pathlib
 import secrets as token_source
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1045,6 +1046,41 @@ class BindTest(unittest.TestCase):
         self.assertEqual((attempt.outcome, attempt.after_head, attempt.problems), ("applied", head, ()))
         project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
 
+    def test_bind_refuses_missing_or_invalid_automatic_manifest(self):
+        for damage in ("run-folder", "missing", "json", "encoding", "list", "empty", "inventory",
+                       "attempt", "before", "outcome", "commands", "digest"):
+            with self.subTest(damage=damage):
+                project = FixProject(self)
+                result = applied(self, project, {"write": {**FIXED, "src/new.py": "NEW = 1\n"}})
+                git(project.repo, "add", "-u")
+                git(project.repo, "commit", "-q", "-m", "tracked correction" + CODEX_TRAILER)
+                folder = pathlib.Path(result.run_dir)
+                path = folder / "correction.json"
+                saved = json.loads(path.read_bytes())
+                if damage == "run-folder":
+                    shutil.rmtree(folder)
+                elif damage == "missing":
+                    path.unlink()
+                elif damage in ("json", "encoding"):
+                    path.write_bytes(b"{" if damage == "json" else b"\xff")
+                else:
+                    if damage == "list":
+                        saved = []
+                    elif damage == "empty":
+                        saved = {}
+                    else:
+                        field, value = {"inventory": ("new_files", "src/new.py"),
+                                        "attempt": ("attempt_id", "A2"), "before": ("before_head", "0" * 40),
+                                        "outcome": ("outcome", "failed"), "commands": ("commands", [None]),
+                                        "digest": ("changes_sha256", "invalid")}[damage]
+                        saved[field] = value
+                    path.write_bytes(json.dumps(saved).encode("utf-8"))
+                error = project.refused("OAH_FIX_MANIFEST_INVALID", project.bind)
+                self.assertIn("rerun oah fix --bind --task t1", str(error))
+                self.assertTrue((project.repo / "src/new.py").is_file())
+                [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
+                self.assertIsNone(attempt.after_head, "metadata loss must never complete the attempt")
+
     def test_bind_refuses_until_committed_cleanly_with_trailers(self):
         project = FixProject(self)
         applied(self, project, {"write": {"src/app.py": "print('fixed')\n", "src/new.py": "NEW = 1\n"}})
@@ -1287,6 +1323,42 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_unexported_credential_patterns_withhold_raw_file_inputs(self):
+        for pattern in ("key", "env-secret"):
+            for channel in ("tracked", "new", "deleted", "replaced", "user", "utf16-le", "utf16-be", "binary"):
+                with self.subTest(pattern=pattern, channel=channel):
+                    project = FixProject(self)
+                    key = ("s" + "k-" if pattern == "key" else "") + token_source.token_hex(20)
+                    text = (("SERVICE_TOKEN" + "=") if pattern == "env-secret" else "") + key + "\n"
+                    raw = text.encode("utf-8")
+                    if channel.startswith("utf16"):
+                        bom = b"\xff\xfe" if channel == "utf16-le" else b"\xfe\xff"
+                        raw = bom + text.encode(channel.replace("utf16", "utf-16"))
+                    elif channel == "binary":
+                        raw = b"\x00\xff" + raw
+                    name = "src/private.txt"
+                    old_side = channel in ("deleted", "replaced", "utf16-le", "utf16-be", "binary")
+                    if old_side or channel == "tracked":
+                        project.commit({name: raw if old_side else b"before\n"})
+                    project.changes_requested()
+                    if channel == "user":
+                        (project.repo / name).write_bytes(raw)
+                    self.assertFalse(any(key in value for value in project.env.values()))
+                    content = None if channel == "deleted" else "replacement\n" if old_side or channel == "user" else text
+                    project.queue_fix({"write": {**FIXED, name: content}})
+                    terminal = io.StringIO()
+                    result = project.fix(terminal=terminal)
+                    self.assertEqual((result.outcome, result.commands), ("failed", []))
+                    self.assertIsNone(result.next_command)
+                    self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                    self.assert_private(project, [key, text.rstrip()], json.dumps(result.to_json()), terminal.getvalue())
+                    self.assertNotIn(name, json.dumps(result.to_json()), "withheld files are position-only")
+                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                    self.assertIn("OAH_FIX_SENSITIVE_CONTENT", patch)
+                    self.assertIn("[file ", patch)
+                    self.assertNotIn(name, patch)
+                    self.assertIn("src/app.py", patch, "safe files remain reviewable")
+
     def test_diff_prefixed_worker_streams_are_live_but_never_retained(self):
         for channel in ("stdout", "stderr", "last_message"):
             with self.subTest(channel=channel):
