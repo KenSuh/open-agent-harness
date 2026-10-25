@@ -201,6 +201,32 @@ class GitignoreTest(unittest.TestCase):
         self.assertEqual(self.entries(data)[-1], ".agents/skills/unlazy/")
         self.assertIsNone(init.add_gitignore_entries(data, unlazy_copy=True))
 
+    def test_ignorecase_applies_to_existing_names_and_parents(self):
+        for name, pattern in (("PRODUCTION.KEY", "*.key"),
+                              (".OAH/TASKS/real/GATES.MD", ".oah/tasks/*/GATES.md"),
+                              ("nested/.OBSIDIAN/WORKSPACE.JSON", "**/.obsidian/workspace*.json")):
+            with self.subTest(name=name):
+                repo = make_git_repo(self)
+                git("config", "core.ignorecase", "true", cwd=repo)
+                path = repo / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"# harmless fixture\r\n")
+                (repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False) +
+                                                 ("!" + name + "\n").encode("ascii"))
+                exposed = subprocess.run(["git", "check-ignore", "--no-index", "-q", "--", name],
+                                         cwd=repo, env=git_env())
+                self.assertEqual(exposed.returncode, 1)
+                problems = init._ignore_problems(repo, unlazy_copy=False)
+                self.assertTrue(any("required pattern " + pattern + " " in item for item in problems), problems)
+
+    def test_case_sensitive_git_keeps_uppercase_paths_distinct(self):
+        repo = make_git_repo(self)
+        git("config", "core.ignorecase", "false", cwd=repo)
+        (repo / "PRODUCTION.KEY").write_bytes(b"# harmless fixture\r\n")
+        (repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False) +
+                                         b"!PRODUCTION.KEY\n")
+        self.assertEqual(init._ignore_problems(repo, unlazy_copy=False), [])
+
 
 class PlanFilesTest(unittest.TestCase):
     def setUp(self):
@@ -877,6 +903,85 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
+
+    @unittest.skipIf(os.name == "nt", "POSIX staging pathname replacement")
+    def test_staging_swap_cannot_redirect_checkout(self):
+        self._staging_swap_cannot_redirect_checkout()
+
+    @unittest.skipUnless(os.name == "nt", "Windows staging junction replacement")
+    def test_windows_staging_swap_cannot_redirect_checkout(self):
+        self._staging_swap_cannot_redirect_checkout()
+
+    def _staging_swap_cannot_redirect_checkout(self):
+        for boundary in ("before-clone", "after-clone", "before-checkout"):
+            with self.subTest(boundary=boundary):
+                self.repo = make_git_repo(self)
+                outside = make_git_repo(self)
+                git("fetch", str(self.source), self.commit, cwd=outside)
+                git("checkout", "--detach", self.commit, cwd=outside)
+                head = git_commit(outside, {"scripts/gate-check.mjs": b"// external repository\r\n"})
+                external_bytes = (outside / "scripts/gate-check.mjs").read_bytes()
+                run = init.run_command
+                calls = 0
+
+                def swap():
+                    staging, = self.repo.glob(".unlazy-*.tmp")
+                    staging.rename(self.repo / "saved-stage")
+                    directory_alias(outside, staging)
+
+                def command(argv, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if (calls == 1 and boundary == "before-clone"
+                            or calls == 2 and boundary == "before-checkout"):
+                        swap()
+                    result = run(argv, **kwargs)
+                    if calls == 1 and boundary == "after-clone":
+                        swap()
+                    return result
+
+                with mock.patch.object(init, "run_command", side_effect=command):
+                    try:
+                        problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+                    except init.InitError as exc:
+                        problem = str(exc)
+                self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+                self.assertEqual(git("rev-parse", "HEAD", cwd=outside), head)
+                self.assertEqual((outside / "scripts/gate-check.mjs").read_bytes(), external_bytes)
+                self.assertFalse(self.target.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows staging handle denies directory replacement")
+    def test_windows_staging_publication_keeps_source_pinned(self):
+        move = init._windows_move_directory
+        attempts = []
+
+        def publication(handle, target):
+            staging, = self.repo.glob(".unlazy-*.tmp")
+            with self.assertRaises(PermissionError):
+                staging.rename(self.repo / "saved-stage")
+            attempts.append(True)
+            return move(handle, target)
+
+        with mock.patch.object(init, "_windows_move_directory", side_effect=publication):
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertEqual(problem, "")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows staging pin during an external command")
+    def test_windows_staging_command_denies_directory_replacement(self):
+        staging = self.repo / "staging"
+        staging.mkdir()
+        script = ("import pathlib, sys\n"
+                  "try:\n"
+                  "    pathlib.Path(sys.argv[1]).rename(sys.argv[1] + '-moved')\n"
+                  "except PermissionError:\n"
+                  "    sys.exit(0)\n"
+                  "sys.exit(1)\n")
+        with init._pinned_directory(staging, allow_swap=True) as (_handle, identity):
+            code = init._staging_command(str(staging), identity, [sys.executable, "-c", script, str(staging)])
+        self.assertEqual(code, 0)
+        self.assertTrue(staging.is_dir())
 
     def test_failed_git_diagnostics_are_discarded(self):
         secret = "fake-" + token_source.token_hex(20)
