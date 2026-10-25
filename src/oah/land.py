@@ -36,8 +36,9 @@ The changed paths are `F..HEAD` when HEAD contains F (exactly what lands). Other
 from the merge-base with the local default ref to HEAD.
 
 `push(root, assessment, env=...)` revalidates local authorization under the state lock, then runs
-`git push --porcelain --no-follow-tags --force-with-lease=refs/heads/<branch>:<F> <verified-remote-name>
+`git push --porcelain --no-follow-tags --no-recurse-submodules --force-with-lease=refs/heads/<branch>:<F> <verified-remote-name>
 <HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step.
+After a successful push, a fresh fetch must show the default branch at exactly HEAD before reporting landed.
 After a failed push, a fresh fetch checks whether the remote history contains HEAD; failed verification leaves
 the outcome explicitly uncertain.
 
@@ -1178,12 +1179,10 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
     ref = f"refs/heads/{assessment.branch}"
     where = _destination_text(assessment.remote, assessment.branch)
     git_context = assessment._git
-    result = git_context.run("push", "--porcelain", "--no-follow-tags",
+    result = git_context.run("push", "--porcelain", "--no-follow-tags", "--no-recurse-submodules",
                              f"--force-with-lease={ref}:{assessment.fetched}", "--", assessment.remote,
                              f"{assessment.head}:{ref}", timeout=float(settings["git_timeout"]))
-    if result.returncode == 0 and not result.timed_out:
-        return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head} (a fast-forward from "
-                                               f"{assessment.fetched[:12]}); inspect the remote history", assessment.head)
+    succeeded = result.returncode == 0 and not result.timed_out
     from oah.atomic import StateCorrupt
     from oah.impact.errors import ImpactError
     from oah.lockfile import LockTimeout
@@ -1197,6 +1196,14 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
                 and _destination(root, assessment.remote, env) == assessment._destination):
             if git_context.unchanged(env):
                 now = after.commit
+                if succeeded:
+                    if now == assessment.head:
+                        return Pushed(True, "OAH_LAND_LANDED",
+                                      f"{where} now points at {assessment.head} (a fast-forward from "
+                                      f"{assessment.fetched[:12]}); inspect the remote history", now)
+                    return Pushed(False, "OAH_LAND_PUSH_FAILED",
+                                  "git push returned success, but the remote default branch is not at the assessed "
+                                  "HEAD; inspect the remote history and hooks before retrying oah land --merge", now)
                 history = git_context.run("rev-list", now, timeout=float(settings["git_timeout"]))
                 if history.returncode == 0 and not history.timed_out:
                     contains = assessment.head in history.stdout.splitlines()
@@ -1216,7 +1223,7 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
     except (ImpactError, LandError, LockTimeout, StateCorrupt, OSError):
         pass  # A failed verification must never turn a possible acceptance into 'nothing landed'.
     return Pushed(None, "OAH_LAND_OUTCOME_UNCERTAIN",
-                  "git push reported a problem and acceptance could not be established; the outcome is uncertain. "
+                  "the remote branch could not be verified after git push; the outcome is uncertain. "
                   "Inspect the destination's history for the assessed HEAD before retrying oah land --check")
 
 

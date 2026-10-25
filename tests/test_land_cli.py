@@ -487,6 +487,41 @@ class LandCliTest(unittest.TestCase):
         self.assertEqual(records(project)[-1]["default_branch"], landed[0])
         self.assertEqual(project.remote_main(), landed[0])
 
+    def test_merge_pushes_parent_with_recurse_submodules_only(self):
+        project = LandProject(self)
+        git(project.repo, "config", "push.recurseSubmodules", "only")
+        done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head, "--json")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(project.remote_main(), project.head)
+        body = json.loads(done.stdout)
+        self.assertEqual((body["code"], body["pushed"]["landed"], body["pushed"]["remote_sha"]),
+                         ("OAH_LAND_LANDED", True, project.head))
+        self.assertEqual((records(project)[-1]["landed"], records(project)[-1]["remote_sha"]),
+                         (True, project.head))
+
+    @unittest.skipIf(os.name == "nt", "the post-receive hook fixture uses a POSIX shell")
+    def test_zero_exit_push_requires_remote_at_exact_head(self):
+        for outcome in ("rewound", "descendant"):
+            with self.subTest(outcome=outcome):
+                project = LandProject(self)
+                expected = project.base
+                if outcome == "descendant":
+                    expected = git(project.repo, "commit-tree", "-p", project.head, "-m", "later landing",
+                                   f"{project.head}^{{tree}}")
+                    git(project.repo, "push", "-q", "origin", f"{expected}:refs/heads/fixture")
+                hook = project.remote / "hooks/post-receive"
+                hook.write_bytes((f"#!/bin/sh\ngit update-ref refs/heads/main {expected}\n").encode("utf-8"))
+                hook.chmod(0o755)
+                done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head, "--json")
+                self.assertEqual(project.remote_main(), expected)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                body = json.loads(done.stdout)
+                self.assertEqual((body["code"], body["pushed"]["landed"], body["pushed"]["remote_sha"]),
+                                 ("OAH_LAND_PUSH_FAILED", False, expected))
+                saved = records(project)[-1]
+                self.assertEqual((saved["code"], saved["landed"], saved["remote_sha"]),
+                                 ("OAH_LAND_PUSH_FAILED", False, expected))
+
     def test_merge_requires_confirmation(self):
         project = LandProject(self)
         cases = [(("--merge", "--task", "t1"), {}, "OAH_LAND_CONFIRM_REQUIRED"),
