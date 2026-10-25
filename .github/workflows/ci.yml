@@ -25,7 +25,8 @@ jobs:
         # The Windows suite outgrew one 30-minute job; tools/test_shard.py splits discovery suites by test count.
         shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Shards are balanced by test count, not time, so the slowest Windows shard needs headroom.
+    timeout-minutes: 45
     steps:
       # Test the PR head itself; GitHub's temporary merge commit carries an identity we do not control.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
