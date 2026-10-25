@@ -179,9 +179,12 @@ class DryRunSubprocessTest(unittest.TestCase):
                                 capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
         out = result.stdout.decode("utf-8")
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8"))
-        self.assertIn(".oah/config.toml", out)
-        self.assertIn("Impact map", out)
-        self.assertTrue(last_line(out).startswith("OAH_INIT_DRY_RUN"), out)
+        plan = plan_block(out)
+        for section in ("\nTools (", "\nSign-ins (", "\nFiles:\n  create     .oah/config.toml",
+                        "\nManaged content", "AGENTS.md: the oah rules block", "\nHooks:",
+                        "\nImpact map:\n  build the first map"):
+            self.assertIn(section, plan, section)
+        self.assertTrue(last_line(out).startswith("OAH_INIT_DRY_RUN changes="), out)
         self.assertEqual(snapshot(repo), before)
 
 
