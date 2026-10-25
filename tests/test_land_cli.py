@@ -1,6 +1,7 @@
 # oah land 명령 검사 — 실제 명령 탐색으로 검사 출력·종료 코드, 확인 없는 병합 거부, 확인 중 원격 이동, 바뀐 기본 브랜치, 비밀·계정 정보 누출 없음, 사용법 오류를 본다.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 from oah import land, land_cli
 from oah.cli import build_parser
-from tests.test_land import OTHER_LEDGER, LandProject
+from tests.test_land import OTHER_LEDGER, LandProject, git
 
 
 def land_command(project: LandProject, *args: str, stdin: str | None = None, interactive: bool = False,
@@ -31,6 +32,102 @@ def records(project: LandProject) -> list[dict]:
 
 
 class LandCliTest(unittest.TestCase):
+    def test_required_gate_labels_and_paths_are_private_in_all_exports(self):
+        private = "account-" + secrets.token_hex(16)
+        target = f"src/{private}/app.py"
+        ledger = f".oah/tasks/{private}/GATES.md"
+        project = LandProject(self, main_files={ledger: OTHER_LEDGER.replace("src/app.py", target), target: "v0\n"},
+                              work_files={target: "v1\n"})
+        result = project.assess()
+        self.assertEqual(result.check("required-checks").code, "OAH_LAND_CHECKS_REQUIRED")
+        digest = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest()
+        for flags in ((), ("--json",)):
+            done = land_command(project, "--check", "--task", "t1", *flags)
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            emitted = done.stdout + done.stderr + json.dumps(result.to_json()) + json.dumps(records(project))
+            self.assertNotIn(private, emitted)
+            self.assertNotIn(ledger, emitted)
+            self.assertNotIn(target, emitted)
+            self.assertIn(digest(ledger + "#G1"), emitted)
+            self.assertIn(digest(target), emitted)
+        item = result.to_json()["required_checks"][0]
+        self.assertEqual(item["position"], 1)
+        self.assertEqual(item["gate"], {"position": 1, "digest": digest(ledger + "#G1")})
+        self.assertIn({"position": 1, "digest": digest(target)}, item["targets"])
+        self.assertEqual(records(project)[-1]["required_checks"], result.to_json()["required_checks"])
+
+    def test_destination_and_confirmation_values_stay_private(self):
+        project = LandProject(self)
+        remote, branch = ("account-" + secrets.token_hex(16), "branch-" + secrets.token_hex(16))
+        git(project.repo, "remote", "rename", "origin", remote)
+        git(project.repo, "config", "branch.feat.remote", remote)
+        git(project.repo, "push", "-q", remote, f"{project.base}:refs/heads/{branch}")
+        git(project.remote, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        private = "github" + "_pat_" + secrets.token_hex(16)
+        outputs = []
+        for flags in ((), ("--json",)):
+            outputs.append(land_command(project, "--check", "--task", "t1", *flags))
+            outputs.append(land_command(project, "--merge", "--task", "t1", "--confirm", private, *flags))
+            self.assertEqual(outputs[-2].returncode, 0, outputs[-2].stdout + outputs[-2].stderr)
+            self.assertEqual(outputs[-1].returncode, 1)
+
+        def answer(prompt):
+            outputs.append(prompt)
+            return "y\n"
+
+        landed = land_command(project, "--merge", "--task", "t1", interactive=True, ask=answer)
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        emitted = "".join(item if isinstance(item, str) else item.stdout + item.stderr for item in outputs)
+        emitted += landed.stdout + landed.stderr + json.dumps(records(project))
+        for value in (remote, branch, private, str(project.remote)):
+            self.assertNotIn(value, emitted)
+        for value in (remote, branch):
+            self.assertIn(hashlib.sha256(value.encode("utf-8")).hexdigest(), emitted)
+        self.assertEqual(git(project.remote, "rev-parse", branch), project.head)
+
+    def test_gate_errors_and_tool_installation_details_stay_private(self):
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(16)
+        token = "gh" + "p_" + secrets.token_hex(18)
+        for problem in ("runtime", "unavailable", "unpinned"):
+            with self.subTest(problem=problem):
+                if problem == "runtime":
+                    project.stub.reply("gate-check.mjs", {"stdout": private, "stderr": token, "code": 2})
+                else:
+                    folder = project.work / private
+                    folder.mkdir(exist_ok=True)
+                    project.env["OAH_UNLAZY_DIR"] = str(folder)
+                    if problem == "unpinned":
+                        (folder / "scripts").mkdir(exist_ok=True)
+                        (folder / "scripts/gate-check.mjs").write_bytes(b"// unpinned\n")
+                for flags in ((), ("--json",)):
+                    done = land_command(project, "--check", "--task", "t1", *flags)
+                    self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                    self.assertIn("OAH_LAND_GATES_UNMET", done.stdout + done.stderr)
+                    emitted = done.stdout + done.stderr + json.dumps(records(project))
+                    for value in (private, token, str(project.work), str(project.home)):
+                        self.assertNotIn(value, emitted)
+        self.assertEqual(project.remote_main(), project.base)
+
+    def test_environment_exceptions_and_record_warnings_stay_private(self):
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(16)
+        project.commit({".oah/config.toml": "[" + private + "\n"})
+        for flags in ((), ("--json",)):
+            done = land_command(project, "--check", "--task", "t1", *flags)
+            self.assertEqual(done.returncode, 69, done.stdout + done.stderr)
+            for value in (private, str(project.repo)):
+                self.assertNotIn(value, done.stdout + done.stderr)
+        project = LandProject(self)
+        # Real record I/O failure: the parent that should be a directory is a private file.
+        (project.state / "land").write_bytes(private.encode("utf-8"))
+        for flags in ((), ("--json",)):
+            done = land_command(project, "--check", "--task", "t1", *flags)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertIn("OAH_LAND_RECORD_FAILED", done.stderr)
+            for value in (private, str(project.state)):
+                self.assertNotIn(value, done.stdout + done.stderr)
+
     def test_private_ci_names_never_reach_text_json_or_records(self):
         project = LandProject(self)
         private = ["gh" + "p_" + secrets.token_hex(18), "account-" + secrets.token_hex(18)]
@@ -140,9 +237,8 @@ class LandCliTest(unittest.TestCase):
         lines = done.stdout.splitlines()
         self.assertEqual([line.split(":")[0] for line in lines[:len(land.CHECKS)]], list(land.CHECKS))
         self.assertTrue(all(": passed — " in line for line in lines[:len(land.CHECKS)]), done.stdout)
-        self.assertTrue(lines[-1].startswith(f"OAH_LAND_READY: task t1 can land: HEAD {project.head} fast-forwards "
-                                             f"origin/main from {project.base[:12]}"), lines[-1])
-        self.assertIn("oah land --merge --task t1", lines[-1])
+        self.assertTrue(lines[-1].startswith(f"OAH_LAND_READY: the task can land: HEAD {project.head} fast-forwards destination"), lines[-1])
+        self.assertIn("oah land --merge --task <task>", lines[-1])
         self.assertEqual(done.stderr, "")
         self.assertEqual(project.remote_main(), project.base)  # a check never pushes
         shown = land_command(project, "--check", "--task", "t1", "--json")
@@ -177,7 +273,7 @@ class LandCliTest(unittest.TestCase):
         done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertTrue(done.stderr.startswith("OAH_LAND_IMPACT_STALE:"), done.stderr)
-        self.assertIn(f"origin/main is at {moved[:12]}, which HEAD does not contain", done.stderr)
+        self.assertIn(f"is at {moved[:12]}, which HEAD does not contain", done.stderr)
         self.assertIn("Nothing was pushed.", done.stderr)
         self.assertEqual(project.remote_main(), moved)
         merge = records(project)[-1]
@@ -189,21 +285,22 @@ class LandCliTest(unittest.TestCase):
         landed: list[str] = []
 
         def racing_answer(prompt: str) -> str:
-            self.assertIn(f"push HEAD {project.head} to origin/main", prompt)
+            self.assertIn(f"push HEAD {project.head} to destination", prompt)
             landed.append(project.advance_main({".oah/tasks/x/GATES.md": OTHER_LEDGER}))
             return "y\n"
 
         done = land_command(project, "--merge", "--task", "t1", interactive=True, ask=racing_answer)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertTrue(done.stderr.startswith(f"OAH_LAND_IMPACT_STALE: origin/main moved to {landed[0][:12]} while "
-                                               "landing"), done.stderr)
+        self.assertTrue(done.stderr.startswith("OAH_LAND_IMPACT_STALE: destination"), done.stderr)
+        self.assertIn(f"moved to {landed[0][:12]} while landing", done.stderr)
         self.assertIn("nothing landed", done.stderr)
         self.assertEqual(project.remote_main(), landed[0])
         self.assertEqual(records(project)[-1]["landed"], False)
         retry = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)
         self.assertEqual(retry.returncode, 1, retry.stdout + retry.stderr)
         self.assertTrue(retry.stderr.startswith("OAH_LAND_CHECKS_REQUIRED:"), retry.stderr)
-        self.assertIn("  - .oah/tasks/x/GATES.md#G1 (exec on src/app.py): pending", retry.stdout)
+        self.assertIn(hashlib.sha256(b".oah/tasks/x/GATES.md#G1").hexdigest(), retry.stdout)
+        self.assertIn("): pending", retry.stdout)
         self.assertEqual(records(project)[-1]["default_branch"], landed[0])
         self.assertEqual(project.remote_main(), landed[0])
 
@@ -226,8 +323,7 @@ class LandCliTest(unittest.TestCase):
         done = land_command(project, "--merge", "--task", "t1", interactive=True, stdin="y\n")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("Land it? [y/N]", done.stderr)
-        self.assertTrue(done.stdout.splitlines()[-1].startswith(f"OAH_LAND_LANDED: origin/main now points at "
-                                                               f"{project.head}"), done.stdout)
+        self.assertTrue(done.stdout.splitlines()[-1].startswith("OAH_LAND_LANDED: destination"), done.stdout)
         self.assertEqual(project.remote_main(), project.head)
         self.assertEqual((records(project)[-1]["landed"], records(project)[-1]["remote_sha"]), (True, project.head))
         again = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)

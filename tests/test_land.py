@@ -16,6 +16,7 @@ from oah.gates.ledger import definition_digest
 from oah.review import receipts
 from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.test_privacy_scan import load_scanner
 from tests.test_review_summary import publish_receipt
 
 FAKE_GH = pathlib.Path(__file__).resolve().parent / "fakes" / "fake_gh.py"
@@ -169,6 +170,42 @@ class LandProject:
 
 
 class AssessTest(unittest.TestCase):
+    def test_landing_fixtures_contain_no_private_literals(self):
+        source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        self.assertEqual(load_scanner().scan_text(source, []), [])
+
+    def test_exported_gate_labels_require_the_exact_identifier_pattern(self):
+        private = "account-" + secrets.token_hex(16)
+        windows_home = "C:\\" + "Users\\" + private
+        labels = ("GATES.md#G1", "a" * 80, "a" * 81, f"checks/{private}#G1",
+                  f"{windows_home}\\GATES.md#G1", f"G1\n{private}", "게이트#G1", "G1\n")
+        result = land.Assessment(task=private, head="a" * 40, remote=private, branch=private,
+                                 changed=[f"{windows_home}\\app.py"], warnings=[private])
+        result.required = [{"gate": label, "binding": "exec", "targets": result.changed,
+                            "definition": "b" * 64, "state": "pending"} for label in labels]
+        exported = result.to_json()
+        for position, (label, item) in enumerate(zip(labels, exported["required_checks"]), 1):
+            with self.subTest(position=position):
+                self.assertEqual(item["gate"]["position"], position)
+                self.assertEqual(item["gate"]["digest"], hashlib.sha256(label.encode("utf-8")).hexdigest())
+                if position <= 2:
+                    self.assertEqual(item["gate"]["label"], label)
+                else:
+                    self.assertNotIn("label", item["gate"])
+        folder = make_tmp_dir(self)
+        land.record(folder, result, "check", None)
+        raw = (folder / "land" / private / "records.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn(private, json.dumps(exported) + raw + "\n".join(land._required_text(result.required)))
+        self.assertEqual(json.loads(raw)["required_checks"], exported["required_checks"])
+
+    def test_simple_committed_gate_label_remains_visible(self):
+        project = LandProject(self, config='[impact]\nledger_globs = ["GATES.md", ".oah/tasks/*/GATES.md"]\n',
+                              main_files={"GATES.md": OTHER_LEDGER})
+        result = project.assess()
+        self.assertEqual(result.failure.code, "OAH_LAND_CHECKS_REQUIRED", describe(result))
+        self.assertIn("GATES.md#G1", result.failure.message)
+        self.assertEqual(result.to_json()["required_checks"][0]["gate"]["label"], "GATES.md#G1")
+
     def test_ci_later_page_errors_refuse_and_preserve_known_failures(self):
         project = LandProject(self)
         errors = ({"exit": 1}, {"raw": "invalid JSON"}, {"raw": "[]"},
@@ -309,15 +346,11 @@ class AssessTest(unittest.TestCase):
         self.assertIn("--redact", scanned)
         asked = json.loads(project.gh_log.read_text(encoding="utf-8").splitlines()[-1])
         self.assertIn(f"repos/{{owner}}/{{repo}}/commits/{project.head}/check-runs?per_page=100&page=1", asked)
-        self.assertEqual(self.check_detail(project, result), {"receipt": "R1.json"})
+        self.assertEqual(result.check("review").detail["round"], 1)
         data = result.to_json()
         self.assertTrue(data["ready"])
         self.assertEqual(data["default_branch"], project.base)
         self.assertEqual(data["impact"]["result"], result.impact["result"])
-
-    def check_detail(self, project, result):
-        detail = project.check(result, "review").detail
-        return {"receipt": detail.get("receipt")}
 
     def test_review_check_uses_latest_task_event(self):
         project = LandProject(self, receipt=False)
@@ -325,26 +358,26 @@ class AssessTest(unittest.TestCase):
         publish_receipt(project, 1, head=older, base=project.base)
         result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
-        self.assertIn(f"R1.json approved head {older[:12]}, not HEAD {project.head[:12]}", result.failure.message)
+        self.assertIn("no converged latest review approves HEAD", result.failure.message)
         publish_receipt(project, 2, head=project.head, base=project.base)
         self.assertTrue(project.assess().ready)
         receipts.log_round(project.state, "t1", {"event": "start", "base": project.base, "series_round": 3,
                                                  "round": 3, "attempt": 1, "run_id": "later"})
         result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
-        self.assertIn("a review round started after R2.json", result.failure.message)
+        self.assertIn("inspect the review history", result.failure.message)
         other = intent.Binding(".oah/tasks/t1/PACKET.md", "t1", 2, "sha256:" + "d" * 64, ("AC1", "AC2"))
         publish_receipt(project, 3, head=project.head, base=project.base, binding=other)
         result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
-        self.assertIn("another intent binding", result.failure.message)
+        self.assertIn("current intent binding", result.failure.message)
 
     def test_exact_head_failures_have_named_codes(self):
         older = LandProject(self, receipt=False)
         publish_receipt(older, 1, head=git(older.repo, "rev-parse", "HEAD~1"), base=older.base)
         result = older.assess()
         self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_REVIEW_REQUIRED"), describe(result))
-        self.assertIn("oah review --task t1", result.failure.message)
+        self.assertIn("oah review --task <task>", result.failure.message)
 
         failing = LandProject(self)
         failing.ci([{"name": "tests", "status": "completed", "conclusion": "failure"},
@@ -359,13 +392,13 @@ class AssessTest(unittest.TestCase):
         result = unbound.assess()
         self.assertEqual((result.ready, result.failure.code), (False, "OAH_LAND_GATES_SUMMARY_MISSING"),
                          describe(result))
-        self.assertIn("oah gates check t1", result.failure.message)
+        self.assertIn("oah gates check <task>", result.failure.message)
 
     def test_gates_need_a_committed_summary_at_head(self):
         bare = LandProject(self, ledger=None)
         result = bare.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_GATES_REQUIRED", describe(result))
-        self.assertIn("oah gates new t1", result.failure.message)
+        self.assertIn("oah gates new <task>", result.failure.message)
 
         project = LandProject(self)
         project.stub.reply("gate-check.mjs", UNMET)
@@ -405,7 +438,7 @@ class AssessTest(unittest.TestCase):
         with patch("oah.impact.mapstore.fresh_map", broken):
             result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_IMPACT_STALE", describe(result))
-        self.assertIn("OAH_IMPACT_GIT_FAILED", result.failure.message)
+        self.assertIn("impact map of this worktree is unavailable", result.failure.message)
 
         disabled = LandProject(self, config="[impact]\nrefresh_default_branch = false\n")
         result = disabled.assess()
@@ -422,7 +455,7 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(result.required, [{
             "gate": ".oah/tasks/x/GATES.md#G1", "binding": "exec", "targets": ["src/app.py"],
             "definition": definition_digest("python src/app.py", "v1", None), "state": "pending"}])
-        self.assertIn(".oah/tasks/x/GATES.md#G1", result.failure.message)
+        self.assertIn(hashlib.sha256(b".oah/tasks/x/GATES.md#G1").hexdigest(), result.failure.message)
         self.assertEqual(project.check(result, "fast-forward").code, "OAH_LAND_IMPACT_STALE")
         self.assertIn("does not contain", project.check(result, "fast-forward").message)
         self.assertEqual(project.check(result, "scan").state, "skipped")
@@ -496,7 +529,7 @@ class AssessTest(unittest.TestCase):
         project = LandProject(self, finish=False)
         result = project.assess()
         self.assertEqual(result.failure.code, "OAH_LAND_LEASE_OPEN", describe(result))
-        self.assertIn("oah finish --task t1 --agent claude", result.failure.message)
+        self.assertIn("oah finish --task <task> --agent <agent>", result.failure.message)
         (project.repo / "README.md").write_text("changed\n", encoding="utf-8")
         with self.assertRaises(land.LandError) as caught:
             project.assess()
@@ -506,7 +539,8 @@ class AssessTest(unittest.TestCase):
         with self.assertRaises(land.LandError) as caught:
             project.assess()
         self.assertEqual(caught.exception.code, "OAH_LAND_DIRTY_TREE")
-        self.assertIn("untracked files are present (notes.txt)", str(caught.exception))
+        self.assertIn(hashlib.sha256(b"notes.txt").hexdigest(), str(caught.exception))
+        self.assertNotIn("notes.txt", str(caught.exception))
         (project.repo / "notes.txt").unlink()
         project.env["OAH_WORKER"] = "1"
         with self.assertRaises(land.LandError) as caught:

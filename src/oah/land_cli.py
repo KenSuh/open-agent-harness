@@ -17,6 +17,26 @@ from oah.review import ReviewError
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 COMMANDS = ("land",)
 ENVIRONMENT_CODES = frozenset({"OAH_REVIEW_GIT_FAILED", "OAH_RUN_PATH_UNSAFE"})
+EXCEPTION_MESSAGES = {
+    "OAH_LAND_FAILED": "landing could not be checked; inspect the local setup and run oah land again",
+    "OAH_LAND_WORKER_REFUSED": "dispatched workers never land; return the work to the dispatcher to run oah land",
+    "OAH_LAND_DIRTY_TREE": "the tree has uncommitted inputs; commit, ignore or remove them, then run oah land again",
+    "OAH_LAND_NOTHING_TO_LAND": "there is no commit to land; commit the work and get it reviewed before oah land",
+    "OAH_LAND_NOT_READY": "a push needs passing landing checks; run oah land --merge again",
+    "OAH_LAND_DESTINATION_CHANGED": "the destination changed; run oah land --merge and confirm again",
+    "OAH_LAND_DESTINATION_UNSUPPORTED": "the destination is ambiguous; configure one literal remote URL and retry",
+    "OAH_TASK_INVALID": "the task name is invalid; choose a valid task name and run oah land again",
+    "OAH_REVIEW_GIT_FAILED": "git could not read landing evidence; check the repository and run oah land again",
+    "OAH_RUN_PATH_UNSAFE": "landing state contains an unsafe path; remove linked state paths and run oah land again",
+    "OAH_LAND_IMPACT_STALE": "landing impact is unavailable; run oah impact refresh, then oah land again",
+    "OAH_CONFIG_INVALID": "the configuration could not be loaded; repair the project configuration and retry",
+    "OAH_NOT_A_REPO": "the current directory is not a repository; run oah land from the project checkout",
+    "OAH_GIT_MISSING": "git is unavailable; install git and run oah land again",
+    "OAH_STATE_LOCK_TIMEOUT": "the state lock is busy; wait for the other command, then run oah land again",
+    "OAH_STATE_CORRUPT": "the state could not be read; repair the state files and run oah land again",
+    "OAH_STATE_PENDING": "a state transaction is pending; recover it before running oah land again",
+    "OAH_STATE_IO": "landing could not access local files; check permissions and free space, then run oah land again",
+}
 
 
 def register(commands: argparse._SubParsersAction) -> None:
@@ -56,13 +76,12 @@ def _check_lines(assessment: land.Assessment) -> list[str]:
         code = f" {check.code}" if check.code else ""
         lines.append(f"{check.name}: {check.state}{code} — {check.message}")
         if check.name == "required-checks":
-            lines += [f"  - {item['gate']} ({item['binding']} on {', '.join(item['targets'])}): {item['state']}"
-                      for item in assessment.required]
+            lines += [f"  - {text}" for text in land._required_text(assessment.required)]
     return lines
 
 
 def _where(assessment: land.Assessment) -> str:
-    return f"{assessment.remote}/{assessment.branch}"
+    return land._destination_text(assessment.remote, assessment.branch)
 
 
 def _ci_note(assessment: land.Assessment) -> str:
@@ -72,19 +91,19 @@ def _ci_note(assessment: land.Assessment) -> str:
 
 def _ready_message(assessment: land.Assessment) -> str:
     plural = "s" if assessment.commits != 1 else ""
-    return (f"task {assessment.task} can land: HEAD {assessment.head} fast-forwards {_where(assessment)} from "
+    return (f"the task can land: HEAD {assessment.head} fast-forwards {_where(assessment)} from "
             f"{assessment.fetched[:12]} ({assessment.commits} commit{plural}).{_ci_note(assessment)} Run oah land "
-            f"--merge --task {assessment.task} to land it; it checks everything again and asks you to confirm")
+            "--merge --task <task> to land it; it checks everything again and asks you to confirm")
 
 
 def _confirmation(args: argparse.Namespace, assessment: land.Assessment) -> tuple[str, str] | None:
     """None when the merge is confirmed, else (code, message); nothing is pushed in that case."""
-    head, task, where = assessment.head, assessment.task, _where(assessment)
+    head, task, where = assessment.head, "<task>", _where(assessment)
     if args.confirm is not None:
         given = args.confirm.strip().lower()
         if given == head:
             return None
-        return ("OAH_LAND_CONFIRM_MISMATCH", f"--confirm {args.confirm.strip()!r} is not HEAD's full SHA {head}; "
+        return ("OAH_LAND_CONFIRM_MISMATCH", f"--confirm is not HEAD's full SHA {head}; "
                                              f"nothing was pushed. Read the checks above, then run oah land --merge "
                                              f"--task {task} --confirm {head}")
     if not _interactive():
@@ -92,7 +111,7 @@ def _confirmation(args: argparse.Namespace, assessment: land.Assessment) -> tupl
                                              "was pushed. Run it in a terminal to answer the prompt, or read the "
                                              f"checks above and run oah land --merge --task {task} --confirm {head}")
     plural = "s" if assessment.commits != 1 else ""
-    answer = _ask(f"About to land task {task}: push HEAD {head} to {where}, a fast-forward from "
+    answer = _ask(f"OAH_LAND_CONFIRM_REQUIRED: about to land the task: push HEAD {head} to {where}, a fast-forward from "
                   f"{assessment.fetched[:12]} ({assessment.commits} commit{plural}).{_ci_note(assessment)}\n"
                   "This changes the remote's default branch, and oah cannot undo it. Land it? [y/N] ")
     if answer.strip().lower() in ("y", "yes"):
@@ -105,8 +124,8 @@ def _record(state: pathlib.Path, assessment: land.Assessment, mode: str, pushed:
     """Write the landing record; a failure never changes what happened, so it is only reported."""
     try:
         land.record(state, assessment, mode, pushed)
-    except (land.LandError, LockTimeout, StateCorrupt, OSError) as exc:
-        print(f"OAH_LAND_RECORD_FAILED: the landing record could not be written ({exc}); the result below stands. "
+    except (land.LandError, LockTimeout, StateCorrupt, OSError):
+        print("OAH_LAND_RECORD_FAILED: the landing record could not be written; the result below stands. "
               "Check the state folder's permissions and free space", file=sys.stderr)
 
 
@@ -158,13 +177,13 @@ def run(args: argparse.Namespace) -> int:
                      pushed)
     except (land.LandError, ReviewError) as exc:
         code = getattr(exc, "code", "OAH_LAND_FAILED")
-        return _done(code, str(exc).split(": ", 1)[-1], EXIT_ENVIRONMENT if code in ENVIRONMENT_CODES
+        code = code if code in EXCEPTION_MESSAGES else "OAH_LAND_FAILED"
+        return _done(code, EXCEPTION_MESSAGES[code], EXIT_ENVIRONMENT if code in ENVIRONMENT_CODES
                      else EXIT_REFUSED, args.json)
-    except ImpactError as exc:
-        return _done(exc.code, str(exc).split(": ", 1)[-1], exc.exit_code, args.json)
+    except ImpactError:
+        return _done("OAH_LAND_IMPACT_STALE", EXCEPTION_MESSAGES["OAH_LAND_IMPACT_STALE"], EXIT_ENVIRONMENT, args.json)
     except (ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError) as exc:
-        code = getattr(exc, "code", type(exc).__name__)
-        return _done(code, str(exc).removeprefix(f"{code}: "), EXIT_ENVIRONMENT, args.json)
-    except OSError as exc:
-        error = StorageError(pathlib.Path(exc.filename or "."), exc)
-        return _done(error.code, str(error).removeprefix(f"{error.code}: "), EXIT_ENVIRONMENT, args.json)
+        code = "OAH_CONFIG_INVALID" if isinstance(exc, ConfigError) else exc.code
+        return _done(code, EXCEPTION_MESSAGES[code], EXIT_ENVIRONMENT, args.json)
+    except OSError:
+        return _done("OAH_STATE_IO", EXCEPTION_MESSAGES["OAH_STATE_IO"], EXIT_ENVIRONMENT, args.json)

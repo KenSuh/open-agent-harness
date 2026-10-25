@@ -148,12 +148,15 @@ class Assessment:
         return next(check for check in self.checks if check.name == name)
 
     def to_json(self) -> dict:
-        return {"task": self.task, "head": self.head, "remote": self.remote, "branch": self.branch,
-                "default_branch": self.fetched, "base": self.base, "changed": list(self.changed),
+        return {"task": _reference(self.task), "head": self.head,
+                "remote": _reference(self.remote), "branch": _reference(self.branch),
+                "default_branch": self.fetched, "base": self.base,
+                "changed": [_reference(path, position) for position, path in enumerate(self.changed, 1)],
                 "commits": self.commits, "impact": dict(self.impact) if self.impact else None,
-                "required_checks": [dict(item) for item in self.required],
+                "required_checks": _required_json(self.required),
                 "checks": [check.to_json() for check in self.checks], "ready": self.ready, "code": self.code,
-                "warnings": list(self.warnings)}
+                "warnings": ["OAH_LAND_IMPACT_WARNING: impact reported a warning; inspect the impact configuration"
+                             for _warning in self.warnings]}
 
 
 def find_gh(env: Mapping[str, str]) -> tuple[str, ...] | None:
@@ -166,13 +169,47 @@ def find_gitleaks(env: Mapping[str, str]) -> tuple[str, ...] | None:
     return found.argv if found is not None else None
 
 
-def _one_line(value: object, limit: int = 80) -> str:
-    text = " ".join(str(value).split())
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+def _reference(value: str | None, position: int = 1) -> dict | None:
+    """An output identity, never the private repository name or path."""
+    if value is None:
+        return None
+    return {"position": position, "digest": hashlib.sha256(value.encode("utf-8")).hexdigest()}
+
+
+def _gate_reference(label: str, position: int) -> dict:
+    result = _reference(label, position)
+    if re.fullmatch(r"[A-Za-z0-9._#:-]{1,80}", label):
+        result["label"] = label
+    return result
+
+
+def _required_json(items: Sequence[dict]) -> list[dict]:
+    return [{"position": position, "gate": _gate_reference(item["gate"], position),
+             "binding": item["binding"], "definition": item["definition"], "state": item["state"],
+             "targets": [_reference(path, index) for index, path in enumerate(item["targets"], 1)]}
+            for position, item in enumerate(items, 1)]
+
+
+def _reference_text(reference: dict) -> str:
+    label = f" {reference['label']}" if "label" in reference else ""
+    return f"position {reference['position']}{label} digest {reference['digest']}"
+
+
+def _destination_text(remote: str | None, branch: str | None) -> str:
+    if remote is None or branch is None:
+        return "the default-branch destination"
+    return f"destination (remote {_reference_text(_reference(remote))}; branch {_reference_text(_reference(branch))})"
+
+
+def _required_text(items: Sequence[dict]) -> list[str]:
+    return [f"check {_reference_text(item['gate'])} ({item['binding']}; "
+            f"{len(item['targets'])} target(s): " + "; ".join(_reference_text(target) for target in item["targets"])
+            + f"): {item['state']}" for item in _required_json(items)]
 
 
 def _listed(paths: Sequence[str]) -> str:
-    return ", ".join(paths[:10]) + (f" and {len(paths) - 10} more" if len(paths) > 10 else "")
+    return ", ".join(_reference_text(_reference(path, position)) for position, path in enumerate(paths[:10], 1)) + (
+        f" and {len(paths) - 10} more" if len(paths) > 10 else "")
 
 
 def _untracked_inputs(root: pathlib.Path, declared: Sequence[str]) -> list[str]:
@@ -185,8 +222,7 @@ def _untracked_inputs(root: pathlib.Path, declared: Sequence[str]) -> list[str]:
 
     result = run_git(root, "ls-files", "-z", "--others", "--exclude-standard")
     if result.returncode != 0:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git could not list untracked files in {root} "
-                          f"({result.stderr.strip() or 'no output'}); check the repository and retry")
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "git could not list untracked files; check the repository and retry")
     skip = (*GENERATED, *(glob.escape(path) for path in declared))
     return sorted(name for name in result.stdout.split("\0")
                   if name and not any(fnmatch.fnmatchcase(name, pattern) for pattern in skip))
@@ -202,13 +238,13 @@ def _lease_check(state: pathlib.Path, root: pathlib.Path) -> Check:
     held = [(lease, stale) for lease, stale in Store(state).snapshot() if same_worktree(lease.worktree, root)]
     if not held:
         return _passed("lease", "no lease is open on this worktree")
-    lease, stale = held[0]
+    _lease, stale = held[0]
     more = f" (and {len(held) - 1} more)" if len(held) > 1 else ""
     return _failed("lease", "OAH_LAND_LEASE_OPEN",
-                   f"task {lease.task} held by {lease.agent} is still open on this worktree"
+                   "a lease is still open on this worktree"
                    f"{' (stale)' if stale else ''}{more}, so a push would be refused. Finish it with oah finish "
-                   f'--task {lease.task} --agent {lease.agent} --summary "<what you did>", or drop it with oah release '
-                   f'--task {lease.task} --agent {lease.agent} --reason "<why>", then run oah land again')
+                   '--task <task> --agent <agent> --summary "<what you did>", or drop it with oah release '
+                   '--task <task> --agent <agent> --reason "<why>", then run oah land again')
 
 
 def _intent_check(root: pathlib.Path, task: str, head: str,
@@ -216,16 +252,16 @@ def _intent_check(root: pathlib.Path, task: str, head: str,
     def refuse(why: str) -> tuple[None, Check]:
         return None, _failed("intent", "OAH_LAND_INTENT_NOT_CURRENT", why)
 
-    bind = (f"bind the accepted packet with oah start --task {task} --agent <you> --packet "
-            f".oah/tasks/{task}/PACKET.md, get the work reviewed and finished, then run oah land again")
+    bind = ("bind the accepted packet with oah start --task <task> --agent <agent> --packet <packet>, "
+            "get the work reviewed and finished, then run oah land again")
     if lease is None:
-        return refuse(f"task {task} has never been leased in this repository, so no intent is bound to it; {bind}")
+        return refuse(f"the task has never been leased in this repository, so no intent is bound to it; {bind}")
     binding = lease.binding
     if binding is None:
-        return refuse(f"the latest lease of task {task} has no intent binding (unbound); {bind}")
-    state, reason = oah_intent.explain_binding(binding, root)
+        return refuse(f"the task's latest lease has no intent binding (unbound); {bind}")
+    state, _reason = oah_intent.explain_binding(binding, root)
     if state != "current":
-        return refuse(f"{binding.line()} is {state}: {reason}. Restore {binding.source} as it was bound, or raise its "
+        return refuse("the intent binding is not current. Restore the bound packet, or raise its "
                       "Revision, accept it, rebind it with oah start --packet and get it reviewed again")
     data = evidence.committed_bytes(root, head, binding.source)
     try:
@@ -233,9 +269,9 @@ def _intent_check(root: pathlib.Path, task: str, head: str,
     except (UnicodeDecodeError, oah_intent.IntentInvalid):
         parsed = None
     if parsed is None or parsed.digest != binding.digest:
-        return refuse(f"{binding.source} is not committed at HEAD as bound ({binding.line()}); commit it as bound, "
+        return refuse("the packet is not committed at HEAD as bound; commit it as bound, "
                       "get the head reviewed, then run oah land --check again")
-    return binding, _passed("intent", f"{binding.line()} is current and committed at HEAD")
+    return binding, _passed("intent", f"intent digest {binding.digest} is current and committed at HEAD")
 
 
 def _review_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
@@ -243,23 +279,26 @@ def _review_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
     found = evidence.convergence(root, state, task, head, binding)
     if not found.converged:
         return _failed("review", "OAH_LAND_REVIEW_REQUIRED",
-                       f"no converged review approves HEAD {head[:12]}: {found.reason}")
+                       f"no converged latest review approves HEAD {head[:12]} for the current intent binding; "
+                       "inspect the review history, resolve any decision and run oah review --task <task> again")
     record = found.receipt.record
     reviewer = record.get("reviewer") if isinstance(record.get("reviewer"), dict) else {}
     effort = "effort verified" if reviewer.get("effort_verified") is True else "effort unverified"
-    return _passed("review", f"{found.receipt.name} {found.receipt.digest} approves HEAD for {binding.line()} "
+    return _passed("review", f"receipt digest {found.receipt.digest} approves HEAD for intent digest {binding.digest} "
                              f"({evidence.independence_label(record.get('independent'))}, {effort})",
-                   {"receipt": found.receipt.name, "digest": found.receipt.digest})
+                   {"round": record["round"], "digest": found.receipt.digest})
 
 
 def _gate_tools(root: pathlib.Path, env: Mapping[str, str], home: pathlib.Path | None):
+    from oah.engines.proc import UnsupportedBatchShim
     from oah.gates.context import find_tools
     from oah.unlazy import UnlazyError
 
     try:
-        return find_tools(root, env, home or pathlib.Path.home()), ""
-    except UnlazyError as exc:
-        return None, str(exc)
+        tools = find_tools(root, env, home or pathlib.Path.home())
+        return (tools, "") if tools.available else (None, "gate tools are unavailable; install pinned unlazy and node")
+    except (UnlazyError, UnsupportedBatchShim):
+        return None, "gate tools could not be verified; install pinned unlazy and a supported node executable"
 
 
 def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, lease: evidence.TaskLease | None,
@@ -274,47 +313,52 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
     retry = "then run oah land --check again"
     try:
         ledgers = guard.resolve_ledgers(root, task, declared)
-    except GateRefused as exc:
-        return _failed("gates", "OAH_LAND_GATES_UNMET", f"{exc}; {retry}")
+    except GateRefused:
+        return _failed("gates", "OAH_LAND_GATES_UNMET", f"the declared ledgers could not be resolved; restore the "
+                       f"task's ledgers, {retry}")
     if not ledgers:
         return _failed("gates", "OAH_LAND_GATES_REQUIRED",
-                       f"no gate ledger governs task {task}, so nothing proves it done at HEAD. Write one with oah "
-                       f"gates new {task}, meet it with oah gates check {task}, commit {summary}, get the head "
+                       "no gate ledger governs the task, so nothing proves it done at HEAD. Write one with oah "
+                       "gates new <task>, meet it with oah gates check <task>, commit the gate summary, get the head "
                        f"reviewed, {retry}")
     if tools is None:
-        return _failed("gates", "OAH_LAND_GATES_UNMET", f"{tools_error}; {retry}")
+        return _failed("gates", "OAH_LAND_GATES_UNMET", f"gate tools could not be verified; install pinned unlazy "
+                       f"and a supported node executable, {retry}")
     try:
         report = guard.evaluate(root, task, declared, state, tools=tools, allow_structural=False, env=env,
                                 env_names=settings["input_env"], commit_ledgers=settings["commit_ledgers"])
-    except (GateRefused, UnlazyError) as exc:
-        return _failed("gates", "OAH_LAND_GATES_UNMET", f"the gates of task {task} do not pass at HEAD ({exc}); "
-                                                        f"once they pass, {retry}")
-    detail = {"outcome": report.outcome, "handoff": list(report.handoff)}
+    except (GateRefused, UnlazyError):
+        return _failed("gates", "OAH_LAND_GATES_UNMET", f"the task's gates do not pass at HEAD; inspect the ledgers "
+                       f"and run oah gates check <task>; once they pass, {retry}")
+    detail = {"outcome": report.outcome,
+              "handoff": [_gate_reference(label, position) for position, label in enumerate(report.handoff, 1)]}
     if settings["commit_ledgers"]:
-        for path in ledgers:
+        for position, path in enumerate(ledgers, 1):
             key = check_mod.ledger_key(root, path)
+            shown = _reference_text(_reference(key, position))
             committed = evidence.committed_bytes(root, head, key)
             if committed is None:
                 return _failed("gates", "OAH_LAND_GATES_SUMMARY_MISSING",
-                               f"{key} is not committed at HEAD ([gates] commit_ledgers = true), so the gate results "
+                               f"ledger {shown} is not committed at HEAD ([gates] commit_ledgers = true), so its results "
                                f"are not bound to the commit that lands; commit it, get the head reviewed, {retry}")
             if committed.replace(b"\r\n", b"\n") != path.read_bytes().replace(b"\r\n", b"\n"):
                 return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
-                               f"{key} at HEAD differs from the ledger on disk; commit the checked ledger, get the "
+                               f"ledger {shown} at HEAD differs from disk; commit the checked ledger, get the "
                                f"head reviewed, {retry}")
         bound = "the ledgers committed at HEAD match the gate records"
     else:
         committed = evidence.committed_bytes(root, head, summary)
         if committed is None:
             return _failed("gates", "OAH_LAND_GATES_SUMMARY_MISSING",
-                           f"{summary} is not committed at HEAD, so the gate results are not bound to the commit that "
-                           f"lands; run oah gates check {task}, commit {summary}, get the head reviewed, {retry}")
+                           "the gate summary is not committed at HEAD, so the gate results are not bound to the "
+                           f"commit that lands; run oah gates check <task>, commit the summary, get the head reviewed, {retry}")
         if committed.decode("utf-8", errors="replace").replace("\r\n", "\n") != report.summary_text:
             return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
-                           f"{summary} at HEAD does not match the current gate records; run oah gates check {task}, "
-                           f"commit {summary}, get the head reviewed, {retry}")
-        bound = f"{summary} at HEAD matches the gate records"
-    handoff = f"; abandoned (a handoff, not met): {', '.join(report.handoff)}" if report.handoff else ""
+                           "the gate summary at HEAD does not match the current gate records; run oah gates check <task>, "
+                           f"commit the gate summary, get the head reviewed, {retry}")
+        bound = "the gate summary at HEAD matches the gate records"
+    handoff = ("; abandoned (a handoff, not met): " + "; ".join(_reference_text(item) for item in detail["handoff"])
+               if report.handoff else "")
     count = f"{len(ledgers)} ledgers pass" if len(ledgers) != 1 else "1 ledger passes"
     return _passed("gates", f"{count} through unlazy and {bound}{handoff}", detail)
 
@@ -350,10 +394,11 @@ _STALE_FIXES = {"offline": "drop --offline when the network is back",
 
 
 def _stale_message(branch) -> str:
-    fix = _STALE_FIXES.get(branch.reason, f"run git fetch {branch.remote or 'origin'} yourself to see why")
+    fix = _STALE_FIXES.get(branch.reason, "check the remote and fetch it yourself to see why")
+    reason = branch.reason if branch.reason in _STALE_FIXES or branch.reason == "fetch failed" else "refresh failed"
     if branch.reason.startswith("map failed"):
         fix = "run oah impact refresh"
-    return (f"the default branch was not fetched in this run ({branch.label()}), and landing reassesses impact "
+    return (f"the default branch was not fetched in this run ({reason}), and landing reassesses impact "
             f"against the remote's current SHA, so it refuses. To fix it, {fix}, then run oah land --check again")
 
 
@@ -397,13 +442,14 @@ def _ledger_gates(source: pathlib.Path, rev: str, settings: Mapping) -> list[tup
     paths = sorted(path for path in files if chosen(path))
     contents = mapstore.read_blobs(source, rev, paths, settings["git_timeout"])
     found = []
-    for path in paths:
+    for position, path in enumerate(paths, 1):
+        shown = _reference_text(_reference(path, position))
         if path not in contents:
-            raise ImpactError("OAH_GATES_INVALID", f"{path} could not be read at {rev[:12]}; check that commit's "
+            raise ImpactError("OAH_GATES_INVALID", f"ledger {shown} could not be read at {rev[:12]}; check that commit's "
                               "ledgers and land again")
         ledger = parse_text(contents[path], pathlib.Path(path))
         if ledger.errors:
-            raise ImpactError("OAH_GATES_INVALID", f"{path} at {rev[:12]} cannot be parsed ({len(ledger.errors)} "
+            raise ImpactError("OAH_GATES_INVALID", f"ledger {shown} at {rev[:12]} cannot be parsed ({len(ledger.errors)} "
                               "problems); fix it with oah gates lint where it was committed, then land again")
         found += [(gatebind.GateRef(path, gate.id, gate.check, gate.expect), gate.definition)
                   for gate in ledger.gates if gate.runnable]
@@ -505,8 +551,8 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
     try:
         settings = configured(root)
         info, data = mapstore.fresh_map(root, refresh=True, env=env)
-    except ImpactError as exc:
-        return _Reassessment(False, f"the impact map of this worktree is unavailable ({exc}); run oah impact refresh, "
+    except ImpactError:
+        return _Reassessment(False, f"the impact map of this worktree is unavailable; run oah impact refresh, "
                                     f"{retry}")
     if info.commit != head:
         return _Reassessment(False, f"HEAD moved to {info.commit[:12]} while the impact map was refreshed; {retry}")
@@ -552,9 +598,9 @@ def _reassess(root: pathlib.Path, head: str, env: Mapping[str, str], offline: bo
                                  newly=_newly_affected(their_rows, here, there),
                                  commits=_count(root, fetched, head) if contains else 0, warnings=warnings,
                                  destination=destination)
-    except (ImpactError, ReviewError, LandError) as exc:
-        return _Reassessment(False, f"impact could not be reassessed against the fetched default branch ({exc}); fix "
-                                    f"that, {retry}", warnings=warnings)
+    except (ImpactError, ReviewError, LandError):
+        return _Reassessment(False, f"impact could not be reassessed against the fetched default branch; check the "
+                                    f"destination and run oah impact refresh, {retry}", warnings=warnings)
 
 
 def _evidence_by_definition(root: pathlib.Path, state: pathlib.Path, task: str, lease: evidence.TaskLease | None,
@@ -567,12 +613,12 @@ def _evidence_by_definition(root: pathlib.Path, state: pathlib.Path, task: str, 
     from oah.unlazy import UnlazyError
 
     if tools is None or not tools.available:
-        return {}, tools_error or (tools.reason if tools is not None else "unlazy is not available")
+        return {}, "gate tools are unavailable; install pinned unlazy and node"
     declared = lease.gates if lease else ()
     try:
         found = guard.assess(root, task, declared, state, tools=tools, env=env, env_names=settings["input_env"])
-    except (GateRefused, UnlazyError) as exc:
-        return {}, str(exc)
+    except (GateRefused, UnlazyError):
+        return {}, "gate evidence could not be verified; inspect the ledgers and rerun the task's gates"
     seen: dict[str, list[bool]] = {}
     for path in found.ledgers:
         key = check_mod.ledger_key(root, path)
@@ -593,28 +639,28 @@ def _required_check(result: Assessment, reassessed: _Reassessment, seen: dict[st
     open_items = [item for item in result.required if item["state"] != PASSED]
     if not open_items:
         return _passed("required-checks", f"{len(result.required)} newly affected check(s) pass against HEAD through "
-                                          f"gates of task {result.task} with the same definition")
-    listed = "; ".join(f"{item['gate']} ({item['binding']} on {', '.join(item['targets'])}): {item['state']}"
-                       for item in open_items)
-    unverified = f" (no gate evidence of the task could be read: {unread})" if unread else ""
+                                          "the task's gates with the same definition")
+    listed = "; ".join(text for item, text in zip(result.required, _required_text(result.required))
+                       if item["state"] != PASSED)
+    unverified = " (the task's gate evidence could not be verified; inspect and rerun its gates)" if unread else ""
     return _failed("required-checks", "OAH_LAND_CHECKS_REQUIRED",
                    f"the fetched default branch binds checks to files this task changed, and they have no passing "
                    f"evidence against HEAD{unverified}: {listed}. Add a gate with the same CHECK, EXPECT and CWD to "
                    f"the task's ledger and run oah gates "
-                   f"check {result.task}; then commit, get the head reviewed and run oah land --check again")
+                   "check <task>; then commit, get the head reviewed and run oah land --check again")
 
 
 def _fast_forward_check(head: str, reassessed: _Reassessment) -> Check:
-    where = f"{reassessed.remote}/{reassessed.branch}"
+    where = _destination_text(reassessed.remote, reassessed.branch)
     fetched = reassessed.fetched
     if fetched == head:
         return _failed("fast-forward", "OAH_LAND_NOTHING_TO_LAND", f"{where} is already at HEAD {head[:12]}; there is "
-                                                                   "nothing to land")
+                                                                   "nothing to land; start a new task for more work")
     if not reassessed.contains:
         return _failed("fast-forward", "OAH_LAND_IMPACT_STALE",
                        f"{where} is at {fetched[:12]}, which HEAD does not contain: the default branch moved since "
                        f"this task was based on it, so HEAD cannot fast-forward it and nothing can land. Rebase onto "
-                       f"it (git fetch {reassessed.remote}, then git rebase {where}), get the new head reviewed, then "
+                       "it using your configured remote and branch, get the new head reviewed, then "
                        "run oah land --check again; it fetches the new SHA, reassesses impact and requires the "
                        "affected checks again")
     return _passed("fast-forward", f"{where} moves from {fetched[:12]} to HEAD {head[:12]}, a fast-forward of "
@@ -632,8 +678,9 @@ def _scan_check(root: pathlib.Path, head: str, reassessed: _Reassessment, env: M
     retry = "then run oah land --check again"
     try:
         gitleaks = find_gitleaks(env)
-    except UnsupportedBatchShim as exc:
-        return _failed("scan", "OAH_LAND_SCAN_REQUIRED", f"{exc}; {retry}")
+    except UnsupportedBatchShim:
+        return _failed("scan", "OAH_LAND_SCAN_REQUIRED", f"gitleaks needs a supported executable; fix its "
+                       f"installation, {retry}")
     if gitleaks is None:
         return _failed("scan", "OAH_LAND_SCAN_REQUIRED",
                        f"gitleaks is not installed, so the commits that would land ({shown}) were not scanned for "
@@ -641,8 +688,8 @@ def _scan_check(root: pathlib.Path, head: str, reassessed: _Reassessment, env: M
     try:
         result = run_command([*gitleaks, "detect", "--source", str(root), "--log-opts", span, "--redact",
                               "--no-banner", "--exit-code", "1"], timeout=GITLEAKS_TIMEOUT, env=dict(env))
-    except OSError as exc:
-        return _failed("scan", "OAH_LAND_SCAN_FAILED", f"gitleaks could not start ({exc.strerror or exc}); {retry}")
+    except OSError:
+        return _failed("scan", "OAH_LAND_SCAN_FAILED", f"gitleaks could not start; fix its installation, {retry}")
     look = f"run gitleaks detect --source . --log-opts {span} --redact yourself"
     if result.returncode == 0 and not result.timed_out:
         return _passed("scan", f"gitleaks found nothing in the commits that would land ({shown})", {"range": span})
@@ -778,7 +825,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
     if untracked:
         raise LandError("OAH_LAND_DIRTY_TREE", f"untracked files are present ({_listed(untracked)}); gate evidence "
                                                "covers them as inputs, but they would not land, so commit, ignore or "
-                                               f"remove them, run oah gates check {task} if a gate read them, then run "
+                                               "remove them, run oah gates check <task> if a gate read them, then run "
                                                "oah land again")
     result = Assessment(task=task, head=head)
     result._authorization = authorization
@@ -797,7 +844,7 @@ def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bo
         result.fetched, result.base, result.changed = reassessed.fetched, reassessed.base, reassessed.changed
         result.commits = reassessed.commits
         result.impact = {"worktree": head, "default_branch": reassessed.fetched, "result": reassessed.result}
-        result.checks.append(_passed("impact", f"default branch {reassessed.remote}/{reassessed.branch} fetched at "
+        result.checks.append(_passed("impact", f"{_destination_text(reassessed.remote, reassessed.branch)} fetched at "
                                                f"{reassessed.fetched[:12]}; {len(reassessed.changed)} changed path(s) "
                                                f"reassessed against it and HEAD {head[:12]}; result "
                                                f"{reassessed.result[:12]}", dict(result.impact)))
@@ -929,7 +976,7 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
 
     settings = configured(root)
     ref = f"refs/heads/{assessment.branch}"
-    where = f"{assessment.remote}/{assessment.branch}"
+    where = _destination_text(assessment.remote, assessment.branch)
     # Literal destinations can contain credentials. Disable URL/curl tracing, including
     # configured trace2 targets, before handing the destination to git or its children.
     push_env = {key: value for key, value in env.items()
@@ -940,7 +987,7 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
                           f"{assessment.head}:{ref}"], timeout=float(settings["git_timeout"]), env=push_env)
     if result.returncode == 0 and not result.timed_out:
         return Pushed(True, "OAH_LAND_LANDED", f"{where} now points at {assessment.head} (a fast-forward from "
-                                               f"{assessment.fetched[:12]})", assessment.head)
+                                               f"{assessment.fetched[:12]}); inspect the remote history", assessment.head)
     from oah.atomic import StateCorrupt
     from oah.impact.errors import ImpactError
     from oah.lockfile import LockTimeout
@@ -993,10 +1040,11 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
 
     moment = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
     line = {"schema": RECORD_SCHEMA, "at": moment.isoformat().replace("+00:00", "Z"), "mode": mode,
-            "task": assessment.task, "head": assessment.head, "remote": assessment.remote, "branch": assessment.branch,
+            "task": _reference(assessment.task), "head": assessment.head,
+            "remote": _reference(assessment.remote), "branch": _reference(assessment.branch),
             "default_branch": assessment.fetched, "base": assessment.base,
             "impact_result": assessment.impact["result"] if assessment.impact else None,
-            "required_checks": [dict(item) for item in assessment.required],
+            "required_checks": _required_json(assessment.required),
             "checks": [{"name": check.name, "state": check.state, "code": check.code} for check in assessment.checks],
             "ready": assessment.ready, "code": pushed.code if pushed else assessment.code,
             "landed": pushed.landed if pushed else False, "remote_sha": pushed.remote_sha if pushed else None}
@@ -1004,5 +1052,6 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
         path = _contained_path(state, "land", assessment.task, "records.jsonl")
         with StateLock(_contained_path(state, ".lock")):
             append_jsonl(path, line)
-    except RunError as exc:
-        raise LandError(exc.code, str(exc).split(": ", 1)[-1]) from None
+    except RunError:
+        raise LandError("OAH_RUN_PATH_UNSAFE", "the landing record path is unsafe; remove linked state paths and "
+                        "run oah land again") from None
