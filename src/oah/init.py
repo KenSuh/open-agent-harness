@@ -870,9 +870,9 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     statuses = guide.check_tools(tools, which=machine.which, env=machine.env, home=machine.home, repo_root=root)
     unlazy_step = (plan_unlazy(root, env=machine.env, home=machine.home, pin=machine.unlazy_pin, force=force)
                    if values["unlazy"] else None)
-    project_copy = str((root / UNLAZY_PROJECT).resolve())
     unlazy_copy = unlazy_step is not None and (unlazy_step.action in ("install", "replace") or (
-        unlazy_step.action == "present" and str(pathlib.Path(unlazy_step.folder).resolve()) == project_copy))
+        unlazy_step.action == "present"
+        and pathlib.Path(unlazy_step.folder).resolve() == (root / UNLAZY_PROJECT).resolve()))
     files = plan_files(root, config=config, wiki_dir=wiki.dir, agents=agent_files(engines) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
     notes_found = []
