@@ -18,6 +18,7 @@ the end. A step may set:
   spawn_descendant true: leave a descendant with closed output pipes after a normal return
   probe_lease    true: run `oah renew`, `oah finish` and `oah fix --bind` as this worker and record the results
   header_effort  the header's reasoning effort; "-" omits the line; default echoes -c model_reasoning_effort
+  header_workdir the header's workdir label; default echoes -C (fixed labels isolate dispatcher output tests)
   last_message   the final message; default: a line, then the INTENT and AC lines read from the brief
   sleep          seconds to wait after the header, before any change or output
   stdin_delay    seconds to wait before reading the brief
@@ -141,7 +142,7 @@ def main(argv: list[str]) -> int:
     effort = next((m.group(1) for m in (re.fullmatch(r'model_reasoning_effort="([a-z]+)"', c) for c in configs) if m),
                   "")
     header = step.get("header_effort", effort)
-    lines = ["OpenAI Codex v0.163.0 (fake)", "--------", f"workdir: {options.get('-C', '')}",
+    lines = ["OpenAI Codex v0.163.0 (fake)", "--------", f"workdir: {step.get('header_workdir', options.get('-C', ''))}",
              f"model: {options.get('-m', '')}", f"sandbox: {options.get('-s', '')}"]
     if header != "-":
         lines.append(f"reasoning effort: {header}")

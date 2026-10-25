@@ -19,7 +19,7 @@ import time
 import unittest
 from unittest import mock
 
-from oah import briefs, call, call_cli, intent
+from oah import briefs, call, call_cli, intent, runs
 from oah.lease import Store
 from oah.lockfile import StateLock
 from oah.paths import repo_info
@@ -39,7 +39,7 @@ class FixProject:
 
     def __init__(self, test: unittest.TestCase, *, config: str = "", files: dict | None = None,
                  packet: str = PACKET, newline: str = "\n", attributes: str | None = "* -text\n",
-                 repo_name: str = "repo") -> None:
+                 repo_name: str = "repo", agent: str = "claude") -> None:
         self.test = test
         self.repo = make_git_repo(test)
         if repo_name != self.repo.name:
@@ -76,7 +76,7 @@ class FixProject:
         self.queue_fix()
         source = self.repo / ".oah/tasks/t1/PACKET.md"
         self.binding = intent.parse(intent.read_source(source)).bind(".oah/tasks/t1/PACKET.md")
-        self.lease = Store(self.state).start(task="t1", agent="claude", scope=("src", ".oah/tasks/t1"),
+        self.lease = Store(self.state).start(task="t1", agent=agent, scope=("src", ".oah/tasks/t1"),
                                              note="fix fixture", ttl_hours=1, info=repo_info(self.repo),
                                              intent=self.binding)
 
@@ -132,6 +132,9 @@ class FixProject:
 
     def fix_calls(self) -> list[dict]:
         return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(self.fix_dir.glob("call-*.json"))]
+
+    def run_folder(self, result: fix.Result) -> pathlib.Path:
+        return runs.find_run(self.state, result.run_id).path
 
     def folder(self) -> pathlib.Path:
         return self.state / "reviews" / "t1"
@@ -520,6 +523,52 @@ class RefusalTest(unittest.TestCase):
 
 
 class WorkerTest(unittest.TestCase):
+    @unittest.skipUnless(os.name != "nt", "POSIX directory symlink; Windows junction has its own test")
+    def test_nested_metadata_snapshot_does_not_follow_external_directory_links(self):
+        self.assert_nested_snapshot_does_not_follow_external_link(junction=False)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows directory junction")
+    def test_nested_metadata_snapshot_does_not_follow_external_junctions(self):
+        self.assert_nested_snapshot_does_not_follow_external_link(junction=True)
+
+    def assert_nested_snapshot_does_not_follow_external_link(self, *, junction):
+        project = FixProject(self)
+        nested = project.repo / "src/nested"
+        metadata = nested / ".git"
+        metadata.mkdir(parents=True)
+        external = project.work / "external"
+        external.mkdir()
+        (external / "user.txt").write_bytes(b"before\r\n")
+        link = metadata / "external"
+        if junction:
+            subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(external)],
+                           check=True, capture_output=True)
+            self.addCleanup(link.rmdir)  # Remove the junction before temporary directory cleanup.
+        else:
+            link.symlink_to(external, target_is_directory=True)
+        before = fix._file_snapshot(project.repo, "src/nested")
+        (external / "user.txt").write_bytes(b"edited\r\n")
+        self.assertEqual(fix._file_snapshot(project.repo, "src/nested"), before,
+                         "directory inventories must not read external link targets")
+
+    def test_untracked_nested_repository_metadata_is_user_owned_too(self):
+        for alongside in (False, True):
+            with self.subTest(alongside=alongside):
+                project = FixProject(self)
+                project.changes_requested()
+                nested = project.repo / "src/nested"
+                nested.mkdir()
+                subprocess.run(["git", "init", "-q", "--initial-branch=main", str(nested)],
+                               check=True, capture_output=True)
+                git_commit(nested, {"README.md": b"nested\r\n"}, "nested")
+                name = "src/nested/.git/config"
+                data = (project.repo / name).read_bytes() + b"\n# changed by corrector\r\n"
+                project.queue_fix({"write": {**(FIXED if alongside else {}), name: data.decode("utf-8")}})
+                result = project.fix()
+                self.assertEqual((result.outcome, result.commands, result.next_command), ("failed", [], None))
+                self.assertNotIn(name, json.dumps(result.to_json()))
+                self.assertTrue(any("OAH_FIX_USER_FILES_CHANGED" in warning for warning in result.warnings))
+
     def test_ignored_nested_repository_metadata_is_user_owned_too(self):
         project = FixProject(self, files={".gitignore": "private/\n"})
         project.changes_requested()
@@ -565,7 +614,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual((result.outcome, result.commands), ("failed", []))
                 self.assertIn("OAH_FIX_USER_FILES_CHANGED", result.message)
                 self.assertFalse(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                patch = (project.run_folder(result) / "correction.patch").read_bytes()
                 self.assertIn(b"+print('fixed')", patch)
                 self.assertNotIn(b"before\r\n", patch)
                 self.assertNotIn(name.encode("ascii"), patch)
@@ -594,7 +643,7 @@ class WorkerTest(unittest.TestCase):
                     self.assertTrue(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
                     self.assertTrue(any("OAH_FIX_USER_FILES_CHANGED" in warning for warning in result.warnings))
                     self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
-                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    patch = (project.run_folder(result) / "correction.patch").read_bytes()
                     self.assertIn(b"withheld", patch)
                     self.assertNotIn(b"user bytes", patch)
                     self.assertNotIn(b"other bytes", patch)
@@ -759,14 +808,14 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn(name, "\n".join(result.lines))
                     self.assertNotIn(name, project.record("A1-outcome.json")["evidence"])
                     self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
-                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    patch = (project.run_folder(result) / "correction.patch").read_bytes()
                     self.assertIn(b"-user's original\r\n", patch)
                     if content is not None:
                         self.assertIn(b"+overwritten\n", patch)
                     self.assertFalse(any(name in command for command in result.commands))
                     self.assertEqual(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings),
                                      name.startswith("outside/"))
-                    saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                    saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
                     self.assertIn(name, saved["user_files"])
                     self.assertNotIn(name, saved["new_files"])
 
@@ -789,7 +838,7 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("--ephemeral", argv, "Codex must not retain its own correction session text")
         env = record["env"]
         self.assertEqual((env["OAH_WORKER"], env["OAH_TASK"], env["OAH_RUN_ID"]),
-                         ("1", "t1", pathlib.Path(result.run_dir).name))
+                         ("1", "t1", result.run_id))
         renew, finish, bind = record["probes"]
         for probe, code in ((renew, "OAH_WORKER_LEASE_REFUSED"), (finish, "OAH_WORKER_LEASE_REFUSED"),
                             (bind, "OAH_FIX_WORKER_REFUSED")):
@@ -872,7 +921,7 @@ class OutcomeTest(unittest.TestCase):
         terminal.close()
         result = project.fix(terminal=terminal, timeout_s=3)
         self.assertEqual(result.outcome, "failed")
-        folder = pathlib.Path(result.run_dir)
+        folder = project.run_folder(result)
         run = json.loads((folder / "result.json").read_bytes())
         self.assertEqual(run["status"], "failed", "a closed terminal stops the worker before its timeout")
         self.assertIn("OAH_FIX_STREAM_FAILED", run["error"])
@@ -1033,7 +1082,7 @@ class OutcomeTest(unittest.TestCase):
                          {"source_receipt": "R1.json", "source_receipt_digest": project.receipt_digest(1),
                           "finding_ids": ["R1-F1", "R1-F2"], "class_ids": ["R1-C1", "R1-C2"],
                           "before_head": project.head, "engine": "codex", "manual": False,
-                          "run_id": pathlib.Path(result.run_dir).name})
+                          "run_id": result.run_id})
         outcome = project.record("A1-outcome.json")
         self.assertEqual((outcome["outcome"], outcome["after_head"]), ("applied", None))
         self.assertIn(result.attempt_id, ("A1",))
@@ -1134,11 +1183,11 @@ def applied(test: unittest.TestCase, project: FixProject, step: dict | None = No
 
 
 class BindTest(unittest.TestCase):
-    def test_commit_guidance_runs_in_the_leased_worktree_from_any_caller(self):
+    def test_commit_guidance_names_no_directory_and_runs_from_the_leased_root(self):
         self.assert_guidance_from_any_caller()
 
     @unittest.skipUnless(os.name == "nt", "native Windows PowerShell 5.1 command quoting")
-    def test_powershell_commit_guidance_runs_in_the_leased_worktree_from_any_caller(self):
+    def test_powershell_commit_guidance_names_no_directory_and_runs_from_the_leased_root(self):
         self.assert_guidance_from_any_caller(powershell=True)
 
     def assert_guidance_from_any_caller(self, *, powershell=False):
@@ -1159,7 +1208,7 @@ class BindTest(unittest.TestCase):
                     argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
                              command + "; exit $LASTEXITCODE"] if powershell or os.name == "nt" else
                             ["/bin/sh", "-c", command] if os.name != "nt" else shlex.split(command))
-                    done = subprocess.run(argv, cwd=caller, env=git_env(), capture_output=True)
+                    done = subprocess.run(argv, cwd=project.repo, env=git_env(), capture_output=True)
                     self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", errors="replace"))
                 self.assertEqual(git(project.repo, "status", "--porcelain"), "")
                 self.assertEqual(git(project.repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines(),
@@ -1177,17 +1226,17 @@ class BindTest(unittest.TestCase):
         for line in ("-print('v1')", "+print('fixed')", "+NEW = 1", "+ODD = 1", "+ID = 1"):
             self.assertIn(line, text)
         self.assertNotIn("THE USER'S OWN", text, "a file that was untracked before the run is not Codex's change")
-        command = f"git -C '{project.repo.as_posix()}'"
+        command = "git"
         self.assertEqual(result.commands, [
             command + " add -u", command + " add -- ':(literal)src/[id].py' src/new.py ':(literal)src/odd name.py'",
             command + ' commit -m "Correct R1-F1 of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
         self.assertEqual(result.next_command, "oah fix --bind --task t1")
         for command in (*result.commands, result.next_command):
             self.assertIn(command, result.lines)
-        saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+        saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
         self.assertEqual((saved["commands"], saved["changed"], saved["new_files"]),
                          (result.commands, ["src/app.py"], ["src/[id].py", "src/new.py", "src/odd name.py"]))
-        patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+        patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
         self.assertEqual((patch.count("+NEW = 1"), patch.count("+print('fixed')")), (1, 1))
         self.assertIn(saved["changes_sha256"], project.record("A1-outcome.json")["evidence"])
         head = project.run_commands(result.commands)
@@ -1217,7 +1266,7 @@ class BindTest(unittest.TestCase):
                 result = applied(self, project, {"write": {**FIXED, "src/new.py": "NEW = 1\n"}})
                 git(project.repo, "add", "-u")
                 git(project.repo, "commit", "-q", "-m", "tracked correction" + CODEX_TRAILER)
-                folder = pathlib.Path(result.run_dir)
+                folder = project.run_folder(result)
                 path = folder / "correction.json"
                 saved = json.loads(path.read_bytes())
                 if damage == "run-folder":
@@ -1514,6 +1563,103 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_recovery_and_binding_notes_use_fixed_actor_metadata(self):
+        for operation in ("abort", "bind-override"):
+            with self.subTest(operation=operation):
+                account = "account-" + token_source.token_hex(10)
+                project = FixProject(self, agent=account)
+                project.changes_requested()
+                if operation == "abort":
+                    publish_start(project)
+                else:
+                    project.queue_fix({"write": FIXED})
+                    self.assertEqual(project.fix().outcome, "applied")
+                    project.commit({"src/app.py": "print('replacement')\n"}, trailer=CLAUDE_TRAILER)
+                events = project.state / "events.jsonl"
+                before = events.read_bytes()
+                result = project.abort() if operation == "abort" else project.bind(engine="claude")
+                self.assertNotIn(account, json.dumps(result.to_json()))
+                self.assertNotIn(account.encode("ascii"), events.read_bytes()[len(before):])
+
+    def test_abort_does_not_copy_saved_status_or_invalid_run_id_into_new_records(self):
+        for field in ("status", "run_id"):
+            with self.subTest(field=field):
+                project = FixProject(self)
+                project.changes_requested()
+                marker = "account-" + token_source.token_hex(12)
+                run = runs.new_run(project.state, "t1", "codex", "correction")
+                if field == "status":
+                    record = run.read()
+                    record["status"] = str(project.repo / marker)
+                    run.result_path.write_bytes(json.dumps(record).encode("utf-8"))
+                start = {"schema": 1, "kind": "attempt-start", "task": "t1", "attempt_id": "A1",
+                         "source_receipt": "R1.json", "source_receipt_digest": project.receipt_digest(1),
+                         "finding_ids": ["R1-F1"], "class_ids": ["R1-C1"], "before_head": project.head,
+                         "engine": "codex", "manual": False, "started_at": "2026-10-25T00:00:00Z",
+                         "run_id": str(project.repo / marker) if field == "run_id" else run.id}
+                receipts.publish(project.state, "t1", "A1-start.json", start)
+                if field == "run_id":
+                    project.refused("OAH_FIX_HISTORY_INVALID", project.abort)
+                else:
+                    result = project.abort()
+                    self.assertNotIn(marker, json.dumps(result.to_json()))
+                    self.assertNotIn(marker, json.dumps(project.record("A1-outcome.json")))
+                    self.assertIn("unknown", project.record("A1-outcome.json")["evidence"])
+
+    def test_all_retained_brief_inputs_are_scanned_before_creating_a_correction_run(self):
+        for field in ("intent", "finding", "class", "footer", "verify-footer", "skill"):
+            for exported in (False, True):
+                with self.subTest(field=field, exported=exported):
+                    marker = "s" + "k-" + token_source.token_hex(20) if not exported else token_source.token_hex(20)
+                    packet = PACKET.replace("### Problem", "### Problem\n" + marker) if field == "intent" else PACKET
+                    skill = {".claude/skills/systematic-debugging/SKILL.md":
+                             "---\nname: systematic-debugging\ndescription: trace bugs\n---\n" + marker + "\n"}
+                    project = FixProject(self, packet=packet, files=skill if field == "skill" else None,
+                                         config='[skills]\nmode = "attach"\n' if field == "skill" else "")
+                    step = {"findings": [bug(title=marker) if field == "finding" else bug()]}
+                    if field == "class":
+                        step["classes"] = [{"class_id": "R{n}-C1", "mechanism": marker, "rule": "safe rule"}]
+                    project.queue(step)
+                    self.assertEqual(project.review().code, "OAH_REVIEW_CHANGES_REQUESTED")
+                    if exported:
+                        project.env["OPENAI_API_KEY"] = marker
+                    before = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+                    tools = call_cli.intent_tools()
+                    with contextlib.ExitStack() as stack:
+                        if field == "footer":
+                            stack.enter_context(mock.patch.object(call_cli, "intent_tools", return_value=
+                                tools._replace(footer=tools.footer + "\n" + marker + "\n")))
+                        elif field == "verify-footer":
+                            stack.enter_context(mock.patch.object(briefs, "VERIFY_FOOTER",
+                                                                  briefs.VERIFY_FOOTER + "\n" + marker + "\n"))
+                        error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.fix)
+                    self.assertNotIn(marker, str(error))
+                    self.assertEqual({path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()},
+                                     before, "input refusal must not create or change run/state artifacts")
+
+    def test_sensitive_task_and_path_metadata_refuses_before_retention(self):
+        for operation in ("correct", "bind", "manual", "abort"):
+            for field in ("task", "worktree", "state"):
+                with self.subTest(operation=operation, field=field):
+                    marker = "s" + "k-" + token_source.token_hex(20)
+                    project = FixProject(self, repo_name=marker if field == "worktree" else "repo")
+                    env = dict(project.env)
+                    if field == "state":
+                        env["OAH_STATE_DIR"] = str(project.work / marker)
+                    task = marker if field == "task" else "t1"
+                    actions = {"correct": lambda: fix.correct(fix.Request(task), cwd=project.repo, env=env),
+                               "bind": lambda: fix.bind(task, cwd=project.repo, env=env),
+                               "manual": lambda: fix.record_manual(task, engine="human", cwd=project.repo, env=env),
+                               "abort": lambda: fix.abort(task, cwd=project.repo, env=env)}
+                    before = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+                    error = project.refused("OAH_TASK_INVALID" if field == "task" else "OAH_FIX_SENSITIVE_METADATA",
+                                            actions[operation])
+                    self.assertNotIn(marker, str(error))
+                    self.assertEqual({path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()},
+                                     before)
+                    if field == "state":
+                        self.assertFalse((project.work / marker).exists())
+
     def test_packet_scope_is_checked_against_credentials_removed_from_worker_env(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1602,7 +1748,7 @@ class SecretTest(unittest.TestCase):
                     self.assertIsNone(result.next_command)
                     self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                     self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                    patch = (project.run_folder(result) / "correction.patch").read_bytes()
                     self.assertIn(b"[file ", patch)
                     self.assertNotIn(name.encode("utf-8"), patch)
                     self.assertIn(b"src/app.py", patch)
@@ -1636,8 +1782,8 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual((result.code, result.outcome, result.commands), ("OAH_FIX_FAILED", "failed", []))
                 self.assertIsNone(result.next_command)
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
-                saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
+                saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
                 self.assertIn("withheld", patch)
                 self.assertTrue(any(item.startswith("[file ") for field in ("changed", "new_files", "user_files")
                                     for item in saved[field]))
@@ -1734,7 +1880,7 @@ class SecretTest(unittest.TestCase):
                     self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                     self.assert_private(project, [key, text.rstrip()], json.dumps(result.to_json()), terminal.getvalue())
                     self.assertNotIn(name, json.dumps(result.to_json()), "withheld files are position-only")
-                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                    patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                     self.assertIn("OAH_FIX_SENSITIVE_CONTENT", patch)
                     self.assertIn("[file ", patch)
                     self.assertNotIn(name, patch)
@@ -1754,7 +1900,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(result.outcome, "applied", result.message)
                 self.assertTrue(text in terminal.getvalue(), "worker output must stream live")
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-                folder = pathlib.Path(result.run_dir)
+                folder = project.run_folder(result)
                 for name in ("stdout.log", "stderr.log", "last-message.md"):
                     self.assertFalse((folder / name).exists(), "corrector text must never be written")
                 run = json.loads((folder / "result.json").read_bytes())
@@ -1834,7 +1980,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(result.outcome, "applied", result.message)
                 self.assertFalse(marker.exists(), "change discovery and patch generation must not run conversions")
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                patch = (project.run_folder(result) / "correction.patch").read_bytes()
                 if conversion == "encoding":
                     self.assertIn(f"binary, {len(new)} bytes".encode("ascii"), patch)
                 else:
@@ -1857,7 +2003,7 @@ class SecretTest(unittest.TestCase):
         with mock.patch.object(fix, "_scan_files", side_effect=scanned):
             result = project.fix()
         self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-        patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+        patch = (project.run_folder(result) / "correction.patch").read_bytes()
         self.assertIn(b"+print('fixed')", patch)
 
     def test_binary_and_undecodable_sides_are_size_markers_only(self):
@@ -1876,7 +2022,7 @@ class SecretTest(unittest.TestCase):
                 with mock.patch.object(call, "execute", side_effect=dispatched):
                     result = project.fix()
                 self.assertEqual(result.outcome, "applied", result.message)
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                patch = (project.run_folder(result) / "correction.patch").read_bytes()
                 for data in (old, new):
                     self.assertIn(f"binary, {len(data)} bytes".encode("ascii"), patch)
                     self.assertNotIn(data, patch)
@@ -1915,7 +2061,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual((result.outcome, result.commands), ("failed", []))
                 self.assertIsNone(result.next_command)
                 self.assertNotIn(name, json.dumps(result.to_json()))
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+                patch = (project.run_folder(result) / "correction.patch").read_bytes()
                 self.assertNotIn(b"outside contents", patch)
                 self.assertIn(b"[file ", patch)
 
@@ -1943,7 +2089,7 @@ class SecretTest(unittest.TestCase):
         self.assertEqual(result.outcome, "applied", result.message)
         self.assertFalse(marker.exists(), "neither external diff nor textconv drivers may run")
         self.assertNotIn("unsafe driver output", json.dumps(result.to_json()))
-        patch = (pathlib.Path(result.run_dir) / "correction.patch").read_bytes()
+        patch = (project.run_folder(result) / "correction.patch").read_bytes()
         self.assertIn(b"+print('fixed')", patch)
         self.assertIn(b"+NEW = 1", patch)
         self.assertEqual(built, [], "Git must never build correction diff content")
@@ -2016,7 +2162,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 self.assertNotIn(name, json.dumps(result.to_json()), "unsupported changes are named by position only")
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                 expected = ("OAH_FIX_INDEX_CHANGED" if change in ("deleted", "added", "untracked", "index-only")
                             else "OAH_FIX_UNSUPPORTED_SUBMODULE")
                 self.assertIn(expected, patch)
@@ -2063,7 +2209,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 self.assertNotIn(name, json.dumps(result.to_json()), "identify a withheld file by position only")
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                 self.assertIn("withheld", patch)
                 if channel == "staged":
                     self.assertIn("OAH_FIX_INDEX_CHANGED", patch)
@@ -2089,7 +2235,7 @@ class SecretTest(unittest.TestCase):
                 result = project.fix()
                 self.assertEqual((result.outcome, result.commands), ("failed", []))
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-                patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                 self.assertIn("withheld", patch)
 
     def launches(self) -> tuple[list, object]:
@@ -2129,7 +2275,7 @@ class SecretTest(unittest.TestCase):
         for argv, env in found:
             wanted = dict(expected)
             if "exec" in argv:
-                wanted.update(OAH_WORKER="1", OAH_TASK="t1", OAH_RUN_ID=pathlib.Path(result.run_dir).name)
+                wanted.update(OAH_WORKER="1", OAH_TASK="t1", OAH_RUN_ID=result.run_id)
             self.assertEqual(env, wanted)
             self.assertFalse({name.upper() for name in excluded} & {name.upper() for name in env})
         self.assertFalse(any(name.upper() in ("CODEX_API_KEY", "OPENAI_API_KEY") for name in project.fix_calls()[0]["env"]))
@@ -2195,10 +2341,10 @@ class SecretTest(unittest.TestCase):
                                     *result.warnings)
                 self.assertEqual((result.code, result.outcome), ("OAH_FIX_FAILED", "failed"))
                 self.assertEqual(result.commands, [], "sensitive filenames must withhold executable guidance")
-                saved = json.loads((pathlib.Path(result.run_dir) / "correction.json").read_text(encoding="utf-8"))
+                saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
                 self.assertEqual(saved["commands"], [])
                 if channel == "encoded":
-                    patch = (pathlib.Path(result.run_dir) / "correction.patch").read_text(encoding="utf-8")
+                    patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                     self.assertFalse("diff --git" in patch, "withhold Git-quoted sensitive filenames too")
                 project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
 
@@ -2218,7 +2364,7 @@ class SecretTest(unittest.TestCase):
         project = FixProject(self)
         result = applied(self, project)
         key = "s" + "k-" + token_source.token_hex(20)
-        manifest = pathlib.Path(result.run_dir) / "correction.json"
+        manifest = project.run_folder(result) / "correction.json"
         saved = json.loads(manifest.read_text(encoding="utf-8"))
         saved["commands"] = ["git add -- src/" + key + ".txt"]
         manifest.write_text(json.dumps(saved), encoding="utf-8")
@@ -2239,16 +2385,16 @@ class SecretTest(unittest.TestCase):
 
 
 class TemplateTest(unittest.TestCase):
-    def test_powershell_quotes_the_exact_worktree_argument(self):
+    def test_powershell_guidance_omits_the_worktree_argument(self):
         root = pathlib.Path("/leased 'space $cash `tick !")
         with mock.patch.object(fix.os, "name", "nt"):
             commands, unquoted = fix.commit_commands(
                 task="t1", attempt_id="A1", receipt="R1", finding_ids=["R1-F1"],
                 changes=fix._Changes(("src/app.py",), ()), root=root)
         self.assertEqual(unquoted, [])
-        self.assertEqual(commands[0], "git -C '/leased ''space $cash `tick !' add -u")
+        self.assertEqual(commands[0], "git add -u")
         for command in commands:
-            self.assertTrue(command.startswith("git -C '/leased ''space $cash `tick !' "))
+            self.assertTrue(command.startswith("git "))
 
     def test_round_instructions_render_every_placeholder_once(self):
         finding = {"finding_id": "R1-F1", "class_id": "R1-C1", "severity": "P1", "axis": "quality",
@@ -2281,9 +2427,9 @@ class TemplateTest(unittest.TestCase):
                                                  changes=fix._Changes(("src/app.py",), new), root=pathlib.Path("/worktree"))
         literal = [":(literal)-dash.py", ":(literal)src/a b.py", ":(literal)src/a,b.py", "src/new.py",
                    ":(literal)src/[id].py", ":(literal)src/한글.py"]
-        self.assertEqual(commands[0], "git -C '/worktree' add -u")
-        self.assertEqual(shlex.split(commands[1]), ["git", "-C", "/worktree", "add", "--", *literal])
-        self.assertEqual(commands[2], 'git -C \'/worktree\' commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
+        self.assertEqual(commands[0], "git add -u")
+        self.assertEqual(shlex.split(commands[1]), ["git", "add", "--", *literal])
+        self.assertEqual(commands[2], 'git commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
                                       '-m "Agent-Engine: codex"')
         self.assertEqual(unquoted, ["src/it's.py", "src/tab\there.py"])
         for command in commands:
@@ -2291,8 +2437,8 @@ class TemplateTest(unittest.TestCase):
         many, _ = fix.commit_commands(task="t1", attempt_id="A1", receipt="R1",
                                       finding_ids=[f"R1-F{k}" for k in range(1, 6)], changes=fix._Changes((), ("x.py",)),
                                       root=pathlib.Path("/worktree"))
-        self.assertEqual(many, ["git -C '/worktree' add -- x.py",
-                                'git -C \'/worktree\' commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" '
+        self.assertEqual(many, ["git add -- x.py",
+                                'git commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" '
                                 '-m "Agent-Engine: codex"'])
 
 

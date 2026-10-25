@@ -19,7 +19,7 @@ from oah.cli import build_parser, main
 from oah.lease import Store
 from oah.paths import repo_info
 from oah.review import receipts
-from tests.test_fix import FIXED, FixProject, wait_for
+from tests.test_fix import FIXED, FixProject, publish_start, wait_for
 from tests.test_review_rounds import PACKET, git
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -84,6 +84,69 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_task_identifiers_refuse_sensitive_or_non_identifier_values_in_all_modes(self):
+        marker = "s" + "k-" + token_source.token_hex(20)
+        account = "account-" + token_source.token_hex(12) + "@example.invalid"
+        project = FixProject(self)
+        for task in (marker, account, "Task", "-task", "a" * 65):
+            for mode in ((), ("--bind",), ("--manual", "--engine", "human"), ("--abort",)):
+                for as_json in (False, True):
+                    with self.subTest(task=task, mode=mode, as_json=as_json):
+                        done = oah(project, "fix", "--task=" + task, *mode, *(('--json',) if as_json else ()))
+                        self.assertEqual(done.returncode, 1)
+                        self.assertIn("OAH_TASK_INVALID", done.stderr)
+                        self.assertNotIn(marker, done.stdout + done.stderr)
+                        self.assertNotIn(account, done.stdout + done.stderr)
+        self.assertEqual(project.names(), [])
+        self.assertEqual(project.fix_calls(), [])
+
+    def test_results_and_new_records_use_run_ids_and_omit_directory_metadata(self):
+        for scenario in ("applied", "no-change", "failed", "bind", "manual", "abort", "refused"):
+            for as_json in (False, True):
+                with self.subTest(scenario=scenario, as_json=as_json):
+                    account = "account-" + token_source.token_hex(12)
+                    project = FixProject(self, repo_name=account)
+                    project.changes_requested()
+                    args = []
+                    if scenario == "bind":
+                        project.queue_fix({"write": FIXED})
+                        project.run_commands(project.fix().commands)
+                        args = ["--bind"]
+                    elif scenario == "manual":
+                        project.commit(FIXED, trailer="\n\nAgent-Engine: human")
+                        args = ["--manual", "--engine", "human"]
+                    elif scenario == "abort":
+                        publish_start(project)
+                        args = ["--abort"]
+                    elif scenario == "refused":
+                        (project.repo / "src/app.py").write_bytes(b"dirty\r\n")
+                    else:
+                        # Worker streams remain live and unretained (owner I). Keep their header fixed here
+                        # so the complete CLI capture checks the dispatcher's text/JSON output boundary.
+                        project.queue_fix({"header_workdir": "leased worktree",
+                                           **({"write": FIXED} if scenario == "applied" else
+                                              {"exit": 3} if scenario == "failed" else {})})
+                    before = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+                    done = oah(project, "fix", "--task", "t1", *args, *(('--json',) if as_json else ()))
+                    expected = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
+                                "failed": "OAH_FIX_FAILED", "bind": "OAH_FIX_BOUND", "manual": "OAH_FIX_RECORDED",
+                                "abort": "OAH_FIX_ABORTED", "refused": "OAH_FIX_DIRTY_TREE"}[scenario]
+                    self.assertIn(expected, done.stdout + done.stderr)
+                    artifacts = [done.stdout.encode("utf-8"), done.stderr.encode("utf-8")]
+                    for path in project.state.rglob("*"):
+                        if path.is_file() and before.get(path) != path.read_bytes():
+                            data = path.read_bytes()
+                            previous = before.get(path, b"")
+                            # Append-only logs retain their preexisting entries, including the landed lease.
+                            artifacts.append(data[len(previous):] if data.startswith(previous) else data)
+                    for value in (account, str(project.repo), str(project.state), str(project.work)):
+                        self.assertFalse(any(value.encode("utf-8") in data for data in artifacts),
+                                         "directory metadata reached a result or newly retained record")
+                    if as_json and scenario in ("applied", "no-change", "failed"):
+                        result = json.loads(done.stdout)
+                        self.assertIsNone(result["run_dir"])
+                        self.assertRegex(result["run_id"], r"^r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+
     def test_argument_errors_use_fixed_diagnostics_in_text_and_json(self):
         project = FixProject(self)
         marker = "account-" + token_source.token_hex(12)

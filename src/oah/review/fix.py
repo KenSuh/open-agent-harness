@@ -80,6 +80,7 @@ OUTCOME_CODES = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
 PLACEHOLDERS = ("TASK", "ATTEMPT", "RECEIPT", "RECEIPT_DIGEST", "BASE", "REVIEWED", "HEAD", "FINDINGS", "CLASSES")
 _PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+_TASK_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _STOP_SIGNALS = tuple(getattr(signal, name) for name in (("SIGBREAK",) if os.name == "nt" else ("SIGTERM", "SIGHUP"))
                       if hasattr(signal, name))
 LAUNCHED, RECORDED = "Nothing was launched", "Nothing was recorded"
@@ -102,6 +103,10 @@ _ERROR_DIAGNOSTICS = {
     "OAH_FIX_PROXY_CREDENTIALS": "proxy userinfo is forbidden; configure a credential-free proxy, then retry.",
     "OAH_FIX_SENSITIVE_SCOPE": "scope metadata contains a credential; remove it from the lease and packet "
                                "scope before retrying oah fix.",
+    "OAH_FIX_SENSITIVE_INPUT": "a correction brief input contains a credential; remove it from the accepted "
+                               "packet or review inputs and review again before retrying oah fix.",
+    "OAH_FIX_SENSITIVE_METADATA": "task or directory metadata contains a credential; use credential-free "
+                                  "metadata and bind the task again before retrying oah fix.",
     "OAH_FIX_BUSY": "another correction or review is running; wait for it to finish, then retry.",
     "OAH_FIX_ATTEMPT_UNFINISHED": "an attempt is unfinished; inspect the worktree, then run "
                                  "oah fix --abort --task <task>.",
@@ -214,6 +219,7 @@ class Result:
     commands: list[str] = dataclasses.field(default_factory=list)
     next_command: str | None = None
     run_dir: str | None = None
+    run_id: str | None = None
 
     def to_json(self) -> dict:
         return dataclasses.asdict(self)
@@ -336,8 +342,12 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
     if env.get("OAH_WORKER") == "1":
         raise ReviewError("OAH_FIX_WORKER_REFUSED", "dispatched workers do not run or record corrections; return your "
                           "work to the dispatcher, who runs oah fix")
+    redact = runner.credential_redactor(env)
+    if not isinstance(task, str) or not _TASK_ID.fullmatch(task) or _has_credential(task, redact):
+        raise ReviewError("OAH_TASK_INVALID", _ERROR_DIAGNOSTICS["OAH_TASK_INVALID"])
     info = repo_info(pathlib.Path(cwd))
     state = state_dir(info, env)
+    _safe_inputs((str(cwd), str(state)), redact, "OAH_FIX_SENSITIVE_METADATA")
     receipts.review_dir(state, task)
     lease = next((lease for lease, stale in Store(state).snapshot() if lease.task == task and not stale), None)
     if lease is None:
@@ -346,6 +356,7 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
                           f"--agent <you> --packet .oah/tasks/{task}/PACKET.md (use your packet's path), then run the "
                           "command again")
     root = pathlib.Path(lease.worktree)
+    _safe_inputs((str(root), lease.intent, lease.agent), redact, "OAH_FIX_SENSITIVE_METADATA")
     if not root.is_dir():
         raise ReviewError("OAH_WORKTREE_UNRESOLVED", f"the lease of task {task} names the worktree {root}, which no "
                           f"longer exists. {nothing}. Release it with oah release --task {task} --agent {lease.agent} "
@@ -448,6 +459,9 @@ class _History:
 
 def _history(t: _Task) -> _History:
     records = receipts.load(t.state, t.name)
+    if any("run_id" in entry.record and not runs.RUN_ID_RE.fullmatch(entry.record["run_id"] or "")
+           for entry in records.entries if entry.kind != "receipt"):
+        raise ReviewError("OAH_FIX_HISTORY_INVALID", _ERROR_DIAGNOSTICS["OAH_FIX_HISTORY_INVALID"])
     return _History(records, tuple(receipts.attempts(records)))
 
 
@@ -531,26 +545,38 @@ def _untracked(root: pathlib.Path) -> list[str]:
 def _ignored(root: pathlib.Path) -> list[str]:
     listed = [os.fsdecode(name) for name in _git_bytes(
         root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z").split(b"\0") if name]
+    return _user_files(root, listed)
+
+
+def _user_files(root: pathlib.Path, listed: Iterable[str]) -> list[str]:
+    """Expand user-owned directories, including nested .git files, without following links."""
     found = set(listed)
 
     def unreadable(_error):
         raise ReviewError("OAH_FIX_GIT_FAILED", _ERROR_DIAGNOSTICS["OAH_FIX_GIT_FAILED"])
 
     # Git collapses nested repositories to a directory; their ignored metadata is user-owned too.
-    for name in listed:
+    for name in sorted(found):
         path = root / name
-        if not path.is_symlink() and path.is_dir():
+        if not path.parent.resolve().is_relative_to(root.resolve()):
+            continue
+        if not path.is_symlink() and path.is_dir() and path.resolve().is_relative_to(root.resolve()):
             for parent, directories, files in os.walk(path, followlinks=False, onerror=unreadable):
                 found.update((pathlib.Path(parent) / child).relative_to(root).as_posix()
                              for child in (*directories, *files))
+                directories[:] = [child for child in directories if not (pathlib.Path(parent) / child).is_symlink()
+                                  and (pathlib.Path(parent) / child).resolve().is_relative_to(root.resolve())]
     return sorted(found)
 
 
 def _ignored_state(root: pathlib.Path, names: Iterable[str]) -> dict[str, tuple[int, int, str] | None]:
-    """Fingerprint ignored user files using raw bytes, full modes and sizes, never Git conversion."""
+    """Fingerprint user files using raw bytes, full modes and sizes, never Git conversion."""
     found = {}
     for name in names:
         snapshot = _file_snapshot(root, name)
+        if not (root / name).parent.resolve().is_relative_to(root.resolve()):
+            found[name] = (stat.S_IFDIR, 0, receipts.digest(b""))
+            continue
         try:
             mode = (root / name).lstat().st_mode if snapshot is not None else None
         except FileNotFoundError:
@@ -682,21 +708,19 @@ def _file_snapshot(root: pathlib.Path, name: str) -> tuple[int, bytes] | None:
         data = (os.fsencode(os.readlink(path)) if stat.S_ISLNK(info.st_mode) else
                 path.read_bytes() if stat.S_ISREG(info.st_mode) else b"")
         if stat.S_ISDIR(info.st_mode):
-            # Detect dirty nested repositories without invoking their filters or following their links.
+            # Include every nested file and directory mode, including .git, using raw filesystem bytes only.
             digest = hashlib.sha256()
-            if (path / ".git").exists():
-                for args in (("rev-parse", "--verify", "HEAD"), ("ls-files", "--stage", "-z")):
-                    digest.update(_git_bytes(path, *args))
-            for child in sorted(path.rglob("*")):
-                relative = child.relative_to(path)
-                if ".git" in relative.parts:
+            for child_name in _user_files(root, (name,)):
+                if child_name == name:
                     continue
-                snapshot = (_file_snapshot(root, child.relative_to(root).as_posix())
-                            if child.is_symlink() or not child.is_dir() else None)
-                if snapshot is not None:
-                    for part in (os.fsencode(relative), str(snapshot[0]).encode("ascii"), snapshot[1]):
-                        digest.update(len(part).to_bytes(8, "big"))
-                        digest.update(part)
+                child = root / child_name
+                child_info = child.lstat()
+                snapshot = (None if stat.S_ISDIR(child_info.st_mode) else _file_snapshot(root, child_name))
+                child_data = snapshot[1] if snapshot else b""
+                for part in (os.fsencode(child.relative_to(path)), str(child_info.st_mode).encode("ascii"),
+                             str(len(child_data)).encode("ascii"), child_data):
+                    digest.update(len(part).to_bytes(8, "big"))
+                    digest.update(part)
             data = digest.digest()
         return kind | (info.st_mode & 0o111), data
     except FileNotFoundError:
@@ -836,7 +860,14 @@ def _changes(root: pathlib.Path, before: str, untracked: Mapping[str, tuple[int,
     for name in sorted(tree.keys() | index.keys() | (baseline.keys() if baseline is not None else set())):
         old = baseline.get(name) if baseline is not None else _blob_snapshot(root, tree.get(name))
         gitlink = any(entry and entry[0] == 0o160000 for entry in (tree.get(name), index.get(name)))
-        if old != _file_snapshot(root, name) or (gitlink and tree.get(name) != index.get(name)):
+        current = _file_snapshot(root, name)
+        gitlink_changed = gitlink and tree.get(name) != index.get(name)
+        if (gitlink and current and stat.S_ISDIR(current[0]) and not (root / name).is_symlink()
+                and (root / name).resolve().is_relative_to(root.resolve())):
+            # Tracked submodules can keep .git as a pointer outside this directory. Read their HEAD identity
+            # separately; user-owned directory fingerprints never follow that pointer or invoke Git.
+            gitlink_changed = gitlink_changed or _head(root / name) != (tree.get(name) or index[name])[1]
+        if old != current or gitlink_changed:
             tracked.append(name)
     user = tuple(name for name, snapshot in untracked.items()
                  if name in tracked or _file_snapshot(root, name) != snapshot)
@@ -848,6 +879,20 @@ def _has_credential(text: str, redact: Callable[[str], str]) -> bool:
     return any(redact(candidate) != candidate or any(pattern.search(candidate) for rule, pattern in CONTENT_RULES
                                                     if rule in ("key", "env-secret"))
                for candidate in (text, text.replace("\r\n", "\n")))
+
+
+def _safe_inputs(value, redact: Callable[[str], str], code: str = "OAH_FIX_SENSITIVE_INPUT") -> None:
+    """Scan original strings before retention, without replacing any accepted intent bytes."""
+    if isinstance(value, str):
+        if _has_credential(value, redact):
+            raise ReviewError(code, _ERROR_DIAGNOSTICS[code])
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            _safe_inputs(key, redact, code)
+            _safe_inputs(item, redact, code)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _safe_inputs(item, redact, code)
 
 
 def _path_labels(names: Iterable[str], redact: Callable[[str], str]) -> list[str]:
@@ -937,14 +982,7 @@ def _git_word(path: str) -> str | None:
 def commit_commands(*, task: str, attempt_id: str, receipt: str, finding_ids: Sequence[str],
                     changes: _Changes, root: pathlib.Path) -> tuple[list[str], list[str]]:
     """The exact commands that commit a Codex correction, and the new files they could not name."""
-    directory = root.as_posix()
-    if not directory.isprintable():
-        raise ReviewError("OAH_FIX_UNQUOTABLE_PATH", "the leased worktree directory contains control characters, so "
-                          "commit commands were withheld; use a worktree path without control characters, inspect "
-                          "the changes there and retry oah fix")
-    # PowerShell escapes a single quote by doubling it; sh concatenates a quoted apostrophe.
-    quoted_directory = "'" + directory.replace("'", "''" if os.name == "nt" else "'\"'\"'") + "'"
-    command = "git -C " + quoted_directory
+    command = "git"  # The dispatcher runs guidance from the leased worktree root; never retain its path.
     commands = [command + " add -u"] if changes.tracked else []
     words, unquoted = [], []
     for name in changes.new:
@@ -998,8 +1036,10 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
-        ignored = _ignored(t.root)
-        untracked = {name: _file_snapshot(t.root, name) for name in (*_untracked(t.root), *ignored)}
+        user_names = _untracked(t.root)
+        directories = [name for name in user_names if not (t.root / name).is_symlink() and (t.root / name).is_dir()]
+        ignored = _user_files(t.root, (*directories, *_ignored(t.root)))
+        untracked = {name: _file_snapshot(t.root, name) for name in (*user_names, *ignored)}
         ignored_baseline = _ignored_state(t.root, ignored)
         # Compare discovery with checkout bytes, so an untouched CRLF/encoded file stays unchanged.
         baseline = {name: _file_snapshot(t.root, name) for name in _tree_files(t.root, before)}
@@ -1008,24 +1048,27 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
             findings=findings, classes=classes)
         tools = call_cli.intent_tools()
+        _safe_inputs((findings, classes, instructions, tools.footer, briefs.VERIFY_FOOTER), redact)
 
         def read_source(path: pathlib.Path) -> str:
             text = _committed_reader(t.root)(path)
             packet = call.read_packet(t.root, path, parse_intent=tools.parse, read_source=lambda _path: text)
             if any(_has_credential(value, redact) for value in packet.scope):
                 raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
+            _safe_inputs(text, redact)
             return text
 
         scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-fix-", dir=temp_root))
         try:
             final = scratch / "last-message.md"
-            prepared = call.prepare(
-                call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
-                                 round_instructions=redact(instructions), timeout_s=request.timeout_s,
-                                 ephemeral=True, retain_worker_text=False),
-                settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
-                has_footer=tools.has_footer, parse_intent=tools.parse, read_source=read_source,
-                keychain=keychain)
+            with call._correction_inputs(lambda value: _safe_inputs(value, redact)):
+                prepared = call.prepare(
+                    call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
+                                     round_instructions=instructions, timeout_s=request.timeout_s,
+                                     ephemeral=True, retain_worker_text=False),
+                    settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
+                    has_footer=tools.has_footer, parse_intent=tools.parse, read_source=read_source,
+                    keychain=keychain)
             attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
                                baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
             return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
@@ -1138,7 +1181,7 @@ class _Attempt:
                 "changes_sha256": receipts.digest(patch.encode("utf-8")), "commands": [], "out_of_scope": []})
             return _Judged("failed", reason, reason, _Changes(positions, ()), patch, effort, [], [], [], "", head)
         changes = _changes(root, self.before, untracked, baseline=self.baseline)
-        ignored_state = _ignored_state(root, sorted(self.ignored_baseline.keys() | set(_ignored(root))))
+        ignored_state = _ignored_state(root, _user_files(root, self.ignored_baseline.keys() | set(_ignored(root))))
         ignored_changes = {name for name, snapshot in ignored_state.items()
                            if snapshot != self.ignored_baseline.get(name)}
         changes = _Changes(changes.tracked, changes.new,
@@ -1156,8 +1199,8 @@ class _Attempt:
                     "filenames or file contents contain a credential; remove credentials or restore the affected files "
                     "before retrying oah fix\n").encode("utf-8")
         ignored_reason = (f"OAH_FIX_USER_FILES_CHANGED: diff withheld for {_ids(list(ignored_positions.values()))} "
-                          "because ignored user files changed; all commit guidance was withheld. Inspect the "
-                          "worktree and restore or keep those files yourself before retrying oah fix")
+                          "because preexisting untracked or ignored user files changed; all commit guidance was "
+                          "withheld. Inspect the worktree and restore or keep those files yourself before retrying oah fix")
         if ignored_positions:
             raw += (ignored_reason + "\n").encode("utf-8")
         unsupported_reason = (f"OAH_FIX_UNSUPPORTED_SUBMODULE: diff withheld for {_ids(list(unsupported.values()))} "
@@ -1258,24 +1301,24 @@ class _Attempt:
         code = "OAH_FIX_UNQUOTABLE_PATH"
         warnings += [f"{code}: " + _WARNING_DIAGNOSTICS[code].format(positions=positions[name])
                      for name in judged.unquoted]
-        lines = [f"run folder: {self.prepared.run_dir}", judged.effort]
+        lines = [f"run: {self.run_id}", judged.effort]
         if judged.changes.files:
             lines.append("changed files: " + _ids(list(positions.values())))
             shown = judged.patch.splitlines()
             lines += shown[:DIFF_LINES]
             if len(shown) > DIFF_LINES:
-                lines.append(f"… {len(shown) - DIFF_LINES} more lines: run git diff {self.before} in {t.root}, or read "
-                             f"correction.patch in the run folder")
+                lines.append(f"… {len(shown) - DIFF_LINES} more lines: inspect correction.patch for run {self.run_id}")
         result = Result(OUTCOME_CODES[judged.outcome], 0 if judged.outcome == "applied" else 1, "", lines=lines,
                         warnings=warnings, attempt_id=self.attempt_id, outcome=judged.outcome,
-                        records=list(self.published), run_dir=self.prepared.run_dir)
+                        records=list(self.published), run_id=self.run_id)
         if judged.outcome == "applied":
             result.commands = list(judged.commands)
             result.next_command = f"oah fix --bind --task {t.name}"
             result.message = (f"OAH_FIX_APPLIED: {self.attempt_id} changed the worktree to correct {ids} of {receipt} "
                               f"in task {t.name}. Nothing is committed yet: review the change, commit it with the "
                               f"commands below, then run {result.next_command} so the next review counts it")
-            result.lines += ["Commit the correction with:", *result.commands, "Then bind the commit to the attempt:",
+            result.lines += ["From the leased worktree root, commit the correction with:", *result.commands,
+                             "Then bind the commit to the attempt:",
                              result.next_command]
         elif judged.outcome == "no-change":
             result.message = (f"OAH_FIX_NO_CHANGE: {self.attempt_id} finished without changing any file; {ids} of "
@@ -1414,7 +1457,7 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
         with _held_signals():
             digest = receipts.publish(t.state, t.name, name, record)
         if written_by != start["engine"]:
-            Store(t.state).log(task=t.name, agent=t.lease.agent, message=f"fix {attempt.attempt_id}: bound to {head} "
+            Store(t.state).log(task=t.name, agent="oah", message=f"fix {attempt.attempt_id}: bound to {head} "
                                f"with --engine {written_by} (not {start['engine']})")
     return Result("OAH_FIX_BOUND", 0, f"OAH_FIX_BOUND: {attempt.attempt_id} is bound to {head}, so the next review "
                   f"counts it. Run oah review --task {t.name} for the next round",
@@ -1540,6 +1583,8 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                     try:
                         run = runs.find_run(t.state, start["run_id"])
                         status = run.read().get("status", "unknown")
+                        if status not in (*runs.TERMINAL, "created", "prepared", "queued", "running"):
+                            status = "unknown"
                     except runs.RunError:
                         run, status = None, "missing"
                 evidence = (f"recorded by oah fix --abort: the oah fix that started {attempt.attempt_id} stopped without "
@@ -1558,8 +1603,8 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                                                     "without recording a result; oah fix --abort recorded its attempt "
                                                     "as aborted")
         ids = _ids(item.attempt_id for item in unfinished)
-        Store(t.state).log(task=t.name, agent=t.lease.agent, message=f"fix {ids}: recorded as aborted (oah fix --abort)")
+        Store(t.state).log(task=t.name, agent="oah", message=f"fix {ids}: recorded as aborted (oah fix --abort)")
     return Result("OAH_FIX_ABORTED", 0, f"OAH_FIX_ABORTED: {ids} {'is' if len(unfinished) == 1 else 'are'} recorded "
-                  f"as aborted. An interrupted correction may have left changes in {t.root}: check git status, then "
+                  "as aborted. An interrupted correction may have left changes in the leased worktree: inspect it, then "
                   "commit or discard them before the next oah fix or oah review",
                   attempt_id=unfinished[-1].attempt_id, outcome="aborted", records=published)

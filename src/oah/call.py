@@ -60,6 +60,7 @@ ISOLATED_CODEX_FLAGS = ("--ignore-user-config", "--ignore-rules")  # review roun
 WAIT_LIMIT_S = 540.0
 POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a running worker is polled
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
+_CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
@@ -522,6 +523,56 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
     return ()
 
 
+@contextmanager
+def _correction_inputs(check):
+    """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
+    token = _CORRECTION_INPUT_CHECK.set(check)
+    try:
+        yield
+    finally:
+        _CORRECTION_INPUT_CHECK.reset(token)
+
+
+def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease):
+    intent = packet.intent if packet else None
+    section = (packet.section or getattr(intent, "section", None)) if packet else None
+    instructions = request.round_instructions
+    if stored is not None:
+        section = section if section is not None else briefs.raw_section(stored)
+        content = briefs.reusable_content(stored, stage=request.stage, footer=footer, has_footer=has_footer)
+        warnings.extend(briefs.reusable_warnings(content))
+        instructions = "\n\n".join(part for part in (content, instructions) if part)
+    chosen, skills_rerank = selection if selection is not None else (None, None)
+    return briefs.build(run_id=run_id, task=request.task, stage=request.stage, engine=request.engine,
+                        scope=list(checked_lease.scope) if checked_lease is not None else list(scope),
+                        intent_section=section, binding=intent,
+                        packet_source=packet.source if packet else None,
+                        round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer,
+                        skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
+                        skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else ())
+
+
+def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now):
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is None:
+        return skillsel.choose(root, kind=kind, stage=stage, risk=risk, scope=scope, state_dir=state_dir,
+                               env=env, keychain=keychain, brief_disabled=brief_disabled, now=now)
+    from oah import rerank
+    from oah.config import load_config
+
+    settings = skillsel.settings_for(root)
+    kit = skillsel.kit_roots(state_dir, pins=settings["pins"])
+    roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit)
+    # Corrections omit optional telemetry so even an unsafe attached skill leaves no selection record.
+    selection = skillsel.select(kind, stage, risk, scope, roots=roots, settings=settings, state_dir=None,
+                                repo_root=root, now=now)
+    check(selection.brief_text())
+    check(selection.to_record())
+    config = load_config(root).section("rerank", rerank.DEFAULTS)
+    return skillsel.rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
+                                 brief_disabled=brief_disabled, env=env, keychain=keychain)
+
+
 def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
             parse_intent: Callable[[str], object] | None = None,
@@ -582,12 +633,21 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         warnings.extend(scored.warnings)
         advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
     skill_axes = scored.axes
-    selection = skillsel.choose(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
-                                state_dir=state_dir, env=env, keychain=keychain,
-                                brief_disabled=disabled, now=now)
+    selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
+                              state_dir=state_dir, env=env, keychain=keychain,
+                              brief_disabled=disabled, now=now)
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
                                 refresh=request.refresh_models, now=now)
     warnings.extend(resolution.warnings)
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is not None:
+        # Render before any run exists. The real run id replaces only this fixed placeholder later.
+        check(_brief_text(request, "pending", packet, scope, stored, footer, has_footer,
+                          list(warnings), selection, holder))
+        check(dataclasses.asdict(resolution))
+        check(warnings)
+        if selection[0] is not None:
+            check(selection[0].to_record())
     run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
     try:
         return _finish_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
@@ -610,22 +670,8 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         Store(state_dir).log(task=request.task, agent=request.engine,
                              message=f"stage override: run {run.id} runs {request.engine} for stage {request.stage} "
                                      f"(configured: {settings.stages[request.stage]})")
-    intent = packet.intent if packet else None
-    section = (packet.section or getattr(intent, "section", None)) if packet else None
-    instructions = request.round_instructions
-    if stored is not None:
-        section = section if section is not None else briefs.raw_section(stored)
-        content = briefs.reusable_content(stored, stage=request.stage, footer=footer, has_footer=has_footer)
-        warnings.extend(briefs.reusable_warnings(content))
-        instructions = "\n\n".join(part for part in (content, instructions) if part)
     chosen, skills_rerank = selection if selection is not None else (None, None)
-    text = briefs.build(run_id=run.id, task=request.task, stage=request.stage, engine=request.engine,
-                        scope=list(checked_lease.scope) if checked_lease is not None else list(scope),
-                        intent_section=section, binding=intent,
-                        packet_source=packet.source if packet else None,
-                        round_instructions=instructions, skills=request.skills, footer=footer, has_footer=has_footer,
-                        skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
-                        skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else ())
+    text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease)
     read_only = request.stage == "review"
     if request.engine == "codex":
         argv = codex.build_command(resolution.base, workdir=str(root), read_only=read_only, model=resolution.model,
@@ -650,8 +696,9 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         write_json_atomic(run.file_path("skills.json"), {"rerank": skills_rerank, **chosen.to_record()})
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
-    run.result(status="prepared", command=list(argv), cwd=str(root), read_only=read_only,
-               cli_path=resolution.base[0], cli_version=resolution.cli_version,
+    run.result(status="prepared", command=list(argv) if request.retain_worker_text else None,
+               cwd=str(root) if request.retain_worker_text else None, read_only=read_only,
+               cli_path=resolution.base[0] if request.retain_worker_text else None, cli_version=resolution.cli_version,
                requested_model=resolution.requested_model or None, resolved_model=resolution.model,
                model_source=resolution.model_source, requested_effort=resolution.requested_effort,
                launch_effort=resolution.launch_effort,
