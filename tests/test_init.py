@@ -904,6 +904,157 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
 
+    def test_clone_uses_private_git_state_and_publishes_only_file_bytes(self):
+        common = repo_info(self.repo).common_dir
+        run, publish = init.run_command, init._publish
+        stages, publications = [], []
+
+        def command(argv, **kwargs):
+            staging = pathlib.Path(argv[6])
+            self.assertTrue(staging.is_relative_to(common / "oah/staging"))
+            self.assertFalse(staging.is_relative_to(self.target.parent))
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(staging.parent.stat().st_mode), 0o700)
+            stages.append(staging)
+            return run(argv, **kwargs)
+
+        def publication(root, relative, data, *args, **kwargs):
+            if root == self.repo and relative.startswith(init.UNLAZY_PROJECT + "/"):
+                if data is not None:  # directories are reserved exclusively through the same publication path
+                    self.assertIsInstance(data, bytes)
+                    publications.append(relative)
+                self.assertIsNone(kwargs.get("source"))
+            return publish(root, relative, data, *args, **kwargs)
+
+        def directory_move(source, target, *args):
+            self.fail("installation must not rename a directory into the worktree")
+
+        with (mock.patch.object(init, "run_command", side_effect=command),
+              mock.patch.object(init, "_publish", side_effect=publication),
+              mock.patch.object(init, "_rename_exclusive", side_effect=directory_move),
+              mock.patch.dict(os.environ, {"OAH_STATE_DIR": str(self.repo / "unsafe-state")})):
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertEqual(problem, "")
+        self.assertEqual(len(stages), 2)
+        self.assertEqual(stages[0], stages[1])
+        self.assertTrue(publications)
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+        self.assertFalse((self.repo / "unsafe-state").exists())
+
+    def test_install_preserves_empty_git_directories_from_a_detached_source(self):
+        git("checkout", "--detach", self.commit, cwd=self.source)
+        git("branch", "-D", "main", cwd=self.source)
+        self.assertEqual(init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin), "")
+        self.assertTrue((self.target / ".git/refs").is_dir())
+        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory replacement while its handle is open")
+    def test_source_swap_at_publication_never_installs_replacement_bytes(self):
+        run, publish, pinned = init.run_command, init._publish, init._pinned_directory
+        staging = None
+        swapped = False
+        replacement = b"// unverified replacement\r\n"
+
+        def swap():
+            nonlocal swapped
+            staging.rename(staging.with_name(staging.name + "-verified"))
+            (staging / "scripts").mkdir(parents=True)
+            (staging / "scripts/gate-check.mjs").write_bytes(replacement)
+            swapped = True
+
+        def command(argv, **kwargs):
+            nonlocal staging
+            staging = pathlib.Path(argv[6])
+            return run(argv, **kwargs)
+
+        @contextlib.contextmanager
+        def directory(path, **kwargs):
+            with pinned(path, **kwargs) as held:
+                # The old directory-publication boundary: replace after its source handle opens.
+                if path == staging and "delete" in kwargs and not swapped:
+                    swap()
+                yield held
+
+        def publication(root, relative, data, *args, **kwargs):
+            # The replacement design publishes frozen bytes, never this staging pathname.
+            if (root == self.repo and relative.startswith(init.UNLAZY_PROJECT + "/")
+                    and not swapped):
+                swap()
+            return publish(root, relative, data, *args, **kwargs)
+
+        with (mock.patch.object(init, "run_command", side_effect=command),
+              mock.patch.object(init, "_pinned_directory", side_effect=directory),
+              mock.patch.object(init, "_publish", side_effect=publication)):
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertTrue(swapped)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        for path in self.target.rglob("*"):
+            if path.is_file():
+                self.assertNotEqual(path.read_bytes(), replacement)
+        self.assertEqual((staging / "scripts/gate-check.mjs").read_bytes(), replacement)
+
+    def test_cleanup_never_recursively_deletes_a_replaced_staging_path(self):
+        run, remove = init.run_command, init.shutil.rmtree
+        user_files = self.repo / "user-files"
+        user_files.mkdir()
+        sentinel = b"unrelated user data\r\n\x00"
+        (user_files / "keep.bin").write_bytes(sentinel)
+        stages = []
+
+        def command(argv, **kwargs):
+            stages.append(pathlib.Path(argv[6]))
+            return run(argv, **kwargs)
+
+        def cleanup(path, **kwargs):
+            # Immediately after the old final identity check, replace it with a regular user directory.
+            path.rename(path.with_name(path.name + "-original"))
+            user_files.rename(path)
+            remove(path, **kwargs)
+
+        bad = unlazy.Pin(commit=self.commit, files={"scripts/gate-check.mjs": "0" * 64})
+        with (mock.patch.object(init, "run_command", side_effect=command),
+              mock.patch.object(init.shutil, "rmtree", side_effect=cleanup) as recursive):
+            problem = init.install_unlazy(self.repo, self.plan(pin=bad), source=str(self.source), pin=bad)
+        self.assertTrue(problem.startswith("OAH_INIT_"), problem)
+        recursive.assert_not_called()
+        self.assertEqual((user_files / "keep.bin").read_bytes(), sentinel)
+        self.assertTrue(stages[0].is_dir())  # private state is retained for explicit manual cleanup
+
+    def test_partial_install_is_not_discovered_as_verified(self):
+        commit = git_commit(self.source, {"zz-extra.txt": b"additional pinned-checkout content\r\n"})
+        pin = unlazy.Pin(commit=commit, files=self.pin.files)
+        publish = init._publish
+
+        def publication(root, relative, data, *args, **kwargs):
+            if relative == init.UNLAZY_PROJECT + "/zz-extra.txt":
+                return False
+            return publish(root, relative, data, *args, **kwargs)
+
+        with mock.patch.object(init, "_publish", side_effect=publication):
+            problem = init.install_unlazy(self.repo, self.plan(pin=pin), source=str(self.source), pin=pin)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertTrue(unlazy.verify_pin(self.target, pin))
+        self.assertEqual(self.plan(pin=pin).action, "blocked")
+
+    def test_capture_rejects_a_pinned_empty_script_removed_after_verification(self):
+        commit = git_commit(self.source, {"scripts/gate-check.mjs": b""})
+        pin = unlazy.Pin(commit=commit, files={**self.pin.files,
+                                            "scripts/gate-check.mjs": hashlib.sha256(b"").hexdigest()})
+        verify = init._verify_unlazy_pin
+
+        def verification(root, folder, expected):
+            problems = verify(root, folder, expected)
+            if not problems:
+                (folder / "scripts/gate-check.mjs").unlink()
+            return problems
+
+        step = self.plan(pin=pin)
+        with mock.patch.object(init, "_verify_unlazy_pin", side_effect=verification):
+            problem = init.install_unlazy(self.repo, step, source=str(self.source), pin=pin)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertFalse(self.target.exists())
+
     @unittest.skipIf(os.name == "nt", "POSIX staging pathname replacement")
     def test_staging_swap_cannot_redirect_checkout(self):
         self._staging_swap_cannot_redirect_checkout()
@@ -924,9 +1075,8 @@ class UnlazyStepTest(unittest.TestCase):
                 run = init.run_command
                 calls = 0
 
-                def swap():
-                    staging, = self.repo.glob(".unlazy-*.tmp")
-                    staging.rename(self.repo / "saved-stage")
+                def swap(staging):
+                    staging.rename(staging.with_name(staging.name + "-saved"))
                     directory_alias(outside, staging)
 
                 def command(argv, **kwargs):
@@ -934,10 +1084,10 @@ class UnlazyStepTest(unittest.TestCase):
                     calls += 1
                     if (calls == 1 and boundary == "before-clone"
                             or calls == 2 and boundary == "before-checkout"):
-                        swap()
+                        swap(pathlib.Path(argv[6]))
                     result = run(argv, **kwargs)
                     if calls == 1 and boundary == "after-clone":
-                        swap()
+                        swap(pathlib.Path(argv[6]))
                     return result
 
                 with mock.patch.object(init, "run_command", side_effect=command):
@@ -952,17 +1102,24 @@ class UnlazyStepTest(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows staging handle denies directory replacement")
     def test_windows_staging_publication_keeps_source_pinned(self):
-        move = init._windows_move_directory
+        run, publish = init.run_command, init._publish
         attempts = []
+        staging = None
 
-        def publication(handle, target):
-            staging, = self.repo.glob(".unlazy-*.tmp")
-            with self.assertRaises(PermissionError):
-                staging.rename(self.repo / "saved-stage")
-            attempts.append(True)
-            return move(handle, target)
+        def command(argv, **kwargs):
+            nonlocal staging
+            staging = pathlib.Path(argv[6])
+            return run(argv, **kwargs)
 
-        with mock.patch.object(init, "_windows_move_directory", side_effect=publication):
+        def publication(root, relative, data, *args, **kwargs):
+            if not attempts:
+                with self.assertRaises(PermissionError):
+                    staging.rename(staging.with_name(staging.name + "-saved"))
+                attempts.append(True)
+            return publish(root, relative, data, *args, **kwargs)
+
+        with (mock.patch.object(init, "run_command", side_effect=command),
+              mock.patch.object(init, "_publish", side_effect=publication)):
             problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
         self.assertEqual(problem, "")
         self.assertEqual(len(attempts), 1)
@@ -1137,15 +1294,12 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(step.action, "install")
         self.assertIn("not the pinned", step.note)
 
-    def test_remove_tree_clears_read_only_files(self):
-        # git writes its object files read-only; Windows refuses to delete those without clearing the flag
-        folder = make_tmp_dir(self) / "clone"
-        (folder / "objects").mkdir(parents=True)
-        locked = folder / "objects" / "pack"
-        locked.write_text("x", encoding="utf-8")
-        locked.chmod(0o444)
-        init._remove_tree(folder)
-        self.assertFalse(folder.exists())
+    def test_successful_install_retains_staging_for_manual_cleanup(self):
+        self.assertEqual(init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin), "")
+        staging, = (repo_info(self.repo).common_dir / "oah/staging").iterdir()
+        self.assertEqual(unlazy.verify_pin(staging, self.pin), [])
+        # Retaining even read-only Git objects requires no pathname-based permission repair or deletion.
+        self.assertTrue(any(path.is_file() for path in (staging / ".git/objects").rglob("*")))
 
     def test_override_must_be_cleared(self):
         empty = make_tmp_dir(self)
