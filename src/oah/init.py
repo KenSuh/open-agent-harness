@@ -284,9 +284,14 @@ def add_gitignore_entries(data: bytes | None, *, unlazy_copy: bool) -> bytes | N
 def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
     """Ask Git about effective rules, probing required patterns and their existing/nested locations."""
     index = run_git(root, "ls-files", "--stage", "-z")
-    if index.returncode != 0:
+    others = run_git(root, "ls-files", "--others", "-z")
+    case = run_git(root, "config", "--type=bool", "--get", "core.ignorecase")
+    if index.returncode != 0 or others.returncode != 0 or case.returncode not in (0, 1):
         return ["OAH_INIT_IGNORE_UNVERIFIED: the index could not be checked. Check repository permissions, "
                 "then run oah init again"]
+    # Git folds ASCII filename bytes, independently of Python's host-platform matching rules.
+    folding = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    normalize = (lambda value: value.translate(folding)) if case.stdout.strip() == "true" else (lambda value: value)
     submodules = {row.partition("\t")[2] for row in index.stdout.split("\0") if row.startswith("160000 ")}
     folders = {}
 
@@ -305,6 +310,13 @@ def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
         return ["OAH_INIT_IGNORE_UNVERIFIED: ignore protection could not be checked. Check directory permissions, "
                 "then run oah init again"]
 
+    # Keep actual spellings from both Git and the walk; never read any candidate's contents.
+    for name in others.stdout.split("\0"):
+        path = pathlib.PurePosixPath(name)
+        parent = path.parent.as_posix()
+        if name and parent in folders and path.name not in folders[parent][0] + folders[parent][1]:
+            folders[parent][1].append(path.name)
+
     problems = []
     for _comment, entries in _gitignore_groups(unlazy_copy):
         for pattern in entries:
@@ -313,14 +325,16 @@ def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
             probes = {sample + ("/oah-init-probe" if pattern.endswith("/") else "")}
             for folder, (dirs, files) in folders.items():
                 path = pathlib.PurePosixPath(folder)
-                matches_parent = (folder == parent or (parent and (
-                    path.match(parent) and (parent.startswith("**/") or len(path.parts) == len(parent.split("/"))))))
-                if parent.startswith("**/") and folder == parent[3:]:
+                matched_path, matched_parent = pathlib.PurePosixPath(normalize(folder)), normalize(parent)
+                matches_parent = (normalize(folder) == matched_parent or (parent and (
+                    matched_path.match(matched_parent)
+                    and (parent.startswith("**/") or len(path.parts) == len(parent.split("/"))))))
+                if parent.startswith("**/") and normalize(folder) == matched_parent[3:]:
                     matches_parent = True
                 if not parent or matches_parent:
                     # Existing matching names also catch specific negations such as !production.key.
                     for name in dirs + files:
-                        if fnmatch.fnmatchcase(name, leaf):
+                        if fnmatch.fnmatchcase(normalize(name), normalize(leaf)):
                             probes.add((path / name).as_posix() + ("/oah-init-probe" if pattern.endswith("/") else ""))
                     if matches_parent or not parent:
                         probes.add((path / leaf.replace("*", "oah-init-probe")).as_posix()
@@ -582,9 +596,75 @@ def _rename_exclusive(source, target, source_folder: int | None, folder: int | N
         raise OSError(ctypes.get_errno(), "exclusive installation publication failed")
 
 
+@contextmanager
+def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: bool = False):
+    """Hold the directory's identity; command pins also deny Windows write/delete sharing."""
+    if os.name != "nt":
+        handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(handle)
+            yield handle, f"{info.st_dev}:{info.st_ino}"
+        finally:
+            os.close(handle)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    info = kernel.GetFileInformationByHandleEx
+    info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    info.restype = wintypes.BOOL
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    handle = create(str(path), 0x80 | (0x10000 if delete else 0), 7 if allow_swap else 1,
+                    None, 3, 0x02200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = (wintypes.DWORD * 2)()
+        identity = (ctypes.c_ubyte * 24)()  # FILE_ID_INFO: volume serial and 128-bit file id
+        if (not info(handle, 9, attributes, ctypes.sizeof(attributes))
+                or not info(handle, 18, identity, ctypes.sizeof(identity))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if attributes[0] & 0x400 or not attributes[0] & 0x10:
+            raise OSError("linked or non-directory staging path")
+        yield handle, bytes(identity).hex()
+    finally:
+        close(handle)
+
+
+def _windows_move_directory(handle: int, target: pathlib.Path) -> None:
+    """Rename the pinned source object, without reopening its replaceable pathname."""
+    import ctypes
+    from ctypes import wintypes
+
+    class RenameInfo(ctypes.Structure):
+        _fields_ = [("replace", wintypes.BOOLEAN), ("root", wintypes.HANDLE),
+                    ("length", wintypes.DWORD), ("name", wintypes.WCHAR * (len(str(target)) + 1))]
+
+    encoded = str(target).encode("utf-16-le")
+    # Allocate by UTF-16 code units, including non-BMP characters in project paths.
+    size = RenameInfo.name.offset + len(encoded)
+    data = ctypes.create_string_buffer(max(size, ctypes.sizeof(RenameInfo)))
+    info = ctypes.cast(data, ctypes.POINTER(RenameInfo)).contents
+    info.replace, info.root, info.length = False, None, len(encoded)
+    ctypes.memmove(ctypes.addressof(data) + RenameInfo.name.offset, encoded, len(encoded))
+    rename = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
+    rename.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    rename.restype = wintypes.BOOL
+    if not rename(handle, 3, data, size):  # FileRenameInfo, ReplaceIfExists = FALSE
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: bytes | None = None, *,
              executable: bool = False, source: str | None = None, source_digest: str = "",
-             private: bool = False, source_root: pathlib.Path | None = None) -> bool:
+             private: bool = False, source_root: pathlib.Path | None = None,
+             source_identity: str = "") -> bool:
     """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
     root = pathlib.Path(root).absolute()
     try:
@@ -608,8 +688,17 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                             return False
                     if _linked(source_root, source) is not None:
                         return False
-                    _rename_exclusive(source_path if source_folder is None else source_path.name, name,
-                                      source_folder, folder)
+                    if source_identity:
+                        with _pinned_directory(source_path, delete=os.name == "nt") as (handle, identity):
+                            if identity != source_identity:
+                                return False
+                            if os.name == "nt":
+                                _windows_move_directory(handle, path)
+                            else:
+                                _rename_exclusive(source_path.name, name, source_folder, folder)
+                    else:
+                        _rename_exclusive(source_path if source_folder is None else source_path.name, name,
+                                          source_folder, folder)
                     if private and os.name != "nt":
                         _private_tree(folder, name)
                     if folder is not None:
@@ -1282,6 +1371,28 @@ def _remove_tree(path: pathlib.Path) -> None:
         shutil.rmtree(path, onerror=writable)
 
 
+def _staging_command(path: str, expected: str, argv: list[str]) -> int:
+    """Child entry: bind Git's working directory before it can write, without a pathname race."""
+    try:
+        with _pinned_directory(pathlib.Path(path)) as (handle, identity):
+            if identity != expected:
+                return 125
+            if os.name == "nt":
+                import subprocess
+
+                return subprocess.call(argv, cwd=path)  # the non-reparse handle denies replacement
+            os.fchdir(handle)
+            os.execvp(argv[0], argv)  # Git uses only '.'; a rename cannot redirect its working directory
+    except OSError:
+        return 125
+
+
+def _require_staging(path: pathlib.Path, expected: str) -> None:
+    with _pinned_directory(path) as (_handle, identity):
+        if identity != expected:
+            raise OSError("staging directory changed")
+
+
 def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy.UPSTREAM_GIT,
                    pin: unlazy.Pin = unlazy.PIN, timeout: float = CLONE_TIMEOUT) -> str:
     """Clone into a staging folder, check out the pinned commit, verify it, then move it into place.
@@ -1298,39 +1409,56 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
             if _linked(root, relative) is not None:
                 raise OSError("linked installation path")
         # The clone is isolated from mutable skill parents. Nothing is moved aside until it verifies.
-        with _parents(root, staging_relative):
-            try:
-                for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
-                                            strict=True):
-                    result = run_command(argv, timeout=timeout, env={**os.environ, **NETWORK_ENV})
-                    if result.timed_out or result.returncode != 0:
-                        detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
-                        return (f"OAH_INIT_UNLAZY_FAILED: git {operation} failed ({detail}). Check your "
-                                "network and git, then run oah init --with-unlazy again")
-                if _verify_unlazy_pin(root, staging, pin):
-                    return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
-                            "source and pin, then run oah init --with-unlazy again. Nothing was installed")
-                digest = _tree_digest(staging, root=root)
-                if step.action == "replace":
-                    aside = pathlib.Path(step.aside)
-                    if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
-                        raise OSError("non-local replacement")
-                    relative = aside.relative_to(root).as_posix()
-                    if not step.backup:
-                        raise OSError("no backup was planned")
-                    backup = f"oah/backups/{step.backup}"
-                    if not _publish(_backup_root(root), backup, None, source=relative, source_root=root,
-                                    source_digest=step.digest, private=True):
-                        return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
-                                "away and run oah init --with-unlazy --force again")
-                if not _publish(root, UNLAZY_PROJECT, None, source=staging_relative, source_digest=digest):
-                    return ("OAH_INIT_CHANGED: the unlazy destination changed; inspect the project copy and any "
-                            "private Git state backup, then run oah init --with-unlazy again")
-                return ""
-            finally:
-                if not _is_link(staging) and staging.exists():
-                    _remove_tree(staging)
-    except OSError:
+        with _parents(root, staging_relative) as parent:
+            os.mkdir(staging if parent is None else staging.name, 0o700, dir_fd=parent)
+            with _pinned_directory(staging, allow_swap=True) as (_handle, identity):
+                try:
+                    for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
+                                                strict=True):
+                        argv[-1 if operation == "clone" else len(git_argv()) + 1] = "."
+                        _require_staging(staging, identity)
+                        # The child reopens without following links, checks the held identity and fchdirs on
+                        # POSIX. Windows also denies replacement throughout the external command.
+                        command = [sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+                                   "from oah.init import _staging_command; "
+                                   "sys.exit(_staging_command(sys.argv[2], sys.argv[3], sys.argv[4:]))",
+                                   str(pathlib.Path(__file__).resolve().parent.parent), str(staging), identity, *argv]
+                        result = run_command(command, timeout=timeout, env={**os.environ, **NETWORK_ENV})
+                        _require_staging(staging, identity)
+                        if result.timed_out or result.returncode != 0:
+                            detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
+                            return (f"OAH_INIT_UNLAZY_FAILED: git {operation} failed ({detail}). Check your "
+                                    "network and git, then run oah init --with-unlazy again")
+                    with _pinned_directory(staging) as (_verification_handle, actual):
+                        if actual != identity:
+                            raise OSError("staging directory changed")
+                        if _verify_unlazy_pin(root, staging, pin):
+                            return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
+                                    "source and pin, then run oah init --with-unlazy again. Nothing was installed")
+                        digest = _tree_digest(staging, root=root)
+                        _require_staging(staging, identity)
+                    if step.action == "replace":
+                        aside = pathlib.Path(step.aside)
+                        if aside not in (root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"):
+                            raise OSError("non-local replacement")
+                        relative = aside.relative_to(root).as_posix()
+                        if not step.backup:
+                            raise OSError("no backup was planned")
+                        backup = f"oah/backups/{step.backup}"
+                        if not _publish(_backup_root(root), backup, None, source=relative, source_root=root,
+                                        source_digest=step.digest, private=True):
+                            return ("OAH_INIT_CHANGED: the old unlazy copy or its backup changed; move any backup "
+                                    "away and run oah init --with-unlazy --force again")
+                    if not _publish(root, UNLAZY_PROJECT, None, source=staging_relative, source_digest=digest,
+                                    source_identity=identity):
+                        return ("OAH_INIT_CHANGED: the unlazy destination changed; inspect the project copy and any "
+                                "private Git state backup, then run oah init --with-unlazy again")
+                    return ""
+                finally:
+                    if not _is_link(staging) and staging.exists():
+                        _require_staging(staging, identity)
+                        _remove_tree(staging)
+    except (OSError, InitError):
         return ("OAH_INIT_UNLAZY_FAILED: an installation path changed, is linked or cannot be written safely. "
                 "Remove links and check permissions, then run oah init --with-unlazy again")
 

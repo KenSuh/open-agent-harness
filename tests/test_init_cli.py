@@ -716,6 +716,22 @@ class CorrectionC3Test(unittest.TestCase):
         self.assertNotIn(secret.decode("utf-8"), out + err)
         self.assertEqual(path.read_bytes(), secret)
 
+    def test_ignorecase_secret_negation_leaves_init_incomplete(self):
+        repo = committed_repo(self)
+        subprocess.run(["git", "config", "core.ignorecase", "true"], cwd=repo, check=True, env=git_env())
+        secret = ("fake-" + token_source.token_hex(20)).encode("ascii")
+        path = repo / "PRODUCTION.KEY"
+        path.write_bytes(secret)
+        original = init.add_gitignore_entries(None, unlazy_copy=False) + b"!PRODUCTION.KEY\n"
+        (repo / ".gitignore").write_bytes(original)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OAH_INIT_IGNORE_UNPROTECTED: required pattern *.key", out)
+        self.assertIn("OAH_INIT_INCOMPLETE", last_line(out))
+        self.assertNotIn(secret.decode("ascii"), out + err)
+        self.assertEqual(path.read_bytes(), secret)
+        self.assertEqual((repo / ".gitignore").read_bytes(), original)
+
     def test_existing_ci_command_never_enters_plan_workflow_or_state(self):
         for detected in (False, True):
             with self.subTest(detected=detected):
