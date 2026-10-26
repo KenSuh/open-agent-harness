@@ -1218,6 +1218,35 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
         self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
 
+    def test_manifest_write_failure_settles_as_failed_without_commit_guidance(self):
+        for transient in (True, False):
+            with self.subTest(transient=transient):
+                project = FixProject(self)
+                project.changes_requested()
+                project.queue_fix({"write": FIXED})
+                write = fix.write_text_atomic
+                failures = []
+                terminal = io.StringIO()
+
+                def persist(path, text, **kwargs):
+                    if path.name == "correction.json" and (not transient or not failures):
+                        failures.append(path)
+                        raise PermissionError("manifest persistence unavailable")
+                    return write(path, text, **kwargs)
+
+                with mock.patch.object(fix, "write_text_atomic", side_effect=persist):
+                    with self.assertRaises(ReviewError) as caught:
+                        project.fix(terminal=terminal)
+                self.assertEqual(caught.exception.code, "OAH_STATE_IO")
+                self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
+                for text in (str(caught.exception), terminal.getvalue()):
+                    self.assertNotIn("git commit", text)
+                    self.assertNotIn("oah fix --bind", text)
+                    self.assertNotIn("manifest persistence unavailable", text)
+                self.assertEqual((project.repo / "src/app.py").read_text(encoding="utf-8"), FIXED["src/app.py"])
+                project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
+
     def completed_tree_stops_before_inspection(self):
         project = FixProject(self)
         project.changes_requested()
@@ -1737,6 +1766,41 @@ class ManualTest(unittest.TestCase):
                                   for p in project.state.rglob("*")}, before)
                 self.assertEqual(run.read()["status"], "running")
                 self.assertEqual(run.result(status="finished")["status"], "finished")
+
+    def test_abort_refuses_all_history_problems_without_changing_state(self):
+        for problem in ("index", "source_digest", "findings", "classes", "completed_attempt"):
+            with self.subTest(problem=problem):
+                project = FixProject(self)
+                project.changes_requested()
+                run = runs.new_run(project.state, "t1", "codex", "correction")
+                run.result(status="running")
+                publish_start(project)
+                start = dict(project.record("A1-start.json"), attempt_id="A2", run_id=run.id)
+                if problem == "source_digest":
+                    start["source_receipt_digest"] = receipts.digest(b"unmatched source receipt")
+                elif problem == "findings":
+                    start["finding_ids"] = ["R1-F2"]
+                elif problem == "classes":
+                    start["class_ids"] = ["R1-C2"]
+                receipts.publish(project.state, "t1", "A2-start.json", start)
+                if problem == "index":
+                    with (project.folder() / "index.jsonl").open("ab") as handle:
+                        handle.write(b"{}\n")
+                elif problem == "completed_attempt":
+                    receipts.publish(project.state, "t1", "A3-outcome.json", {
+                        "schema": 1, "kind": "attempt-outcome", "task": "t1", "attempt_id": "A3",
+                        "outcome": "failed", "after_head": None, "evidence": "missing start",
+                        "finished_at": "2026-10-24T00:01:00Z"})
+                records = receipts.load(project.state, "t1")
+                self.assertTrue(records.problems or any(
+                    any(not p.startswith(f"{a.attempt_id} is unfinished:") for p in a.problems)
+                    for a in receipts.attempts(records)))
+                before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                          for p in project.state.rglob("*")}
+                project.refused("OAH_FIX_HISTORY_INVALID", project.abort)
+                self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                                  for p in project.state.rglob("*")}, before)
+                self.assertEqual(run.read()["status"], "running")
 
     def test_abort_accepts_owned_correction_run_identities(self):
         for hashed in (False, True):

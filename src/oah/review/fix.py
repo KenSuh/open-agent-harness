@@ -1247,7 +1247,13 @@ class _Attempt:
     def _end(self, outcome: str, evidence: str) -> None:
         publication = call._CORRECTION_PUBLICATION.get()
         if publication is not None:
+            if outcome == "applied":
+                # Binding requires this manifest; a failure must take the failed-settlement path.
+                write_text_atomic(self.prepared.run.file_path("correction.json"),
+                                  publication.artifacts["correction.json"])
             for name, text in publication.artifacts.items():
+                if outcome == "applied" and name == "correction.json":
+                    continue
                 try:
                     write_text_atomic(self.prepared.run.file_path(name), text)
                 except Exception:
@@ -1781,11 +1787,14 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                     f"{t.name}." if waiting else "")
             raise ReviewError("OAH_FIX_NOTHING_TO_ABORT", f"task {t.name} has no unfinished correction attempt. "
                               f"{RECORDED}.{hint}")
-        broken = [item.attempt_id for item in unfinished if h.start(item) is None]
-        if broken:
-            raise ReviewError("OAH_FIX_HISTORY_INVALID", f"{_ids(broken)} {'has' if len(broken) == 1 else 'have'} no "
-                              f"start record, so oah fix did not start {'it' if len(broken) == 1 else 'them'}. "
-                              f"{RECORDED}. Inspect the records of task {t.name} by hand")
+        problems = list(h.records.problems)
+        for item in h.attempts:
+            # Only the landed reader's missing-outcome diagnostic is expected during abort.
+            problems.extend(problem for problem in item.problems if not (
+                item in unfinished and problem.startswith(
+                    f"{item.attempt_id} is unfinished: it has a start record but no outcome,")))
+        if problems:
+            raise ReviewError("OAH_FIX_HISTORY_INVALID", _ERROR_DIAGNOSTICS["OAH_FIX_HISTORY_INVALID"])
         planned = []
         for attempt in unfinished:
             start = h.start(attempt)
