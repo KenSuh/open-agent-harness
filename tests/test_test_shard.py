@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from unittest import mock
 
@@ -117,6 +118,50 @@ class ShardTest(unittest.TestCase):
                     if name == folder.name or name.startswith(f"{folder.name}."):
                         del sys.modules[name]
 
+    def test_load_tests_custom_suite_preserves_nested_execution(self):
+        events = []
+
+        class FirstTest(unittest.TestCase):
+            def test_first(self):
+                self.assertEqual(events, ["setup"])
+                events.append("first")
+
+        class SecondTest(unittest.TestCase):
+            def test_second(self):
+                self.assertEqual(events, ["setup", "first"])
+                events.append("second")
+
+        class Wrapper(unittest.TestSuite):
+            def run(self, result, debug=False):
+                events.append("setup")
+                try:
+                    return super().run(result, debug)
+                finally:
+                    events.append("teardown")
+
+        module = types.ModuleType("custom_suite_fixture")
+
+        def load_tests(loader, tests, pattern):
+            return Wrapper([
+                unittest.TestSuite([FirstTest("test_first")]),
+                unittest.TestSuite([SecondTest("test_second")]),
+            ])
+
+        module.load_tests = load_tests
+        for count in (1, 2, 5):
+            with self.subTest(count=count):
+                events.clear()
+                loader = unittest.TestLoader()
+                with mock.patch.object(loader, "discover", side_effect=lambda *args, **kwargs:
+                                       unittest.TestSuite([loader.loadTestsFromModule(module)])):
+                    groups = tool.shards(count, loader=loader)
+                actual = unittest.TestSuite(unittest.TestSuite(group) for group in groups)
+                result = unittest.TestResult()
+                actual.run(result)
+                self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+                self.assertEqual(result.testsRun, 2)
+                self.assertEqual(events, ["setup", "first", "second", "teardown"])
+
     @staticmethod
     def _test_ids(suite):
         if isinstance(suite, unittest.TestCase):
@@ -163,7 +208,7 @@ class ShardTest(unittest.TestCase):
             folder.mkdir()
             (folder / "__init__.py").write_text("# 클래스 단위 분할 검사 패키지.\n", encoding="utf-8")
             source = "# 큰 모듈 하나를 클래스 단위로 나누는 검사.\nimport unittest\n"
-            for name, count in (("First", 6), ("Second", 5), ("Third", 2)):
+            for name, count in (("First", 2), ("Second", 5), ("Third", 6)):
                 source += f"class {name}Test(unittest.TestCase):\n"
                 source += "".join(f"    def test_{i}(self): pass\n" for i in range(count))
             (folder / "test_big.py").write_text(source, encoding="utf-8")
@@ -174,7 +219,7 @@ class ShardTest(unittest.TestCase):
             try:
                 groups = tool.shards(2, folder)
                 classes = [[suite._tests[0].__class__.__name__ for suite in group] for group in groups]
-                self.assertEqual(classes, [["FirstTest", "SmallTest"], ["SecondTest", "ThirdTest"]])
+                self.assertEqual(classes, [["ThirdTest", "SmallTest"], ["FirstTest", "SecondTest"]])
                 totals = [sum(suite.countTestCases() for suite in group) for group in groups]
                 self.assertEqual(totals, [8, 7])
             finally:

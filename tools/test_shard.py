@@ -3,9 +3,10 @@
 """Run one shard of the unit tests: `python tools/test_shard.py INDEX COUNT [unittest options]`.
 
 Discovery runs once, so nested packages and load_tests hooks shape the suite as usual. The suite is then cut into
-units, each the innermost suite that holds only test cases (normally one TestCase class), so one large module can
-spread over several shards while class fixtures stay together. Units are assigned greedily by test count, largest
-first, to the smallest shard so far; ties follow discovery order, and each shard runs its units in discovery order,
+units, each a custom suite or the innermost plain suite holding only test cases (normally one TestCase class).
+One large module can spread over several shards while class fixtures stay together. Custom suites stay intact.
+Units are assigned greedily by test count, largest first, to the smallest shard so far; ties follow discovery order,
+and each shard runs its units in discovery order,
 so every runner computes the same split and a module's classes stay adjacent.
 """
 from __future__ import annotations
@@ -33,7 +34,10 @@ def shards(count: int, tests_dir: pathlib.Path = ROOT / "tests",
 
 
 def _units(suite: unittest.TestSuite):
-    """Yield the innermost suites that hold only test cases; a lone test case becomes its own unit."""
+    """Keep custom suites intact; split plain suites down to case-only suites or lone test cases."""
+    if type(suite) is not unittest.TestSuite:
+        yield suite
+        return
     children = list(suite)
     if children and all(isinstance(child, unittest.TestCase) for child in children):
         yield suite
