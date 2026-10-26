@@ -1261,6 +1261,34 @@ class WindowsSecurityTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_google_and_stripe_comment_tokens_use_digest_only_preview(self):
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        for prefix, size in (("AI" + "za", 35), ("sk" + "_live_", 24)):
+            value = prefix + "".join(token_source.SystemRandom().sample(alphabet, size))
+            original = ("# integration example " + value + "\r\n").encode("ascii")
+            for before, after in ((original, b"# revised\r\n"), (b"# original\r\n", original)):
+                self.assertTrue(init._preview_text(original) is None, "credential must not reach the terminal")
+                self.assertTrue(init._terminal_diff("file.md", before, after)
+                                == ["             " + init._replacement_note(before)],
+                                "credential must produce only a digest")
+
+    def test_unknown_high_entropy_tokens_use_digest_only_preview(self):
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+/=-"
+        for size in (20, 32, 64):
+            value = "".join(token_source.SystemRandom().sample(alphabet, size))
+            original = ("# integration example " + value + "\n").encode("ascii")
+            for before, after in ((original, b"# revised\n"), (b"# original\n", original)):
+                self.assertTrue(init._terminal_diff("file.md", before, after)
+                                == ["             " + init._replacement_note(before)],
+                                "unknown token must produce only a digest")
+
+    def test_prose_short_hex_and_low_entropy_runs_keep_the_diff(self):
+        for original in (b"# ordinary project guidance\n", b"# revision a1b2c3d4e5f6\n",
+                         b"# " + b"a" * 32 + b"\n"):
+            preview = "\n".join(init._terminal_diff("file.md", original, b"# revised\n"))
+            self.assertIn("-" + original.decode("ascii").strip(), preview)
+            self.assertIn("+# revised", preview)
+
     def test_provider_tokens_and_pat_assignments_use_digest_only_preview(self):
         fixtures = [prefix + token_source.token_hex(20) for prefix in
                     ("gl" + "pat-", "gl" + "dt-", "hf" + "_", "npm" + "_", "pypi" + "-")]
@@ -1951,6 +1979,57 @@ class UnlazyStepTest(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX directory symlinks")
     def test_internal_directory_alias_install_and_discovery(self):
         self._assert_internal_directory_alias_install()
+
+    def _assert_casing_alias_install(self):
+        destination = self.repo / "Local-Skills"
+        destination.mkdir()
+        alternate = self.repo / "local-skills"
+        if not alternate.exists() or not alternate.samefile(destination):
+            self.skipTest("requires a case-insensitive filesystem")
+        alias = self.repo / ".agents"
+        directory_alias(alternate, alias)
+        step = self.plan()
+        self.assertEqual(step.action, "install")
+        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        installed = destination / "skills/unlazy"
+        self.assertEqual(unlazy.verify_pin(installed, self.pin), [])
+        self.assertEqual(self.plan().action, "present")
+        self.assertEqual(self.plan(env={unlazy.ENV_VAR: str(alias / "skills/unlazy")}).action, "present")
+        self.assertTrue(init._is_link(alias))
+
+    @unittest.skipIf(os.name == "nt", "POSIX case-insensitive internal symlink")
+    def test_case_insensitive_internal_alias_install_and_discovery(self):
+        self._assert_casing_alias_install()
+
+    @unittest.skipUnless(os.name == "nt", "Windows case-insensitive internal junction")
+    def test_windows_case_insensitive_internal_alias_install_and_discovery(self):
+        self._assert_casing_alias_install()
+
+    def test_project_verification_compares_held_directory_identities(self):
+        git("clone", "--quiet", str(self.source), str(self.target))
+        pinned = init._pinned_directory
+        identities = []
+
+        @contextlib.contextmanager
+        def directory(path, **kwargs):
+            with pinned(path, **kwargs) as held:
+                identities.append(held[1])
+                yield held
+
+        with mock.patch.object(init, "_pinned_directory", side_effect=directory):
+            self.assertEqual(init._verify_unlazy_pin(self.repo, self.target, self.pin), [])
+        self.assertGreaterEqual(len(identities), 2)
+        self.assertEqual(identities[-1], identities[-2])
+
+    def test_project_verification_rejects_a_different_git_directory(self):
+        git_commit(self.repo, self.FILES, "parent checkout")
+        self.target.mkdir(parents=True)
+        for relative, data in self.FILES.items():
+            path = self.target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data.encode("ascii"))
+        parent_pin = unlazy.Pin(commit=git("rev-parse", "HEAD", cwd=self.repo), files=self.pin.files)
+        self.assertTrue(init._verify_unlazy_pin(self.repo, self.target, parent_pin))
 
     @unittest.skipUnless(os.name == "nt", "native Windows directory junctions")
     def test_windows_internal_directory_alias_install_and_discovery(self):

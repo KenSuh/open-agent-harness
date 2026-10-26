@@ -194,16 +194,19 @@ class PlanFirstTest(unittest.TestCase):
 
     def test_existing_text_diff_precedes_force_confirmation_and_is_not_stored(self):
         repo = committed_repo(self)
-        target = repo / ".graphifyignore"
-        original = b"# project graph exclusions\r\ncustom-cache/\r\n"
+        # Keep both sides free of long token-alphabet runs (J″ also catches long paths).
+        relative = "docs/wiki/.obsidian/app.json"
+        target = repo / relative
+        target.parent.mkdir(parents=True)
+        original = b'{\r\n  "myOption": true\r\n}\r\n'
         target.write_bytes(original)
         before = snapshot(repo)
         code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", "--force",
                                   *flags(graph=True))
         self.assertEqual(code, 0, err)
-        self.assertIn("--- a/.graphifyignore", out)
-        self.assertIn("+++ b/.graphifyignore", out)
-        self.assertIn("-custom-cache/", out)
+        self.assertIn("--- a/" + relative, out)
+        self.assertIn("+++ b/" + relative, out)
+        self.assertIn('-  "myOption": true', out)
         self.assertEqual(snapshot(repo), before)
         self.assertFalse((repo / ".git/oah").exists())
 
@@ -218,14 +221,14 @@ class PlanFirstTest(unittest.TestCase):
         code, out, err = run_init(repo, machine, "--force", *flags(graph=True))
         self.assertEqual(code, 1, out + err)
         self.assertIn("Apply this plan?", observed[0][0])
-        self.assertIn("-custom-cache/", observed[0][1])
+        self.assertIn('-  "myOption": true', observed[0][1])
         self.assertEqual(snapshot(repo), before)
 
         code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", *flags(graph=True))
         self.assertEqual(code, 0, out + err)
         for name, data in snapshot(repo / ".git/oah").items():
-            self.assertNotIn(b"custom-cache/", data, name)
-            self.assertNotIn(b"--- a/.graphifyignore", data, name)
+            self.assertNotIn(b'"myOption"', data, name)
+            self.assertNotIn(("--- a/" + relative).encode("ascii"), data, name)
 
     def test_terminal_diff_falls_back_for_credentials_binary_and_invalid_utf8(self):
         fixtures = (b"# API_KEY=" + ("fake-" + token_source.token_hex(20)).encode("ascii") + b"\n",
@@ -256,10 +259,13 @@ class PlanFirstTest(unittest.TestCase):
         code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", "--force",
                                   *flags(hooks=True, ci=True))
         self.assertEqual(code, 0, err)
-        for path in ("AGENTS.md", ".git/hooks/pre-push", ".github/workflows/oah-ci.yml"):
+        for path in ("AGENTS.md", ".git/hooks/pre-push"):
             self.assertIn("--- a/" + path, out)
         self.assertIn("-# custom push check", out)
-        self.assertIn("-# custom workflow", out)
+        # CI's pinned SHA values trigger J″ even when the existing comment is safe.
+        self.assertIn(init._replacement_note(workflow.read_bytes()), out)
+        self.assertNotIn("--- a/.github/workflows/oah-ci.yml", out)
+        self.assertNotIn("-# custom workflow", out)
         code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", *flags(hooks=True, ci=True))
         self.assertEqual(code, 0, err)
         self.assertIn("--- a/.git/hooks/pre-push", out)

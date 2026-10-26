@@ -19,6 +19,7 @@ import fnmatch
 import hashlib
 import importlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -27,6 +28,7 @@ import shutil
 import stat
 import sys
 import time
+from collections import Counter
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Callable, Mapping, NamedTuple
 
@@ -1545,7 +1547,13 @@ def _replacement_note(data: bytes | None) -> str:
 
 
 def _preview_text(data: bytes) -> str | None:
-    """Apply the landed scanner's rules in memory; never stage user bytes for scanning."""
+    """Shared preview/guidance scanner: landed privacy rules plus unknown high-entropy tokens.
+
+    The toolkit mirrors the repository privacy scanner (parity-tested), including email policy.
+    Keep provider patterns there rather than maintaining another per-format list here. Unknown
+    token-alphabet runs of at least 20 characters and >= 3 bits/character also hide the preview.
+    Nothing is staged, logged or refused on a hit.
+    """
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
@@ -1554,10 +1562,12 @@ def _preview_text(data: bytes) -> str | None:
         return None  # Includes NULs, terminal escapes and other binary/control data, at any offset.
     if any(pattern.search(text) for _rule, pattern in checks.CONTENT_RULES):
         return None
-    # Provider formats absent from the landed scanner still must never reach a terminal preview.
-    if re.search(r"(?<![A-Za-z0-9])(?:gl(?:pat|dt|rt|ft|ptt|cbt|imt|oas)-[A-Za-z0-9_-]{20,}|"
-                 r"hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})", text):
-        return None
+    for match in re.finditer(r"[A-Za-z0-9_+/=\-]{20,}", text):
+        token = match.group()
+        entropy = -sum((count / len(token)) * math.log2(count / len(token))
+                       for count in Counter(token).values())
+        if entropy >= 3.0:
+            return None
     for match in checks.EMAIL.finditer(text):
         address = match.group().lower()
         domain = address.rsplit("@", 1)[-1]
@@ -1808,7 +1818,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
     relative_folder = folder.relative_to(root)
     try:
         with _parents(root, (relative_folder / ".init-pin").as_posix(), create_parents=False,
-                      private_staging=private_staging) as held:
+                      private_staging=private_staging) as held, \
+                _pinned_directory(folder, private_staging=private_staging) as (_handle, identity):
             original = folder.lstat()
 
             def check_directory() -> None:
@@ -1828,8 +1839,18 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
             top = _unlazy_git(folder, "rev-parse", "--show-toplevel", env=env)
             head = _unlazy_git(folder, "rev-parse", "--verify", "--quiet", "HEAD", env=env)
             check_directory()
+            same_directory = False
+            if top.returncode == 0 and top.stdout.strip():
+                reported = pathlib.Path(top.stdout.strip())
+                if reported.is_absolute() and reported.is_relative_to(root):
+                    relative_top = _relative((reported.relative_to(root) / ".init-pin").as_posix())
+                    with _parents(root, relative_top, create_parents=False,
+                                  private_staging=private_staging), \
+                            _pinned_directory(reported, private_staging=private_staging) as (_top, top_identity):
+                        same_directory = identity == top_identity
+                        check_directory()
             if (top.returncode != 0 or not top.stdout.strip()
-                    or pathlib.Path(top.stdout.strip()).absolute() != folder.absolute()
+                    or not same_directory
                     or head.returncode != 0 or head.stdout.strip() != pin.commit):
                 problems.append("the checkout or commit does not match the pin")
             return problems

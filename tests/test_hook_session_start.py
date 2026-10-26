@@ -73,6 +73,29 @@ class SessionStartTest(unittest.TestCase):
         self.assertFalse(credential in text, "lease guidance exposed a credential")
         self.assertIn("OAH_SESSION_START_UNSAFE", text)
 
+    def test_provider_and_unknown_tokens_are_omitted_from_session_guidance(self):
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        for prefix, size in (("AI" + "za", 35), ("sk" + "_live_", 24), ("", 20)):
+            credential = prefix + "".join(secrets.SystemRandom().sample(alphabet, size))
+            (self.repo / "docs/wiki/log.md").write_bytes(
+                LOG.replace("Task two", "Integration " + credential).encode("utf-8"))
+            direct = "\n".join(hook_session_start.lines(self.repo, {}))
+            result = run_hook(self.repo, worker=False)
+            self.assertFalse(credential in direct, "guidance exposed a credential")
+            self.assertFalse(credential.encode("ascii") in result.stdout + result.stderr,
+                             "hook output exposed a credential")
+            self.assertIn("OAH_SESSION_START_UNSAFE", direct)
+            self.assertIn(b"OAH_SESSION_START_UNSAFE", result.stdout)
+            self.assertIn(b"2026-10-24 Task one", result.stdout)
+            self.assertEqual((result.returncode, result.stderr), (0, b""))
+
+    def test_prose_and_short_hex_ids_remain_in_session_guidance(self):
+        (self.repo / "docs/wiki/log.md").write_bytes(
+            LOG.replace("Task two", "Project guidance a1b2c3d4e5f6").encode("utf-8"))
+        text = "\n".join(hook_session_start.lines(self.repo, {}))
+        self.assertIn("Project guidance a1b2c3d4e5f6", text)
+        self.assertNotIn("OAH_SESSION_START_UNSAFE", text)
+
 
     def test_worker_prints_nothing_even_when_state_is_broken(self):
         self.state.mkdir(parents=True)
