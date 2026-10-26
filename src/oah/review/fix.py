@@ -202,6 +202,7 @@ _WARNING_DIAGNOSTICS = {
 
 def _error_diagnostic(exc: BaseException) -> tuple[str, str]:
     """Never format exception text, paths, class names or unapproved codes, even without exported keys."""
+    import sys as _s, traceback as _t; _s.stderr.write("OAH_DIAG_ERROR " + "".join(_t.format_exception(exc)) + "\n")
     code = INTERRUPTED if isinstance(exc, KeyboardInterrupt) else getattr(exc, "code", None)
     if not isinstance(code, str) or code not in _ERROR_DIAGNOSTICS:
         code = "OAH_STATE_IO" if isinstance(exc, OSError) else "OAH_FIX_FAILED"
