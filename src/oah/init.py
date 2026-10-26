@@ -434,17 +434,11 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
         if os.name == "nt" or create:
             unlazy._verify_snapshot_permissions(path)
         if os.name == "nt":
-            # The landed verifier rejects foreign writes; private backups must also reject foreign reads.
+            # Match the landed creator's exact private grants, allowing its trusted Windows owners.
             descriptor = unlazy._windows_security_descriptor(path)
             sid = unlazy._windows_user_sid()
-            unlazy._verify_windows_dacl(descriptor, sid, snapshot=True, protected=True)
-            owner = descriptor[2:descriptor.index("D:")]
-            if unlazy._windows_canonical_sid(owner) != sid:
-                raise OSError("state owner is not the current user")
-            for ace in re.findall(r"\(([^()]*)\)", descriptor):
-                fields = ace.split(";")  # Syntax has already been validated by the landed verifier.
-                if fields[0] == "A" and unlazy._windows_canonical_sid(fields[5]) not in (sid, "S-1-3-4"):
-                    raise OSError("state grants access to another account")
+            if not _windows_security_matches(descriptor, f"O:{sid}D:P(A;OICI;FA;;;OW)"):
+                raise OSError("state DACL differs from private grants")
         elif stat.S_IMODE(path.lstat().st_mode) != 0o700:
             raise OSError("state directory is not owner-only")
     except (OSError, unlazy.UnlazyError):
@@ -764,21 +758,43 @@ def _macos_file_acl(fd: int, value: bytes | None = None) -> bytes:
 
 
 def _windows_security_matches(actual: str, expected: str) -> bool:
-    """Require a protected DACL with the same owner and ordered effective ACEs.
+    """Require trusted owners and a protected DACL with identical ordered effective ACEs.
 
     Freezing inheritance can change AI/AR control bits and inherited-ACE provenance (ID),
-    without changing any grant or denial. No other ACE flag, right or principal is ignored.
+    without changing any grant or denial. Resolve owner/ACE aliases through the landed SID helper;
+    the landed verifier owns the trusted-owner set. No other ACE flag, right or principal is ignored.
     """
-    pattern = r"O:([^:()]+)D:((?:P|AI|AR)*)(\(.+\))"
-    found, wanted = re.fullmatch(pattern, actual), re.fullmatch(pattern, expected)
-    if found is None or wanted is None or "P" not in found[2] or found[1] != wanted[1]:
-        return False
+    # Same standard/file rights vocabulary as the landed verifier, including SDDL's hex spelling.
+    rights_masks = {"CC": 0x1, "DC": 0x2, "LC": 0x4, "SW": 0x8, "RP": 0x10, "WP": 0x20,
+                    "DT": 0x40, "LO": 0x80, "CR": 0x100, "SD": 0x10000, "RC": 0x20000,
+                    "WD": 0x40000, "WO": 0x80000, "FA": 0x1F01FF, "FR": 0x120089,
+                    "FW": 0x120116, "FX": 0x1200A0, "GA": 0x10000000, "GX": 0x20000000,
+                    "GW": 0x40000000, "GR": 0x80000000}
 
-    def effective(aces: str) -> str:
-        return re.sub(r"(\([^;()]+;)((?:OI|CI|NP|IO|ID|SA|FA)*)(;)",
-                      lambda match: match[1] + match[2].replace("ID", "") + match[3], aces)
+    def effective(descriptor: str) -> list[tuple]:
+        aces = []
+        for ace in re.findall(r"\(([^()]*)\)", descriptor):
+            kind, flags, rights, object_type, inherited_type, principal = ace.split(";")
+            if re.fullmatch(r"0x[0-9a-fA-F]+", rights):
+                mask = int(rights, 16)
+            else:
+                tokens = [rights[i:i + 2] for i in range(0, len(rights), 2)]
+                if not tokens or any(token not in rights_masks for token in tokens):
+                    raise OSError("unverified DACL rights")
+                mask = 0
+                for token in tokens:
+                    mask |= rights_masks[token]
+            aces.append((kind, flags.replace("ID", ""), mask, object_type, inherited_type,
+                         unlazy._windows_canonical_sid(principal)))
+        return aces
 
-    return effective(found[3]) == effective(wanted[3])
+    try:
+        sid = unlazy._windows_canonical_sid(unlazy._windows_user_sid())
+        unlazy._verify_windows_dacl(actual, sid, protected=True)
+        unlazy._verify_windows_dacl(expected, sid)
+        return effective(actual) == effective(expected)
+    except OSError:
+        return False  # Never forward the landed verifier's account identifiers or descriptor bytes.
 
 
 def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool = False,
@@ -856,7 +872,6 @@ def _private_file(temp: pathlib.Path, folder: int | None) -> int:
     try:
         if os.name == "nt":
             actual = unlazy._windows_security_descriptor(temp)
-            unlazy._verify_windows_dacl(actual, sid, snapshot=True, directory=False, protected=True)
             if not _windows_security_matches(actual, expected):
                 raise OSError("staging security differs from owner-only DACL")
         elif sys.platform == "darwin":
@@ -921,8 +936,15 @@ def _file_restrictions(root: pathlib.Path, relative: str, folder: int | None) ->
             raise OSError("non-regular replacement")
         if os.name != "nt" and info.st_uid != os.getuid():
             raise OSError("replacement owner differs")
-        acl = (unlazy._windows_security_descriptor(path) if os.name == "nt" else
-               _macos_file_acl(fd) if sys.platform == "darwin" else b"")
+        if os.name == "nt":
+            original = unlazy._windows_security_descriptor(path)
+            # Snapshot the protected effective DACL that publication will copy, even if this source
+            # still inherits. Rechecks use the same structural comparator rather than SDDL spelling.
+            acl = re.sub(r"D:(?:P|AI|AR)*", "D:P", original, count=1)
+            if not _windows_security_matches(acl, original):
+                raise OSError("replacement permissions cannot be verified")
+        else:
+            acl = _macos_file_acl(fd) if sys.platform == "darwin" else b""
         return stat.S_IMODE(info.st_mode), acl
     finally:
         os.close(fd)
@@ -978,7 +1000,12 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     if ((current is None) != (before is None) or (current is not None and
                             hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
                         return False
-                    if _file_restrictions(root, relative, folder) != restrictions:
+                    current_restrictions = _file_restrictions(root, relative, folder)
+                    if os.name == "nt" and current_restrictions is not None and restrictions is not None:
+                        if (current_restrictions[0] != restrictions[0] or not
+                                _windows_security_matches(current_restrictions[1], restrictions[1])):
+                            return False
+                    elif current_restrictions != restrictions:
                         return False
                     if _current(root, relative, folder) != current:
                         return False
