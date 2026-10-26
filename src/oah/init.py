@@ -445,33 +445,36 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
 
 @contextmanager
 def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
-                     private_from: pathlib.Path | None = None):
-    """Hold every no-follow parent without delete sharing through all pathname operations."""
+                     private_from: pathlib.Path | None = None, private_staging: bool = False):
+    """Hold no-follow parents; only the private state subtree may share delete access."""
     parent = (root / relative).absolute().parent
+    if private and private_from is None:
+        private_from = root / pathlib.PurePosixPath(relative).parts[0]
     with ExitStack() as pins:
         for path in (*reversed(parent.parents), parent):
-            restricted = private or (private_from is not None and path.is_relative_to(private_from))
+            restricted = private_from is not None and path.is_relative_to(private_from)
             if create_parents and path.is_relative_to(root):
                 if restricted:
                     if not path.exists():
                         unlazy._private_directory(path)
                 else:
                     path.mkdir(exist_ok=True)
-            pins.enter_context(_pinned_directory(path))
-            if restricted and path != root and path.is_relative_to(root):
+            share_delete = restricted or (private_staging and path.is_relative_to(root))
+            pins.enter_context(_pinned_directory(path, private_staging=share_delete))
+            if restricted and path.is_relative_to(root):
                 _private_state_directory(path)
         yield
 
 
 @contextmanager
 def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
-             private_from: pathlib.Path | None = None):
+             private_from: pathlib.Path | None = None, private_staging: bool = False):
     """Keep every parent pinned until the caller has published and cleaned up."""
     if _linked(root, relative) is not None:
         raise OSError("linked publication path")
     if os.name == "nt":
         with _windows_parents(root, relative, create_parents=create_parents, private=private,
-                              private_from=private_from):
+                              private_from=private_from, private_staging=private_staging):
             yield None
         return
     handles = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
@@ -567,11 +570,11 @@ def _windows_file_identity(fd: int) -> bytes:
     return bytes(identity)
 
 
-def _read_user(root: pathlib.Path, relative: str) -> bytes | None:
-    """Read only worktree-local regular files, without creating missing parent directories."""
+def _read_user(root: pathlib.Path, relative: str, *, private_staging: bool = False) -> bytes | None:
+    """Read regular files under the given root, without creating missing parent directories."""
     relative = _relative(relative)
     try:
-        with _parents(root, relative, create_parents=False) as folder:
+        with _parents(root, relative, create_parents=False, private_staging=private_staging) as folder:
             return _current(root, relative, folder)
     except FileNotFoundError:
         return None
@@ -843,7 +846,7 @@ def _private_file(temp: pathlib.Path, folder: int | None, *, security: str | Non
 
 
 @contextmanager
-def _file_staging(path: pathlib.Path, folder: int | None):
+def _file_staging(path: pathlib.Path, folder: int | None, *, private: bool = False):
     """Keep staging files under a private directory, with security established at creation."""
     directory = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     name = directory if folder is None else directory.name
@@ -851,12 +854,12 @@ def _file_staging(path: pathlib.Path, folder: int | None):
         unlazy._private_directory(directory)
         identity = ""
         try:
-            with _pinned_directory(directory) as (_handle, identity):
+            with _pinned_directory(directory, private_staging=private) as (_handle, identity):
                 _verify_windows_private_descriptor(unlazy._windows_security_descriptor(directory), directory=True)
                 yield directory / "file.tmp", None
         finally:
             if identity:
-                _require_staging(directory, identity)
+                _require_staging(directory, identity, private_staging=private)
                 os.rmdir(directory)
         return
     os.mkdir(name, 0o700, dir_fd=folder)
@@ -918,14 +921,14 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
             path = root / relative
             name = path if folder is None else path.name
             if os.name == "nt":
-                with _pinned_directory(path.parent) as (_handle, parent_identity):
+                with _pinned_directory(path.parent, private_staging=private) as (_handle, parent_identity):
                     pass
             if data is None:
                 # Reserve a new installation exclusively, without merging into a concurrent directory.
                 if os.name == "nt":
                     unlazy._private_directory(path)
                     _verify_windows_private_descriptor(unlazy._windows_security_descriptor(path), directory=True)
-                    _require_staging(path.parent, parent_identity)
+                    _require_staging(path.parent, parent_identity, private_staging=private)
                 else:
                     os.mkdir(name, 0o700, dir_fd=folder)
                     if private:
@@ -933,10 +936,10 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                 if folder is not None:
                     os.fsync(folder)
                 return True
-            with _file_staging(path, folder) as (temp, staging_folder):
+            with _file_staging(path, folder, private=private) as (temp, staging_folder):
                 temporary = temp if folder is None else temp.name
                 if os.name == "nt":
-                    with _pinned_directory(temp.parent) as (_handle, staging_identity):
+                    with _pinned_directory(temp.parent, private_staging=private) as (_handle, staging_identity):
                         pass
                 try:
                     restrictions = _file_restrictions(root, relative, folder)
@@ -969,8 +972,8 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     if _current(root, relative, folder) != current:
                         return False
                     if os.name == "nt":
-                        _require_staging(path.parent, parent_identity)
-                        _require_staging(temp.parent, staging_identity)
+                        _require_staging(path.parent, parent_identity, private_staging=private)
+                        _require_staging(temp.parent, staging_identity, private_staging=private)
                     if before is not None:
                         os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
                     elif os.name == "nt":
@@ -982,8 +985,8 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     return True
                 finally:
                     if os.name == "nt":
-                        _require_staging(path.parent, parent_identity)
-                        _require_staging(temp.parent, staging_identity)
+                        _require_staging(path.parent, parent_identity, private_staging=private)
+                        _require_staging(temp.parent, staging_identity, private_staging=private)
                     try:
                         os.unlink(temporary, dir_fd=staging_folder)
                     except FileNotFoundError:
@@ -1626,7 +1629,8 @@ def _unlazy_exists(relative: str) -> str:
 
 
 def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin, *,
-                       env: Mapping[str, str] | None = None) -> list[str]:
+                       env: Mapping[str, str] | None = None,
+                       private_staging: bool = False) -> list[str]:
     """Adapt the landed pin check's project reads; external tool installations keep their landed check."""
     env = _unlazy_environment() if env is None else env
     if not folder.is_relative_to(root):
@@ -1646,7 +1650,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
         return problems
     relative_folder = folder.relative_to(root)
     try:
-        with _parents(root, (relative_folder / ".init-pin").as_posix(), create_parents=False) as held:
+        with _parents(root, (relative_folder / ".init-pin").as_posix(), create_parents=False,
+                      private_staging=private_staging) as held:
             original = folder.lstat()
 
             def check_directory() -> None:
@@ -1659,7 +1664,7 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
             check_directory()
             problems = []
             for relative, digest in pin.files.items():
-                data = _read_user(root, (relative_folder / relative).as_posix())
+                data = _read_user(root, (relative_folder / relative).as_posix(), private_staging=private_staging)
                 if data is None or hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest() != digest:
                     problems.append("a script is missing or differs from the pin")
             check_directory()
@@ -1811,17 +1816,17 @@ def _staged_files(path: pathlib.Path, handle: int) -> tuple[dict[str, tuple[byte
             child = _relative(f"{relative}/{name}" if relative else name)
             if os.name == "nt":
                 # The caller holds a non-reparse source identity and rechecks it at publication.
-                with _parents(path, child, create_parents=False):
+                with _parents(path, child, create_parents=False, private_staging=True):
                     item = path / child
                     if _is_link(item):
                         raise OSError("linked staged entry")
                     info = item.stat(follow_symlinks=False)
                     if stat.S_ISDIR(info.st_mode):
                         directories.append(child)
-                        with _pinned_directory(item) as (held, _identity):
+                        with _pinned_directory(item, private_staging=True) as (held, _identity):
                             visit(item, child, held)
                     elif stat.S_ISREG(info.st_mode):
-                        data = _read_user(path, child)
+                        data = _read_user(path, child, private_staging=True)
                         if data is None:
                             raise OSError("staged entry disappeared")
                         files[child] = data, bool(info.st_mode & stat.S_IXUSR)
@@ -1895,13 +1900,13 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                     with _pinned_directory(staging, private_staging=True) as (_verification_handle, actual):
                         if actual != identity:
                             raise OSError("staging directory changed")
-                        if _verify_unlazy_pin(staging, staging, pin, env=environment):
+                        if _verify_unlazy_pin(staging, staging, pin, env=environment, private_staging=True):
                             return ("OAH_INIT_UNLAZY_FAILED: the downloaded copy is not the pinned unlazy; check the "
                                     "source and pin, then run oah init --with-unlazy again. Nothing was installed")
                         files, directories = _staged_files(staging, _verification_handle)
                         # The landed verifier only needs a detached HEAD and a recognizable checkout.
                         # Never publish objects (commit authors), config/remotes, index, refs or reflogs.
-                        head = _read_user(staging, ".git/HEAD")
+                        head = _read_user(staging, ".git/HEAD", private_staging=True)
                         files[".git/HEAD"] = head or b"", False
                         files[".git/config"] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n", False
                         directories += [".git", ".git/objects", ".git/refs"]

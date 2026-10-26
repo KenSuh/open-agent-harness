@@ -821,6 +821,34 @@ class RulesStepTest(unittest.TestCase):
 
 
 class WindowsDirectoryPinsTest(unittest.TestCase):
+    def test_windows_parent_sharing_follows_the_private_root_boundary(self):
+        repo = make_git_repo(self)
+        common = repo_info(repo).common_dir
+        staging = common / "oah/staging/run"
+        unlazy._private_makedirs(staging / "scripts")
+        pinned = init._pinned_directory
+        cases = (
+            (repo, ".oah/nested/file.md", {}, None),
+            (staging, "scripts/file.mjs", {"private_staging": True}, staging),
+            (common, "oah/backups/run/file", {"private": True}, common / "oah"),
+            (common, "oah/staging/new/file", {"private": True}, common / "oah"),
+        )
+        for root, relative, options, boundary in cases:
+            seen = []
+
+            @contextlib.contextmanager
+            def directory(path, **kwargs):
+                shared = boundary is not None and path.is_relative_to(boundary)
+                self.assertEqual(kwargs.get("private_staging", False), shared, str(path))
+                seen.append(path)
+                with pinned(path, **kwargs) as identity:
+                    yield identity
+
+            with self.subTest(root=root, relative=relative):
+                with mock.patch.object(init, "_pinned_directory", side_effect=directory):
+                    with init._windows_parents(root, relative, **options):
+                        self.assertIn((root / relative).parent, seen)
+
     def test_windows_parent_walk_holds_non_delete_pins_through_creation_and_use(self):
         repo = make_git_repo(self)
         pinned, mkdir = init._pinned_directory, pathlib.Path.mkdir
@@ -971,7 +999,6 @@ class WindowsSecurityTest(unittest.TestCase):
                         self.assertEqual(eval(share, {"__builtins__": {},
                                                       "private_staging": private_staging}), expected)
         self.assertIs(inspect.signature(init._pinned_directory).parameters["private_staging"].default, False)
-        self.assertIn("pins.enter_context(_pinned_directory(path))", inspect.getsource(init._windows_parents))
 
     def test_windows_security_is_set_only_at_creation(self):
         tree = ast.parse(inspect.getsource(init))
@@ -1680,8 +1707,10 @@ class UnlazyStepTest(unittest.TestCase):
         step = self.plan()
         self.assertEqual(step.action, "install")
         pinned = init._pinned_directory
+        parents = init._parents
         staging_parent = repo_info(self.repo).common_dir / "oah/staging"
         shared = []
+        staging_reads = []
 
         @contextlib.contextmanager
         def directory(path, **kwargs):
@@ -1690,13 +1719,27 @@ class UnlazyStepTest(unittest.TestCase):
                 self.assertTrue(private_staging, "private Git staging must explicitly share delete")
                 shared.append(path)
             elif private_staging:
-                self.fail("only private Git-state staging pins may share delete")
+                self.assertTrue(path.is_relative_to(staging_parent.parent),
+                                "only private Git-state pins may share delete")
             with pinned(path, **kwargs) as identity:
                 yield identity
 
-        with mock.patch.object(init, "_pinned_directory", side_effect=directory):
+        @contextlib.contextmanager
+        def parent_walk(root, relative, **kwargs):
+            if root.is_relative_to(staging_parent):
+                self.assertTrue(kwargs.get("private_staging", False),
+                                "staging verification and reads must retain their root kind")
+                staging_reads.append(relative)
+            with parents(root, relative, **kwargs) as held:
+                yield held
+
+        with (mock.patch.object(init, "_pinned_directory", side_effect=directory),
+              mock.patch.object(init, "_parents", side_effect=parent_walk)):
             self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
         self.assertTrue(shared)
+        self.assertIn(".init-pin", staging_reads)
+        self.assertTrue(set(self.FILES) <= set(staging_reads))
+        self.assertIn(".git/HEAD", staging_reads)
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
 
     def test_staging_identity_change_on_pin_exit_reports_changed(self):
@@ -2146,9 +2189,9 @@ class UnlazyStepTest(unittest.TestCase):
         redirected = False
         last = f"{init.UNLAZY_PROJECT}/{list(self.pin.files)[-1]}"
 
-        def redirect(root, relative):
+        def redirect(root, relative, **kwargs):
             nonlocal redirected
-            data = read(root, relative)
+            data = read(root, relative, **kwargs)
             if not redirected and relative == last:
                 redirected = True
                 self.target.rename(self.target.with_name("saved"))
