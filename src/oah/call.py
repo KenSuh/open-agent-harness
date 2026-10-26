@@ -61,7 +61,8 @@ WAIT_LIMIT_S = 540.0
 POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a running worker is polled
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
-_CORRECTION_MODEL_WRITES = ContextVar("oah_correction_model_writes", default=None)
+_CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
+_CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
@@ -132,35 +133,65 @@ class Resolution:
 
 
 class _CorrectionCatalog(models.Catalog):
-    """Use the landed catalog resolver, deferring its writes until preparation has passed every scan."""
+    """Run the landed resolver against captured bytes; publication never reopens model inputs."""
 
     def __init__(self, state_dir):
         super().__init__(state_dir)
         check = _CORRECTION_INPUT_CHECK.get()
-        # A save preserves other engines/tiers too; scan the entire original artifacts, not just the selection.
+        self.original = {}
+        self.writes = {}
         for path in (self.catalog_path, self.resolved_path, self.changes_path):
-            if path.exists():
+            try:
                 text = path.read_bytes().decode("utf-8")
-                check(text)
-                # JSON escapes must not hide credentials that a later catalog save would decode.
-                values = text.splitlines() if path == self.changes_path else (text,)
-                for value in values:
-                    if value.strip():
-                        check(json.loads(value))
+            except FileNotFoundError:
+                text = ""
+            check(text)
+            values = text.splitlines() if path == self.changes_path else (text,)
+            for value in values:
+                if value.strip():
+                    check(json.loads(value))
+            self.original[path] = text
+
+    def load(self, engine):
+        data = json.loads(self.original[self.catalog_path] or "{}")
+        return models.Entry.from_json(engine, data.get(engine)) if isinstance(data, dict) else None
 
     def _save(self, entry):
-        _CORRECTION_INPUT_CHECK.get()(dataclasses.asdict(entry))
-        _CORRECTION_MODEL_WRITES.get().append(lambda: super(_CorrectionCatalog, self)._save(entry))
+        data = json.loads(self.original[self.catalog_path] or "{}")
+        data = data if isinstance(data, dict) else {}
+        data[entry.engine] = entry.to_json()
+        self._plan_write(self.catalog_path, data)
+
+    def resolved(self):
+        data = json.loads(self.original[self.resolved_path] or "{}")
+        return data if isinstance(data, dict) else {}
+
+    def _plan_write(self, path, data):
+        _CORRECTION_INPUT_CHECK.get()(data)
+        self.writes[path] = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
     def record_resolution(self, engine, tier, **fields):
-        _CORRECTION_INPUT_CHECK.get()((engine, tier, fields, self.resolved()))
-        _CORRECTION_MODEL_WRITES.get().append(
-            lambda: super(_CorrectionCatalog, self).record_resolution(engine, tier, **fields))
-        return []
+        data = self.resolved()
+        old = data.get(engine, {}).get(tier, {}) if isinstance(data.get(engine), dict) else {}
+        stamp = _iso(fields.get("now") or models.utc_now())
+        changes = [{"ts": stamp, "engine": engine, "tier": tier, "field": field, "old": old.get(field),
+                    "new": fields[field], "why": fields["why"]}
+                   for field in ("model", "effort") if old.get(field) != fields[field]]
+        if changes:
+            text = self.original[self.changes_path] + "".join(
+                json.dumps(change, ensure_ascii=False, sort_keys=True) + "\n" for change in changes)
+            _CORRECTION_INPUT_CHECK.get()(text)
+            self.writes[self.changes_path] = text
+        if changes or old.get("source") != fields["source"]:
+            data.setdefault(engine, {})[tier] = {key: fields[key] for key in ("model", "effort", "source")}
+            data[engine][tier]["at"] = stamp
+            self._plan_write(self.resolved_path, data)
+        return changes
 
 
 def _catalog(state_dir):
-    return (_CorrectionCatalog if _CORRECTION_INPUT_CHECK.get() is not None else models.Catalog)(state_dir)
+    inputs = _CORRECTION_INPUTS.get()
+    return inputs.catalog if inputs is not None else models.Catalog(state_dir)
 
 
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
@@ -381,6 +412,11 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
             raise EngineError("OAH_WORKTREE_LEASE_MISMATCH", "a mutating worker must run in the dispatcher's leased "
                               f"worktree ({lease.worktree}). Nothing was launched. Run oah call again with "
                               "--worktree set to that exact path")
+    inputs = _CORRECTION_INPUTS.get()
+    if inputs is not None:
+        # Both the working and committed intent were checked while capturing this snapshot.
+        _check_lease_source(lease.binding(), inputs.packet, lease.task)
+        return
     check_lease_binding(lease)
     # A read-only review may use another tree; its intent must still match the lease.
     check_lease_binding(dataclasses.replace(lease, worktree=str(root)))
@@ -392,6 +428,11 @@ def dispatch_guard(prepared: Prepared):
     from oah.lease import LeaseError, Store
 
     run = prepared.run
+    publication = _CORRECTION_PUBLICATION.get()
+    if publication is not None and publication.plan.prepared == prepared:
+        # Publication already validated this immutable lease and still owns its lock.
+        yield
+        return
     try:
         saved = run._read_json("lease.json")
         if not (isinstance(saved, dict) and isinstance(saved.get("id"), str) and saved["id"]
@@ -516,6 +557,9 @@ class Prepared:
 
     @property
     def run(self) -> runs.Run:
+        publication = _CORRECTION_PUBLICATION.get()
+        if publication is not None and publication.plan.prepared == self:
+            return publication.run
         return runs.Run(id=self.run_id, task=self.task, path=pathlib.Path(self.run_dir))
 
     def to_json(self) -> dict:
@@ -540,7 +584,96 @@ class _CallPlan:
     result_fields: dict
     skills_record: dict | None
     initial_record: dict | None = None
-    model_writes: tuple = ()
+    model_writes: tuple[tuple[pathlib.Path, str], ...] = ()
+    binding_record: str | None = None
+    lease_record: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class _CorrectionSnapshot:
+    lease_json: str
+    inputs_json: str
+    plan_json: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _CorrectionRun(runs.Run):
+    """Only dispatcher-authored lifecycle values are read after publication begins."""
+
+    record: dict = dataclasses.field(default_factory=dict, kw_only=True, compare=False)
+
+    def read(self):
+        return json.loads(json.dumps(self.record))
+
+    def _write_result(self, data):
+        super()._write_result(data)
+        self.record.clear()
+        self.record.update(data)
+
+    @contextmanager
+    def _result_lock(self):
+        yield  # The correction publication already owns the state/lease lock.
+
+
+@dataclasses.dataclass
+class _CorrectionInputs:
+    state: pathlib.Path
+    lease_json: str
+    bound_json: str
+    packet: Packet
+    catalog: _CorrectionCatalog
+    config: object
+    metadata_json: str
+    snapshot: _CorrectionSnapshot | None = None
+    plan: _CallPlan | None = None
+    run: _CorrectionRun | None = None
+
+    def holder(self):
+        from oah.lease import Lease
+
+        record = self.snapshot.lease_json if self.snapshot is not None else self.lease_json
+        return Lease.from_json(json.loads(record), self.state / "leases.json")
+
+    @contextmanager
+    def publication(self):
+        """One locked publication, through the terminal outcome; no input is reopened except the lease."""
+        from oah.atomic import read_json
+        from oah.journal import PendingTransaction
+        from oah.lease import Store
+        from oah.lockfile import StateLock
+
+        holder = self.holder()
+        store = Store(self.state)
+        with StateLock(store.lock_path):
+            # Never run Store._lock's journal recovery: a refusal must not repair or write state.
+            if store.journal.path.exists():
+                raise PendingTransaction("OAH_STATE_PENDING: a lease transaction is pending; recover it before retrying")
+            data = read_json(store.leases_path, {"version": 1, "leases": []})
+            store._decode(data)
+            live = next((item for item in data["leases"] if item["task"] == holder.task), None)
+            if live != json.loads(self.snapshot.lease_json) or holder.expired(store.now()):
+                raise EngineError("OAH_LEASE_CHANGED", "the dispatch lease changed; check oah status and retry oah fix")
+            token = _CORRECTION_PUBLICATION.set(self)
+            try:
+                yield
+            finally:
+                _CORRECTION_PUBLICATION.reset(token)
+
+    def publish_run(self):
+        """Consume only the scanned plan, after the attempt start is durable."""
+        from oah.atomic import write_json_atomic, write_text_atomic
+
+        plan = self.plan
+        for path, text in plan.model_writes:
+            write_text_atomic(path, text)
+        runs._create_run(self.run, plan.initial_record)
+        self.run.write_prompt(plan.prompt)
+        if plan.skills_record is not None:
+            write_json_atomic(self.run.file_path("skills.json"), plan.skills_record)
+        self.run.result(**plan.result_fields)
+        if plan.binding_record is not None:
+            write_text_atomic(_binding_path(self.state, self.run.task), plan.binding_record)
+        write_text_atomic(self.run.file_path("lease.json"), plan.lease_record)
 
 
 def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled: bool = False,
@@ -551,7 +684,9 @@ def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled:
     except ImportError:
         return "unused(not-configured)"
     try:
-        advice = rerank.advise_difficulty(axes, task, root=root, brief_disabled=brief_disabled, env=env,
+        inputs = _CORRECTION_INPUTS.get()
+        config = {"config": inputs.config.section("rerank", rerank.DEFAULTS)} if inputs is not None else {}
+        advice = rerank.advise_difficulty(axes, task, root=root, brief_disabled=brief_disabled, env=env, **config,
                                           keychain=keychain)
     except Exception as exc:  # a plugin failure must never block a launch
         return f"unused(error: {type(exc).__name__})"
@@ -570,14 +705,18 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _correction_inputs(check):
+def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
-    writes = _CORRECTION_MODEL_WRITES.set([])
     try:
-        yield
+        inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
+                                   metadata_json)
+        snapshot = _CORRECTION_INPUTS.set(inputs)
+        try:
+            yield inputs
+        finally:
+            _CORRECTION_INPUTS.reset(snapshot)
     finally:
-        _CORRECTION_MODEL_WRITES.reset(writes)
         _CORRECTION_INPUT_CHECK.reset(token)
 
 
@@ -606,9 +745,8 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
         return skillsel.choose(root, kind=kind, stage=stage, risk=risk, scope=scope, state_dir=state_dir,
                                env=env, keychain=keychain, brief_disabled=brief_disabled, now=now)
     from oah import rerank
-    from oah.config import load_config
 
-    settings = skillsel.settings_for(root)
+    settings = _CORRECTION_INPUTS.get().config.section("skills", skillsel.config_defaults())
     kit = skillsel.kit_roots(state_dir, pins=settings["pins"])
     roots = skillsel.default_roots(root, home=skillsel.home_of(env), env=env, kit_cache=kit)
     # Corrections omit optional telemetry so even an unsafe attached skill leaves no selection record.
@@ -616,7 +754,7 @@ def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, b
                                 repo_root=root, now=now)
     check(selection.brief_text())
     check(selection.to_record())
-    config = load_config(root).section("rerank", rerank.DEFAULTS)
+    config = _CORRECTION_INPUTS.get().config.section("rerank", rerank.DEFAULTS)
     return skillsel.rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
                                  brief_disabled=brief_disabled, env=env, keychain=keychain)
 
@@ -639,7 +777,8 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     same = routing.same_engine_warning(settings.stages)
     if same:
         warnings.append(same)
-    holder = bound_lease(state_dir, request.task)
+    inputs = _CORRECTION_INPUTS.get()
+    holder = inputs.holder() if inputs is not None else bound_lease(state_dir, request.task)
     if holder is None:
         raise EngineError("OAH_INTENT_NOT_CURRENT", f"task {request.task} has no active lease with an intent binding. "
                           "Nothing was launched. Accept the packet, then bind it with "
@@ -647,11 +786,12 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
                           f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then call again")
     _check_dispatch_lease(holder, root, stage=request.stage)
     leased = holder.binding()
-    bound = dispatch_binding(state_dir, request.task)
+    bound = json.loads(inputs.bound_json) if inputs is not None else dispatch_binding(state_dir, request.task)
     default_source = bound["source"] if bound else leased.source
     packet_path = request.packet or root / default_source
-    packet = read_packet(root, packet_path, parse_intent=parse_intent or oah_intent.parse,
-                         read_source=read_source or oah_intent.read_source)
+    packet = inputs.packet if inputs is not None else read_packet(
+        root, packet_path, parse_intent=parse_intent or oah_intent.parse,
+        read_source=read_source or oah_intent.read_source)
     _check_lease_source(leased, packet, request.task)
     check_dispatch_binding(bound, packet, request.task)
     stored = None
@@ -698,15 +838,35 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     if check is not None:
         run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
         # Build the real command, brief and metadata once, without creating a run or flushing writes.
-        plan = dataclasses.replace(_plan_prepare(request, settings, run, **fields), initial_record=record,
-                                   model_writes=tuple(_CORRECTION_MODEL_WRITES.get()))
-        check(dataclasses.asdict(resolution))
-        check(dataclasses.asdict(plan))
-        # All correction writes consume this complete validated plan; nothing is rebuilt afterward.
-        for write in plan.model_writes:
-            write()
-        _CORRECTION_MODEL_WRITES.get().clear()
-        runs._create_run(run, plan.initial_record)
+        advance = check_dispatch_binding(bound, packet, request.task)
+        binding_record = None
+        if advance:
+            intent = packet.intent
+            history = list(bound.get("history", [])) if bound else []
+            history.append({"revision": intent.revision, "digest": intent.digest, "run_id": run.id})
+            binding_record = json.dumps({"source": packet.source, "id": intent.id, "revision": intent.revision,
+                                         "digest": intent.digest, "history": history}) + "\n"
+        plan = dataclasses.replace(
+            _plan_prepare(request, settings, run, **fields), initial_record=record,
+            model_writes=tuple(inputs.catalog.writes.items()), binding_record=binding_record,
+            lease_record=json.dumps({"id": holder.id, "generation": holder.generation, "intent": holder.intent}) + "\n")
+        captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
+                    "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
+                    "config": json.loads(json.dumps(inputs.config.raw, default=
+                        lambda value: dict(value) if isinstance(value, Mapping) else str(value))),
+                    "models": [(str(path), text) for path, text in inputs.catalog.original.items()],
+                    "resolution": dataclasses.asdict(resolution)}
+        inputs.snapshot = _CorrectionSnapshot(inputs.lease_json, json.dumps(captured),
+                                               json.dumps(dataclasses.asdict(plan), default=str))
+        check(json.loads(inputs.snapshot.inputs_json))
+        check(json.loads(inputs.snapshot.plan_json))
+        # Reconstitute the publication solely from immutable serialized values, never live inputs.
+        sealed = json.loads(inputs.snapshot.plan_json)
+        sealed["prepared"] = Prepared.from_json(sealed["prepared"])
+        sealed["model_writes"] = tuple((pathlib.Path(path), text) for path, text in sealed["model_writes"])
+        inputs.plan = _CallPlan(**sealed)
+        inputs.run = _CorrectionRun(id=run.id, task=run.task, path=run.path, record=dict(plan.initial_record))
+        return plan.prepared
     else:
         run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
     try:
@@ -833,7 +993,9 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     clean = redact or (lambda text: text)
     started = dt.datetime.now(dt.timezone.utc)
     run.result(status="running", started_at=_iso(started), pid=os.getpid())
-    prompt = run.prompt_path.read_bytes().decode("utf-8")  # the brief goes to stdin byte for byte
+    publication = _CORRECTION_PUBLICATION.get()
+    prompt = (publication.plan.prompt if publication is not None and publication.plan.prepared == prepared else
+              run.prompt_path.read_bytes().decode("utf-8"))  # the brief goes to stdin byte for byte
     if prepared.retain_worker_text:
         run.file_path("last-message.md")
     try:

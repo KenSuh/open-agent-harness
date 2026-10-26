@@ -1715,6 +1715,174 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_noncanonical_lease_identifiers_leave_the_complete_state_tree_unchanged(self):
+        for position, identifier in enumerate(("", "not-a-lease", "account-" + token_source.token_hex(8))):
+            with self.subTest(position=position):
+                project = FixProject(self)
+                project.changes_requested()
+                path = project.state / "leases.json"
+                data = json.loads(path.read_bytes())
+                data["leases"][0]["id"] = identifier
+                path.write_bytes(json.dumps(data).encode("utf-8"))
+
+                def snapshot():
+                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                            for p in project.state.rglob("*")}
+
+                before = snapshot()
+                error = project.refused("OAH_STATE_CORRUPT", project.fix)
+                if identifier:
+                    self.assertNotIn(identifier, str(error))
+                self.assertEqual(snapshot(), before)
+
+    def test_publication_does_not_revalidate_inputs_after_its_first_write(self):
+        project = FixProject(self)
+        project.changes_requested()
+        publish = fix._Attempt._publish
+        with contextlib.ExitStack() as stack:
+            def published(attempt, kind, *args, **kwargs):
+                result = publish(attempt, kind, *args, **kwargs)
+                if kind == "start":
+                    # The checked lease stays exclusively locked even if its TTL elapses during publication.
+                    later = call.dt.datetime.now(call.dt.timezone.utc) + call.dt.timedelta(hours=2)
+                    stack.enter_context(mock.patch("oah.lease.utc_now", return_value=later))
+                return result
+
+            stack.enter_context(mock.patch.object(fix._Attempt, "_publish", published))
+            result = project.fix()
+        self.assertEqual(result.outcome, "no-change")
+        self.assertEqual(project.record("A1-outcome.json")["outcome"], "no-change")
+
+    def test_missing_task_lock_is_not_created_by_a_refusal(self):
+        for reviewed in (False, True):
+            with self.subTest(reviewed=reviewed):
+                project = FixProject(self)
+                if reviewed:
+                    project.changes_requested()
+                    shutil.rmtree(project.folder() / ".locks")
+
+                def snapshot():
+                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                            for p in project.state.rglob("*")}
+
+                before = snapshot()
+                project.refused("OAH_FIX_HISTORY_INVALID" if reviewed else "OAH_FIX_NOTHING_TO_FIX", project.fix)
+                self.assertEqual(snapshot(), before)
+
+    def test_one_publication_holds_the_lease_lock_through_the_terminal_record(self):
+        project = FixProject(self)
+        project.changes_requested()
+        execute, end = call.execute, fix._Attempt._end
+        probed = []
+
+        def probe():
+            # A different process must be unable to renew between publication writes or before launch.
+            code = ("import sys; from oah.lease import Store; from oah.lockfile import LockTimeout\n"
+                    "try: Store(sys.argv[1], lock_timeout=0).renew(task='t1', agent='claude', ttl_hours=2)\n"
+                    "except LockTimeout: raise SystemExit(0)\n"
+                    "raise SystemExit(1)\n")
+            done = subprocess.run([sys.executable, "-c", code, str(project.state)], capture_output=True,
+                                  env=dict(project.env, PYTHONPATH=str(FAKES.parent.parent / "src")), timeout=20)
+            probed.append(done.returncode)
+
+        def dispatched(*args, **kwargs):
+            probe()
+            return execute(*args, **kwargs)
+
+        def ended(attempt, *args, **kwargs):
+            probe()
+            return end(attempt, *args, **kwargs)
+
+        with mock.patch.object(call, "execute", side_effect=dispatched), \
+                mock.patch.object(fix._Attempt, "_end", ended):
+            result = project.fix()
+        self.assertEqual(probed, [0, 0])
+        self.assertEqual(result.outcome, "no-change")
+        Store(project.state, lock_timeout=0).renew(task="t1", agent="claude", ttl_hours=2)
+
+    def test_preparation_lease_changes_leave_the_complete_state_tree_unchanged(self):
+        for change in ("renew", "release", "same-generation"):
+            with self.subTest(change=change):
+                project = FixProject(self)
+                project.changes_requested()
+                # Force deferred catalog creation as well as resolution writes.
+                shutil.rmtree(project.state / "models")
+
+                def snapshot():
+                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                            for p in project.state.rglob("*")}
+
+                expected = []
+                resolve = call.resolve_engine
+
+                def changed(*args, **kwargs):
+                    result = resolve(*args, **kwargs)
+                    store = Store(project.state)
+                    if change == "renew":
+                        store.renew(task="t1", agent="claude", ttl_hours=2)
+                    elif change == "release":
+                        store.release(task="t1", agent="claude", reason="preparation race", force=False)
+                    else:
+                        path = project.state / "leases.json"
+                        data = json.loads(path.read_bytes())
+                        data["leases"][0]["note"] = "changed without advancing generation"
+                        path.write_bytes(json.dumps(data).encode("utf-8"))
+                    expected.append(snapshot())
+                    return result
+
+                with mock.patch.object(call, "resolve_engine", side_effect=changed):
+                    project.refused("OAH_LEASE_CHANGED", project.fix)
+                self.assertEqual(snapshot(), expected[0], "the refused fix must add no writes to the racing state")
+
+    def test_the_entire_lease_record_is_scanned_before_any_state_write(self):
+        for field in ("id", "note", "gates"):
+            with self.subTest(field=field):
+                project = FixProject(self)
+                project.changes_requested()
+                marker = "s" + "k-" + token_source.token_hex(20)
+                path = project.state / "leases.json"
+                data = json.loads(path.read_bytes())
+                data["leases"][0][field] = [marker] if field == "gates" else marker
+                path.write_bytes(json.dumps(data).encode("utf-8"))
+
+                def snapshot():
+                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                            for p in project.state.rglob("*")}
+
+                before = snapshot()
+                error = project.refused("OAH_FIX_SENSITIVE_METADATA", project.fix)
+                self.assertNotIn(marker, str(error))
+                self.assertEqual(snapshot(), before)
+
+    def test_preparation_reads_each_state_input_once(self):
+        project = FixProject(self)
+        project.changes_requested()
+        watched = {project.state / name for name in (
+            "leases.json", "transaction.json", "runs/t1/intent-binding.json", "models/catalog.json",
+            "models/resolved.json", "models/changes.jsonl", "reviews/t1/R1.json",
+            "reviews/t1/index.jsonl", "reviews/t1/rounds.jsonl")}
+        reads = {path: 0 for path in watched}
+        at_plan = []
+        read_bytes, plan = pathlib.Path.read_bytes, call._plan_prepare
+
+        def read(path):
+            if path in reads:
+                reads[path] += 1
+            return read_bytes(path)
+
+        def planned(*args, **kwargs):
+            result = plan(*args, **kwargs)
+            at_plan.append(dict(reads))
+            return result
+
+        with mock.patch.object(pathlib.Path, "read_bytes", read), \
+                mock.patch.object(call, "_plan_prepare", side_effect=planned):
+            self.assertEqual(project.fix().outcome, "no-change")
+        self.assertEqual(at_plan, [dict.fromkeys(watched, 1)], "preparation must consume one captured input snapshot")
+        expected = dict.fromkeys(watched, 1)
+        expected[project.state / "leases.json"] = 2  # The sole live comparison under the lease lock.
+        self.assertEqual(reads, expected, "publication must not reopen any captured input")
+
     def test_invalid_model_pins_leave_the_complete_state_tree_unchanged(self):
         for pin in ("-invalid", "s" + "k-" + token_source.token_hex(20)):
             for cached in (True, False):
@@ -1917,15 +2085,8 @@ class SecretTest(unittest.TestCase):
                     target, name = call.briefs, "build"
                     error = briefs.BriefError("OAH_UNSAFE_ARGUMENT", key)
                 elif point == "dispatch":
-                    target, name = call, "_check_dispatch_lease"
-                    check = call._check_dispatch_lease
-
-                    def fail_dispatch(*args, **kwargs):
-                        if (project.folder() / "A1-start.json").exists():
-                            raise call.EngineError("OAH_LEASE_CHANGED", key)
-                        return check(*args, **kwargs)
-
-                    error = fail_dispatch
+                    target, name = call, "dispatch_guard"
+                    error = call.EngineError("OAH_LEASE_CHANGED", key)
                 else:
                     target, name = (call, "_run_prepared") if point == "launch" else (fix._Attempt, "_judge")
                     error = (KeyboardInterrupt(key) if point == "interrupt" else ReviewError(key, key)

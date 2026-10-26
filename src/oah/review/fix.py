@@ -61,7 +61,8 @@ from typing import Callable, Iterable, Iterator, Mapping, Sequence
 from oah import briefs, call, call_cli, runs
 from oah import intent as oah_intent
 from oah.atomic import StateCorrupt, read_json, write_json_atomic, write_text_atomic
-from oah.engines.effort import BEHAVIOUR_CHANGING, ORDINARY
+from oah.config import load_config
+from oah.engines.effort import BEHAVIOUR_CHANGING, ORDINARY, load_rules
 from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
@@ -340,6 +341,7 @@ class _Task:
     state: pathlib.Path
     lease: object  # oah.lease.Lease
     root: pathlib.Path
+    lease_json: str
 
 
 def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) -> _Task:
@@ -353,19 +355,28 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
     state = state_dir(info, env)
     _safe_inputs((str(cwd), str(state)), redact, "OAH_FIX_SENSITIVE_METADATA")
     receipts.review_dir(state, task)
-    lease = next((lease for lease, stale in Store(state).snapshot() if lease.task == task and not stale), None)
+    store = Store(state)
+    store.journal.check_pending()
+    lease_data = read_json(store.leases_path, {"version": 1, "leases": []})
+    lease = next((lease for lease in store._decode(lease_data)
+                  if lease.task == task and not lease.expired(store.now())), None)
     if lease is None:
         raise ReviewError("OAH_INTENT_NOT_CURRENT", f"task {task} has no active lease, so oah fix has no current intent "
                           f"or worktree to work with. {nothing}. Bind the accepted packet with oah start --task {task} "
                           f"--agent <you> --packet .oah/tasks/{task}/PACKET.md (use your packet's path), then run the "
                           "command again")
+    exact = next(item for item in lease_data["leases"] if item["task"] == task)
+    if any(_has_credential(value, redact) for value in lease.scope):
+        raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
+    _safe_inputs(exact, redact, "OAH_FIX_SENSITIVE_METADATA")
+    if re.fullmatch(r"[0-9a-f]{16}", lease.id) is None:  # Store.start's token_hex(8), never free text.
+        raise ReviewError("OAH_STATE_CORRUPT", _ERROR_DIAGNOSTICS["OAH_STATE_CORRUPT"])
     root = pathlib.Path(lease.worktree)
-    _safe_inputs((str(root), lease.intent, lease.agent), redact, "OAH_FIX_SENSITIVE_METADATA")
     if not root.is_dir():
         raise ReviewError("OAH_WORKTREE_UNRESOLVED", f"the lease of task {task} names the worktree {root}, which no "
                           f"longer exists. {nothing}. Release it with oah release --task {task} --agent {lease.agent} "
                           '--reason "worktree removed", then start the lease again in the task\'s worktree')
-    return _Task(task, state, lease, root)
+    return _Task(task, state, lease, root, json.dumps(exact))
 
 
 def _committed_reader(root: pathlib.Path, *, ref: str = "HEAD") -> Callable[[pathlib.Path], str]:
@@ -391,7 +402,7 @@ def _committed_reader(root: pathlib.Path, *, ref: str = "HEAD") -> Callable[[pat
     return read
 
 
-def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
+def _check_intent(t: _Task, nothing: str, *, committed_text: str | None = None) -> oah_intent.Binding:
     binding = t.lease.binding()
     rebind = (f"oah start --task {t.name} --agent {t.lease.agent} --packet "
               f"{binding.source if binding else f'.oah/tasks/{t.name}/PACKET.md'}")
@@ -405,7 +416,8 @@ def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
                           "packet as it was bound, or raise its Revision, accept it and rebind the lease with "
                           "oah start --packet <packet>; then run the command again")
     try:
-        committed = oah_intent.parse(_committed_reader(t.root)(oah_intent.source_path(binding, t.root)))
+        committed = oah_intent.parse(committed_text if committed_text is not None else
+                                     _committed_reader(t.root)(oah_intent.source_path(binding, t.root)))
     except (oah_intent.SourceError, oah_intent.IntentInvalid):
         committed = None
     if committed is None or committed.digest != binding.digest:
@@ -415,14 +427,15 @@ def _check_intent(t: _Task, nothing: str) -> oah_intent.Binding:
     return binding
 
 
-def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.Binding, nothing: str) -> None:
+def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.Binding, nothing: str, *,
+                         current_text: str | None = None) -> None:
     matches = (receipt.record.get("intent") == binding.to_json()
                and receipt.record.get("intent_digest") == binding.digest)
     if matches:
         try:
             source = oah_intent.source_path(binding, t.root)
             reviewed = _committed_reader(t.root, ref=receipt.record["head"])(source)
-            current = _committed_reader(t.root)(source)
+            current = current_text if current_text is not None else _committed_reader(t.root)(source)
             matches = (oah_intent.parse(reviewed).bind(binding.source) == binding
                        and briefs.raw_section(reviewed) == briefs.raw_section(current))
         except (oah_intent.SourceError, oah_intent.IntentInvalid):
@@ -437,6 +450,7 @@ def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.
 class _History:
     records: receipts.Records
     attempts: tuple[receipts.Attempt, ...]
+    index_bytes: bytes = b""
 
     def start(self, attempt: receipts.Attempt) -> dict | None:
         return next((entry.record for entry in self.records.entries
@@ -461,12 +475,12 @@ class _History:
         return f"A{max(numbers, default=0) + 1}"
 
 
-def _history(t: _Task) -> _History:
-    records = receipts.load(t.state, t.name)
+def _history(t: _Task, *, capture: bool = False) -> _History:
+    records, index = receipts._capture_records(t.state, t.name) if capture else (receipts.load(t.state, t.name), b"")
     if any("run_id" in entry.record and not runs.RUN_ID_RE.fullmatch(entry.record["run_id"] or "")
            for entry in records.entries if entry.kind != "receipt"):
         raise ReviewError("OAH_FIX_HISTORY_INVALID", _ERROR_DIAGNOSTICS["OAH_FIX_HISTORY_INVALID"])
-    return _History(records, tuple(receipts.attempts(records)))
+    return _History(records, tuple(receipts.attempts(records)), index)
 
 
 def _unfinished(t: _Task, attempts: Sequence[receipts.Attempt], nothing: str) -> ReviewError:
@@ -494,13 +508,14 @@ def _check_history(t: _Task, h: _History, nothing: str) -> None:
                           "\nRestore or complete the records first, then run the command again")
 
 
-def _source(t: _Task, h: _History, nothing: str) -> receipts.Entry:
+def _source(t: _Task, h: _History, nothing: str, *, round_log: list[dict] | None = None) -> receipts.Entry:
     found = h.records.receipts()
     if not found:
         raise ReviewError("OAH_FIX_NOTHING_TO_FIX", f"task {t.name} has no review receipt yet, so there are no findings "
                           f"to correct. {nothing}. Run oah review --task {t.name} first")
     latest = found[-1]
-    history = rounds.series(h.records, receipts.read_round_log(t.state, t.name), latest.record["base"],
+    history = rounds.series(h.records, receipts.read_round_log(t.state, t.name) if round_log is None else round_log,
+                            latest.record["base"],
                             head=_head(t.root), is_ancestor=lambda a, b: _is_ancestor(t.root, a, b))
     stopped = rounds.decision_stop(history)
     if stopped:
@@ -648,8 +663,14 @@ def _classes(h: _History, findings: Sequence[Mapping]) -> tuple[list[str], list[
 
 
 @contextlib.contextmanager
-def _task_lock(t: _Task) -> Iterator[None]:
-    lock = StateLock(receipts.task_lock_path(t.state, t.name), timeout=0)
+def _task_lock(t: _Task, *, create: bool = True) -> Iterator[None]:
+    path = receipts.task_lock_path(t.state, t.name)
+    if not create and not path.is_file():
+        # A successful review already created this lock. Refusals never create or repair state.
+        code = ("OAH_FIX_HISTORY_INVALID" if any(receipts.review_dir(t.state, t.name).glob("R*.json")) else
+                "OAH_FIX_NOTHING_TO_FIX")
+        raise ReviewError(code, _ERROR_DIAGNOSTICS[code])
+    lock = StateLock(path, timeout=0)
     try:
         lock.__enter__()
     except LockTimeout:
@@ -1021,10 +1042,17 @@ def correct(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
 
 def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) -> Result:
     t = _task(request.task, cwd, env, LAUNCHED)
-    if any(_has_credential(value, redact) for value in t.lease.scope):
-        raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
-    binding = _check_intent(t, LAUNCHED)
-    settings = call_cli.load_settings(t.root)
+    binding = t.lease.binding()
+    try:
+        committed_text = (_committed_reader(t.root)(oah_intent.source_path(binding, t.root))
+                          if binding is not None else None)
+    except oah_intent.SourceError:
+        raise ReviewError("OAH_INTENT_NOT_CURRENT", _ERROR_DIAGNOSTICS["OAH_INTENT_NOT_CURRENT"]) from None
+    binding = _check_intent(t, LAUNCHED, committed_text=committed_text)
+    config = load_config(t.root)
+    settings = call.Settings.validated(config.section("stages", call.STAGE_DEFAULTS),
+                                       config.section("engines", call.ENGINE_DEFAULTS),
+                                       config.section("models", call.models.DEFAULTS))
     stage = settings.stages.get(STAGE)
     if stage != ENGINE:
         raise ReviewError("OAH_FIX_ENGINE_UNSUPPORTED", f"[stages] correction is {stage!r} in .oah/config.toml, and oah "
@@ -1039,13 +1067,14 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         raise ReviewError("OAH_FIX_PROXY_CREDENTIALS", f"proxy userinfo is not allowed in the corrector's environment. "
                           f"{LAUNCHED}. Use a credential-free proxy or Codex's own configuration, then run oah fix "
                           "again") from None
-    with _task_lock(t):
-        h = _history(t)
+    with _task_lock(t, create=False):
+        h = _history(t, capture=True)
         _check_history(t, h, LAUNCHED)
-        receipt = _source(t, h, LAUNCHED)
+        round_log = receipts.read_round_log(t.state, t.name)
+        receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)
-        _check_review_intent(t, receipt, binding, LAUNCHED)
+        _check_review_intent(t, receipt, binding, LAUNCHED, current_text=committed_text)
         findings = _select(t, receipt, h, request.findings, LAUNCHED)
         class_ids, classes = _classes(h, findings)
         attempt_id = h.next_id()
@@ -1061,30 +1090,34 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             receipt_digest=receipt.digest, base=receipt.record["base"], reviewed=receipt.record["head"], head=before,
             findings=findings, classes=classes)
         tools = call_cli.intent_tools()
-        _safe_inputs((findings, classes, instructions, tools.footer, briefs.VERIFY_FOOTER), redact)
-
-        def read_source(path: pathlib.Path) -> str:
-            text = _committed_reader(t.root)(path)
-            packet = call.read_packet(t.root, path, parse_intent=tools.parse, read_source=lambda _path: text)
-            if any(_has_credential(value, redact) for value in packet.scope):
-                raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
-            _safe_inputs(text, redact)
-            return text
+        packet = call.read_packet(t.root, oah_intent.source_path(binding, t.root), parse_intent=tools.parse,
+                                  read_source=lambda _path: committed_text)
+        if any(_has_credential(value, redact) for value in packet.scope):
+            raise ReviewError("OAH_FIX_SENSITIVE_SCOPE", _ERROR_DIAGNOSTICS["OAH_FIX_SENSITIVE_SCOPE"])
+        bound = call.dispatch_binding(t.state, t.name)
+        rules = json.loads(json.dumps(load_rules() if rules is None else list(rules)))
+        metadata = (dataclasses.asdict(request), dataclasses.asdict(settings), committed_text, bound, rules,
+                    dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), round_log,
+                    findings, classes, instructions, tools.footer, briefs.VERIFY_FOOTER)
+        _safe_inputs((config.raw, metadata), redact)
 
         scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-fix-", dir=temp_root))
         try:
             final = scratch / "last-message.md"
-            with call._correction_inputs(lambda value: _safe_inputs(value, redact)):
+            with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
+                                         lease_json=t.lease_json, bound=bound, packet=packet, config=config,
+                                         metadata_json=json.dumps(metadata)) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,
                                      ephemeral=True, retain_worker_text=False),
                     settings, root=t.root, state_dir=t.state, env=launch_env, footer=tools.footer,
-                    has_footer=tools.has_footer, parse_intent=tools.parse, read_source=read_source,
+                    has_footer=tools.has_footer, parse_intent=tools.parse,
                     keychain=keychain)
-            attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
-                               baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
-            return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
+                attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
+                                   baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
+                with _stop_signals(), inputs.publication(), receipts._correction_publication(t.state, t.name, h.index_bytes):
+                    return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
 
@@ -1141,6 +1174,9 @@ class _Attempt:
         try:
             with _held_signals() as held:
                 self._publish("start", start)
+                publication = call._CORRECTION_PUBLICATION.get()
+                if publication is not None:
+                    publication.publish_run()
             if held:
                 raise KeyboardInterrupt("stop signal while recording the start; Codex was never launched")
             with call._correction_cleanup():

@@ -38,6 +38,7 @@ Round log
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -45,8 +46,9 @@ import os
 import pathlib
 import re
 from typing import Iterable, Mapping
+from contextvars import ContextVar
 
-from oah.atomic import StateCorrupt, StorageError, _fsync_folder, append_jsonl, read_jsonl
+from oah.atomic import StateCorrupt, StorageError, _fsync_folder, append_jsonl, read_jsonl, write_text_atomic
 from oah.lease import TASK_RE
 from oah.lockfile import StateLock
 from oah.review import ReviewError
@@ -72,6 +74,18 @@ SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _RECEIPT_NAME = re.compile(r"R([1-9][0-9]{0,8})\.json")
 _ATTEMPT_NAME = re.compile(r"(A[1-9][0-9]{0,8})-(start|outcome|head)\.json")
+_CORRECTION_PUBLICATION = ContextVar("oah_correction_receipts_publication", default=None)
+
+
+@contextlib.contextmanager
+def _correction_publication(state, task, index):
+    """The caller holds the lease lock; index bytes were captured with the correction history."""
+    publication = {"state": state, "task": task, "index": index}
+    token = _CORRECTION_PUBLICATION.set(publication)
+    try:
+        yield
+    finally:
+        _CORRECTION_PUBLICATION.reset(token)
 
 
 def _iso(now: dt.datetime | None = None) -> str:
@@ -250,11 +264,14 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
     data = canonical(record)
     value = digest(data)
     line = {"kind": kind, "name": name, "digest": value, "recorded_at": _iso(now), **extra}
+    publication = _CORRECTION_PUBLICATION.get()
+    captured = (publication is not None and publication["state"] == state and publication["task"] == task)
     try:
-        with StateLock(_contained_path(state, ".lock")):
+        with contextlib.nullcontext() if captured else StateLock(_contained_path(state, ".lock")):
             folder.mkdir(parents=True, exist_ok=True)
             index = _path(state, task, INDEX_NAME)
-            if any(item.get("name") == name for item in read_jsonl(index)):
+            lines = ([json.loads(item) for item in publication["index"].splitlines()] if captured else read_jsonl(index))
+            if any(item.get("name") == name for item in lines):
                 raise ReviewError("OAH_REVIEW_RECORD_EXISTS", f"{name} is already indexed for task {task}; records "
                                   "are never rewritten")
             path = _path(state, task, name)
@@ -272,7 +289,12 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
             finally:
                 os.close(fd)
             _fsync_folder(folder)
-            append_jsonl(index, line)
+            if captured:
+                contents = publication["index"] + (json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+                write_text_atomic(index, contents.decode("utf-8"))
+                publication["index"] = contents
+            else:
+                append_jsonl(index, line)
     except RunError as exc:
         raise ReviewError(exc.code, str(exc).split(": ", 1)[1]) from None
     except OSError as exc:
@@ -303,12 +325,41 @@ class Records:
 
 def load(state: pathlib.Path, task: str) -> Records:
     """Every indexed record, re-read and digest-checked, with the problems found (never repaired)."""
+    return _load(state, task, read_jsonl)
+
+
+def _capture_records(state: pathlib.Path, task: str) -> tuple[Records, bytes]:
+    """Capture the index once, retaining its exact bytes for correction publication."""
+    raw = b""
+
+    def read_index(path):
+        nonlocal raw
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
+        try:
+            if raw and not raw.endswith(b"\n"):
+                raise ValueError("incomplete index")
+            lines = [json.loads(line.decode("utf-8")) for line in raw.split(b"\n")[:-1]]
+            if any(not isinstance(line, dict) for line in lines):
+                raise ValueError("invalid index line")
+            return lines
+        except (UnicodeDecodeError, ValueError):
+            raise StateCorrupt("OAH_STATE_CORRUPT: invalid review index; repair the index before retrying") from None
+
+    return _load(state, task, read_index), raw
+
+
+def _load(state, task, read_index):
     folder = review_dir(state, task)
     if not folder.is_dir():
         return Records(task)
     problems: list[str] = []
     try:
-        lines = read_jsonl(_path(state, task, INDEX_NAME))
+        lines = read_index(_path(state, task, INDEX_NAME))
     except StateCorrupt as exc:
         problems.append(f"{INDEX_NAME} cannot be read ({str(exc).split(': ', 1)[-1]})")
         lines = []
