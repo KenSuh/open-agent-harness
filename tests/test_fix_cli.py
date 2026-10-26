@@ -691,11 +691,12 @@ class CliTest(unittest.TestCase):
         self.assertTrue(done.stderr.startswith("OAH_FIX_ATTEMPT_UNFINISHED:"), done.stderr)
         done = oah(project, "fix", "--abort", "--task", "t1", "--json")
         self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (0, "OAH_FIX_ABORTED"), done.stderr)
-        self.assertIn("its run was last running", project.record("A1-outcome.json")["evidence"])
+        self.assertEqual(project.record("A1-outcome.json")["evidence"], receipts.digest(
+            b"recorded by oah fix --abort; interrupted attempt; its run was last running"))
         run_id = project.record("A1-start.json")["run_id"]
         run = json.loads((project.state / "runs" / "t1" / run_id / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(run["status"], "lost")
-        self.assertTrue(run["error"].startswith("OAH_RUN_LOST:"), run["error"])
+        self.assertEqual(run["error"], "OAH_RUN_LOST")
         done = oah(project, "fix", "--abort", "--task", "t1")
         self.assertEqual(done.returncode, 1)
         self.assertTrue(done.stderr.startswith("OAH_FIX_NOTHING_TO_ABORT:"), done.stderr)

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import secrets as token_source
 import shlex
 import shutil
@@ -730,9 +731,10 @@ class WorkerTest(unittest.TestCase):
                     self.assertEqual((result.outcome, result.commands, result.next_command), ("failed", [], None))
                     self.assertTrue(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
                     self.assertTrue(any("OAH_FIX_USER_FILES_CHANGED" in warning for warning in result.warnings))
-                    self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
+                    self.assertRegex(project.record("A1-outcome.json")["evidence"], r"^sha256:[0-9a-f]{64}$")
                     patch = (project.run_folder(result) / "correction.patch").read_bytes()
-                    self.assertIn(b"withheld", patch)
+                    self.assertEqual(patch, b"OAH_FIX_FAILED\n")
+                    self.assertIn("withheld", result.message)
                     self.assertNotIn(b"user bytes", patch)
                     self.assertNotIn(b"other bytes", patch)
                     SecretTest.assert_private(self, project, [key, name], json.dumps(result.to_json()))
@@ -749,7 +751,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(result.outcome, "applied" if exit_code == 0 else "failed")
                 outcome = project.record("A1-outcome.json")
                 self.assertNotIn(account, json.dumps(outcome))
-                self.assertIn("[file 1]", outcome["evidence"])
+                self.assertRegex(outcome["evidence"], r"^sha256:[0-9a-f]{64}$")
                 self.assertNotIn(account, result.message)
                 for line in result.lines:
                     if line.startswith("changed files:"):
@@ -926,7 +928,7 @@ class WorkerTest(unittest.TestCase):
                     self.assertNotEqual(result.outcome, "no-change")
                     self.assertNotIn(name, "\n".join(result.lines))
                     self.assertNotIn(name, project.record("A1-outcome.json")["evidence"])
-                    self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
+                    self.assertRegex(project.record("A1-outcome.json")["evidence"], r"^sha256:[0-9a-f]{64}$")
                     patch = b"".join(project.patches)
                     self.assertIn(b"-user's original\r\n", patch)
                     if content is not None:
@@ -1027,7 +1029,7 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("HEAD moved", result.message)
         self.assertIn("git log", result.message)
         self.assertNotIn("git restore", result.message, "committed changes cannot be restored away")
-        self.assertIn("HEAD moved", project.record("A1-outcome.json")["evidence"])
+        self.assertRegex(project.record("A1-outcome.json")["evidence"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(result.commands, [])
 
 
@@ -1203,8 +1205,8 @@ class OutcomeTest(unittest.TestCase):
                 self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
                 outcome = project.record("A1-outcome.json")
                 self.assertEqual(outcome["outcome"], "aborted" if interrupt else "failed")
-                self.assertEqual(outcome["evidence"], fix._error_diagnostic(
-                    KeyboardInterrupt() if interrupt else PermissionError())[1])
+                self.assertEqual(outcome["evidence"], receipts.digest(fix._error_diagnostic(
+                    KeyboardInterrupt() if interrupt else PermissionError())[1].encode("utf-8")))
 
     def test_result_diagnostic_failure_is_settled_as_failed(self):
         project = FixProject(self)
@@ -1313,17 +1315,23 @@ class OutcomeTest(unittest.TestCase):
                 project = FixProject(self)
                 project.changes_requested()
                 project.queue_fix(step)
-                if patcher is None:
-                    result = project.fix(**fields)
-                else:
-                    with patcher(project):
+                evidence_digests = []
+                end = fix._Attempt._end
+                def ended(attempt, outcome, evidence):
+                    evidence_digests.append(receipts.digest(evidence.encode("utf-8")))
+                    return end(attempt, outcome, evidence)
+                with mock.patch.object(fix._Attempt, "_end", ended):
+                    if patcher is None:
                         result = project.fix(**fields)
+                    else:
+                        with patcher(project):
+                            result = project.fix(**fields)
                 self.assertEqual((result.code, result.outcome), (code, outcome), result.message)
                 self.assertEqual(result.exit_code, 0 if outcome == "applied" else 1)
                 self.assertEqual(self.outcome_names(project), ["A1-start.json", "A1-outcome.json"])
                 record = project.record("A1-outcome.json")
                 self.assertEqual((record["outcome"], record["after_head"]), (outcome, None))
-                self.assertIn(word, record["evidence"])
+                self.assertEqual([record["evidence"]], evidence_digests)
                 [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
                 self.assertTrue(attempt.terminal)
                 if label == "non-zero exit":
@@ -1349,7 +1357,7 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
         run = json.loads((project.state / "runs/t1" / project.record("A1-start.json")["run_id"] / "result.json")
                          .read_text(encoding="utf-8"))
-        self.assertTrue(run["error"].startswith("OAH_RUN_INTERRUPTED:"))
+        self.assertEqual(run["error"], "OAH_RUN_INTERRUPTED")
         project.queue_fix({"write": FIXED})
         self.assertEqual(project.fix().code, "OAH_FIX_APPLIED", "the lock was released and A1 is settled")
 
@@ -1434,8 +1442,8 @@ class BindTest(unittest.TestCase):
         self.assertEqual((saved["changed"], len(saved["new_files"])), (["[file 1]"], 3))
         patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
         self.assertNotIn("print(", patch)
-        self.assertIn("git diff", patch)
-        self.assertIn(saved["changes_sha256"], project.record("A1-outcome.json")["evidence"])
+        self.assertEqual(patch, "OAH_FIX_APPLIED\n")
+        self.assertRegex(project.record("A1-outcome.json")["evidence"], r"^sha256:[0-9a-f]{64}$")
         head = project.run_commands(result.commands)
         self.assertTrue(git(project.repo, "log", "-1", "--format=%B").rstrip().endswith("Agent-Engine: codex"))
         self.assertEqual(authors.commit_engines(project.repo, project.receipt(1)["head"], head), [(head, "codex")])
@@ -1450,7 +1458,7 @@ class BindTest(unittest.TestCase):
         self.assertEqual(bound.next_command, "oah review --task <task>")
         record = project.record("A1-head.json")
         self.assertEqual(record["after_head"], head)
-        self.assertIn(f"{head[:12]} (codex)", record["evidence"])
+        self.assertEqual(record["engine"], "codex")
         [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
         self.assertEqual((attempt.outcome, attempt.after_head, attempt.problems), ("applied", head, ()))
         project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
@@ -1484,8 +1492,10 @@ class BindTest(unittest.TestCase):
                                         "digest": ("changes_sha256", "invalid")}[damage]
                         saved[field] = value
                     path.write_bytes(json.dumps(saved).encode("utf-8"))
-                error = project.refused("OAH_FIX_MANIFEST_INVALID", project.bind)
-                self.assertIn("rerun oah fix --bind --task <task>", str(error))
+                error = project.refused("OAH_STATE_CORRUPT" if damage in ("json", "encoding") else
+                                        "OAH_FIX_MANIFEST_INVALID", project.bind)
+                if damage not in ("json", "encoding"):
+                    self.assertIn("rerun oah fix --bind --task <task>", str(error))
                 self.assertTrue((project.repo / "src/new.py").is_file())
                 [attempt] = receipts.attempts(receipts.load(project.state, "t1"))
                 self.assertIsNone(attempt.after_head, "metadata loss must never complete the attempt")
@@ -1510,7 +1520,7 @@ class BindTest(unittest.TestCase):
         project.refused("OAH_FIX_ENGINE_MISMATCH", project.bind, engine="human")
         bound = project.bind(engine="claude")
         self.assertEqual(bound.code, "OAH_FIX_BOUND", bound.message)
-        self.assertIn("--engine claude", project.record("A1-head.json")["evidence"])
+        self.assertEqual(project.record("A1-head.json")["engine"], "claude")
         events = [json.loads(line) for line in (project.state / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertFalse(any("--engine claude" in event.get("message", "") for event in events),
                          "the immutable binding records the override without another state transaction")
@@ -1663,8 +1673,7 @@ class ManualTest(unittest.TestCase):
         self.assertEqual((start["before_head"], start["finding_ids"], start["engine"]), (codex_head, ["R1-F2"], "claude"))
         bound = project.record("A2-head.json")
         self.assertEqual(bound["after_head"], head)
-        self.assertIn("(claude)", bound["evidence"])
-        self.assertNotIn("(codex)", bound["evidence"], "only the commits after the bound result are attributed")
+        self.assertEqual(bound["engine"], "claude", "only the commits after the bound result are attributed")
 
     def test_manual_refuses_without_new_attributed_commits(self):
         project = FixProject(self)
@@ -1689,7 +1698,8 @@ class ManualTest(unittest.TestCase):
         self.assertEqual((result.code, result.exit_code, result.attempt_id), ("OAH_FIX_ABORTED", 0, "A1"), result.message)
         outcome = project.record("A1-outcome.json")
         self.assertEqual((outcome["outcome"], outcome["after_head"]), ("aborted", None))
-        self.assertIn("oah fix --abort", outcome["evidence"])
+        self.assertEqual(outcome["evidence"], receipts.digest(
+            b"recorded by oah fix --abort; interrupted attempt; its run was last unknown"))
         project.refused("OAH_FIX_NOTHING_TO_ABORT", project.abort)
         project.queue_fix({"write": FIXED})
         self.assertEqual(project.fix().code, "OAH_FIX_APPLIED", "an aborted attempt is retried")
@@ -1761,6 +1771,170 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_automatic_tier_reasons_never_retain_scope_paths(self):
+        path = "src/auth/account-unrecognized-file.py"
+        project = FixProject(self, packet=PACKET.replace("- src\n", f"- {path}\n"))
+        project.changes_requested()
+        result = project.fix(tier=None)
+        data = json.loads((project.run_folder(result) / "result.json").read_bytes())
+        self.assertEqual((data["tier_source"], data["axes"]["risk"]), ("rules", "high"))
+        self.assertTrue(data["tier_reasons"])
+        self.assertNotIn(path, json.dumps(data))
+        self.assertEqual(set(data["tier_reasons"]), {"OAH_FIX_ROUTING_RULE"})
+
+    def test_captured_model_changes_require_complete_object_lines(self):
+        for raw in (b'{}', b'[]\n', b'\n', b'{}\n\n', b'{}\r', b'\xff\n'):
+            with self.subTest(raw=raw):
+                project = FixProject(self)
+                project.changes_requested()
+                (project.state / "models/changes.jsonl").write_bytes(raw)
+                # A different tier forces resolution changes and hence a planned append.
+                before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                          for p in project.state.rglob("*")}
+                project.refused("OAH_STATE_CORRUPT", project.fix, tier="max")
+                self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                                  for p in project.state.rglob("*")}, before)
+
+    def test_abort_validates_closed_run_fields_before_publishing(self):
+        project = FixProject(self)
+        project.changes_requested()
+        run = runs.new_run(project.state, "t1", "codex", "correction")
+        publish_start(project)
+        path = project.folder() / "A1-start.json"
+        start = project.record(path.name)
+        start["run_id"] = run.id
+        path.write_bytes(receipts.canonical(start))
+        index = project.folder() / "index.jsonl"
+        lines = [json.loads(line) for line in index.read_bytes().splitlines()]
+        lines[-1]["digest"] = receipts.digest(path.read_bytes())
+        index.write_bytes(b"".join((json.dumps(line) + "\n").encode() for line in lines))
+        data = run.read()
+        data["unrecognized-field"] = "account-unrecognized-value"
+        run.result_path.write_bytes(json.dumps(data).encode())
+        before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                  for p in project.state.rglob("*")}
+        project.refused("OAH_STATE_CORRUPT", project.abort)
+        self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                          for p in project.state.rglob("*")}, before)
+
+    def test_abort_scans_every_captured_index_object_before_publication(self):
+        project = FixProject(self)
+        project.changes_requested()
+        publish_start(project)
+        marker = "s" + "k-" + token_source.token_hex(20)
+        encoded = json.dumps({"kind": "unrecognized", "note": marker}).replace(
+            marker, "".join(f"\\u{ord(c):04x}" for c in marker))
+        with (project.folder() / "index.jsonl").open("ab") as stream:
+            stream.write((encoded + "\n").encode())
+        before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                  for p in project.state.rglob("*")}
+        error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.abort)
+        self.assertNotIn(marker, str(error))
+        self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                          for p in project.state.rglob("*")}, before)
+
+    def test_captured_state_uses_landed_validation_before_any_publication(self):
+        for mode in ("fix", "manual", "bind", "abort"):
+            for target in ("index", "record", "catalog", "resolved"):
+                if mode != "fix" and target in ("catalog", "resolved"):
+                    continue  # Those modes do not consume model inputs.
+                with self.subTest(mode=mode, target=target):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    if mode == "manual":
+                        project.commit(FIXED, trailer=HUMAN_TRAILER)
+                    elif mode == "bind":
+                        project.queue_fix({"write": FIXED})
+                        project.run_commands(project.fix().commands)
+                    elif mode == "abort":
+                        publish_start(project)
+                    if target == "index":
+                        path = project.folder() / "index.jsonl"
+                        path.write_bytes(path.read_bytes().rstrip(b"\n"))
+                    elif target == "record":
+                        path = project.folder() / "R1.json"
+                        path.write_bytes(b'{')
+                        index = project.folder() / "index.jsonl"
+                        lines = [json.loads(line) for line in index.read_bytes().splitlines()]
+                        lines[0]["digest"] = receipts.digest(path.read_bytes())
+                        index.write_bytes(b"".join((json.dumps(line) + "\n").encode() for line in lines))
+                    else:
+                        (project.state / f"models/{target}.json").write_bytes(b"")
+                    before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                              for p in project.state.rglob("*")}
+                    action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
+                    project.refused("OAH_STATE_CORRUPT", action)
+                    self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                                      for p in project.state.rglob("*")}, before)
+
+    def test_every_correction_record_has_only_closed_schema_strings(self):
+        enums = {"codex", "claude", "human", "correction", "attempt-start", "attempt-outcome", "attempt-head",
+                 "created", "prepared", "queued", "running", "finished", "failed", "timed_out", "refused", "lost",
+                 "applied", "no-change", "aborted", "unverified", "match", "mismatch", "downgraded",
+                 "low", "medium", "high", "xhigh", "max", "highest", "normal", "critical", "flag", "packet", "rules",
+                 "implementation", "pin", "quality_order", "quality_order(unconfirmed)", "cli_default", "effective_config"}
+        codes = {"OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED",
+                 "OAH_FIX_WARNING", "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
+                 *fix._ERROR_DIAGNOSTICS}
+        forms = re.compile(r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"
+                           r"A[1-9][0-9]*|R[1-9][0-9]*(?:-[FC][1-9][0-9]*)?|R[1-9][0-9]*\.json|"
+                           r"A[1-9][0-9]*-(?:start|outcome|head)\.json|\[file [1-9][0-9]*\]|"
+                           r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
+
+        def check(value):
+            if isinstance(value, dict):
+                for item in value.values():
+                    check(item)
+            elif isinstance(value, list):
+                for item in value:
+                    check(item)
+            elif isinstance(value, str):
+                self.assertTrue(value in enums or value in codes or forms.fullmatch(value), repr(value))
+            else:
+                self.assertIsInstance(value, (int, float, bool, type(None)))
+
+        for scenario in ("applied", "no-change", "failed", "timeout", "interrupted", "bind", "manual", "abort"):
+            with self.subTest(scenario=scenario):
+                project = FixProject(self, packet=PACKET.replace("- src\n", "- src/auth/account-unrecognized-file.py\n"),
+                                     files={".claude/skills/systematic-debugging/SKILL.md":
+                                            "---\nname: systematic-debugging\ndescription: trace bugs\n---\nTrace the defect.\n"})
+                project.changes_requested()
+                before = {p: p.read_bytes() for p in project.state.rglob("*") if p.is_file()}
+                if scenario == "manual":
+                    project.commit(FIXED, trailer=HUMAN_TRAILER)
+                    project.manual("human")
+                elif scenario == "abort":
+                    publish_start(project)
+                    before[project.folder() / "A1-start.json"] = (project.folder() / "A1-start.json").read_bytes()
+                    project.abort()
+                elif scenario == "interrupted":
+                    project.queue_fix({"hang": True})
+                    with default_sigint():
+                        thread = interrupt_when(project.fix_dir / "pid-000.txt")
+                        with self.assertRaises(fix.FixInterrupted):
+                            project.fix(tier=None, timeout_s=120)
+                        thread.join(5)
+                else:
+                    project.queue_fix({"write": FIXED} if scenario in ("applied", "bind") else
+                                      {"exit": 3} if scenario == "failed" else
+                                      {"hang": True} if scenario == "timeout" else {})
+                    result = project.fix(tier=None, **({"timeout_s": 1} if scenario == "timeout" else {}))
+                    if scenario == "bind":
+                        project.run_commands(result.commands)
+                        project.bind()
+                artifacts = list(project.folder().glob("A*.json"))
+                for name in ("result.json", "correction.json", "skills.json", "lease.json"):
+                    artifacts.extend((project.state / "runs/t1").glob("*/" + name))
+                for path in artifacts:
+                    if path.read_bytes() != before.get(path):
+                        check(json.loads(path.read_bytes()))
+                for path in (project.state / "runs/t1").glob("*/correction.patch"):
+                    self.assertIn(path.read_text().strip(), codes | {"OAH_FIX_APPLIED", "OAH_FIX_NO_CHANGE"})
+                for line in (project.folder() / "index.jsonl").read_bytes().splitlines():
+                    data = json.loads(line)
+                    if data["kind"].startswith("attempt-"):
+                        check(data)
+
     def test_shared_lock_covers_snapshot_and_every_modes_publication(self):
         for mode in ("fix", "manual", "bind", "abort"):
             with self.subTest(mode=mode):
@@ -2203,7 +2377,8 @@ class SecretTest(unittest.TestCase):
                     result = project.abort()
                     self.assertNotIn(marker, json.dumps(result.to_json()))
                     self.assertNotIn(marker, json.dumps(project.record("A1-outcome.json")))
-                    self.assertIn("unknown", project.record("A1-outcome.json")["evidence"])
+                    self.assertEqual(project.record("A1-outcome.json")["evidence"], receipts.digest(
+                        b"recorded by oah fix --abort; interrupted attempt; its run was last unknown"))
 
     def test_all_retained_brief_inputs_are_scanned_before_creating_a_correction_run(self):
         for field in ("intent", "finding", "class", "footer", "verify-footer", "skill"):
@@ -2341,7 +2516,7 @@ class SecretTest(unittest.TestCase):
                     self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                     self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                     patch = (project.run_folder(result) / "correction.patch").read_bytes()
-                    self.assertIn(b"[file ", patch)
+                    self.assertIn("[file ", result.message)
                     self.assertNotIn(name.encode("utf-8"), patch)
                     self.assertNotIn(b"src/app.py", patch)
                     self.assertIn(b"src/app.py", b"".join(project.patches))
@@ -2377,7 +2552,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                 patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                 saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
-                self.assertIn("withheld", patch)
+                self.assertEqual(patch, "OAH_FIX_FAILED\n")
                 self.assertTrue(any(item.startswith("[file ") for field in ("changed", "new_files", "user_files")
                                     for item in saved[field]))
                 project.refused("OAH_FIX_NOTHING_TO_BIND", project.bind)
@@ -2398,8 +2573,8 @@ class SecretTest(unittest.TestCase):
                         self.fail("inspection must stop")
                 outcome = project.record("A1-outcome.json")
                 self.assertEqual(outcome["outcome"], "aborted" if exception is KeyboardInterrupt else "failed")
-                self.assertEqual(outcome["evidence"], fix._error_diagnostic(
-                    KeyboardInterrupt() if exception is KeyboardInterrupt else PermissionError())[1])
+                self.assertEqual(outcome["evidence"], receipts.digest(fix._error_diagnostic(
+                    KeyboardInterrupt() if exception is KeyboardInterrupt else PermissionError())[1].encode("utf-8")))
 
     def test_unexported_credential_filenames_are_withheld_in_dirty_tree_refusals(self):
         for mode in ("correct", "manual", "bind"):
@@ -2475,8 +2650,8 @@ class SecretTest(unittest.TestCase):
                     self.assert_private(project, [key, text.rstrip()], json.dumps(result.to_json()), terminal.getvalue())
                     self.assertNotIn(name, json.dumps(result.to_json()), "withheld files are position-only")
                     patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
-                    self.assertIn("OAH_FIX_SENSITIVE_CONTENT", patch)
-                    self.assertIn("[file ", patch)
+                    self.assertIn("OAH_FIX_SENSITIVE_CONTENT", result.message)
+                    self.assertIn("[file ", result.message)
                     self.assertNotIn(name, patch)
                     self.assertNotIn("src/app.py", patch)
                     self.assertIn(b"src/app.py", b"".join(project.patches), "safe raw diffs are built only in memory")
@@ -2670,7 +2845,7 @@ class SecretTest(unittest.TestCase):
                 self.assertNotIn(name, json.dumps(result.to_json()))
                 patch = (project.run_folder(result) / "correction.patch").read_bytes()
                 self.assertNotIn(b"outside contents", patch)
-                self.assertIn(b"[file ", patch)
+                self.assertIn("[file ", result.message)
 
     def test_file_diffs_disable_submodule_expansion_and_user_diff_drivers(self):
         project = FixProject(self, attributes="* -text\n*.py diff=custom\n")
@@ -2772,8 +2947,8 @@ class SecretTest(unittest.TestCase):
                 patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
                 expected = ("OAH_FIX_INDEX_CHANGED" if change in ("deleted", "added", "untracked", "index-only")
                             else "OAH_FIX_UNSUPPORTED_SUBMODULE")
-                self.assertIn(expected, patch)
-                self.assertIn("[file ", patch)
+                self.assertIn(expected, result.message)
+                self.assertIn("[file ", result.message)
                 self.assertNotIn("diff --git", patch, "a submodule change withholds the whole diff")
                 self.assertEqual(built, [], "no content diff is built for an unsupported attempt")
 
@@ -2817,9 +2992,9 @@ class SecretTest(unittest.TestCase):
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 self.assertNotIn(name, json.dumps(result.to_json()), "identify a withheld file by position only")
                 patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
-                self.assertIn("withheld", patch)
+                self.assertEqual(patch, "OAH_FIX_FAILED\n")
                 if channel == "staged":
-                    self.assertIn("OAH_FIX_INDEX_CHANGED", patch)
+                    self.assertIn("OAH_FIX_INDEX_CHANGED", result.message)
                     self.assertNotIn("diff --git", patch)
                 else:
                     self.assertNotIn("src/app.py", patch)
@@ -2844,7 +3019,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual((result.outcome, result.commands), ("failed", []))
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
                 patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
-                self.assertIn("withheld", patch)
+                self.assertEqual(patch, "OAH_FIX_FAILED\n")
 
     def launches(self) -> tuple[list, object]:
         found: list = []

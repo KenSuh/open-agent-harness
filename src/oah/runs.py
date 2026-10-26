@@ -11,18 +11,20 @@ from __future__ import annotations
 
 import datetime as dt
 import contextlib
+import hashlib
 import json
 import os
 import pathlib
 import re
 import secrets
 import stat
+import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Callable, TypeVar
+from typing import Callable, Mapping, Sequence, TypeVar
 
 from oah import launchers
-from oah.atomic import RETRY_SECONDS, StateCorrupt, StorageError, read_json, write_json_atomic, write_text_atomic
+from oah.atomic import RETRY_SECONDS, StateCorrupt, StorageError, read_json, read_jsonl, write_json_atomic, write_text_atomic
 from oah.lease import TASK_RE
 from oah.lockfile import LockTimeout, StateLock
 
@@ -43,6 +45,86 @@ RESULT_FIELDS = (
     "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
     "launcher", "worker_output",
 )
+
+# Correction records have a closed vocabulary; shared helpers never supply retained prose.
+_CORRECTION_ENUMS = frozenset({
+    "claude", "codex", "human", "initial", "review", "correction", "attempt-start", "attempt-outcome", "attempt-head",
+    "created", "prepared", "queued", "running", *TERMINAL, "applied", "no-change", "aborted", "unverified",
+    "match", "mismatch", "downgraded", "low", "medium", "high", "xhigh", "max", "highest", "none", "minimal",
+    "normal", "critical", "flag", "packet", "rules", "pin", "quality_order", "quality_order(unconfirmed)",
+    "cli_default", "effective_config", "quick", "docs", "research", "implementation", "refactor", "broad-audit",
+    "adversarial-review", "migration", "security", "high-risk-review",
+    "OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED", "OAH_FIX_WARNING",
+    "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
+})
+_CORRECTION_FORMS = re.compile(
+    r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"
+    r"A[1-9][0-9]*|R[1-9][0-9]*(?:-[FC][1-9][0-9]*)?|R[1-9][0-9]*\.json|"
+    r"A[1-9][0-9]*-(?:start|outcome|head)\.json|\[file [1-9][0-9]*\]|"
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
+_CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256"})
+
+
+def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
+    """Build a correction record from fixed keys, enums/IDs and typed identities, hashing other text."""
+    from oah.review.fix import _ERROR_DIAGNOSTICS
+
+    if set(record) - set(allowed):
+        raise RunError("OAH_RUN_FIELD_UNKNOWN", "correction record fields are invalid; update oah before retrying")
+
+    def digest(value):
+        raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def closed(value):
+        if isinstance(value, str):
+            return value if (value in _CORRECTION_ENUMS or value in _ERROR_DIAGNOSTICS
+                             or _CORRECTION_FORMS.fullmatch(value)) else digest(value)
+        if isinstance(value, (list, tuple)):
+            return [closed(item) for item in value]
+        if isinstance(value, dict):
+            return ({key: closed(item) for key, item in value.items()}
+                    if set(value) <= _CORRECTION_NESTED_KEYS else digest(value))
+        if value is None or type(value) in (bool, int, float):
+            return value
+        raise RunError("OAH_RUN_FIELD_UNKNOWN", "correction record values are invalid; update oah before retrying")
+
+    out = {key: closed(value) for key, value in record.items()}
+    if record.get("tier_reasons") is not None:
+        out["tier_reasons"] = ["OAH_FIX_ROUTING_RULE" for _ in record["tier_reasons"]]
+    if record.get("warnings") is not None:
+        out["warnings"] = [value if value in _ERROR_DIAGNOSTICS else "OAH_FIX_WARNING"
+                           for value in (str(item).partition(":")[0] for item in record["warnings"])]
+    if record.get("advisory") is not None:
+        out["advisory"] = ("OAH_FIX_ADVISORY_USED" if record["advisory"] == "OAH_FIX_ADVISORY_USED"
+                           or str(record["advisory"]).startswith("used") else "OAH_FIX_ADVISORY_UNUSED")
+    if record.get("normalization_basis") is not None:
+        out["normalization_basis"] = "OAH_FIX_NORMALIZATION"
+    if record.get("commands") is not None:
+        out["commands"] = ["OAH_FIX_COMMIT_COMMAND" for _ in record["commands"]]
+    if record.get("error") is not None:
+        code = str(record["error"]).partition(":")[0]
+        out["error"] = code if code in _ERROR_DIAGNOSTICS else "OAH_FIX_FAILED"
+    return out
+
+
+def _captured_state(path: pathlib.Path, *, jsonl: bool = False, default=None) -> tuple[bytes, object]:
+    """Apply the landed reader to one exact byte capture, never reopening the source.
+
+    The readers take filesystem paths. A private, short-lived copy outside state preserves their
+    validation (including JSONL newlines) on both Windows and POSIX without a second parser.
+    """
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return b"", [] if jsonl else default
+    except OSError as exc:
+        raise StorageError(path, exc) from exc
+    with tempfile.TemporaryDirectory(prefix="oah-state-") as folder:
+        copy = pathlib.Path(folder) / "input"
+        copy.write_bytes(raw)
+        parsed = read_jsonl(copy) if jsonl else read_json(copy, default)
+    return raw, parsed
 
 
 class RunError(Exception):

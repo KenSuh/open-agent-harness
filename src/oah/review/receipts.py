@@ -52,7 +52,7 @@ from oah.atomic import StateCorrupt, StorageError, _fsync_folder, append_jsonl, 
 from oah.lease import TASK_RE
 from oah.lockfile import StateLock
 from oah.review import ReviewError
-from oah.runs import RunError, _contained_path
+from oah.runs import RunError, _captured_state, _contained_path
 
 SCHEMA = 1
 INDEX_NAME = "index.jsonl"
@@ -69,7 +69,7 @@ _ATTEMPT_KEYS = {
                                   "finished_at"}),
     "attempt-head": frozenset({"schema", "kind", "task", "attempt_id", "after_head", "evidence", "bound_at"}),
 }
-_OPTIONAL_KEYS = frozenset({"run_id"})
+_OPTIONAL_KEYS = frozenset({"run_id", "engine"})
 SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _RECEIPT_NAME = re.compile(r"R([1-9][0-9]{0,8})\.json")
@@ -78,9 +78,9 @@ _CORRECTION_PUBLICATION = ContextVar("oah_correction_receipts_publication", defa
 
 
 @contextlib.contextmanager
-def _correction_publication(state, task, index):
+def _correction_publication(state, task, index, lines):
     """The caller holds the lease lock; index bytes were captured with the correction history."""
-    publication = {"state": state, "task": task, "index": index}
+    publication = {"state": state, "task": task, "index": index, "lines": list(lines)}
     token = _CORRECTION_PUBLICATION.set(publication)
     try:
         yield
@@ -179,13 +179,16 @@ def _receipt_shape(record: dict) -> str | None:
 
 def _attempt_shape(kind: str, record: dict) -> str | None:
     keys = _ATTEMPT_KEYS[kind]
-    missing, extra = sorted(keys - set(record)), sorted(set(record) - keys - _OPTIONAL_KEYS)
+    optional = _OPTIONAL_KEYS if kind == "attempt-head" else {"run_id"}
+    missing, extra = sorted(keys - set(record)), sorted(set(record) - keys - optional)
     if missing:
         return f"it misses {', '.join(missing)}"
     if extra:
         return f"it has unknown fields {', '.join(extra)}"
     if "run_id" in record and not _text(record["run_id"]):
         return "run_id must be text"
+    if kind == "attempt-head" and "engine" in record and record["engine"] not in ENGINES:
+        return "engine must be a known author engine"
     if kind == "attempt-start":
         if not (isinstance(record["source_receipt"], str) and _RECEIPT_NAME.fullmatch(record["source_receipt"])):
             return "source_receipt must name a receipt such as R1.json"
@@ -270,7 +273,7 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
         with contextlib.nullcontext() if captured else StateLock(_contained_path(state, ".lock")):
             folder.mkdir(parents=True, exist_ok=True)
             index = _path(state, task, INDEX_NAME)
-            lines = ([json.loads(item) for item in publication["index"].splitlines()] if captured else read_jsonl(index))
+            lines = publication["lines"] if captured else read_jsonl(index)
             if any(item.get("name") == name for item in lines):
                 raise ReviewError("OAH_REVIEW_RECORD_EXISTS", f"{name} is already indexed for task {task}; records "
                                   "are never rewritten")
@@ -293,6 +296,7 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
                 contents = publication["index"] + (json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
                 write_text_atomic(index, contents.decode("utf-8"))
                 publication["index"] = contents
+                publication["lines"].append(line)
             else:
                 append_jsonl(index, line)
     except RunError as exc:
@@ -328,32 +332,13 @@ def load(state: pathlib.Path, task: str) -> Records:
     return _load(state, task, read_jsonl)
 
 
-def _capture_records(state: pathlib.Path, task: str) -> tuple[Records, bytes]:
+def _capture_records(state: pathlib.Path, task: str) -> tuple[Records, bytes, tuple[dict, ...]]:
     """Capture the index once, retaining its exact bytes for correction publication."""
-    raw = b""
-
-    def read_index(path):
-        nonlocal raw
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
-            return []
-        except OSError as exc:
-            raise StorageError(path, exc) from exc
-        try:
-            if raw and not raw.endswith(b"\n"):
-                raise ValueError("incomplete index")
-            lines = [json.loads(line.decode("utf-8")) for line in raw.split(b"\n")[:-1]]
-            if any(not isinstance(line, dict) for line in lines):
-                raise ValueError("invalid index line")
-            return lines
-        except (UnicodeDecodeError, ValueError):
-            raise StateCorrupt("OAH_STATE_CORRUPT: invalid review index; repair the index before retrying") from None
-
-    return _load(state, task, read_index), raw
+    raw, lines = _captured_state(_path(state, task, INDEX_NAME), jsonl=True)
+    return _load(state, task, lambda _path: lines, capture=True), raw, tuple(lines)
 
 
-def _load(state, task, read_index):
+def _load(state, task, read_index, *, capture=False):
     folder = review_dir(state, task)
     if not folder.is_dir():
         return Records(task)
@@ -384,7 +369,12 @@ def _load(state, task, read_index):
         seen.add(name)
         path = _path(state, task, name)
         try:
-            data = path.read_bytes()
+            if capture:
+                data, record = _captured_state(path)
+                if not data and record is None:
+                    raise FileNotFoundError
+            else:
+                data = path.read_bytes()
         except FileNotFoundError:
             problems.append(f"{name} is listed in {INDEX_NAME} but the file is missing")
             continue
@@ -393,11 +383,12 @@ def _load(state, task, read_index):
         if digest(data) != value:
             problems.append(f"{name} no longer matches its indexed digest {value}; it was changed after publication")
             continue
-        try:
-            record = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            problems.append(f"{name} is not UTF-8 JSON")
-            continue
+        if not capture:
+            try:
+                record = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                problems.append(f"{name} is not UTF-8 JSON")
+                continue
         problem = _record_problem(name, kind, ident, record, task) or _summary_problem(name, line, record)
         if problem is not None:
             problems.append(problem)

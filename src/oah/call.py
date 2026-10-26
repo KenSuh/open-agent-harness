@@ -140,31 +140,28 @@ class _CorrectionCatalog(models.Catalog):
         super().__init__(state_dir)
         check = _CORRECTION_INPUT_CHECK.get()
         self.original = {}
+        self.values = {}
         self.writes = {}
         for path in (self.catalog_path, self.resolved_path, self.changes_path):
-            try:
-                text = path.read_bytes().decode("utf-8")
-            except FileNotFoundError:
-                text = ""
+            raw, data = runs._captured_state(path, jsonl=path == self.changes_path, default={})
+            text = raw.decode("utf-8")
             check(text)
-            values = text.splitlines() if path == self.changes_path else (text,)
-            for value in values:
-                if value.strip():
-                    check(json.loads(value))
+            check(data)
             self.original[path] = text
+            self.values[path] = data
 
     def load(self, engine):
-        data = json.loads(self.original[self.catalog_path] or "{}")
+        data = self.values[self.catalog_path]
         return models.Entry.from_json(engine, data.get(engine)) if isinstance(data, dict) else None
 
     def _save(self, entry):
-        data = json.loads(self.original[self.catalog_path] or "{}")
+        data = json.loads(json.dumps(self.values[self.catalog_path]))
         data = data if isinstance(data, dict) else {}
         data[entry.engine] = entry.to_json()
         self._plan_write(self.catalog_path, data)
 
     def resolved(self):
-        data = json.loads(self.original[self.resolved_path] or "{}")
+        data = json.loads(json.dumps(self.values[self.resolved_path]))
         return data if isinstance(data, dict) else {}
 
     def _plan_write(self, path, data):
@@ -172,6 +169,7 @@ class _CorrectionCatalog(models.Catalog):
         self.writes[path] = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
     def record_resolution(self, engine, tier, **fields):
+        fields["why"] = "OAH_FIX_MODEL_RESOLUTION"
         data = self.resolved()
         old = data.get(engine, {}).get(tier, {}) if isinstance(data.get(engine), dict) else {}
         stamp = _iso(fields.get("now") or models.utc_now())
@@ -608,6 +606,9 @@ class _CorrectionRun(runs.Run):
 
     def _write_result(self, data):
         data["task"] = "sha256:" + hashlib.sha256(self.task.encode("utf-8")).hexdigest()
+        closed = runs._correction_record(data, runs.RESULT_FIELDS)
+        data.clear()
+        data.update(closed)
         super()._write_result(data)
         self.record.clear()
         self.record.update(data)
@@ -842,6 +843,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     if check is not None:
         run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
         record["task"] = "sha256:" + hashlib.sha256(request.task.encode("utf-8")).hexdigest()
+        record = runs._correction_record(record, runs.RESULT_FIELDS)
         # Build the real command, brief and metadata once, without creating a run or flushing writes.
         advance = check_dispatch_binding(bound, packet, request.task)
         binding_record = None
@@ -854,7 +856,9 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         plan = dataclasses.replace(
             _plan_prepare(request, settings, run, **fields), initial_record=record,
             model_writes=tuple(inputs.catalog.writes.items()), binding_record=binding_record,
-            lease_record=json.dumps({"id": holder.id, "generation": holder.generation, "intent": holder.intent}) + "\n")
+            lease_record=json.dumps(runs._correction_record(
+                {"id": holder.id, "generation": holder.generation, "intent": holder.intent},
+                ("id", "generation", "intent"))) + "\n")
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
                     "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
@@ -915,13 +919,20 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                launch_effort=resolution.launch_effort,
                axes=axes.to_json() if axes else None, tier=tier, tier_source=tier_source, tier_reasons=reasons,
                advisory=advisory, override_stage=request.override_stage, warnings=warnings)
+    if _CORRECTION_INPUT_CHECK.get() is not None:
+        result_fields = runs._correction_record(result_fields, runs.RESULT_FIELDS)
+    skills_record = {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None
+    if skills_record is not None and _CORRECTION_INPUT_CHECK.get() is not None:
+        skills_record = runs._correction_record(
+            {"count": len(chosen.skills), "sha256": hashlib.sha256(
+                json.dumps(skills_record, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+             "advisory": skills_rerank}, ("count", "sha256", "advisory"))
     prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
                     stage=request.stage, argv=tuple(argv), cwd=str(root), timeout_s=timeout_s,
                     env_additions=additions, model=resolution.model, launch_effort=resolution.launch_effort,
                     cli_version=resolution.cli_version, warnings=tuple(warnings),
                     retain_worker_text=request.retain_worker_text)
-    return _CallPlan(prepared, text, result_fields,
-                     {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None)
+    return _CallPlan(prepared, text, result_fields, skills_record)
 
 
 def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, root: pathlib.Path,

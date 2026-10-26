@@ -159,6 +159,7 @@ _ERROR_DIAGNOSTICS = {
     "OAH_ENGINE_FAILED": "Codex failed; inspect the live terminal output and worktree before retrying.",
     "OAH_RUN_TIMEOUT": "Codex timed out; inspect the worktree and increase the timeout or split the task before retrying.",
     "OAH_RUN_INTERRUPTED": "the run was interrupted; inspect the worktree and task records before retrying.",
+    "OAH_RUN_LOST": "the correction stopped before completion; inspect git diff and task records before retrying.",
     "OAH_RUN_PATH_UNSAFE": "the run path is unsafe; restore the original state directory before retrying.",
     "OAH_RUN_LAUNCH_INVALID": "the saved launch is invalid; restore the original run metadata before retrying.",
     "OAH_RUN_CORRUPT": "the run record is invalid; restore its original metadata before retrying.",
@@ -242,6 +243,18 @@ class FixInterrupted(KeyboardInterrupt):
 
 def _iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _attempt_record(kind, task, attempt_id, fields):
+    record = {"schema": receipts.SCHEMA, "kind": kind, "task": receipts.digest(task.encode("utf-8")),
+              "attempt_id": attempt_id, **fields}
+    return runs._correction_record(record, receipts._ATTEMPT_KEYS[kind] | receipts._OPTIONAL_KEYS)
+
+
+def _write_manifest(run, record):
+    fields = ("attempt_id", "before_head", "outcome", "changed", "new_files", "user_files", "new_file_digests",
+              "changes_sha256", "commands", "out_of_scope")
+    write_json_atomic(run.file_path("correction.json"), runs._correction_record(record, fields))
 
 
 def _fence(text: str, language: str = "text") -> str:
@@ -451,6 +464,7 @@ class _History:
     records: receipts.Records
     attempts: tuple[receipts.Attempt, ...]
     index_bytes: bytes = b""
+    index_lines: tuple[dict, ...] = ()
 
     def start(self, attempt: receipts.Attempt) -> dict | None:
         return next((entry.record for entry in self.records.entries
@@ -476,11 +490,12 @@ class _History:
 
 
 def _history(t: _Task, *, capture: bool = False) -> _History:
-    records, index = receipts._capture_records(t.state, t.name) if capture else (receipts.load(t.state, t.name), b"")
+    records, index, lines = (receipts._capture_records(t.state, t.name) if capture
+                             else (receipts.load(t.state, t.name), b"", ()))
     if any("run_id" in entry.record and not runs.RUN_ID_RE.fullmatch(entry.record["run_id"] or "")
            for entry in records.entries if entry.kind != "receipt"):
         raise ReviewError("OAH_FIX_HISTORY_INVALID", _ERROR_DIAGNOSTICS["OAH_FIX_HISTORY_INVALID"])
-    return _History(records, tuple(receipts.attempts(records)), index)
+    return _History(records, tuple(receipts.attempts(records)), index, lines)
 
 
 def _unfinished(t: _Task, attempts: Sequence[receipts.Attempt], nothing: str) -> ReviewError:
@@ -692,7 +707,7 @@ def _publication(t: _Task, h: _History):
     live = next((item for item in data["leases"] if item["task"] == t.name), None)
     if live != json.loads(t.lease_json) or t.lease.expired(store.now()):
         raise ReviewError("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
-    with receipts._correction_publication(t.state, t.name, h.index_bytes):
+    with receipts._correction_publication(t.state, t.name, h.index_bytes, h.index_lines):
         yield
 
 
@@ -1102,7 +1117,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                           "again") from None
     with _task_lock(t, create=False):
         h = _history(t, capture=True)
-        _safe_inputs(dataclasses.asdict(h.records), redact)
+        _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, LAUNCHED)
         round_log = receipts.read_round_log(t.state, t.name)
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
@@ -1150,7 +1165,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                     keychain=keychain)
                 attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
                                    baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
-                with _stop_signals(), inputs.publication(), receipts._correction_publication(t.state, t.name, h.index_bytes):
+                with _stop_signals(), inputs.publication(), receipts._correction_publication(
+                        t.state, t.name, h.index_bytes, h.index_lines):
                     return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1182,8 +1198,7 @@ class _Attempt:
         return self.prepared.run_id
 
     def _publish(self, kind: str, fields: dict, summary: dict | None = None) -> None:
-        record = {"schema": receipts.SCHEMA, "kind": f"attempt-{kind}", "task": receipts.digest(self.t.name.encode("utf-8")),
-                  "attempt_id": self.attempt_id, **fields}
+        record = _attempt_record(f"attempt-{kind}", self.t.name, self.attempt_id, fields)
         name = f"{self.attempt_id}-{kind}.json"
         digest = receipts.publish(self.t.state, self.t.name, name, record, summary=summary)
         self.published.append({"kind": f"attempt-{kind}", "digest": digest})
@@ -1259,8 +1274,8 @@ class _Attempt:
             diagnostic = f"{code}: " + _ERROR_DIAGNOSTICS[code]
             # The captured patch/guidance no longer describe the final tree. Retain only fixed diagnostics.
             try:
-                write_text_atomic(self.prepared.run.file_path("correction.patch"), diagnostic + "\n")
-                write_json_atomic(self.prepared.run.file_path("correction.json"), {
+                write_text_atomic(self.prepared.run.file_path("correction.patch"), code + "\n")
+                _write_manifest(self.prepared.run, {
                     "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
                     "changed": [], "new_files": [], "user_files": [], "commands": [], "out_of_scope": [],
                     "changes_sha256": receipts.digest(diagnostic.encode("utf-8"))})
@@ -1291,8 +1306,8 @@ class _Attempt:
             if head != self.before:
                 reason += f"; HEAD moved from {self.before} to {head}"
             patch = reason + "\n"
-            write_text_atomic(self.prepared.run.file_path("correction.patch"), patch)
-            write_json_atomic(self.prepared.run.file_path("correction.json"), {
+            write_text_atomic(self.prepared.run.file_path("correction.patch"), "OAH_FIX_FAILED\n")
+            _write_manifest(self.prepared.run, {
                 "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
                 "changed": list(positions), "new_files": [], "user_files": [],
                 "changes_sha256": receipts.digest(patch.encode("utf-8")), "commands": [], "out_of_scope": []})
@@ -1391,19 +1406,15 @@ class _Attempt:
             reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a credential and was withheld; "
                       "remove sensitive commit metadata before correcting again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
-        diagnostic = ("OAH_FIX_APPLIED: inspect git diff and stage the intended files before committing.\n"
-                      if outcome == "applied" else
-                      f"OAH_FIX_FAILED: {reason}; inspect git diff before retrying.\n" if reason else
-                      "OAH_FIX_NO_CHANGE: no files changed; inspect the findings before retrying.\n")
-        write_text_atomic(self.prepared.run.file_path("correction.patch"), diagnostic)
+        write_text_atomic(self.prepared.run.file_path("correction.patch"), OUTCOME_CODES[outcome] + "\n")
         positions = {name: f"[file {n}]" for n, name in enumerate(changes.files, 1)}
-        write_json_atomic(self.prepared.run.file_path("correction.json"), _redacted({
+        _write_manifest(self.prepared.run, {
             "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,
             "changed": [positions[n] for n in changes.tracked], "new_files": [positions[n] for n in changes.new],
             "user_files": [positions[n] for n in changes.user],
             "new_file_digests": [hashlib.sha256(os.fsencode(n)).hexdigest() for n in changes.new],
             "changes_sha256": digest,
-            "commands": commands, "out_of_scope": [positions[n] for n in beyond]}, self.redact))
+            "commands": commands, "out_of_scope": [positions[n] for n in beyond]})
         return _Judged(outcome, evidence, reason, changes, patch, effort, commands, unquoted, beyond, message, head)
 
     def _result(self, judged: "_Judged") -> Result:
@@ -1511,7 +1522,7 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
     t = _task(task, cwd, env, RECORDED)
     with _task_lock(t):
         h = _history(t, capture=True)
-        _safe_inputs(dataclasses.asdict(h.records), redact)
+        _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         unfinished = h.unfinished()
         if unfinished:
             raise _unfinished(t, unfinished, RECORDED)
@@ -1563,8 +1574,9 @@ def _bind(task: str, *, cwd, env, engine, redact) -> Result:
         if written_by != start["engine"]:
             evidence += (f"; written by {written_by}, not by the attempt's engine {start['engine']}: the commits "
                          f"replace its changes (--engine {written_by})")
-        record = {"schema": receipts.SCHEMA, "kind": "attempt-head", "task": receipts.digest(t.name.encode("utf-8")), "attempt_id": attempt.attempt_id,
-                  "after_head": head, "evidence": redact(evidence), "bound_at": _iso()}
+        record = _attempt_record("attempt-head", t.name, attempt.attempt_id,
+                                 {"after_head": head, "evidence": redact(evidence), "bound_at": _iso(),
+                                  "engine": written_by})
         name = f"{attempt.attempt_id}-head.json"
         with _held_signals(), _publication(t, h):
             digest = receipts.publish(t.state, t.name, name, record)
@@ -1586,7 +1598,7 @@ def _saved_correction(t: _Task, start: Mapping) -> dict:
             run = runs.find_run(t.state, run_id)
             if run.task == t.name:
                 saved = read_json(run.file_path("correction.json"), None)
-    except (runs.RunError, StateCorrupt, OSError):
+    except (runs.RunError, OSError):
         pass  # Never echo malformed metadata or storage exception text.
     if (not isinstance(saved, dict) or saved.get("attempt_id") != start["attempt_id"]
             or saved.get("before_head") != start["before_head"] or saved.get("outcome") != "applied"
@@ -1620,7 +1632,7 @@ def _manual(task: str, *, engine, cwd, env, findings, redact) -> Result:
     binding = _check_intent(t, RECORDED)
     with _task_lock(t):
         h = _history(t, capture=True)
-        _safe_inputs(dataclasses.asdict(h.records), redact)
+        _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, RECORDED)
         round_log = receipts.read_round_log(t.state, t.name)
         _safe_inputs((round_log, findings), redact)
@@ -1653,15 +1665,15 @@ def _manual(task: str, *, engine, cwd, env, findings, redact) -> Result:
             ("outcome", {"outcome": "applied", "after_head": None, "evidence": redact(evidence), "finished_at": now},
              {"outcome": "applied"}),
             ("head", {"after_head": head, "evidence": redact(f"bound to {head} by oah fix --manual: "
-                                                             f"{_authored(commits)}"), "bound_at": now}, None),
+                                                             f"{_authored(commits)}"), "bound_at": now,
+                      "engine": engine}, None),
         ]
         published = []
         _safe_inputs(records, redact)
         with _held_signals(), _publication(t, h):
             for kind, fields, summary in records:
                 name = f"{attempt_id}-{kind}.json"
-                record = {"schema": receipts.SCHEMA, "kind": f"attempt-{kind}", "task": receipts.digest(t.name.encode("utf-8")),
-                          "attempt_id": attempt_id, **fields}
+                record = _attempt_record(f"attempt-{kind}", t.name, attempt_id, fields)
                 published.append({"kind": f"attempt-{kind}", "digest": receipts.publish(t.state, t.name, name, record,
                                                                            summary=summary)})
     return Result("OAH_FIX_RECORDED", 0, "OAH_FIX_RECORDED: the manual correction is recorded and bound; "
@@ -1680,7 +1692,7 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
     t = _task(task, cwd, env, RECORDED)
     with _task_lock(t):
         h = _history(t, capture=True)
-        _safe_inputs(dataclasses.asdict(h.records), redact)
+        _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         unfinished = h.unfinished()
         if not unfinished:
             waiting = h.waiting()
@@ -1702,6 +1714,11 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                     found = runs.find_run(t.state, start["run_id"])
                     data = found.read()
                     _safe_inputs(data, redact)
+                    try:
+                        data = runs._correction_record(data, runs.RESULT_FIELDS)
+                    except runs.RunError:
+                        raise StateCorrupt("OAH_STATE_CORRUPT: invalid correction run fields; restore the run "
+                                           "metadata before retrying") from None
                     run = call._CorrectionRun(id=found.id, task=found.task, path=found.path, record=data)
                     status = data.get("status", "unknown")
                     if status not in (*runs.TERMINAL, "created", "prepared", "queued", "running"):
@@ -1713,8 +1730,7 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
             if isinstance(start.get("run_id"), str):
                 fields["run_id"] = start["run_id"]
             name = f"{attempt.attempt_id}-outcome.json"
-            record = {"schema": receipts.SCHEMA, "kind": "attempt-outcome", "task": receipts.digest(t.name.encode("utf-8")),
-                      "attempt_id": attempt.attempt_id, **fields}
+            record = _attempt_record("attempt-outcome", t.name, attempt.attempt_id, fields)
             planned.append((name, record, run, status))
         _safe_inputs([record for _name, record, _run, _status in planned], redact)
         published = []
