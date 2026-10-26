@@ -1795,6 +1795,12 @@ def _abort(task: str, *, cwd, env, redact) -> Result:
                     found = runs.find_run(t.state, start["run_id"])
                     data = found.read()
                     _safe_inputs(data, redact)
+                    task_digest = "sha256:" + hashlib.sha256(t.name.encode("utf-8")).hexdigest()
+                    if (found.task != t.name or data.get("task") not in (t.name, task_digest)
+                            or data.get("run_id") != start["run_id"]
+                            or data.get("engine") != ENGINE or start.get("engine") != ENGINE
+                            or data.get("stage") != STAGE):
+                        raise ReviewError("OAH_FIX_HISTORY_INVALID", _ERROR_DIAGNOSTICS["OAH_FIX_HISTORY_INVALID"])
                     try:
                         data = runs._correction_record(data, runs.RESULT_FIELDS)
                     except runs.RunError:

@@ -1705,6 +1705,60 @@ class ManualTest(unittest.TestCase):
         self.assertEqual(project.fix().code, "OAH_FIX_APPLIED", "an aborted attempt is retried")
         self.assertEqual(project.record("A2-start.json")["finding_ids"], ["R1-F1"])
 
+    def test_abort_refuses_inconsistent_run_references_before_publication(self):
+        for mismatch in ("directory", "engine", "stage", "run_id", "task", "task_digest", "start_engine"):
+            with self.subTest(mismatch=mismatch):
+                project = FixProject(self)
+                project.changes_requested()
+                run = runs.new_run(project.state, "t2" if mismatch == "directory" else "t1", "codex", "correction")
+                run.result(status="running")
+                data = run.read()
+                if mismatch == "engine":
+                    data["engine"] = "claude"
+                elif mismatch == "stage":
+                    data["stage"] = "review"
+                elif mismatch == "run_id":
+                    data["run_id"] = run.id[:-8] + ("00000000" if run.id[-8:] != "00000000" else "11111111")
+                elif mismatch == "task":
+                    data["task"] = "t2"
+                elif mismatch == "task_digest":
+                    data["task"] = "sha256:" + hashlib.sha256(b"t2").hexdigest()
+                run.result_path.write_bytes(receipts.canonical(data))
+                # A preceding valid attempt must not be partially settled on refusal either.
+                publish_start(project)
+                start = dict(project.record("A1-start.json"), attempt_id="A2", run_id=run.id)
+                if mismatch == "start_engine":
+                    start["engine"] = "claude"
+                receipts.publish(project.state, "t1", "A2-start.json", start)
+                before = {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                          for p in project.state.rglob("*")}
+                project.refused("OAH_FIX_HISTORY_INVALID", project.abort)
+                self.assertEqual({p.relative_to(project.state): p.read_bytes() if p.is_file() else None
+                                  for p in project.state.rglob("*")}, before)
+                self.assertEqual(run.read()["status"], "running")
+                self.assertEqual(run.result(status="finished")["status"], "finished")
+
+    def test_abort_accepts_owned_correction_run_identities(self):
+        for hashed in (False, True):
+            with self.subTest(hashed=hashed):
+                project = FixProject(self)
+                project.changes_requested()
+                run = runs.new_run(project.state, "t1", "codex", "correction")
+                run.result(status="running")
+                if hashed:
+                    data = run.read()
+                    data["task"] = "sha256:" + hashlib.sha256(b"t1").hexdigest()
+                    run.result_path.write_bytes(receipts.canonical(data))
+                start = {"schema": 1, "kind": "attempt-start", "task": "t1", "attempt_id": "A1",
+                         "source_receipt": "R1.json", "source_receipt_digest": project.receipt_digest(1),
+                         "finding_ids": ["R1-F1"], "class_ids": ["R1-C1"], "before_head": project.head,
+                         "engine": "codex", "manual": False, "started_at": "2026-10-25T00:00:00Z",
+                         "run_id": run.id}
+                receipts.publish(project.state, "t1", "A1-start.json", start)
+                self.assertEqual(project.abort().code, "OAH_FIX_ABORTED")
+                self.assertEqual(project.record("A1-outcome.json")["outcome"], "aborted")
+                self.assertEqual(run.read()["status"], "lost")
+
     def test_records_are_never_rewritten(self):
         project = FixProject(self)
         result = applied(self, project)
