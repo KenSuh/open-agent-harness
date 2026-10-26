@@ -533,6 +533,16 @@ class Prepared:
         return cls(**fields)
 
 
+@dataclasses.dataclass(frozen=True)
+class _CallPlan:
+    prepared: Prepared
+    prompt: str
+    result_fields: dict
+    skills_record: dict | None
+    initial_record: dict | None = None
+    model_writes: tuple = ()
+
+
 def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled: bool = False,
            env: Mapping[str, str] | None = None, keychain=None) -> str:
     """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
@@ -680,43 +690,37 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
                                 refresh=request.refresh_models, now=now)
     warnings.extend(resolution.warnings)
+    fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
+                  has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
+                  reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder)
+    plan = None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
-        # Render before any run exists. The real run id replaces only this fixed placeholder later.
-        check(_brief_text(request, "pending", packet, scope, stored, footer, has_footer,
-                          list(warnings), selection, holder))
+        run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
+        # Build the real command, brief and metadata once, without creating a run or flushing writes.
+        plan = dataclasses.replace(_plan_prepare(request, settings, run, **fields), initial_record=record,
+                                   model_writes=tuple(_CORRECTION_MODEL_WRITES.get()))
         check(dataclasses.asdict(resolution))
-        check(warnings)
-        if selection[0] is not None:
-            check(selection[0].to_record())
-        # No catalog/resolution/run write is allowed until all original preparation inputs pass.
-        changes = []
-        for write in _CORRECTION_MODEL_WRITES.get():
-            changes.extend(write() or ())
+        check(dataclasses.asdict(plan))
+        # All correction writes consume this complete validated plan; nothing is rebuilt afterward.
+        for write in plan.model_writes:
+            write()
         _CORRECTION_MODEL_WRITES.get().clear()
-        resolution = dataclasses.replace(resolution, changes=tuple(changes))
-    run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
+        runs._create_run(run, plan.initial_record)
+    else:
+        run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
     try:
-        return _finish_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
-                               stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
-                               tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                               warnings=warnings, selection=selection, checked_lease=holder)
+        return _finish_prepare(request, settings, run, plan=plan, **fields)
     except (EngineError, briefs.BriefError) as exc:
         run.result(status="refused", error=_recorded_error(exc, request.retain_worker_text), warnings=warnings)
         raise
 
 
-def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, root: pathlib.Path,
+def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, root: pathlib.Path,
                     state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
-                    warnings: list[str], selection: tuple | None = None, checked_lease=None) -> Prepared:
-    if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
-        from oah.lease import Store
-
-        Store(state_dir).log(task=request.task, agent=request.engine,
-                             message=f"stage override: run {run.id} runs {request.engine} for stage {request.stage} "
-                                     f"(configured: {settings.stages[request.stage]})")
+                    warnings: list[str], selection: tuple | None = None, checked_lease=None) -> _CallPlan:
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease)
     read_only = request.stage == "review"
@@ -736,14 +740,9 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=read_only)
-    run.write_prompt(text)
-    if chosen is not None:
-        from oah.atomic import write_json_atomic
-
-        write_json_atomic(run.file_path("skills.json"), {"rerank": skills_rerank, **chosen.to_record()})
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
-    run.result(status="prepared", command=list(argv) if request.retain_worker_text else None,
+    result_fields = dict(status="prepared", command=list(argv) if request.retain_worker_text else None,
                cwd=str(root) if request.retain_worker_text else None, read_only=read_only,
                cli_path=resolution.base[0] if request.retain_worker_text else None, cli_version=resolution.cli_version,
                requested_model=resolution.requested_model or None, resolved_model=resolution.model,
@@ -751,13 +750,41 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                launch_effort=resolution.launch_effort,
                axes=axes.to_json() if axes else None, tier=tier, tier_source=tier_source, tier_reasons=reasons,
                advisory=advisory, override_stage=request.override_stage, warnings=warnings)
-    if packet is not None:
-        record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
-    return Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
+    prepared = Prepared(run_dir=str(run.path), run_id=run.id, task=request.task, engine=request.engine,
                     stage=request.stage, argv=tuple(argv), cwd=str(root), timeout_s=timeout_s,
                     env_additions=additions, model=resolution.model, launch_effort=resolution.launch_effort,
                     cli_version=resolution.cli_version, warnings=tuple(warnings),
                     retain_worker_text=request.retain_worker_text)
+    return _CallPlan(prepared, text, result_fields,
+                     {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None)
+
+
+def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, root: pathlib.Path,
+                    state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
+                    footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
+                    tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
+                    warnings: list[str], selection: tuple | None = None, checked_lease=None,
+                    plan: _CallPlan | None = None) -> Prepared:
+    if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
+        from oah.lease import Store
+
+        Store(state_dir).log(task=request.task, agent=request.engine,
+                             message=f"stage override: run {run.id} runs {request.engine} for stage {request.stage} "
+                                     f"(configured: {settings.stages[request.stage]})")
+    if plan is None:
+        plan = _plan_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
+                             stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
+                             tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
+                             warnings=warnings, selection=selection, checked_lease=checked_lease)
+    run.write_prompt(plan.prompt)
+    if plan.skills_record is not None:
+        from oah.atomic import write_json_atomic
+
+        write_json_atomic(run.file_path("skills.json"), plan.skills_record)
+    run.result(**plan.result_fields)
+    if packet is not None:
+        record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
+    return plan.prepared
 
 
 def _iso(moment: dt.datetime) -> str:
@@ -905,14 +932,24 @@ class _PosixTree:
         self.child = child
         self.owned = {}
         self.stopped = threading.Event()
-        self.error = False
+        self.error = True
         self.thread = None
-        self._scan(self._processes(), initial=True)
+        # Keep even initialization failures on identity-checked cleanup, never the PID/group fallback.
+        child._oah_posix_tree = self
+        info = self._process_info(child.pid)
+        if info is not None:
+            self.owned[child.pid] = info[2]
+        self._scan(self._processes())
         self.thread = threading.Thread(target=self._watch, daemon=True)
-        self.thread.start()
+        self.error = False
+        try:
+            self.thread.start()
+        except Exception:
+            self.error = True
+            raise
 
-    def _processes(self):
-        rows = {}
+    def _process_info(self, pid):
+        """Read one PID's current birth identity, independently of descendant enumeration."""
         if sys.platform == "darwin":
             import ctypes
             import errno
@@ -926,6 +963,26 @@ class _PosixTree:
                 api.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                                             ctypes.c_void_p, ctypes.c_int)
                 api.proc_listchildpids.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+            info = ctypes.create_string_buffer(136)
+            ctypes.set_errno(0)
+            if api.proc_pidinfo(pid, 3, 0, info, len(info)) != len(info):  # PROC_PIDTBSDINFO
+                if ctypes.get_errno() not in (errno.ESRCH, errno.ENOENT):
+                    raise OSError  # Unreadable ownership metadata must not silently drop a live worker.
+                return None  # exited/reaped between enumeration and inspection
+            parent = struct.unpack_from("=I", info, 16)[0]
+            status = {4: "T", 5: "Z"}.get(struct.unpack_from("=I", info, 4)[0], "R")
+            return parent, status, struct.unpack_from("=QQ", info, 120)
+        try:
+            fields = pathlib.Path(f"/proc/{pid}/stat").read_bytes().rsplit(b") ", 1)[1].split()
+            return int(fields[1]), fields[0].decode("ascii"), int(fields[19])
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+
+    def _processes(self):
+        rows = {}
+        if sys.platform == "darwin":
+            import ctypes
+
             pending = set(self.owned) | {self.child.pid}
             seen = set()
             while pending:
@@ -933,15 +990,11 @@ class _PosixTree:
                 if pid in seen:
                     continue
                 seen.add(pid)
-                info = ctypes.create_string_buffer(136)
-                ctypes.set_errno(0)
-                if api.proc_pidinfo(pid, 3, 0, info, len(info)) != len(info):  # PROC_PIDTBSDINFO
-                    if ctypes.get_errno() not in (errno.ESRCH, errno.ENOENT):
-                        raise OSError  # Unreadable ownership metadata must not silently drop a live worker.
-                    continue  # exited/reaped between enumeration and inspection
-                parent = struct.unpack_from("=I", info, 16)[0]
-                status = {4: "T", 5: "Z"}.get(struct.unpack_from("=I", info, 4)[0], "R")
-                rows[pid] = (parent, status, struct.unpack_from("=QQ", info, 120))
+                info = self._process_info(pid)
+                if info is None:
+                    continue
+                rows[pid] = info
+                api = self._api
                 size = api.proc_listchildpids(pid, None, 0)
                 if size < 0:
                     raise OSError
@@ -958,11 +1011,10 @@ class _PosixTree:
         # Linux test/development hosts expose the same numeric metadata in procfs.
         for directory in pathlib.Path("/proc").iterdir():
             if directory.name.isdigit():
-                try:
-                    fields = (directory / "stat").read_bytes().rsplit(b") ", 1)[1].split()
-                    rows[int(directory.name)] = (int(fields[1]), fields[0].decode("ascii"), int(fields[19]))
-                except (FileNotFoundError, ProcessLookupError):
-                    pass
+                pid = int(directory.name)
+                info = self._process_info(pid)
+                if info is not None:
+                    rows[pid] = info
         return rows
 
     def _scan(self, rows, *, initial=False):
@@ -986,22 +1038,29 @@ class _PosixTree:
 
     def close(self):
         self.stopped.set()
-        if self.thread is not None:
+        if self.thread is not None and self.thread.ident is not None:
             self.thread.join()
 
-    @staticmethod
-    def _signal(pids, number):
+    def _signal(self, pids, number):
         for pid in pids:
             try:
+                info = self._process_info(pid)
+                if info is None:
+                    continue
+                if pid not in self.owned or info[2] != self.owned[pid]:
+                    self.error = True
+                    continue
                 os.kill(pid, number)
             except ProcessLookupError:
                 pass
+            except Exception:
+                self.error = True
 
     def kill(self):
-        from oah.engines.proc import REAP_SECONDS, kill_tree
+        from oah.engines.proc import REAP_SECONDS
 
-        self.close()
         try:
+            self.close()
             # Freeze every reachable member before killing any parent, then enumerate again. This
             # prevents a surviving parent from creating more children or orphaning known descendants.
             deadline = time.monotonic() + REAP_SECONDS
@@ -1015,7 +1074,6 @@ class _PosixTree:
                 if time.monotonic() >= deadline:
                     raise TimeoutError
             self._signal(active, signal.SIGKILL)
-            kill_tree(self.child)  # Also cover unobserved survivors in the original process group.
             while True:
                 rows = self._processes()
                 active = {pid for pid in self._scan(rows) if not rows[pid][1].startswith("Z")}
@@ -1028,8 +1086,8 @@ class _PosixTree:
             if self.error:
                 raise RuntimeError
         except Exception:
-            # Even enumeration failure must first stop all the processes already owned.
-            kill_tree(self.child)
+            # Enumeration may fail while individual identities remain readable. Never signal a
+            # remembered PID (or a process group) without re-establishing that member's ownership.
             self._signal(self.owned, signal.SIGKILL)
             raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: process-tree cleanup could not be verified; inspect "
                                  "running workers and the worktree before retrying") from None
@@ -1041,8 +1099,11 @@ def _kill_owned_tree(child):
     tree = getattr(child, "_oah_posix_tree", None)
     if tree is not None:
         tree.kill()
-    else:
+    elif os.name == "nt" and getattr(child, "_oah_job", None) is not None:
         kill_tree(child)
+    else:
+        raise _CleanupFailed("OAH_FIX_CLEANUP_FAILED: process-tree cleanup could not be verified; inspect "
+                             "running workers and the worktree before retrying")
 
 
 @dataclasses.dataclass(frozen=True)

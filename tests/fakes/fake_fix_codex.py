@@ -152,6 +152,8 @@ def main(argv: list[str]) -> int:
     if step.get("exit_with_descendant"):
         subprocess.Popen([sys.executable, __file__, "--descendant", str(record_dir / "descendant.txt")],
                          stdin=subprocess.DEVNULL)
+        # Keep the parent-PID edge observable before testing cleanup after the launcher exits.
+        time.sleep(0.3)
         os._exit(0)
     if step.get("spawn_descendant"):
         pid_file = record_dir / "descendant.txt"

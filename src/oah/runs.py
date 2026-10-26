@@ -420,15 +420,29 @@ def task_directory(state_dir: pathlib.Path, task: str) -> pathlib.Path:
 
 def new_run(state_dir: pathlib.Path, task: str, engine: str, stage: str, *, now: dt.datetime | None = None) -> Run:
     """Create runs/<task>/<run-id>/ atomically, with a first result.json."""
+    run, record = _plan_run(state_dir, task, engine, stage, now=now)
+    return _create_run(run, record)
+
+
+def _plan_run(state_dir: pathlib.Path, task: str, engine: str, stage: str, *,
+              now: dt.datetime | None = None) -> tuple[Run, dict]:
+    """Allocate the run identity and initial metadata without writing any state."""
     parent = task_directory(state_dir, task)
     now = now or dt.datetime.now(dt.timezone.utc)
     run_id = f"r{now.astimezone(dt.timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
     final = parent / run_id
-    temp = parent / f".{run_id}.tmp"
     record = {name: None for name in RESULT_FIELDS}
     record.update({name: UNVERIFIED for name in UNVERIFIED_FIELDS})
     record.update(run_id=run_id, task=task, engine=engine, stage=stage, status="created", created_at=_iso(now),
                   warnings=[])
+    return Run(id=run_id, task=task, path=final), record
+
+
+def _create_run(run: Run, record: dict) -> Run:
+    """Publish exactly the identity and initial metadata allocated by `_plan_run`."""
+    final = run.path
+    state_dir, task, run_id = final.parents[2], run.task, run.id
+    temp = final.with_name(f".{run_id}.tmp")
     try:
         _contained_path(state_dir, "runs", task, temp.name)
         temp.mkdir(parents=True)
@@ -438,7 +452,7 @@ def new_run(state_dir: pathlib.Path, task: str, engine: str, stage: str, *, now:
         os.rename(temp, final)
     except OSError as exc:
         raise StorageError(final, exc) from exc
-    return Run(id=run_id, task=task, path=final)
+    return run
 
 
 def find_run(state_dir: pathlib.Path, run_id: str, *, deadline: float | None = None) -> Run:

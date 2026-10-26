@@ -199,6 +199,77 @@ def interrupt_when(path: pathlib.Path) -> threading.Thread:
 
 
 class CallSeamTest(unittest.TestCase):
+    def test_every_owned_signal_rechecks_birth_identity(self):
+        for number in (19, 9):
+            for observed in ((1, "R", "original"), (1, "R", "reused"), None, OSError()):
+                with self.subTest(signal=number, observed=observed):
+                    tree = object.__new__(call._PosixTree)
+                    tree.owned, tree.error = {123: "original"}, False
+                    with mock.patch.object(tree, "_process_info", create=True,
+                                           side_effect=observed if isinstance(observed, Exception) else None,
+                                           return_value=observed) as read, mock.patch.object(os, "kill") as send:
+                        tree._signal({123}, number)
+                    self.assertEqual(send.call_args_list,
+                                     [mock.call(123, number)] if observed == (1, "R", "original") else [])
+                    read.assert_called_once_with(123)
+                    self.assertEqual(tree.error, isinstance(observed, Exception) or observed == (1, "R", "reused"))
+
+    def test_missing_ownership_never_falls_back_to_a_pid_or_group(self):
+        child = mock.Mock(spec=("pid", "kill"))
+        child.pid = 123
+        with mock.patch("oah.engines.proc.kill_tree") as unchecked:
+            with self.assertRaises(call._CleanupFailed):
+                call._kill_owned_tree(child)
+        unchecked.assert_not_called()
+        child.kill.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX ownership initialization")
+    def test_failed_initial_enumeration_keeps_cleanup_on_the_identity_checked_path(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        try:
+            with mock.patch.object(call._PosixTree, "_processes", side_effect=OSError):
+                with self.assertRaises(OSError):
+                    call._PosixTree(child)
+                with self.assertRaises(call._CleanupFailed):
+                    call._kill_owned_tree(child)
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+
+    @unittest.skipIf(os.name == "nt", "POSIX PID birth identities")
+    def test_cleanup_enumeration_failure_never_signals_a_reused_pid(self):
+        for failure in ("enumeration", "watcher"):
+            with self.subTest(failure=failure):
+                children = []
+                try:
+                    for _ in range(2):
+                        children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                                         start_new_session=True))
+                    child, unrelated = children
+                    tree = call._PosixTree(child)
+                    tree.close()
+                    # The live unrelated process has reused an exited descendant's remembered PID.
+                    tree.owned[unrelated.pid] = ("exited descendant",)
+                    with contextlib.ExitStack() as stack:
+                        if failure == "enumeration":
+                            stack.enter_context(mock.patch.object(tree, "_processes", side_effect=OSError))
+                        else:
+                            tree.error = True
+                            self.assertNotIn(unrelated.pid, tree._scan(tree._processes()))
+                        with self.assertRaises(call._CleanupFailed):
+                            tree.kill()
+                    with self.assertRaises(subprocess.TimeoutExpired,
+                                           msg="fallback killed a PID whose birth identity no longer matches"):
+                        unrelated.wait(timeout=0.2)
+                    self.assertIsNotNone(child.wait(timeout=5))
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                        child.wait(timeout=5)
+
     def test_landed_orca_launcher_imports_with_prepared_subclass(self):
         result = subprocess.run([sys.executable, "-c", "import tests; from oah.launchers import orca"],
                                 capture_output=True, cwd=FAKES.parent.parent)
@@ -1644,6 +1715,29 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_invalid_model_pins_leave_the_complete_state_tree_unchanged(self):
+        for pin in ("-invalid", "s" + "k-" + token_source.token_hex(20)):
+            for cached in (True, False):
+                with self.subTest(credential=not pin.startswith("-"), cached=cached):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    config = (project.repo / ".oah/config.toml").read_text(encoding="utf-8")
+                    config += '\n[engines.codex.tiers.high]\nmodel = ' + json.dumps(pin) + '\n'
+                    project.commit({".oah/config.toml": config})
+                    if not cached:
+                        shutil.rmtree(project.state / "models")
+
+                    def snapshot():
+                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                                for p in project.state.rglob("*")}
+
+                    before = snapshot()
+                    code = "OAH_MODEL_UNRESOLVED" if pin.startswith("-") else "OAH_FIX_SENSITIVE_INPUT"
+                    error = project.refused(code, project.fix)
+                    self.assertNotIn(pin, str(error))
+                    self.assertEqual(snapshot(), before,
+                                     "invalid launch arguments must leave all state bytes and directories unchanged")
+
     def test_rejected_model_metadata_leaves_the_complete_state_tree_unchanged(self):
         for field in ("pin", "quality-order", "cache", "stored-catalog", "escaped-catalog", "escaped-changes",
                       "stored-resolution", "effective", "resolution", "late-brief", "no-model-state"):
