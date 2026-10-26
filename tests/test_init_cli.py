@@ -158,6 +158,101 @@ class DiscoveryTest(unittest.TestCase):
 class PlanFirstTest(unittest.TestCase):
     """AC1: the full plan comes first; --dry-run prints it and writes, installs and runs nothing."""
 
+    def _assert_internal_rules_link_cli(self):
+        repo = committed_repo(self)
+        (repo / "AGENTS.md").write_bytes(b"# shared guidance\n")
+        (repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("CLAUDE.md -> AGENTS.md", plan_block(out))
+        self.assertTrue((repo / "CLAUDE.md").is_symlink())
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_INIT_UNCHANGED impact=fresh", out)
+        self.assertEqual(snapshot(repo), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_internal_rules_link_plan_and_second_run(self):
+        self._assert_internal_rules_link_cli()
+
+    @unittest.skipUnless(os.name == "nt", "Windows file symlinks (CI developer mode)")
+    def test_windows_internal_rules_link_plan_and_second_run(self):
+        self._assert_internal_rules_link_cli()
+
+    def test_existing_text_diff_precedes_force_confirmation_and_is_not_stored(self):
+        repo = committed_repo(self)
+        target = repo / ".graphifyignore"
+        original = b"# project graph exclusions\r\ncustom-cache/\r\n"
+        target.write_bytes(original)
+        before = snapshot(repo)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", "--force",
+                                  *flags(graph=True))
+        self.assertEqual(code, 0, err)
+        self.assertIn("--- a/.graphifyignore", out)
+        self.assertIn("+++ b/.graphifyignore", out)
+        self.assertIn("-custom-cache/", out)
+        self.assertEqual(snapshot(repo), before)
+        self.assertFalse((repo / ".git/oah").exists())
+
+        machine = make_machine(self, FakeTools(), interactive=True)
+        observed = []
+
+        def decline(prompt):
+            observed.append((prompt, sys.stdout.getvalue()))
+            return "n"
+
+        machine.ask = decline
+        code, out, err = run_init(repo, machine, "--force", *flags(graph=True))
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("Apply this plan?", observed[0][0])
+        self.assertIn("-custom-cache/", observed[0][1])
+        self.assertEqual(snapshot(repo), before)
+
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--force", *flags(graph=True))
+        self.assertEqual(code, 0, out + err)
+        for name, data in snapshot(repo / ".git/oah").items():
+            self.assertNotIn(b"custom-cache/", data, name)
+            self.assertNotIn(b"--- a/.graphifyignore", data, name)
+
+    def test_terminal_diff_falls_back_for_credentials_binary_and_invalid_utf8(self):
+        fixtures = (b"# API_KEY=" + ("fake-" + token_source.token_hex(20)).encode("ascii") + b"\n",
+                    b"# Authorization: Bearer " + ("fake-" + token_source.token_hex(20)).encode("ascii") + b"\n",
+                    json.dumps({"Authorization": "fake-" + token_source.token_hex(20)}).encode("ascii"),
+                    json.dumps({"cookie": "fake-" + token_source.token_hex(20)}).encode("ascii"),
+                    b"private-binary\x00payload\n", b"private-undecodable\xff\n")
+        for original in fixtures:
+            with self.subTest(kind=fixtures.index(original)):
+                repo = committed_repo(self)
+                (repo / ".graphifyignore").write_bytes(original)
+                before = snapshot(repo)
+                code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", "--force",
+                                          *flags(graph=True))
+                self.assertEqual(code, 0, err)
+                self.assertIn(init._replacement_note(original), out)
+                self.assertNotIn(original.decode("utf-8", errors="replace").strip(), out + err)
+                self.assertNotIn("--- a/.graphifyignore", out)
+                self.assertEqual(snapshot(repo), before)
+
+    def test_terminal_diffs_cover_managed_rules_hooks_and_ci(self):
+        repo = committed_repo(self)
+        (repo / "AGENTS.md").write_bytes(b"# project guidance\n")
+        (repo / ".git/hooks/pre-push").write_bytes(b"#!/bin/sh\n# custom push check\n")
+        workflow = repo / ".github/workflows/oah-ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_bytes(b"# custom workflow\n")
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", "--force",
+                                  *flags(hooks=True, ci=True))
+        self.assertEqual(code, 0, err)
+        for path in ("AGENTS.md", ".git/hooks/pre-push", ".github/workflows/oah-ci.yml"):
+            self.assertIn("--- a/" + path, out)
+        self.assertIn("-# custom push check", out)
+        self.assertIn("-# custom workflow", out)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", *flags(hooks=True, ci=True))
+        self.assertEqual(code, 0, err)
+        self.assertIn("--- a/.git/hooks/pre-push", out)
+        self.assertIn("-# custom push check", out)
+
     def test_dry_run_refuses_project_redirection_during_discovery(self):
         repo = committed_repo(self)
         tools = FakeTools()

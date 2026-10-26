@@ -3,8 +3,8 @@
 
 Every planned file is a `FileChange`: `create` (missing), `replace` (differs, and `--force` was given),
 `update` (managed content added in place: missing `.gitignore` entries, the guide's index line), `keep`
-(exists and stays as it is), `unchanged` (already what init would write) or `blocked` (a link is on its
-path: nothing is written through a link, which could reach a file outside the project). The wiki's
+(exists and stays as it is), `unchanged` (already what init would write) or `blocked` (an unsafe path).
+Internal links are resolved while planning; publication uses only the captured no-follow target. The wiki's
 `index.md` and `log.md` are content: they are never replaced, not even with `--force`. A file that changed
 after the plan was shown is skipped with `OAH_INIT_CHANGED`. A blocked file, a refused hook or a skipped
 CI starter leaves the run incomplete. Settings are parameters, so this module never reads the config.
@@ -43,6 +43,7 @@ from oah.lockfile import LockTimeout, StateLock, _try_lock
 from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_dir
 from oah.setup import companions, guide
 from oah.setup.tools import Tool, catalog, display, os_name_for
+from oah.toolkit import checks
 from oah.wiki import notes
 from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings
 from oah.wiki.log import parse_log
@@ -98,6 +99,7 @@ class FileChange:
     data: bytes | None = None  # the bytes to write, for create, replace and update
     before: bytes | None = None  # the bytes found while planning
     note: str = ""
+    target: str = ""  # resolved once while planning; an empty value uses path for compatibility
 
 
 # Questions -------------------------------------------------------------------------------------------
@@ -323,6 +325,14 @@ def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
             folders[parent][1].append(path.name)
 
     problems = []
+
+    def ignored(probe: str) -> bool:
+        try:
+            path = _ignore_path(root, probe)
+        except InitError:
+            return False  # An unsafe alias stays incomplete; never query Git about an outside target.
+        return run_git(root, "check-ignore", "--no-index", "-q", "--", path).returncode == 0
+
     for _comment, entries in _gitignore_groups(unlazy_copy):
         for pattern in entries:
             parent, _sep, leaf = pattern.rstrip("/").rpartition("/")
@@ -344,12 +354,17 @@ def _ignore_problems(root: pathlib.Path, *, unlazy_copy: bool) -> list[str]:
                     if matches_parent or not parent:
                         probes.add((path / leaf.replace("*", "oah-init-probe")).as_posix()
                                    + ("/oah-init-probe" if pattern.endswith("/") else ""))
-            if any(run_git(root, "check-ignore", "--no-index", "-q", "--", probe).returncode != 0
-                   for probe in sorted(probes)):
+            if any(not ignored(probe) for probe in sorted(probes)):
                 problems.append(f"OAH_INIT_IGNORE_UNPROTECTED: required pattern {pattern} does not protect every "
                                 "checked path. Fix overriding negations in the root or nested .gitignore files, "
                                 "then run oah init again")
     return problems
+
+
+def _ignore_path(root: pathlib.Path, relative: str) -> str:
+    """Git cannot check paths below a directory alias; check its captured in-tree target instead."""
+    link = _linked(root, relative)
+    return _resolved_path(root, relative) if link is not None and link != relative else relative
 
 
 # The default branch ----------------------------------------------------------------------------------
@@ -416,10 +431,32 @@ def _relative(relative: str) -> str:
 
 def _wiki_dir(root: pathlib.Path, relative: str) -> str:
     relative = _relative(relative)
-    if _linked(root, relative) is not None:
-        raise InitError("OAH_INIT_PATH_UNSAFE", "[wiki] dir contains a link or junction. Choose a regular "
-                        "folder inside this worktree, then run oah init again", EXIT_ENVIRONMENT)
+    _resolved_path(root, relative)
     return relative
+
+
+def _resolved_path(root: pathlib.Path, relative: str) -> str:
+    """Resolve existing links once, confine the result, then leave all I/O to no-follow handles."""
+    relative = _relative(relative)
+    link = _linked(root, relative)
+    if link is None:
+        return relative
+    try:
+        # Strictly resolve each existing linked component, including links below directory aliases.
+        # An ordinary missing suffix below a valid directory link can still be scaffolded.
+        target = root
+        for part in pathlib.PurePosixPath(relative).parts:
+            target = target / part
+            if _is_link(target):
+                target = target.resolve(strict=True)
+        relative_target = _relative(target.relative_to(root.resolve()).as_posix())
+        if _linked(root, relative_target) is not None:
+            raise OSError("resolved target changed")
+        return relative_target
+    except (OSError, RuntimeError, ValueError):
+        raise InitError("OAH_INIT_PATH_UNSAFE", "a link or junction leaves this worktree, is dangling or cannot "
+                        "be resolved. Point it at an existing target inside this worktree, then run oah init "
+                        "again", EXIT_ENVIRONMENT) from None
 
 
 def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> None:
@@ -585,7 +622,7 @@ def _read_user(root: pathlib.Path, relative: str, *, private_staging: bool = Fal
 
 
 def _load_config(root: pathlib.Path) -> Config:
-    data = _read_user(root, CONFIG_PATH)
+    data = _read_user(root, _resolved_path(root, CONFIG_PATH))
     return Config(path=None, raw={}) if data is None else parse_config(data, path=root / CONFIG_PATH)
 
 
@@ -1013,21 +1050,23 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
 
     def owned(path: str, data: bytes, group: str) -> FileChange:
         path = _relative(path)
-        link = _linked(root, path)
-        before = None if link is not None else _read_user(root, path)
-        if link is not None:
-            change = FileChange(path, "blocked", group, None, before,
-                                f"{link} is a link; oah never writes through links, which could reach files outside "
-                                "the project")
-        elif before is None:
+        try:
+            target = _resolved_path(root, path)
+        except InitError as exc:
+            change = FileChange(path, "blocked", group, note=str(exc))
+            changes.append(change)
+            return change
+        before = _read_user(root, target)
+        if before is None:
             change = FileChange(path, "create", group, data)
         elif before == data:
             change = FileChange(path, "unchanged", group, None, before)
         elif force:
             change = FileChange(path, "replace", group, data, before)
         else:
-            change = FileChange(path, "keep", group, None, before,
+            change = FileChange(path, "keep", group, data, before,
                                 KEEP_NOTES.get(path, "exists; pass --force to replace it"))
+        change = dataclasses.replace(change, target=target)
         changes.append(change)
         return change
 
@@ -1037,7 +1076,7 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
                        ("GATES.md", notes.packaged("gates", "GATES.md").encode("utf-8")), ("README.md", readme)):
         owned(f"{TEMPLATES_DIR}/{name}", data, "templates")
     scaffold = notes.scaffold_files(today)
-    guide_missing = _read_user(root, _wiki_path(wiki_dir, f"{GUIDE_SLUG}.md")) is None
+    guide_missing = _read_user(root, _resolved_path(root, _wiki_path(wiki_dir, f"{GUIDE_SLUG}.md"))) is None
     for name in WIKI_CONTENT:
         changes.append(_plan_wiki_content(root, _wiki_path(wiki_dir, name), scaffold[name], guide_missing))
     for name, data in scaffold.items():
@@ -1053,50 +1092,60 @@ def plan_files(root: pathlib.Path, *, config: bytes, wiki_dir: str, agents: Mapp
 
 
 def _plan_wiki_content(root: pathlib.Path, path: str, fresh: bytes, guide_missing: bool) -> FileChange:
-    link = _linked(root, path)
-    before = None if link is not None else _read_user(root, path)
-    if link is not None:
-        return FileChange(path, "blocked", "wiki", None, before, f"{link} is a link; oah never writes through links")
+    try:
+        target = _resolved_path(root, path)
+    except InitError as exc:
+        return FileChange(path, "blocked", "wiki", note=str(exc))
+    before = _read_user(root, target)
+
+    def change(*args):
+        return FileChange(path, *args, target=target)
+
     if before is None:
-        return FileChange(path, "create", "wiki", fresh)
+        return change("create", "wiki", fresh)
     if before == fresh:
-        return FileChange(path, "unchanged", "wiki", None, before)
+        return change("unchanged", "wiki", None, before)
     keep = "wiki content; init never replaces it"
     if path.endswith("/index.md") and guide_missing:
         try:
             if not _GUIDE_LINK.search(before.decode("utf-8")):
                 updated = notes.add_to_index(before, "Notes", notes.index_item(GUIDE_SLUG, GUIDE_TITLE))
-                return FileChange(path, "update", "wiki", updated, before, f"add the line for {GUIDE_SLUG}.md")
+                return change("update", "wiki", updated, before, f"add the line for {GUIDE_SLUG}.md")
         except (UnicodeDecodeError, WikiError):
-            return FileChange(path, "keep", "wiki", None, before,
+            return change("keep", "wiki", None, before,
                               f"{keep}; it is not UTF-8 text, so add [[{GUIDE_SLUG}]] to it by hand")
     if path.endswith("/log.md"):
         try:
             parse_log(before, "log.md")
         except WikiError:
-            return FileChange(path, "keep", "wiki", None, before,
+            return change("keep", "wiki", None, before,
                               f"{keep}; its log format is invalid; repair it before running oah wiki commands")
-    return FileChange(path, "keep", "wiki", None, before, keep)
+    return change("keep", "wiki", None, before, keep)
 
 
 def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
-    if _is_link(root / GITIGNORE):
-        return FileChange(GITIGNORE, "blocked", "gitignore", None, None,
-                          "it is a link; oah never writes through links")
-    before = _read_user(root, GITIGNORE)
+    try:
+        target = _resolved_path(root, GITIGNORE)
+    except InitError as exc:
+        return FileChange(GITIGNORE, "blocked", "gitignore", note=str(exc))
+    before = _read_user(root, target)
+
+    def change(*args):
+        return FileChange(GITIGNORE, *args, target=target)
+
     try:
         data = add_gitignore_entries(before, unlazy_copy=unlazy_copy)
     except UnicodeDecodeError:
         missing = [entry for _comment, entries in _gitignore_groups(unlazy_copy) for entry in entries]
-        return FileChange(GITIGNORE, "keep", "gitignore", None, before,
+        return change("keep", "gitignore", None, before,
                           f"it is not UTF-8 text, so add these entries by hand: {', '.join(missing)}")
     if data is None:
-        return FileChange(GITIGNORE, "unchanged", "gitignore", None, before)
+        return change("unchanged", "gitignore", None, before)
     what = "gate ledgers, Obsidian's UI state and local secret files stay out of git"
     if before is None:
-        return FileChange(GITIGNORE, "create", "gitignore", data, None, what)
+        return change("create", "gitignore", data, None, what)
     added = len(data.decode("utf-8").splitlines()) - len(before.decode("utf-8").splitlines())
-    return FileChange(GITIGNORE, "update", "gitignore", data, before, f"append {added} lines so {what}")
+    return change("update", "gitignore", data, before, f"append {added} lines so {what}")
 
 
 def _wiki_state_path(root: pathlib.Path, state: pathlib.Path) -> pathlib.Path:
@@ -1208,7 +1257,8 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
     problems: list[str] = []
 
     def write(change: FileChange) -> None:
-        if not _publish(root, change.path, change.data, None if change.action == "create" else change.before):
+        if not _publish(root, change.target or change.path, change.data,
+                        None if change.action == "create" else change.before):
             problems.append(f"OAH_INIT_CHANGED: {change.path} changed after the plan was shown, so init left it "
                             "as it is. Run oah init again to see the new plan.")
             return
@@ -1236,12 +1286,21 @@ class RulesStep(NamedTuple):
     planned: rules.Plan | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class _RulesPlan(rules.Plan):
+    agents_path: str = "AGENTS.md"
+    claude_path: str = "CLAUDE.md"
+
+
 def _rules_plan(root: pathlib.Path, *, lang: str | None = None) -> rules.Plan:
     """Adapt rules.plan's algorithm with pinned input reads; all rendering/validation stays in rules."""
     root = pathlib.Path(root)
-    local_bytes = _read_user(root, rules.LOCAL_RULES.as_posix())
+    local_bytes = _read_user(root, _resolved_path(root, rules.LOCAL_RULES.as_posix()))
     local = "".join(rules._decode(local_bytes, str(rules.LOCAL_RULES))) if local_bytes is not None else ""
-    agents = _read_user(root, "AGENTS.md")
+    agents_path = _resolved_path(root, "AGENTS.md")
+    claude_path = _resolved_path(root, "CLAUDE.md")
+    shared = agents_path == claude_path
+    agents = _read_user(root, agents_path)
     if agents is None:
         lang = lang or "en"
         block = rules.render_block(lang, local, "\n")
@@ -1271,23 +1330,26 @@ def _rules_plan(root: pathlib.Path, *, lang: str | None = None) -> rules.Plan:
         raise rules.RulesError("OAH_RULES_BLOCK_TOO_LARGE", f"the managed block would be {size} bytes, over the "
                                f"{rules.BLOCK_LIMIT}-byte limit. Shorten {rules.LOCAL_RULES} (link a wiki note for "
                                "long project rules) and retry. Nothing was written.")
-    if len(after) > rules.AGENTS_BUDGET:
-        raise rules.RulesError("OAH_RULES_BUDGET", f"AGENTS.md would be {len(after)} bytes, over Codex's "
-                               f"{rules.AGENTS_BUDGET}-byte project-doc limit. Move long sections into docs/wiki/ "
-                               "and link them, then retry. Nothing was written.")
-    claude = _read_user(root, "CLAUDE.md")
-    if claude is None:
+    claude = agents if shared else _read_user(root, claude_path)
+    import_base = after if shared else claude
+    if import_base is None:
         claude_after = (rules.IMPORT + "\n").encode("ascii")
     else:
-        lines = rules._decode(claude, "CLAUDE.md")
+        lines = rules._decode(import_base, "CLAUDE.md")
         count = sum(1 for line in lines if rules.strip_eol(line).strip() == rules.IMPORT)
         if count > 1:
             raise rules.RulesError("OAH_RULES_MARKER_DUPLICATE", f"CLAUDE.md has {count} {rules.IMPORT} lines; keep "
                                    "exactly one and run `oah rules sync` again. Nothing was written.")
-        eol = eol_of(claude)
-        claude_after = claude if count else (claude + (b"" if not claude or claude.endswith(b"\n") else eol)
-                                           + rules.IMPORT.encode("ascii") + eol)
-    return rules.Plan(lang, agents, after, claude, claude_after, size)
+        eol = eol_of(import_base)
+        claude_after = import_base if count else (import_base + (b"" if not import_base or
+                    import_base.endswith(b"\n") else eol) + rules.IMPORT.encode("ascii") + eol)
+    if shared:
+        after = claude_after
+    if len(after) > rules.AGENTS_BUDGET:
+        raise rules.RulesError("OAH_RULES_BUDGET", f"AGENTS.md would be {len(after)} bytes, over Codex's "
+                               f"{rules.AGENTS_BUDGET}-byte project-doc limit. Move long sections into docs/wiki/ "
+                               "and link them, then retry. Nothing was written.")
+    return _RulesPlan(lang, agents, after, claude, claude_after, size, agents_path, claude_path)
 
 
 def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
@@ -1298,6 +1360,7 @@ def plan_rules(root: pathlib.Path, *, lang: str | None) -> RulesStep:
         return "create" if before is None else "unchanged" if before == after else "update"
 
     return RulesStep(found.lang, action(found.agents_before, found.agents_after),
+                     "unchanged" if found.agents_path == found.claude_path else
                      action(found.claude_before, found.claude_after), found.block_bytes, found)
 
 
@@ -1307,10 +1370,15 @@ def _sync_rules(root: pathlib.Path, step: RulesStep) -> rules.SyncResult:
     if found is None:
         raise InitError("OAH_INIT_CHANGED", "no rules publication was planned; run oah init again")
     changed = []
+    seen = set()
     for name, before, after in (("AGENTS.md", found.agents_before, found.agents_after),
                                 ("CLAUDE.md", found.claude_before, found.claude_after)):
+        target = getattr(found, "agents_path" if name == "AGENTS.md" else "claude_path", name)
+        if target in seen:
+            continue
+        seen.add(target)
         if before != after:
-            if not _publish(root, name, after, before):
+            if not _publish(root, target, after, before):
                 raise InitError("OAH_INIT_CHANGED", f"{name} changed; run oah init again to see the new plan")
             changed.append(name)
     return rules.SyncResult(found.lang, tuple(changed), len(found.agents_after), found.block_bytes)
@@ -1326,11 +1394,11 @@ def add_aside_rules(root: pathlib.Path, *, lang: str) -> str:
 def _plan_aside_local(root: pathlib.Path, *, lang: str) -> FileChange:
     """Capture the conditional local publication before confirmation, including its original bytes."""
     relative = rules.LOCAL_RULES.as_posix()
-    link = _linked(root, relative)
-    if link is not None:
-        return FileChange(relative, "blocked", "rules", note="OAH_INIT_CHANGED: rules path is linked; "
-                          "remove the link and run oah init again")
-    before = _read_user(root, relative)
+    try:
+        target = _resolved_path(root, relative)
+    except InitError as exc:
+        return FileChange(relative, "blocked", "rules", note=str(exc))
+    before = _read_user(root, target)
     text, eol = "", "\n"
     if before is not None:
         try:
@@ -1339,7 +1407,7 @@ def _plan_aside_local(root: pathlib.Path, *, lang: str) -> FileChange:
             return FileChange(relative, "blocked", "rules", note="OAH_INIT_CHANGED: local rules are not UTF-8; "
                               "save them as UTF-8 and run oah init again")
         if any(line.rstrip() == companions.RULES_BEGIN for line in text.split("\n")):
-            return FileChange(relative, "unchanged", "rules", before, before)
+            return FileChange(relative, "unchanged", "rules", before, before, target=target)
         eol = eol_of(before).decode("ascii")
     if text and not text.endswith("\n"):
         text += eol
@@ -1347,16 +1415,16 @@ def _plan_aside_local(root: pathlib.Path, *, lang: str) -> FileChange:
         text += eol
     data = (text + companions.rules_section(True, lang=lang).replace("\n", eol)).encode("utf-8")
     return FileChange(relative, "create" if before is None else "update", "rules", data, before,
-                      _replacement_note(before))
+                      _replacement_note(before), target=target)
 
 
 def _write_aside_local(root: pathlib.Path, change: FileChange) -> str:
     if change.action == "blocked":
         return "skipped: " + change.note
     if change.action == "unchanged":
-        if _linked(root, change.path) is None and _read_user(root, change.path) == change.before:
+        if _read_user(root, change.target or change.path) == change.before:
             return "present"
-    elif _publish(root, change.path, change.data, change.before):
+    elif _publish(root, change.target or change.path, change.data, change.before):
         return "added"
     return "skipped: OAH_INIT_CHANGED: rules changed; run oah init again"
 
@@ -1376,7 +1444,9 @@ def _plan_aside(root: pathlib.Path, step: RulesStep) -> tuple[FileChange, RulesS
     if size >= rules.BLOCK_LIMIT or len(after) > rules.AGENTS_BUDGET:
         raise rules.RulesError("OAH_RULES_BUDGET", "the Aside rules would exceed the rules budget. Shorten "
                                ".oah/rules.local.md or AGENTS.md, then run oah init again")
-    planned = dataclasses.replace(found, agents_after=after, block_bytes=size)
+    shared = (getattr(found, "agents_path", "AGENTS.md") == getattr(found, "claude_path", "CLAUDE.md"))
+    planned = dataclasses.replace(found, agents_after=after, block_bytes=size,
+                                  claude_after=after if shared else found.claude_after)
     action = "create" if found.agents_before is None else "unchanged" if found.agents_before == after else "update"
     return local, RulesStep(step.lang, action, step.claude, size, planned)
 
@@ -1393,6 +1463,7 @@ class HookStep:
     before: bytes | None = dataclasses.field(default=None, repr=False)
     data: bytes | None = dataclasses.field(default=None, repr=False)
     backup: str = ""  # run/position below <git common dir>/oah/backups, never a worktree file
+    target: str = ""  # captured no-follow publication target for an internal link
 
 
 def _shown_path(root: pathlib.Path, path: pathlib.Path) -> str:
@@ -1402,27 +1473,37 @@ def _shown_path(root: pathlib.Path, path: pathlib.Path) -> str:
         return str(path)
 
 
-def _local_settings_problem(root: pathlib.Path, *, require_ignored: bool) -> str:
-    paths = (CLAUDE_SETTINGS, CLAUDE_SETTINGS + hooks.BACKUP_SUFFIX)
+def _local_settings_problem(root: pathlib.Path, *, require_ignored: bool, target: str = "") -> str:
+    backup = CLAUDE_SETTINGS + hooks.BACKUP_SUFFIX
+    try:
+        target = target or _resolved_path(root, CLAUDE_SETTINGS)
+        backup_target = _resolved_path(root, backup)
+    except InitError:
+        return ("OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings or their backup has an unsafe link. "
+                "Point it inside this worktree and run oah init again")
+    paths = tuple(dict.fromkeys((CLAUDE_SETTINGS, backup, target, backup_target)))
     tracked = run_git(root, "ls-files", "-z", "--", *paths)
     if tracked.returncode != 0 or tracked.stdout:
         return ("OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings or their backup may be tracked. Remove them from "
                 "the index with git rm --cached, keep them ignored, then run oah init again")
-    for path in paths:
+    for path in (target, backup_target):
         if _linked(root, path) is not None:
             return "OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings or their backup is a link; remove the link and retry"
-        if require_ignored and run_git(root, "check-ignore", "-q", "--", path).returncode != 0:
+    for path in paths:
+        if require_ignored and run_git(root, "check-ignore", "-q", "--",
+                                      _ignore_path(root, path)).returncode != 0:
             return ("OAH_INIT_HOOK_SETTINGS_UNSAFE: local settings and backups must both be ignored before hook "
                     "installation. Add .claude/settings.local.json and .claude/settings.local.json.oah.bak to "
-                    ".gitignore, remove any overriding negation, then run oah init again")
+                    ".gitignore, also ignore their resolved targets, remove any overriding negation, then run "
+                    "oah init again")
     return ""
 
 
-def _git_hook_problem(root: pathlib.Path, kind: str) -> str:
+def _git_hook_problem(root: pathlib.Path, kind: str, *, target: str = "") -> str:
     path = pathlib.Path(os.path.abspath(hooks.git_hook_path(root, kind)))
     try:
         relative = _relative(path.relative_to(root).as_posix())
-        if not _is_link(root) and _linked(root, relative) is None:
+        if not _is_link(root) and _linked(root, target or _resolved_path(root, relative)) is None:
             return ""
     except (ValueError, InitError):
         pass
@@ -1444,6 +1525,50 @@ def _replacement_note(data: bytes | None) -> str:
     return f"replaces {len(data)} bytes (sha256 {hashlib.sha256(data).hexdigest()})" if data is not None else ""
 
 
+def _preview_text(data: bytes) -> str | None:
+    """Apply the landed scanner's rules in memory; never stage user bytes for scanning."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if any(not char.isprintable() and char not in "\r\n\t" for char in text):
+        return None  # Includes NULs, terminal escapes and other binary/control data, at any offset.
+    if any(pattern.search(text) for _rule, pattern in checks.CONTENT_RULES):
+        return None
+    for match in checks.EMAIL.finditer(text):
+        address = match.group().lower()
+        domain = address.rsplit("@", 1)[-1]
+        if (address not in checks.ALLOWED_EMAILS
+                and not any(domain == allowed or domain.endswith("." + allowed)
+                            for allowed in checks.ALLOWED_EMAIL_DOMAINS)
+                and not domain.endswith(checks.ALLOWED_EMAIL_TLDS)):
+            return None
+    # Also cover JSON settings, lowercase assignments and opaque Authorization values, without
+    # extracting credentials or consulting the environment/keychain.
+    if re.search(r"(?i)(?:authorization[\"']?\s*[:=]|\b(?:bearer|basic)\s+|"
+                 r"(?<![\w-])[\w-]*(?:key|token|secret|password|cookie|credential|account[_-]?id)"
+                 r"[\"']?\s*[:=]\s*[\"']?(?!\$|<)\S+)", text):
+        return None
+    return text
+
+
+def _terminal_diff(path: str, before: bytes | None, after: bytes | None) -> list[str]:
+    """Render only for terminal output. No diff or scanner input is written to a plan/state file."""
+    if before is None or after is None or before == after:
+        return []
+    old, new = _preview_text(before), _preview_text(after)
+    if old is None or new is None:
+        return ["             " + _replacement_note(before)]
+    diff = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                                fromfile=f"a/{path}", tofile=f"b/{path}")
+    lines = []
+    for line in diff:
+        lines.append("             | " + line.rstrip("\r\n"))
+        if not line.endswith(("\r", "\n")):
+            lines.append("             | \\ No newline at end of file")
+    return lines
+
+
 def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
     """Every hook oah offers (PLAN 5.12) with the diff its install would make. Writes nothing."""
     root = pathlib.Path(root)
@@ -1454,19 +1579,20 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
         if not hooks.hook_available(kind):
             steps.append(HookStep(kind, "unavailable", note=f"this oah version does not provide `oah hook {kind}` yet"))
             continue
-        link = _linked(root, CLAUDE_SETTINGS) if kind in hooks.CLAUDE_KINDS else None
-        if link is not None:
-            steps.append(HookStep(kind, "refused", note=f"{link} is a link; oah never writes through links, which "
-                                                        "could reach your global Claude Code settings"))
-            continue
         try:
-            problem = (_local_settings_problem(root, require_ignored=False) if kind in hooks.CLAUDE_KINDS
-                       else _git_hook_problem(root, kind))
+            path = root / CLAUDE_SETTINGS if kind in hooks.CLAUDE_KINDS else hooks.git_hook_path(root, kind)
+            try:
+                relative = _relative(path.relative_to(root).as_posix())
+            except ValueError:
+                raise InitError("OAH_INIT_HOOK_LOCATION_UNSAFE", "git hooks must be inside this worktree. "
+                                "Select a project-local core.hooksPath and run oah init again") from None
+            target = _resolved_path(root, relative)
+            problem = (_local_settings_problem(root, require_ignored=False, target=target)
+                       if kind in hooks.CLAUDE_KINDS else _git_hook_problem(root, kind, target=target))
             if problem:
                 steps.append(HookStep(kind, "refused", note=problem))
                 continue
-            path = root / CLAUDE_SETTINGS if kind in hooks.CLAUDE_KINDS else hooks.git_hook_path(root, kind)
-            original = _read_user(root, path.relative_to(root).as_posix())
+            original = _read_user(root, target)
             if kind in hooks.CLAUDE_KINDS:
                 if settings_data is None:
                     settings_before, settings_data = _hook_settings(original)
@@ -1480,11 +1606,16 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
                     raise hooks.HookError("OAH_HOOK_FOREIGN", "a foreign hook requires --force")
                 if not unchanged and original is not None and os.path.lexists(str(path) + hooks.BACKUP_SUFFIX):
                     raise hooks.HookError("OAH_HOOK_BACKUP_EXISTS", "move the legacy backup away and retry")
+        except InitError as exc:
+            steps.append(HookStep(kind, "refused", note=str(exc)))
+            continue
         except hooks.HookError as exc:
             if exc.code == "OAH_HOOK_FOREIGN":
-                steps.append(HookStep(kind, "keep", note="a hook oah did not write is there; pass --force to replace "
-                                                         "it (restore the private state-folder backup by hand "
-                                                         "if you later remove the hook)"))
+                steps.append(HookStep(kind, "keep", path=relative,
+                                      note="a hook oah did not write is there; pass --force to replace "
+                                           "it (restore the private state-folder backup by hand "
+                                           "if you later remove the hook)",
+                                      before=original, data=hooks.git_hook_text(kind).encode("utf-8"), target=target))
             else:
                 steps.append(HookStep(kind, "refused", note=f"{exc.code}: the hook cannot be safely planned; "
                                       "check its settings and backup, then run oah init again"))
@@ -1500,7 +1631,7 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
             note = _replacement_note(before)
             diff = (_claude_hook_diff(kind) if kind in hooks.CLAUDE_KINDS else "".join(difflib.unified_diff(
                 [], hooks.git_hook_text(kind).splitlines(keepends=True), fromfile="/dev/null",
-                tofile=f"b/{_shown_path(root, path)} (canonical hook only)")))
+                tofile=f"b/{relative} (canonical hook only)")))
             if kind in hooks.CLAUDE_KINDS:
                 event, matcher = hooks.CLAUDE_KINDS[kind]
                 group = {"matcher": matcher} if matcher else {}
@@ -1517,7 +1648,7 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
                 backup = f"{backup_run}/{len(steps) + 1}"
                 note += (f"; private backup position {len(steps) + 1} in <git common dir>/oah/backups/<run>/ "
                          f"(sha256 {hashlib.sha256(original).hexdigest()}); restore by hand if needed")
-        steps.append(HookStep(kind, action, diff, _shown_path(root, path), note, before, data, backup))
+        steps.append(HookStep(kind, action, diff, relative, note, before, data, backup, target))
     return steps
 
 
@@ -1568,23 +1699,24 @@ def install_hooks(root: pathlib.Path, steps: list[HookStep], *, force: bool) -> 
     for step in steps:
         if step.action != "install":
             continue
-        if step.kind in hooks.CLAUDE_KINDS and _linked(root, CLAUDE_SETTINGS) is not None:
-            problems.append(f"OAH_INIT_CHANGED: {CLAUDE_SETTINGS} became a link after the plan was shown; "
-                            f"the {step.kind} hook was not installed")
+        target = step.target or step.path
+        if _linked(root, target) is not None:
+            problems.append(f"OAH_INIT_CHANGED: the {step.kind} hook target became a link after the plan was shown; "
+                            "run oah init again")
             continue
         try:
-            problem = (_local_settings_problem(root, require_ignored=True) if step.kind in hooks.CLAUDE_KINDS
-                       else _git_hook_problem(root, step.kind))
+            problem = (_local_settings_problem(root, require_ignored=True, target=target)
+                       if step.kind in hooks.CLAUDE_KINDS else _git_hook_problem(root, step.kind, target=target))
             if problem:
                 problems.append(problem)
                 continue
             path = (root / CLAUDE_SETTINGS if step.kind in hooks.CLAUDE_KINDS
                     else hooks.git_hook_path(root, step.kind))
-            if step.path != _shown_path(root, path):
+            if step.path != path.relative_to(root).as_posix():
                 problems.append(f"OAH_INIT_CHANGED: the {step.kind} hook destination changed; run oah init again")
                 continue
             base = root
-            relative = path.relative_to(base).as_posix()
+            relative = target
             backup_note = (f" Inspect the planned backup at <git common dir>/oah/backups/{step.backup} "
                            f"(sha256 {hashlib.sha256(step.before).hexdigest()})." if step.backup else "")
             if step.before is not None:
@@ -1951,7 +2083,7 @@ def _ci_plan(root: pathlib.Path, oses, test_command) -> ci.CiPlan:
 
     class InputPath(type(root)):
         def read_bytes(self):
-            data = _read_user(root, self.relative_to(root).as_posix())
+            data = _read_user(root, _resolved_path(root, self.relative_to(root).as_posix()))
             if data is None:
                 raise FileNotFoundError("missing project input")
             return data
@@ -1961,7 +2093,8 @@ def _ci_plan(root: pathlib.Path, oses, test_command) -> ci.CiPlan:
                    if item is not None)
              if test_command is None or isinstance(test_command, str) or test_command is ci.PLACEHOLDER else ())
     chosen = ci.parse_oses(oses) if oses else (ci.current_os(),)
-    existing_bytes = _read_user(root, ci.WORKFLOW_PATH.as_posix())
+    target = _resolved_path(root, ci.WORKFLOW_PATH.as_posix())
+    existing_bytes = _read_user(root, target)
     try:
         existing = None if existing_bytes is None else existing_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -1976,7 +2109,7 @@ def _ci_plan(root: pathlib.Path, oses, test_command) -> ci.CiPlan:
         detection = test_command or (found[0] if found else None)
         steps = detection.steps if detection else ()
         setups = [detection.ecosystem] if detection else []
-    return ci.CiPlan(root, root / ci.WORKFLOW_PATH, chosen, detection, steps, not steps,
+    return ci.CiPlan(root, root / target, chosen, detection, steps, not steps,
                      ci.render(chosen, setups, steps), existing)
 
 
@@ -2017,7 +2150,7 @@ def write_ci(step: CiStep) -> str:
     if found is None or step.action not in ("create", "replace"):
         return "OAH_INIT_CHANGED: no CI publication was planned; run oah init again"
     before = found.existing.encode("utf-8") if found.existing is not None else None
-    if not _publish(found.root, ci.WORKFLOW_PATH, step.text.encode("utf-8"), before):
+    if not _publish(found.root, found.path.relative_to(found.root).as_posix(), step.text.encode("utf-8"), before):
         return "OAH_INIT_CHANGED: the CI workflow or its parents changed; run oah init again"
     return ""
 
@@ -2328,24 +2461,42 @@ def render_plan(plan: Plan) -> list[str]:
     for change in plan.files:
         if change.group != "gitignore":
             lines.append(_file_line(change))
+            lines += _terminal_diff(change.path, change.before, change.data)
     lines.append("Managed content (changed in place; everything else in these files stays as it is):")
     for name, action in (("AGENTS.md", plan.rules.agents), ("CLAUDE.md", plan.rules.claude)):
         what = (f"the oah rules block ({plan.rules.lang}, {plan.rules.block_bytes} bytes)" if name == "AGENTS.md"
                 else "the @AGENTS.md import line")
-        lines.append(f"  {action:<10} {name}: {what}")
-    lines += [_file_line(change) for change in plan.files if change.group == "gitignore"]
+        found = plan.rules.planned
+        target = getattr(found, "agents_path" if name == "AGENTS.md" else "claude_path", name)
+        shown = name if target == name else f"{name} -> {target}"
+        lines.append(f"  {action:<10} {shown}: {what}")
+        if found is not None:
+            if name == "CLAUDE.md" and target == getattr(found, "agents_path", "AGENTS.md"):
+                continue  # Shared rules/import target was previewed once above.
+            before, after = ((found.agents_before, found.agents_after) if name == "AGENTS.md" else
+                             (found.claude_before, found.claude_after))
+            lines += _terminal_diff(name, before, after)
+    for change in plan.files:
+        if change.group == "gitignore":
+            lines.append(_file_line(change))
+            lines += _terminal_diff(change.path, change.before, change.data)
     if "aside" in plan.apps:
         lines.append(f"  if Aside gets registered, its web rules go into {rules.LOCAL_RULES} and the AGENTS.md block")
         lines.append(_file_line(plan.aside_local))
+        lines += _terminal_diff(plan.aside_local.path, plan.aside_local.before, plan.aside_local.data)
         lines.append(f"  {plan.aside_rules.agents:<10} AGENTS.md: conditional Aside block "
                      f"({plan.aside_rules.block_bytes} bytes); original planned file required")
     lines.append("Hooks:")
     if not plan.answers["hooks"].value:
         lines.append("  none chosen; `oah hooks install <kind>` adds one later")
     for step in plan.hooks:
-        where = f" ({step.path})" if step.path else ""
+        shown = f"{step.path} -> {step.target}" if step.target and step.target != step.path else step.path
+        where = f" ({shown})" if shown else ""
         lines.append(f"  {step.action:<10} {step.kind}{where}{': ' + step.note if step.note else ''}")
-        lines += _indented(step.diff, "             | ")
+        preview = _terminal_diff(step.path, step.before, step.data)
+        lines += preview
+        if not preview or preview[0].startswith("             replaces "):
+            lines += _indented(step.diff, "             | ")  # Canonical additions contain no user bytes.
     lines.append("unlazy:")
     if plan.unlazy is None:
         lines.append("  not chosen; gate commands need it (`oah init --with-unlazy` installs it later)")
@@ -2362,9 +2513,15 @@ def render_plan(plan: Plan) -> list[str]:
     if plan.ci is None:
         lines.append("  not chosen; `oah ci init` writes it later")
     else:
-        lines.append(f"  {plan.ci.action:<10} {ci.WORKFLOW_PATH}{': ' + plan.ci.note if plan.ci.note else ''}")
-        if plan.ci.action in ("create", "replace"):
-            lines += _indented(plan.ci.diff if plan.ci.action == "replace" else plan.ci.text, "             | ")
+        target = plan.ci.plan.path.relative_to(plan.root).as_posix() if plan.ci.plan is not None else ""
+        shown = f"{ci.WORKFLOW_PATH} -> {target}" if target and target != ci.WORKFLOW_PATH.as_posix() \
+            else ci.WORKFLOW_PATH
+        lines.append(f"  {plan.ci.action:<10} {shown}{': ' + plan.ci.note if plan.ci.note else ''}")
+        if plan.ci.plan is not None and plan.ci.plan.existing is not None:
+            lines += _terminal_diff(ci.WORKFLOW_PATH.as_posix(), plan.ci.plan.existing.encode("utf-8"),
+                                    plan.ci.text.encode("utf-8"))
+        elif plan.ci.action == "create":
+            lines += _indented(plan.ci.text, "             | ")
     lines.append("Companion apps:")
     if not plan.apps:
         lines.append("  none chosen")
@@ -2396,7 +2553,8 @@ def render_plan(plan: Plan) -> list[str]:
 
 
 def _file_line(change: FileChange) -> str:
-    return f"  {change.action:<10} {change.path}{': ' + change.note if change.note else ''}"
+    shown = (f"{change.path} -> {change.target}" if change.target and change.target != change.path else change.path)
+    return f"  {change.action:<10} {shown}{': ' + change.note if change.note else ''}"
 
 
 def _wrap(prefix: str, text: str, width: int = 110) -> list[str]:

@@ -268,6 +268,22 @@ class PlanFilesTest(unittest.TestCase):
         self.assertFalse([path for path in found if path.startswith(".claude/agents/")])
         self.assertNotIn(".graphifyignore", found)
 
+    def test_internal_directory_alias_plans_resolved_targets(self):
+        target = self.repo / "project-config"
+        target.mkdir()
+        directory_alias(target, self.repo / ".oah")
+        found = self.by_path(self.plan())
+        change = found[init.CONFIG_PATH]
+        self.assertEqual(change.target, "project-config/config.toml")
+        self.assertIn(".oah/config.toml -> project-config/config.toml", init._file_line(change))
+        self.assertTrue(init._publish(self.repo, change.target, change.data, change.before))
+        self.assertEqual((target / "config.toml").read_bytes(), self.config)
+        self.assertTrue(init._is_link(self.repo / ".oah"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction path semantics")
+    def test_windows_internal_directory_alias_plans_resolved_targets(self):
+        self.test_internal_directory_alias_plans_resolved_targets()
+
     def test_plan_files_keeps_existing_and_force_replaces(self):
         git_commit(self.repo, {
             ".oah/config.toml": "[stages]\ninitial = \"codex\"\n",
@@ -724,6 +740,108 @@ class RulesStepTest(unittest.TestCase):
     def setUp(self):
         self.repo = make_git_repo(self)
 
+    def _assert_shared_rules_link(self):
+        for imported in (False, True):
+            with self.subTest(imported=imported):
+                repo = make_git_repo(self)
+                original = b"# project rules\r\n" + (b"@AGENTS.md\r\n" if imported else b"")
+                (repo / "AGENTS.md").write_bytes(original)
+                link = repo / "CLAUDE.md"
+                link.symlink_to("AGENTS.md")
+                step = init.plan_rules(repo, lang=None)
+                result = init._sync_rules(repo, step)
+                self.assertEqual(result.changed, ("AGENTS.md",))
+                data = (repo / "AGENTS.md").read_bytes()
+                self.assertTrue(data.startswith(original))
+                self.assertEqual(data.count(rules.BEGIN.encode("ascii")), 1)
+                self.assertEqual(data.splitlines().count(b"@AGENTS.md"), 1)
+                self.assertEqual(data.count(b"\n"), data.count(b"\r\n"))
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(os.readlink(link), "AGENTS.md")
+                again = init.plan_rules(repo, lang=None)
+                self.assertEqual((again.agents, again.claude), ("unchanged", "unchanged"))
+                self.assertEqual(init._sync_rules(repo, again).changed, ())
+                self.assertEqual((repo / "AGENTS.md").read_bytes(), data)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_internal_claude_link_updates_shared_rules_once(self):
+        self._assert_shared_rules_link()
+
+    @unittest.skipUnless(os.name == "nt", "Windows file symlinks (CI developer mode)")
+    def test_windows_internal_claude_link_updates_shared_rules_once(self):
+        self._assert_shared_rules_link()
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_rules_link_destination_is_bound_to_plan_and_rechecked(self):
+        target = self.repo / "shared.md"
+        target.write_bytes(b"# shared rules\n")
+        link = self.repo / "CLAUDE.md"
+        link.symlink_to("shared.md")
+        step = init.plan_rules(self.repo, lang=None)
+        target.write_bytes(b"# concurrent change\n")
+        with self.assertRaises(init.InitError) as caught:
+            init._sync_rules(self.repo, step)
+        self.assertEqual(caught.exception.code, "OAH_INIT_CHANGED")
+        self.assertEqual(target.read_bytes(), b"# concurrent change\n")
+        self.assertTrue(link.is_symlink())
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_resolved_rules_target_cannot_become_a_link_before_publication(self):
+        target = self.repo / "shared.md"
+        target.write_bytes(b"# shared rules\n")
+        (self.repo / "CLAUDE.md").symlink_to("shared.md")
+        step = init.plan_rules(self.repo, lang=None)
+        outside = make_tmp_dir(self) / "outside.md"
+        outside.write_bytes(b"# shared rules\n")  # Even matching bytes cannot authorize following a new link.
+        target.unlink()
+        target.symlink_to(outside)
+        with self.assertRaises(init.InitError) as caught:
+            init._sync_rules(self.repo, step)
+        self.assertEqual(caught.exception.code, "OAH_INIT_CHANGED")
+        self.assertEqual(outside.read_bytes(), b"# shared rules\n")
+        self.assertTrue(target.is_symlink())
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_link_retarget_after_plan_never_selects_a_new_destination(self):
+        first, second = self.repo / "first.md", self.repo / "second.md"
+        first.write_bytes(b"# original\n")
+        second.write_bytes(b"# original\n")
+        link = self.repo / "CLAUDE.md"
+        link.symlink_to("first.md")
+        step = init.plan_rules(self.repo, lang=None)
+        link.unlink()
+        link.symlink_to("second.md")
+        init._sync_rules(self.repo, step)
+        self.assertEqual(second.read_bytes(), b"# original\n")
+        self.assertEqual(first.read_bytes(), b"# original\n" + b"@AGENTS.md\n")
+        self.assertEqual(os.readlink(link), "second.md")
+
+    def _assert_unsafe_rules_links(self):
+        outside = make_tmp_dir(self) / "private.md"
+        outside.write_bytes(b"private outside rules\n")
+        for target in (str(outside), "missing.md", "CLAUDE.md"):
+            with self.subTest(target=target):
+                link = self.repo / "CLAUDE.md"
+                link.symlink_to(target)
+                try:
+                    with self.assertRaises(init.InitError) as caught:
+                        init.plan_rules(self.repo, lang=None)
+                    self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
+                    self.assertNotIn("private outside rules", str(caught.exception))
+                    self.assertFalse((self.repo / "AGENTS.md").exists())
+                    self.assertEqual(os.readlink(link), target)
+                finally:
+                    link.unlink()
+        self.assertEqual(outside.read_bytes(), b"private outside rules\n")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_rules_refuse_outside_dangling_and_cyclic_links(self):
+        self._assert_unsafe_rules_links()
+
+    @unittest.skipUnless(os.name == "nt", "Windows file symlinks (CI developer mode)")
+    def test_windows_rules_refuse_outside_dangling_and_cyclic_links(self):
+        self._assert_unsafe_rules_links()
+
     def test_plan_rules_states(self):
         step = init.plan_rules(self.repo, lang=None)
         self.assertEqual((step.lang, step.agents, step.claude), ("en", "create", "create"))
@@ -1100,6 +1218,53 @@ class WindowsSecurityTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_terminal_diff_shows_final_newline_change(self):
+        preview = "\n".join(init._terminal_diff("file.md", b"same line", b"same line\n"))
+        self.assertIn("-same line", preview)
+        self.assertIn("+same line", preview)
+        self.assertIn("\\ No newline at end of file", preview)
+
+    def test_terminal_diff_rejects_binary_controls_beyond_prefix_and_private_addresses(self):
+        for original in (b"line\n" * 2000 + b"\x00end", b"\x1b[31mred\n",
+                         ("Contact someone@" + "private-domain.org\n").encode("ascii")):
+            with self.subTest(kind=len(original)):
+                self.assertEqual(init._terminal_diff("file.md", original, b"new\n"),
+                                 ["             " + init._replacement_note(original)])
+
+    def test_internal_settings_directory_alias_keeps_ignore_checks(self):
+        target = self.repo / "local-claude"
+        target.mkdir()
+        directory_alias(target, self.repo / ".claude")
+        original = b'{"permissions": {"allow": []}}\r\n'
+        (target / "settings.local.json").write_bytes(original)
+        (self.repo / ".gitignore").write_bytes(init.add_gitignore_entries(None, unlazy_copy=False) +
+                                             b"\nlocal-claude/settings.local.json*\n")
+        steps = [step for step in self.steps().values() if step.kind in hooks.CLAUDE_KINDS
+                 and step.action != "unavailable"]
+        self.assertTrue(all(step.action == "install" for step in steps))
+        installed, problems = init.install_hooks(self.repo, steps, force=False)
+        self.assertEqual(problems, [])
+        self.assertEqual(installed, [step.kind for step in steps])
+        self.assertTrue(init._is_link(self.repo / ".claude"))
+        self.assertIn(b'"permissions"', (target / "settings.local.json").read_bytes())
+        self.assertEqual((self.repo / ".git/oah/backups" / steps[0].backup).read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_internal_git_hook_link_publishes_target_with_private_backup(self):
+        target = self.repo / ".git/hooks/custom-push"
+        original = b"#!/bin/sh\n# custom check\n"
+        target.write_bytes(original)
+        link = self.repo / ".git/hooks/pre-push"
+        link.symlink_to("custom-push")
+        step = self.steps(force=True)["pre-push"]
+        self.assertEqual(step.action, "install")
+        self.assertIn("+++ b/.git/hooks/pre-push (canonical hook only)", step.diff)
+        installed, problems = init.install_hooks(self.repo, [step], force=True)
+        self.assertEqual((installed, problems), (["pre-push"], []))
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_bytes(), hooks.git_hook_text("pre-push").encode("utf-8"))
+        self.assertEqual((self.repo / ".git/oah/backups" / step.backup).read_bytes(), original)
+
     def test_windows_creation_requests_no_dacl_update_access(self):
         for function, opener, expected in ((init._pinned_directory, "create", 0x81),
                                             (init._windows_file_security, "opener", 0x40000000)):
@@ -2489,6 +2654,19 @@ class UnlazyStepTest(unittest.TestCase):
 
 
 class CiStepTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_internal_workflow_link_is_not_replaced(self):
+        target = self.repo / "workflow.yml"
+        target.write_bytes(b"# original workflow\n")
+        link = self.repo / init.ci.WORKFLOW_PATH
+        link.parent.mkdir(parents=True)
+        link.symlink_to("../../workflow.yml")
+        step = init.plan_ci(self.repo, force=True, oses=["macos"], test_command=init.ci.PLACEHOLDER)
+        self.assertEqual(step.action, "replace")
+        self.assertEqual(init.write_ci(step), "")
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_bytes(), step.text.encode("utf-8"))
+
     def setUp(self):
         self.repo = make_git_repo(self)
         (self.repo / "go.mod").write_text("module x\n", encoding="utf-8")
