@@ -27,7 +27,7 @@ import shutil
 import stat
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Callable, Mapping, NamedTuple
 
 from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
@@ -431,16 +431,13 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
         # Shared state parents contain landed modules' files and retained Git checkouts. Prove this
         # directory's ownership/ACLs and its ancestry without imposing snapshot modes on those siblings.
         unlazy._verify_state_ancestry(path)
-        if os.name == "nt" or create:
-            unlazy._verify_snapshot_permissions(path)
         if os.name == "nt":
-            # Match the landed creator's exact private grants, allowing its trusted Windows owners.
-            descriptor = unlazy._windows_security_descriptor(path)
-            sid = unlazy._windows_user_sid()
-            if not _windows_security_matches(descriptor, f"O:{sid}D:P(A;OICI;FA;;;OW)"):
-                raise OSError("state DACL differs from private grants")
-        elif stat.S_IMODE(path.lstat().st_mode) != 0o700:
-            raise OSError("state directory is not owner-only")
+            _verify_windows_private_descriptor(unlazy._windows_security_descriptor(path), directory=True)
+        else:
+            if create:
+                unlazy._verify_snapshot_permissions(path)
+            if stat.S_IMODE(path.lstat().st_mode) != 0o700:
+                raise OSError("state directory is not owner-only")
     except (OSError, unlazy.UnlazyError):
         raise InitError("OAH_INIT_STATE_UNSAFE", "private Git state permissions cannot be verified. Restrict "
                         "the state directory to your account, then rerun oah init", EXIT_ENVIRONMENT) from None
@@ -449,50 +446,21 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
 @contextmanager
 def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
                      private_from: pathlib.Path | None = None):
-    """Pin non-reparse parents, denying write/delete sharing until publication finishes."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    create = kernel.CreateFileW
-    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
-    create.restype = wintypes.HANDLE
-    info = kernel.GetFileInformationByHandleEx
-    info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
-    info.restype = wintypes.BOOL
-    close = kernel.CloseHandle
-    close.argtypes = (wintypes.HANDLE,)
-    close.restype = wintypes.BOOL
-    handles = []
+    """Hold non-reparse parent identities with rename-compatible Windows sharing."""
     parent = (root / relative).absolute().parent
-    try:
+    with ExitStack() as pins:
         for path in (*reversed(parent.parents), parent):
             restricted = private or (private_from is not None and path.is_relative_to(private_from))
-            # Ancestors of root exist; only project directories may be created.
             if create_parents and path.is_relative_to(root):
                 if restricted:
                     if not path.exists():
                         unlazy._private_directory(path)
                 else:
                     path.mkdir(exist_ok=True)
-            # Attribute-only opens do not participate in Windows share-access checks. Include
-            # FILE_LIST_DIRECTORY so omitting FILE_SHARE_DELETE actually prevents replacement.
-            handle = create(str(path), 0x81, 1, None, 3, 0x02200000, None)
-            if handle == wintypes.HANDLE(-1).value:
-                raise ctypes.WinError(ctypes.get_last_error())
-            handles.append(handle)
-            attributes = (wintypes.DWORD * 2)()
-            if not info(handle, 9, attributes, ctypes.sizeof(attributes)):
-                raise ctypes.WinError(ctypes.get_last_error())
-            if attributes[0] & 0x400 or not attributes[0] & 0x10:
-                raise OSError("linked or non-directory parent")
+            pins.enter_context(_pinned_directory(path))
             if restricted and path != root and path.is_relative_to(root):
                 _private_state_directory(path)
         yield
-    finally:
-        for handle in reversed(handles):
-            close(handle)
 
 
 @contextmanager
@@ -660,9 +628,8 @@ def _rename_exclusive(source, target, source_folder: int | None, folder: int | N
 
 
 @contextmanager
-def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: bool = False,
-                      security: bool = False):
-    """Hold the directory's identity; command pins also deny Windows write/delete sharing."""
+def _pinned_directory(path: pathlib.Path):
+    """Hold a no-follow identity, sharing read/write/delete and rechecking the pathname on exit."""
     if os.name != "nt":
         handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -685,45 +652,35 @@ def _pinned_directory(path: pathlib.Path, *, allow_swap: bool = False, delete: b
     close = kernel.CloseHandle
     close.argtypes = (wintypes.HANDLE,)
     close.restype = wintypes.BOOL
-    # Protected DACL updates read the current descriptor as well as writing it: READ_CONTROL | WRITE_DAC.
-    handle = create(str(path), 0x81 | (0x10000 if delete else 0) | (0x60000 if security else 0), 7 if allow_swap else 1,
-                    None, 3, 0x02200000, None)
-    if handle == wintypes.HANDLE(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        attributes = (wintypes.DWORD * 2)()
-        identity = (ctypes.c_ubyte * 24)()  # FILE_ID_INFO: volume serial and 128-bit file id
-        if (not info(handle, 9, attributes, ctypes.sizeof(attributes))
-                or not info(handle, 18, identity, ctypes.sizeof(identity))):
+
+    def open_directory():
+        handle = create(str(path), 0x81, 7, None, 3, 0x02200000, None)
+        if handle == wintypes.HANDLE(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
-        if attributes[0] & 0x400 or not attributes[0] & 0x10:
-            raise OSError("linked or non-directory staging path")
-        yield handle, bytes(identity).hex()
+        try:
+            attributes = (wintypes.DWORD * 2)()
+            identity = (ctypes.c_ubyte * 24)()  # FILE_ID_INFO: volume serial and 128-bit file id
+            if (not info(handle, 9, attributes, ctypes.sizeof(attributes))
+                    or not info(handle, 18, identity, ctypes.sizeof(identity))):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if attributes[0] & 0x400 or not attributes[0] & 0x10:
+                raise OSError("linked or non-directory path")
+            return handle, bytes(identity).hex()
+        except BaseException:
+            close(handle)
+            raise
+
+    handle, identity = open_directory()
+    try:
+        yield handle, identity
+        current, actual = open_directory()
+        try:
+            if actual != identity:
+                raise OSError("pinned directory changed")
+        finally:
+            close(current)
     finally:
         close(handle)
-
-
-def _windows_move_directory(handle: int, target: pathlib.Path) -> None:
-    """Rename the pinned source object, without reopening its replaceable pathname."""
-    import ctypes
-    from ctypes import wintypes
-
-    class RenameInfo(ctypes.Structure):
-        _fields_ = [("replace", wintypes.BOOLEAN), ("root", wintypes.HANDLE),
-                    ("length", wintypes.DWORD), ("name", wintypes.WCHAR * (len(str(target)) + 1))]
-
-    encoded = str(target).encode("utf-16-le")
-    # Allocate by UTF-16 code units, including non-BMP characters in project paths.
-    size = RenameInfo.name.offset + len(encoded)
-    data = ctypes.create_string_buffer(max(size, ctypes.sizeof(RenameInfo)))
-    info = ctypes.cast(data, ctypes.POINTER(RenameInfo)).contents
-    info.replace, info.root, info.length = False, None, len(encoded)
-    ctypes.memmove(ctypes.addressof(data) + RenameInfo.name.offset, encoded, len(encoded))
-    rename = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
-    rename.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
-    rename.restype = wintypes.BOOL
-    if not rename(handle, 3, data, size):  # FileRenameInfo, ReplaceIfExists = FALSE
-        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _macos_file_acl(fd: int, value: bytes | None = None) -> bytes:
@@ -797,13 +754,33 @@ def _windows_security_matches(actual: str, expected: str) -> bool:
         return False  # Never forward the landed verifier's account identifiers or descriptor bytes.
 
 
-def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool = False,
-                           fd: int | None = None, handle: int | None = None) -> int | None:
-    """Create an empty owner-only staging file, or freeze the target's effective DACL on it."""
+def _verify_windows_private_descriptor(descriptor: str, *, directory: bool) -> None:
+    """Use landed owner/DACL verification, retaining init's refusal of foreign read grants."""
+    try:
+        sid = unlazy._windows_user_sid()
+        unlazy._verify_windows_dacl(descriptor, sid, snapshot=True, directory=directory, protected=True)
+        owner = unlazy._windows_canonical_sid(re.match(r"O:([^:()]+)D:", descriptor)[1])
+        # The landed verifier proves write integrity; backups additionally forbid disclosure to any
+        # other principal. Do not compare creator/read-back SDDL, owner aliases or inheritance spelling.
+        for ace in re.findall(r"\(([^()]*)\)", descriptor):
+            kind, _flags, _rights, _object, _inherited, principal = ace.split(";")
+            if kind == "A" and unlazy._windows_canonical_sid(principal) not in {sid, owner, "S-1-3-4"}:
+                raise OSError("private DACL grants access to another principal")
+    except OSError:
+        raise OSError("private Windows permissions cannot be verified") from None
+
+
+def _windows_file_security(path: pathlib.Path, descriptor: str) -> int:
+    """Create a file with its final protected DACL; never rewrite existing object security."""
     import ctypes
     import msvcrt
     from ctypes import wintypes
 
+    # The landed verifier supplies the trusted-owner and supported-DACL rules for replacements too.
+    try:
+        unlazy._verify_windows_dacl(descriptor, unlazy._windows_user_sid(), protected=True, directory=False)
+    except OSError:
+        raise OSError("replacement Windows permissions cannot be verified") from None
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
@@ -814,31 +791,6 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
     if not convert(descriptor, 1, ctypes.byref(security), None):
         raise OSError(ctypes.get_last_error(), "cannot prepare file security")
     try:
-        if not create:
-            get_dacl = advapi.GetSecurityDescriptorDacl
-            get_dacl.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
-                                ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL))
-            get_dacl.restype = wintypes.BOOL
-            present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
-            if not get_dacl(security, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)):
-                raise OSError(ctypes.get_last_error(), "cannot read replacement DACL")
-            if not present.value or not dacl.value:
-                raise OSError("cannot read replacement DACL")
-            setter = advapi.SetSecurityInfo
-            setter.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
-                               ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-            setter.restype = wintypes.DWORD
-            # Protect the copied effective ACEs from the destination parent's inherited grants.
-            # Use the file-object API for DACL/protection updates on the held handle.
-            held = handle if handle is not None else msvcrt.get_osfhandle(fd) if fd is not None else None
-            if held is None:
-                raise OSError("cannot preserve file security")
-            error = setter(held, 1, 0x80000004, None, None, dacl, None)
-            if error:
-                # SetSecurityInfo returns its error code directly; GetLastError may be unrelated.
-                raise OSError(error, "cannot preserve file security")
-            return None
-
         class Attributes(ctypes.Structure):
             _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
 
@@ -847,12 +799,12 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
         opener.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Attributes),
                            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
         opener.restype = wintypes.HANDLE
-        # The CRT fd retains this handle's READ_CONTROL | WRITE_DAC for later DACL copies.
-        handle = opener(str(path), 0xC0060000, 1, ctypes.byref(attributes), 1, 0x00200000, None)
+        # Only writing is needed: a preserved denial of FILE_READ_DATA must not prevent staging.
+        handle = opener(str(path), 0x40000000, 1, ctypes.byref(attributes), 1, 0x00200000, None)
         if handle == wintypes.HANDLE(-1).value:
             raise OSError(ctypes.get_last_error(), "cannot create private staging file")
         try:
-            return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+            return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
         except BaseException:
             kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
             kernel.CloseHandle(handle)
@@ -861,19 +813,21 @@ def _windows_file_security(path: pathlib.Path, descriptor: str, *, create: bool 
         kernel.LocalFree(security)
 
 
-def _private_file(temp: pathlib.Path, folder: int | None) -> int:
+def _private_file(temp: pathlib.Path, folder: int | None, *, security: str | None = None) -> int:
     """Establish and verify owner-only permissions before any preserved bytes reach staging."""
     if os.name == "nt":
         sid = unlazy._windows_user_sid()
-        expected = f"O:{sid}D:P(A;;FA;;;{sid})"
-        fd = _windows_file_security(temp, expected, create=True)
+        expected = security or f"O:{sid}D:P(A;;FA;;;OW)"
+        fd = _windows_file_security(temp, expected)
     else:
         fd = os.open(temp.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
     try:
         if os.name == "nt":
             actual = unlazy._windows_security_descriptor(temp)
-            if not _windows_security_matches(actual, expected):
-                raise OSError("staging security differs from owner-only DACL")
+            if security is None:
+                _verify_windows_private_descriptor(actual, directory=False)
+            elif not _windows_security_matches(actual, expected):
+                raise OSError("replacement security differs from planned DACL")
         elif sys.platform == "darwin":
             if unlazy._macos_mount_flags(temp) & 0x00200000:  # MNT_IGNORE_OWNERSHIP
                 raise OSError("staging volume does not enforce ownership")
@@ -890,35 +844,35 @@ def _private_file(temp: pathlib.Path, folder: int | None) -> int:
 
 @contextmanager
 def _file_staging(path: pathlib.Path, folder: int | None):
-    """Keep empty staging files under a private, pinned directory without inherited ACL entries."""
+    """Keep staging files under a private directory, with security established at creation."""
     directory = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     name = directory if folder is None else directory.name
     if os.name == "nt":
         unlazy._private_directory(directory)
-    else:
-        os.mkdir(name, 0o700, dir_fd=folder)
-    try:
-        if os.name == "nt":
-            with _pinned_directory(directory, security=True) as (handle, _identity):
-                sid = unlazy._windows_user_sid()
-                expected = f"O:{sid}D:P(A;;FA;;;{sid})"
-                _windows_file_security(directory, expected, handle=handle)
-                if not _windows_security_matches(unlazy._windows_security_descriptor(directory), expected):
-                    raise OSError("staging directory DACL differs")
+        identity = ""
+        try:
+            with _pinned_directory(directory) as (_handle, identity):
+                _verify_windows_private_descriptor(unlazy._windows_security_descriptor(directory), directory=True)
                 yield directory / "file.tmp", None
-        else:
-            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
-            try:
-                info = os.fstat(descriptor)
-                if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-                    raise OSError("staging directory is not owner-only")
-                if sys.platform == "darwin":
-                    _macos_file_acl(descriptor, b"")
-                    if _macos_file_acl(descriptor).strip() not in (b"", b"!#acl 1"):
-                        raise OSError("staging directory ACL is not empty")
-                yield directory / "file.tmp", descriptor
-            finally:
-                os.close(descriptor)
+        finally:
+            if identity:
+                _require_staging(directory, identity)
+                os.rmdir(directory)
+        return
+    os.mkdir(name, 0o700, dir_fd=folder)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+        try:
+            info = os.fstat(descriptor)
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise OSError("staging directory is not owner-only")
+            if sys.platform == "darwin":
+                _macos_file_acl(descriptor, b"")
+                if _macos_file_acl(descriptor).strip() not in (b"", b"!#acl 1"):
+                    raise OSError("staging directory ACL is not empty")
+            yield directory / "file.tmp", descriptor
+        finally:
+            os.close(descriptor)
     finally:
         os.rmdir(name, dir_fd=folder)  # Never recurse into a replaced directory.
 
@@ -963,10 +917,15 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
         with _parents(root, relative, private=private) as folder:
             path = root / relative
             name = path if folder is None else path.name
+            if os.name == "nt":
+                with _pinned_directory(path.parent) as (_handle, parent_identity):
+                    pass
             if data is None:
                 # Reserve a new installation exclusively, without merging into a concurrent directory.
-                if private and os.name == "nt":
-                    _private_state_directory(path, create=True)
+                if os.name == "nt":
+                    unlazy._private_directory(path)
+                    _verify_windows_private_descriptor(unlazy._windows_security_descriptor(path), directory=True)
+                    _require_staging(path.parent, parent_identity)
                 else:
                     os.mkdir(name, 0o700, dir_fd=folder)
                     if private:
@@ -976,9 +935,13 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                 return True
             with _file_staging(path, folder) as (temp, staging_folder):
                 temporary = temp if folder is None else temp.name
+                if os.name == "nt":
+                    with _pinned_directory(temp.parent) as (_handle, staging_identity):
+                        pass
                 try:
                     restrictions = _file_restrictions(root, relative, folder)
-                    fd = _private_file(temp, staging_folder)
+                    fd = (_private_file(temp, staging_folder, security=restrictions[1])
+                          if os.name == "nt" and restrictions is not None else _private_file(temp, staging_folder))
                     with os.fdopen(fd, "wb") as handle:
                         handle.write(data)
                         handle.flush()
@@ -991,10 +954,6 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                                 _macos_file_acl(handle.fileno(), restrictions[1])
                                 if _macos_file_acl(handle.fileno()) != restrictions[1]:
                                     raise OSError("replacement ACL changed")
-                        elif restrictions is not None:
-                            _windows_file_security(temp, restrictions[1], fd=handle.fileno())
-                            if not _windows_security_matches(unlazy._windows_security_descriptor(temp), restrictions[1]):
-                                raise OSError("replacement DACL changed")
                         os.fsync(handle.fileno())
                     current = _current(root, relative, folder)
                     if ((current is None) != (before is None) or (current is not None and
@@ -1009,6 +968,9 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                         return False
                     if _current(root, relative, folder) != current:
                         return False
+                    if os.name == "nt":
+                        _require_staging(path.parent, parent_identity)
+                        _require_staging(temp.parent, staging_identity)
                     if before is not None:
                         os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
                     elif os.name == "nt":
@@ -1019,6 +981,9 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                         os.fsync(folder)
                     return True
                 finally:
+                    if os.name == "nt":
+                        _require_staging(path.parent, parent_identity)
+                        _require_staging(temp.parent, staging_identity)
                     try:
                         os.unlink(temporary, dir_fd=staging_folder)
                     except FileNotFoundError:
@@ -1167,6 +1132,9 @@ def _wiki_session(root: pathlib.Path, wiki):
     try:
         with _parents(anchor, (state.relative_to(anchor) / ".init-state").as_posix(),
                       private_from=private_from) as folder:
+            if os.name == "nt":
+                with _pinned_directory(state) as (_handle, state_identity):
+                    pass
             def open_lock() -> int:
                 return (_windows_read_fd(state / ".lock", writable=True) if os.name == "nt" else
                         os.open(".lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
@@ -1186,6 +1154,7 @@ def _wiki_session(root: pathlib.Path, wiki):
                 if _linked(anchor, (state.relative_to(anchor) / ".lock").as_posix()) is not None:
                     raise OSError("wiki lock redirected")
                 if os.name == "nt":
+                    _require_staging(state, state_identity)
                     current_fd = _windows_read_fd(state / ".lock", writable=True)
                     try:
                         if _windows_file_identity(current_fd) != held:
@@ -1810,7 +1779,13 @@ def _staging_command(path: str, expected: str, argv: list[str]) -> int:
             if os.name == "nt":
                 import subprocess
 
-                return subprocess.call(argv, cwd=path)  # the non-reparse handle denies replacement
+                previous = os.getcwd()
+                try:
+                    os.chdir(path)
+                    _require_staging(pathlib.Path.cwd(), expected)
+                    return subprocess.call(argv, cwd=".")
+                finally:
+                    os.chdir(previous)
             os.fchdir(handle)
             os.execvp(argv[0], argv)  # Git uses only '.'; a rename cannot redirect its working directory
     except OSError:
@@ -1835,7 +1810,7 @@ def _staged_files(path: pathlib.Path, handle: int) -> tuple[dict[str, tuple[byte
                 continue  # No captured Git metadata is approved for publication.
             child = _relative(f"{relative}/{name}" if relative else name)
             if os.name == "nt":
-                # The caller holds a non-reparse source handle denying write/delete sharing.
+                # The caller holds a non-reparse source identity and rechecks it at publication.
                 with _parents(path, child, create_parents=False):
                     item = path / child
                     if _is_link(item):
@@ -1899,14 +1874,14 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
             else:
                 os.mkdir(staging.name, 0o700, dir_fd=parent)
                 _private_state_directory(staging)
-            with _pinned_directory(staging, allow_swap=True) as (_handle, identity):
-                try:
+            try:
+                with _pinned_directory(staging) as (_handle, identity):
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
                                                 strict=True):
                         argv[len(git_argv()) + len(UNLAZY_GIT_OPTIONS) + 1] = "."
                         _require_staging(staging, identity)
                         # The child reopens without following links, checks the held identity and fchdirs on
-                        # POSIX. Windows also denies replacement throughout the external command.
+                        # POSIX. Windows binds and verifies its cwd before starting the external command.
                         command = [sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
                                    "from oah.init import _staging_command; "
                                    "sys.exit(_staging_command(sys.argv[2], sys.argv[3], sys.argv[4:]))",
@@ -1954,10 +1929,10 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                         if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin, env=environment):
                             raise OSError("published installation does not match the pin")
                         return ""
-                except (OSError, InitError):
-                    return ("OAH_INIT_CHANGED: the unlazy source or destination changed; inspect the project copy "
-                            "and any private Git state backup. Staging remains in <git common dir>/oah/staging/ "
-                            "for manual cleanup; run oah init --with-unlazy again after resolving the conflict")
+            except (OSError, InitError):
+                return ("OAH_INIT_CHANGED: the unlazy source or destination changed; inspect the project copy "
+                        "and any private Git state backup. Staging remains in <git common dir>/oah/staging/ "
+                        "for manual cleanup; run oah init --with-unlazy again after resolving the conflict")
     except (OSError, InitError):
         return ("OAH_INIT_UNLAZY_FAILED: an installation path changed, is linked or cannot be written safely. "
                 "Remove links and check permissions, then run oah init --with-unlazy again")

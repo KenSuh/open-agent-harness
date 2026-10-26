@@ -397,7 +397,7 @@ class WriteFilesTest(unittest.TestCase):
                 check()
 
     @unittest.skipUnless(os.name == "nt", "native Windows lock identity and sharing")
-    def test_windows_wiki_lock_uses_handle_identity_and_denies_replacement(self):
+    def test_windows_wiki_lock_uses_handle_identity_and_checks_state_replacement(self):
         with init._wiki_session(self.repo, self.wiki) as check:
             fd = init._windows_read_fd(self.wiki.lock_path, writable=True)
             try:
@@ -406,8 +406,17 @@ class WriteFilesTest(unittest.TestCase):
                 self.assertEqual(init._windows_file_identity(fd), first)
                 with self.assertRaises(PermissionError):
                     self.wiki.lock_path.rename(self.wiki.lock_path.with_name("moved-lock"))
-                with self.assertRaises(PermissionError):
-                    self.wiki.state.rename(self.wiki.state.with_name("moved-state"))
+                moved = self.wiki.state.with_name("moved-state")
+                try:
+                    self.wiki.state.rename(moved)
+                except PermissionError:
+                    pass  # The held lock can also prevent its containing directory's rename.
+                else:
+                    self.wiki.state.mkdir()
+                    with self.assertRaises(OSError):
+                        check()
+                    self.wiki.state.rmdir()
+                    moved.rename(self.wiki.state)
             finally:
                 os.close(fd)
 
@@ -575,36 +584,60 @@ class WriteFilesTest(unittest.TestCase):
         self.test_creates_refuse_parents_linked_after_planning()
 
     @unittest.skipUnless(os.name == "nt", "Windows directory handle sharing")
-    def test_windows_publication_pins_parents_against_replacement(self):
-        with init._windows_parents(self.repo, init.CONFIG_PATH):
-            result = subprocess.run([sys.executable, "-c", "import os, sys; os.rename(sys.argv[1], sys.argv[2])",
-                                     str(self.repo / ".oah"), str(self.repo / "moved")], capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertTrue((self.repo / ".oah").is_dir())
+    def test_windows_parent_identity_check_refuses_replacement(self):
+        with self.assertRaises(OSError):
+            with init._windows_parents(self.repo, init.CONFIG_PATH):
+                (self.repo / ".oah").rename(self.repo / "moved")
+                (self.repo / ".oah").mkdir()
 
     @unittest.skipUnless(os.name == "nt", "Windows publication handles")
-    def test_windows_updates_keep_parent_pinned_through_publication(self):
+    def test_windows_updates_recheck_parent_identity_before_publication(self):
         parent = self.repo / ".oah"
         parent.mkdir()
         target = parent / "config.toml"
         target.write_bytes(b"before\r\n")
         change = init.FileChange(init.CONFIG_PATH, "replace", "config", b"after\r\n", b"before\r\n")
-        flush = os.fsync
-        attempts = []
+        read = init._current
+        changed = False
 
-        def swap(fd):
-            flush(fd)
-            if stat.S_ISREG(os.fstat(fd).st_mode):
-                result = subprocess.run([sys.executable, "-c", "import os, sys; os.rename(sys.argv[1], sys.argv[2])",
-                                         str(parent), str(self.repo / "moved")], capture_output=True)
-                attempts.append(result.returncode)
+        def swap(root, relative, folder):
+            nonlocal changed
+            if not changed and root == self.repo and relative == init.CONFIG_PATH:
+                changed = True
+                parent.rename(self.repo / "moved")
+                parent.mkdir()
+                # Matching bytes cannot bless a different parent object.
+                target.write_bytes(b"before\r\n")
+            return read(root, relative, folder)
 
-        with mock.patch.object(os, "fsync", side_effect=swap):
+        with mock.patch.object(init, "_current", side_effect=swap):
             written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
-        self.assertTrue(attempts and all(code != 0 for code in attempts))
-        self.assertEqual(problems, [])
-        self.assertEqual(written, [change])
-        self.assertEqual(target.read_bytes(), b"after\r\n")
+        self.assertTrue(changed)
+        self.assertEqual(written, [])
+        self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
+        self.assertEqual(target.read_bytes(), b"before\r\n")
+        self.assertEqual((self.repo / "moved/config.toml").read_bytes(), b"before\r\n")
+
+    @unittest.skipUnless(os.name == "nt", "Windows staging identity and safe cleanup")
+    def test_windows_staging_replacement_is_neither_published_nor_cleaned(self):
+        read = init._current
+        swapped = []
+
+        def swap(root, relative, folder):
+            if not swapped and root == self.repo and relative == "published":
+                staging, = self.repo.glob(".published.*.tmp")
+                staging.rename(staging.with_name(staging.name + "-saved"))
+                staging.mkdir()
+                sentinel = staging / "file.tmp"
+                sentinel.write_bytes(b"unrelated bytes\r\n\x00")
+                swapped.append(sentinel)
+            return read(root, relative, folder)
+
+        with mock.patch.object(init, "_current", side_effect=swap):
+            self.assertFalse(init._publish(self.repo, "published", b"planned bytes\r\n"))
+        self.assertEqual(len(swapped), 1)
+        self.assertEqual(swapped[0].read_bytes(), b"unrelated bytes\r\n\x00")
+        self.assertFalse((self.repo / "published").exists())
 
     def test_replace_skips_a_file_edited_after_the_plan(self):
         late = self.repo / ".oah" / "config.toml"
@@ -795,6 +828,61 @@ class WindowsSecurityTest(unittest.TestCase):
                                                return_value="S-1-5-21-100-200-300-1001"))
         self.sid = unlazy._windows_user_sid()
 
+    def test_windows_directory_pins_share_read_write_and_delete(self):
+        # Check the real native call arguments, without mocking Windows filesystem semantics.
+        for function in (init._pinned_directory,):
+            tree = ast.parse(inspect.getsource(function))
+            calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == "create"]
+            self.assertTrue(calls)
+            for call in calls:
+                with self.subTest(function=function.__name__):
+                    share = compile(ast.Expression(call.args[2]), "<share mask>", "eval")
+                    self.assertEqual(eval(share, {"__builtins__": {}}), 7)
+        self.assertIn("pins.enter_context(_pinned_directory(path))", inspect.getsource(init._windows_parents))
+
+    def test_windows_security_is_set_only_at_creation(self):
+        tree = ast.parse(inspect.getsource(init))
+        setters = [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                   and node.attr in ("SetSecurityInfo", "SetFileSecurityW", "SetKernelObjectSecurity")]
+        self.assertEqual(setters, [], "existing directory and file DACLs must never be rewritten")
+        source = inspect.getsource(init._file_staging)
+        self.assertIn("unlazy._private_directory(directory)", source)
+        self.assertNotIn("_windows_file_security", source)
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr == "CreateDirectoryW"
+                             for node in ast.walk(tree)), "private directories use the landed creator")
+        creator = ast.parse(inspect.getsource(init._windows_file_security))
+        calls = [node for node in ast.walk(creator) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "opener"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(ast.literal_eval(calls[0].args[4]), 1, "CREATE_NEW is the only file creation path")
+        self.assertIsInstance(calls[0].args[3], ast.Call, "SECURITY_ATTRIBUTES accompany creation")
+
+    def test_private_windows_verification_reuses_landed_trusted_owner_rules(self):
+        # Read-back ownership and inheritance spelling do not establish a new privacy policy.
+        for owner in (self.sid, "BA", "SY"):
+            for principal in ("OW", owner):
+                descriptor = f"O:{owner}D:PAI(A;OICIID;FA;;;{principal})"
+                with self.subTest(owner_kind="user" if owner == self.sid else owner, owner_rights=principal == "OW"):
+                    init._verify_windows_private_descriptor(descriptor, directory=True)
+        for descriptor in (f"O:WDD:P(A;OICI;FA;;;OW)",
+                           f"O:{self.sid}D:(A;OICI;FA;;;OW)",
+                           f"O:{self.sid}D:P(A;OICI;FA;;;OW)(A;;FR;;;WD)"):
+            with self.assertRaises(OSError) as caught:
+                init._verify_windows_private_descriptor(descriptor, directory=True)
+            self.assertNotIn("S-1-", str(caught.exception), "permission errors must not expose account SIDs")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows publication sharing and creation")
+    def test_windows_publication_uses_landed_private_directory_creation_without_rewriting(self):
+        repo = make_git_repo(self)
+        # Real helpers and real files: all temporary directories must originate in the landed creator.
+        with mock.patch.object(unlazy, "_private_directory", wraps=unlazy._private_directory) as create:
+            for name in (".git/hooks/c14", ".github/workflows/oah-ci.yml"):
+                self.assertTrue(init._publish(repo, name, b"fixture\r\n\x00"))
+                self.assertTrue(init._publish(repo, name, b"replacement\r\n", b"fixture\r\n\x00"))
+                self.assertEqual((repo / name).read_bytes(), b"replacement\r\n")
+        self.assertEqual(create.call_count, 4)
+
     def test_windows_security_accepts_trusted_owners_and_canonical_ace_principals(self):
         expected = (f"O:{self.sid}D:P(D;;GX;;;WD)(A;OICI;FA;;;{self.sid})"
                     "(A;;FR;;;SY)(A;;FR;;;BA)(A;IO;FR;;;OW)")
@@ -848,78 +936,48 @@ class WindowsSecurityTest(unittest.TestCase):
         init._private_state_directory(destination.parent)
         self.assertTrue(init._publish(common, "oah/backups/run/hook", b"private\r\n\x00fixture", private=True))
         self.assertEqual(destination.read_bytes(), b"private\r\n\x00fixture")
-        self.assertTrue(init._windows_security_matches(
-            unlazy._windows_security_descriptor(destination.parent), before))
+        self.assertTrue(unlazy._windows_security_descriptor(destination.parent) == before,
+                        "the existing directory DACL must remain byte-identical")
 
 
 class HookStepTest(unittest.TestCase):
-    def test_windows_security_opens_request_read_control_and_write_dac(self):
-        # Inspect the actual CreateFileW arguments without emulating native Windows APIs.
-        for function, opener, cases in (
-                (init._pinned_directory, "create", (
-                    ({"delete": False, "security": True}, 0x60081),
-                    ({"delete": True, "security": True}, 0x70081),
-                    ({"delete": False, "security": False}, 0x81))),
-                (init._windows_file_security, "opener", (({}, 0xC0060000),))):
+    def test_windows_creation_requests_no_dacl_update_access(self):
+        for function, opener, expected in ((init._pinned_directory, "create", 0x81),
+                                            (init._windows_file_security, "opener", 0x40000000)):
             tree = ast.parse(inspect.getsource(function))
             calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                      and isinstance(node.func, ast.Name) and node.func.id == opener]
             self.assertEqual(len(calls), 1)
             expression = compile(ast.Expression(calls[0].args[1]), "<access mask>", "eval")
-            for variables, expected in cases:
-                with self.subTest(function=function.__name__, **variables):
-                    access = eval(expression, {"__builtins__": {}}, variables)
-                    self.assertEqual(access, expected)
-                    self.assertEqual(access & 0x80000, 0, "DACL changes do not set the owner")
-                    if variables.get("security", True):
-                        self.assertEqual(access & 0x60000, 0x60000, "READ_CONTROL | WRITE_DAC")
+            self.assertEqual(eval(expression, {"__builtins__": {}}), expected)
+            self.assertEqual(expected & 0xE0000, 0, "no READ_CONTROL, WRITE_DAC or WRITE_OWNER updates")
 
     @unittest.skipUnless(os.name == "nt", "native Windows security API error codes")
     def test_windows_security_failures_keep_numeric_errors_without_paths(self):
-        import msvcrt
-
         path = self.repo / "private-staging"
         sid = unlazy._windows_user_sid()
-        descriptor = f"O:{sid}D:P(A;;FA;;;{sid})"
-        fd = init._windows_file_security(path, descriptor, create=True)
+        descriptor = f"O:{sid}D:P(A;;FA;;;OW)"
+        fd = init._windows_file_security(path, descriptor)
         os.close(fd)
-        for operation, expected in (("convert", None), ("create", 80), ("fd", 5), ("handle", 5)):
-            with self.subTest(operation=operation):
-                with self.assertRaises(OSError) as caught:
-                    if operation == "convert":
-                        init._windows_file_security(path, "invalid descriptor", create=True)
-                    elif operation == "create":
-                        init._windows_file_security(path, descriptor, create=True)
-                    else:
-                        fd = init._windows_read_fd(path)  # No WRITE_DAC on this read-only handle.
-                        try:
-                            arguments = {"fd": fd} if operation == "fd" else {"handle": msvcrt.get_osfhandle(fd)}
-                            init._windows_file_security(path, descriptor, **arguments)
-                        finally:
-                            os.close(fd)
-                error = caught.exception
-                self.assertIsInstance(error.errno, int)
-                self.assertGreater(error.errno, 0)
-                if expected is not None:
-                    self.assertEqual(error.errno, expected)
-                self.assertIsNone(error.filename)
-                self.assertNotIn(str(path), str(error))
-                self.assertFalse(sid in str(error), "security error exposed an account identifier")
+        with self.assertRaises(OSError) as caught:
+            init._windows_file_security(path, descriptor)
+        error = caught.exception
+        self.assertEqual(error.errno, 80)
+        self.assertIsNone(error.filename)
+        self.assertNotIn(str(path), str(error))
+        self.assertFalse(sid in str(error), "security error exposed an account identifier")
 
-    @unittest.skipUnless(os.name == "nt", "native Windows descriptor DACL updates")
-    def test_windows_staging_dacl_is_protected_through_the_held_handle(self):
+    @unittest.skipUnless(os.name == "nt", "native Windows descriptor security at creation")
+    def test_windows_staging_security_is_final_at_creation(self):
         with init._parents(self.repo, "published") as parent:
             with init._file_staging(self.repo / "published", parent) as (temp, folder):
+                init._verify_windows_private_descriptor(
+                    unlazy._windows_security_descriptor(temp.parent), directory=True)
                 sid = unlazy._windows_user_sid()
-                expected = f"O:{sid}D:P(A;;FA;;;{sid})"
-                self.assertTrue(init._windows_security_matches(
-                    unlazy._windows_security_descriptor(temp.parent), expected))
-                fd = init._private_file(temp, folder)
+                denied = f"O:{sid}D:P(D;;CC;;;WD)(A;;FA;;;OW)"
+                fd = init._private_file(temp, folder, security=denied)
                 try:
-                    self.assertTrue(init._windows_security_matches(unlazy._windows_security_descriptor(temp), expected))
-                    # A descriptor update must copy and protect the effective DACL, including denials.
-                    denied = f"O:{sid}D:P(D;;CC;;;WD)(A;;FA;;;{sid})"
-                    init._windows_file_security(temp, denied, fd=fd)
+                    self.assertEqual(os.fstat(fd).st_size, 0)
                     self.assertTrue(init._windows_security_matches(unlazy._windows_security_descriptor(temp), denied))
                 finally:
                     os.close(fd)
@@ -957,19 +1015,19 @@ class HookStepTest(unittest.TestCase):
         observed = []
         existing = sorted(p.name for p in self.repo.iterdir())
 
-        def private_file(temp, folder):
+        def private_file(temp, folder, **kwargs):
             self.assertNotEqual(temp.parent, self.repo)
             self.assertTrue(temp.parent.is_relative_to(self.repo))
             if os.name == "nt":
                 descriptor = unlazy._windows_security_descriptor(temp.parent)
                 self.assertIn("D:P", descriptor)
-                self.assertNotIn(";OICI;", descriptor)
+                init._verify_windows_private_descriptor(descriptor, directory=True)
             else:
                 self.assertEqual(stat.S_IMODE(os.fstat(folder).st_mode), 0o700)
                 if sys.platform == "darwin":
                     self.assertIn(init._macos_file_acl(folder).strip(), (b"", b"!#acl 1"))
             observed.append(temp)
-            return create(temp, folder)
+            return create(temp, folder, **kwargs)
 
         with mock.patch.object(init, "_private_file", side_effect=private_file):
             self.assertTrue(init._publish(self.repo, "published", b"known bytes\r\n"))
@@ -1491,6 +1549,36 @@ class UnlazyStepTest(unittest.TestCase):
         self.assertEqual(step.action, "install")
         self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+
+    def test_staging_identity_change_on_pin_exit_reports_changed(self):
+        pinned = init._pinned_directory
+        common = repo_info(self.repo).common_dir
+        depth = 0
+        swapped = []
+
+        @contextlib.contextmanager
+        def directory(path):
+            nonlocal depth
+            is_staging = path.parent == common / "oah/staging"
+            with pinned(path) as held:
+                if is_staging:
+                    depth += 1
+                try:
+                    yield held
+                    if is_staging and depth == 1:
+                        path.rename(path.with_name(path.name + "-saved"))
+                        path.mkdir()
+                        swapped.append(path)
+                        init._require_staging(path, held[1])
+                finally:
+                    if is_staging:
+                        depth -= 1
+
+        with mock.patch.object(init, "_pinned_directory", side_effect=directory):
+            problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
+        self.assertEqual(len(swapped), 1)
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
+        self.assertEqual(list(swapped[0].iterdir()), [])
         self.assertEqual(sorted(path.name for path in self.target.parent.iterdir()), ["unlazy"])
         self.assertEqual(self.plan().action, "present")
 
@@ -1801,8 +1889,8 @@ class UnlazyStepTest(unittest.TestCase):
                 self.assertEqual((outside / "scripts/gate-check.mjs").read_bytes(), external_bytes)
                 self.assertFalse(self.target.exists())
 
-    @unittest.skipUnless(os.name == "nt", "Windows staging handle denies directory replacement")
-    def test_windows_staging_publication_keeps_source_pinned(self):
+    @unittest.skipUnless(os.name == "nt", "Windows staging identity during publication")
+    def test_windows_staging_publication_refuses_source_replacement(self):
         run, publish = init.run_command, init._publish
         attempts = []
         staging = None
@@ -1814,17 +1902,18 @@ class UnlazyStepTest(unittest.TestCase):
 
         def publication(root, relative, data, *args, **kwargs):
             if not attempts:
-                with self.assertRaises(PermissionError):
-                    staging.rename(staging.with_name(staging.name + "-saved"))
+                staging.rename(staging.with_name(staging.name + "-saved"))
+                staging.mkdir()
                 attempts.append(True)
             return publish(root, relative, data, *args, **kwargs)
 
         with (mock.patch.object(init, "run_command", side_effect=command),
               mock.patch.object(init, "_publish", side_effect=publication)):
             problem = init.install_unlazy(self.repo, self.plan(), source=str(self.source), pin=self.pin)
-        self.assertEqual(problem, "")
+        self.assertTrue(problem.startswith("OAH_INIT_CHANGED"), problem)
         self.assertEqual(len(attempts), 1)
-        self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
+        self.assertFalse((self.target / ".git/HEAD").exists())
+        self.assertEqual(list(staging.iterdir()), [])
 
     @unittest.skipUnless(os.name == "nt", "Windows staging pin during an external command")
     def test_windows_staging_command_denies_directory_replacement(self):
@@ -1836,7 +1925,7 @@ class UnlazyStepTest(unittest.TestCase):
                   "except PermissionError:\n"
                   "    sys.exit(0)\n"
                   "sys.exit(1)\n")
-        with init._pinned_directory(staging, allow_swap=True) as (_handle, identity):
+        with init._pinned_directory(staging) as (_handle, identity):
             code = init._staging_command(str(staging), identity, [sys.executable, "-c", script, str(staging)])
         self.assertEqual(code, 0)
         self.assertTrue(staging.is_dir())
