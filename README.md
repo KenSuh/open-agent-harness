@@ -50,8 +50,32 @@ trustworthy.
 > apps. The Codex review loop (P6), the guided `oah init` with the SessionStart hook (P7b) and the full
 > docs (P9) are planned. Commands, file formats and this README will change.
 
+## Purpose: a harness that keeps adapting
+
+`oah` is not meant to be the one perfect harness that everyone adopts as is. It is a worked reference and a
+guideline for building a development environment that fits you and keeps changing as AI changes.
+
+A harness is set up once and then usually left alone, while the models and skills under it keep improving. Rules
+and skills that helped an older model can hold a newer one back from its full ability, and outdated skills can make
+results worse. A good harness flows like water: it keeps up with each new model, drops skills that are no longer
+needed, adds the ones that are, and changes its rules to match.
+
+- **Adapt the parts you need.** If you already use other AI tools or another harness, read how `oah` handles
+  leases, engine stages, evidence gates, the impact map, the wiki and the review loop, and carry over only the
+  ideas that fit your tools. The rules are written down in [`docs/PLAN.md`](docs/PLAN.md) so they can be copied
+  as ideas, not only as code.
+- **Or follow it and make it yours.** If you start from `oah` as it is, treat it as a starting point: change the
+  config, the stages and the rules to match your own goals, and grow your own project wiki and impact map as your
+  code grows. The harness you end up with should be yours, not a copy of ours.
+- **Keep updating it.** Review your models, skills and rules as the tools change. Remove what no longer helps and
+  add what does. `oah` keeps updating too, so that its users can adapt to a changing AI environment together.
+
+So `oah` prefers defaults you can understand and change over checks you cannot turn off. When a rule gets in
+the way of your work or of a newer model, the project treats that as a design problem to fix.
+
 ## Contents
 
+- [Purpose: a harness that keeps adapting](#purpose-a-harness-that-keeps-adapting)
 - [At a glance](#at-a-glance)
 - [Strengths](#strengths)
 - [Beginner mistakes oah guards against](#beginner-mistakes-oah-guards-against)
@@ -977,6 +1001,29 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 동시�
 
 `oah`는 Python 3.11 이상과 표준 라이브러리만으로 동작한다. macOS와 Windows에서 WSL 없이 바로 돈다.
 Claude Code나 Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을 수 있게 하는 기록을 남긴다.
+
+### 이 프로젝트의 목적
+
+`oah`는 모두가 그대로 써야 하는 완벽한 하네스를 내놓는 것이 목적이 아니다. 각자에게 맞고, AI가 바뀌는 만큼
+함께 바뀌는 개발 환경을 만들도록 돕는 참고 구현이자 가이드라인이다.
+
+하네스는 보통 한 번 세팅해 두면 그대로 쓰인다. 그 사이 AI 모델과 스킬은 계속 업데이트된다. 예전 모델에서 잘
+쓰던 규칙과 스킬이 업그레이드된 모델의 최대 성능을 막는 제약이 되기도 하고, 시대에 뒤떨어진 스킬이 오히려
+더 나쁜 결과를 내기도 한다. 좋은 하네스는 흐르는 물처럼 새 모델에 맞춰 계속 바뀐다. 필요 없어진 스킬은
+지우고, 필요한 스킬은 더하고, 규칙도 그에 맞게 고친다.
+
+- **필요한 부분만 가져가 적용한다.** 이미 다른 AI 도구나 다른 하네스를 쓰고 있다면 `oah`가 리스, 단계별
+  엔진, 증거 게이트, 영향 지도, 위키, 리뷰 루프를 어떻게 다루는지 참고해서 자기 도구에 맞는 부분만 옮겨
+  하네스를 업그레이드하면 된다. 규칙은 [`docs/PLAN.md`](docs/PLAN.md)에 글로 적어 두었으니 코드가 아니라
+  생각으로도 가져갈 수 있다.
+- **그대로 따라 하더라도 자기 것으로 키운다.** `oah`를 그대로 시작점으로 삼는다면 설정과 단계, 규칙을 자기
+  개발 목적에 맞게 바꾸고, 코드가 자라는 만큼 자기 프로젝트 위키와 영향 지도를 만들어 가면 된다. 결국 남는
+  하네스는 우리 것을 복사한 것이 아니라 사용자 자신의 것이어야 한다.
+- **계속 업데이트한다.** 도구가 바뀌면 모델과 스킬, 규칙을 다시 살핀다. 더는 도움이 안 되는 것은 지우고
+  도움이 되는 것은 더한다. `oah`도 계속 업데이트하면서 사용자들이 변하는 AI 환경에 함께 적응하도록 돕는다.
+
+그래서 `oah`는 끌 수 없는 검사보다 이해하고 바꿀 수 있는 기본값을 고른다. 규칙이 사용자의 작업이나 새 모델을
+가로막으면 이 프로젝트는 그것을 고쳐야 할 설계 문제로 다룬다.
 
 ### 현재 상태
 
