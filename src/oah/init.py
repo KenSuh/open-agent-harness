@@ -1272,7 +1272,7 @@ def write_files(root: pathlib.Path, changes: list[FileChange], *, wiki) -> tuple
     def write(change: FileChange) -> None:
         if not _publish(root, change.target or change.path, change.data,
                         None if change.action == "create" else change.before):
-            problems.append(f"OAH_INIT_CHANGED: {change.path} changed after the plan was shown, so init left it "
+            problems.append(f"OAH_INIT_CHANGED: {_terminal_metadata(change.path)} changed after the plan was shown, so init left it "
                             "as it is. Run oah init again to see the new plan.")
             return
         written.append(change)
@@ -1552,6 +1552,8 @@ def _preview_text(data: bytes) -> str | None:
     The toolkit mirrors the repository privacy scanner (parity-tested), including email policy.
     Keep provider patterns there rather than maintaining another per-format list here. Unknown
     token-alphabet runs of at least 20 characters and >= 3 bits/character also hide the preview.
+    This is best effort: split, escaped or otherwise encoded tokens can pass. Do not reassemble
+    or decode content to scan it; previews show the user's own file only on their terminal.
     Nothing is staged, logged or refused on a hit.
     """
     try:
@@ -1586,6 +1588,14 @@ def _preview_text(data: bytes) -> str | None:
     return text
 
 
+def _terminal_metadata(value: object) -> str:
+    """Scan untrusted display metadata, then escape controls without changing its I/O spelling."""
+    text = str(value)
+    if _preview_text(text.encode("utf-8", errors="surrogatepass")) is None:
+        return "<withheld metadata>"
+    return "".join(char if char.isprintable() else json.dumps(char)[1:-1] for char in text)
+
+
 def _terminal_diff(path: str, before: bytes | None, after: bytes | None) -> list[str]:
     """Render only for terminal output. No diff or scanner input is written to a plan/state file."""
     if before is None or after is None or before == after:
@@ -1593,8 +1603,9 @@ def _terminal_diff(path: str, before: bytes | None, after: bytes | None) -> list
     old, new = _preview_text(before), _preview_text(after)
     if old is None or new is None:
         return ["             " + _replacement_note(before)]
+    shown = _terminal_metadata(path)
     diff = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                fromfile=f"a/{path}", tofile=f"b/{path}")
+                                fromfile=f"a/{shown}", tofile=f"b/{shown}")
     lines = []
     for line in diff:
         lines.append("             | " + line.rstrip("\r\n"))
@@ -1665,7 +1676,7 @@ def plan_hooks(root: pathlib.Path, *, force: bool) -> list[HookStep]:
             note = _replacement_note(before)
             diff = (_claude_hook_diff(kind) if kind in hooks.CLAUDE_KINDS else "".join(difflib.unified_diff(
                 [], hooks.git_hook_text(kind).splitlines(keepends=True), fromfile="/dev/null",
-                tofile=f"b/{relative} (canonical hook only)")))
+                tofile=f"b/{_terminal_metadata(relative)} (canonical hook only)")))
             if kind in hooks.CLAUDE_KINDS:
                 event, matcher = hooks.CLAUDE_KINDS[kind]
                 group = {"matcher": matcher} if matcher else {}
@@ -1791,7 +1802,7 @@ class UnlazyStep:
 
 
 def _unlazy_exists(relative: str) -> str:
-    return (f"OAH_INIT_UNLAZY_EXISTS: an existing directory at {relative} cannot be replaced. "
+    return (f"OAH_INIT_UNLAZY_EXISTS: an existing directory at {_terminal_metadata(relative)} cannot be replaced. "
             "Remove it yourself, then rerun oah init --with-unlazy")
 
 
@@ -1906,23 +1917,23 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
                                               "then run oah init --with-unlazy again")
         if target.exists() or target.is_symlink():
             return UnlazyStep("blocked", str(target), _unlazy_exists(UNLAZY_PROJECT))
-        shown = UNLAZY_PROJECT if destination == UNLAZY_PROJECT else f"{UNLAZY_PROJECT} -> {destination}"
+        shown = UNLAZY_PROJECT if destination == UNLAZY_PROJECT else f"{UNLAZY_PROJECT} -> {_terminal_metadata(destination)}"
         return UnlazyStep("install", note=f"downloads unlazy into {shown} at commit {short}", target=destination)
     problems = _verify_unlazy_pin(root, folder, pin)
     if not problems:
-        shown = (f"{UNLAZY_PROJECT} -> {destination}" if folder == target and destination != UNLAZY_PROJECT
-                 else str(folder))
+        shown = (f"{UNLAZY_PROJECT} -> {_terminal_metadata(destination)}" if folder == target and destination != UNLAZY_PROJECT
+                 else _terminal_metadata(folder))
         return UnlazyStep("present", str(folder), f"{shown} is the pinned commit {short}, with matching file digests",
                           target=destination)
     why = "its commit or script digests do not match the pin"
     if override:
-        return UnlazyStep("blocked", str(folder), f"{override} names {folder}, which is not the pinned unlazy ({why}). "
+        return UnlazyStep("blocked", str(folder), f"{override} names {_terminal_metadata(folder)}, which is not the pinned unlazy ({why}). "
                                                   f"Clear {override}, then run oah init --with-unlazy again")
     project = {root / relative for relative in targets.values()}
     if folder in project:
         where = _shown_path(root, folder)
         return UnlazyStep("blocked", str(folder), _unlazy_exists(where))
-    return UnlazyStep("install", str(folder), f"your copy at {folder} is not the pinned one ({why}); init installs "
+    return UnlazyStep("install", str(folder), f"your copy at {_terminal_metadata(folder)} is not the pinned one ({why}); init installs "
                                               f"the pinned project copy into {UNLAZY_PROJECT}, which oah uses first",
                       target=destination)
 
@@ -2323,8 +2334,21 @@ def _companion_steps(apps, *, os_name: str, root: pathlib.Path) -> tuple[compani
         if check is not None:
             step = dataclasses.replace(step, skip_if=check, verify=check,
                                        already="the requested Orca setup is already present")
+        if step.key == "orca-project":
+            step = dataclasses.replace(step, display=_terminal_project_metadata(step.display, step, root),
+                                       instruction=_terminal_project_metadata(step.instruction, step, root))
         found.append(step)
     return tuple(found)
+
+
+def _terminal_project_metadata(text: str, step, root: pathlib.Path) -> str:
+    """Keep landed companion commands intact while filtering their project metadata for display."""
+    values = [str(root)]
+    if step.argv is not None and "--project" in step.argv:
+        values.append(step.argv[step.argv.index("--project") + 1])
+    for value in values:
+        text = text.replace(value, _terminal_metadata(value))
+    return text
 
 
 def companion_probe(argv, cwd: pathlib.Path) -> int | None:
@@ -2476,7 +2500,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         apps=apps, companion_steps=_companion_steps(apps, os_name=machine.companion_os, root=root) if apps else (),
         map=map_state(root, machine.env),
         unlazy_runs=tuple(" ".join(["git", *argv[len(git_argv()):]]) for argv in unlazy_commands(
-            pathlib.Path("<git common dir>/oah/staging/<run>"), source=machine.unlazy_source, pin=machine.unlazy_pin))
+            pathlib.Path("<git common dir>/oah/staging/<run>"), source=_terminal_metadata(machine.unlazy_source),
+            pin=machine.unlazy_pin))
         if unlazy_step is not None and unlazy_step.action in ("install", "replace") else ())
 
 
@@ -2486,7 +2511,7 @@ def _indented(text: str, prefix: str) -> list[str]:
 
 def render_plan(plan: Plan) -> list[str]:
     """The plan as printed, the same for --dry-run and a real run."""
-    lines = [f"Plan for {plan.root}:"]
+    lines = [f"Plan for {_terminal_metadata(plan.root)}:"]
     names = {question.key: question.key.replace("_", "-") for question in QUESTIONS}
     lines += _wrap("  Answers: ", ", ".join(f"{names[key]} {'yes' if answer.value else 'no'}"
                                             for key, answer in plan.answers.items()))
@@ -2524,7 +2549,7 @@ def render_plan(plan: Plan) -> list[str]:
                 else "the @AGENTS.md import line")
         found = plan.rules.planned
         target = getattr(found, "agents_path" if name == "AGENTS.md" else "claude_path", name)
-        shown = name if target == name else f"{name} -> {target}"
+        shown = name if target == name else f"{name} -> {_terminal_metadata(target)}"
         lines.append(f"  {action:<10} {shown}: {what}")
         if found is not None:
             if name == "CLAUDE.md" and target == getattr(found, "agents_path", "AGENTS.md"):
@@ -2546,7 +2571,8 @@ def render_plan(plan: Plan) -> list[str]:
     if not plan.answers["hooks"].value:
         lines.append("  none chosen; `oah hooks install <kind>` adds one later")
     for step in plan.hooks:
-        shown = f"{step.path} -> {step.target}" if step.target and step.target != step.path else step.path
+        shown = (f"{_terminal_metadata(step.path)} -> {_terminal_metadata(step.target)}"
+                 if step.target and step.target != step.path else _terminal_metadata(step.path))
         where = f" ({shown})" if shown else ""
         lines.append(f"  {step.action:<10} {step.kind}{where}{': ' + step.note if step.note else ''}")
         preview = _terminal_diff(step.path, step.before, step.data)
@@ -2570,7 +2596,7 @@ def render_plan(plan: Plan) -> list[str]:
         lines.append("  not chosen; `oah ci init` writes it later")
     else:
         target = plan.ci.plan.path.relative_to(plan.root).as_posix() if plan.ci.plan is not None else ""
-        shown = f"{ci.WORKFLOW_PATH} -> {target}" if target and target != ci.WORKFLOW_PATH.as_posix() \
+        shown = f"{ci.WORKFLOW_PATH} -> {_terminal_metadata(target)}" if target and target != ci.WORKFLOW_PATH.as_posix() \
             else ci.WORKFLOW_PATH
         lines.append(f"  {plan.ci.action:<10} {shown}{': ' + plan.ci.note if plan.ci.note else ''}")
         if plan.ci.plan is not None and plan.ci.plan.existing is not None:
@@ -2590,11 +2616,12 @@ def render_plan(plan: Plan) -> list[str]:
             lines.append(f"       you do it: {step.instruction}")
         lines.append(f"       source: {step.source}")
         if step.key in ("orca-skills", "orca-project") and step.skip_if is not None:
-            lines.append(f"       check first: {companions.show(step.skip_if)}; skip when already present; "
+            shown = _terminal_project_metadata(companions.show(step.skip_if), step, plan.root)
+            lines.append(f"       check first: {shown}; skip when already present; "
                          "leave pending if unverified")
     jev = plan.answers["jev"].value
     lines.append("Settings:")
-    lines.append(f"  default branch: {plan.branch} ({plan.how})")
+    lines.append(f"  default branch: {_terminal_metadata(plan.branch)} ({_terminal_metadata(plan.how)})")
     lines.append(f"  Jev re-ranker: {'on, with your consent' if jev else 'off'}")
     updates = plan.answers["skill_updates"].value
     lines.append(f"  skill updates: {'on, checked at most once a day' if updates else 'off'}")
@@ -2609,7 +2636,8 @@ def render_plan(plan: Plan) -> list[str]:
 
 
 def _file_line(change: FileChange) -> str:
-    shown = (f"{change.path} -> {change.target}" if change.target and change.target != change.path else change.path)
+    shown = (f"{_terminal_metadata(change.path)} -> {_terminal_metadata(change.target)}"
+             if change.target and change.target != change.path else _terminal_metadata(change.path))
     return f"  {change.action:<10} {shown}{': ' + change.note if change.note else ''}"
 
 
@@ -2679,7 +2707,7 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
         out("")
         out("Files:")
     for change in written:
-        out(f"  {VERBS[change.action]} {change.path}")
+        out(f"  {VERBS[change.action]} {_terminal_metadata(change.path)}")
     for name in synced.changed:
         out(f"  updated {name} (the oah rules block)" if name == "AGENTS.md" else f"  updated {name} (@AGENTS.md)")
     blocked = [change for change in plan.files if change.action == "blocked"]
@@ -2687,7 +2715,7 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
         out("")
         out("Files:")
     for change in blocked:
-        out(f"  not written: {change.path}: {change.note}")
+        out(f"  not written: {_terminal_metadata(change.path)}: {change.note}")
     for problem in problems:
         out(f"  {problem}")
     outcome.changed += len(written) + len(synced.changed)
@@ -2750,7 +2778,7 @@ def _apply_unlazy(plan: Plan, machine: Machine, outcome: Outcome, out) -> None:
         out(f"  {step.note}" if step.note.startswith("OAH_") else f"  OAH_INIT_UNLAZY_FAILED: {step.note}")
         outcome.pending.append("unlazy")
         return
-    out(f"  installing unlazy into {UNLAZY_PROJECT} from {machine.unlazy_source} ...")
+    out(f"  installing unlazy into {UNLAZY_PROJECT} from {_terminal_metadata(machine.unlazy_source)} ...")
     problem = install_unlazy(plan.root, step, source=machine.unlazy_source, pin=machine.unlazy_pin)
     if problem:
         out(f"  {problem}")
@@ -2808,6 +2836,7 @@ def _run_orca_steps(steps, root: pathlib.Path, machine: Machine, *, ask, out):
     """Add conservative presence checks without changing the landed companion setup contract."""
     outcomes, statuses = [], {}
     for step in steps:
+        emit = lambda text: out(_terminal_project_metadata(text, step, root))
         if step.requires is not None and statuses.get(step.requires) not in ("done", "present"):
             status = "blocked"
         elif step.key in ("orca-skills", "orca-project") and step.skip_if is not None:
@@ -2816,7 +2845,7 @@ def _run_orca_steps(steps, root: pathlib.Path, machine: Machine, *, ask, out):
                 status = "present"
             elif state != 1:
                 status = "pending"
-                out(f"OAH_INIT_ORCA_UNVERIFIED: cannot verify {step.key}; no change was made. Open Orca, "
+                emit(f"OAH_INIT_ORCA_UNVERIFIED: cannot verify {step.key}; no change was made. Open Orca, "
                     f"check `{companions.show(step.skip_if)}`, then run oah init again")
             else:
                 status = ""  # definitely missing: the landed runner still asks for this command's consent
@@ -2828,7 +2857,7 @@ def _run_orca_steps(steps, root: pathlib.Path, machine: Machine, *, ask, out):
             # The check above is authoritative for this step; do not let a second unknown probe fall through.
             run_step = dataclasses.replace(step, skip_if=None) if step.argv is not None else step
             outcomes += companions.run_steps([run_step], project_root=root, yes=False, which=machine.which,
-                                             ask=ask, out=out, runner=machine.companion_runner,
+                                             ask=ask, out=emit, runner=machine.companion_runner,
                                              probe=machine.companion_probe, refresh=machine.refresh)
         statuses[step.key] = outcomes[-1].status
     return outcomes

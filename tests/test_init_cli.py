@@ -156,6 +156,78 @@ class DiscoveryTest(unittest.TestCase):
 
 
 class PlanFirstTest(unittest.TestCase):
+    def test_repository_error_scans_path_metadata_and_keeps_problem_code(self):
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        outside = make_tmp_dir(self) / credential
+        outside.mkdir()
+        (outside / ".git").write_bytes(b"gitdir: missing\n")  # Stop Git discovering this checkout above TMPDIR.
+        code, out, err = run_init(outside, make_machine(self, FakeTools()), "--dry-run", *flags())
+        self.assertEqual(code, 69)
+        self.assertFalse(credential in out + err, "repository diagnostic exposed private metadata")
+        self.assertTrue(err.startswith("OAH_NOT_A_REPO:"))
+        self.assertIn("git init", err)
+
+    def test_private_root_metadata_is_hidden_in_heading_and_companion_instructions(self):
+        repo = committed_repo(self)
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        renamed = repo.with_name(credential)
+        repo.rename(renamed)
+        code, out, err = run_init(renamed, make_machine(self, FakeTools()), "--dry-run", *flags(orca=True))
+        self.assertEqual(code, 0)
+        self.assertFalse(credential in out + err, "heading or companion instruction exposed private metadata")
+        self.assertIn("Plan for <withheld metadata>:", out)
+
+    def test_private_wiki_path_metadata_is_hidden_without_refusing_init(self):
+        repo = committed_repo(self)
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        folder = "docs/" + credential
+        (repo / ".oah").mkdir()
+        (repo / ".oah/config.toml").write_bytes(("[wiki]\ndir = " + json.dumps(folder) + "\n").encode("ascii"))
+        machine = make_machine(self, FakeTools())
+        before = snapshot(repo)
+        code, out, err = run_init(repo, machine, "--dry-run", *flags())
+        self.assertEqual(code, 0)
+        self.assertFalse(credential in out + err, "dry-run exposed private path metadata")
+        self.assertIn("<withheld metadata>", out)
+        self.assertEqual(snapshot(repo), before)
+        code, out, err = run_init(repo, machine, *flags())
+        self.assertEqual(code, 0)
+        self.assertFalse(credential in out + err, "apply diagnostics exposed private path metadata")
+        self.assertTrue((repo / folder / "index.md").is_file())
+
+    def _assert_private_rules_target_metadata(self):
+        repo = committed_repo(self)
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        target = credential + ".md"
+        (repo / target).write_bytes(b"# shared guidance\n")
+        (repo / "CLAUDE.md").symlink_to(target)
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), "--dry-run", *flags())
+        self.assertEqual(code, 0)
+        self.assertFalse(credential in out + err, "rules plan exposed a private link target")
+        self.assertIn("CLAUDE.md -> <withheld metadata>", out)
+        self.assertTrue((repo / "CLAUDE.md").is_symlink())
+        self.assertEqual((repo / target).read_bytes(), b"# shared guidance\n")
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_private_rules_target_metadata(self):
+        self._assert_private_rules_target_metadata()
+
+    @unittest.skipUnless(os.name == "nt", "Windows file symlinks (CI developer mode)")
+    def test_windows_private_rules_target_metadata(self):
+        self._assert_private_rules_target_metadata()
+
+    @unittest.skipIf(os.name == "nt", "Windows forbids control characters in filenames")
+    def test_wiki_path_controls_are_escaped_in_plan_and_apply_output(self):
+        repo = committed_repo(self)
+        folder = "docs/line\nbreak\t"
+        (repo / ".oah").mkdir()
+        (repo / ".oah/config.toml").write_bytes(("[wiki]\ndir = " + json.dumps(folder) + "\n").encode("ascii"))
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags())
+        self.assertEqual(code, 0)
+        self.assertNotIn(folder, out + err)
+        self.assertIn("docs/line\\nbreak\\t/index.md", out)
+        self.assertTrue((repo / folder / "index.md").is_file())
+
     def test_foreign_hook_pat_is_hidden_before_force_confirmation(self):
         repo = committed_repo(self)
         credential = "gl" + "pat-" + token_source.token_hex(10)
@@ -668,7 +740,7 @@ class IdempotentTest(unittest.TestCase):
         machine = make_machine(self, FakeTools())
         code, out, err = run_init(repo, machine, *flags(unlazy=True))
         self.assertEqual(code, 0, out + err)
-        self.assertIn(".agents/skills/unlazy -> local-agents/skills/unlazy", out)
+        self.assertIn(".agents/skills/unlazy -> <withheld metadata>", out)
         self.assertEqual(unlazy.verify_pin(target / "skills/unlazy", machine.unlazy_pin), [])
         self.assertEqual(subprocess.run(["git", "check-ignore", "-q", "--", "local-agents/skills/unlazy/"],
                                         cwd=repo).returncode, 0)
@@ -1036,7 +1108,7 @@ class BlockedTest(unittest.TestCase):
         code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(agents=True, hooks=True))
         self.assertEqual(code, 1, err)
         self.assertEqual(list(outside.iterdir()), [])
-        self.assertIn("not written: .claude/agents/oah-low.md", out)
+        self.assertIn("not written: <withheld metadata>: OAH_INIT_PATH_UNSAFE:", out)
         self.assertIn("hook stop was not installed", out)
         token = last_line(out)
         self.assertTrue(token.startswith("OAH_INIT_INCOMPLETE"), token)

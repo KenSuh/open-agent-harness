@@ -57,7 +57,9 @@ def run(args: argparse.Namespace) -> int:
               "then run oah init again", file=sys.stderr)
         return exc.exit_code
     except (NotARepo, GitMissing) as exc:
-        print(f"{exc}. Run oah init inside your project's git repository; `git init` starts one.", file=sys.stderr)
+        detail = str(exc).removeprefix(f"{exc.code}: ")
+        print(f"{exc.code}: {init._terminal_metadata(detail)}. Run oah init inside your project's git repository; "
+              "`git init` starts one.", file=sys.stderr)
         return EXIT_ENVIRONMENT
     except ConfigError as exc:
         print(f"{exc.code}: the project configuration is invalid. Fix .oah/config.toml, then run oah init again",
@@ -83,7 +85,7 @@ def _init(args: argparse.Namespace, machine: init.Machine) -> int:
             raise
         existing = None  # --force replaces a config that does not parse
     writes_config = existing is None or existing.path is None or args.force
-    print(f"oah init: guided setup of {root}"
+    print(f"oah init: guided setup of {init._terminal_metadata(root)}"
           + (" (dry run: nothing will be written, installed or run)" if args.dry_run else ""))
     answers = init.resolve_answers(given, recorded=None if writes_config else init.recorded_answers(existing),
                                    interactive=machine.interactive, dry_run=args.dry_run, ask=machine.ask, out=print)

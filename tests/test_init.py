@@ -59,6 +59,13 @@ def sections(text: str) -> dict:
     }
 
 
+def link_target_text(value: str) -> str:
+    """Windows readlink can add an extended-length drive or UNC prefix."""
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    return value.removeprefix("\\\\?\\")
+
+
 class ConfigTest(unittest.TestCase):
     def test_config_validates_against_every_section(self):
         for jev in (True, False):
@@ -275,7 +282,7 @@ class PlanFilesTest(unittest.TestCase):
         found = self.by_path(self.plan())
         change = found[init.CONFIG_PATH]
         self.assertEqual(change.target, "project-config/config.toml")
-        self.assertIn(".oah/config.toml -> project-config/config.toml", init._file_line(change))
+        self.assertIn(".oah/config.toml -> <withheld metadata>", init._file_line(change))
         self.assertTrue(init._publish(self.repo, change.target, change.data, change.before))
         self.assertEqual((target / "config.toml").read_bytes(), self.config)
         self.assertTrue(init._is_link(self.repo / ".oah"))
@@ -872,10 +879,18 @@ class RulesStepTest(unittest.TestCase):
                     self.assertEqual(caught.exception.code, "OAH_INIT_PATH_UNSAFE")
                     self.assertNotIn("private outside rules", str(caught.exception))
                     self.assertFalse((self.repo / "AGENTS.md").exists())
-                    self.assertEqual(os.readlink(link), target)
+                    self.assertEqual(link_target_text(os.readlink(link)), link_target_text(target))
                 finally:
                     link.unlink()
         self.assertEqual(outside.read_bytes(), b"private outside rules\n")
+
+    def test_link_target_text_normalizes_windows_extended_prefix_only(self):
+        for actual, expected in ((r"\\?\C:\private.md", r"C:\private.md"),
+                                 (r"\\?\UNC\server\share\private.md", r"\\server\share\private.md"),
+                                 (r"C:\private.md", r"C:\private.md"),
+                                 ("missing.md", "missing.md"), ("CLAUDE.md", "CLAUDE.md")):
+            with self.subTest(actual=actual):
+                self.assertEqual(link_target_text(actual), expected)
 
     @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
     def test_rules_refuse_outside_dangling_and_cyclic_links(self):
@@ -1261,6 +1276,39 @@ class WindowsSecurityTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_preview_is_best_effort_without_reassembly_or_decoding(self):
+        value = token_source.token_hex(24)
+        contiguous = ("# example " + value + "\n").encode("ascii")
+        self.assertIsNone(init._preview_text(contiguous))
+        prose = b"# ordinary project guidance\n"
+        self.assertEqual(init._preview_text(prose), prose.decode("ascii"))
+        # Split/encoded text is a documented limit, not reconstructed scanner input.
+        for text in ("\n".join(value[i:i + 8] for i in range(0, len(value), 8)),
+                     "".join("\\x" + format(ord(char), "02x") for char in value)):
+            self.assertTrue(init._preview_text(text.encode("ascii")) == text,
+                            "the best-effort scanner must not reconstruct tokens")
+
+    def test_diff_headers_scan_metadata_and_escape_controls(self):
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        preview = "\n".join(init._terminal_diff(credential + "/file.md", b"old\n", b"new\n"))
+        self.assertFalse(credential in preview, "diff headers exposed private metadata")
+        self.assertIn("<withheld metadata>", preview)
+        self.assertIn("-old", preview)
+        self.assertIn("+new", preview)
+        preview = "\n".join(init._terminal_diff("notes/line\nbreak\t.md", b"old\n", b"new\n"))
+        self.assertIn("a/notes/line\\nbreak\\t.md", preview)
+        self.assertNotIn("line\nbreak", preview)
+
+    def test_file_lines_scan_paths_and_link_targets(self):
+        credential = "gl" + "pat-" + token_source.token_hex(20)
+        for path, target in ((credential + "/note.md", ""), ("CLAUDE.md", credential + ".md")):
+            line = init._file_line(init.FileChange(path, "create", "wiki", target=target))
+            self.assertFalse(credential in line, "plan exposed private metadata")
+            self.assertIn("<withheld metadata>", line)
+        line = init._file_line(init.FileChange("notes/line\nbreak\t.md", "create", "wiki"))
+        self.assertIn("notes/line\\nbreak\\t.md", line)
+        self.assertNotIn("line\nbreak", line)
+
     def test_google_and_stripe_comment_tokens_use_digest_only_preview(self):
         alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         for prefix, size in (("AI" + "za", 35), ("sk" + "_live_", 24)):
@@ -2640,7 +2688,7 @@ class UnlazyStepTest(unittest.TestCase):
                 step = self.plan(force=force)
                 self.assertEqual(step.action, "blocked")
                 self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
-                self.assertIn(init.UNLAZY_PROJECT, step.note)
+                self.assertIn("<withheld metadata>", step.note)
                 self.assertIn("Remove", step.note)
                 self.assertIn("rerun", step.note)
                 self.assertFalse(step.backup)
@@ -2656,7 +2704,7 @@ class UnlazyStepTest(unittest.TestCase):
         step = self.plan(force=True)
         self.assertEqual(step.action, "blocked")
         self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
-        self.assertIn(init.UNLAZY_PROJECT, step.note)
+        self.assertIn("<withheld metadata>", step.note)
         self.assertFalse(step.backup)
         self.assertEqual((self.target / "keep.bin").read_bytes(), original)
 
@@ -2666,7 +2714,7 @@ class UnlazyStepTest(unittest.TestCase):
         step = self.plan(force=True)
         self.assertEqual(step.action, "blocked")
         self.assertTrue(step.note.startswith("OAH_INIT_UNLAZY_EXISTS:"), step.note)
-        self.assertIn(".claude/skills/unlazy", step.note)
+        self.assertIn("<withheld metadata>", step.note)
         self.assertFalse(step.backup)
 
     def test_directory_source_publication_refuses_hash_then_regular_directory_swap(self):
