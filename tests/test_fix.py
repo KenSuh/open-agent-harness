@@ -25,6 +25,7 @@ from oah.lockfile import StateLock
 from oah.paths import repo_info
 from oah.review import ReviewError, authors, fix, receipts, runner
 from oah.secrets import NoKeychain
+from tests.fixtures.gates.support import remove_tree
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 from tests.test_review_rounds import CLAUDE_TRAILER, LEVELS, PACKET, RULES, bug, git, toml_list
 
@@ -42,9 +43,11 @@ class FixProject:
                  repo_name: str = "repo", agent: str = "claude") -> None:
         self.test = test
         self.repo = make_git_repo(test)
+        test.addCleanup(lambda: remove_tree(self.repo) if self.repo.exists() else None)
         if repo_name != self.repo.name:
             self.repo = self.repo.rename(self.repo.with_name(repo_name))
         self.work = make_tmp_dir(test)
+        test.addCleanup(remove_tree, self.work)
         self.state, self.home = self.work / "state", self.work / "codex-home"
         self.calls_dir, self.fix_dir, self.temp_root = self.work / "calls", self.work / "fix-calls", self.work / "temp"
         self.script, self.fix_script = self.work / "script.json", self.work / "fix-script.json"
@@ -103,7 +106,14 @@ class FixProject:
     def fix(self, *, cwd: pathlib.Path | None = None, env: dict | None = None, rules: list | None = None,
             terminal: io.StringIO | None = None, **fields) -> fix.Result:
         fields.setdefault("tier", "high")
-        with contextlib.redirect_stderr(terminal if terminal is not None else io.StringIO()):
+        self.patches = []
+        patch = fix._patch
+        def captured(*args, **kwargs):
+            data = patch(*args, **kwargs)
+            self.patches.append(data)
+            return data
+        with contextlib.redirect_stderr(terminal if terminal is not None else io.StringIO()), \
+                mock.patch.object(fix, "_patch", side_effect=captured):
             return fix.correct(fix.Request(task="t1", **fields), cwd=cwd or self.repo,
                                env=self.env if env is None else env, keychain=NoKeychain(),
                                rules=RULES if rules is None else rules, temp_root=self.temp_root)
@@ -160,6 +170,12 @@ class FixProject:
 
     def run_commands(self, commands: list[str]) -> str:
         """Run the printed commands in their platform shell, and return the new HEAD."""
+        manifests = list((self.state / "runs" / "t1").glob("*/correction.json"))
+        if manifests:
+            saved = json.loads(max(manifests, key=lambda p: p.stat().st_mtime_ns).read_bytes())
+            for name in fix._untracked(self.repo):
+                if hashlib.sha256(os.fsencode(name)).hexdigest() in saved.get("new_file_digests", []):
+                    git(self.repo, "add", "--", ":(literal)" + name)
         for command in commands:
             argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command + "; exit $LASTEXITCODE"]
                     if os.name == "nt" else shlex.split(command))
@@ -686,7 +702,8 @@ class WorkerTest(unittest.TestCase):
                 self.assertIn("OAH_FIX_USER_FILES_CHANGED", result.message)
                 self.assertFalse(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings))
                 patch = (project.run_folder(result) / "correction.patch").read_bytes()
-                self.assertIn(b"+print('fixed')", patch)
+                self.assertNotIn(b"+print('fixed')", patch)
+                self.assertIn(b"+print('fixed')", b"".join(project.patches))
                 self.assertNotIn(b"before\r\n", patch)
                 self.assertNotIn(name.encode("ascii"), patch)
 
@@ -780,10 +797,41 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed")
                 SecretTest.assert_private(self, project, [key, *key.splitlines()], json.dumps(result.to_json()))
 
+    def test_checkout_cleanup_retries_permission_error_after_enabling_writes(self):
+        folder = make_tmp_dir(self) / "checkout"
+        folder.mkdir()
+        path = folder / "loose-object"
+        path.write_bytes(b"git object fixture\n")
+        import stat
+        path.chmod(stat.S_IREAD)
+        def remove(_folder, **kwargs):
+            def retry(target):
+                self.assertTrue(path.stat().st_mode & stat.S_IWRITE)
+                os.unlink(target)
+            error = PermissionError("read-only Git object")
+            if "onexc" in kwargs:
+                kwargs["onexc"](retry, path, error)
+            else:
+                kwargs["onerror"](retry, path, (PermissionError, error, None))
+        with mock.patch.object(shutil, "rmtree", side_effect=remove):
+            remove_tree(folder)
+        self.assertFalse(path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Git for Windows read-only loose objects")
+    def test_checkout_removal_retries_read_only_git_objects(self):
+        project = FixProject(self)
+        import stat
+        objects = [p for p in (project.repo / ".git" / "objects").glob("??/*") if p.is_file()]
+        self.assertTrue(objects)
+        for path in objects:
+            path.chmod(stat.S_IREAD)
+        remove_tree(project.repo)
+        self.assertFalse(project.repo.exists())
+
     def test_fresh_autocrlf_checkout_is_clean_without_running_filters(self):
         project = FixProject(self, attributes=None)
         git(project.repo, "push", "-q", "origin", "feat")
-        shutil.rmtree(project.repo)
+        remove_tree(project.repo)
         subprocess.run(["git", "clone", "-c", "core.autocrlf=true", "-q", "-b", "feat",
                         str(project.work / "remote.git"), str(project.repo)], check=True, capture_output=True)
         project.changes_requested()
@@ -876,10 +924,10 @@ class WorkerTest(unittest.TestCase):
                     project.queue_fix({"write": {name: content}})
                     result = project.fix()
                     self.assertNotEqual(result.outcome, "no-change")
-                    self.assertIn(name, "\n".join(result.lines))
+                    self.assertNotIn(name, "\n".join(result.lines))
                     self.assertNotIn(name, project.record("A1-outcome.json")["evidence"])
                     self.assertIn("[file 1]", project.record("A1-outcome.json")["evidence"])
-                    patch = (project.run_folder(result) / "correction.patch").read_bytes()
+                    patch = b"".join(project.patches)
                     self.assertIn(b"-user's original\r\n", patch)
                     if content is not None:
                         self.assertIn(b"+overwritten\n", patch)
@@ -887,7 +935,7 @@ class WorkerTest(unittest.TestCase):
                     self.assertEqual(any("OAH_FIX_OUT_OF_SCOPE" in warning for warning in result.warnings),
                                      name.startswith("outside/"))
                     saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
-                    self.assertIn(name, saved["user_files"])
+                    self.assertIn("[file 1]", saved["user_files"])
                     self.assertNotIn(name, saved["new_files"])
 
     def test_correction_runs_as_a_worker_in_the_leased_worktree(self):
@@ -1238,7 +1286,7 @@ class OutcomeTest(unittest.TestCase):
         outcome = project.record("A1-outcome.json")
         self.assertEqual((outcome["outcome"], outcome["after_head"]), ("applied", None))
         self.assertIn(result.attempt_id, ("A1",))
-        self.assertEqual([item["name"] for item in result.records], ["A1-start.json", "A1-outcome.json"])
+        self.assertEqual([item["kind"] for item in result.records], ["attempt-start", "attempt-outcome"])
 
     def test_every_ending_leaves_one_terminal_outcome(self):
         def launch_failure(project):
@@ -1356,6 +1404,7 @@ class BindTest(unittest.TestCase):
                 project.queue_fix({"write": {**FIXED, "README.md": "corrected root file\n", "src/new.py": "NEW = 1\n"}})
                 result = project.fix(cwd=caller)
                 self.assertEqual(result.outcome, "applied", result.message)
+                git(project.repo, "add", "--", "src/new.py")
                 for command in result.commands:
                     argv = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
                              command + "; exit $LASTEXITCODE"] if powershell or os.name == "nt" else
@@ -1374,22 +1423,18 @@ class BindTest(unittest.TestCase):
         (project.repo / "src/i.py").write_text("THE USER'S OWN UNTRACKED FILE\n", encoding="utf-8")
         result = applied(self, project, {"write": {"src/app.py": "print('fixed')\n", "src/new.py": "NEW = 1\n",
                                                    "src/odd name.py": "ODD = 1\n", "src/[id].py": "ID = 1\n"}})
-        text = "\n".join(result.lines)
-        for line in ("-print('v1')", "+print('fixed')", "+NEW = 1", "+ODD = 1", "+ID = 1"):
-            self.assertIn(line, text)
-        self.assertNotIn("THE USER'S OWN", text, "a file that was untracked before the run is not Codex's change")
-        command = "git"
+        text = json.dumps(result.to_json())
+        for line in ("-print('v1')", "+print('fixed')", "NEW = 1", "ODD = 1", "ID = 1", "src/app.py"):
+            self.assertNotIn(line, text)
+        self.assertIn("git diff", text)
         self.assertEqual(result.commands, [
-            command + " add -u", command + " add -- ':(literal)src/[id].py' src/new.py ':(literal)src/odd name.py'",
-            command + ' commit -m "Correct R1-F1 of R1 in task t1 (oah fix A1)" -m "Agent-Engine: codex"'])
-        self.assertEqual(result.next_command, "oah fix --bind --task t1")
-        for command in (*result.commands, result.next_command):
-            self.assertIn(command, result.lines)
-        saved = json.loads((project.run_folder(result) / "correction.json").read_text(encoding="utf-8"))
-        self.assertEqual((saved["commands"], saved["changed"], saved["new_files"]),
-                         (result.commands, ["src/app.py"], ["src/[id].py", "src/new.py", "src/odd name.py"]))
+            "git add -u", 'git commit -m "Correct review findings" -m "Agent-Engine: codex"'])
+        self.assertEqual(result.next_command, "oah fix --bind --task <task>")
+        saved = json.loads((project.run_folder(result) / "correction.json").read_bytes())
+        self.assertEqual((saved["changed"], len(saved["new_files"])), (["[file 1]"], 3))
         patch = (project.run_folder(result) / "correction.patch").read_text(encoding="utf-8")
-        self.assertEqual((patch.count("+NEW = 1"), patch.count("+print('fixed')")), (1, 1))
+        self.assertNotIn("print(", patch)
+        self.assertIn("git diff", patch)
         self.assertIn(saved["changes_sha256"], project.record("A1-outcome.json")["evidence"])
         head = project.run_commands(result.commands)
         self.assertTrue(git(project.repo, "log", "-1", "--format=%B").rstrip().endswith("Agent-Engine: codex"))
@@ -1402,7 +1447,7 @@ class BindTest(unittest.TestCase):
         head = project.run_commands(applied(self, project).commands)
         bound = project.bind()
         self.assertEqual((bound.code, bound.exit_code, bound.attempt_id), ("OAH_FIX_BOUND", 0, "A1"), bound.message)
-        self.assertEqual(bound.next_command, "oah review --task t1")
+        self.assertEqual(bound.next_command, "oah review --task <task>")
         record = project.record("A1-head.json")
         self.assertEqual(record["after_head"], head)
         self.assertIn(f"{head[:12]} (codex)", record["evidence"])
@@ -1467,7 +1512,8 @@ class BindTest(unittest.TestCase):
         self.assertEqual(bound.code, "OAH_FIX_BOUND", bound.message)
         self.assertIn("--engine claude", project.record("A1-head.json")["evidence"])
         events = [json.loads(line) for line in (project.state / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertTrue(any("--engine claude" in event.get("message", "") for event in events), "the override is logged")
+        self.assertFalse(any("--engine claude" in event.get("message", "") for event in events),
+                         "the immutable binding records the override without another state transaction")
         project = FixProject(self)
         applied(self, project)
         git(project.repo, "stash", "push", "-q", "-u", "-m", "set aside")
@@ -1660,7 +1706,7 @@ class ManualTest(unittest.TestCase):
             self.assertEqual((project.folder() / name).read_bytes(), data, name)
         index = {entry.name: entry.digest for entry in receipts.load(project.state, "t1").entries}
         for item in result.records + bound.records:
-            self.assertEqual(index[item["name"]], item["digest"])
+            self.assertIn(item["digest"], index.values())
         with self.assertRaises(ReviewError) as caught:
             receipts.publish(project.state, "t1", "A1-outcome.json", project.record("A1-outcome.json"))
         self.assertEqual(caught.exception.code, "OAH_REVIEW_RECORD_EXISTS")
@@ -1715,6 +1761,156 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_shared_lock_covers_snapshot_and_every_modes_publication(self):
+        for mode in ("fix", "manual", "bind", "abort"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                project.changes_requested()
+                if mode == "manual":
+                    project.commit(FIXED, trailer=HUMAN_TRAILER)
+                elif mode == "bind":
+                    project.queue_fix({"write": FIXED})
+                    project.run_commands(project.fix().commands)
+                elif mode == "abort":
+                    publish_start(project)
+                observed = []
+
+                def probe():
+                    code = ("import sys; from oah.lockfile import StateLock, LockTimeout\n"
+                            "try:\n with StateLock(sys.argv[1], timeout=0): pass\n"
+                            "except LockTimeout: raise SystemExit(0)\nraise SystemExit(1)\n")
+                    done = subprocess.run([sys.executable, "-c", code, str(project.state / ".lock")],
+                                          capture_output=True, timeout=20,
+                                          env=dict(project.env, PYTHONPATH=str(FAKES.parent.parent / "src")))
+                    observed.append(done.returncode)
+
+                history, publish = fix._history, receipts.publish
+                catalog_init = call._CorrectionCatalog.__init__
+                def captured_models(catalog, *args, **kwargs):
+                    probe()
+                    return catalog_init(catalog, *args, **kwargs)
+                def captured(*args, **kwargs):
+                    probe()
+                    return history(*args, **kwargs)
+                def published(*args, **kwargs):
+                    probe()
+                    return publish(*args, **kwargs)
+                action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
+                with mock.patch.object(fix, "_history", side_effect=captured), \
+                        mock.patch.object(call._CorrectionCatalog, "__init__", captured_models), \
+                        mock.patch.object(receipts, "publish", side_effect=published):
+                    action()
+                self.assertGreaterEqual(len(observed), 2)
+                self.assertEqual(observed, [0] * len(observed))
+
+    def test_manual_lease_change_after_preparation_refuses_all_three_records(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.commit(FIXED, trailer=HUMAN_TRAILER)
+        attribution = fix._attribution
+        expected = []
+        def snapshot():
+            return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                    for p in project.state.rglob("*")}
+        def changed(*args, **kwargs):
+            result = attribution(*args, **kwargs)
+            path = project.state / "leases.json"
+            data = json.loads(path.read_bytes())
+            data["leases"][0]["note"] = "preparation changed"
+            path.write_bytes(json.dumps(data).encode("utf-8"))
+            expected.append(snapshot())
+            return result
+        with mock.patch.object(fix, "_attribution", side_effect=changed):
+            project.refused("OAH_LEASE_CHANGED", project.manual, "human")
+        self.assertEqual(snapshot(), expected[0])
+
+    def test_every_mode_refuses_without_creating_missing_locks(self):
+        for mode in ("fix", "manual", "bind", "abort"):
+            for missing in ("task", "state"):
+                with self.subTest(mode=mode, missing=missing):
+                    project = FixProject(self)
+                    if missing == "state":
+                        (project.state / ".lock").unlink()
+                    def snapshot():
+                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                                for p in project.state.rglob("*")}
+                    before = snapshot()
+                    action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
+                    with self.assertRaises(ReviewError):
+                        action()
+                    self.assertEqual(snapshot(), before)
+
+    def test_every_mode_consumes_captured_state_after_publication_starts(self):
+        for mode in ("fix", "manual", "bind", "abort"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                project.changes_requested()
+                if mode == "manual":
+                    project.commit(FIXED, trailer=HUMAN_TRAILER)
+                elif mode == "bind":
+                    project.queue_fix({"write": FIXED})
+                    project.run_commands(project.fix().commands)
+                elif mode == "abort":
+                    # Include a real interrupted run, so abort must use its captured lifecycle record.
+                    run = runs.new_run(project.state, "t1", "codex", "correction")
+                    run.result(status="running")
+                    publish_start(project)
+                    path = project.folder() / "A1-start.json"
+                    record = project.record(path.name)
+                    record["run_id"] = run.id
+                    path.write_bytes(receipts.canonical(record))
+                    index = project.folder() / "index.jsonl"
+                    lines = [json.loads(line) for line in index.read_bytes().splitlines()]
+                    lines[-1]["digest"] = receipts.digest(path.read_bytes())
+                    index.write_bytes(b"".join((json.dumps(line) + "\n").encode("utf-8") for line in lines))
+                read, publish = pathlib.Path.read_bytes, receipts.publish
+                started = False
+                def checked(path):
+                    if started and path.is_relative_to(project.state):
+                        self.fail("publication reopened a state input")
+                    return read(path)
+                def published(*args, **kwargs):
+                    nonlocal started
+                    result = publish(*args, **kwargs)
+                    started = True
+                    return result
+                action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
+                with mock.patch.object(pathlib.Path, "read_bytes", checked), \
+                        mock.patch.object(receipts, "publish", side_effect=published):
+                    result = action()
+                self.assertIn(result.code, ("OAH_FIX_NO_CHANGE", "OAH_FIX_RECORDED", "OAH_FIX_BOUND", "OAH_FIX_ABORTED"))
+
+    def test_bind_and_abort_recheck_the_complete_captured_lease_before_writing(self):
+        for mode in ("bind", "abort"):
+            for change in ("renew", "release"):
+                with self.subTest(mode=mode, change=change):
+                    project = FixProject(self)
+                    if mode == "bind":
+                        project.run_commands(applied(self, project).commands)
+                    else:
+                        project.changes_requested()
+                        publish_start(project)
+                    publication = fix._publication
+                    expected = []
+                    def snapshot():
+                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
+                                for p in project.state.rglob("*")}
+                    @contextlib.contextmanager
+                    def changed(t, h):
+                        path = project.state / "leases.json"
+                        data = json.loads(path.read_bytes())
+                        if change == "renew":
+                            data["leases"][0]["generation"] += 1
+                        else:
+                            data["leases"] = []
+                        path.write_bytes(json.dumps(data).encode("utf-8"))
+                        expected.append(snapshot())
+                        with publication(t, h):
+                            yield
+                    with mock.patch.object(fix, "_publication", changed):
+                        project.refused("OAH_LEASE_CHANGED", getattr(project, mode))
+                    self.assertEqual(snapshot(), expected[0])
+
     def test_noncanonical_lease_identifiers_leave_the_complete_state_tree_unchanged(self):
         for position, identifier in enumerate(("", "not-a-lease", "account-" + token_source.token_hex(8))):
             with self.subTest(position=position):
@@ -1817,16 +2013,15 @@ class SecretTest(unittest.TestCase):
 
                 def changed(*args, **kwargs):
                     result = resolve(*args, **kwargs)
-                    store = Store(project.state)
+                    path = project.state / "leases.json"
+                    data = json.loads(path.read_bytes())
                     if change == "renew":
-                        store.renew(task="t1", agent="claude", ttl_hours=2)
+                        data["leases"][0]["generation"] += 1
                     elif change == "release":
-                        store.release(task="t1", agent="claude", reason="preparation race", force=False)
+                        data["leases"] = []
                     else:
-                        path = project.state / "leases.json"
-                        data = json.loads(path.read_bytes())
                         data["leases"][0]["note"] = "changed without advancing generation"
-                        path.write_bytes(json.dumps(data).encode("utf-8"))
+                    path.write_bytes(json.dumps(data).encode("utf-8"))
                     expected.append(snapshot())
                     return result
 
@@ -2148,7 +2343,8 @@ class SecretTest(unittest.TestCase):
                     patch = (project.run_folder(result) / "correction.patch").read_bytes()
                     self.assertIn(b"[file ", patch)
                     self.assertNotIn(name.encode("utf-8"), patch)
-                    self.assertIn(b"src/app.py", patch)
+                    self.assertNotIn(b"src/app.py", patch)
+                    self.assertIn(b"src/app.py", b"".join(project.patches))
 
     def test_unexported_credential_filenames_are_withheld_by_position(self):
         for channel in ("new", "tracked", "deleted", "renamed-from", "renamed-to", "user", "user-deleted",
@@ -2282,7 +2478,8 @@ class SecretTest(unittest.TestCase):
                     self.assertIn("OAH_FIX_SENSITIVE_CONTENT", patch)
                     self.assertIn("[file ", patch)
                     self.assertNotIn(name, patch)
-                    self.assertIn("src/app.py", patch, "safe files remain reviewable")
+                    self.assertNotIn("src/app.py", patch)
+                    self.assertIn(b"src/app.py", b"".join(project.patches), "safe raw diffs are built only in memory")
 
     def test_diff_prefixed_worker_streams_are_live_but_never_retained(self):
         for channel in ("stdout", "stderr", "last_message"):
@@ -2378,7 +2575,7 @@ class SecretTest(unittest.TestCase):
                 self.assertEqual(result.outcome, "applied", result.message)
                 self.assertFalse(marker.exists(), "change discovery and patch generation must not run conversions")
                 self.assert_private(project, [key, *key.splitlines()], json.dumps(result.to_json()))
-                patch = (project.run_folder(result) / "correction.patch").read_bytes()
+                patch = b"".join(project.patches)
                 if conversion == "encoding":
                     self.assertIn(f"binary, {len(new)} bytes".encode("ascii"), patch)
                 else:
@@ -2432,7 +2629,7 @@ class SecretTest(unittest.TestCase):
                 with mock.patch.object(call, "execute", side_effect=dispatched):
                     result = project.fix()
                 self.assertEqual(result.outcome, "applied", result.message)
-                patch = (project.run_folder(result) / "correction.patch").read_bytes()
+                patch = b"".join(project.patches)
                 for data in (old, new):
                     self.assertIn(f"binary, {len(data)} bytes".encode("ascii"), patch)
                     self.assertNotIn(data, patch)
@@ -2499,7 +2696,7 @@ class SecretTest(unittest.TestCase):
         self.assertEqual(result.outcome, "applied", result.message)
         self.assertFalse(marker.exists(), "neither external diff nor textconv drivers may run")
         self.assertNotIn("unsafe driver output", json.dumps(result.to_json()))
-        patch = (project.run_folder(result) / "correction.patch").read_bytes()
+        patch = b"".join(project.patches)
         self.assertIn(b"+print('fixed')", patch)
         self.assertIn(b"+NEW = 1", patch)
         self.assertEqual(built, [], "Git must never build correction diff content")
@@ -2625,7 +2822,8 @@ class SecretTest(unittest.TestCase):
                     self.assertIn("OAH_FIX_INDEX_CHANGED", patch)
                     self.assertNotIn("diff --git", patch)
                 else:
-                    self.assertIn("src/app.py", patch, "safe changed files remain reviewable")
+                    self.assertNotIn("src/app.py", patch)
+                    self.assertIn(b"src/app.py", b"".join(project.patches), "safe raw diffs are built only in memory")
                 for raw in built:
                     for line in key.splitlines():
                         self.assertFalse(line.encode("utf-8") in raw, "Git built a diff containing credential content")
@@ -2778,7 +2976,7 @@ class SecretTest(unittest.TestCase):
         saved = json.loads(manifest.read_text(encoding="utf-8"))
         saved["commands"] = ["git add -- src/" + key + ".txt"]
         manifest.write_text(json.dumps(saved), encoding="utf-8")
-        error = project.refused("OAH_FIX_NOT_COMMITTED", project.bind)
+        error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.bind)
         self.assertFalse(key in str(error), "a credential-shaped filename reached saved command guidance")
         self.assertNotIn("git add", str(error))
 
@@ -2835,21 +3033,14 @@ class TemplateTest(unittest.TestCase):
                "src/tab\there.py")
         commands, unquoted = fix.commit_commands(task="t1", attempt_id="A2", receipt="R3", finding_ids=["R3-F1", "R3-F2"],
                                                  changes=fix._Changes(("src/app.py",), new), root=pathlib.Path("/worktree"))
-        literal = [":(literal)-dash.py", ":(literal)src/a b.py", ":(literal)src/a,b.py", "src/new.py",
-                   ":(literal)src/[id].py", ":(literal)src/한글.py"]
-        self.assertEqual(commands[0], "git add -u")
-        self.assertEqual(shlex.split(commands[1]), ["git", "add", "--", *literal])
-        self.assertEqual(commands[2], 'git commit -m "Correct R3-F1, R3-F2 of R3 in task t1 (oah fix A2)" '
-                                      '-m "Agent-Engine: codex"')
-        self.assertEqual(unquoted, ["src/it's.py", "src/tab\there.py"])
+        self.assertEqual(commands, ["git add -u",
+                                    'git commit -m "Correct review findings" -m "Agent-Engine: codex"'])
+        self.assertEqual(unquoted, [])
         for command in commands:
             self.assertFalse(set(command) & set("$`!"), "nothing either shell would expand")
-        many, _ = fix.commit_commands(task="t1", attempt_id="A1", receipt="R1",
-                                      finding_ids=[f"R1-F{k}" for k in range(1, 6)], changes=fix._Changes((), ("x.py",)),
-                                      root=pathlib.Path("/worktree"))
-        self.assertEqual(many, ["git add -- x.py",
-                                'git commit -m "Correct 5 findings of R1 in task t1 (oah fix A1)" '
-                                '-m "Agent-Engine: codex"'])
+            for name in (*new, "t1", "R3-F1", "R3-F2"):
+                self.assertNotIn(name, command)
+
 
 
 if __name__ == "__main__":

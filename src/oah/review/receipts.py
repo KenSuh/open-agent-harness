@@ -224,7 +224,7 @@ def _record_problem(name: str, kind: str, ident: int | str, record: object, task
         return f"{name} is not a JSON object"
     if record.get("kind") != kind:
         return f"{name} has kind {record.get('kind')!r}, not {kind!r}"
-    if record.get("task") != task:
+    if record.get("task") != task and not (kind != "receipt" and record.get("task") == digest(task.encode("utf-8"))):
         return f"{name} belongs to task {record.get('task')!r}, not {task!r}"
     if kind == "receipt" and record.get("round") != ident:
         return f"{name} holds round {record.get('round')!r}, not {ident}"

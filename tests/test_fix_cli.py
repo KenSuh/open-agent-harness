@@ -33,6 +33,8 @@ from oah.review import fix
 signal.signal(signal.SIGINT, signal.default_int_handler)
 point = os.environ["OAH_FIX_TEST_POINT"]
 number = getattr(signal, os.environ["OAH_FIX_TEST_SIGNAL"])
+# Noninteractive launchers may ignore SIGHUP; this test must deliver the chosen stop signal.
+signal.signal(number, signal.default_int_handler if number == signal.SIGINT else signal.SIG_DFL)
 held_signals = fix._held_signals
 judge = fix._Attempt._judge
 fired = False
@@ -84,6 +86,70 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_unrecognized_task_file_and_patch_markers_never_enter_complete_results(self):
+        for scenario in ("applied", "no-change", "failed", "bind", "manual", "abort"):
+            for as_json in (False, True):
+                with self.subTest(scenario=scenario, as_json=as_json):
+                    marker = "account-unrecognized-owner"
+                    project = FixProject(self)
+                    project.changes_requested()
+                    # Rename the valid task in its real state, keeping the reviewed Git binding intact.
+                    for path in project.state.rglob("*"):
+                        if path.is_file() and path.suffix in (".json", ".jsonl"):
+                            path.write_bytes(path.read_bytes().replace(b'"task": "t1"', b'"task": ' + json.dumps(marker).encode("ascii")))
+                    for parent in (project.state / "reviews", project.state / "runs"):
+                        (parent / "t1").rename(parent / marker)
+                    from oah.review import receipts
+                    folder = project.state / "reviews" / marker
+                    lines = [json.loads(line) for line in (folder / "index.jsonl").read_bytes().splitlines()]
+                    for line in lines:
+                        line["digest"] = receipts.digest((folder / line["name"]).read_bytes())
+                    (folder / "index.jsonl").write_bytes(
+                        b"".join((json.dumps(line) + "\n").encode("utf-8") for line in lines))
+                    args = []
+                    if scenario == "manual":
+                        project.commit(FIXED, trailer="\n\nAgent-Engine: human")
+                        args = ["--manual", "--engine", "human"]
+                    elif scenario == "abort":
+                        from oah.review import receipts
+                        receipt = json.loads((project.state / "reviews" / marker / "R1.json").read_bytes())
+                        receipts.publish(project.state, marker, "A1-start.json", {
+                            "schema": 1, "kind": "attempt-start", "task": marker, "attempt_id": "A1",
+                            "source_receipt": "R1.json", "source_receipt_digest": receipts.digest(
+                                (project.state / "reviews" / marker / "R1.json").read_bytes()),
+                            "finding_ids": ["R1-F1"], "class_ids": ["R1-C1"], "before_head": receipt["head"],
+                            "engine": "codex", "manual": False, "started_at": "2026-10-24T00:00:00Z"})
+                        args = ["--abort"]
+                    else:
+                        project.queue_fix({"header_workdir": "leased worktree",
+                                           **({"write": {"src/account-unrecognized-file.py": "unmatched-patch-marker\n"}}
+                                              if scenario in ("applied", "bind") else
+                                              {"exit": 3} if scenario == "failed" else {})})
+                        if scenario == "bind":
+                            first = oah(project, "fix", "--task", marker, "--json")
+                            self.assertEqual(json.loads(first.stdout)["outcome"], "applied")
+                            project.commit({"src/account-unrecognized-file.py": "unmatched-patch-marker\n"},
+                                           trailer="\n\nAgent-Engine: codex")
+                            args = ["--bind"]
+                    before_artifacts = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
+                    done = oah(project, "fix", "--task", marker, *args, *(('--json',) if as_json else ()))
+                    for value in (marker, "account-unrecognized-file.py", "unmatched-patch-marker"):
+                        self.assertNotIn(value, done.stdout + done.stderr)
+                    expected = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
+                                "failed": "OAH_FIX_FAILED", "bind": "OAH_FIX_BOUND",
+                                "manual": "OAH_FIX_RECORDED", "abort": "OAH_FIX_ABORTED"}[scenario]
+                    self.assertIn(expected, done.stdout + done.stderr)
+                    artifacts = list(folder.glob("A*.json"))
+                    for name in ("result.json", "correction.json", "correction.patch"):
+                        artifacts.extend((project.state / "runs" / marker).glob("*/" + name))
+                    for path in artifacts:
+                        if before_artifacts.get(path) == path.read_bytes():
+                            continue  # Landed review/legacy records remain immutable.
+                        for value in (marker, "account-unrecognized-file.py", "unmatched-patch-marker"):
+                            self.assertNotIn(value.encode("ascii"), path.read_bytes())
+                    if scenario == "applied":
+                        self.assertIn("git diff", done.stdout)
+
     def test_task_identifiers_refuse_sensitive_or_non_identifier_values_in_all_modes(self):
         marker = "s" + "k-" + token_source.token_hex(20)
         account = "account-" + token_source.token_hex(12) + "@example.invalid"
@@ -521,7 +587,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         result = json.loads(done.stdout)
         self.assertEqual((result["code"], result["attempt_id"], result["outcome"]), ("OAH_FIX_APPLIED", "A1", "applied"))
-        self.assertEqual(result["next_command"], "oah fix --bind --task t1")
+        self.assertEqual(result["next_command"], "oah fix --bind --task <task>")
         done = oah(project, "fix", "--task", "t1")
         self.assertEqual(done.returncode, 1)
         self.assertTrue(done.stderr.startswith("OAH_FIX_BIND_REQUIRED:"), done.stderr)
@@ -635,7 +701,9 @@ class CliTest(unittest.TestCase):
         self.assertTrue(done.stderr.startswith("OAH_FIX_NOTHING_TO_ABORT:"), done.stderr)
         done = oah(project, "fix", "--task", "t1", "--tier", "high")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertTrue(done.stdout.startswith("OAH_FIX_APPLIED: A2 changed the worktree to correct R1-F1"), done.stdout)
+        self.assertTrue(done.stdout.startswith("OAH_FIX_APPLIED:"), done.stdout)
+        self.assertIn("git diff", done.stdout)
+        self.assertNotIn("t1", done.stdout)
         self.assertIn('-m "Agent-Engine: codex"', done.stdout)
         self.assertEqual(git(project.repo, "status", "--porcelain"), "M src/app.py")
 

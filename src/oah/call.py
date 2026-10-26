@@ -44,7 +44,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from typing import Callable, Mapping, Sequence
 
@@ -62,6 +62,7 @@ POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
 _CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
+_CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
@@ -606,6 +607,7 @@ class _CorrectionRun(runs.Run):
         return json.loads(json.dumps(self.record))
 
     def _write_result(self, data):
+        data["task"] = "sha256:" + hashlib.sha256(self.task.encode("utf-8")).hexdigest()
         super()._write_result(data)
         self.record.clear()
         self.record.update(data)
@@ -644,7 +646,7 @@ class _CorrectionInputs:
 
         holder = self.holder()
         store = Store(self.state)
-        with StateLock(store.lock_path):
+        with nullcontext() if _CORRECTION_STATE_LOCK.get() == self.state else StateLock(store.lock_path):
             # Never run Store._lock's journal recovery: a refusal must not repair or write state.
             if store.journal.path.exists():
                 raise PendingTransaction("OAH_STATE_PENDING: a lease transaction is pending; recover it before retrying")
@@ -707,6 +709,8 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 @contextmanager
 def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
+    if _CORRECTION_STATE_LOCK.get() != state:
+        raise EngineError("OAH_LEASE_CHANGED", "capture correction inputs under the shared state lock before retrying")
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
@@ -837,6 +841,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
         run, record = runs._plan_run(state_dir, request.task, request.engine, request.stage, now=now)
+        record["task"] = "sha256:" + hashlib.sha256(request.task.encode("utf-8")).hexdigest()
         # Build the real command, brief and metadata once, without creating a run or flushing writes.
         advance = check_dispatch_binding(bound, packet, request.task)
         binding_record = None
