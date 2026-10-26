@@ -956,6 +956,7 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
              source_identity: str = "") -> bool:
     """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
     if source is not None:
+        print("OAH_DIAG_PUBLISH_FALSE 1", relative, file=sys.stderr)
         return False  # No directory may be moved out of or into the worktree (owner M).
     root = pathlib.Path(root).absolute()
     try:
@@ -999,15 +1000,19 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     current = _current(root, relative, folder)
                     if ((current is None) != (before is None) or (current is not None and
                             hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
+                        print("OAH_DIAG_PUBLISH_FALSE 2", relative, file=sys.stderr)
                         return False
                     current_restrictions = _file_restrictions(root, relative, folder)
                     if os.name == "nt" and current_restrictions is not None and restrictions is not None:
                         if (current_restrictions[0] != restrictions[0] or not
                                 _windows_security_matches(current_restrictions[1], restrictions[1])):
+                            print("OAH_DIAG_PUBLISH_FALSE 3", relative, file=sys.stderr)
                             return False
                     elif current_restrictions != restrictions:
+                        print("OAH_DIAG_PUBLISH_FALSE 4", relative, file=sys.stderr)
                         return False
                     if _current(root, relative, folder) != current:
+                        print("OAH_DIAG_PUBLISH_FALSE 5", relative, file=sys.stderr)
                         return False
                     if before is not None:
                         os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
@@ -1024,6 +1029,8 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                     except FileNotFoundError:
                         pass
     except (OSError, InitError, unlazy.UnlazyError):
+        import traceback as _t; _t.print_exc(file=sys.stderr)
+        print("OAH_DIAG_PUBLISH_FALSE 6", relative, file=sys.stderr)
         return False
 
 
@@ -1223,6 +1230,7 @@ def _wiki_session(root: pathlib.Path, wiki):
                 else:
                     os.close(fd)
     except (OSError, unlazy.UnlazyError):
+        import traceback as _t; _t.print_exc(file=sys.stderr)
         raise InitError("OAH_INIT_STATE_UNSAFE", "wiki state changed or cannot be accessed safely. "
                         "Remove state links, check private state permissions, then rerun oah init",
                         EXIT_ENVIRONMENT) from None
