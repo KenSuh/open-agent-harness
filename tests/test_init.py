@@ -616,27 +616,28 @@ class WriteFilesTest(unittest.TestCase):
         self.assertEqual(written, [])
         self.assertTrue(problems and problems[0].startswith("OAH_INIT_CHANGED"))
         self.assertEqual(target.read_bytes(), b"before\r\n")
-        self.assertEqual((self.repo / "moved/config.toml").read_bytes(), b"before\r\n")
+        self.assertFalse((self.repo / "moved").exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows staging identity and safe cleanup")
-    def test_windows_staging_replacement_is_neither_published_nor_cleaned(self):
+    def test_windows_staging_pin_refuses_replacement_before_publication(self):
         read = init._current
         swapped = []
 
         def swap(root, relative, folder):
             if not swapped and root == self.repo and relative == "published":
                 staging, = self.repo.glob(".published.*.tmp")
+                swapped.append(staging)
                 staging.rename(staging.with_name(staging.name + "-saved"))
                 staging.mkdir()
                 sentinel = staging / "file.tmp"
                 sentinel.write_bytes(b"unrelated bytes\r\n\x00")
-                swapped.append(sentinel)
             return read(root, relative, folder)
 
         with mock.patch.object(init, "_current", side_effect=swap):
             self.assertFalse(init._publish(self.repo, "published", b"planned bytes\r\n"))
         self.assertEqual(len(swapped), 1)
-        self.assertEqual(swapped[0].read_bytes(), b"unrelated bytes\r\n\x00")
+        self.assertFalse(swapped[0].exists())
+        self.assertFalse(swapped[0].with_name(swapped[0].name + "-saved").exists())
         self.assertFalse((self.repo / "published").exists())
 
     def test_replace_skips_a_file_edited_after_the_plan(self):
@@ -819,6 +820,134 @@ class RulesStepTest(unittest.TestCase):
         self.assertIn(companions.RULES_BEGIN, block)
 
 
+class WindowsDirectoryPinsTest(unittest.TestCase):
+    def test_windows_parent_walk_holds_non_delete_pins_through_creation_and_use(self):
+        repo = make_git_repo(self)
+        pinned, mkdir = init._pinned_directory, pathlib.Path.mkdir
+        held = set()
+
+        @contextlib.contextmanager
+        def directory(path, **kwargs):
+            self.assertFalse(kwargs.get("private_staging", False))
+            with pinned(path, **kwargs) as identity:
+                held.add(path)
+                try:
+                    yield identity
+                finally:
+                    held.remove(path)
+
+        def create(path, *args, **kwargs):
+            self.assertIn(path.parent, held, "creation must happen with its parent still pinned")
+            return mkdir(path, *args, **kwargs)
+
+        # Exercise the Windows parent walk using real no-follow directory handles on either OS.
+        with (mock.patch.object(init, "_pinned_directory", side_effect=directory),
+              mock.patch.object(pathlib.Path, "mkdir", create)):
+            with init._windows_parents(repo, ".oah/nested/file.md"):
+                self.assertTrue({repo, repo / ".oah", repo / ".oah/nested"} <= held)
+        self.assertEqual(held, set())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction swaps during a pinned read")
+    def test_restored_junction_swap_cannot_supply_local_rules_bytes(self):
+        repo = make_git_repo(self)
+        parent = repo / ".oah"
+        parent.mkdir()
+        local = b"Use local rules.\r\n"
+        outside_bytes = b"Outside rules must never enter AGENTS.md.\r\n\x00"
+        (parent / "rules.local.md").write_bytes(local)
+        outside = make_tmp_dir(self)
+        (outside / "rules.local.md").write_bytes(outside_bytes)
+        read = init._windows_read_fd
+        blocked = []
+
+        def swap(path, **kwargs):
+            if path == parent / "rules.local.md":
+                saved = parent.with_name("saved-oah")
+                try:
+                    parent.rename(saved)
+                except PermissionError:
+                    blocked.append(True)
+                else:
+                    # Restore before the directory identity recheck, retaining the outside fd.
+                    try:
+                        directory_alias(outside, parent)
+                        return read(path, **kwargs)
+                    finally:
+                        parent.rmdir()
+                        saved.rename(parent)
+            return read(path, **kwargs)
+
+        with mock.patch.object(init, "_windows_read_fd", side_effect=swap):
+            step = init.plan_rules(repo, lang=None)
+        self.assertEqual(blocked, [True])
+        self.assertIn(local.replace(b"\r\n", b"\n"), step.planned.agents_after)
+        self.assertNotIn(outside_bytes.splitlines()[0], step.planned.agents_after)
+        self.assertEqual((parent / "rules.local.md").read_bytes(), local)
+        self.assertEqual((outside / "rules.local.md").read_bytes(), outside_bytes)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction swaps before directory creation")
+    def test_parent_pin_prevents_writes_before_a_persistent_swap_is_detected(self):
+        repo = make_git_repo(self)
+        parent = repo / ".oah"
+        parent.mkdir()
+        outside = make_tmp_dir(self)
+        sentinel = b"outside bytes\r\n\x00"
+        (outside / "keep").write_bytes(sentinel)
+        mkdir = pathlib.Path.mkdir
+        blocked = []
+
+        def swap(path, *args, **kwargs):
+            if path == parent / "nested":
+                try:
+                    parent.rename(parent.with_name("saved-oah"))
+                except PermissionError:
+                    blocked.append(True)
+                else:
+                    directory_alias(outside, parent)
+            return mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "mkdir", swap):
+            published = init._publish(repo, ".oah/nested/file.md", b"planned bytes\r\n")
+        # A late refusal cannot undo even an empty directory created outside the worktree.
+        self.assertEqual(sorted(path.name for path in outside.iterdir()), ["keep"])
+        self.assertEqual((outside / "keep").read_bytes(), sentinel)
+        self.assertEqual(blocked, [True])
+        self.assertTrue(published)
+        self.assertEqual((parent / "nested/file.md").read_bytes(), b"planned bytes\r\n")
+
+    @unittest.skipUnless(os.name == "nt", "Windows publication into a directory pinned without delete sharing")
+    def test_publication_renames_children_while_worktree_parent_remains_pinned(self):
+        repo = make_git_repo(self)
+        parent = repo / ".oah"
+        parent.mkdir()
+        before, after = b"before\r\n\x00", b"after\r\n\x00"
+        for name in ("created", "replaced"):
+            with self.subTest(name=name):
+                if name == "replaced":
+                    (parent / name).write_bytes(before)
+                with init._pinned_directory(parent):
+                    with self.assertRaises(PermissionError):
+                        parent.rename(parent.with_name("moved-oah"))
+                    self.assertTrue(init._publish(repo, f".oah/{name}", after,
+                                                  before if name == "replaced" else None))
+                    self.assertEqual((parent / name).read_bytes(), after)
+        # Closing the pin releases the restriction; no release/reopen is needed to publish a child.
+        parent.rename(parent.with_name("moved-oah"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows private Git-state staging share mode")
+    def test_private_state_staging_pin_allows_rename_and_detects_changed_identity(self):
+        repo = make_git_repo(self)
+        staging = repo_info(repo).common_dir / "oah/staging/run"
+        unlazy._private_makedirs(staging)
+        renamed = False
+        with self.assertRaises(OSError):
+            with init._pinned_directory(staging, private_staging=True):
+                staging.rename(staging.with_name("saved-run"))
+                renamed = True
+                unlazy._private_directory(staging)
+        self.assertTrue(renamed, "delete sharing must allow the private staging directory to move")
+
+
 class WindowsSecurityTest(unittest.TestCase):
     def setUp(self):
         # Substitute only the native SID APIs off Windows; the landed DACL verifier stays real.
@@ -828,7 +957,7 @@ class WindowsSecurityTest(unittest.TestCase):
                                                return_value="S-1-5-21-100-200-300-1001"))
         self.sid = unlazy._windows_user_sid()
 
-    def test_windows_directory_pins_share_read_write_and_delete(self):
+    def test_windows_directory_pins_share_delete_only_for_private_state_staging(self):
         # Check the real native call arguments, without mocking Windows filesystem semantics.
         for function in (init._pinned_directory,):
             tree = ast.parse(inspect.getsource(function))
@@ -838,7 +967,10 @@ class WindowsSecurityTest(unittest.TestCase):
             for call in calls:
                 with self.subTest(function=function.__name__):
                     share = compile(ast.Expression(call.args[2]), "<share mask>", "eval")
-                    self.assertEqual(eval(share, {"__builtins__": {}}), 7)
+                    for private_staging, expected in ((False, 3), (True, 7)):
+                        self.assertEqual(eval(share, {"__builtins__": {},
+                                                      "private_staging": private_staging}), expected)
+        self.assertIs(inspect.signature(init._pinned_directory).parameters["private_staging"].default, False)
         self.assertIn("pins.enter_context(_pinned_directory(path))", inspect.getsource(init._windows_parents))
 
     def test_windows_security_is_set_only_at_creation(self):
@@ -1547,7 +1679,24 @@ class UnlazyStepTest(unittest.TestCase):
     def test_unlazy_install_from_local_source(self):
         step = self.plan()
         self.assertEqual(step.action, "install")
-        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        pinned = init._pinned_directory
+        staging_parent = repo_info(self.repo).common_dir / "oah/staging"
+        shared = []
+
+        @contextlib.contextmanager
+        def directory(path, **kwargs):
+            private_staging = kwargs.get("private_staging", False)
+            if path.parent == staging_parent:
+                self.assertTrue(private_staging, "private Git staging must explicitly share delete")
+                shared.append(path)
+            elif private_staging:
+                self.fail("only private Git-state staging pins may share delete")
+            with pinned(path, **kwargs) as identity:
+                yield identity
+
+        with mock.patch.object(init, "_pinned_directory", side_effect=directory):
+            self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        self.assertTrue(shared)
         self.assertEqual(unlazy.verify_pin(self.target, self.pin), [])
 
     def test_staging_identity_change_on_pin_exit_reports_changed(self):
@@ -1557,10 +1706,10 @@ class UnlazyStepTest(unittest.TestCase):
         swapped = []
 
         @contextlib.contextmanager
-        def directory(path):
+        def directory(path, **kwargs):
             nonlocal depth
             is_staging = path.parent == common / "oah/staging"
-            with pinned(path) as held:
+            with pinned(path, **kwargs) as held:
                 if is_staging:
                     depth += 1
                 try:

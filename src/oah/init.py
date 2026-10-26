@@ -446,7 +446,7 @@ def _private_state_directory(path: pathlib.Path, *, create: bool = False) -> Non
 @contextmanager
 def _windows_parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, private: bool = False,
                      private_from: pathlib.Path | None = None):
-    """Hold non-reparse parent identities with rename-compatible Windows sharing."""
+    """Hold every no-follow parent without delete sharing through all pathname operations."""
     parent = (root / relative).absolute().parent
     with ExitStack() as pins:
         for path in (*reversed(parent.parents), parent):
@@ -628,8 +628,8 @@ def _rename_exclusive(source, target, source_folder: int | None, folder: int | N
 
 
 @contextmanager
-def _pinned_directory(path: pathlib.Path):
-    """Hold a no-follow identity, sharing read/write/delete and rechecking the pathname on exit."""
+def _pinned_directory(path: pathlib.Path, *, private_staging: bool = False):
+    """Deny directory replacement; only private Git-state staging may share delete access."""
     if os.name != "nt":
         handle = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -654,7 +654,7 @@ def _pinned_directory(path: pathlib.Path):
     close.restype = wintypes.BOOL
 
     def open_directory():
-        handle = create(str(path), 0x81, 7, None, 3, 0x02200000, None)
+        handle = create(str(path), 0x81, 7 if private_staging else 3, None, 3, 0x02200000, None)
         if handle == wintypes.HANDLE(-1).value:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -1773,7 +1773,7 @@ def _rename(source: pathlib.Path, target: pathlib.Path) -> None:
 def _staging_command(path: str, expected: str, argv: list[str]) -> int:
     """Child entry: bind Git's working directory before it can write, without a pathname race."""
     try:
-        with _pinned_directory(pathlib.Path(path)) as (handle, identity):
+        with _pinned_directory(pathlib.Path(path), private_staging=True) as (handle, identity):
             if identity != expected:
                 return 125
             if os.name == "nt":
@@ -1782,7 +1782,7 @@ def _staging_command(path: str, expected: str, argv: list[str]) -> int:
                 previous = os.getcwd()
                 try:
                     os.chdir(path)
-                    _require_staging(pathlib.Path.cwd(), expected)
+                    _require_staging(pathlib.Path.cwd(), expected, private_staging=True)
                     return subprocess.call(argv, cwd=".")
                 finally:
                     os.chdir(previous)
@@ -1792,8 +1792,8 @@ def _staging_command(path: str, expected: str, argv: list[str]) -> int:
         return 125
 
 
-def _require_staging(path: pathlib.Path, expected: str) -> None:
-    with _pinned_directory(path) as (_handle, identity):
+def _require_staging(path: pathlib.Path, expected: str, *, private_staging: bool = False) -> None:
+    with _pinned_directory(path, private_staging=private_staging) as (_handle, identity):
         if identity != expected:
             raise OSError("staging directory changed")
 
@@ -1875,11 +1875,11 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                 os.mkdir(staging.name, 0o700, dir_fd=parent)
                 _private_state_directory(staging)
             try:
-                with _pinned_directory(staging) as (_handle, identity):
+                with _pinned_directory(staging, private_staging=True) as (_handle, identity):
                     for operation, argv in zip(("clone", "checkout"), unlazy_commands(staging, source=source, pin=pin),
                                                 strict=True):
                         argv[len(git_argv()) + len(UNLAZY_GIT_OPTIONS) + 1] = "."
-                        _require_staging(staging, identity)
+                        _require_staging(staging, identity, private_staging=True)
                         # The child reopens without following links, checks the held identity and fchdirs on
                         # POSIX. Windows binds and verifies its cwd before starting the external command.
                         command = [sys.executable, "-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
@@ -1887,12 +1887,12 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                    "sys.exit(_staging_command(sys.argv[2], sys.argv[3], sys.argv[4:]))",
                                    str(pathlib.Path(__file__).resolve().parent.parent), str(staging), identity, *argv]
                         result = run_command(command, timeout=timeout, env=environment)
-                        _require_staging(staging, identity)
+                        _require_staging(staging, identity, private_staging=True)
                         if result.timed_out or result.returncode != 0:
                             detail = f"exit code {result.returncode}; timed out: {'yes' if result.timed_out else 'no'}"
                             return (f"OAH_INIT_UNLAZY_FAILED: git {operation} failed ({detail}). Check your "
                                     "network and git, then run oah init --with-unlazy again")
-                    with _pinned_directory(staging) as (_verification_handle, actual):
+                    with _pinned_directory(staging, private_staging=True) as (_verification_handle, actual):
                         if actual != identity:
                             raise OSError("staging directory changed")
                         if _verify_unlazy_pin(staging, staging, pin, env=environment):
@@ -1911,21 +1911,21 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                 name not in files or hashlib.sha256(files[name][0].replace(b"\r\n", b"\n"))
                                 .hexdigest() != digest for name, digest in pin.files.items())):
                             raise OSError("captured installation does not match the pin")
-                        _require_staging(staging, identity)
+                        _require_staging(staging, identity, private_staging=True)
                         if not _publish(root, UNLAZY_PROJECT, None):
                             raise OSError("installation destination changed")
                         for name in directories:
-                            _require_staging(staging, identity)
+                            _require_staging(staging, identity, private_staging=True)
                             if not _publish(root, f"{UNLAZY_PROJECT}/{name}", None):
                                 raise OSError("installation directory changed")
                         # The landed verifier needs a checkout of its own. Publish its detached HEAD last,
                         # so a partial install cannot be discovered as the completed pinned checkout.
                         for name in sorted(files, key=lambda name: (name == ".git/HEAD", name)):
                             data, executable = files[name]
-                            _require_staging(staging, identity)
+                            _require_staging(staging, identity, private_staging=True)
                             if not _publish(root, f"{UNLAZY_PROJECT}/{name}", data, executable=executable):
                                 raise OSError("installation file changed")
-                        _require_staging(staging, identity)
+                        _require_staging(staging, identity, private_staging=True)
                         if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin, env=environment):
                             raise OSError("published installation does not match the pin")
                         return ""
