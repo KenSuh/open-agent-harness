@@ -86,6 +86,33 @@ def reap(pid: int) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_other_lane_can_start_and_publish_review_during_correction(self):
+        project, other = FixProject(self), FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"hang": True})
+        other.commit({".oah/tasks/other/PACKET.md": PACKET.replace("t1", "other").replace("- src\n", "- other-src\n")
+                      + "## Plan\n- review → codex → high\n## Acceptance\nSee success conditions.\n## Return\nReport evidence.\n"})
+        other.env["OAH_STATE_DIR"] = str(project.state)
+        process = start_oah(project, "fix", "--task", "t1", "--tier", "high", "--timeout-seconds", "15")
+        try:
+            self.assertTrue(wait_for(project.fix_dir / "pid-000.txt"))
+            started = oah(other, "start", "--task", "other", "--agent", "claude", "--scope", "other-src",
+                          "--packet", ".oah/tasks/other/PACKET.md")
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            reviewed = oah(other, "review", "--task", "other", "--tier", "high", "--json")
+            self.assertEqual(reviewed.returncode, 0, reviewed.stdout + reviewed.stderr)
+            self.assertTrue((project.state / "reviews/other/R1.json").exists())
+            self.assertIsNone(process.poll(), "the other lane must finish while the corrector is running")
+            out, err = process.communicate(timeout=30)
+            self.assertEqual(project.record("A1-outcome.json")["outcome"], "failed", (out, err))
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+            marker = project.fix_dir / "pid-000.txt"
+            if marker.exists():
+                reap(int(marker.read_bytes()))
+
     def test_unrecognized_task_file_and_patch_markers_never_enter_complete_results(self):
         for scenario in ("applied", "no-change", "failed", "bind", "manual", "abort"):
             for as_json in (False, True):
@@ -134,7 +161,10 @@ class CliTest(unittest.TestCase):
                     before_artifacts = {path: path.read_bytes() for path in project.state.rglob("*") if path.is_file()}
                     done = oah(project, "fix", "--task", marker, *args, *(('--json',) if as_json else ()))
                     for value in (marker, "account-unrecognized-file.py", "unmatched-patch-marker"):
-                        self.assertNotIn(value, done.stdout + done.stderr)
+                        if scenario == "applied":
+                            self.assertIn(value, done.stderr)
+                        if as_json:
+                            self.assertNotIn(value, done.stdout)
                     expected = {"applied": "OAH_FIX_APPLIED", "no-change": "OAH_FIX_NO_CHANGE",
                                 "failed": "OAH_FIX_FAILED", "bind": "OAH_FIX_BOUND",
                                 "manual": "OAH_FIX_RECORDED", "abort": "OAH_FIX_ABORTED"}[scenario]
@@ -386,6 +416,23 @@ class CliTest(unittest.TestCase):
                             self.assertFalse(any(value.encode("utf-8") in data for data in artifacts),
                                              "a packet value reached output or state")
 
+    def test_live_diff_omits_packet_fields_and_keeps_scanned_code_changes(self):
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                project = FixProject(self)
+                project.changes_requested()
+                marker = "packet-value-" + token_source.token_hex(20)
+                source = ".oah/tasks/t1/PACKET.md"
+                project.queue_fix({"write": {**FIXED, source: PACKET + f"\n## Plan\n{marker}\n"}})
+                done = oah(project, "fix", "--task", "t1", "--tier", "high", *(("--json",) if as_json else ()))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                for value in ("task t1", source, "src/app.py", "+print('fixed')"):
+                    self.assertIn(value, done.stderr)
+                self.assertNotIn(marker, done.stdout + done.stderr)
+                for path in project.state.rglob("*"):
+                    if path.is_file():
+                        self.assertNotIn(marker.encode("utf-8"), path.read_bytes())
+
     def test_cli_withholds_unexported_credential_filenames_in_text_and_json(self):
         for as_json in (False, True):
             with self.subTest(as_json=as_json):
@@ -422,7 +469,7 @@ class CliTest(unittest.TestCase):
             reader.start()
             reader.join(timeout=10)
             self.assertFalse(reader.is_alive(), "the first worker line must stream while it is still running")
-            self.assertIn(b"OpenAI Codex", seen[0])
+            self.assertIn(b"OAH_FIX_STARTED: task t1", seen[0])
             self.assertIsNone(process.poll(), "the worker output must be visible before timeout")
             run_id = project.record("A1-start.json")["run_id"]
             folder = project.state / "runs" / "t1" / run_id
@@ -674,6 +721,9 @@ class CliTest(unittest.TestCase):
         finally:
             process.kill()  # a hard kill: no handler runs, so no outcome is recorded
             process.communicate(timeout=30)
+        run_id = project.record("A1-start.json")["run_id"]
+        durable = project.state / "runs" / "t1" / run_id / "result.json"
+        self.assertEqual(json.loads(durable.read_bytes())["status"], "prepared")
         pid = int(pid_file.read_text(encoding="utf-8"))
         reap(pid)
         deadline = time.monotonic() + 10
@@ -692,7 +742,7 @@ class CliTest(unittest.TestCase):
         done = oah(project, "fix", "--abort", "--task", "t1", "--json")
         self.assertEqual((done.returncode, json.loads(done.stdout)["code"]), (0, "OAH_FIX_ABORTED"), done.stderr)
         self.assertEqual(project.record("A1-outcome.json")["evidence"], receipts.digest(
-            b"recorded by oah fix --abort; interrupted attempt; its run was last running"))
+            b"recorded by oah fix --abort; interrupted attempt; its run was last prepared"))
         run_id = project.record("A1-start.json")["run_id"]
         run = json.loads((project.state / "runs" / "t1" / run_id / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(run["status"], "lost")
@@ -704,7 +754,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertTrue(done.stdout.startswith("OAH_FIX_APPLIED:"), done.stdout)
         self.assertIn("git diff", done.stdout)
-        self.assertNotIn("t1", done.stdout)
+        self.assertIn("task t1", done.stderr)
         self.assertIn('-m "Agent-Engine: codex"', done.stdout)
         self.assertEqual(git(project.repo, "status", "--porcelain"), "M src/app.py")
 

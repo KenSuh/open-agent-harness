@@ -21,6 +21,7 @@ import stat
 import tempfile
 import time
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 from typing import Callable, Mapping, Sequence, TypeVar
 
 from oah import launchers
@@ -29,6 +30,7 @@ from oah.lease import TASK_RE
 from oah.lockfile import LockTimeout, StateLock
 
 T = TypeVar("T")
+_CORRECTION_CAPTURE = ContextVar("oah_correction_capture", default=None)
 
 UNVERIFIED = "unverified"
 RUN_ID_RE = re.compile(r"r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
@@ -117,6 +119,8 @@ def _captured_state(path: pathlib.Path, *, jsonl: bool = False, default=None) ->
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
+        if (capture := _CORRECTION_CAPTURE.get()) is not None:
+            capture[path] = None
         return b"", [] if jsonl else default
     except OSError as exc:
         raise StorageError(path, exc) from exc
@@ -124,6 +128,8 @@ def _captured_state(path: pathlib.Path, *, jsonl: bool = False, default=None) ->
         copy = pathlib.Path(folder) / "input"
         copy.write_bytes(raw)
         parsed = read_jsonl(copy) if jsonl else read_json(copy, default)
+    if (capture := _CORRECTION_CAPTURE.get()) is not None:
+        capture[path] = raw
     return raw, parsed
 
 
@@ -202,6 +208,8 @@ class Run:
 
     def _read_json(self, name: str) -> object:
         path = self.file_path(name)
+        if _CORRECTION_CAPTURE.get() is not None:
+            return _captured_state(path)[1]
         if self.deadline is None:
             return read_json(path, None)
         try:

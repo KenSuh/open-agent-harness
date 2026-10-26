@@ -30,7 +30,6 @@ branch or worktree name into exactly one worktree before any intent is read.
 """
 from __future__ import annotations
 
-import codecs
 import dataclasses
 import datetime as dt
 import hashlib
@@ -134,7 +133,7 @@ class Resolution:
 
 
 class _CorrectionCatalog(models.Catalog):
-    """Run the landed resolver against captured bytes; publication never reopens model inputs."""
+    """Resolve against captured bytes; start publication compares them before writing the plan."""
 
     def __init__(self, state_dir):
         super().__init__(state_dir)
@@ -317,7 +316,8 @@ def dispatch_binding(state_dir: pathlib.Path, task: str) -> dict | None:
     """The intent source bound at the task's first dispatch, or None."""
     from oah.atomic import read_json
 
-    data = read_json(_binding_path(state_dir, task), None)
+    path = _binding_path(state_dir, task)
+    data = (runs._captured_state(path)[1] if runs._CORRECTION_CAPTURE.get() is not None else read_json(path, None))
     return data if isinstance(data, dict) else None
 
 
@@ -429,7 +429,7 @@ def dispatch_guard(prepared: Prepared):
     run = prepared.run
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
-        # Publication already validated this immutable lease and still owns its lock.
+        # Fix authorized this immutable lease at start publication and owns the task review lock.
         yield
         return
     try:
@@ -609,13 +609,17 @@ class _CorrectionRun(runs.Run):
         closed = runs._correction_record(data, runs.RESULT_FIELDS)
         data.clear()
         data.update(closed)
-        super()._write_result(data)
+        if _CORRECTION_STATE_LOCK.get() == self.path.parents[2]:
+            super()._write_result(data)
+            if (capture := runs._CORRECTION_CAPTURE.get()) is not None:
+                capture[self.result_path] = (json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+                                             + "\n").encode("utf-8")
         self.record.clear()
         self.record.update(data)
 
     @contextmanager
     def _result_lock(self):
-        yield  # The correction publication already owns the state/lease lock.
+        yield  # Lifecycle changes stay in memory between the two locked publications.
 
 
 @dataclasses.dataclass
@@ -630,6 +634,7 @@ class _CorrectionInputs:
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
+    artifacts: dict = dataclasses.field(default_factory=dict)
 
     def holder(self):
         from oah.lease import Lease
@@ -639,34 +644,21 @@ class _CorrectionInputs:
 
     @contextmanager
     def publication(self):
-        """One locked publication, through the terminal outcome; no input is reopened except the lease."""
-        from oah.atomic import read_json
-        from oah.journal import PendingTransaction
-        from oah.lease import Store
-        from oah.lockfile import StateLock
-
-        holder = self.holder()
-        store = Store(self.state)
-        with nullcontext() if _CORRECTION_STATE_LOCK.get() == self.state else StateLock(store.lock_path):
-            # Never run Store._lock's journal recovery: a refusal must not repair or write state.
-            if store.journal.path.exists():
-                raise PendingTransaction("OAH_STATE_PENDING: a lease transaction is pending; recover it before retrying")
-            data = read_json(store.leases_path, {"version": 1, "leases": []})
-            store._decode(data)
-            live = next((item for item in data["leases"] if item["task"] == holder.task), None)
-            if live != json.loads(self.snapshot.lease_json) or holder.expired(store.now()):
-                raise EngineError("OAH_LEASE_CHANGED", "the dispatch lease changed; check oah status and retry oah fix")
-            token = _CORRECTION_PUBLICATION.set(self)
-            try:
-                yield
-            finally:
-                _CORRECTION_PUBLICATION.reset(token)
+        """Make the immutable call plan available; fix owns the short publication locks."""
+        token = _CORRECTION_PUBLICATION.set(self)
+        try:
+            yield
+        finally:
+            _CORRECTION_PUBLICATION.reset(token)
 
     def publish_run(self):
         """Consume only the scanned plan, after the attempt start is durable."""
         from oah.atomic import write_json_atomic, write_text_atomic
 
         plan = self.plan
+        # Only start publication depends on model inputs, including when a later write fails.
+        for path in self.catalog.original:
+            runs._CORRECTION_CAPTURE.get().pop(path, None)
         for path, text in plan.model_writes:
             write_text_atomic(path, text)
         runs._create_run(self.run, plan.initial_record)
@@ -676,6 +668,7 @@ class _CorrectionInputs:
         self.run.result(**plan.result_fields)
         if plan.binding_record is not None:
             write_text_atomic(_binding_path(self.state, self.run.task), plan.binding_record)
+            runs._CORRECTION_CAPTURE.get()[_binding_path(self.state, self.run.task)] = plan.binding_record.encode("utf-8")
         write_text_atomic(self.run.file_path("lease.json"), plan.lease_record)
 
 
@@ -710,8 +703,6 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 @contextmanager
 def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
-    if _CORRECTION_STATE_LOCK.get() != state:
-        raise EngineError("OAH_LEASE_CHANGED", "capture correction inputs under the shared state lock before retrying")
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
@@ -1294,35 +1285,20 @@ class _StreamedResult:
 
 
 def _stream_correction(child, prepared: Prepared, prompt: str):
-    """Drain both pipes live, hashing exact bytes; stderr stays in memory only for A1 verification."""
+    """Drain and hash exact worker bytes without displaying or retaining worker text."""
     from oah.engines.proc import REAP_SECONDS
 
     streams = {name: {"bytes": 0, "sha256": hashlib.sha256()} for name in ("stdout", "stderr")}
     header = bytearray()
-    terminal_lock = threading.Lock()
     failed = []
 
     def drain(name, pipe):
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while data := pipe.read1(65536):
                 streams[name]["bytes"] += len(data)
                 streams[name]["sha256"].update(data)
                 if name == "stderr":
                     header.extend(data)
-                # Both channels go to the live diagnostic stream, leaving CLI JSON on stdout intact.
-                with terminal_lock:
-                    try:
-                        sys.stderr.write(decoder.decode(data))
-                        sys.stderr.flush()
-                    except (OSError, ValueError):
-                        failed.append(True)  # Keep draining until the dispatcher stops the owned tree.
-            with terminal_lock:
-                try:
-                    sys.stderr.write(decoder.decode(b"", final=True))
-                    sys.stderr.flush()
-                except (OSError, ValueError):
-                    failed.append(True)
         except (OSError, ValueError):
             failed.append(True)
         finally:

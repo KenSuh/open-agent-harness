@@ -53,8 +53,10 @@ import re
 import shutil
 import signal
 import stat
+import sys
 import tempfile
 import threading
+import time
 from importlib import resources
 from typing import Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -146,6 +148,8 @@ _ERROR_DIAGNOSTICS = {
     "OAH_WORKTREE_UNRESOLVED": "the leased worktree cannot be resolved; restore that worktree, then retry.",
     "OAH_WORKTREE_LEASE_MISMATCH": "the worktree does not match the lease; retry in the leased worktree.",
     "OAH_LEASE_CHANGED": "the dispatch lease changed; check oah status and bind the accepted packet before retrying.",
+    "OAH_FIX_STATE_CHANGED": "correction inputs changed before publication; inspect the task records and retry; "
+                             "settle an unfinished attempt with oah fix --abort first.",
     "OAH_UNSAFE_ARGUMENT": "a brief argument is unsafe; use simple task and packet paths, then retry.",
     "OAH_FOOTER_NOT_APPENDED": "the brief footer is invalid; update oah and rebuild the packet before retrying.",
     "OAH_PACKET_INTENT_INVALID": "the packet intent is invalid; correct and accept the intent before retrying.",
@@ -254,7 +258,16 @@ def _attempt_record(kind, task, attempt_id, fields):
 def _write_manifest(run, record):
     fields = ("attempt_id", "before_head", "outcome", "changed", "new_files", "user_files", "new_file_digests",
               "changes_sha256", "commands", "out_of_scope")
-    write_json_atomic(run.file_path("correction.json"), runs._correction_record(record, fields))
+    _artifact_text(run, "correction.json", json.dumps(runs._correction_record(record, fields),
+                                                    ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def _artifact_text(run, name, text):
+    publication = call._CORRECTION_PUBLICATION.get()
+    if publication is not None:
+        publication.artifacts[name] = text
+    else:
+        write_text_atomic(run.file_path(name), text)
 
 
 def _fence(text: str, language: str = "text") -> str:
@@ -370,7 +383,8 @@ def _task(task: str, cwd: pathlib.Path, env: Mapping[str, str], nothing: str) ->
     receipts.review_dir(state, task)
     store = Store(state)
     store.journal.check_pending()
-    lease_data = read_json(store.leases_path, {"version": 1, "leases": []})
+    _raw, lease_data = runs._captured_state(store.leases_path, default={"version": 1, "leases": []})
+    runs._CORRECTION_CAPTURE.get().pop(store.leases_path, None)  # Compare only this task's complete lease.
     lease = next((lease for lease in store._decode(lease_data)
                   if lease.task == task and not lease.expired(store.now())), None)
     if lease is None:
@@ -459,7 +473,7 @@ def _check_review_intent(t: _Task, receipt: receipts.Entry, binding: oah_intent.
                           "to review the updated intent before correcting its findings")
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class _History:
     records: receipts.Records
     attempts: tuple[receipts.Attempt, ...]
@@ -686,8 +700,11 @@ class _ExistingLock(StateLock):
         except FileNotFoundError:
             raise ReviewError("OAH_INTENT_NOT_CURRENT", _ERROR_DIAGNOSTICS["OAH_INTENT_NOT_CURRENT"]) from None
         try:
-            if not _try_lock(fd):
-                raise LockTimeout("OAH_STATE_LOCK_TIMEOUT: state is busy; wait and retry.")
+            deadline = time.monotonic() + self.timeout
+            while not _try_lock(fd):
+                if time.monotonic() >= deadline:
+                    raise LockTimeout("OAH_STATE_LOCK_TIMEOUT: state is busy; wait and retry.")
+                time.sleep(self.poll)
         except BaseException:
             os.close(fd)
             raise
@@ -695,20 +712,42 @@ class _ExistingLock(StateLock):
         return self
 
 
+class _PublicationConflict(ReviewError):
+    """Only a failed optimistic publication check may leave the durable start unfinished."""
+
+
 @contextlib.contextmanager
 def _publication(t: _Task, h: _History):
-    """Compare the captured lease once, then consume captured inputs under the already-held lock."""
+    """Optimistically compare dependencies before any write, holding only a bounded publication lock."""
+    from oah.lease import utc_now
+
     store = Store(t.state)
-    if store.journal.path.exists():
-        from oah.journal import PendingTransaction
-        raise PendingTransaction("OAH_STATE_PENDING: recover the pending transaction before retrying.")
-    data = read_json(store.leases_path, {"version": 1, "leases": []})
-    store._decode(data)
-    live = next((item for item in data["leases"] if item["task"] == t.name), None)
-    if live != json.loads(t.lease_json) or t.lease.expired(store.now()):
-        raise ReviewError("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
-    with receipts._correction_publication(t.state, t.name, h.index_bytes, h.index_lines):
-        yield
+    with _ExistingLock(store.lock_path):
+        if store.journal.path.exists():
+            from oah.journal import PendingTransaction
+            raise PendingTransaction("OAH_STATE_PENDING: recover the pending transaction before retrying.")
+        data = read_json(store.leases_path, {"version": 1, "leases": []})
+        store._decode(data)
+        live = next((item for item in data["leases"] if item["task"] == t.name), None)
+        if live != json.loads(t.lease_json) or t.lease.expired(utc_now()):
+            raise _PublicationConflict("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
+        for path, expected in runs._CORRECTION_CAPTURE.get().items():
+            try:
+                actual = path.read_bytes()
+            except FileNotFoundError:
+                actual = None
+            if actual != expected:
+                raise _PublicationConflict("OAH_FIX_STATE_CHANGED", _ERROR_DIAGNOSTICS["OAH_FIX_STATE_CHANGED"])
+        token = call._CORRECTION_STATE_LOCK.set(t.state)
+        try:
+            with receipts._correction_publication(t.state, t.name, h.index_bytes, h.index_lines):
+                try:
+                    yield
+                finally:
+                    publication = receipts._CORRECTION_PUBLICATION.get()
+                    h.index_bytes, h.index_lines = publication["index"], tuple(publication["lines"])
+        finally:
+            call._CORRECTION_STATE_LOCK.reset(token)
 
 
 @contextlib.contextmanager
@@ -743,7 +782,7 @@ def _redacted(value, redact: Callable[[str], str]):
 
 
 def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]], Result], *, cwd: pathlib.Path) -> Result:
-    """Hold the shared state lock from capture through publication; expose only fixed diagnostics."""
+    """Capture one input snapshot without writes; publication alone takes the shared state lock."""
     raw_redact = runner.credential_redactor(env)
     folded_redact = runner.credential_redactor({name: value.replace("\r\n", "\n") for name, value in env.items()})
 
@@ -754,12 +793,13 @@ def _guarded(env: Mapping[str, str], operation: Callable[[Callable[[str], str]],
             raise ReviewError("OAH_FIX_WORKER_REFUSED", _ERROR_DIAGNOSTICS["OAH_FIX_WORKER_REFUSED"])
         state = state_dir(repo_info(pathlib.Path(cwd)), env)
         _safe_inputs((str(cwd), str(state)), redact, "OAH_FIX_SENSITIVE_METADATA")
-        with _ExistingLock(state / ".lock", timeout=0):
-            token = call._CORRECTION_STATE_LOCK.set(state)
-            try:
-                return operation(redact)
-            finally:
-                call._CORRECTION_STATE_LOCK.reset(token)
+        if not (state / ".lock").is_file():
+            raise ReviewError("OAH_INTENT_NOT_CURRENT", _ERROR_DIAGNOSTICS["OAH_INTENT_NOT_CURRENT"])
+        token = runs._CORRECTION_CAPTURE.set({})
+        try:
+            return operation(redact)
+        finally:
+            runs._CORRECTION_CAPTURE.reset(token)
     except BaseException as exc:
         code, diagnostic = _error_diagnostic(exc)
         message = diagnostic[len(code) + 2:]
@@ -1165,8 +1205,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
                     keychain=keychain)
                 attempt = _Attempt(t, attempt_id, receipt, findings, class_ids, before, prepared, binding, redact,
                                    baseline=baseline, index_baseline=_index_state(t.root), ignored_baseline=ignored_baseline)
-                with _stop_signals(), inputs.publication(), receipts._correction_publication(
-                        t.state, t.name, h.index_bytes, h.index_lines):
+                attempt.history = h
+                with _stop_signals(), inputs.publication():
                     return attempt.run(launch_env=launch_env, rules=rules, final=final, untracked=untracked)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1188,6 +1228,7 @@ class _Attempt:
     baseline: Mapping[str, tuple[int, bytes] | None] | None = None
     index_baseline: Mapping[str, tuple[bytes, ...]] = dataclasses.field(default_factory=dict)
     ignored_baseline: Mapping[str, tuple[int, int, str] | None] = dataclasses.field(default_factory=dict)
+    history: _History | None = None
 
     @property
     def finding_ids(self) -> list[str]:
@@ -1204,6 +1245,21 @@ class _Attempt:
         self.published.append({"kind": f"attempt-{kind}", "digest": digest})
 
     def _end(self, outcome: str, evidence: str) -> None:
+        publication = call._CORRECTION_PUBLICATION.get()
+        if publication is not None:
+            for name, text in publication.artifacts.items():
+                try:
+                    write_text_atomic(self.prepared.run.file_path(name), text)
+                except Exception:
+                    pass  # Optional diagnostics never prevent settlement.
+            run = self.prepared.run
+            try:
+                if outcome in ("failed", "aborted") and run.read().get("status") not in runs.TERMINAL:
+                    code = evidence.partition(":")[0]
+                    run.result(status="failed", error=code if code in _ERROR_DIAGNOSTICS else "OAH_FIX_FAILED")
+                run._write_result(run.read())
+            except Exception:
+                pass  # A lifecycle diagnostic write must not prevent the terminal receipt.
         self._publish("outcome", {"outcome": outcome, "after_head": None,
                                   "evidence": self.redact(evidence)[:2000] or "(no evidence)",
                                   "finished_at": _iso(), "run_id": self.run_id}, {"outcome": outcome})
@@ -1221,13 +1277,18 @@ class _Attempt:
                  "engine": ENGINE, "manual": False, "started_at": _iso(), "run_id": self.run_id}
         fingerprint = None
         try:
-            with _held_signals() as held:
+            with _held_signals() as held, _publication(self.t, self.history):
                 self._publish("start", start)
                 publication = call._CORRECTION_PUBLICATION.get()
                 if publication is not None:
                     publication.publish_run()
             if held:
                 raise KeyboardInterrupt("stop signal while recording the start; Codex was never launched")
+            try:
+                print(f"OAH_FIX_STARTED: task {self.t.name}; wait for the correction, then inspect git diff.",
+                      file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                raise ReviewError("OAH_FIX_STREAM_FAILED", _ERROR_DIAGNOSTICS["OAH_FIX_STREAM_FAILED"]) from None
             with call._correction_cleanup():
                 try:
                     run = call.execute(self.prepared, base_env=launch_env, rules=rules, redact=self.redact)
@@ -1243,14 +1304,16 @@ class _Attempt:
             result = self._result(judged)
             with _held_signals() as held:
                 self._check_fingerprint(fingerprint)
-                self._end(judged.outcome, judged.evidence)
+                with _publication(self.t, self.history):
+                    self._end(judged.outcome, judged.evidence)
             result.records = list(self.published)
             if held:
                 result.warnings.append(f"{INTERRUPTED}: a stop signal arrived during terminal publication; the outcome "
                                        f"of {self.attempt_id} is durable. Inspect the worktree before continuing")
+            self._show(judged)
             return result
         except BaseException as exc:
-            if not self.published or self.ended:
+            if not self.published or self.ended or isinstance(exc, _PublicationConflict):
                 raise
             interrupted = isinstance(exc, KeyboardInterrupt)
             with _held_signals():
@@ -1263,10 +1326,19 @@ class _Attempt:
                     except Exception:
                         pass
                 code, diagnostic = _error_diagnostic(exc)
-                self._end("aborted" if interrupted else "failed", diagnostic)
+                with _publication(self.t, self.history):
+                    self._end("aborted" if interrupted else "failed", diagnostic)
             if interrupted:
                 raise FixInterrupted(diagnostic[len(code) + 2:]) from None
             raise ReviewError(code, diagnostic[len(code) + 2:]) from None
+
+    def _show(self, judged):
+        print(f"{OUTCOME_CODES[judged.outcome]}: task {self.t.name}; changed paths "
+              f"{json.dumps(judged.changes.files, ensure_ascii=True)}; inspect git diff before continuing.",
+              file=sys.stderr, flush=True)
+        if judged.patch:
+            print(f"{OUTCOME_CODES[judged.outcome]}: scanned diff follows; inspect it before staging.\n"
+                  + "\n".join(judged.patch.splitlines()[:DIFF_LINES]), file=sys.stderr, flush=True)
 
     def _check_fingerprint(self, expected: str) -> None:
         if _worktree_fingerprint(self.t.root) != expected:
@@ -1274,7 +1346,7 @@ class _Attempt:
             diagnostic = f"{code}: " + _ERROR_DIAGNOSTICS[code]
             # The captured patch/guidance no longer describe the final tree. Retain only fixed diagnostics.
             try:
-                write_text_atomic(self.prepared.run.file_path("correction.patch"), code + "\n")
+                _artifact_text(self.prepared.run, "correction.patch", code + "\n")
                 _write_manifest(self.prepared.run, {
                     "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
                     "changed": [], "new_files": [], "user_files": [], "commands": [], "out_of_scope": [],
@@ -1306,7 +1378,7 @@ class _Attempt:
             if head != self.before:
                 reason += f"; HEAD moved from {self.before} to {head}"
             patch = reason + "\n"
-            write_text_atomic(self.prepared.run.file_path("correction.patch"), "OAH_FIX_FAILED\n")
+            _artifact_text(self.prepared.run, "correction.patch", "OAH_FIX_FAILED\n")
             _write_manifest(self.prepared.run, {
                 "attempt_id": self.attempt_id, "before_head": self.before, "outcome": "failed",
                 "changed": list(positions), "new_files": [], "user_files": [],
@@ -1326,6 +1398,7 @@ class _Attempt:
                                    for group in (changes.tracked, changes.new, changes.user)))
         raw = (b"" if sensitive_paths or unsupported else
                _patch(root, self.before, safe_changes, untracked, captured=captured))
+        content_size = len(raw)
         if sensitive:
             raw += (f"OAH_FIX_SENSITIVE_CONTENT: diff withheld for {_ids(list(sensitive.values()))} because raw "
                     "filenames or file contents contain a credential; remove credentials or restore the affected files "
@@ -1346,13 +1419,21 @@ class _Attempt:
         # Withheld files are identified only by their positions in every retained or printed artifact.
         changes = _Changes(*(tuple(withheld.get(name, name) for name in group)
                               for group in (changes.tracked, changes.new, changes.user)))
+        # Packet values stay out of terminal diagnostics too; keep their scanned bytes in accounting only.
+        display_raw = raw
+        packet_name = oah_intent.source_path(self.binding, root).relative_to(root).as_posix()
+        if packet_name in safe_changes.files:
+            display_changes = _Changes(*(tuple(name for name in group if name != packet_name)
+                                         for group in (safe_changes.tracked, safe_changes.new, safe_changes.user)))
+            display_raw = (b"" if sensitive_paths or unsupported else
+                           _patch(root, self.before, display_changes, untracked, captured=captured)) + raw[content_size:]
         # Git can octal-escape filenames; withhold those headers rather than retaining encoded credentials.
         patch = (f"OAH_FIX_SENSITIVE_PATH: diff withheld for {_ids(list(sensitive.values()))} because a filename "
                  "contains a credential; "
                  "rename or discard the affected files before retrying oah fix\n" if sensitive_paths else
-                 self.redact(raw.decode("utf-8", errors="replace")))
+                 self.redact(display_raw.decode("utf-8", errors="replace")))
         digest = receipts.digest(raw)
-        message = ""  # Final-message output is streamed with stdout; no worker text is retained.
+        message = ""  # Worker text is drained and hashed only, never displayed or retained.
         files = changes.files
         positions = _path_labels(files, self.redact)
         named = _ids(positions[:20]) + (f" and {len(files) - 20} more" if len(files) > 20 else "")
@@ -1406,7 +1487,7 @@ class _Attempt:
             reason = ("OAH_FIX_SENSITIVE_COMMAND: commit guidance contains a credential and was withheld; "
                       "remove sensitive commit metadata before correcting again")
             evidence = f"codex run {rid} failed: {reason}; changes {digest}; {effort}"
-        write_text_atomic(self.prepared.run.file_path("correction.patch"), OUTCOME_CODES[outcome] + "\n")
+        _artifact_text(self.prepared.run, "correction.patch", OUTCOME_CODES[outcome] + "\n")
         positions = {name: f"[file {n}]" for n, name in enumerate(changes.files, 1)}
         _write_manifest(self.prepared.run, {
             "attempt_id": self.attempt_id, "before_head": self.before, "outcome": outcome,
@@ -1597,7 +1678,7 @@ def _saved_correction(t: _Task, start: Mapping) -> dict:
         if isinstance(run_id, str):
             run = runs.find_run(t.state, run_id)
             if run.task == t.name:
-                saved = read_json(run.file_path("correction.json"), None)
+                saved = runs._captured_state(run.file_path("correction.json"))[1]
     except (runs.RunError, OSError):
         pass  # Never echo malformed metadata or storage exception text.
     if (not isinstance(saved, dict) or saved.get("attempt_id") != start["attempt_id"]

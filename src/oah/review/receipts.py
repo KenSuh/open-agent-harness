@@ -297,6 +297,10 @@ def publish(state: pathlib.Path, task: str, name: str, record: Mapping, *, summa
                 write_text_atomic(index, contents.decode("utf-8"))
                 publication["index"] = contents
                 publication["lines"].append(line)
+                from oah.runs import _CORRECTION_CAPTURE
+                if (capture := _CORRECTION_CAPTURE.get()) is not None:
+                    capture[index] = contents
+                    capture[path] = data
             else:
                 append_jsonl(index, line)
     except RunError as exc:
@@ -532,7 +536,9 @@ def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetim
 
 def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
     """The round-attempt log; a torn or invalid log raises StateCorrupt (never repaired)."""
-    return read_jsonl(_path(state, task, ROUNDS_NAME))
+    from oah.runs import _CORRECTION_CAPTURE
+    path = _path(state, task, ROUNDS_NAME)
+    return _captured_state(path, jsonl=True)[1] if _CORRECTION_CAPTURE.get() is not None else read_jsonl(path)
 
 
 def task_lock_path(state: pathlib.Path, task: str) -> pathlib.Path:
