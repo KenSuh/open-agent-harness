@@ -27,6 +27,7 @@ from oah.setup import companions
 from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.notes import parse_frontmatter
 from oah.wiki.store import Wiki
+from tests.fixtures.gates.support import windows_sid
 from tests.helpers import directory_alias, git_commit, git_env, make_git_repo, make_tmp_dir, make_unlazy
 
 TODAY = dt.date(2026, 10, 25)
@@ -785,6 +786,72 @@ class RulesStepTest(unittest.TestCase):
         self.assertIn(companions.RULES_BEGIN, block)
 
 
+class WindowsSecurityTest(unittest.TestCase):
+    def setUp(self):
+        # Substitute only the native SID APIs off Windows; the landed DACL verifier stays real.
+        if os.name != "nt":
+            self.enterContext(mock.patch.object(unlazy, "_windows_canonical_sid", side_effect=windows_sid))
+            self.enterContext(mock.patch.object(unlazy, "_windows_user_sid",
+                                               return_value="S-1-5-21-100-200-300-1001"))
+        self.sid = unlazy._windows_user_sid()
+
+    def test_windows_security_accepts_trusted_owners_and_canonical_ace_principals(self):
+        expected = (f"O:{self.sid}D:P(D;;GX;;;WD)(A;OICI;FA;;;{self.sid})"
+                    "(A;;FR;;;SY)(A;;FR;;;BA)(A;IO;FR;;;OW)")
+        aces = (f"(D;;GX;;;S-1-1-0)(A;OICIID;FA;;;{self.sid})"
+                "(A;;FR;;;S-1-5-18)(A;;FR;;;S-1-5-32-544)(A;IO;FR;;;S-1-3-4)")
+        for index, owner in enumerate((self.sid, "BA", "S-1-5-32-544", "SY", "S-1-5-18",
+                                       "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")):
+            with self.subTest(case=index):
+                actual = f"O:{owner}D:PAI{aces}"
+                self.assertTrue(init._windows_security_matches(actual, expected))
+                self.assertTrue(init._windows_security_matches(expected, actual))
+
+    def test_windows_security_refuses_foreign_owners_extra_grants_and_changed_aces(self):
+        expected = f"O:{self.sid}D:P(D;;GX;;;WD)(A;OICI;FA;;;{self.sid})"
+        for index, actual in enumerate((expected.replace(f"O:{self.sid}", "O:WD"),
+                                        expected.replace("D:P", "D:"), expected + "(A;;FR;;;WD)",
+                                        expected + "(A;;FR;;;BA)", expected.replace("GX", "GW"),
+                                        expected.replace("D;;", "D;IO;"), expected.replace("OICI", "OI"),
+                                        f"O:{self.sid}D:P(A;OICI;FA;;;{self.sid})(D;;GX;;;WD)",
+                                        expected.replace(f";;;{self.sid})", ";;;BA)"),
+                                        expected.replace("GX", "ZZ"), expected + "unparsed")):
+            with self.subTest(case=index):
+                self.assertFalse(init._windows_security_matches(actual, expected))
+        # An untrusted expected owner cannot bless a read-back descriptor either.
+        self.assertFalse(init._windows_security_matches(expected, expected.replace(f"O:{self.sid}", "O:WD")))
+
+    def test_windows_security_compares_numeric_and_named_rights(self):
+        expected = f"O:{self.sid}D:P(A;;FA;;;{self.sid})(A;;FRFX;;;SY)"
+        actual = f"O:BAD:P(A;;0x1f01ff;;;{self.sid})(A;;0x1200a9;;;S-1-5-18)"
+        self.assertTrue(init._windows_security_matches(actual, expected))
+        self.assertFalse(init._windows_security_matches(actual.replace("0x1200a9", "0x1200ab"), expected))
+
+    def test_frozen_windows_dacl_compares_permissions_without_inheritance_bookkeeping(self):
+        before = f"O:{self.sid}D:AI(D;ID;GX;;;WD)(A;ID;FA;;;OW)"
+        frozen = f"O:{self.sid}D:PAI(D;;GX;;;WD)(A;;FA;;;OW)"
+        self.assertTrue(init._windows_security_matches(frozen, before))
+        for index, changed in enumerate((frozen.replace("D:PAI", "D:AI"), frozen.replace("(D;;GX;;;WD)", ""),
+                                         frozen + "(A;;FR;;;WD)", frozen.replace("GX", "GW"),
+                                         frozen.replace(f"O:{self.sid}", "O:WD"),
+                                         frozen.replace("D;;", "D;IO;"), frozen.replace("A;;", "A;OICI;"))):
+            with self.subTest(case=index):
+                self.assertFalse(init._windows_security_matches(changed, before))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows trusted-owner private state and publication")
+    def test_windows_private_state_accepts_readback_owner_without_changing_its_dacl(self):
+        repo = make_git_repo(self)
+        common = repo_info(repo).common_dir
+        destination = common / "oah/backups/run/hook"
+        unlazy._private_makedirs(destination.parent)
+        before = unlazy._windows_security_descriptor(destination.parent)
+        init._private_state_directory(destination.parent)
+        self.assertTrue(init._publish(common, "oah/backups/run/hook", b"private\r\n\x00fixture", private=True))
+        self.assertEqual(destination.read_bytes(), b"private\r\n\x00fixture")
+        self.assertTrue(init._windows_security_matches(
+            unlazy._windows_security_descriptor(destination.parent), before))
+
+
 class HookStepTest(unittest.TestCase):
     def test_windows_security_opens_request_read_control_and_write_dac(self):
         # Inspect the actual CreateFileW arguments without emulating native Windows APIs.
@@ -838,16 +905,6 @@ class HookStepTest(unittest.TestCase):
                 self.assertIsNone(error.filename)
                 self.assertNotIn(str(path), str(error))
                 self.assertFalse(sid in str(error), "security error exposed an account identifier")
-
-    def test_frozen_windows_dacl_compares_permissions_without_inheritance_bookkeeping(self):
-        before = "O:OWD:AI(D;ID;GX;;;WD)(A;ID;FA;;;OW)"
-        frozen = "O:OWD:PAI(D;;GX;;;WD)(A;;FA;;;OW)"
-        self.assertTrue(init._windows_security_matches(frozen, before))
-        for changed in (frozen.replace("D:PAI", "D:AI"), frozen.replace("(D;;GX;;;WD)", ""),
-                        frozen + "(A;;FR;;;WD)", frozen.replace("GX", "GW"), frozen.replace("O:OW", "O:WD"),
-                        frozen.replace("D;;", "D;IO;"), frozen.replace("A;;", "A;OICI;")):
-            with self.subTest(changed=changed):
-                self.assertFalse(init._windows_security_matches(changed, before))
 
     @unittest.skipUnless(os.name == "nt", "native Windows descriptor DACL updates")
     def test_windows_staging_dacl_is_protected_through_the_held_handle(self):
