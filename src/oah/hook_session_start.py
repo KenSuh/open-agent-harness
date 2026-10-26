@@ -16,6 +16,7 @@ import sys
 from typing import Mapping
 
 from oah.config import load_config
+from oah.init import _preview_text
 from oah.lease import Store
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
 from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS
@@ -38,7 +39,9 @@ def lines(cwd: pathlib.Path, env: Mapping[str, str]) -> list[str]:
     out += _log(info.root)
     out.append("Before you edit: run `oah status` and `oah preflight`, then take a lease with "
                "`oah start --task <task> --agent <you> --scope <paths>`.")
-    return out
+    return [line if _preview_text(line.encode("utf-8")) is not None else
+            "OAH_SESSION_START_UNSAFE: omitted unsafe session guidance; remove private or control data "
+            "from the source entry before starting another session." for line in out]
 
 
 def _leases(info, env: Mapping[str, str]) -> list[str]:

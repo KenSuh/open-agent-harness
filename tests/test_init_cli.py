@@ -156,6 +156,18 @@ class DiscoveryTest(unittest.TestCase):
 
 
 class PlanFirstTest(unittest.TestCase):
+    def test_foreign_hook_pat_is_hidden_before_force_confirmation(self):
+        repo = committed_repo(self)
+        credential = "gl" + "pat-" + token_source.token_hex(10)
+        original = ("#!/bin/sh\nexport GITLAB_PAT=" + credential + "\n").encode("ascii")
+        (repo / ".git/hooks/pre-push").write_bytes(original)
+        machine = make_machine(self, FakeTools(), interactive=True, replies=("n",))
+        code, out, err = run_init(repo, machine, "--force", *flags(hooks=True))
+        self.assertEqual(code, 1)
+        self.assertFalse(credential in out + err, "force preview exposed a provider credential")
+        self.assertIn(init._replacement_note(original), out)
+        self.assertEqual((repo / ".git/hooks/pre-push").read_bytes(), original)
+
     """AC1: the full plan comes first; --dry-run prints it and writes, installs and runs nothing."""
 
     def _assert_internal_rules_link_cli(self):
@@ -642,6 +654,24 @@ class ImpactTest(unittest.TestCase):
 
 
 class IdempotentTest(unittest.TestCase):
+    def test_unlazy_directory_alias_init_is_complete_and_idempotent(self):
+        repo = committed_repo(self)
+        target = repo / "local-agents"
+        target.mkdir()
+        directory_alias(target, repo / ".agents")
+        machine = make_machine(self, FakeTools())
+        code, out, err = run_init(repo, machine, *flags(unlazy=True))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(".agents/skills/unlazy -> local-agents/skills/unlazy", out)
+        self.assertEqual(unlazy.verify_pin(target / "skills/unlazy", machine.unlazy_pin), [])
+        self.assertEqual(subprocess.run(["git", "check-ignore", "-q", "--", "local-agents/skills/unlazy/"],
+                                        cwd=repo).returncode, 0)
+        before = snapshot(repo)
+        code, out, err = run_init(repo, machine, *flags(unlazy=True))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_INIT_UNCHANGED impact=fresh", out)
+        self.assertEqual(snapshot(repo), before)
+
     """AC6: a second run changes nothing; after a commit it only refreshes the map."""
 
     def chosen(self) -> list[str]:

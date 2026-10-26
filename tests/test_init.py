@@ -771,6 +771,49 @@ class RulesStepTest(unittest.TestCase):
     def test_windows_internal_claude_link_updates_shared_rules_once(self):
         self._assert_shared_rules_link()
 
+    def _assert_mixed_case_shared_target(self):
+        original = b"# shared rules\r\n"
+        (self.repo / "AGENTS.md").write_bytes(original)
+        if not (self.repo / "agents.md").exists():
+            self.skipTest("requires a case-insensitive filesystem")
+        link = self.repo / "CLAUDE.md"
+        link.symlink_to("agents.md")
+        step = init.plan_rules(self.repo, lang=None)
+        result = init._sync_rules(self.repo, step)
+        self.assertEqual(result.changed, ("AGENTS.md",))
+        data = (self.repo / "AGENTS.md").read_bytes()
+        self.assertTrue(data.startswith(original))
+        self.assertEqual(data.count(rules.BEGIN.encode("ascii")), 1)
+        self.assertEqual(data.splitlines().count(b"@AGENTS.md"), 1)
+        self.assertEqual(data.count(b"\n"), data.count(b"\r\n"))
+        self.assertEqual(os.readlink(link), "agents.md")
+        again = init.plan_rules(self.repo, lang=None)
+        self.assertEqual((again.agents, again.claude), ("unchanged", "unchanged"))
+        self.assertEqual(init._sync_rules(self.repo, again).changed, ())
+        self.assertEqual((self.repo / "AGENTS.md").read_bytes(), data)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
+    def test_mixed_case_link_updates_shared_rules_once(self):
+        self._assert_mixed_case_shared_target()
+
+    @unittest.skipUnless(os.name == "nt", "Windows file symlinks (CI developer mode)")
+    def test_windows_mixed_case_link_updates_shared_rules_once(self):
+        self._assert_mixed_case_shared_target()
+
+    @unittest.skipIf(os.name == "nt", "POSIX case-sensitive file symlinks")
+    def test_distinct_mixed_case_targets_are_not_merged(self):
+        (self.repo / "AGENTS.md").write_bytes(b"# primary\n")
+        if (self.repo / "agents.md").exists():
+            self.skipTest("requires a case-sensitive filesystem")
+        target = self.repo / "agents.md"
+        target.write_bytes(b"# separate\n")
+        (self.repo / "CLAUDE.md").symlink_to("agents.md")
+        step = init.plan_rules(self.repo, lang=None)
+        self.assertEqual(init._sync_rules(self.repo, step).changed, ("AGENTS.md", "CLAUDE.md"))
+        self.assertEqual(target.read_bytes(), b"# separate\n" + b"@AGENTS.md\n")
+        self.assertIn(rules.BEGIN.encode("ascii"), (self.repo / "AGENTS.md").read_bytes())
+        self.assertEqual(init._sync_rules(self.repo, init.plan_rules(self.repo, lang=None)).changed, ())
+
     @unittest.skipIf(os.name == "nt", "POSIX file symlinks")
     def test_rules_link_destination_is_bound_to_plan_and_rechecked(self):
         target = self.repo / "shared.md"
@@ -1218,6 +1261,21 @@ class WindowsSecurityTest(unittest.TestCase):
 
 
 class HookStepTest(unittest.TestCase):
+    def test_provider_tokens_and_pat_assignments_use_digest_only_preview(self):
+        fixtures = [prefix + token_source.token_hex(20) for prefix in
+                    ("gl" + "pat-", "gl" + "dt-", "hf" + "_", "npm" + "_", "pypi" + "-")]
+        fixtures += [name + "=" + token_source.token_hex(20) for name in
+                     ("GITLAB_PAT", "pat", "github-pat")]
+        for number, value in enumerate(fixtures):
+            with self.subTest(fixture=number):
+                original = ("#!/bin/sh\nexport " + value + "\n").encode("ascii")
+                expected = ["             " + init._replacement_note(original)]
+                for before, after in ((original, b"new\n"), (b"old\n", original)):
+                    preview = init._terminal_diff("hook", before, after)
+                    self.assertTrue(preview == ["             " + init._replacement_note(before)],
+                                    "unsafe content must produce only a digest")
+                self.assertTrue(init._terminal_diff("hook", original, b"new\n") == expected)
+
     def test_terminal_diff_shows_final_newline_change(self):
         preview = "\n".join(init._terminal_diff("file.md", b"same line", b"same line\n"))
         self.assertIn("-same line", preview)
@@ -1867,6 +1925,54 @@ class UnlazyStepTest(unittest.TestCase):
 
     def plan(self, *, force: bool = False, env: dict | None = None, pin=None):
         return init.plan_unlazy(self.repo, env=env or {}, home=self.home, pin=pin or self.pin, force=force)
+
+    def _assert_internal_directory_alias_install(self):
+        for name in (".agents", ".claude"):
+            with self.subTest(alias=name):
+                self.repo = make_git_repo(self)
+                destination = self.repo / "local-skills"
+                destination.mkdir()
+                alias = self.repo / name
+                directory_alias(destination, alias)
+                if name == ".claude":
+                    # Discovery must retain the captured secondary project target as well.
+                    git("clone", "--quiet", str(self.source), str(destination / "skills/unlazy"))
+                    self.assertEqual(self.plan().action, "present")
+                    self.assertEqual(self.plan(env={unlazy.ENV_VAR: str(alias / "skills/unlazy")}).action,
+                                     "present")
+                else:
+                    step = self.plan()
+                    self.assertEqual(step.action, "install")
+                    self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+                    self.assertEqual(unlazy.verify_pin(destination / "skills/unlazy", self.pin), [])
+                    self.assertEqual(self.plan().action, "present")
+                self.assertTrue(init._is_link(alias))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory symlinks")
+    def test_internal_directory_alias_install_and_discovery(self):
+        self._assert_internal_directory_alias_install()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows directory junctions")
+    def test_windows_internal_directory_alias_install_and_discovery(self):
+        self._assert_internal_directory_alias_install()
+
+    def test_install_keeps_captured_internal_target_after_alias_retarget(self):
+        first, second = self.repo / "first", self.repo / "second"
+        first.mkdir()
+        second.mkdir()
+        alias = self.repo / ".agents"
+        directory_alias(first, alias)
+        step = self.plan()
+        self.assertEqual(step.action, "install")
+        if os.name == "nt":
+            alias.rmdir()
+        else:
+            alias.unlink()
+        directory_alias(second, alias)
+        self.assertEqual(init.install_unlazy(self.repo, step, source=str(self.source), pin=self.pin), "")
+        self.assertEqual(unlazy.verify_pin(first / "skills/unlazy", self.pin), [])
+        self.assertEqual(list(second.iterdir()), [])
+
 
     def test_unlazy_install_from_local_source(self):
         step = self.plan()

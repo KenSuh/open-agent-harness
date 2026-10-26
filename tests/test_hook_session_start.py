@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import sys
 import unittest
@@ -48,6 +49,30 @@ class SessionStartTest(unittest.TestCase):
         self.lease("t1", ["src"])
         result = run_hook(self.repo, worker=True, payload={"cwd": str(self.repo), "source": "startup"})
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+
+    def test_credentials_in_log_titles_are_omitted_from_session_guidance(self):
+        for prefix in ("s" + "k-", "gl" + "pat-"):
+            credential = prefix + secrets.token_hex(20)
+            (self.repo / "docs/wiki/log.md").write_bytes(
+                LOG.replace("Task two", "Private " + credential).encode("utf-8"))
+            direct = "\n".join(hook_session_start.lines(self.repo, {}))
+            result = run_hook(self.repo, worker=False)
+            self.assertFalse(credential in direct, "guidance exposed a credential")
+            self.assertFalse(credential.encode("ascii") in result.stdout + result.stderr,
+                             "hook output exposed a credential")
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("OAH_SESSION_START_UNSAFE", direct)
+            self.assertIn(b"OAH_SESSION_START_UNSAFE", result.stdout)
+            self.assertIn(b"2026-10-24 Task one", result.stdout)
+            self.assertEqual(result.stderr, b"")
+
+    def test_credentials_in_lease_fields_are_omitted(self):
+        credential = "s" + "k-" + secrets.token_hex(20)
+        self.lease("private", ["src/" + credential])
+        text = "\n".join(hook_session_start.lines(self.repo, {}))
+        self.assertFalse(credential in text, "lease guidance exposed a credential")
+        self.assertIn("OAH_SESSION_START_UNSAFE", text)
+
 
     def test_worker_prints_nothing_even_when_state_is_broken(self):
         self.state.mkdir(parents=True)

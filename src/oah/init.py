@@ -1135,6 +1135,17 @@ def _plan_gitignore(root: pathlib.Path, unlazy_copy: bool) -> FileChange:
 
     try:
         data = add_gitignore_entries(before, unlazy_copy=unlazy_copy)
+        if unlazy_copy:
+            destination = _resolved_path(root, UNLAZY_PROJECT)
+            if destination != UNLAZY_PROJECT:
+                # Git does not follow directory aliases when applying ignore rules. Protect the
+                # actual project copy too, escaping its literal name as a root-relative pattern.
+                pattern = "/" + re.sub(r"([*?\[\]#! ])", r"\\\1", destination) + "/"
+                current = data if data is not None else before or b""
+                if pattern not in current.decode("utf-8").splitlines():
+                    eol = eol_of(current)
+                    data = current + (b"" if not current or current.endswith(b"\n") else eol)
+                    data += eol + b"# The resolved project copy of unlazy." + eol + pattern.encode("utf-8") + eol
     except UnicodeDecodeError:
         missing = [entry for _comment, entries in _gitignore_groups(unlazy_copy) for entry in entries]
         return change("keep", "gitignore", None, before,
@@ -1299,6 +1310,14 @@ def _rules_plan(root: pathlib.Path, *, lang: str | None = None) -> rules.Plan:
     local = "".join(rules._decode(local_bytes, str(rules.LOCAL_RULES))) if local_bytes is not None else ""
     agents_path = _resolved_path(root, "AGENTS.md")
     claude_path = _resolved_path(root, "CLAUDE.md")
+    # Path.resolve preserves spelling on case-insensitive filesystems. Use the filesystem's
+    # identity, then keep one captured spelling for preview, budget checking and publication.
+    if agents_path != claude_path and agents_path.casefold() == claude_path.casefold():
+        try:
+            if (root / agents_path).samefile(root / claude_path):
+                claude_path = agents_path
+        except FileNotFoundError:
+            pass
     shared = agents_path == claude_path
     agents = _read_user(root, agents_path)
     if agents is None:
@@ -1535,6 +1554,10 @@ def _preview_text(data: bytes) -> str | None:
         return None  # Includes NULs, terminal escapes and other binary/control data, at any offset.
     if any(pattern.search(text) for _rule, pattern in checks.CONTENT_RULES):
         return None
+    # Provider formats absent from the landed scanner still must never reach a terminal preview.
+    if re.search(r"(?<![A-Za-z0-9])(?:gl(?:pat|dt|rt|ft|ptt|cbt|imt|oas)-[A-Za-z0-9_-]{20,}|"
+                 r"hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})", text):
+        return None
     for match in checks.EMAIL.finditer(text):
         address = match.group().lower()
         domain = address.rsplit("@", 1)[-1]
@@ -1546,7 +1569,8 @@ def _preview_text(data: bytes) -> str | None:
     # Also cover JSON settings, lowercase assignments and opaque Authorization values, without
     # extracting credentials or consulting the environment/keychain.
     if re.search(r"(?i)(?:authorization[\"']?\s*[:=]|\b(?:bearer|basic)\s+|"
-                 r"(?<![\w-])[\w-]*(?:key|token|secret|password|cookie|credential|account[_-]?id)"
+                 r"(?<![\w-])(?:[\w-]*(?:key|token|secret|password|cookie|credential|account[_-]?id)|"
+                 r"(?:[\w-]+[_-])?pat)"
                  r"[\"']?\s*[:=]\s*[\"']?(?!\$|<)\S+)", text):
         return None
     return text
@@ -1753,6 +1777,7 @@ class UnlazyStep:
     aside: str = ""  # retained for compatibility; init never moves an existing copy
     digest: str = ""
     backup: str = ""
+    target: str = ""  # captured no-follow destination of the primary project copy
 
 
 def _unlazy_exists(relative: str) -> str:
@@ -1815,7 +1840,8 @@ def _verify_unlazy_pin(root: pathlib.Path, folder: pathlib.Path, pin: unlazy.Pin
 
 
 def _find_unlazy_dir(root: pathlib.Path, env: Mapping[str, str],
-                     home: pathlib.Path) -> tuple[pathlib.Path | None, str]:
+                     home: pathlib.Path, *, targets: Mapping[str, str] | None = None
+                     ) -> tuple[pathlib.Path | None, str]:
     """Keep discovery's lexical origin: project probes use the same pinned reads as verification."""
     override = env.get(unlazy.ENV_VAR)
     candidates = ([pathlib.Path(override)] if override else
@@ -1824,8 +1850,11 @@ def _find_unlazy_dir(root: pathlib.Path, env: Mapping[str, str],
     for candidate in candidates:
         folder = pathlib.Path(os.path.abspath(candidate))
         if folder.is_relative_to(root):
-            # Never resolve a project path into an external installation, even during a dry run.
-            relative = (folder.relative_to(root) / "scripts/gate-check.mjs").as_posix()
+            # Resolve only while planning; all project probes and verification use captured targets.
+            relative = folder.relative_to(root).as_posix()
+            relative = targets[relative] if targets is not None and relative in targets else _resolved_path(root, relative)
+            folder = root / relative
+            relative = (pathlib.PurePosixPath(relative) / "scripts/gate-check.mjs").as_posix()
             present = _read_user(root, relative) is not None
         else:
             present = unlazy._is_unlazy(folder)
@@ -1840,13 +1869,14 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
                 force: bool) -> UnlazyStep:
     """Whether the pinned unlazy (5.8) is in place, and what installing the project copy would do."""
     root = pathlib.Path(os.path.abspath(root))
-    target = root / UNLAZY_PROJECT
-    for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
-        if _linked(root, relative) is not None:
-            return UnlazyStep("blocked", note="OAH_INIT_PATH_UNSAFE: a project unlazy path is a link; remove "
-                                              "the link, then run "
-                                              "oah init --with-unlazy again")
-    folder, reason = _find_unlazy_dir(root, env, home)
+    try:
+        targets = {relative: _resolved_path(root, relative)
+                   for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy")}
+    except InitError as exc:
+        return UnlazyStep("blocked", note=str(exc))
+    destination = targets[UNLAZY_PROJECT]
+    target = root / destination
+    folder, reason = _find_unlazy_dir(root, env, home, targets=targets)
     override = unlazy.ENV_VAR if env.get(unlazy.ENV_VAR) else None
     short = pin.commit[:12]
     if folder is None:
@@ -1855,20 +1885,25 @@ def plan_unlazy(root: pathlib.Path, *, env: Mapping[str, str], home: pathlib.Pat
                                               "then run oah init --with-unlazy again")
         if target.exists() or target.is_symlink():
             return UnlazyStep("blocked", str(target), _unlazy_exists(UNLAZY_PROJECT))
-        return UnlazyStep("install", note=f"downloads unlazy into {UNLAZY_PROJECT} at commit {short}")
+        shown = UNLAZY_PROJECT if destination == UNLAZY_PROJECT else f"{UNLAZY_PROJECT} -> {destination}"
+        return UnlazyStep("install", note=f"downloads unlazy into {shown} at commit {short}", target=destination)
     problems = _verify_unlazy_pin(root, folder, pin)
     if not problems:
-        return UnlazyStep("present", str(folder), f"{folder} is the pinned commit {short}, with matching file digests")
+        shown = (f"{UNLAZY_PROJECT} -> {destination}" if folder == target and destination != UNLAZY_PROJECT
+                 else str(folder))
+        return UnlazyStep("present", str(folder), f"{shown} is the pinned commit {short}, with matching file digests",
+                          target=destination)
     why = "its commit or script digests do not match the pin"
     if override:
         return UnlazyStep("blocked", str(folder), f"{override} names {folder}, which is not the pinned unlazy ({why}). "
                                                   f"Clear {override}, then run oah init --with-unlazy again")
-    project = {root / UNLAZY_PROJECT, root / ".claude/skills/unlazy"}
+    project = {root / relative for relative in targets.values()}
     if folder in project:
         where = _shown_path(root, folder)
         return UnlazyStep("blocked", str(folder), _unlazy_exists(where))
     return UnlazyStep("install", str(folder), f"your copy at {folder} is not the pinned one ({why}); init installs "
-                                              f"the pinned project copy into {UNLAZY_PROJECT}, which oah uses first")
+                                              f"the pinned project copy into {UNLAZY_PROJECT}, which oah uses first",
+                      target=destination)
 
 
 def unlazy_commands(target: pathlib.Path, *, source: str, pin: unlazy.Pin) -> list[list[str]]:
@@ -1998,9 +2033,9 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
             return _unlazy_exists(relative)
         if step.action != "install":
             return "OAH_INIT_UNLAZY_FAILED: installation was not planned; remove any links and run oah init again"
-        for relative in (UNLAZY_PROJECT, ".claude/skills/unlazy"):
-            if _linked(root, relative) is not None:
-                raise OSError("linked installation path")
+        destination = _relative(step.target or UNLAZY_PROJECT)
+        if _linked(root, destination) is not None:
+            raise OSError("linked installation path")
         # Ignore OAH_STATE_DIR: external tree writers must stay in Git's own private metadata storage.
         common = _backup_root(root, env=environment)
         staging_relative = f"oah/staging/{secrets.token_hex(16)}"
@@ -2049,21 +2084,21 @@ def install_unlazy(root: pathlib.Path, step: UnlazyStep, *, source: str = unlazy
                                 .hexdigest() != digest for name, digest in pin.files.items())):
                             raise OSError("captured installation does not match the pin")
                         _require_staging(staging, identity, private_staging=True)
-                        if not _publish(root, UNLAZY_PROJECT, None):
+                        if not _publish(root, destination, None):
                             raise OSError("installation destination changed")
                         for name in directories:
                             _require_staging(staging, identity, private_staging=True)
-                            if not _publish(root, f"{UNLAZY_PROJECT}/{name}", None):
+                            if not _publish(root, f"{destination}/{name}", None):
                                 raise OSError("installation directory changed")
                         # The landed verifier needs a checkout of its own. Publish its detached HEAD last,
                         # so a partial install cannot be discovered as the completed pinned checkout.
                         for name in sorted(files, key=lambda name: (name == ".git/HEAD", name)):
                             data, executable = files[name]
                             _require_staging(staging, identity, private_staging=True)
-                            if not _publish(root, f"{UNLAZY_PROJECT}/{name}", data, executable=executable):
+                            if not _publish(root, f"{destination}/{name}", data, executable=executable):
                                 raise OSError("installation file changed")
                         _require_staging(staging, identity, private_staging=True)
-                        if _verify_unlazy_pin(root, root / UNLAZY_PROJECT, pin, env=environment):
+                        if _verify_unlazy_pin(root, root / destination, pin, env=environment):
                             raise OSError("published installation does not match the pin")
                         return ""
             except (OSError, InitError):
@@ -2396,7 +2431,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
                    if values["unlazy"] else None)
     unlazy_copy = unlazy_step is not None and (unlazy_step.action in ("install", "replace") or (
         unlazy_step.action == "present"
-        and pathlib.Path(unlazy_step.folder).resolve() == (root / UNLAZY_PROJECT).resolve()))
+        and pathlib.Path(unlazy_step.folder) == root / (unlazy_step.target or UNLAZY_PROJECT)))
     files = plan_files(root, config=config, wiki_dir=wiki.dir, agents=agent_files(engines) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
     rules_step = plan_rules(root, lang=lang)
@@ -2665,7 +2700,7 @@ def apply_plan(plan: Plan, machine: Machine, *, yes: bool, force: bool, out) -> 
     _apply_unlazy(plan, machine, outcome, out)
     _apply_companions(plan, machine, outcome, yes=yes, ask=ask, out=out)
     unlazy_copy = plan.unlazy is not None and (plan.unlazy.action in ("install", "replace") or
-                                              pathlib.Path(plan.unlazy.folder) == root / UNLAZY_PROJECT)
+                                              pathlib.Path(plan.unlazy.folder) == root / (plan.unlazy.target or UNLAZY_PROJECT))
     problems = _ignore_problems(root, unlazy_copy=unlazy_copy)
     for problem in problems:
         out(problem)
