@@ -137,6 +137,26 @@ class PrivacyScanTest(unittest.TestCase):
             for allowed in (domain, "docs." + domain):
                 self.assertEqual(self.scanner.scan_text("alice" + "@" + allowed, []), [])
 
+    def test_email_after_backslash_escape_is_not_an_address(self):
+        for text in ("data = b\"intro\\n" + "@" + "AGENTS.md\\n\"",
+                     "\\r\\n" + "@" + "AGENTS.md",
+                     "b\"\\t" + "@" + "x.md\"",
+                     "\\\\n" + "@" + "notes.md"):
+            with self.subTest(text=text):
+                self.assertEqual(self.scanner.scan_text(text, []), [])
+
+    def test_real_emails_next_to_punctuation_and_escapes_are_found(self):
+        address = PERSONAL_EMAIL
+        for text in (f"({address})", f"<{address}>", f"\"{address}\"", f"'{address}',", f"mail {address}.",
+                     f"{address};", f"[{address}]", f"x\\n{address}", f"b\"\\t{address}\""):
+            with self.subTest(text=text):
+                self.assertEqual(self.scanner.scan_text(text, []), [("email", 1, address)])
+        single = "z" + "@" + "corp.dev"
+        self.assertEqual(self.scanner.scan_text("\\" + single, []), [("email", 1, single)],
+                         "a backslash before a letter that is not an escape keeps the whole address")
+        self.assertEqual([rule for rule, _, _ in self.scanner.scan_text("\\" + address, [])], ["email"],
+                         "an address whose first letter reads as an escape is still reported")
+
     def test_env_secret_assignment_hit(self):
         repo = make_repo(self)
         commit(repo, {"env.txt": f"{ENV_ASSIGNMENT}\nMAX_TOKEN = 1024\n"})

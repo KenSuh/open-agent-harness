@@ -42,7 +42,9 @@ CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
                               + r"(?:'[^'\r\n]{12,}'|\"[^\"\r\n]{12,}\"|(?!['\"])\S{12,})")),
     ("keychain", re.compile(r"secu" + r"rity\s+find-(?:generic|internet)-password")),
 ]
-EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Group 1 is the address. A local part never starts with the letter of a backslash escape such as `\n`,
+# so `b"\n@AGENTS.md"` is not an address, while `\nalice@...` still reports `alice@...`.
+EMAIL = re.compile(r"(?:(?<=\\)[abfnrtv])?(?!(?<=\\)[abfnrtv])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 ALLOWED_EMAILS = {"noreply@github.com", "noreply@anthropic.com", "git@github.com"}
 ALLOWED_EMAIL_DOMAINS = ("users.noreply.github.com", "example.com", "example.org", "example.net")
 ALLOWED_EMAIL_TLDS = (".example", ".test", ".invalid", ".localhost")
@@ -125,7 +127,7 @@ def scan_text(text: str, terms: Iterable[Term]) -> list[tuple[str, int, str]]:
     for number, line in enumerate(text.splitlines(), start=1):
         for rule, pattern in CONTENT_RULES:
             found.extend((rule, number, m.group(0)) for m in pattern.finditer(line))
-        found.extend(("email", number, m.group(0)) for m in EMAIL.finditer(line) if not _email_allowed(m.group(0)))
+        found.extend(("email", number, m.group(1)) for m in EMAIL.finditer(line) if not _email_allowed(m.group(1)))
         for pattern in term_patterns:
             found.extend(("private-term", number, m.group(0)) for m in pattern.finditer(line))
     return found
