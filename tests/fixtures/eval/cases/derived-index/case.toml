@@ -1,0 +1,11 @@
+id = "derived-index"
+split = "control"
+provenance = "Synthetic and de-identified: built by tests/fixtures/eval/make_snapshot.py. A change to a source list misses its generated index."
+requirement = "requirement.md"
+prompt = "task.md"
+forbidden = ["*.orig", "fix.patch"]
+
+[snapshot]
+file = "snapshot.bundle"
+format = "bundle"
+commit = "11ac4e9c014277808ff6cba43db7ee4adfa650aa"
