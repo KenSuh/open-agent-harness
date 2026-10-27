@@ -125,8 +125,9 @@ def round_instructions(ctx: PromptContext) -> str:
             + ("correction attempt " if len(item.attempts) == 1 else "correction attempts ")
             + ", ".join(f"{attempt} ({outcome})" for attempt, outcome in item.attempts) for item in ctx.attempted)
         history += ("\n\nClasses a correction of this task already tried to fix, in this series or an earlier one. "
-                    "Reuse the class id for a finding with the same mechanism and rule; such a finding is a "
-                    f"recurrence, whatever its wording:\n{tried}")
+                    "Reuse the class id for a finding with the same mechanism and rule. A shared class or location "
+                    "alone does not establish recurrence; a distinct defect is a new instance of that class. "
+                    f"Recurrence requires a prior reference to the occurrence a correction targeted:\n{tried}")
     else:
         history += "\n\nNo correction attempt is recorded for this task."
     parts.append(f"### History of this series\n{history}")
@@ -142,9 +143,10 @@ def round_instructions(ctx: PromptContext) -> str:
         "series, reuse that class_id even if the wording changed. Only a new mechanism gets a new class, with id "
         f"R{n}-C1, R{n}-C2, and so on, defined in classes with its mechanism and rule. Do not define earlier "
         "classes again.\n"
-        "- prior_refs: for a finding that repeats or continues an earlier finding, add one entry per earlier "
-        "finding with its round number, its receipt digest, its finding_id and its class_id, exactly as the "
-        "history shows them. Leave it empty for a finding that is new.\n"
+        "- prior_refs: when you judge a finding to be the same problem as an earlier finding, whatever its wording "
+        "or class_id, add one entry per earlier finding with its round number, its receipt digest, its finding_id "
+        "and its historical class_id, exactly as the history shows them. Leave it empty for a distinct new "
+        "instance, even if it shares a class, definition or location with an earlier finding.\n"
         "- in_scope: false when the fix lies outside the task scope above.\n"
         "- fix_kind: design or stored-format when the fix needs a design change or a change to a stored format; "
         "otherwise local.\n"
