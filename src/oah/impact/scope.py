@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+from difflib import SequenceMatcher
 from typing import Iterable, Mapping, Sequence
 
 from oah.impact import lexical
@@ -58,23 +59,25 @@ def _ambiguous_item(item: Mapping) -> dict:
 
 
 def _rename_item(item: Mapping) -> dict:
-    how = "same file name" if item["similarity"] is None else f"git similarity {item['similarity']}%"
+    how = "same file name" if item["similarity"] is None else f"content similarity {item['similarity']}%"
     detail = (f"{item['from']} -> {item['to']} looks like a rename ({how}); impact read it as a separate delete "
               "and add, so re-check references to both paths")
     return dict(item, kind="rename", detail=detail)
 
 
 def report(layers: Mapping[str, Mapping], ambiguous: Sequence[Mapping], renames: Sequence[Mapping], *,
-           rows_found: int) -> dict:
+           rows_found: int, gaps: Sequence[Mapping] = ()) -> dict:
     """The scope block: depth, complete, per-layer status, what was not analysed, and a summary sentence."""
     unanalysed = [_ambiguous_item(item) for item in ambiguous]
     for name, layer in layers.items():
         if layer["status"] not in ("analysed", "skipped"):
             unanalysed.append({"kind": "layer", "layer": name, "status": layer["status"],
                                "detail": f"{name}: {layer['reason']}"})
+    unanalysed += [dict(item) for item in gaps]
     unanalysed += [_rename_item(item) for item in renames]
     unanalysed.append({"kind": "dynamic", "detail": DYNAMIC_NOTE})
-    complete = all(layer["status"] == "analysed" for layer in layers.values()) and not ambiguous and not renames
+    complete = (all(layer["status"] == "analysed" for layer in layers.values())
+                and not ambiguous and not renames and not gaps)
     found = f"{rows_found} result{'' if rows_found == 1 else 's'} found in the analysed scope"
     if not rows_found:
         summary = EMPTY
@@ -95,10 +98,10 @@ def lines(scope: Mapping) -> list[str]:
 
 
 def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: float) -> list[dict]:
-    """Deleted and added paths that look like one rename: git's -M pairs, then pairs with the same file name.
+    """Deleted and added paths that look like one rename: git's -M pairs, matching names or similar content.
 
     Without ref the worktree is compared, and untracked files count as added."""
-    from oah.impact.mapstore import _git
+    from oah.impact.mapstore import _git, _safe_worktree_path
 
     fields = [field for field in _git(root, "diff", "-M", "--name-status", "-z", since, *([ref] if ref else []),
                                       "--", timeout=timeout).split("\0") if field]
@@ -118,12 +121,24 @@ def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: 
         elif status == "A":
             added.append(fields[index + 1])
         index += 2
-    if ref is None:
-        added += [name for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z",
-                                        timeout=timeout).split("\0") if name]
+    untracked = ([name for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z",
+                                       timeout=timeout).split("\0") if name] if ref is None else [])
+    added += untracked
+    contents = {name: (root / name).read_bytes() for name in untracked
+                if deleted and _safe_worktree_path(root, name) and (root / name).is_file()}
     for old in deleted:
         name = old.rsplit("/", 1)[-1]
         pairs += [{"from": old, "to": new, "similarity": None} for new in added if new.rsplit("/", 1)[-1] == name]
+        candidates = {new: body for new, body in contents.items() if new.rsplit("/", 1)[-1] != name}
+        if not candidates:
+            continue
+        original = _git(root, "cat-file", "blob", f"{since}:{old}", timeout=timeout,
+                        encoding="latin-1").encode("latin-1")
+        for new, body in candidates.items():
+            similarity = SequenceMatcher(None, original.splitlines(), body.splitlines(),
+                                         autojunk=False).ratio()
+            if similarity >= 0.5:
+                pairs.append({"from": old, "to": new, "similarity": int(similarity * 100)})
     return sorted(pairs, key=lambda pair: (pair["from"], pair["to"]))
 
 
@@ -171,7 +186,7 @@ def fallback(gates: Sequence, targets: Sequence[str], *, strong: Sequence[Mappin
                     "why": f"its ledger names {', '.join(named)}, a folder or module of the target",
                     "targets": sorted(matched)})
     out.sort(key=lambda item: item["source"])
-    if files:
+    if targets:
         out += [{"source": CONFIGURED, "line": None, "binding": "fallback", "check": check,
-                 "why": f"configured in {CONFIGURED}", "targets": files} for check in checks]
+                 "why": f"configured in {CONFIGURED}", "targets": sorted(set(targets))} for check in checks]
     return out

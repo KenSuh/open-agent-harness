@@ -203,6 +203,21 @@ def _ambiguous(maps: list[dict], targets: list[str], settings: dict) -> list[dic
     return out
 
 
+def _coverage_gaps(maps: list[tuple[str, mapstore.MapInfo]]) -> list[dict]:
+    gaps = []
+    for name, info in maps:
+        for path in info.excluded_paths:
+            gaps.append({"kind": "excluded-path", "map": name, "file": path,
+                         "detail": f"OAH_IMPACT_INCOMPLETE: {name} map excludes symlink input {path}; replace "
+                                   "it with a regular repository file and run oah impact refresh"})
+        for region in info.sql_unparsed:
+            gaps.append(dict(region, kind="sql-unparsed", map=name,
+                             detail=f"OAH_IMPACT_SQL_UNPARSED: {name} map {region['file']}:{region['line']}: "
+                                    f"{region['reason']}; review this SQL region manually for dependencies "
+                                    "before selecting checks"))
+    return gaps
+
+
 def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     if args.kind and not args.task:
         raise ImpactError("OAH_IMPACT_USAGE", "--kind only filters a task's Scope; add --task <task>", EXIT_USAGE)
@@ -260,7 +275,8 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
                                  db_available=identity["status"] == "available",
                                  graph_status=(graph_state, graph_reason), branch_state=branch.state,
                                  branch_reason=branch.reason)
-    report_scope = impact_scope.report(layers, skipped, renames, rows_found=total)
+    coverage = _coverage_gaps([("worktree", info)] + ([("default-branch", branch.info)] if branch.info else []))
+    report_scope = impact_scope.report(layers, skipped, renames, rows_found=total, gaps=coverage)
     # Weak fallback checks cover what an incomplete result could not analyse; the strong plan stays separate.
     checks, incomplete = settings["fallback_checks"], not report_scope["complete"]
     fallback = impact_scope.fallback(gates, targets, strong=query.rerun_plan(rows), checks=checks) if incomplete else []

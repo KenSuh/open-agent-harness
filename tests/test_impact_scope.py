@@ -11,6 +11,7 @@ import unittest
 from oah.impact import gatebind, query, scope
 from oah.impact.defaults import effective
 from tests.helpers import git_commit, git_env, make_git_repo
+from tests.test_impact_default_branch import RemoteFixture, git
 from tests.test_impact_map import head, run_impact
 
 LAYER_NAMES = ["gates", "lexical", "db", "graph", "cochange"]
@@ -140,6 +141,33 @@ class LayersTest(unittest.TestCase):
 
 
 class RenameTest(unittest.TestCase):
+    def test_untracked_rename_matches_crlf_checkout_to_lf_blob(self):
+        repo = make_git_repo(self)
+        body = b"FIRST = 1\nSECOND = 2\n"
+        base = git_commit(repo, {".gitattributes": b"* -text\n", "src/old.py": body})
+        (repo / "src/old.py").unlink()
+        # Reproduce Git's LF blob / Windows CRLF checkout without depending on the host OS.
+        (repo / "src/new.py").write_bytes(body.replace(b"\n", b"\r\n"))
+        self.assertEqual(scope.likely_renames(repo, base, None, timeout=60.0),
+                         [{"from": "src/old.py", "to": "src/new.py", "similarity": 100}])
+
+    def test_untracked_rename_with_different_filename(self):
+        for edited in (False, True):
+            with self.subTest(edited=edited):
+                repo = make_git_repo(self)
+                body = b"".join(f"VALUE_{i} = {i}\r\n".encode("ascii") for i in range(40))
+                base = git_commit(repo, {".gitattributes": "* -text\n", "src/old.py": body})
+                (repo / "src/old.py").rename(repo / "src/new.py")
+                if edited:
+                    (repo / "src/new.py").write_bytes(body + b"EXTRA = 1\r\n")
+                (repo / "src/unrelated.py").write_bytes(b"unrelated content\r\n")
+                pairs = scope.likely_renames(repo, base, None, timeout=60.0)
+                self.assertEqual(len(pairs), 1, pairs)
+                self.assertEqual((pairs[0]["from"], pairs[0]["to"]), ("src/old.py", "src/new.py"))
+                self.assertGreaterEqual(pairs[0]["similarity"], 50)
+                self.assertEqual(pairs[0]["similarity"] == 100, not edited)
+                self.assertEqual(scope.likely_renames(repo, base, head(repo), timeout=60.0), [])
+
     def test_rename_pairs(self):
         repo = make_git_repo(self)
         body = "".join(f"line {i}\n" for i in range(40))
@@ -192,9 +220,12 @@ class FallbackTest(unittest.TestCase):
         configured = scope.fallback([], ["src/a.py", "db_table:users"], strong=[], checks=["make test"])
         self.assertEqual(configured, [{"source": "[impact] fallback_checks", "line": None, "binding": "fallback",
                                        "check": "make test", "why": "configured in [impact] fallback_checks",
-                                       "targets": ["src/a.py"]}])
-        self.assertEqual(scope.fallback(gates, ["db_table:users"], strong=[], checks=["make test"]), [],
-                         "DB entities have no file needles, and configured checks need a file target")
+                                       "targets": ["db_table:users", "src/a.py"]}])
+        self.assertEqual(scope.fallback(gates, ["db_table:users"], strong=[], checks=["make test"]),
+                         [{"source": "[impact] fallback_checks", "line": None, "binding": "fallback",
+                           "check": "make test", "why": "configured in [impact] fallback_checks",
+                           "targets": ["db_table:users"]}])
+        self.assertEqual(scope.fallback(gates, [], strong=[], checks=["make test"]), [])
 
 
 LEDGER = (".oah/tasks/t1/GATES.md", "- [ ] G1: the check runs\n  CHECK: python tools/check.py\n  EXPECT: OK\n"
@@ -263,6 +294,8 @@ class ScopeCliTest(unittest.TestCase):
 
     def test_scope_table_json_shape(self):
         def fresh_graph(repo):
+            # The SQL dependency scanner reports every statement as partially parsed.
+            git_commit(repo, {"db/migrations/001_init.sql": b"-- no SQL statements\n"})
             write_graph(repo, {"nodes": [{"id": "n1", "source_file": "tools/check.py"}], "links": [],
                                "graph": {"commit": head(repo)}})
 
@@ -301,6 +334,42 @@ class ScopeCliTest(unittest.TestCase):
         self.assertFalse(block["complete"])
         self.assertIn("shared.py (basename of pkg0/shared.py) is shared by 4 files", text)
 
+    def test_map_coverage_gaps_make_scope_incomplete(self):
+        for source in ("worktree", "default-branch"):
+            for kind in ("excluded-path", "sql-unparsed"):
+                with self.subTest(source=source, kind=kind):
+                    if source == "worktree":
+                        repo = gap_repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n"})
+                    else:
+                        fx = RemoteFixture(self)
+                        repo, gap_repo = fx.lane, fx.pusher
+                        git_commit(repo, dict(BASE, **{"db/migrations/001_init.sql": b"-- no SQL statements\n"}))
+                    git_commit(repo, {".oah/config.toml":
+                                     '[impact]\nfallback_checks = ["python -m unittest"]\n'})
+                    path = "tools/excluded.py" if kind == "excluded-path" else "db/unparsed.sql"
+                    git_commit(gap_repo, {path: b"check.py" if kind == "excluded-path" else
+                                         b"\nCREATE UNRECOGNISED widget;\n"})
+                    if kind == "excluded-path":
+                        # A real Git symlink entry also works where OS symlinks need privileges.
+                        blob = git(gap_repo, "rev-parse", f"HEAD:{path}")
+                        git(gap_repo, "update-index", "--cacheinfo", f"120000,{blob},{path}")
+                        git(gap_repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "symlink")
+                    if source == "default-branch":
+                        git(gap_repo, "push", "-q", "origin", "HEAD:main")
+                    write_graph(repo, {"nodes": [], "links": [], "commit": head(repo)})
+                    report, text = self.impact(repo, "tools/check.py", "--ref", "HEAD")
+                    block = self.assert_shape(report, text)
+                    self.assertTrue(all(layer["status"] == "analysed" for layer in block["layers"].values()))
+                    self.assertFalse(block["complete"])
+                    gaps = [item for item in block["unanalysed"] if item["kind"] == kind]
+                    self.assertEqual(len(gaps), 1, block)
+                    self.assertEqual((gaps[0]["map"], gaps[0]["file"]), (source, path))
+                    if kind == "sql-unparsed":
+                        self.assertEqual(gaps[0]["line"], 2)
+                    self.assertIn(gaps[0]["detail"], text)
+                    self.assertTrue(any(item["check"] == "python -m unittest" for item in report["fallback"]))
+                    self.assertIn("re-run (fallback): python -m unittest", text)
+
     def test_rename_pair(self):
         repo = self.repo()
         base = head(repo)
@@ -316,6 +385,30 @@ class ScopeCliTest(unittest.TestCase):
         self.assertIn("src/lib/util.py -> src/lib/helpers.py looks like a rename", text)
         self.assertEqual(report["changed_since"]["files"], ["src/lib/helpers.py", "src/lib/util.py"],
                          "changes are still read without rename folding")
+
+    def test_unstaged_rename_is_unanalysed(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n"})
+        base = head(repo)
+        (repo / "src/lib/util.py").rename(repo / "src/lib/helpers.py")
+        write_graph(repo, {"nodes": [], "links": [], "commit": base})
+        report, text = self.impact(repo, "--changed-since", base)
+        block = self.assert_shape(report, text)
+        renames = [item for item in block["unanalysed"] if item["kind"] == "rename"]
+        self.assertEqual([(item["from"], item["to"], item["similarity"]) for item in renames],
+                         [("src/lib/util.py", "src/lib/helpers.py", 100)])
+        self.assertFalse(block["complete"])
+        self.assertEqual(report["changed_since"]["files"], ["src/lib/helpers.py", "src/lib/util.py"])
+
+    def test_entity_only_query_includes_configured_fallback(self):
+        repo = self.repo({".oah/config.toml": '[impact]\nfallback_checks = ["python -m unittest"]\n'})
+        report, text = self.impact(repo, "db_table:users")
+        block = self.assert_shape(report, text)
+        self.assertFalse(block["complete"])
+        self.assertEqual(report["fallback"],
+                         [{"source": "[impact] fallback_checks", "line": None, "binding": "fallback",
+                           "check": "python -m unittest", "why": "configured in [impact] fallback_checks",
+                           "targets": ["db_table:users"]}])
+        self.assertIn("re-run (fallback): python -m unittest", text)
 
     def test_empty_result_is_not_proof(self):
         repo = self.repo()
