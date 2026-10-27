@@ -393,6 +393,14 @@ class MaintenanceCheckOutputsTest(unittest.TestCase):
             with self.subTest(record=record):
                 self.assertIsNone(MaintenanceCheck(ok=True, record=record).outputs)
 
+    def test_mixed_output_keys_are_none(self):
+        check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log.md": self.DIGEST, 1: self.DIGEST}})
+        self.assertIsNone(check.outputs)
+
+    def test_nul_output_path_is_none(self):
+        check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log\x00.md": self.DIGEST}})
+        self.assertIsNone(check.outputs)
+
 
 class WikiMaintenanceTest(unittest.TestCase):
     """finish exempts only verified `oah wiki maintain` outputs; a stub verify_maintenance returns real checks."""

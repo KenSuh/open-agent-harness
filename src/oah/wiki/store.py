@@ -100,11 +100,11 @@ class MaintenanceCheck:
         outputs = self.record.get("outputs") if isinstance(self.record, dict) else None
         if not isinstance(outputs, dict):
             return None
-        pairs = sorted(outputs.items())
-        if not all(isinstance(rel, str) and rel and isinstance(digest, str) and _DIGEST.fullmatch(digest)
-                   for rel, digest in pairs):
+        if not all(isinstance(rel, str) and rel and "\x00" not in rel
+                   and isinstance(digest, str) and _DIGEST.fullmatch(digest)
+                   for rel, digest in outputs.items()):
             return None
-        return pairs
+        return sorted(outputs.items())
 
 
 @dataclass(frozen=True)

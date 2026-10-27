@@ -10,7 +10,7 @@ import subprocess
 import sys
 import unittest
 
-from oah.wiki import notes
+from oah.wiki import notes, verify_maintenance
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -80,6 +80,40 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
         self.assertEqual(overridden.returncode, 1, overridden.stdout + overridden.stderr)
         self.assertTrue(overridden.stderr.startswith("OAH_SCOPE_EXCEEDED"), overridden.stderr)
         self.assertIn("docs/wiki/log.md", overridden.stderr)
+
+    def test_json_encoded_nul_path_refuses_and_allows_recorded_override(self):
+        self.maintain_after_edit()
+        records = self.state / "wiki" / "maintenance.jsonl"
+        lines = [json.loads(line) for line in records.read_bytes().splitlines()]
+        lines[-1]["outputs"]["docs/wiki/log\x00.md"] = "0" * 64
+        data = b"".join((json.dumps(line) + "\n").encode("utf-8") for line in lines)
+        self.assertIn(b"\\u0000", data)
+        records.write_bytes(data)
+
+        check = verify_maintenance(self.repo, "t1", env=self.env)
+        self.assertFalse(check.ok)
+        self.assertIsNone(check.outputs)
+        self.assertTrue(any(problem.startswith("OAH_WIKI_MAINTENANCE_STALE") for problem in check.problems),
+                        check.problems)
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"), refused.stderr)
+        self.assertIn("OAH_WIKI_MAINTENANCE_STALE", refused.stderr)
+        self.assertIn("oah wiki maintain --task t1", refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+        overridden = self.finish("--allow-missing-wiki-maintenance")
+        self.assertEqual(overridden.returncode, 1, overridden.stdout + overridden.stderr)
+        self.assertTrue(overridden.stderr.startswith("OAH_SCOPE_EXCEEDED"), overridden.stderr)
+        self.assertIn("docs/wiki/log.md", overridden.stderr)
+
+        self.ok("renew", "--task", "t1", "--agent", "claude", "--scope", "src", "--scope", "docs/wiki")
+        finished = self.finish("--allow-missing-wiki-maintenance")
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.assertIn("OAH_WIKI_MAINTENANCE_SKIPPED", finished.stdout)
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertEqual(self.last_finish()["wiki_maintenance"],
+                         {"task": "t1", "override": True, "problems": check.problems})
+        self.assertEqual(records.read_bytes(), data)
 
 
 if __name__ == "__main__":
