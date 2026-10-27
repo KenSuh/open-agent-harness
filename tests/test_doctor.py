@@ -420,6 +420,19 @@ class McpNoticeDoctorTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("MCP", out)
 
+    def test_doctor_skips_non_string_notice_items(self):
+        for item in ([], {}):
+            with self.subTest(item=item):
+                self.write_log(self.notice(item=item))
+                code, out = self.doctor(json_output=True)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(json.loads(out)["mcp_notices"], [])
+                self.write_log(self.notice(), self.notice(item=item, new="9.9.9"))
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertIn("4.4.4 -> 4.5.0", out)
+                self.assertNotIn("9.9.9", out)
+
 
 if __name__ == "__main__":
     unittest.main()

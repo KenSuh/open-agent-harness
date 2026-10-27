@@ -20,7 +20,8 @@ def latest_answer(package: str, version: str, **extra) -> bytes:
 class FakeRegistry:
     """Serves answers[path] as (status, body bytes[, headers]); unknown paths get 404."""
 
-    def __init__(self, test: unittest.TestCase, answers: dict | None = None, *, delay: float = 0.0) -> None:
+    def __init__(self, test: unittest.TestCase, answers: dict | None = None, *, delay: float = 0.0,
+                 trickle: str | None = None, interval: float = 0.01) -> None:
         self.answers = dict(answers or {})
         self.delay = delay
         self.requests: list[tuple[str, dict[str, str]]] = []
@@ -34,18 +35,32 @@ class FakeRegistry:
                 status, body, *rest = registry.answers.get(self.path, (404, b'{"error":"Not found"}'))
                 headers = rest[0] if rest else {"Content-Type": "application/json"}
                 try:
+                    if registry.trickle == "headers":
+                        for byte in b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n":
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                            time.sleep(interval)
+                        self.wfile.write(body)
+                        return
                     self.send_response(status)
                     for key, value in headers.items():
                         self.send_header(key, value)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
-                    self.wfile.write(body)
+                    if registry.trickle == "body":
+                        for byte in body:
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                            time.sleep(interval)
+                    else:
+                        self.wfile.write(body)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
             def log_message(self, *args):
                 pass
 
+        self.trickle = trickle
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)

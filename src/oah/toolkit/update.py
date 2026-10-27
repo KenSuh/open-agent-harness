@@ -542,8 +542,10 @@ def last_mcp_notices(state_dir: pathlib.Path, catalog: Catalog) -> list[dict]:
     pins = {entry.name: entry for entry in catalog.mcp}
     latest: dict[str, dict] = {}
     for record in records:
-        if record.get("kind") == "mcp" and record.get("status") == "notice" and record.get("item") in pins:
-            latest[record["item"]] = record
+        item = record.get("item")
+        if (record.get("kind") == "mcp" and record.get("status") == "notice"
+                and isinstance(item, str) and item in pins):
+            latest[item] = record
     notices = []
     for name, entry in pins.items():
         record = latest.get(name)

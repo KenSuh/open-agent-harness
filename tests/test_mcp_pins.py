@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
 import os
 import pathlib
 import re
 import shutil
+import time
 import tomllib
 import unittest
 from unittest import mock
@@ -196,6 +198,70 @@ class RegistryTest(unittest.TestCase):
         registry = FakeRegistry(self, {"/demo/latest": (200, latest_answer("demo", "4.5.0"))}, delay=1.5)
         with self.assertRaises(npm.RegistryOffline):
             npm.latest_version("demo", registry=registry.url, timeout=0.3)
+
+    def test_trickling_answer_meets_deadline_and_check_continues(self):
+        for phase in ("headers", "body"):
+            with self.subTest(phase=phase):
+                slow = FakeRegistry(self, {"/slow-mcp/latest": (200, latest_answer("slow-mcp", "2.0.0"))},
+                                    trickle=phase, interval=0.04)
+                fast = FakeRegistry(self, {"/fast-mcp/latest": (200, latest_answer("fast-mcp", "2.0.0"))})
+
+                def query(package):
+                    return npm.latest_version(package, registry=slow.url if package == "slow-mcp" else fast.url,
+                                              timeout=0.3 if package == "slow-mcp" else 3)
+
+                started = time.monotonic()
+                results = check_mcp([entry("slow", "slow-mcp"), entry("fast", "fast-mcp")], registry=query)
+                elapsed = time.monotonic() - started
+                self.assertEqual([r.status for r in results], ["unused(offline)", "notice"])
+                self.assertLess(elapsed, 1.5)
+                self.assertEqual([path for path, _ in fast.requests], ["/fast-mcp/latest"])
+
+    def test_blocked_registry_worker_is_reaped_and_check_continues(self):
+        # Exercise hard cancellation without sockets: the child represents a blocked DNS,
+        # header or body operation, and would keep running if only the caller stopped waiting.
+        code = ("import json, sys, time; package, base, timeout = json.load(sys.stdin); "
+                "time.sleep(3 if package == 'slow-mcp' else 0); "
+                "sys.stdout.write(json.dumps(['ok', '2.0.0']))")
+        children = []
+        real_popen = npm.subprocess.Popen
+
+        def popen(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        def query(package):
+            return npm.latest_version(package, timeout=0.3 if package == "slow-mcp" else 3)
+
+        with mock.patch.object(npm, "_WORKER_CODE", code), mock.patch.object(npm.subprocess, "Popen", popen):
+            started = time.monotonic()
+            results = check_mcp([entry("slow", "slow-mcp"), entry("fast", "fast-mcp")], registry=query)
+            elapsed = time.monotonic() - started
+        self.assertEqual([r.status for r in results], ["unused(offline)", "notice"])
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(len(children), 2)
+        self.assertTrue(all(child.poll() is not None for child in children))
+
+    def test_nested_json_is_registry_error_and_check_continues(self):
+        body = b"[" * 2000 + b"0" + b"]" * 2000
+        asked = []
+
+        def opener(request, timeout):
+            asked.append(request.full_url)
+            return io.BytesIO(body if "/nested-mcp/" in request.full_url else latest_answer("next-mcp", "2.0.0"))
+
+        query = lambda package: npm.latest_version(package, opener=opener)
+        with self.assertRaises(npm.RegistryInvalid) as caught:
+            query("nested-mcp")
+        # Python 3.11 raises RecursionError; newer decoders may accept the nesting and then
+        # reject the top-level array. Both paths must return a fixed-text RegistryInvalid.
+        self.assertIn(str(caught.exception), ("the registry answer is not UTF-8 JSON",
+                                             "the registry answer is not a JSON object"))
+        results = check_mcp([entry("nested", "nested-mcp"), entry("next", "next-mcp")], registry=query)
+        self.assertEqual([r.status for r in results], ["unused(registry error)", "notice"])
+        self.assertNotIn(body.decode(), results[0].describe())
+        self.assertTrue(asked[-1].endswith("/next-mcp/latest"))
 
     def test_closed_port_is_offline(self):
         with self.assertRaises(npm.RegistryOffline):

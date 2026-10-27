@@ -11,8 +11,11 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import pathlib
 import re
 import socket
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +32,7 @@ SEMVER_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
                        rf"(?:-({_IDENT}(?:\.{_IDENT})*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
 
 Opener = Callable[[urllib.request.Request, float], object]
+_WORKER_CODE = "import sys; sys.path.insert(0, sys.argv[1]); from oah.toolkit.npm import _worker; _worker()"
 
 
 class RegistryOffline(Exception):
@@ -117,16 +121,72 @@ def _read(response, deadline: float) -> bytes:
         chunks.append(chunk)
 
 
+def _bounded_latest(package: str, base: str, timeout: float) -> str:
+    """Kill and reap registry I/O at the deadline, including DNS, connect and headers.
+
+    A socket timeout bounds individual receives, not a response whose bytes keep arriving. Use
+    a fresh interpreter so cancellation works on Windows too, without leaving background reads.
+    Only a validated version or a fixed-text error crosses the pipe, never the registry body.
+    """
+    try:
+        env = git_env()
+    except FetchError as exc:
+        raise RegistryOffline(str(exc).partition(": ")[2]) from None
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", _WORKER_CODE, str(pathlib.Path(__file__).resolve().parents[2])],
+            input=json.dumps([package, base, timeout]).encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+            timeout=max(0, timeout - (time.monotonic() - started)))
+    except subprocess.TimeoutExpired:
+        raise RegistryOffline(f"the npm registry did not answer within {timeout:g}s") from None
+    except OSError:
+        raise RegistryOffline("the npm registry query could not start") from None
+    if result.returncode != 0:
+        raise RegistryInvalid("the registry query failed")
+    status, value = json.loads(result.stdout)
+    if status == "offline":
+        raise RegistryOffline(value)
+    if status != "ok":
+        raise RegistryInvalid(value)
+    if not is_semver(value):
+        raise RegistryInvalid("the registry answer's version field is not a plain semver version")
+    return value
+
+
+def _worker() -> None:
+    """Private interpreter entrypoint; do not expose exception text or an unvalidated answer."""
+    try:
+        package, base, timeout = json.load(sys.stdin)
+        url = f"{base}/{urllib.parse.quote(package, safe='@/')}/latest"
+        version = latest_version(package, registry=base, timeout=timeout, opener=_default_opener(url))
+        answer = ("ok", version)
+    except RegistryOffline as exc:
+        answer = ("offline", str(exc))
+    except RegistryInvalid as exc:
+        answer = ("invalid", str(exc))
+    except Exception:
+        answer = ("invalid", "the registry query failed")
+    sys.stdout.write(json.dumps(answer))
+
+
 def latest_version(package: str, *, registry: str | None = None, timeout: float | None = None,
                    opener: Opener | None = None) -> str:
-    """The `latest` dist-tag version of an npm package. Raises RegistryOffline or RegistryInvalid."""
+    """The `latest` dist-tag version of an npm package. Raises RegistryOffline or RegistryInvalid.
+
+    Real registry I/O runs in a cancellable interpreter. An injected opener is a trusted test seam
+    for in-memory responses; it must bound its own blocking operations.
+    """
     base = _registry_base(registry if registry is not None else REGISTRY)
     timeout = FETCH_TIMEOUT if timeout is None else timeout
+    if opener is None:
+        return _bounded_latest(package, base, timeout)
     url = f"{base}/{urllib.parse.quote(package, safe='@/')}/latest"
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "oah"})
     deadline = time.monotonic() + timeout
     try:
-        with (opener or _default_opener(url))(request, timeout) as response:
+        with opener(request, timeout) as response:
             raw = _read(response, deadline)
     except urllib.error.HTTPError as exc:
         raise RegistryInvalid(f"the registry answered HTTP {int(exc.code)}") from None
@@ -144,7 +204,7 @@ def latest_version(package: str, *, registry: str | None = None, timeout: float 
         raise RegistryOffline("the connection to the npm registry failed") from None
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise RegistryInvalid("the registry answer is not UTF-8 JSON") from None
     if not isinstance(data, dict):
         raise RegistryInvalid("the registry answer is not a JSON object")
