@@ -273,16 +273,26 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
 
 
 def content_hashes(data: bytes) -> frozenset[str]:
-    """SHA-256 of original bytes and BOM-marked UTF-8/UTF-16 text normalized to UTF-8/LF."""
+    """SHA-256 of original bytes and plausible UTF-8/UTF-16 text normalized to UTF-8/LF."""
     plain = data.removeprefix(b"\xef\xbb\xbf")
+    hashes = {hashlib.sha256(value).hexdigest() for value in
+              (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n"))}
+    encodings = ()
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings = ("utf-16",)
+    elif (data and len(data) % 2 == 0 and len(data) <= NORMALIZE_LIMIT
+          and max(data[::2].count(0), data[1::2].count(0)) * 4 >= len(data) // 2):
+        encodings = ("utf-16-le", "utf-16-be")
+    for encoding in encodings:
         try:
-            plain = data.decode("utf-16").encode("utf-8")
+            plain = data.decode(encoding).encode("utf-8")
         except UnicodeError:
-            # The channel checker refuses malformed BOM-marked UTF-16 separately.
-            pass
-    return frozenset(hashlib.sha256(value).hexdigest() for value in
-                     (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n")))
+            # A heuristic candidate can be binary or valid only in the other byte order.
+            # The channel checker still refuses malformed BOM-marked text separately.
+            continue
+        hashes.update(hashlib.sha256(value).hexdigest() for value in
+                      (plain, plain.replace(b"\r\n", b"\n")))
+    return frozenset(hashes)
 
 
 def _file_hashes(path: pathlib.Path) -> frozenset[str]:

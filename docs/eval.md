@@ -172,7 +172,8 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
   or loose Git objects in visible inputs or any retained raw Git blob, including overwritten configs
   and unreferenced blobs;
-- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8/UTF-16 BOM normalization,
+- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8/UTF-16 BOM normalization
+  plus plausible BOM-less UTF-16 LE/BE decoding,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
 - a copy of the snapshot file;
 - a file, link or retained Git tree entry matching a `forbidden` pattern, including entries whose
@@ -216,6 +217,11 @@ code/module launch switches (including `--eval`, `--command`, `-c`, `-e` and the
 short options, unsupported config formats, missing/unreadable files, directory inputs and channels
 larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`. Malformed BOM-marked UTF-16 also refuses
 as unchecked.
+
+For even-length BOM-less content within the 64 MiB limit, a NUL in at least a quarter of either
+the even or odd byte positions triggers comparison of both UTF-16 LE and BE decodings, normalized
+to UTF-8/LF. Invalid candidate decodings are skipped; raw byte checks still apply to binary files.
+
 Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing. Existing
 empty directories inside the workspace are allowed; an existing external destination is refused. A
 workspace destination file is checked and frozen like any other file.

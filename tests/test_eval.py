@@ -1777,6 +1777,78 @@ class CorrectionC5Test(unittest.TestCase):
         self.assertEqual(files[str(script)], hashlib.sha256(script.read_bytes()).hexdigest())
 
 
+class CorrectionC6Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_bomless_utf16_oracle_copy_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        text = oracle.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                out = self.root / (encoding + ".json")
+                (case_dir(self.root) / "inputs" / "notes.md").write_bytes(
+                    text.replace("\n", "\r\n").encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(str(oracle.parent), str(caught.exception))
+                self.assertFalse(out.exists())
+                self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_bomless_utf16_oracle_copy_refused_by_run_scanner(self):
+        source = self.source()
+        ws = self.build(source)
+        raw = oracle_path(self.root).read_bytes()
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                (ws.inputs / "notes.md").write_bytes(raw.decode("utf-8").encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
+                        b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n")))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_binary_without_utf16_nul_pattern_remains_accepted(self):
+        source = self.source()
+        ws = self.build(source)
+        # Even length, invalid UTF-16 LE, but fewer than one quarter NULs in either byte lane.
+        raw = b"\x00\xd8\x01\x02\x03\x04\x05\x06\x07\x08"
+        (ws.inputs / "binary.dat").write_bytes(raw)
+        workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
+            oracle_path(self.root).read_bytes()))
+        self.assertEqual(workspace.content_hashes(raw), frozenset({hashlib.sha256(raw).hexdigest()}))
+
+    def test_bomless_utf16_accepts_one_valid_byte_order(self):
+        ws = self.build()
+        hashes = workspace.content_hashes(oracle_path(self.root).read_bytes())
+        text = "Ø ordinary notes\r\n"
+        normalized = hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        for encoding, other in (("utf-16-le", "utf-16-be"), ("utf-16-be", "utf-16-le")):
+            with self.subTest(encoding=encoding):
+                raw = text.encode(encoding)
+                with self.assertRaises(UnicodeError):
+                    raw.decode(other)
+                (ws.inputs / "notes.md").write_bytes(raw)
+                workspace.check_variant_channels(ws, oracle_hashes=hashes)
+                self.assertIn(normalized, workspace.content_hashes(raw))
+
+    def test_binary_matching_nul_pattern_keeps_raw_checks(self):
+        ws = self.build()
+        raw = b"\x00\x00\x00\xd8\xd8\x00"
+        (ws.inputs / "notes.md").write_bytes(raw)
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.assertRaises(UnicodeError):
+                raw.decode(encoding)
+        workspace.check_variant_channels(ws)
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=(hashlib.sha256(raw).hexdigest(),))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertIsNone(caught.exception.__cause__)
+
+
 class FixtureTest(unittest.TestCase):
     def test_fixture_bundle_is_reproducible(self):
         spec = importlib.util.spec_from_file_location("make_snapshot", FIXTURE / "make_snapshot.py")
