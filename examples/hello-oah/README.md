@@ -8,8 +8,9 @@ corrects it, gates prove it is done, and it lands on the default branch. It take
 The project is tiny on purpose. `hello.py` prints `Hello, world!`, and `tests/test_hello.py` tests it. The task
 teaches it to greet a name: `python hello.py Ada` should print `Hello, Ada!`.
 
-A test in this repository (`tests/test_example_hello.py`) runs every `oah` command on this page, in this order,
-with stand-ins for Claude Code and Codex. If a command changes, that test fails, so this page stays correct.
+Tests in this repository (`tests/test_example_hello.py`) run the real Python CHECK commands and exercise the
+illustrative changes-requested path below with stand-ins for Claude Code, Codex and unlazy. The offline
+walkthrough uses a local remote and stops before landing; it does not verify GitHub CI or live engine output.
 
 ## Before you start
 
@@ -17,7 +18,8 @@ with stand-ins for Claude Code and Codex. If a command changes, that test fails,
   [Install on macOS](../../docs/install-macos.md) or [Install on Windows](../../docs/install-windows.md).
 - Claude Code and Codex CLI are installed and signed in. `oah doctor` checks both.
 - For the gates: Node.js, and unlazy, which `oah init` offers to install.
-- For landing: gitleaks, and gh signed in with `gh auth login`. Without them the last step stops and says why.
+- For landing: gitleaks, and for the GitHub route, gh signed in with `gh auth login`. Missing gitleaks stops
+  the scan; missing gh leaves CI unverified.
 
 Every command below runs in a terminal. macOS lines work in zsh or bash. Where Windows PowerShell needs a
 different line, it is shown next to it.
@@ -37,8 +39,15 @@ git commit -m "start hello-oah" -m "Agent-Engine: human"
 On Windows PowerShell, the first two lines are
 `Copy-Item -Recurse examples\hello-oah $HOME\hello-oah` and `cd $HOME\hello-oah`.
 
-The loop needs a remote. Create an empty repository on GitHub (no README, no license) and connect it, or, to
-practise without GitHub, use a bare repository on your own disk:
+For the landing walkthrough, create an empty GitHub repository and push the initial branch. From this
+folder, with gh signed in, run (choose another repository name if `hello-oah` already exists in your account):
+
+```sh
+gh repo create hello-oah --private --source . --remote origin
+git push -u origin main
+```
+
+Alternatively, to practise locally through step 8, use a bare repository on your own disk:
 
 ```sh
 git init --bare -b main ~/hello-remote.git
@@ -48,6 +57,9 @@ git push -u origin main
 
 On Windows PowerShell, write `$HOME\hello-remote.git` instead of `~/hello-remote.git`. The remote must be a URL
 or an absolute path: landing refuses a relative path such as `../hello-remote.git`.
+The local alternative cannot complete step 9 with gh installed: gh cannot query GitHub CI for a disk path,
+so landing refuses with `OAH_LAND_CI_PENDING`. Use the GitHub route for landing. Without gh, CI is
+`unverified`, which does not prove CI passed; removing gh is not a CI verification procedure.
 
 ## 2. Set up oah in the project
 
@@ -62,7 +74,17 @@ did not confirm, and it checks your Claude Code and Codex sign-ins with their ow
 
 It writes `.oah/config.toml`, the rules block in `AGENTS.md` (which `CLAUDE.md` imports), the wiki in
 `docs/wiki/`, templates in `.oah/templates/` and `.gitignore` entries, then builds the first impact map. The
-last line is `OAH_INIT_DONE`, or `OAH_INIT_INCOMPLETE` with what is still to do. Commit the result:
+last line is `OAH_INIT_DONE`, or `OAH_INIT_INCOMPLETE` with what is still to do.
+
+Before running gates, append these Python bytecode patterns to `.gitignore`. Init does not add them, and
+the unit-test CHECK creates bytecode; non-ignored new files would invalidate the gate inputs.
+
+```gitignore
+__pycache__/
+*.py[cod]
+```
+
+Commit the result:
 
 ```sh
 git add -A
@@ -175,16 +197,17 @@ argument, and the tests should have a case for a name.
 oah gates check hello-name
 ```
 
-The first run prints each CHECK command and runs nothing: you approve them first. Read them, then run:
+The first run prints each CHECK command and runs nothing: you approve them first. Read them, then run wiki
+maintenance before the final gate check, because it changes tracked files that are gate inputs:
 
 ```sh
-oah gates check hello-name --approve
 oah wiki maintain --task hello-name
+oah gates check hello-name --approve
 ```
 
 ```text
-OAH_GATES_CHECKED task=hello-name run=2 attest=0 carry=0
 OAH_WIKI_MAINTAINED task=hello-name log=added index=added rollover=noop record=…
+OAH_GATES_CHECKED task=hello-name run=2 attest=0 carry=0
 ```
 
 The gates are now ticked with evidence, `GATES.summary.md` records them, and the wiki log has an entry for the
@@ -201,26 +224,35 @@ git commit -m "greet a name" -m "Agent-Engine: claude"
 oah review --task hello-name
 ```
 
-Codex reviews a clean copy of your committed work. In this walkthrough it finds a real problem:
+Codex reviews a clean copy of your committed work. Follow the outcome it actually reports:
+
+- `OAH_REVIEW_CONVERGED`: approval or only P2/P3 follow-ups remain. Skip the correction commands below
+  and go to step 8; record any follow-ups for later work.
+- `OAH_REVIEW_CHANGES_REQUESTED`: correct the reported P0/P1 findings with the commands below.
+- `OAH_REVIEW_NEEDS_DECISION`: decide how to proceed, then resume with
+  `oah review --task hello-name --decision "<your decision>"` and follow its new outcome.
+
+The empty-name finding below is illustrative, and is the case used by the fake reviewer in the test.
+Claude may already handle empty names, so a live review need not report it or require any correction:
 
 ```text
 OAH_REVIEW_CHANGES_REQUESTED: R1 of task hello-name requested changes (P1×1). Correct them (oah fix --task hello-name runs Codex for that), commit, then run oah review --task hello-name again
 R1-F1 P1 quality hello.py:7 — an empty name prints 'Hello, !'
 ```
 
-Let Codex correct it:
+Only when changes are requested, let Codex correct the actual findings:
 
 ```sh
 oah fix --task hello-name
 ```
 
 `oah fix` prints the diff Codex made and leaves it uncommitted for you to inspect. Here `greet` falls back to
-`world` for an empty name. Run the gates and the wiki upkeep again, commit the correction as Codex's work, and
+`world` for an empty name. Run wiki upkeep and then the gates again, commit the correction as Codex's work, and
 bind the commit to the correction:
 
 ```sh
-oah gates check hello-name --approve
 oah wiki maintain --task hello-name
+oah gates check hello-name --approve
 git add -A
 git commit -m "fall back to world for an empty name" -m "Agent-Engine: codex"
 oah fix --task hello-name --bind
@@ -233,8 +265,8 @@ OAH_REVIEW_CONVERGED: R2 of task hello-name the series converged at head …
 independent: no — codex wrote commits in base..head, so this is not an independent review (an honest label for this engine order, not an error)
 ```
 
-The review converged. There is no fixed number of rounds: if a round had found something new, you would run
-`oah fix` and `oah review` again. If the loop needs your decision, it stops with `OAH_REVIEW_NEEDS_DECISION`.
+This illustrative review converged. There is no fixed number of rounds: follow each new outcome using the
+rules above. Running `oah fix` after convergence refuses with `OAH_FIX_NOT_REQUESTED`; go to step 8 instead.
 
 ## 8. Finish the task
 

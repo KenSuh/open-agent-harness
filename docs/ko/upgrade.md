@@ -74,14 +74,42 @@ oah doctor
 ## 4. 게이트 검사기 unlazy
 
 unlazy는 `oah`의 게이트 계약을 검증한 커밋 하나에 고정돼 있고 스킬 업데이트는 이것을 옮기지 않는다. 고정
-커밋은 `oah`의 새 버전만 바꿀 수 있다. 고정된 사본은 `oah init --with-unlazy`로 설치하고, 맞지 않는 사본을
-바꾸려면 `--force`를 더한다. 사본이 맞지 않는 동안 게이트 명령은 `OAH_UNLAZY_UNPINNED`로 거절한다.
+커밋은 `oah`의 새 버전만 바꿀 수 있다. 고정된 사본은 `oah init --with-unlazy`로 설치한다. `--force`는 맞지 않는
+프로젝트 사본을 교체하지 못하며 `.oah/config.toml`을 기본값으로 되돌릴 수 있으므로 더하지 않는다. 사본이 맞지
+않는 동안 게이트 명령은 `OAH_UNLAZY_UNPINNED`로 거절한다. 복구는 다음 순서로 한다.
+
+1. `OAH_UNLAZY_DIR`이 설정돼 있으면 새 고정 커밋과 일치하는 사본을 가리키게 하거나 해제한다. macOS에서는
+   `unset OAH_UNLAZY_DIR`, PowerShell에서는 `Remove-Item Env:OAH_UNLAZY_DIR -ErrorAction SilentlyContinue`를
+   쓴다. 이 변수가 설정돼 있으면 그 위치만 검사하므로 다른 사본을 설치해도 우회되지 않는다.
+2. `.agents/skills/unlazy`와 `.claude/skills/unlazy`를 확인한다. 맞지 않는 프로젝트 사본마다 프로젝트 밖의
+   백업 위치로 옮기거나 더는 필요 없음을 확인한 뒤 직접 지운다. 첫 경로의 예는 macOS에서
+   `mv .agents/skills/unlazy ../unlazy-backup`, PowerShell에서
+   `Move-Item .agents\skills\unlazy ..\unlazy-backup`이다. 아직 존재하지 않는 백업 경로를 고른다.
+   맞지 않는 프로젝트 디렉터리가 있으면 `--force`를 줘도 init은 `OAH_INIT_UNLAZY_EXISTS`를 보고한다.
+3. `oah init --with-unlazy`를 다시 실행하고 계획을 확인한 뒤 고정 사본 설치를 승인한다. 기존 설정은 유지하고
+   커밋하기 전에 결과를 살펴본다.
 
 ## 5. MCP 템플릿
 
-[`mcp/`](../../mcp/README.md)의 템플릿은 띄우는 서버마다 npm 버전을 고정해 두었다. 사용자가 바꿀 때만 바뀐다.
-내 설정에 합쳐 넣은 사본의 `@<version>` 부분을 고친 뒤 Claude Code나 Codex를 다시 시작한다. 서버마다 출처와
-라이선스는 [툴킷](toolkit.md) 문서에 있다.
+[`mcp/`](../../mcp/README.md)의 템플릿은 띄우는 서버마다 npm 버전을 고정해 두었다. 프로젝트 안에서 새 버전을
+확인한다.
+
+```sh
+oah skills update --check
+oah skills update
+oah doctor
+```
+
+두 update 명령은 카탈로그에 고정된 MCP 버전을 npm 레지스트리에 조회한다. `OAH_MCP_UPDATE_AVAILABLE`은 새
+버전이 있다는 뜻이며 설치됐다는 뜻은 아니다. `--check`는 알리기만 하고 아무것도 쓰지 않는다. `oah skills update`는
+스킬 캐시도 업데이트하며 상태 폴더의 `toolkit/updates.jsonl`에 알림을 기록한다. `oah doctor`는 MCP 항목마다
+마지막으로 기록된 알림을 오프라인으로 보여 준다. npm에 조회하거나 내 설정이 업데이트됐음을 증명하지 않는다.
+`current`는 더 새 버전을 찾지 못했다는 뜻이다. `unused(offline)`이나 `unused(registry error)`는 확인할 수 없었다는
+뜻이므로 나중에 다시 시도한다. 어느 명령도 MCP 고정 버전이나 사용자 MCP 설정을 고치지 않는다.
+
+업그레이드하기로 결정하면 내 설정에 합쳐 넣은 사본의 `@<version>` 부분을 고친 뒤 Claude Code나 Codex를 다시
+시작한다. 키트 관리자는 `mcp/` 템플릿과 카탈로그의 고정 버전을 별도로 고친다. 서버마다 출처와 라이선스는
+[툴킷](toolkit.md) 문서에 있다.
 
 ## 6. 모델
 

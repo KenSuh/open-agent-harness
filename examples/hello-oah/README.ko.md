@@ -8,8 +8,9 @@
 프로젝트는 일부러 아주 작게 만들었다. `hello.py`는 `Hello, world!`를 출력하고 `tests/test_hello.py`가 그것을
 검사한다. 이번 작업은 이름을 받아 인사하게 만드는 것이다. `python hello.py Ada`가 `Hello, Ada!`를 출력해야 한다.
 
-이 저장소의 테스트(`tests/test_example_hello.py`)는 이 문서의 `oah` 명령을 Claude Code와 Codex 대역을 써서 이
-순서 그대로 모두 실행한다. 명령이 바뀌면 그 테스트가 실패하므로 이 문서는 늘 코드와 맞는다.
+이 저장소의 테스트(`tests/test_example_hello.py`)는 실제 Python CHECK 명령을 실행하고 Claude Code, Codex,
+unlazy 대역으로 아래의 수정 요청 예시 경로를 검증한다. 오프라인 따라 하기 테스트는 로컬 원격을 쓰고 반영
+직전에 멈춘다. GitHub CI나 실제 엔진의 출력은 검증하지 않는다.
 
 ## 시작하기 전에
 
@@ -17,7 +18,8 @@
   [macOS에 설치하기](../../docs/ko/install-macos.md)나 [Windows에 설치하기](../../docs/ko/install-windows.md)를 따른다.
 - Claude Code와 Codex CLI가 설치돼 있고 로그인돼 있어야 한다. `oah doctor`가 둘 다 확인한다.
 - 게이트에는 Node.js와 unlazy가 필요하다. unlazy는 `oah init`이 설치를 제안한다.
-- 반영 단계에는 gitleaks와 `gh auth login`으로 로그인한 gh가 필요하다. 없으면 마지막 단계가 멈추고 이유를 알려 준다.
+- 반영 단계에는 gitleaks가 필요하고 GitHub 경로에는 `gh auth login`으로 로그인한 gh도 필요하다. gitleaks가
+  없으면 스캔에서 멈추고 gh가 없으면 CI는 미검증으로 남는다.
 
 아래 명령은 모두 터미널에서 실행한다. macOS 명령은 zsh와 bash에서 그대로 된다. Windows PowerShell에서 다르게
 써야 하는 줄은 옆에 따로 적었다.
@@ -37,8 +39,15 @@ git commit -m "start hello-oah" -m "Agent-Engine: human"
 Windows PowerShell에서는 앞의 두 줄을 `Copy-Item -Recurse examples\hello-oah $HOME\hello-oah`와
 `cd $HOME\hello-oah`로 바꾼다.
 
-흐름을 끝까지 돌리려면 원격 저장소가 있어야 한다. GitHub에 빈 저장소(README, 라이선스 없음)를 만들어
-연결한다. GitHub 없이 연습하려면 내 디스크에 bare 저장소를 만들어 쓴다.
+반영까지 따라 하려면 GitHub에 빈 저장소를 만들고 초기 브랜치를 올린다. gh에 로그인한 뒤 이 폴더에서
+실행한다. 계정에 `hello-oah`가 이미 있으면 다른 저장소 이름을 고른다.
+
+```sh
+gh repo create hello-oah --private --source . --remote origin
+git push -u origin main
+```
+
+대신 8단계까지 로컬에서 연습하려면 내 디스크의 bare 저장소를 쓸 수 있다.
 
 ```sh
 git init --bare -b main ~/hello-remote.git
@@ -48,6 +57,9 @@ git push -u origin main
 
 Windows PowerShell에서는 `~/hello-remote.git` 대신 `$HOME\hello-remote.git`이라고 쓴다. 원격은 URL이나
 절대 경로여야 한다. `../hello-remote.git` 같은 상대 경로는 반영 단계에서 거절된다.
+gh가 설치돼 있으면 로컬 대안으로는 9단계를 끝낼 수 없다. gh가 디스크 경로의 GitHub CI를 조회할 수 없어
+`OAH_LAND_CI_PENDING`으로 반영이 거절된다. 반영에는 GitHub 경로를 쓴다. gh가 없으면 CI는 `unverified`이고
+CI 통과를 증명하지 않는다. gh를 제거하는 것은 CI 검증 방법이 아니다.
 
 ## 2. 프로젝트에 oah 설정하기
 
@@ -62,7 +74,17 @@ CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스
 
 `oah init`은 `.oah/config.toml`, `AGENTS.md`의 규칙 블록(`CLAUDE.md`가 불러온다), `docs/wiki/`의 위키,
 `.oah/templates/`의 템플릿, `.gitignore` 항목을 쓰고 첫 영향 지도를 만든다. 마지막 줄은 `OAH_INIT_DONE`이다.
-아직 남은 일이 있으면 `OAH_INIT_INCOMPLETE`와 함께 할 일을 알려 준다. 결과를 커밋한다.
+아직 남은 일이 있으면 `OAH_INIT_INCOMPLETE`와 함께 할 일을 알려 준다.
+
+게이트를 실행하기 전에 `.gitignore`에 아래 Python 바이트코드 패턴을 덧붙인다. init은 이 패턴을 더하지 않는다.
+단위 테스트 CHECK가 바이트코드를 만들므로 무시되지 않은 새 파일이 생기면 게이트 입력이 달라진다.
+
+```gitignore
+__pycache__/
+*.py[cod]
+```
+
+결과를 커밋한다.
 
 ```sh
 git add -A
@@ -175,16 +197,16 @@ oah gates check hello-name
 ```
 
 처음 실행하면 CHECK 명령을 보여 주기만 하고 아무것도 실행하지 않는다. 먼저 사용자가 승인해야 한다. 명령을
-읽어 본 다음 실행한다.
+읽어 본 다음 위키 정리를 먼저 하고 최종 게이트를 실행한다. 위키 정리는 게이트 입력인 추적 파일을 바꾼다.
 
 ```sh
-oah gates check hello-name --approve
 oah wiki maintain --task hello-name
+oah gates check hello-name --approve
 ```
 
 ```text
-OAH_GATES_CHECKED task=hello-name run=2 attest=0 carry=0
 OAH_WIKI_MAINTAINED task=hello-name log=added index=added rollover=noop record=…
+OAH_GATES_CHECKED task=hello-name run=2 attest=0 carry=0
 ```
 
 이제 게이트에 증거와 함께 체크 표시가 붙었고 `GATES.summary.md`가 그것을 기록한다. 위키 로그에는 이 작업의
@@ -201,26 +223,35 @@ git commit -m "greet a name" -m "Agent-Engine: claude"
 oah review --task hello-name
 ```
 
-Codex는 커밋된 작업의 깨끗한 사본을 리뷰한다. 이 예제에서는 실제 문제를 하나 찾는다.
+Codex는 커밋된 작업의 깨끗한 사본을 리뷰한다. 실제로 보고한 결과에 따라 진행한다.
+
+- `OAH_REVIEW_CONVERGED`이면 승인됐거나 P2/P3 후속 작업만 남았다. 아래 수정 명령을 건너뛰고 8단계로 간다.
+  후속 작업은 나중에 할 일로 기록한다.
+- `OAH_REVIEW_CHANGES_REQUESTED`이면 아래 명령으로 보고된 P0/P1 지적을 고친다.
+- `OAH_REVIEW_NEEDS_DECISION`이면 진행 방법을 결정한 뒤
+  `oah review --task hello-name --decision "<your decision>"`으로 이어 가고 새 결과를 따른다.
+
+아래 빈 이름 지적은 테스트의 가짜 리뷰어가 쓰는 예시다. Claude가 이미 빈 이름을 처리했을 수 있으므로 실제
+리뷰에서 이 지적이 나오거나 수정이 필요하리라는 보장은 없다.
 
 ```text
 OAH_REVIEW_CHANGES_REQUESTED: R1 of task hello-name requested changes (P1×1). Correct them (oah fix --task hello-name runs Codex for that), commit, then run oah review --task hello-name again
 R1-F1 P1 quality hello.py:7 — an empty name prints 'Hello, !'
 ```
 
-이름이 비어 있으면 `Hello, !`가 나온다는 지적이다. Codex에게 고치게 한다.
+이름이 비어 있으면 `Hello, !`가 나온다는 지적이다. 수정 요청이 있을 때만 Codex에게 실제 지적을 고치게 한다.
 
 ```sh
 oah fix --task hello-name
 ```
 
 `oah fix`는 Codex가 만든 diff를 출력하고 사용자가 확인할 수 있게 커밋하지 않은 채 남겨 둔다. 여기서는 이름이
-비어 있으면 `world`를 쓰도록 `greet`를 고친다. 게이트와 위키 정리를 다시 하고, 수정을 Codex의 작업으로
+비어 있으면 `world`를 쓰도록 `greet`를 고친다. 위키 정리 다음 게이트를 다시 실행하고, 수정을 Codex의 작업으로
 커밋하고, 그 커밋을 수정 기록에 묶은 다음 다시 리뷰한다.
 
 ```sh
-oah gates check hello-name --approve
 oah wiki maintain --task hello-name
+oah gates check hello-name --approve
 git add -A
 git commit -m "fall back to world for an empty name" -m "Agent-Engine: codex"
 oah fix --task hello-name --bind
@@ -233,8 +264,8 @@ OAH_REVIEW_CONVERGED: R2 of task hello-name the series converged at head …
 independent: no — codex wrote commits in base..head, so this is not an independent review (an honest label for this engine order, not an error)
 ```
 
-리뷰가 수렴했다. 라운드 수는 정해져 있지 않다. 새 지적이 나왔다면 `oah fix`와 `oah review`를 한 번 더
-실행하면 된다. 사용자의 결정이 필요하면 `OAH_REVIEW_NEEDS_DECISION`으로 멈춘다.
+이 예시의 리뷰는 수렴했다. 라운드 수는 정해져 있지 않다. 새 결과마다 위 규칙을 따른다. 수렴한 뒤 `oah fix`를
+실행하면 `OAH_FIX_NOT_REQUESTED`로 거절되므로 8단계로 간다.
 
 ## 8. 작업 끝내기
 

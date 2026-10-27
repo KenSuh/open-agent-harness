@@ -8,6 +8,7 @@ import shutil
 import unittest
 
 from tests.helpers import make_tmp_dir
+from oah.toolkit import update
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "oah"
@@ -23,6 +24,8 @@ FIXED_CAP = re.compile(
     re.IGNORECASE)
 # Codes of commands from lanes still landing: allowed to be missing only while their module is absent.
 PENDING_LANES = {"OAH_FIX_": "oah.fix_cli", "OAH_INIT_": "oah.init_cli"}
+# P7m extends an existing module; keep its one new diagnostic pending only until its notice reader lands.
+PENDING_CODES = {"OAH_MCP_UPDATE_AVAILABLE"} if not hasattr(update, "last_mcp_notices") else set()
 LINK = re.compile(r"\]\(([^)\s]+)\)")
 HANGUL_COLON = re.compile(r"[가-힣][)\]`*]*:\s*$")
 
@@ -96,7 +99,8 @@ class TroubleshootingCodesTest(unittest.TestCase):
         pending = tuple(prefix for prefix, module in PENDING_LANES.items() if importlib.util.find_spec(module) is None)
         for page in lane_docs():
             with self.subTest(page=str(page.relative_to(REPO))):
-                missing = [code for code in missing_codes(read(page), SRC) if not code.startswith(pending or ("-",))]
+                missing = [code for code in missing_codes(read(page), SRC)
+                           if code not in PENDING_CODES and not code.startswith(pending or ("-",))]
                 self.assertEqual(missing, [])
 
 

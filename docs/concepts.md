@@ -107,8 +107,10 @@ each engine.
 - **Rules score four axes:** kind (for example `docs`, `implementation`, `migration`), intensity, reasoning and
   risk. `oah recommend` shows the score. Risk `critical` means `max`, and a migration or security task is at
   least `high`.
-- `oah packet new` and `oah call` apply the score automatically and record it in the packet's `## Plan`.
-  `--tier` overrides it, and the override is recorded.
+- `oah packet new` scores the task and writes the stage routes in the packet's `## Plan`. It has no
+  `--tier` option; edit the generated plan if you want to change a packet's tier.
+- `oah call` uses the packet's stage tier when present, otherwise the rules. Its call-time `--tier` option
+  overrides that choice for the run. Routing and overrides are recorded in run state; the packet is not rewritten.
 - **Effort is what the model supports, with no fixed cap.** A tier's effort is a level the engine lists for the
   model. `highest` means the top reasoning level Codex lists for the resolved model; when Codex has not reported
   the levels, `oah` refuses with `OAH_EFFORT_METADATA_MISSING` instead of guessing.

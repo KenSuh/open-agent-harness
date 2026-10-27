@@ -77,15 +77,42 @@ user and plugin copies.
 ## 4. unlazy, the gate checker
 
 unlazy is pinned to one commit that `oah`'s gate contract is tested against, and skill updates never move it.
-Only a new `oah` version can move the pin. Install the pinned copy with `oah init --with-unlazy`, and add
-`--force` to replace an incompatible copy. Gate commands refuse with `OAH_UNLAZY_UNPINNED` while the copy does
-not match.
+Only a new `oah` version can move the pin. Install the pinned copy with `oah init --with-unlazy`.
+Avoid `--force`: it does not replace an incompatible project copy and can reset `.oah/config.toml` to defaults.
+Gate commands refuse with `OAH_UNLAZY_UNPINNED` while the copy does not match. To repair it:
+
+1. If `OAH_UNLAZY_DIR` is set, either point it at a copy matching the new pin or clear it
+   (`unset OAH_UNLAZY_DIR` on macOS; `Remove-Item Env:OAH_UNLAZY_DIR -ErrorAction SilentlyContinue` in PowerShell).
+   The override is the only location checked while set; installing another copy will not bypass it.
+2. Inspect `.agents/skills/unlazy` and `.claude/skills/unlazy`. Move each incompatible project copy outside
+   the project to a backup location, or remove it yourself if it is no longer needed. For example, for the
+   first path use `mv .agents/skills/unlazy ../unlazy-backup` on macOS or
+   `Move-Item .agents\skills\unlazy ..\unlazy-backup` in PowerShell, choosing a backup path that does not exist.
+   Init reports `OAH_INIT_UNLAZY_EXISTS` for an existing incompatible project directory, even with `--force`.
+3. Run `oah init --with-unlazy` again, inspect its plan and confirm the pinned installation. Keep your existing
+   config; review the result before committing.
 
 ## 5. MCP templates
 
-The templates in [`mcp/`](../mcp/README.md) pin the npm version of each server they start. They change only
-when you change them: edit the `@<version>` suffix in the copy you merged into your configuration, then restart
-Claude Code or Codex. The [Toolkit](toolkit.md) page lists each server with its source and license.
+The templates in [`mcp/`](../mcp/README.md) pin the npm version of each server they start. Check for newer
+versions from inside your project:
+
+```sh
+oah skills update --check
+oah skills update
+oah doctor
+```
+
+Both update commands query the npm registry for the catalog's MCP pins. `OAH_MCP_UPDATE_AVAILABLE` means a
+newer version is available, not installed. `--check` only reports it and writes nothing; `oah skills update`
+also updates the skill cache and records notices in the state folder's `toolkit/updates.jsonl`. `oah doctor`
+shows the last recorded notice per MCP entry offline; it does not query npm or prove your config is updated.
+`current` means no newer version was found; `unused(offline)` or `unused(registry error)` means the check
+could not establish that, so retry later. None of these commands edits an MCP pin or your MCP configuration.
+
+When you choose to upgrade, edit the `@<version>` suffix in the copy you merged into your configuration,
+then restart Claude Code or Codex. Kit maintainers update the `mcp/` templates and catalog pins separately.
+The [Toolkit](toolkit.md) page lists each server with its source and license.
 
 ## 6. Models
 
