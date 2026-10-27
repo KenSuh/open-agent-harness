@@ -2236,7 +2236,12 @@ class SecretTest(unittest.TestCase):
                  "created", "prepared", "queued", "running", "finished", "failed", "timed_out", "refused", "lost",
                  "applied", "no-change", "aborted", "unverified", "match", "mismatch", "downgraded",
                  "low", "medium", "high", "xhigh", "max", "highest", "normal", "critical", "flag", "packet", "rules",
-                 "implementation", "pin", "quality_order", "quality_order(unconfirmed)", "cli_default", "effective_config"}
+                 "implementation", "pin", "quality_order", "quality_order(unconfirmed)", "cli_default", "effective_config",
+                 "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
+                 "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
+                 "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
+                 *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort",
+                                                     "unranked-model", "below-floor", "above-cap"))}
         codes = {"OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED",
                  "OAH_FIX_WARNING", "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
                  *fix._ERROR_DIAGNOSTICS}
