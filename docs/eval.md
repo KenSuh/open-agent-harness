@@ -107,7 +107,10 @@ A variant is a named command, or an `oah` configuration that its command uses. A
 inputs. Bare program names resolve through PATH like every `oah` tool. Relative executable paths such as
 `./run_variant` resolve inside each constructed workspace repository, including oracle tests. Windows
 batch files are never launched. Put script arguments in the snapshot or case `inputs/`; existing external
-input files are refused even when their contents are ordinary. Only the registered executable may be external.
+input files are refused even when their contents are ordinary. Only the registered executable and an
+npm entry script verified by `oah.engines.proc` may be external. Windows npm commands retain that
+resolver provenance; their entry script is scanned and frozen as an executable dependency. An explicit
+`node.exe /external/script.js` command receives no such exception.
 
 ### What a variant sees
 
@@ -169,7 +172,7 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
   or loose Git objects in visible inputs or any retained raw Git blob, including overwritten configs
   and unreferenced blobs;
-- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization,
+- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8/UTF-16 BOM normalization,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
 - a copy of the snapshot file;
 - a file, link or retained Git tree entry matching a `forbidden` pattern, including entries whose
@@ -192,9 +195,9 @@ grader folder's canonical real path (including normalized separators/case on Win
 channel, even inside `@/absolute/path` or `file://` text. UTF-16 files also receive this literal check.
 Free text is never parsed for path aliases: prefixes, `..` and paths inside prose are not resolved.
 Only actual file references in command arguments and structured config values are resolved; existing
-external references refuse except the registered executable. Binary channels retain content/path
-fingerprint checks; retained blobs also receive history-container checks. Runtime environment values
-receive content and literal path checks without interpreting free-text aliases.
+external references refuse except the registered executable and its verified npm entry script. Binary
+channels retain content/path fingerprint checks; retained blobs also receive history-container checks.
+Runtime environment values receive content and literal path checks without interpreting free-text aliases.
 
 Config injection checks every repository ancestor, replaces snapshot links/reparse points at `.oah`
 and `.oah/config.toml`, creates real directories and exclusively creates the file without following
@@ -204,13 +207,15 @@ no Git templates, preventing host template hooks from adding external file refer
 
 Command file references use separate arguments or `--option=value`; relative command paths use the
 workspace repository. Config file references must be absolute: engine config loaders can resolve
-relative paths against different folders, so oah refuses that ambiguity. Referenced workspace files and
-the resolved executable, including nested config dependencies, are hashed per case and checked again
-at run. Values with a path separator, a suffix or a file/path/include/config option or key are conservatively treated as file references.
+relative paths against different folders, so oah refuses that ambiguity. Referenced workspace files,
+the resolved executable and verified npm entry script, including nested config dependencies, are hashed
+per case and checked again at run. Values with a path separator, a suffix or a file/path/include/config
+option or key are conservatively treated as file references.
 Only literal references and TOML/JSON configs can be checked. Dynamic paths, response files, inline
 code/module launch switches (including `--eval`, `--command`, `-c`, `-e` and their `=` forms), attached
 short options, unsupported config formats, missing/unreadable files, directory inputs and channels
-larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`.
+larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`. Malformed BOM-marked UTF-16 also refuses
+as unchecked.
 Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing. Existing
 empty directories inside the workspace are allowed; an existing external destination is refused. A
 workspace destination file is checked and frozen like any other file.
@@ -287,7 +292,8 @@ test_timeout_seconds = 300    # per oracle test, when the oracle sets none
 Run folders go to `<oah state>/eval/runs/<run id>/`, which is `OAH_STATE_DIR` or `<git common dir>/oah`.
 `--runs-dir` overrides this. Each run folder holds:
 
-- `run.json`;
+- `run.json`, whose `source` is a `sha256:<digest>` identifier, never the source file's location (the
+  preregistration hash for frozen runs, or a digest of the loaded plan data for exploratory runs);
 - for each case and variant, `cases/<case>/<variant>/` with `result.json`, `stdout.txt`, `stderr.txt`,
   the final `workspace/` and its `output/`;
 - after grading, `grade.json`.

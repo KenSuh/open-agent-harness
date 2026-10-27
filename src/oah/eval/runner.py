@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import pathlib
 import secrets
@@ -212,7 +213,9 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
             run_dir.mkdir(parents=True)
             results = [_launch(item, run_dir, source.sha256, env, timeout_seconds) for item in prepared]
             run = {"format": "oah-eval-run/1", "run_id": run_id, "prereg_sha256": source.sha256,
-                   "source": str(source.path), "started_at": started, "finished_at": _now(),
+                   "source": "sha256:" + (source.sha256 or hashlib.sha256(json.dumps(
+                       source.data, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()),
+                   "started_at": started, "finished_at": _now(),
                    "cases": [{key: entry.get(key) for key in ("id", "split", "path", "case_sha256", "oracle_sha256",
                                                               "used_for_development")} for entry, _ in cases],
                    "variants": [{"name": v["name"], "fake": bool(v.get("fake"))} for v, _ in variants],

@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,9 +19,10 @@ import zlib
 from unittest import mock
 
 from oah.eval import case as case_mod
-from oah.eval import grade, plan, report, runner, workspace
+from oah.engines import proc
+from oah.eval import commands, grade, plan, report, runner, workspace
 from oah.eval.errors import EvalError
-from tests.helpers import directory_alias, make_tmp_dir
+from tests.helpers import directory_alias, make_tmp_dir, npm_layout
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "eval"
 SNAPSHOT = "e485fa382909fe7dedb3d0a437d7e8b6b14ca10c"
@@ -1635,6 +1637,144 @@ class CorrectionC4Test(unittest.TestCase):
         self.assertIn("honest", limits)
         self.assertIn("malicious case author", limits)
         self.assertIn("sandbox", limits)
+
+
+class CorrectionC5Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+        self.scratch = make_tmp_dir(self)
+        self.env = Env(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_utf16_oracle_input_copy_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        text = oracle.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        for bom, encoding in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+            with self.subTest(encoding=encoding):
+                out = self.root / (encoding + ".json")
+                (case_dir(self.root) / "inputs" / "notes.md").write_bytes(
+                    bom + text.replace("\n", "\r\n").encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(str(oracle.parent), str(caught.exception))
+                self.assertFalse(out.exists())
+                self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_utf16_oracle_input_copy_refused_by_run_scanner(self):
+        source = self.source()
+        ws = self.build(source)
+        raw = oracle_path(self.root).read_bytes()
+        for bom, encoding in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+            with self.subTest(encoding=encoding):
+                (ws.inputs / "notes.md").write_bytes(bom + raw.decode("utf-8").encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
+                        b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n")))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_utf16_input_requires_valid_text_and_allows_non_oracle_text(self):
+        ws = self.build()
+        target = ws.inputs / "notes.md"
+        hashes = workspace.content_hashes(oracle_path(self.root).read_bytes())
+        target.write_bytes(b"\xff\xfe" + "ordinary notes\r\n".encode("utf-16-le"))
+        workspace.check_variant_channels(ws, oracle_hashes=hashes)
+        target.write_bytes(b"\xff\xfe\x00")
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=hashes)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+
+    def npm(self):
+        prefix = self.scratch / "npm"
+        shim = npm_layout(prefix, "@test/cli", {"claude": "cli.js"}, command="claude",
+                          script_rel="cli.js", local_node=True)
+        script = prefix / "node_modules" / "@test" / "cli" / "cli.js"
+        script.write_bytes((self.root / "variants" / "fake_variant.py").read_bytes())
+        if os.name != "nt":
+            # A real, tiny fake runtime avoids requiring Node or an npm installer.
+            node = prefix / "node.exe"
+            node.write_bytes(("#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n').encode("utf-8"))
+            node.chmod(0o755)
+        return shim, script
+
+    def test_verified_npm_entry_is_scanned_and_frozen(self):
+        shim, script = self.npm()
+        ws = self.build()
+        resolved = proc.classify(shim, "claude", platform="win32", search_path=str(shim.parent))
+        with mock.patch.object(commands, "resolve_command", return_value=resolved):
+            argv = commands.resolve_argv(["claude"], self.env.env, "variant", cwd=ws.repo)
+        files = workspace.check_variant_channels(ws, argv=argv)
+        self.assertEqual(files[str(script)], hashlib.sha256(script.read_bytes()).hexdigest())
+        self.assertIn(str(shim.parent / "node.exe"), files)
+        # Spelling the same argv directly conveys no resolver provenance.
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, argv=list(argv))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        external = self.scratch / "public.txt"
+        external.write_bytes(b"ordinary external input\n")
+        argv.append(str(external))
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, argv=argv)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        argv.pop()
+        entry = argv[1]
+        argv[1] = str(external)
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, argv=argv)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        argv[1] = entry
+        script.write_bytes(oracle_path(self.root).read_bytes())
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, argv=argv, oracle_hashes=workspace.content_hashes(
+                script.read_bytes()))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_exploratory_source_is_an_identifier(self):
+        source = plan.load_run_source(self.root / "plan.toml")
+        run_dir = runner.run_eval(source, self.env.runs, env=self.env.env, timeout_seconds=60)
+        run = json.loads((run_dir / "run.json").read_bytes())
+        self.assertIsNone(run["prereg_sha256"])
+        expected = hashlib.sha256(json.dumps(source.data, ensure_ascii=False, sort_keys=True).encode(
+            "utf-8")).hexdigest()
+        self.assertEqual(run["source"], "sha256:" + expected)
+
+    @unittest.skipUnless(os.name != "nt", "POSIX fake runtime; Windows resolution is checked separately")
+    def test_npm_prereg_run_and_changed_entry_refusal(self):
+        shim, script = self.npm()
+        set_plan(self.root, '"{python}", "fake_variant.py"', '"claude"')
+        configure_fixture(self.root, self.env.env)
+        out = self.root / "prereg.json"
+
+        def resolve(name, search_path):
+            return proc.classify(shim, name, platform="win32", search_path=search_path)
+
+        with mock.patch.object(commands, "resolve_command", side_effect=resolve):
+            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+            original = script.read_bytes()
+            script.write_bytes(original + b"\n# changed installed entry\n")
+            with self.assertRaises(EvalError) as caught:
+                runner.run_eval(plan.load_frozen(out), self.env.runs, env=self.env.env,
+                                timeout_seconds=60, run_id="changed")
+            self.assertEqual(caught.exception.code, "OAH_EVAL_PREREG_MISMATCH")
+            self.assertEqual(self.env.launched(), [])
+            self.assertFalse(self.env.runs.exists())
+            script.write_bytes(original)
+            run_dir = runner.run_eval(plan.load_frozen(out), self.env.runs, env=self.env.env,
+                                      timeout_seconds=60)
+            self.assertEqual(self.env.launched(), ["miss", "catch"])
+            self.assertEqual(read_result(run_dir, "baseline")["exit_code"], 0)
+            self.assertEqual(read_result(run_dir, "improved")["exit_code"], 0)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows PATH/npm resolution")
+    def test_windows_npm_resolver_entry_passes_scan(self):
+        shim, script = self.npm()
+        ws = self.build()
+        argv = commands.resolve_argv(["claude"], dict(self.env.env, PATH=str(shim.parent)),
+                                     "variant", cwd=ws.repo)
+        files = workspace.check_variant_channels(ws, argv=argv)
+        self.assertEqual(files[str(script)], hashlib.sha256(script.read_bytes()).hexdigest())
 
 
 class FixtureTest(unittest.TestCase):

@@ -6,10 +6,18 @@ import pathlib
 import sys
 from typing import Mapping, Sequence
 
-from oah.engines.proc import UnsupportedBatchShim, is_batch, resolve_command
+from oah.engines.proc import Resolved, UnsupportedBatchShim, is_batch, resolve_command
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 
 PLACEHOLDERS = ("{python}", "{plan_dir}")
+
+
+class _ResolvedArgv(list[str]):
+    """Keep resolver provenance alongside the argv passed to scanning and launch."""
+
+    def __init__(self, argv: Sequence[str], resolution: Resolved) -> None:
+        super().__init__(argv)
+        self.resolution = resolution
 
 
 def substitute(arg: str, plan_dir: str) -> str:
@@ -40,4 +48,4 @@ def resolve_argv(argv: Sequence[str], env: Mapping[str, str], what: str, *,
     if found is None:
         raise EvalError("OAH_EVAL_COMMAND_MISSING", f"{what}: {program} was not found on PATH; {hint}",
                         EXIT_ENVIRONMENT)
-    return [*found.argv, *rest]
+    return _ResolvedArgv([*found.argv, *rest], found)

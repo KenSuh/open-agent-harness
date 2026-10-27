@@ -21,6 +21,7 @@ from typing import Iterable, Mapping, Sequence
 
 from oah.engines.proc import RunResult, run_command
 from oah.eval.case import Case, file_sha256
+from oah.eval.commands import _ResolvedArgv
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.paths import GitMissing, git_argv
 
@@ -272,8 +273,14 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
 
 
 def content_hashes(data: bytes) -> frozenset[str]:
-    """SHA-256 of original bytes and UTF-8 BOM/CRLF-normalized copies."""
+    """SHA-256 of original bytes and BOM-marked UTF-8/UTF-16 text normalized to UTF-8/LF."""
     plain = data.removeprefix(b"\xef\xbb\xbf")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            plain = data.decode("utf-16").encode("utf-8")
+        except UnicodeError:
+            # The channel checker refuses malformed BOM-marked UTF-16 separately.
+            pass
     return frozenset(hashlib.sha256(value).hexdigest() for value in
                      (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n")))
 
@@ -385,7 +392,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
     dependencies: dict[str, str] = {}
     visited: set[tuple[pathlib.Path, bool]] = set()
 
-    executable = None
+    executable_files: set[pathlib.Path] = set()
     boundary = ws.root.resolve()
 
     def refuse(channel: str, *, unchecked: bool = False, history: bool = False) -> None:
@@ -433,7 +440,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                 exists = False
             fingerprints(channel, _path_bytes(str(resolved)))
             if (exists and channel != "environment" and not resolved.is_relative_to(boundary)
-                    and resolved != executable):
+                    and resolved not in executable_files):
                 refuse(channel)
 
     def check(channel: str, raw: bytes) -> None:
@@ -447,7 +454,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             try:
                 fingerprints(channel, _path_bytes(raw.decode("utf-16")))
             except UnicodeError:
-                pass
+                refuse(channel, unchecked=True)
 
     def read(path: pathlib.Path, channel: str) -> bytes:
         try:
@@ -531,7 +538,12 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
 
     try:
         if argv:
-            executable = pathlib.Path(os.path.realpath(ws.repo / argv[0], strict=True))
+            executable_files.add(pathlib.Path(os.path.realpath(ws.repo / argv[0], strict=True)))
+            if (isinstance(argv, _ResolvedArgv) and argv.resolution.kind == "npm-shim"
+                    and len(argv.resolution.argv) == 2 and tuple(argv[:2]) == argv.resolution.argv):
+                # Only proc's verified npm entry script joins the executable exception.
+                # It still passes content/path checks and is frozen by reference() below.
+                executable_files.add(pathlib.Path(os.path.realpath(ws.repo / argv[1], strict=True)))
         check("prompt", prompt)
         for index, arg in enumerate(argv):
             flag, equal, value = arg.partition("=")

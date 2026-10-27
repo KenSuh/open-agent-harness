@@ -122,6 +122,33 @@ class EvalCliTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(json.loads(out)["rows"]), 2)
 
+    def test_prereg_beside_oracles_keeps_run_records_location_free(self):
+        oracle = oracle_path(self.root)
+        prereg = oracle.parent / "prereg.json"
+        code, _, err = self.cli("eval", "prereg", str(self.root / "plan.toml"), "--oracle",
+                                str(oracle), "--out", str(prereg))
+        self.assertEqual(code, 0, err)
+        code, out, err = self.cli("eval", "run", str(prereg))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(str(oracle.parent), out + err)
+        run_dir = next((self.state / "eval" / "runs").iterdir())
+        run = json.loads((run_dir / "run.json").read_bytes())
+        # Check decoded JSON too, so Windows backslash escaping cannot hide a leak.
+        for path in run_dir.rglob("*.json"):
+            data = json.loads(path.read_bytes())
+            def check(value):
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        check(key)
+                        check(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        check(item)
+                elif isinstance(value, str):
+                    self.assertNotIn(str(oracle.parent), value)
+            check(data)
+        self.assertEqual(run["source"], "sha256:" + run["prereg_sha256"])
+
     def test_isolation_refusal_via_cli(self):
         (case_dir(self.root) / "inputs" / "answers.toml").write_bytes(oracle_path(self.root).read_bytes())
         prereg = self.root / "prereg.json"
