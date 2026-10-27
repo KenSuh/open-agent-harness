@@ -101,7 +101,7 @@ an API key.
 | Codex CLI | required | `irm https://chatgpt.com/codex/install.ps1 \| iex` |
 | uv | recommended | `irm https://astral.sh/uv/install.ps1 \| iex` |
 | Node.js | recommended; required in a project that uses gates | `winget install OpenJS.NodeJS.LTS` |
-| unlazy | recommended (gates) | After lane P5 lands: `oah init --with-unlazy` at P5's contract-tested pin |
+| unlazy | recommended (gates) | `oah init --with-unlazy`, at the commit `oah`'s gates are tested with |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `winget install --id GitHub.cli --source winget` |
 | gitleaks | recommended | `scoop install gitleaks` (needs [Scoop](https://scoop.sh)) |
@@ -110,8 +110,9 @@ an API key.
 
 The `irm … | iex` one-liners run in a separate Windows PowerShell process.
 
-Guided setup does not install unlazy in this lane. After P5 lands, use `oah init --with-unlazy`;
-it will verify the contract-tested commit and scripts digest before running gate commands.
+The installer does not install unlazy. `oah init --with-unlazy` does, inside your project: it installs
+the commit `oah`'s gates are tested with, and verifies that commit and its scripts digest before any gate
+command runs.
 
 `oah doctor` counts Node as required once your project uses gates: when it has
 `.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say

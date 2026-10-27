@@ -103,7 +103,7 @@ Claude Code를 쓰려면 Pro, Max, Team, Enterprise 또는 Console 계정이 있
 | Codex CLI | 필수 | `irm https://chatgpt.com/codex/install.ps1 \| iex` |
 | uv | 권장 | `irm https://astral.sh/uv/install.ps1 \| iex` |
 | Node.js | 권장, 게이트를 쓰는 프로젝트에서는 필수 | `winget install OpenJS.NodeJS.LTS` |
-| unlazy | 권장 (게이트) | P5가 반영된 뒤 `oah init --with-unlazy`로 P5 계약 검사를 통과한 고정 커밋 설치 |
+| unlazy | 권장 (게이트) | `oah init --with-unlazy`로 `oah` 게이트를 검증한 고정 커밋 설치 |
 | graphify | 권장 | `uv tool install graphifyy` |
 | gh | 권장 | `winget install --id GitHub.cli --source winget` |
 | gitleaks | 권장 | `scoop install gitleaks` ([Scoop](https://scoop.sh) 필요) |
@@ -112,8 +112,8 @@ Claude Code를 쓰려면 Pro, Max, Team, Enterprise 또는 Console 계정이 있
 
 `irm … | iex` 형태의 공식 명령은 별도의 Windows PowerShell 프로세스에서 실행된다.
 
-이번 단계의 도구 설치 안내는 unlazy를 설치하지 않는다. P5가 반영된 뒤 `oah init --with-unlazy`를 쓴다.
-게이트 명령을 실행하기 전에 계약 검사를 통과한 고정 커밋과 스크립트 지문을 검증한다.
+설치 프로그램은 unlazy를 설치하지 않는다. 프로젝트 안에서 `oah init --with-unlazy`가 설치한다. `oah` 게이트를
+검증한 커밋을 설치하고, 게이트 명령을 실행하기 전에 그 커밋과 스크립트 지문을 검증한다.
 
 프로젝트가 게이트를 쓰기 시작하면 `oah doctor`는 Node를 필수로 센다. `.oah/tasks/*/GATES.md` 파일이
 있거나 `.oah/config.toml`에 `[gates]` 섹션이 있으면 게이트를 쓰는 것으로 본다. 단 그 섹션에
