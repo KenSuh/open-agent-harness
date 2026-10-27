@@ -3,11 +3,11 @@
 """Run one shard of the unit tests: `python tools/test_shard.py INDEX COUNT [unittest options]`.
 
 Discovery runs once, so nested packages and load_tests hooks shape the suite as usual. The suite is then cut into
-units, each a custom suite or the innermost plain suite holding only test cases (normally one TestCase class).
-One large module can spread over several shards while class fixtures stay together. Custom suites stay intact.
-Units are assigned greedily by test count, largest first, to the smallest shard so far; ties follow discovery order,
-and each shard runs its units in discovery order,
-so every runner computes the same split and a module's classes stay adjacent.
+units, each a single test method or a custom suite, which stays intact. Units are assigned greedily by test count,
+largest first, to the smallest shard so far; ties follow discovery order and go to the lowest shard, so every
+runner computes the same split and the methods of one class are dealt round-robin over the shards. No single
+class can therefore outgrow a shard. Each shard runs its units in discovery order, so a class's methods stay
+adjacent and unittest runs its module and class fixtures once in each shard that holds their tests.
 """
 from __future__ import annotations
 
@@ -34,15 +34,11 @@ def shards(count: int, tests_dir: pathlib.Path = ROOT / "tests",
 
 
 def _units(suite: unittest.TestSuite):
-    """Keep custom suites intact; split plain suites down to case-only suites or lone test cases."""
+    """Keep custom suites intact; split plain suites down to lone test cases."""
     if type(suite) is not unittest.TestSuite:
         yield suite
         return
-    children = list(suite)
-    if children and all(isinstance(child, unittest.TestCase) for child in children):
-        yield suite
-        return
-    for child in children:
+    for child in suite:
         if isinstance(child, unittest.TestCase):
             yield unittest.TestSuite([child])
         else:

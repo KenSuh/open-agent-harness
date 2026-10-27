@@ -171,10 +171,11 @@ class ShardTest(unittest.TestCase):
     def test_every_discovered_test_runs_in_exactly_one_shard(self):
         expected = sorted(self._test_ids(unittest.TestLoader().discover(
             str(ROOT / "tests"), top_level_dir=str(ROOT))))
-        for count in (1, 2, 3, 5):
+        for count in range(1, 7):
             with self.subTest(count=count):
                 groups = tool.shards(count)
                 self.assertEqual(len(groups), count)
+                self.assertTrue(all(groups))
                 flat = self._test_ids(unittest.TestSuite(unittest.TestSuite(group) for group in groups))
                 self.assertEqual(sorted(flat), expected)
                 self.assertEqual(len(flat), len(set(flat)))
@@ -202,31 +203,97 @@ class ShardTest(unittest.TestCase):
                     if name == "balance_fixture" or name.startswith("balance_fixture."):
                         del sys.modules[name]
 
-    def test_large_module_classes_spread_and_keep_discovery_order(self):
+    def test_methods_of_one_class_spread_over_shards(self):
         with tempfile.TemporaryDirectory() as tmp:
-            folder = pathlib.Path(tmp) / "class_fixture"
+            folder = pathlib.Path(tmp) / "method_fixture"
             folder.mkdir()
-            (folder / "__init__.py").write_text("# 클래스 단위 분할 검사 패키지.\n", encoding="utf-8")
-            source = "# 큰 모듈 하나를 클래스 단위로 나누는 검사.\nimport unittest\n"
-            for name, count in (("First", 2), ("Second", 5), ("Third", 6)):
+            (folder / "__init__.py").write_text("# 메서드 단위 분할 검사 패키지.\n", encoding="utf-8")
+            source = "# 큰 클래스 하나를 메서드 단위로 나누는 검사.\nimport unittest\n"
+            for name, count in (("Large", 60), ("Small", 3)):
                 source += f"class {name}Test(unittest.TestCase):\n"
-                source += "".join(f"    def test_{i}(self): pass\n" for i in range(count))
+                source += "".join(f"    def test_{i:02}(self): pass\n" for i in range(count))
             (folder / "test_big.py").write_text(source, encoding="utf-8")
-            (folder / "test_small.py").write_text(
-                "# 작은 모듈.\nimport unittest\nclass SmallTest(unittest.TestCase):\n"
-                "    def test_0(self): pass\n    def test_1(self): pass\n", encoding="utf-8")
             old_path = sys.path[:]
             try:
-                groups = tool.shards(2, folder)
-                classes = [[suite._tests[0].__class__.__name__ for suite in group] for group in groups]
-                self.assertEqual(classes, [["ThirdTest", "SmallTest"], ["FirstTest", "SecondTest"]])
-                totals = [sum(suite.countTestCases() for suite in group) for group in groups]
-                self.assertEqual(totals, [8, 7])
+                discovered = self._test_ids(unittest.TestLoader().discover(str(folder), top_level_dir=tmp))
+                groups = tool.shards(5, folder)
+                self.assertEqual([self._test_ids(group) for group in groups],
+                                 [self._test_ids(group) for group in tool.shards(5, folder)])
+                per_shard = [self._test_ids(group) for group in groups]
+                self.assertEqual([sum(".LargeTest." in name for name in ids) for ids in per_shard], [12] * 5)
+                self.assertEqual(sorted(len(ids) for ids in per_shard), [12, 12, 13, 13, 13])
+                for ids in per_shard:
+                    self.assertEqual(ids, sorted(ids, key=discovered.index))
             finally:
                 sys.path[:] = old_path
                 for name in list(sys.modules):
-                    if name == "class_fixture" or name.startswith("class_fixture."):
+                    if name == "method_fixture" or name.startswith("method_fixture."):
                         del sys.modules[name]
+
+    def test_fixtures_run_once_per_shard_that_holds_their_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = pathlib.Path(tmp) / "fixture_events"
+            folder.mkdir()
+            (folder / "__init__.py").write_text(
+                "# 조각별 픽스처 실행 검사 패키지.\nevents = []\n", encoding="utf-8")
+            for module, classes in (("test_one", (("AlphaTest", 7), ("BetaTest", 2))),
+                                    ("test_two", (("GammaTest", 4),))):
+                source = textwrap.dedent(f"""
+                    # 모듈과 클래스 픽스처 호출을 기록하는 모듈.
+                    import unittest
+                    from fixture_events import events
+                    def setUpModule(): events.append("module_setup:{module}")
+                    def tearDownModule(): events.append("module_teardown:{module}")
+                """).lstrip()
+                for name, count in classes:
+                    source += textwrap.dedent(f"""
+                        class {name}(unittest.TestCase):
+                            @classmethod
+                            def setUpClass(cls): events.append("class_setup:{name}")
+                            @classmethod
+                            def tearDownClass(cls): events.append("class_teardown:{name}")
+                    """)
+                    source += "".join(f"    def test_{i}(self): events.append(self.id())\n"
+                                      for i in range(count))
+                (folder / f"{module}.py").write_text(source, encoding="utf-8")
+            old_path = sys.path[:]
+            try:
+                for count in (2, 3, 5):
+                    with self.subTest(count=count):
+                        events = None
+                        for group in tool.shards(count, folder):
+                            ids = self._test_ids(group)
+                            events = sys.modules["fixture_events"].events
+                            events.clear()
+                            result = unittest.TestResult()
+                            unittest.TestSuite(group).run(result)
+                            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+                            self.assertEqual(events, self._expected_fixture_events(ids))
+            finally:
+                sys.path[:] = old_path
+                for name in list(sys.modules):
+                    if name == "fixture_events" or name.startswith("fixture_events."):
+                        del sys.modules[name]
+
+    @staticmethod
+    def _expected_fixture_events(ids):
+        """Set-up before the first test and tear-down after the last, per run of one module or class."""
+        expected, module, cls = [], None, None
+        for name in ids:
+            next_module, next_class, _ = name.split(".")[-3:]
+            if next_class != cls and cls is not None:
+                expected.append(f"class_teardown:{cls}")
+            if next_module != module:
+                if module is not None:
+                    expected.append(f"module_teardown:{module}")
+                expected.append(f"module_setup:{next_module}")
+            if next_class != cls:
+                expected.append(f"class_setup:{next_class}")
+            expected.append(name)
+            module, cls = next_module, next_class
+        if cls is not None:
+            expected += [f"class_teardown:{cls}", f"module_teardown:{module}"]
+        return expected
 
     def test_usage_errors_exit_2(self):
         for args in ([], ["0", "3"], ["4", "3"], ["x", "3"]):
