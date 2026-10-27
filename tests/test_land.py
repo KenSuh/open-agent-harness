@@ -1007,6 +1007,51 @@ class CiTest(unittest.TestCase):
         checked = read_ci(project)
         self.assertEqual((checked.state, checked.detail["statuses"]), ("passed", 0), checked.message)
 
+    def test_ci_pins_first_page_total_for_runs_and_statuses(self):
+        project = LandProject(self, config='[land]\nrequired_checks = ["tests"]\n')
+        for kind in ("check-runs", "status"):
+            # Each page fits its own advertised total; only the cross-page pin refuses it.
+            for count, first_total, later_total in ((102, 101, 102), (101, 102, 101), (100, 101, 100)):
+                with self.subTest(kind=kind, first_total=first_total, later_total=later_total):
+                    items = ([dict(SUCCESS) for _ in range(count)] if kind == "check-runs" else
+                             [{"context": "tests", "state": "success"} for _ in range(count)])
+                    runs, statuses = (items, []) if kind == "check-runs" else ([], items)
+                    project.ci(runs, statuses=statuses)
+                    self.assertTrue(project.assess().ready)
+                    overrides = {"total_count": first_total, "pages": {"2": {"total_count": later_total}}}
+                    project.ci(runs, statuses=statuses,
+                               **(overrides if kind == "check-runs" else {"status_script": overrides}))
+                    result = project.assess()
+                    checked = result.check("ci")
+                    self.assertEqual((checked.state, checked.code), ("failed", "OAH_LAND_CI_PENDING"),
+                                     describe(result))
+                    self.assertIn("incomplete", checked.message)
+                    self.assertFalse(result.ready, describe(result))
+
+    def test_ci_status_envelope_requires_sha(self):
+        project = LandProject(self, config='[land]\nrequired_checks = ["tests"]\n')
+        status = {"context": "tests", "state": "success", "id": 1}
+        project.ci([], statuses=[status])
+        self.assertTrue(project.assess().ready)
+        project.ci([], status_script={"raw": json.dumps({"total_count": 1, "statuses": [status]})})
+        result = project.assess()
+        checked = result.check("ci")
+        self.assertEqual((checked.state, checked.code), ("failed", "OAH_LAND_CI_PENDING"), describe(result))
+        self.assertIn("incomplete", checked.message)
+        self.assertFalse(result.ready, describe(result))
+
+    def test_ci_status_envelope_requires_exact_head_on_later_pages(self):
+        project = LandProject(self, config='[land]\nrequired_checks = ["tests"]\n')
+        statuses = [{"context": "tests", "state": "success"} for _ in range(101)]
+        project.ci([], statuses=statuses)
+        self.assertTrue(project.assess().ready)
+        project.ci([], statuses=statuses, status_script={"pages": {"2": {"sha": "e" * 40}}})
+        result = project.assess()
+        checked = result.check("ci")
+        self.assertEqual((checked.state, checked.code), ("failed", "OAH_LAND_CI_PENDING"), describe(result))
+        self.assertIn("incomplete", checked.message)
+        self.assertFalse(result.ready, describe(result))
+
     def test_ci_status_read_errors_refuse_without_disclosure(self):
         project = LandProject(self)
         token = "gh" + "o_" + secrets.token_hex(18)
