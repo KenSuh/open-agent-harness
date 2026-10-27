@@ -9,6 +9,7 @@ import sys
 
 from oah.atomic import StateCorrupt, StorageError
 from oah.impact import defaultbranch, gatebind, lexical, mapstore, query
+from oah.impact import scope as impact_scope
 from oah.config import ConfigError
 from oah.impact.defaults import configured
 from oah.impact.errors import EXIT_ENVIRONMENT, EXIT_USAGE, ImpactError
@@ -157,11 +158,11 @@ def _rows(data: dict, targets: list[str], **options) -> list[query.Row]:
 
 
 def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBranch, targets: list[str],
-               gates: list, settings: dict, *, warnings: list[str] | None = None) -> tuple[list[query.Row], dict]:
+               gates: list, settings: dict, *, graph: dict | None,
+               warnings: list[str] | None = None) -> tuple[list[query.Row], dict]:
     """Rows from the worktree map and the default-branch map, merged (A23). An entity is refused only when
     neither map knows it. Gates belong only to the explicitly queried worktree or revision; the
     default-branch mirror contributes its existing map layers without discovering gate ledgers."""
-    graph = query.load_graph(root, settings)
     if branch.data is None:
         rows = query.query(data, targets, gates=gates, graph=graph, settings=settings)
         return rows, {row: "worktree" for row in rows}
@@ -189,6 +190,17 @@ def _both_maps(root: pathlib.Path, data: dict, branch: defaultbranch.DefaultBran
             query.query(data, [target], settings=settings)  # raises the worktree map's refusal
     mine = _rows(data, targets, gates=gates, graph=graph, settings=settings)
     return query.merge_maps(mine, _rows(theirs, targets, settings=settings))
+
+
+def _ambiguous(maps: list[dict], targets: list[str], settings: dict) -> list[dict]:
+    """Names the lexical layer skipped in either map; the first map's count wins for a name both skipped."""
+    seen, out = set(), []
+    for data in maps:
+        for item in query.ambiguous(data, targets, settings):
+            if (item["target"], item["name"]) not in seen:
+                seen.add((item["target"], item["name"]))
+                out.append(item)
+    return out
 
 
 def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
@@ -234,12 +246,26 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
             warnings.append(branch.warning())
         if branch.info:
             warnings += [f"{warning} [default-branch map commit={branch.commit}]" for warning in branch.info.warnings()]
-        rows, found = _both_maps(root, data, branch, targets, gates, settings, warnings=warnings)
+        graph, graph_state, graph_reason = query.read_graph(root, settings, info.commit)
+        rows, found = _both_maps(root, data, branch, targets, gates, settings, graph=graph, warnings=warnings)
+        skipped = _ambiguous([data] + ([branch.data] if branch.data else []), targets, settings)
+        renames = (impact_scope.likely_renames(root, since, info.commit if args.ref else None,
+                                               timeout=settings["git_timeout"]) if since else [])
     rows, rerank = query.apply_rerank(rows, disabled=args.no_rerank, enabled=settings["rerank"])
     shown, total, overflow = query.cap(rows, limit=settings["limit"], strong_only=args.strong_only)
     identity = query.db_identity(data, info.commit, shown, found,
                                  default_branch=(branch.data, branch.commit) if branch.data is not None else None)
     plan = query.rerun_plan([row for row in rows if row.target in changed]) if since else []
+    layers = impact_scope.layers(targets=targets, gate_status=gate_status,
+                                 db_available=identity["status"] == "available",
+                                 graph_status=(graph_state, graph_reason), branch_state=branch.state,
+                                 branch_reason=branch.reason)
+    report_scope = impact_scope.report(layers, skipped, renames, rows_found=total)
+    # Weak fallback checks cover what an incomplete result could not analyse; the strong plan stays separate.
+    checks, incomplete = settings["fallback_checks"], not report_scope["complete"]
+    fallback = impact_scope.fallback(gates, targets, strong=query.rerun_plan(rows), checks=checks) if incomplete else []
+    changed_fallback = (impact_scope.fallback(gates, changed, strong=plan, checks=checks)
+                        if incomplete and since else [])
     for warning in warnings[len(info.warnings()):]:
         print(warning, file=sys.stderr)
     first = f"{'ref' if args.ref else 'worktree'}={info.commit}"
@@ -247,9 +273,11 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
         report = {"targets": targets, "map": info.to_json(), "label": f"{first} {branch.label()}",
                   "maps": {"worktree": {"commit": info.commit, "ref": args.ref}, "default_branch": branch.to_json()},
                   "rerank": rerank, "gates": gate_status, "db_impact": identity, "warnings": warnings,
+                  "scope": report_scope, "fallback": fallback,
                   "rows": [query.row_json(row, found) for row in shown],
                   "total": total, "shown": len(shown), "overflow": overflow,
-                  "changed_since": {"rev": since, "files": changed, "rerun": plan} if since else None}
+                  "changed_since": ({"rev": since, "files": changed, "rerun": plan, "fallback": changed_fallback}
+                                    if since else None)}
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return EXIT_OK
     listed = ", ".join(targets[:5]) + (f" and {len(targets) - 5} more" if len(targets) > 5 else "")
@@ -269,7 +297,11 @@ def _query(args: argparse.Namespace, root: pathlib.Path, settings: dict) -> int:
     for row in shown:
         only = "  [default-branch only]" if found.get(row) == "default-branch" else ""
         print(f"{row.binding:<8}{row.layer:<10}{row.kind:<10}{row.where}  {row.target}  {row.detail}{only}")
-    if not shown:
-        print("no references found")
+    print(report_scope["summary"])
+    for line in impact_scope.lines(report_scope):
+        print(line)
+    for item in fallback:
+        label = "" if item["source"] == impact_scope.CONFIGURED else f"{item['source']} "
+        print(f"re-run (fallback): {label}{item['check']} ({item['why']})")
     print(query.count_line(total, len(shown), overflow))
     return EXIT_OK

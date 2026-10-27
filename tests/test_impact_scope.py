@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
+import sys
 import unittest
 
 from oah.impact import gatebind, query, scope
 from oah.impact.defaults import effective
 from tests.helpers import git_commit, git_env, make_git_repo
-from tests.test_impact_map import head
+from tests.test_impact_map import head, run_impact
 
 LAYER_NAMES = ["gates", "lexical", "db", "graph", "cochange"]
 
@@ -193,6 +195,216 @@ class FallbackTest(unittest.TestCase):
                                        "targets": ["src/a.py"]}])
         self.assertEqual(scope.fallback(gates, ["db_table:users"], strong=[], checks=["make test"]), [],
                          "DB entities have no file needles, and configured checks need a file target")
+
+
+LEDGER = (".oah/tasks/t1/GATES.md", "- [ ] G1: the check runs\n  CHECK: python tools/check.py\n  EXPECT: OK\n"
+          "  EVIDENCE: pending\n")
+BASE = {
+    ".gitignore": "graphify-out/\n",
+    "src/app.py": "from lib import util\nprint('app')\n",
+    "src/lib/util.py": "def helper():\n    return 1\n",
+    "tools/check.py": "print('check')\n",
+    ".github/workflows/ci.yml": "steps:\n  - run: python tools/check.py\n",
+    "docs/guide.md": "See src/app.py and tools/check.py.\n",
+    "db/migrations/001_init.sql": "CREATE TABLE users (id int);\n",
+    LEDGER[0]: LEDGER[1],
+}
+SAFE = re.compile(r"\bsafe(ly|ty)?\b", re.I)
+
+
+def json_strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in [key, *json_strings(item)]]
+    if isinstance(value, list):
+        return [text for item in value for text in json_strings(item)]
+    return []
+
+
+class ScopeCliTest(unittest.TestCase):
+    """Each case builds a repository and runs the real `python -m oah impact`."""
+
+    def repo(self, extra: dict | None = None) -> pathlib.Path:
+        repo = make_git_repo(self)
+        git_commit(repo, dict(BASE, **(extra or {})))
+        return repo
+
+    def impact(self, repo: pathlib.Path, *args: str) -> tuple[dict, str]:
+        report = run_impact(repo, *args, "--json")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        text = run_impact(repo, *args)
+        self.assertEqual(text.returncode, 0, text.stderr)
+        return json.loads(report.stdout), text.stdout
+
+    def assert_shape(self, report: dict, text: str) -> dict:
+        scope_block = report["scope"]
+        self.assertEqual(scope_block["depth"], 1)
+        self.assertIsInstance(scope_block["complete"], bool)
+        self.assertEqual(list(scope_block["layers"]), LAYER_NAMES)
+        for name, layer in scope_block["layers"].items():
+            self.assertIn(layer["status"], ("analysed", "unavailable", "stale", "stale-unknown", "skipped"), name)
+            self.assertTrue(layer["reason"], name)
+            self.assertRegex(text, rf"\n  {re.escape(layer['status'])}\s+{name}\s+\S")
+        self.assertEqual(scope_block["unanalysed"][-1], {"kind": "dynamic", "detail": scope.DYNAMIC_NOTE})
+        self.assertIn(f"scope: depth=1 complete={'true' if scope_block['complete'] else 'false'}", text)
+        self.assertIn("not analysed:", text)
+        self.assertIn(scope.DYNAMIC_NOTE, text)
+        self.assertNotIn("no references found", text)
+        self.assertIsInstance(report["fallback"], list)
+        if scope_block["complete"]:
+            self.assertEqual(report["fallback"], [])
+        for item in report["fallback"]:
+            self.assertEqual(item["binding"], "fallback")
+        for line in [*text.splitlines(), *json_strings(report)]:
+            self.assertIsNone(SAFE.search(line), f"a result is never called safe: {line}")
+        self.assertRegex(text.splitlines()[-1], r"\Atotal=\d+ shown=\d+ overflow=\d+\Z")
+        return scope_block
+
+    def test_scope_table_json_shape(self):
+        def fresh_graph(repo):
+            write_graph(repo, {"nodes": [{"id": "n1", "source_file": "tools/check.py"}], "links": [],
+                               "graph": {"commit": head(repo)}})
+
+        cases = {
+            "direct references, everything fresh": (fresh_graph, ["tools/check.py"], True, {}),
+            "missing graph": (None, ["tools/check.py"], False, {"graph": "unavailable"}),
+            "stale graph": (lambda repo: write_graph(repo, {"nodes": [], "links": [], "commit": "b" * 40}),
+                            ["tools/check.py"], False, {"graph": "stale"}),
+            "unverifiable graph": (lambda repo: write_graph(repo, {"nodes": [], "links": []}),
+                                   ["tools/check.py"], False, {"graph": "stale-unknown"}),
+        }
+        for name, (prepare, args, complete, statuses) in cases.items():
+            with self.subTest(case=name):
+                repo = self.repo()
+                if prepare:
+                    prepare(repo)
+                report, text = self.impact(repo, *args)
+                block = self.assert_shape(report, text)
+                self.assertEqual(block["complete"], complete, block)
+                for layer, status in dict(dict.fromkeys(LAYER_NAMES, "analysed"), **statuses).items():
+                    self.assertEqual(block["layers"][layer]["status"], status, layer)
+                self.assertIn((".github/workflows/ci.yml", "exec"),
+                              {(row["source"], row["binding"]) for row in report["rows"]}, "direct rows are kept")
+                kinds = [(item["kind"], item.get("layer")) for item in block["unanalysed"]]
+                self.assertEqual(("layer", "graph") in kinds, not complete)
+                if not complete:
+                    self.assertIn(block["layers"]["graph"]["reason"], text)
+
+    def test_ambiguous_skip_with_count(self):
+        repo = self.repo({f"pkg{i}/shared.py": f"N = {i}\n" for i in range(4)})
+        report, text = self.impact(repo, "pkg0/shared.py")
+        block = self.assert_shape(report, text)
+        skipped = [item for item in block["unanalysed"] if item["kind"] == "ambiguous-name"]
+        self.assertEqual([(item["name"], item["files"], item["limit"]) for item in skipped],
+                         [("shared.py", 4, 3), ("shared", 4, 3)])
+        self.assertFalse(block["complete"])
+        self.assertIn("shared.py (basename of pkg0/shared.py) is shared by 4 files", text)
+
+    def test_rename_pair(self):
+        repo = self.repo()
+        base = head(repo)
+        subprocess.run(["git", "-C", str(repo), "mv", "src/lib/util.py", "src/lib/helpers.py"], check=True,
+                       env=git_env())
+        git_commit(repo, {})
+        report, text = self.impact(repo, "--changed-since", base)
+        block = self.assert_shape(report, text)
+        renames = [item for item in block["unanalysed"] if item["kind"] == "rename"]
+        self.assertEqual([(item["from"], item["to"], item["similarity"]) for item in renames],
+                         [("src/lib/util.py", "src/lib/helpers.py", 100)])
+        self.assertFalse(block["complete"])
+        self.assertIn("src/lib/util.py -> src/lib/helpers.py looks like a rename", text)
+        self.assertEqual(report["changed_since"]["files"], ["src/lib/helpers.py", "src/lib/util.py"],
+                         "changes are still read without rename folding")
+
+    def test_empty_result_is_not_proof(self):
+        repo = self.repo()
+        git_commit(repo, {"src/lonely_module.py": "VALUE = 7\n"})
+        report, text = self.impact(repo, "src/lonely_module.py")
+        block = self.assert_shape(report, text)
+        self.assertEqual(report["rows"], [])
+        self.assertEqual(block["summary"], scope.EMPTY)
+        lines = text.splitlines()
+        self.assertIn(scope.EMPTY, lines)
+        after = lines[lines.index(scope.EMPTY) + 1:]
+        self.assertIn("not analysed:", after, "the unanalysed list follows the empty-result sentence")
+        self.assertTrue(any(scope.DYNAMIC_NOTE in line for line in after))
+        self.assertFalse(block["complete"])
+
+    def test_entity_only_query_skips_file_layers(self):
+        repo = self.repo()
+        report, text = self.impact(repo, "db_table:users")
+        block = self.assert_shape(report, text)
+        self.assertEqual({name: layer["status"] for name, layer in block["layers"].items()},
+                         {"gates": "skipped", "lexical": "skipped", "db": "analysed", "graph": "skipped",
+                          "cochange": "skipped"})
+        self.assertFalse(block["complete"], "skipped layers did not run")
+        self.assertEqual(report["fallback"], [], "an entity has no folder or module to fall back on")
+
+    def test_fallback_checks_config(self):
+        repo = self.repo()
+        config = repo / ".oah" / "config.toml"
+        config.write_text('[impact]\nfallback_checks = ["make test"]\n', encoding="utf-8")
+        report, text = self.impact(repo, "src/app.py")
+        self.assert_shape(report, text)
+        self.assertIn({"source": "[impact] fallback_checks", "line": None, "binding": "fallback",
+                       "check": "make test", "why": "configured in [impact] fallback_checks",
+                       "targets": ["src/app.py"]}, report["fallback"])
+        self.assertIn("re-run (fallback): make test (configured in [impact] fallback_checks)", text)
+        for bad in ('fallback_checks = "make test"', "fallback_checks = [1]"):
+            with self.subTest(config=bad):
+                config.write_text(f"[impact]\n{bad}\n", encoding="utf-8")
+                result = run_impact(repo, "src/app.py")
+                self.assertEqual(result.returncode, 69, result.stderr)
+                self.assertIn("OAH_CONFIG_INVALID", result.stderr)
+
+
+PLUGIN_LOADER = """import importlib
+import os
+import sys
+
+here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(here))
+names = sorted(f[:-3] for f in os.listdir(here) if f.endswith(".py") and f not in ("__init__.py", "loader.py"))
+for name in names:
+    importlib.import_module("plugins." + name)
+print("loaded", len(names), "plugins")
+"""
+PLUGIN_LEDGER = (".oah/tasks/plugins/GATES.md", "- [ ] G1: every plugin loads\n  CHECK: python src/plugins/loader.py\n"
+                 "  EXPECT: loaded 2 plugins\n  EVIDENCE: pending\n")
+
+
+class MissedCaseTest(unittest.TestCase):
+    def test_string_built_dependency_is_caught_by_fallback(self):
+        repo = make_git_repo(self)
+        git_commit(repo, {"src/plugins/__init__.py": "", "src/plugins/loader.py": PLUGIN_LOADER,
+                          "src/plugins/beta.py": "VALUE = 2\n", PLUGIN_LEDGER[0]: PLUGIN_LEDGER[1]})
+        git_commit(repo, {"src/plugins/alpha.py": "VALUE = 1\n"})
+        base = head(repo)
+        git_commit(repo, {"src/plugins/alpha.py": "VALUE = (\n"})
+        broken = subprocess.run([sys.executable, "-B", "src/plugins/loader.py"], cwd=repo, capture_output=True,
+                                text=True)
+        self.assertNotEqual(broken.returncode, 0, "the gate's check really depends on alpha.py")
+
+        result = run_impact(repo, "--changed-since", base, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["changed_since"]["files"], ["src/plugins/alpha.py"])
+        sources = {row["source"] for row in report["rows"]}
+        self.assertNotIn("src/plugins/loader.py", sources, "impact cannot see the string-built import")
+        self.assertNotIn(PLUGIN_LEDGER[0] + "#G1", sources)
+        self.assertEqual(report["changed_since"]["rerun"], [])
+        self.assertFalse(report["scope"]["complete"])
+        self.assertIn({"kind": "dynamic", "detail": scope.DYNAMIC_NOTE}, report["scope"]["unanalysed"])
+        gate = PLUGIN_LEDGER[0] + "#G1"
+        for plan in (report["fallback"], report["changed_since"]["fallback"]):
+            caught = [item for item in plan if item["source"] == gate]
+            self.assertEqual(len(caught), 1, plan)
+            self.assertEqual((caught[0]["binding"], caught[0]["check"], caught[0]["targets"]),
+                             ("fallback", "python src/plugins/loader.py", ["src/plugins/alpha.py"]))
+        text = run_impact(repo, "--changed-since", base).stdout
+        self.assertIn(f"re-run (fallback): {gate} python src/plugins/loader.py", text)
+        self.assertIn("re-run: nothing is bound to these files by pin or exec", text)
 
 
 if __name__ == "__main__":

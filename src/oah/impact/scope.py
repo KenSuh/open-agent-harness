@@ -75,14 +75,13 @@ def report(layers: Mapping[str, Mapping], ambiguous: Sequence[Mapping], renames:
     unanalysed += [_rename_item(item) for item in renames]
     unanalysed.append({"kind": "dynamic", "detail": DYNAMIC_NOTE})
     complete = all(layer["status"] == "analysed" for layer in layers.values()) and not ambiguous and not renames
+    found = f"{rows_found} result{'' if rows_found == 1 else 's'} found in the analysed scope"
     if not rows_found:
         summary = EMPTY
     elif complete:
-        summary = (f"{rows_found} found in the analysed scope; every layer ran fresh, but dynamic calls and "
-                   "string-built paths are still not traced")
+        summary = f"{found}; every layer ran fresh, but dynamic calls and string-built paths are still not traced"
     else:
-        summary = (f"{rows_found} found in the analysed scope; the analysis is incomplete, so also run the "
-                   "fallback checks")
+        summary = f"{found}; the analysis is incomplete, so also run the fallback checks"
     return {"depth": DEPTH, "complete": complete, "layers": {name: dict(layer) for name, layer in layers.items()},
             "unanalysed": unanalysed, "summary": summary}
 
