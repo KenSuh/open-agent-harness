@@ -690,6 +690,39 @@ class MaintainTaskTest(unittest.TestCase):
         marker = f"<!-- oah-task: {task} -->".encode()
         return sum(path.read_bytes().count(marker) for path in self.wiki_dir.glob("log*.md"))
 
+    def test_configured_directory_maintenance_verifies(self):
+        self.wiki_dir.rename(self.repo / "notes")
+        settings = WikiSettings(dir="notes")
+        self.assertEqual(self.maintain(settings=settings).errors, [])
+        for check in (Wiki(self.repo, settings, self.state).verify_task("t1"), self.verify(settings=settings)):
+            self.assertTrue(check.ok, check.problems)
+            self.assertEqual([path for path, _ in check.outputs], ["notes/index.md", "notes/log.md"])
+
+    def test_task_entry_page_is_recorded_without_archive_output_filter(self):
+        # Existing archive parsing accepts extra padding; this task page is not a new rollover name.
+        self.assertEqual(self.maintain().errors, [])
+        archive = self.wiki_dir / "log_archive_001.md"
+        archive.write_bytes((self.wiki_dir / "log.md").read_bytes())
+        (self.wiki_dir / "log.md").write_bytes(b"# Log\n\n<!-- OAH:LOG_INSERT_BELOW -->\n")
+        self.assertEqual(self.maintain().errors, [])
+        rel = "docs/wiki/log_archive_001.md"
+        self.assertIn(rel, self.records_for("t1")[-1]["outputs"])
+        check = self.verify()
+        self.assertTrue(check.ok, check.problems)
+        self.assertIn((rel, hashlib.sha256(archive.read_bytes()).hexdigest()), check.outputs)
+
+    def test_record_from_other_wiki_directory_refuses_until_maintained_again(self):
+        self.assertEqual(self.maintain().errors, [])
+        self.wiki_dir.rename(self.repo / "notes")
+        settings = WikiSettings(dir="notes")
+        check = self.verify(settings=settings)
+        self.assertFalse(check.ok)
+        self.assertIsNone(check.outputs)
+        self.assertTrue(any(p.startswith("OAH_WIKI_MAINTENANCE_STALE") and "malformed outputs" in p
+                            for p in check.problems), check.problems)
+        self.assertEqual(self.maintain(settings=settings).errors, [])
+        self.assertTrue(self.verify(settings=settings).ok)
+
     def test_nested_marker_examples_do_not_replace_actual_maintenance(self):
         example = (b"## 2026-10-22 Example\n\n- item\n  ~~~\n"
                    b"<!-- oah-task: t1 -->\n  ~~~\n\n")

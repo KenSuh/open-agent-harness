@@ -16,7 +16,7 @@ import pathlib
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator
 
 from oah.atomic import append_jsonl, read_json, read_jsonl, unlink_durable, write_json_atomic, write_text_atomic
 from oah.lockfile import LockTimeout, StateLock
@@ -30,9 +30,10 @@ JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
-# The recorded maintenance paths, also used by finish for scope exemptions.
-WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:(?:log|index)\.md|"
-                                      + log_module.DEFAULT_NAMING.output_pattern + ")")
+# Portable relative path syntax; the allowed files themselves come from maintenance_output_paths.
+_COMPONENT = r"(?!\.{1,2}(?:/|$))[^/\\:\x00-\x1f\x7f-\x9f\ud800-\udfff]+"
+_OUTPUT_PATH = re.compile(_COMPONENT + r"(?:/" + _COMPONENT + r")*")
+_OUTPUT_PAGE = re.compile(r"[^/\\:\x00-\x1f\x7f-\x9f\ud800-\udfff]+\.md")
 RESOLVED = "resolved-records"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
@@ -88,6 +89,22 @@ def _decode_fields(data: dict, keys: tuple[str, ...]) -> bool:
     return True
 
 
+def maintenance_output_paths(settings: WikiSettings, *, archives: Iterable[str] = (),
+                             task_pages: Iterable[str] = ()) -> set[str]:
+    """The writer's outputs: log/index, new canonical archives, and pages holding the task's entry.
+
+    Task pages come from task lookup, independently of new-archive naming. Without task_pages this
+    is also finish's restricted scope-exemption set. This helper never accesses the filesystem.
+    """
+    names = {"log.md", "index.md"}
+    names.update(name for name in archives
+                 if type(name) is str and re.fullmatch(settings.naming.output_pattern, name))
+    names.update(name for name in task_pages if type(name) is str and _OUTPUT_PAGE.fullmatch(name))
+    folder = pathlib.PurePath(settings.dir)
+    return {rel for name in names if _OUTPUT_PAGE.fullmatch(name)
+            if _OUTPUT_PATH.fullmatch(rel := (folder / name).as_posix())}
+
+
 @dataclass
 class MaintenanceCheck:
     """What `oah finish` needs: ok is False when task maintenance is missing or stale."""
@@ -96,6 +113,8 @@ class MaintenanceCheck:
     record: dict | None = None
     lint: str | None = None
     hygiene: str | None = None
+    settings: WikiSettings = field(default_factory=WikiSettings, kw_only=True)
+    task_pages: tuple[str, ...] = field(default=(), kw_only=True)
 
     @property
     def outputs(self) -> list[tuple[str, str]] | None:
@@ -103,9 +122,13 @@ class MaintenanceCheck:
         outputs = self.record.get("outputs") if isinstance(self.record, dict) else None
         if not isinstance(outputs, dict):
             return None
-        if not all(type(rel) is str and WIKI_MAINTENANCE_OUTPUTS.fullmatch(rel)
+        if not all(type(rel) is str and _OUTPUT_PATH.fullmatch(rel)
                    and isinstance(digest, str) and _DIGEST.fullmatch(digest)
                    for rel, digest in outputs.items()):
+            return None
+        allowed = maintenance_output_paths(self.settings, task_pages=self.task_pages,
+                                           archives=(rel.rsplit("/", 1)[-1] for rel in outputs))
+        if any(rel not in allowed for rel in outputs):
             return None
         return sorted(outputs.items())
 
@@ -519,12 +542,12 @@ class Wiki:
         return self.state / MAINTENANCE
 
     def _record(self, task: str, archive: pathlib.Path | None, status: dict[str, str]) -> dict:
-        outputs = [self.dir / "log.md", self.dir / "index.md", *([archive] if archive else [])]
-        outputs.extend(self.dir / name for name, _ in self._task_entries(task) if self.dir / name not in outputs)
+        outputs = maintenance_output_paths(self.settings, archives=(archive.name,) if archive else (),
+                                           task_pages=(name for name, _ in self._task_entries(task)))
         record = {
             "version": 1, "task": task, "worktree": str(self.root.resolve()),
             "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-            "outputs": {self._rel(path): _sha(path.read_bytes()) for path in outputs},
+            "outputs": {rel: _sha((self.root / rel).read_bytes()) for rel in sorted(outputs)},
             "steps": status,
         }
         append_jsonl(self.records_path, record)
@@ -533,11 +556,12 @@ class Wiki:
     def verify_task(self, task: str, *, now: float | None = None) -> "MaintenanceCheck":
         """Read-only: the task's entry, index line and latest record against the current wiki bytes."""
         tasks.check_task(task)
-        check = MaintenanceCheck(ok=False)
+        check = MaintenanceCheck(ok=False, settings=self.settings)
         hint = f"run `oah wiki maintain --task {task}`"
         with self.session():
             self._require("log.md", "index.md")
             found = self._task_entries(task)
+            check.task_pages = tuple(name for name, _ in found)
             if len(found) != 1:
                 check.problems.append(f"OAH_WIKI_MAINTENANCE_MISSING: {len(found)} log entries carry "
                                       f"{tasks.marker(task)} (expected one log entry); {hint}")

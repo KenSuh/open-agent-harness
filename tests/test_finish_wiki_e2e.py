@@ -10,7 +10,7 @@ import subprocess
 import sys
 import unittest
 
-from oah.wiki import notes, verify_maintenance
+from oah.wiki import WikiSettings, notes, verify_maintenance
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -64,14 +64,66 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
                     for rel in ("docs/wiki/index.md", "docs/wiki/log.md")]
         self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
 
+    def test_finish_uses_configured_wiki_directory(self):
+        (self.repo / "docs" / "wiki").rename(self.repo / "notes")
+        git_commit(self.repo, {".oah/config.toml": '[wiki]\ndir = "notes"\n'})
+        self.maintain_after_edit()
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        expected = [[rel, hashlib.sha256((self.repo / rel).read_bytes()).hexdigest()]
+                    for rel in ("notes/index.md", "notes/log.md")]
+        self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
+
+    def test_finish_records_task_entry_page_but_keeps_exemptions_restricted(self):
+        archive = "docs/wiki/log_archive_001.md"
+        page = (b"# Log archive 1\n\n<!-- OAH:LOG_INSERT_BELOW -->\n"
+                b"## 2026-10-26 Previous task entry\n\n<!-- oah-task: t1 -->\n")
+        git_commit(self.repo, {archive: page})
+        self.maintain_after_edit()
+        check = verify_maintenance(self.repo, "t1", env=self.env)
+        self.assertTrue(check.ok, check.problems)
+        self.assertIn((archive, hashlib.sha256(page).hexdigest()), check.outputs)
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        expected = [[rel, hashlib.sha256((self.repo / rel).read_bytes()).hexdigest()]
+                    for rel in ("docs/wiki/index.md", "docs/wiki/log.md")]
+        self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
+
+    def test_configured_existing_task_archive_still_needs_scope(self):
+        (self.repo / "docs" / "wiki").rename(self.repo / "notes")
+        archive = "notes/log_archive_01.md"
+        page = (b"# Log archive 1\n\n<!-- OAH:LOG_INSERT_BELOW -->\n"
+                b"## 2026-10-26 Previous task entry\n\n<!-- oah-task: t1 -->\n")
+        git_commit(self.repo, {".oah/config.toml": '[wiki]\ndir = "notes"\n', archive: page})
+        self.ok("start", "--task", "t1", "--agent", "claude", "--scope", "src")
+        (self.repo / archive).write_bytes(page.replace(b"Previous task entry", b"Edited task entry"))
+        self.ok("wiki", "maintain", "--task", "t1")
+        self.commit()
+        check = verify_maintenance(self.repo, "t1", settings=WikiSettings(dir="notes"), env=self.env)
+        self.assertTrue(check.ok, check.problems)
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
+        self.assertIn(archive, refused.stderr)
+        self.assertNotIn("notes/log.md", refused.stderr)
+        self.assertNotIn("notes/index.md", refused.stderr)
+
     def test_maintain_and_finish_across_archive_99_to_100(self):
+        self.check_archive_boundary("docs/wiki")
+
+    def test_configured_maintain_and_finish_across_archive_99_to_100(self):
+        (self.repo / "docs" / "wiki").rename(self.repo / "notes")
+        self.check_archive_boundary("notes")
+
+    def check_archive_boundary(self, directory):
         git_commit(self.repo, {
-            ".oah/config.toml": "[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\n",
-            "docs/wiki/log_archive_98.md": b"# Log archive 98\n\n<!-- OAH:LOG_INSERT_BELOW -->\n",
+            ".oah/config.toml": f'[wiki]\ndir = "{directory}"\nrollover_trigger_bytes = 1500\n'
+                                "rollover_target_bytes = 700\n",
+            f"{directory}/log_archive_98.md": b"# Log archive 98\n\n<!-- OAH:LOG_INSERT_BELOW -->\n",
         })
         for number in (99, 100):
             task = f"t{number}"
-            rel = f"docs/wiki/log_archive_{number}.md"
+            rel = f"{directory}/log_archive_{number}.md"
             self.ok("start", "--task", task, "--agent", "claude", "--scope", "src")
             (self.repo / "src" / "a.py").write_bytes(f"a = {number}\n".encode("ascii"))
             maintained = self.ok("wiki", "maintain", "--task", task, "--title", f"Work {number}",
@@ -79,9 +131,9 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
             self.assertIn(f"rollover=log_archive_{number}.md", maintained.stdout)
             self.commit()
             expected = [[path, hashlib.sha256((self.repo / path).read_bytes()).hexdigest()]
-                        for path in ("docs/wiki/index.md", "docs/wiki/log.md", rel)]
+                        for path in (f"{directory}/index.md", f"{directory}/log.md", rel)]
             with self.subTest(number=number, step="verify"):
-                check = verify_maintenance(self.repo, task, env=self.env)
+                check = verify_maintenance(self.repo, task, settings=WikiSettings(dir=directory), env=self.env)
                 self.assertTrue(check.ok, check.problems)
                 self.assertEqual(check.outputs, [tuple(pair) for pair in expected])
             with self.subTest(number=number, step="finish"):

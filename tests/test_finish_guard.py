@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 from oah.gates import guard, summary
 from oah.gates.context import GateTools
-from oah.wiki.store import MaintenanceCheck
+from oah.wiki.base import WikiSettings
+from oah.wiki.store import MaintenanceCheck, maintenance_output_paths
 from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
@@ -385,6 +386,18 @@ class MaintenanceCheckOutputsTest(unittest.TestCase):
         self.assertEqual(check.outputs, [("docs/wiki/index.md", self.DIGEST), ("docs/wiki/log.md", self.DIGEST)])
         self.assertEqual(MaintenanceCheck(ok=True, record={"outputs": {}}).outputs, [])
 
+    def test_shared_definition_accepts_task_pages_independently_of_archive_names(self):
+        settings = WikiSettings(dir="notes")
+        task_pages = ("task-t1.md", "log_archive_001.md")
+        paths = maintenance_output_paths(settings, archives=("log_archive_100.md",), task_pages=task_pages)
+        self.assertEqual(paths, {"notes/log.md", "notes/index.md", "notes/log_archive_100.md",
+                                 "notes/task-t1.md", "notes/log_archive_001.md"})
+        check = MaintenanceCheck(ok=True, settings=settings, task_pages=task_pages,
+                                 record={"outputs": {path: self.DIGEST for path in paths}})
+        self.assertEqual(check.outputs, sorted((path, self.DIGEST) for path in paths))
+        restricted = maintenance_output_paths(settings, archives=task_pages)
+        self.assertEqual(restricted, {"notes/log.md", "notes/index.md"})
+
     def test_malformed_outputs_are_none(self):
         for record in (None, [], {}, {"outputs": None}, {"outputs": [["docs/wiki/log.md", self.DIGEST]]},
                        {"outputs": {"docs/wiki/log.md": 1}}, {"outputs": {"docs/wiki/log.md": "abc"}},
@@ -440,7 +453,7 @@ class WikiMaintenanceTest(unittest.TestCase):
         self.check = real_check(True)
         self.calls = []
 
-        def verify_maintenance(root, task):
+        def verify_maintenance(root, task, *, settings):
             self.calls.append((pathlib.Path(root), task))
             return self.check
 

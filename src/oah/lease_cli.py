@@ -25,7 +25,8 @@ from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, run_git, state_dir
 from oah.scope import ScopeError, normalize_scope
 from oah.unlazy import UnlazyError
-from oah.wiki.store import WIKI_MAINTENANCE_OUTPUTS
+from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings
+from oah.wiki.store import maintenance_output_paths
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 GATE_ENVIRONMENT_CODES = {"OAH_UNLAZY_FAILED"}
@@ -97,6 +98,9 @@ def run(args: argparse.Namespace) -> int:
     except UnlazyError as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
+    except WikiError as exc:
+        print(exc, file=sys.stderr)
+        return exc.exit_code
     except (NotARepo, GitMissing, LockTimeout, StateCorrupt, PendingTransaction, StorageError, ConfigError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT
@@ -283,7 +287,8 @@ def _existed_at_start(root: pathlib.Path, lease: Lease, path: str) -> bool:
 
 def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> tuple[set[str], dict | None]:
     """Wiki maintenance outputs exempt from the scope check, and the record for the finish event."""
-    if not (root / "docs" / "wiki").is_dir():
+    settings = WikiSettings.from_mapping(load_config(root).section("wiki", WIKI_DEFAULTS))
+    if not (root / settings.dir).is_dir():
         return set(), None
     try:
         from oah.wiki import verify_maintenance
@@ -294,7 +299,7 @@ def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> 
                              f"{problem}. Install oah with wiki support and run oah wiki maintain --task "
                              f"{lease.task}, or pass --allow-missing-wiki-maintenance (recorded)") from None
         return set(), {"task": lease.task, "override": True, "problems": [problem]}
-    check = verify_maintenance(root, lease.task)
+    check = verify_maintenance(root, lease.task, settings=settings)
     if not check.ok:
         if not allow_missing:
             problems = "; ".join(check.problems) or "wiki maintenance was not run for this task"
@@ -311,14 +316,15 @@ def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> 
                              "--allow-missing-wiki-maintenance (recorded)")
         return set(), {"task": lease.task, "override": True, "problems": [problem]}
     exempt = []
+    fixed = maintenance_output_paths(settings)
     for path, digest in outputs:
-        if not (isinstance(path, str) and WIKI_MAINTENANCE_OUTPUTS.fullmatch(path)):
+        if path not in maintenance_output_paths(settings, archives=(path.rsplit("/", 1)[-1],)):
             continue
         try:
             actual = hashlib.sha256((root / pathlib.PurePosixPath(path)).read_bytes()).hexdigest()
         except OSError:
             continue
-        if actual != digest or (path.startswith("docs/wiki/log_archive_") and _existed_at_start(root, lease, path)):
+        if actual != digest or (path not in fixed and _existed_at_start(root, lease, path)):
             continue
         exempt.append([path, digest])
     return {path for path, _ in exempt}, {"task": lease.task, "exempt": exempt}
