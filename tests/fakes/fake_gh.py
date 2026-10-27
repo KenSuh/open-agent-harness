@@ -17,6 +17,8 @@ Commit statuses come from "statuses": {"<sha>": [{"context", "state", "id"?}, ..
 above apply to check runs only; "status_script" holds the same overrides ("exit", "stderr", "raw", "sleep",
 "total_count", "pages") for the status endpoint, plus "sha" to report another commit in the envelope. Every
 status carries the decoys `id`, `target_url`, `description` and `creator.login`.
+The status overrides `move_head` (a SHA) and `write_tracked` mutate the real checkout before responding,
+so push-time local validation can be tested across processes on every platform.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -73,6 +76,10 @@ def main(argv: list[str]) -> int:
 def statuses(script: dict, sha: str, per_page: int, page: int) -> int:
     overrides = script.get("status_script", {})
     overrides = {**overrides, **overrides.get("pages", {}).get(str(page), {})}
+    if overrides.get("move_head"):
+        subprocess.run(["git", "update-ref", "HEAD", overrides["move_head"]], check=True)
+    if overrides.get("write_tracked"):
+        pathlib.Path("README.md").write_bytes(b"changed during CI\n")
     if overrides.get("sleep"):
         time.sleep(overrides["sleep"])
     if overrides.get("exit"):

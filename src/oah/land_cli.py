@@ -108,6 +108,9 @@ def _check_lines(assessment: land.Assessment) -> list[str]:
         lines.append(f"{check.name}: {check.state}{code} — {check.message}")
         if check.name == "required-checks":
             lines += [f"  - {text}" for text in land._required_text(assessment.required)]
+    if assessment.land_policy and assessment.land_policy["changed"]:
+        lines.append("OAH_LAND_POLICY_CHANGED: HEAD's land policy differs from the fetched landing target; "
+                     "the target policy governs. Land policy changes separately, then run oah land again")
     return lines
 
 

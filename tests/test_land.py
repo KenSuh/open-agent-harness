@@ -331,8 +331,9 @@ class AssessTest(unittest.TestCase):
                         for index in range(1, count + 1)])
             complete = project.assess()
             self.assertTrue(complete.ready, describe(complete))
-            self.assertEqual(complete.check("ci").detail, {"runs": count, "statuses": 0, "required": [],
-                                                           "unverified": []})
+            detail = dict(complete.check("ci").detail)
+            self.assertRegex(detail.pop("results_digest"), r"\A[0-9a-f]{64}\Z")
+            self.assertEqual(detail, {"runs": count, "statuses": 0, "required": [], "unverified": []})
             for failed_position in (None, 1, count):
                 with self.subTest(count=count, failed_position=failed_position):
                     runs = [{"id": index, "status": "completed", "conclusion": "success"}
@@ -1160,6 +1161,66 @@ class CiTest(unittest.TestCase):
 
 
 class PushTest(unittest.TestCase):
+    def test_passing_ci_replacements_with_same_counts_refuse(self):
+        project = LandProject(self)
+        private = "private-" + secrets.token_hex(12)
+        for kind in ("run", "status"):
+            for change in ("id", "name", "state"):
+                if kind == "status" and change == "state":
+                    continue  # commit statuses have only one passing state
+                with self.subTest(kind=kind, change=change):
+                    run = dict(SUCCESS, name=private, id=10)
+                    status = {"context": private, "state": "success", "id": 20}
+                    project.ci([run], statuses=[status])
+                    result = project.assess()
+                    if kind == "run":
+                        run.update({"id": 11} if change == "id" else {"name": private + "-new"}
+                                   if change == "name" else {"conclusion": "neutral"})
+                    else:
+                        status.update({"id": 21} if change == "id" else {"context": private + "-new"})
+                    project.ci([run], statuses=[status])
+                    with project.patched():
+                        pushed = land.push(project.repo, result, env=dict(project.env))
+                    self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_AUTHORIZATION_CHANGED"))
+                    self.assertFalse(result.ready)
+                    self.assertEqual(result.check("ci").state, "passed")
+                    self.assertEqual(project.remote_main(), project.base)
+                    self.assertNotIn(private, json.dumps(result.to_json()))
+
+    def test_local_changes_during_ci_response_refuse(self):
+        for change in ("move_head", "write_tracked"):
+            with self.subTest(change=change):
+                project = LandProject(self)
+                result = project.assess()
+                moved = git(project.repo, "commit-tree", f"{project.head}^{{tree}}", "-p", project.head,
+                            "-m", "during CI")
+                project.ci([SUCCESS], status_script={change: moved if change == "move_head" else True})
+                with project.patched():
+                    pushed = land.push(project.repo, result, env=dict(project.env))
+                self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_AUTHORIZATION_CHANGED"))
+                self.assertEqual(project.remote_main(), project.base)
+
+    def test_exception_is_durable_before_push_and_outcome_is_recorded_after(self):
+        project = LandProject(self)
+        project.ci([])
+        result = project.assess(accept_unverified_ci="no CI yet")
+        original = land._push_verified
+        observed = []
+
+        def inspect_before_push(*args, **kwargs):
+            observed.extend(exceptions(project))
+            self.assertEqual(project.remote_main(), project.base)
+            return original(*args, **kwargs)
+
+        with project.patched(), patch.object(land, "_push_verified", inspect_before_push):
+            pushed = land.push(project.repo, result, env=dict(project.env))
+            land.record(project.state, result, "merge", pushed)
+        self.assertTrue(pushed.landed, pushed.message)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual((observed[0]["head"], observed[0]["reason"], observed[0]["code"]),
+                         (project.head, "no CI yet", "OAH_LAND_READY_WITH_CI_EXCEPTION"))
+        self.assertEqual(exceptions(project)[-1]["code"], "OAH_LAND_LANDED_WITH_CI_EXCEPTION")
+
     def test_complete_git_configuration_is_pinned_across_scopes_and_origins(self):
         repo = make_git_repo(self)
         work = make_tmp_dir(self)
@@ -1524,6 +1585,7 @@ class PushTest(unittest.TestCase):
             with self.subTest(change=name):
                 project.gh_argv = (sys.executable, str(FAKE_GH))
                 project.ci([SUCCESS])
+                result = project.assess()
                 change()
                 with project.patched():
                     pushed = land.push(project.repo, result, env=dict(project.env))
@@ -1531,6 +1593,7 @@ class PushTest(unittest.TestCase):
                 self.assertEqual(project.remote_main(), project.base)
         project.gh_argv = (sys.executable, str(FAKE_GH))
         project.ci([SUCCESS])
+        result = project.assess()
         with project.patched():
             pushed = land.push(project.repo, result, env=dict(project.env))
         self.assertEqual((pushed.landed, pushed.code), (True, "OAH_LAND_LANDED"), pushed.message)
