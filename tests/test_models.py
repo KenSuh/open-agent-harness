@@ -14,7 +14,9 @@ from unittest import mock
 
 from oah import models_cli
 from oah.engines.effort import EngineError
-from oah.models import Catalog, Entry, ModelInfo, map_tier, resolve_base
+from oah.engines import codex
+from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
+                        resolve_base)
 from tests.helpers import make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -246,6 +248,130 @@ class ModelsCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("OAH_MODEL_UNRESOLVED", out)
         self.assertIn("OAH_MODELS_REFRESH_FAILED", err)
+
+
+ALL = ("low", "medium", "high", "xhigh", "max", "ultra")
+JUDGE_ENTRY = Entry("codex", "0.163.0", "2026-10-23T12:00:00Z", (
+    ModelInfo("m-strong", ALL, True),
+    ModelInfo("m-mid", ("low", "medium", "high")),
+    ModelInfo("m-light", ("low", "medium")),
+    ModelInfo("m-hidden", ALL, listed=False),
+    ModelInfo("m-extra", ("medium", "high")),
+), "fixture")
+RANKING = ["m-strong", "m-mid", "m-light"]
+
+
+def candidates(*, ranking=RANKING, floor=("m-mid", "medium"), deterministic=("m-strong", "high"),
+               allowed=(), caps=None, floor_tier="medium"):
+    return build_candidates("codex", entry=JUDGE_ENTRY, deterministic=Pair(*deterministic), floor_tier=floor_tier,
+                            floor=Pair(*floor), quality_order=list(ranking), allowed_models=list(allowed),
+                            effort_caps=dict(caps or {}))
+
+
+def pairs(candidate_set) -> list[tuple[str, str]]:
+    return [(pair.model, pair.effort) for pair in candidate_set.pairs]
+
+
+class CandidateTableTest(unittest.TestCase):
+    def test_hidden_models_are_parsed_and_kept_out_of_candidates(self):
+        parsed = codex.parse_models_cache(json.dumps({"models": [
+            {"slug": "m-a", "visibility": "list", "supported_reasoning_levels": ["low"]},
+            {"slug": "m-b", "visibility": "hide", "supported_reasoning_levels": ["low"]},
+            {"slug": "m-c", "hidden": True, "supported_reasoning_levels": ["low"]},
+            {"slug": "m-d", "supported_reasoning_levels": ["low"]},
+        ]}))
+        self.assertEqual({slug: model.listed for slug, model in parsed.items()},
+                         {"m-a": True, "m-b": False, "m-c": False, "m-d": True})
+        self.assertNotIn("m-hidden", {pair.model for pair in candidates(ranking=[]).pairs})
+        self.assertNotIn("m-hidden", {pair.model for pair in candidates(ranking=["m-hidden", *RANKING]).pairs})
+
+    def test_catalog_round_trips_listed(self):
+        fixture = Fixture(self)
+        write_cache(fixture.home, ("m-a", ["low"], True))
+        cache = json.loads((fixture.home / "models_cache.json").read_text(encoding="utf-8"))
+        cache["models"].append({"slug": "m-b", "visibility": "hide", "supported_reasoning_levels": ["low"]})
+        (fixture.home / "models_cache.json").write_text(json.dumps(cache), encoding="utf-8")
+        fixture.fresh("codex")
+        entry = fixture.catalog.load("codex")
+        self.assertEqual([(model.name, model.listed) for model in entry.models], [("m-a", True), ("m-b", False)])
+        old = Entry.from_json("codex", {"models": [{"name": "m-a", "efforts": ["low"]}]})
+        self.assertTrue(old.models[0].listed)
+
+    def test_candidate_table(self):
+        rows = [
+            ("ranked, floor medium", {}, [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"),
+                                          ("m-strong", "max"), ("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked with a cap", {"caps": {"m-strong": "high"}},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked with an allow list", {"allowed": ["m-mid", "m-hidden"]}, [("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked, floor low", {"floor": ("m-light", "low"), "floor_tier": "low"},
+             [("m-strong", e) for e in ("low", "medium", "high", "xhigh", "max")]
+             + [("m-mid", e) for e in ("low", "medium", "high")] + [("m-light", e) for e in ("low", "medium")]),
+            ("no ranking: the model stays deterministic", {"ranking": [], "floor": ("m-strong", "medium")},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"), ("m-strong", "max")]),
+            ("ranking names no listed model", {"ranking": ["m-hidden", "m-gone"], "floor": ("m-strong", "medium")},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"), ("m-strong", "max")]),
+            ("floor model unranked: effort only", {"floor": ("m-extra", "medium"), "deterministic": ("m-mid", "high")},
+             [("m-mid", "medium"), ("m-mid", "high")]),
+            ("cap below the floor leaves nothing for that model",
+             {"ranking": [], "floor": ("m-strong", "high"), "caps": {"m-strong": "medium"}}, []),
+        ]
+        for name, options, expected in rows:
+            with self.subTest(name):
+                built = candidates(**options)
+                self.assertEqual(pairs(built), expected)
+                for pair in built.pairs:
+                    self.assertIsNone(built.reject_reason(pair.model, pair.effort))
+
+    def test_reject_reasons_table(self):
+        ranked, unranked = candidates(caps={"m-strong": "high"}), candidates(ranking=[], floor=("m-strong", "medium"))
+        allow = candidates(allowed=["m-strong"])
+        rows = [
+            (ranked, ("m-hidden", "high"), "outside-candidates"),
+            (ranked, ("m-unknown", "high"), "outside-candidates"),
+            (allow, ("m-mid", "high"), "not-allowed"),
+            (ranked, ("m-light", "high"), "unsupported-effort"),
+            (ranked, ("m-strong", "ultra"), "unsupported-effort"),
+            (ranked, ("m-strong", "turbo"), "unsupported-effort"),
+            (ranked, ("m-extra", "high"), "unranked-model"),
+            (ranked, ("m-light", "medium"), "below-floor"),
+            (ranked, ("m-strong", "low"), "below-floor"),
+            (ranked, ("m-strong", "max"), "above-cap"),
+            (unranked, ("m-mid", "high"), "outside-candidates"),
+            (unranked, ("m-strong", "low"), "below-floor"),
+            (ranked, ("m-mid", "high"), None),
+        ]
+        for built, (model, effort), rule in rows:
+            with self.subTest(model=model, effort=effort):
+                self.assertEqual(built.reject_reason(model, effort), rule)
+
+    def test_candidate_set_json_names_its_inputs(self):
+        data = candidates(caps={"m-strong": "high"}, allowed=["m-strong", "m-mid"]).to_json()
+        self.assertEqual(data["deterministic"], {"model": "m-strong", "effort": "high"})
+        self.assertEqual(data["floor"], {"tier": "medium", "model": "m-mid", "effort": "medium"})
+        self.assertTrue(data["ranked"])
+        self.assertEqual(data["caps"], {"m-strong": "high"})
+        self.assertEqual(data["allowed_models"], ["m-strong", "m-mid"])
+        self.assertIn(["m-mid", "high"], data["candidates"])
+
+    def test_check_caps_fresh_and_stale(self):
+        self.assertEqual(check_caps("codex", {}, [], JUDGE_ENTRY, fresh=True), [])
+        with self.assertRaises(EngineError) as ctx:
+            check_caps("codex", {"m-typo": "high"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("m-typo", str(ctx.exception))
+        self.assertIn("oah models", str(ctx.exception))
+        warned = check_caps("codex", {"m-strong": "high", "m-typo": "low"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(len(warned), 1)
+        self.assertTrue(warned[0].startswith("OAH_MODEL_CAP_UNKNOWN: "), warned)
+        self.assertIn("m-typo", warned[0])
+        stale = check_caps("codex", {"m-typo": "high"}, [], JUDGE_ENTRY, fresh=False)
+        self.assertTrue(stale[0].startswith("OAH_MODEL_CAP_UNKNOWN: "), stale)
+        hidden = check_caps("codex", {"m-hidden": "high", "m-mid": "high"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertIn("m-hidden", hidden[0])
+        allowed = check_caps("codex", {}, ["m-mid", "m-typo"], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(len(allowed), 1)
+        self.assertTrue(allowed[0].startswith("OAH_MODEL_ALLOWED_UNKNOWN: "), allowed)
 
 
 if __name__ == "__main__":

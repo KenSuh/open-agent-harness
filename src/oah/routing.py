@@ -83,6 +83,11 @@ def _at_least(tier: str, floor: str) -> str:
     return tier if TIERS.index(tier) >= TIERS.index(floor) else floor
 
 
+def floor_tier(kind: str) -> str:
+    """The lowest tier a kind may run at: the kind floors of PLAN 5.5, low for kinds without one."""
+    return "high" if kind in FLOOR_HIGH else "medium" if kind in FLOOR_MEDIUM else "low"
+
+
 def recommend(axes: Axes) -> Recommendation:
     """The tier for these axes, from the scoring table, lifts and kind floors of PLAN 5.5."""
     score = (_check("kind", axes.kind, KIND_SCORES) + _check("intensity", axes.intensity, INTENSITY_SCORES)

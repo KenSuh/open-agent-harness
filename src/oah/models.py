@@ -16,6 +16,17 @@ Mapping
     a model the CLI marks as default); then the effective configuration (Codex's config files). Nothing
     resolvable raises `OAH_MODEL_UNRESOLVED`.
 
+Candidates (amendment 6)
+    `build_candidates` makes the closed set a judge may pick from for one call: listed (never hidden)
+    models, intersected with `allowed_models` (empty = all), each with its supported ordinary efforts at
+    most the model's `effort_caps` entry. With a ranking (`quality_order` names listed models, including
+    the floor tier's model), no model weaker than the floor tier's deterministic model; always, no
+    effort below the floor tier's effort. Without a ranking the model stays the deterministic one and
+    only the effort is judged. `CandidateSet.reject_reason` is the one rule: the candidate list is every
+    listed pair it accepts, and a judged answer is used only when it accepts that answer too.
+    `check_caps` warns about capped or allowed models the catalog does not list, and refuses when a
+    fresh catalog lists none of the capped models.
+
 Changes
     `Catalog.record_resolution` stores the last resolved model and effort per engine and tier in
     `resolved.json` and appends `{ts, engine, tier, field, old, new, why}` to `changes.jsonl` for each
@@ -25,12 +36,12 @@ from __future__ import annotations
 
 import datetime as dt
 import pathlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from oah.atomic import append_jsonl, read_json, write_json_atomic
 from oah.engines import claude, codex
-from oah.engines.effort import EngineError
+from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, rank
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
 
@@ -44,9 +55,10 @@ class ModelInfo:
     name: str
     efforts: tuple[str, ...]
     default: bool = False
+    listed: bool = True  # False: the CLI hides it from its model list; never a judged candidate
 
     def to_json(self) -> dict:
-        return {"name": self.name, "efforts": list(self.efforts), "default": self.default}
+        return {"name": self.name, "efforts": list(self.efforts), "default": self.default, "listed": self.listed}
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,8 @@ class Entry:
         for item in data["models"]:
             if isinstance(item, dict) and isinstance(item.get("name"), str):
                 efforts = tuple(e for e in item.get("efforts", ()) if isinstance(e, str))
-                models.append(ModelInfo(item["name"], efforts, item.get("default") is True))
+                models.append(ModelInfo(item["name"], efforts, item.get("default") is True,
+                                        item.get("listed") is not False))
         version, checked = data.get("cli_version"), data.get("checked_at")
         return cls(engine, version if isinstance(version, str) else None,
                    checked if isinstance(checked, str) else None, tuple(models), str(data.get("source", "")))
@@ -124,7 +137,7 @@ def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str]) -> tu
     if engine == "codex":
         home = codex.codex_home(env)
         cache = codex.read_models_cache(home) or {}
-        return (tuple(ModelInfo(m.slug, m.levels, m.default) for m in cache.values()),
+        return (tuple(ModelInfo(m.slug, m.levels, m.default, m.listed) for m in cache.values()),
                 f"{codex.CACHE_NAME} in CODEX_HOME")
     result = run_command([*base, "--help"], timeout=PROBE_TIMEOUT, env=env)
     info = claude.parse_help(result.stdout if result.returncode == 0 else "")
@@ -247,3 +260,101 @@ def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], 
                       f"the CLI reports no model from quality_order or marked as default{reported}, and no default "
                       f"is configured. Set [engines.{engine}.tiers] {tier} = {{ model = \"<model>\" }} in "
                       f".oah/config.toml, or list a reported model in [engines.{engine}] quality_order")
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One (model, effort) choice."""
+
+    model: str
+    effort: str
+
+    def to_json(self) -> dict:
+        return {"model": self.model, "effort": self.effort}
+
+
+@dataclass(frozen=True)
+class CandidateSet:
+    """The closed (model, effort) pairs a judge may pick from for one call, and the rule that made them."""
+
+    engine: str
+    deterministic: Pair
+    floor_tier: str
+    floor: Pair
+    ranked: bool  # True: quality_order ranks the models, so the model is judged as well as the effort
+    order: tuple[str, ...]  # the ranked listed models, strongest first (empty without a ranking)
+    allowed: tuple[str, ...]
+    caps: tuple[tuple[str, str], ...]
+    entry: Entry | None
+    pairs: tuple[Pair, ...] = ()
+
+    def reject_reason(self, model: str, effort: str) -> str | None:
+        """None when (model, effort) is a candidate, else the rule it breaks."""
+        info = self.entry.model(model) if self.entry is not None and isinstance(model, str) else None
+        if info is None or not info.listed:
+            return "outside-candidates"
+        if self.allowed and model not in self.allowed:
+            return "not-allowed"
+        if effort not in info.efforts or effort in BEHAVIOUR_CHANGING or rank(effort) is None:
+            return "unsupported-effort"
+        if self.ranked:
+            if model not in self.order:
+                return "unranked-model"
+            if self.order.index(model) > self.order.index(self.floor.model):
+                return "below-floor"
+        elif model != self.deterministic.model:
+            return "outside-candidates"
+        floor_rank = rank(self.floor.effort)
+        if floor_rank is None:
+            if effort != self.deterministic.effort:
+                return "outside-candidates"
+        elif rank(effort) < floor_rank:
+            return "below-floor"
+        cap = dict(self.caps).get(model)
+        if cap is not None and rank(cap) is not None and rank(effort) > rank(cap):
+            return "above-cap"
+        return None
+
+    def to_json(self) -> dict:
+        return {"deterministic": self.deterministic.to_json(),
+                "floor": {"tier": self.floor_tier, **self.floor.to_json()}, "ranked": self.ranked,
+                "allowed_models": list(self.allowed), "caps": dict(self.caps),
+                "candidates": [[pair.model, pair.effort] for pair in self.pairs]}
+
+
+def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, floor_tier: str, floor: Pair,
+                     quality_order: Sequence[str], allowed_models: Sequence[str],
+                     effort_caps: Mapping[str, str]) -> CandidateSet:
+    """The closed candidate set for one call (see Candidates above)."""
+    listed = [model.name for model in entry.models if model.listed] if entry else []
+    order = tuple(name for name in quality_order if name in listed)
+    ranked = bool(order) and floor.model in order
+    rule = CandidateSet(engine, deterministic, floor_tier, floor, ranked, order if ranked else (),
+                        tuple(allowed_models), tuple(sorted(effort_caps.items())), entry)
+    names = list(order) if ranked else [deterministic.model]
+    found = [Pair(name, effort) for name in names if entry is not None and entry.model(name) is not None
+             for effort in entry.model(name).efforts if rule.reject_reason(name, effort) is None]
+    found.sort(key=lambda pair: (names.index(pair.model), rank(pair.effort)))
+    return replace(rule, pairs=tuple(found))
+
+
+def check_caps(engine: str, caps: Mapping[str, str], allowed: Sequence[str], entry: Entry | None, *,
+               fresh: bool) -> list[str]:
+    """Warnings for capped or allowed models the catalog does not list; refuse when a fresh catalog lists none."""
+    listed = {model.name for model in entry.models if model.listed} if entry else set()
+    warnings: list[str] = []
+    unknown = sorted(name for name in caps if name not in listed)
+    if unknown and fresh and len(unknown) == len(caps):
+        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] names {', '.join(unknown)}, but the "
+                          f"{engine} CLI lists none of them; run `oah models` to see the listed models, then fix or "
+                          "remove those entries in .oah/config.toml")
+    if unknown:
+        warnings.append(f"OAH_MODEL_CAP_UNKNOWN: [engines.{engine}.effort_caps] names {', '.join(unknown)}, which "
+                        f"the {engine} CLI does not list now; those caps apply only if it lists them again. Run "
+                        "`oah models --refresh` to check, or remove them from .oah/config.toml")
+    missing = [name for name in allowed if name not in listed]
+    if missing:
+        warnings.append(f"OAH_MODEL_ALLOWED_UNKNOWN: [engines.{engine}] allowed_models names {', '.join(missing)}, "
+                        f"which the {engine} CLI does not list now, so the judge cannot pick them. Run "
+                        "`oah models --refresh` to check, or remove them from .oah/config.toml")
+    return warnings
