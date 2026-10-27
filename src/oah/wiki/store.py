@@ -13,6 +13,7 @@ import datetime
 import hashlib
 import os
 import pathlib
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
@@ -28,6 +29,7 @@ from oah.wiki.base import (EXIT_ENVIRONMENT, EXIT_REFUSED, WikiError, WikiSettin
 JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 RESOLVED = "resolved-records"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
@@ -91,6 +93,18 @@ class MaintenanceCheck:
     record: dict | None = None
     lint: str | None = None
     hygiene: str | None = None
+
+    @property
+    def outputs(self) -> list[tuple[str, str]] | None:
+        """record["outputs"] as (path, sha256) pairs sorted by path; None when absent or malformed."""
+        outputs = self.record.get("outputs") if isinstance(self.record, dict) else None
+        if not isinstance(outputs, dict):
+            return None
+        pairs = sorted(outputs.items())
+        if not all(isinstance(rel, str) and rel and isinstance(digest, str) and _DIGEST.fullmatch(digest)
+                   for rel, digest in pairs):
+            return None
+        return pairs
 
 
 @dataclass(frozen=True)
@@ -536,13 +550,17 @@ class Wiki:
                                       f"this worktree; {hint}")
             else:
                 check.record = records[-1]
-                outputs = check.record.get("outputs")
+                outputs = check.outputs
+                if outputs is None:
+                    check.problems.append(f"OAH_WIKI_MAINTENANCE_STALE: the maintenance record for task {task} "
+                                          f"has malformed outputs; {hint} again")
+                recorded = dict(outputs or [])
                 for name, _ in found:
                     rel = self._rel(self.dir / name)
-                    if not isinstance(outputs, dict) or rel not in outputs:
+                    if outputs is not None and rel not in recorded:
                         check.problems.append(f"OAH_WIKI_MAINTENANCE_STALE: {rel} has no recorded digest for "
                                               f"task {task}; {hint} again")
-                for rel, digest in (outputs.items() if isinstance(outputs, dict) else []):
+                for rel, digest in outputs or []:
                     current = read_bytes(self.root / rel)
                     if current is None or _sha(current) != digest:
                         check.problems.append(f"OAH_WIKI_MAINTENANCE_STALE: {rel} changed since the last "

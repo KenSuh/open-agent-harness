@@ -303,8 +303,16 @@ def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> 
                              f"{problems}. Run oah wiki maintain --task {lease.task} before you commit, run the gates "
                              "and ask for review; or pass --allow-missing-wiki-maintenance (recorded)")
         return set(), {"task": lease.task, "override": True, "problems": list(check.problems)}
+    outputs = check.outputs
+    if outputs is None:
+        problem = f"the wiki maintenance record for {lease.task} has no readable outputs"
+        if not allow_missing:
+            raise LeaseError("OAH_WIKI_MAINTENANCE_MISSING",
+                             f"{problem}. Run oah wiki maintain --task {lease.task} again before you commit, or pass "
+                             "--allow-missing-wiki-maintenance (recorded)")
+        return set(), {"task": lease.task, "override": True, "problems": [problem]}
     exempt = []
-    for path, digest in check.outputs:
+    for path, digest in outputs:
         if not (isinstance(path, str) and WIKI_MAINTENANCE_OUTPUTS.fullmatch(path)):
             continue
         try:
