@@ -240,6 +240,31 @@ class ModelsCliTest(unittest.TestCase):
         self.assertEqual(data["engines"]["claude"]["tiers"]["high"]["model"], "opus")
         self.assertIn("gpt-a", [m["name"] for m in data["engines"]["codex"]["models"]])
 
+    def test_shows_candidates_and_caps(self):
+        repo = project_with_fakes(self, 'quality_order = ["m-strong", "m-mid"]\nallowed_models = ["m-strong", "m-mid"]\n'
+                                        '[engines.codex.effort_caps]\n"m-strong" = "high"\n')
+        state, home = make_tmp_dir(self), make_tmp_dir(self)
+        write_cache(home, ("m-strong", ["low", "medium", "high", "xhigh", "max"], True),
+                    ("m-mid", ["low", "medium", "high"], False))
+        with inside(repo, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
+            code, out, err = run_models("--json")
+            text_code, text, _ = run_models()
+        self.assertEqual((code, text_code), (0, 0), err)
+        codex_report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(codex_report["allowed_models"], ["m-strong", "m-mid"])
+        self.assertEqual(codex_report["effort_caps"], {"m-strong": "high"})
+        high = codex_report["tiers"]["high"]
+        self.assertEqual((high["model"], high["effort"]), ("m-strong", "high"))
+        self.assertEqual(high["floor"], {"tier": "high", "model": "m-strong", "effort": "high"})
+        self.assertEqual(high["candidates"], [["m-strong", "high"]])
+        low = codex_report["tiers"]["low"]
+        self.assertEqual((low["model"], low["effort"]), ("m-mid", "low"))
+        self.assertIn(["m-strong", "low"], low["candidates"])
+        self.assertNotIn(["m-strong", "max"], low["candidates"])
+        self.assertIn("allowed m-strong, m-mid", text)
+        self.assertIn("caps m-strong=high", text)
+        self.assertIn("candidates at floor low: m-strong (low, medium, high) · m-mid (low, medium, high)", text)
+
     def test_models_cli_reports_unresolved_tier(self):
         repo = project_with_fakes(self)
         state, home = make_tmp_dir(self), make_tmp_dir(self)
