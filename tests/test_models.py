@@ -380,7 +380,48 @@ class CandidateTableTest(unittest.TestCase):
         entry = fixture.catalog.load("codex")
         self.assertEqual([(model.name, model.listed) for model in entry.models], [("m-a", True), ("m-b", False)])
         old = Entry.from_json("codex", {"models": [{"name": "m-a", "efforts": ["low"]}]})
-        self.assertTrue(old.models[0].listed)
+        self.assertIsNone(old)
+        for listed in (None, "false", 0, 1):
+            with self.subTest(listed=listed):
+                self.assertIsNone(Entry.from_json("codex", {
+                    "models": [{"name": "m-a", "efforts": ["low"], "listed": listed}]}))
+
+    def test_unexpired_legacy_catalog_never_qualifies_hidden_models(self):
+        for readable_cache in (True, False):
+            for mixed_visibility in (False, True):
+                with self.subTest(readable_cache=readable_cache, mixed_visibility=mixed_visibility):
+                    fixture = Fixture(self)
+                    visible = {"name": "m-visible", "efforts": ["high"], "default": True}
+                    if mixed_visibility:
+                        visible["listed"] = True
+                    legacy = {"codex": {"cli_version": "0.163.0", "checked_at": NOW.isoformat(),
+                                        "source": "fixture", "models": [visible,
+                                            {"name": "m-hidden", "efforts": ["high"]}]}}
+                    fixture.catalog.dir.mkdir(parents=True)
+                    fixture.catalog.catalog_path.write_bytes(json.dumps(legacy).encode("utf-8"))
+                    if readable_cache:
+                        fixture.home.mkdir()
+                        (fixture.home / "models_cache.json").write_bytes(json.dumps({"models": [
+                            {"slug": "m-visible", "supported_reasoning_levels": ["high"], "is_default": True},
+                            {"slug": "m-hidden", "supported_reasoning_levels": ["high"], "visibility": "hide"},
+                        ]}).encode("utf-8"))
+                    freshness = fixture.fresh("codex", now=NOW + dt.timedelta(hours=1))
+                    for ranking, pools in ((["m-hidden", "m-visible"], {}),
+                                           ([], {"high": ["m-hidden", "m-visible"]})):
+                        built = build_candidates("codex", entry=freshness.entry, tier="high", floor_tier="high",
+                                                 deterministic=Pair("m-visible", "high"),
+                                                 floor=Pair("m-visible", "high"), quality_order=ranking,
+                                                 allowed_models=[], effort_caps={}, tier_pools=pools)
+                        self.assertEqual(pairs(built), [("m-visible", "high")] if readable_cache else [])
+                        self.assertEqual(built.reject_reason("m-hidden", "high"), "outside-candidates")
+                    self.assertEqual(freshness.entry.cli_version, "0.163.0")
+                    if readable_cache:
+                        self.assertIsNotNone(freshness.refreshed)
+                        self.assertFalse(fixture.catalog.load("codex").model("m-hidden").listed)
+                        self.assertIsNone(fixture.fresh("codex", now=NOW + dt.timedelta(hours=2)).refreshed)
+                    else:
+                        self.assertTrue(any(w.startswith("OAH_MODELS_REFRESH_FAILED") for w in freshness.warnings))
+                        self.assertIsNone(fixture.catalog.load("codex"))
 
     def test_candidate_table(self):
         rows = [

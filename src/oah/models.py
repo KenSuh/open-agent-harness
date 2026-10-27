@@ -6,8 +6,9 @@ Catalog
     checked, and the models the CLI reports (Codex: `models_cache.json` with each model's
     `supported_reasoning_levels`; Claude: the aliases and effort levels in `claude --help`).
     `ensure_fresh` runs before every launch: it probes `<cli> --version` and rebuilds the entry when
-    the version changed, the TTL passed or a refresh was asked for. A rebuild that reads no models keeps
-    the last good entry and warns with `OAH_MODELS_REFRESH_FAILED`; nothing is ever downgraded.
+    the version changed, the TTL passed or a refresh was asked for. Entries missing explicit visibility
+    metadata are invalidated first. A rebuild that reads no models keeps the last valid entry and warns
+    with `OAH_MODELS_REFRESH_FAILED`; nothing is ever downgraded.
 
 Mapping
     `map_tier` applies the precedence: an explicit tier model (a pin) always wins; then the automatic
@@ -87,9 +88,11 @@ class Entry:
         models = []
         for item in data["models"]:
             if isinstance(item, dict) and isinstance(item.get("name"), str):
+                if not isinstance(item.get("listed"), bool):
+                    return None  # Legacy catalogs cannot distinguish hidden models; refresh before reuse.
                 efforts = tuple(e for e in item.get("efforts", ()) if isinstance(e, str))
                 models.append(ModelInfo(item["name"], efforts, item.get("default") is True,
-                                        item.get("listed") is not False))
+                                        item["listed"]))
         version, checked = data.get("cli_version"), data.get("checked_at")
         return cls(engine, version if isinstance(version, str) else None,
                    checked if isinstance(checked, str) else None, tuple(models), str(data.get("source", "")))
