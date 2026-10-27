@@ -36,6 +36,49 @@ CODEX_TRAILER = "\n\nAgent-Engine: codex"
 HUMAN_TRAILER = "\n\nAgent-Engine: human"
 
 
+def state_snapshot(root: pathlib.Path) -> dict:
+    """Keep exact state bytes without reading Windows byte-range-locked files."""
+    return {path.relative_to(root).as_posix():
+            (("lock", path.stat().st_size) if path.name.endswith(".lock") else path.read_bytes())
+            if path.is_file() else None for path in root.rglob("*")}
+
+
+class StateSnapshotTest(unittest.TestCase):
+    def test_locked_files_use_metadata_and_other_files_keep_exact_bytes(self):
+        root = make_tmp_dir(self)
+        self.addCleanup(remove_tree, root)
+        nested = root / "reviews/t1/.locks"
+        nested.mkdir(parents=True)
+        shared, task = root / ".lock", nested / "task.lock"
+        shared.write_bytes(b"")
+        task.write_bytes(b"locked")
+        record = root / "reviews/t1/record.json"
+        record.write_bytes(b"{\r\n}\x00\xff")
+        expected = {".lock": ("lock", 0), "reviews": None, "reviews/t1": None,
+                    "reviews/t1/.locks": None, "reviews/t1/.locks/task.lock": ("lock", 6),
+                    "reviews/t1/record.json": b"{\r\n}\x00\xff"}
+        read_bytes = pathlib.Path.read_bytes
+
+        def read_unlocked(path):
+            if path.name.endswith(".lock"):
+                raise PermissionError("locked bytes must not be read")
+            return read_bytes(path)
+
+        with StateLock(shared), StateLock(task):
+            with mock.patch.object(pathlib.Path, "read_bytes", read_unlocked):
+                self.assertEqual(state_snapshot(root), expected)
+        self.assertEqual(state_snapshot(root), expected)
+        record.write_bytes(b"changed")
+        expected["reviews/t1/record.json"] = b"changed"
+        self.assertEqual(state_snapshot(root), expected)
+        task.write_bytes(b"size changed")
+        expected["reviews/t1/.locks/task.lock"] = ("lock", 12)
+        self.assertEqual(state_snapshot(root), expected)
+        shared.unlink()
+        del expected[".lock"]
+        self.assertEqual(state_snapshot(root), expected)
+
+
 class FixProject:
     """A task branch with a bound lease, reviewed and corrected by the fake engine processes."""
 
@@ -1949,10 +1992,6 @@ class SecretTest(unittest.TestCase):
                 judge = fix._Attempt._judge
                 expected = []
 
-                def snapshot():
-                    return {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
                 def changed(attempt, *args, **kwargs):
                     result = judge(attempt, *args, **kwargs)
                     store = Store(project.state, lock_timeout=0)
@@ -1969,14 +2008,14 @@ class SecretTest(unittest.TestCase):
                     else:
                         later = call.dt.datetime.now(call.dt.timezone.utc) + call.dt.timedelta(hours=2)
                         stack.enter_context(mock.patch("oah.lease.utc_now", return_value=later))
-                    expected.append(snapshot())
+                    expected.append(state_snapshot(project.state))
                     return result
 
                 with mock.patch.object(fix._Attempt, "_judge", changed):
                     with self.assertRaises(ReviewError) as caught:
                         project.fix()
                 self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
-                self.assertEqual(snapshot(), expected[0])
+                self.assertEqual(state_snapshot(project.state), expected[0])
                 self.assertEqual(project.names(), ["R1.json", "A1-start.json"])
 
     def test_landed_lease_changes_between_steps_keep_the_named_refusal(self):
@@ -1986,9 +2025,6 @@ class SecretTest(unittest.TestCase):
                 project.changes_requested()
                 publication = fix._publication
                 expected = []
-                def snapshot():
-                    return {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
                 @contextlib.contextmanager
                 def changed(t, h):
                     store = Store(project.state, lock_timeout=0)
@@ -1996,12 +2032,12 @@ class SecretTest(unittest.TestCase):
                         store.renew(task="t1", agent="claude", ttl_hours=2)
                     else:
                         store.release(task="t1", agent="claude", reason="test", force=False)
-                    expected.append(snapshot())
+                    expected.append(state_snapshot(project.state))
                     with publication(t, h):
                         yield
                 with mock.patch.object(fix, "_publication", changed):
                     project.refused("OAH_LEASE_CHANGED", project.fix)
-                self.assertEqual(snapshot(), expected[0])
+                self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_publication_waits_for_brief_shared_lock_contention(self):
         project = FixProject(self)
@@ -2035,21 +2071,18 @@ class SecretTest(unittest.TestCase):
                     publish_start(project)
                 original = fix._publication
                 expected = []
-                def snapshot():
-                    return {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
                 @contextlib.contextmanager
                 def changed(t, h):
                     path = project.folder() / "index.jsonl"
                     with StateLock(project.state / ".lock", timeout=0):
                         path.write_bytes(path.read_bytes() + b'{"concurrent": true}\n')
-                    expected.append(snapshot())
+                    expected.append(state_snapshot(project.state))
                     with original(t, h):
                         yield
                 action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
                 with mock.patch.object(fix, "_publication", changed):
                     project.refused("OAH_FIX_STATE_CHANGED", action)
-                self.assertEqual(snapshot(), expected[0])
+                self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_terminal_publication_refuses_changed_inputs_without_any_write(self):
         project = FixProject(self)
@@ -2057,21 +2090,18 @@ class SecretTest(unittest.TestCase):
         project.queue_fix({"write": FIXED})
         judge = fix._Attempt._judge
         expected = []
-        def snapshot():
-            return {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
-                    for p in project.state.rglob("*")}
         def changed(attempt, *args, **kwargs):
             result = judge(attempt, *args, **kwargs)
             path = project.folder() / "rounds.jsonl"
             with StateLock(project.state / ".lock", timeout=0):
                 path.write_bytes(path.read_bytes() + b'{"concurrent": true}\n')
-            expected.append(snapshot())
+            expected.append(state_snapshot(project.state))
             return result
         with mock.patch.object(fix._Attempt, "_judge", changed):
             with self.assertRaises(ReviewError) as caught:
                 project.fix()
         self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
-        self.assertEqual(snapshot(), expected[0])
+        self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_model_change_after_capture_refuses_without_overwriting_state(self):
         project = FixProject(self)
@@ -2079,21 +2109,17 @@ class SecretTest(unittest.TestCase):
         resolve = call.resolve_engine
         expected = []
 
-        def snapshot():
-            return {p.relative_to(project.state): p.read_bytes() if p.is_file() else None
-                    for p in project.state.rglob("*")}
-
         def changed(*args, **kwargs):
             result = resolve(*args, **kwargs)
             with StateLock(project.state / ".lock", timeout=0):
                 path = project.state / "models/resolved.json"
                 path.write_bytes(b'{"other": {}}\n')
-            expected.append(snapshot())
+            expected.append(state_snapshot(project.state))
             return result
 
         with mock.patch.object(call, "resolve_engine", side_effect=changed):
             project.refused("OAH_FIX_STATE_CHANGED", project.fix)
-        self.assertEqual(snapshot(), expected[0])
+        self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_live_output_shows_only_scanned_dispatcher_diff(self):
         project = FixProject(self)
@@ -2321,20 +2347,17 @@ class SecretTest(unittest.TestCase):
         project.commit(FIXED, trailer=HUMAN_TRAILER)
         attribution = fix._attribution
         expected = []
-        def snapshot():
-            return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                    for p in project.state.rglob("*")}
         def changed(*args, **kwargs):
             result = attribution(*args, **kwargs)
             path = project.state / "leases.json"
             data = json.loads(path.read_bytes())
             data["leases"][0]["note"] = "preparation changed"
             path.write_bytes(json.dumps(data).encode("utf-8"))
-            expected.append(snapshot())
+            expected.append(state_snapshot(project.state))
             return result
         with mock.patch.object(fix, "_attribution", side_effect=changed):
             project.refused("OAH_LEASE_CHANGED", project.manual, "human")
-        self.assertEqual(snapshot(), expected[0])
+        self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_every_mode_refuses_without_creating_missing_locks(self):
         for mode in ("fix", "manual", "bind", "abort"):
@@ -2343,14 +2366,11 @@ class SecretTest(unittest.TestCase):
                     project = FixProject(self)
                     if missing == "state":
                         (project.state / ".lock").unlink()
-                    def snapshot():
-                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                                for p in project.state.rglob("*")}
-                    before = snapshot()
+                    before = state_snapshot(project.state)
                     action = (lambda: project.manual("human")) if mode == "manual" else getattr(project, mode)
                     with self.assertRaises(ReviewError):
                         action()
-                    self.assertEqual(snapshot(), before)
+                    self.assertEqual(state_snapshot(project.state), before)
 
     def test_every_mode_consumes_captured_state_after_publication_starts(self):
         for mode in ("fix", "manual", "bind", "abort"):
@@ -2413,9 +2433,6 @@ class SecretTest(unittest.TestCase):
                         publish_start(project)
                     publication = fix._publication
                     expected = []
-                    def snapshot():
-                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                                for p in project.state.rglob("*")}
                     @contextlib.contextmanager
                     def changed(t, h):
                         path = project.state / "leases.json"
@@ -2425,12 +2442,12 @@ class SecretTest(unittest.TestCase):
                         else:
                             data["leases"] = []
                         path.write_bytes(json.dumps(data).encode("utf-8"))
-                        expected.append(snapshot())
+                        expected.append(state_snapshot(project.state))
                         with publication(t, h):
                             yield
                     with mock.patch.object(fix, "_publication", changed):
                         project.refused("OAH_LEASE_CHANGED", getattr(project, mode))
-                    self.assertEqual(snapshot(), expected[0])
+                    self.assertEqual(state_snapshot(project.state), expected[0])
 
     def test_noncanonical_lease_identifiers_leave_the_complete_state_tree_unchanged(self):
         for position, identifier in enumerate(("", "not-a-lease", "account-" + token_source.token_hex(8))):
@@ -2442,15 +2459,11 @@ class SecretTest(unittest.TestCase):
                 data["leases"][0]["id"] = identifier
                 path.write_bytes(json.dumps(data).encode("utf-8"))
 
-                def snapshot():
-                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
-                before = snapshot()
+                before = state_snapshot(project.state)
                 error = project.refused("OAH_STATE_CORRUPT", project.fix)
                 if identifier:
                     self.assertNotIn(identifier, str(error))
-                self.assertEqual(snapshot(), before)
+                self.assertEqual(state_snapshot(project.state), before)
 
     def test_expired_lease_is_rechecked_at_terminal_publication(self):
         project = FixProject(self)
@@ -2479,13 +2492,9 @@ class SecretTest(unittest.TestCase):
                     project.changes_requested()
                     shutil.rmtree(project.folder() / ".locks")
 
-                def snapshot():
-                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
-                before = snapshot()
+                before = state_snapshot(project.state)
                 project.refused("OAH_FIX_HISTORY_INVALID" if reviewed else "OAH_FIX_NOTHING_TO_FIX", project.fix)
-                self.assertEqual(snapshot(), before)
+                self.assertEqual(state_snapshot(project.state), before)
 
     def test_publication_releases_the_shared_lock_for_execution(self):
         project = FixProject(self)
@@ -2525,10 +2534,6 @@ class SecretTest(unittest.TestCase):
                 # Force deferred catalog creation as well as resolution writes.
                 shutil.rmtree(project.state / "models")
 
-                def snapshot():
-                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
                 expected = []
                 resolve = call.resolve_engine
 
@@ -2543,12 +2548,12 @@ class SecretTest(unittest.TestCase):
                     else:
                         data["leases"][0]["note"] = "changed without advancing generation"
                     path.write_bytes(json.dumps(data).encode("utf-8"))
-                    expected.append(snapshot())
+                    expected.append(state_snapshot(project.state))
                     return result
 
                 with mock.patch.object(call, "resolve_engine", side_effect=changed):
                     project.refused("OAH_LEASE_CHANGED", project.fix)
-                self.assertEqual(snapshot(), expected[0], "the refused fix must add no writes to the racing state")
+                self.assertEqual(state_snapshot(project.state), expected[0], "the refused fix must add no writes to the racing state")
 
     def test_the_entire_lease_record_is_scanned_before_any_state_write(self):
         for field in ("id", "note", "gates"):
@@ -2561,14 +2566,10 @@ class SecretTest(unittest.TestCase):
                 data["leases"][0][field] = [marker] if field == "gates" else marker
                 path.write_bytes(json.dumps(data).encode("utf-8"))
 
-                def snapshot():
-                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
-                before = snapshot()
+                before = state_snapshot(project.state)
                 error = project.refused("OAH_FIX_SENSITIVE_METADATA", project.fix)
                 self.assertNotIn(marker, str(error))
-                self.assertEqual(snapshot(), before)
+                self.assertEqual(state_snapshot(project.state), before)
 
     def test_preparation_reads_each_state_input_once(self):
         project = FixProject(self)
@@ -2613,15 +2614,11 @@ class SecretTest(unittest.TestCase):
                     if not cached:
                         shutil.rmtree(project.state / "models")
 
-                    def snapshot():
-                        return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                                for p in project.state.rglob("*")}
-
-                    before = snapshot()
+                    before = state_snapshot(project.state)
                     code = "OAH_MODEL_UNRESOLVED" if pin.startswith("-") else "OAH_FIX_SENSITIVE_INPUT"
                     error = project.refused(code, project.fix)
                     self.assertNotIn(pin, str(error))
-                    self.assertEqual(snapshot(), before,
+                    self.assertEqual(state_snapshot(project.state), before,
                                      "invalid launch arguments must leave all state bytes and directories unchanged")
 
     def test_rejected_model_metadata_leaves_the_complete_state_tree_unchanged(self):
@@ -2667,11 +2664,7 @@ class SecretTest(unittest.TestCase):
                 if config != (project.repo / ".oah/config.toml").read_text(encoding="utf-8"):
                     project.commit({".oah/config.toml": config})
 
-                def snapshot():
-                    return {p.relative_to(project.state).as_posix(): p.read_bytes() if p.is_file() else None
-                            for p in project.state.rglob("*")}
-
-                before = snapshot()
+                before = state_snapshot(project.state)
                 with contextlib.ExitStack() as stack:
                     if field in ("late-brief", "no-model-state"):
                         render = call._brief_text
@@ -2683,7 +2676,7 @@ class SecretTest(unittest.TestCase):
                             lambda *args, **kwargs: call.dataclasses.replace(resolve(*args, **kwargs), model=marker)))
                     error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.fix)
                 self.assertNotIn(marker, str(error))
-                self.assertEqual(snapshot(), before, "refusal must leave every state file and directory unchanged")
+                self.assertEqual(state_snapshot(project.state), before, "refusal must leave every state file and directory unchanged")
 
     def test_recovery_and_binding_notes_use_fixed_actor_metadata(self):
         for operation in ("abort", "bind-override"):
