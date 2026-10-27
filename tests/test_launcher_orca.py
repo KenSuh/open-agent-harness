@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -51,6 +53,89 @@ def _minimal_path(*extra: pathlib.Path) -> str:
         if tool and str(pathlib.Path(tool).parent) not in folders:
             folders.append(str(pathlib.Path(tool).parent))
     return os.pathsep.join(folders)
+
+
+def _load_fake_orca():
+    spec = importlib.util.spec_from_file_location("fake_orca", FAKES / "fake_orca.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeOrcaPidFileTest(unittest.TestCase):
+    """The fake Orca publishes PID files atomically, so a reader never acts on an empty or partial one."""
+
+    def setUp(self):
+        self.fake = _load_fake_orca()
+        self.folder = make_tmp_dir(self)
+
+    def test_publish_never_opens_the_final_path_for_writing(self):
+        final = self.folder / "term_x.pid"
+        code = (
+            "import importlib.util, json, os, pathlib, sys\n"
+            "final = pathlib.Path(sys.argv[2])\n"
+            "spec = importlib.util.spec_from_file_location('fake_orca', sys.argv[1])\n"
+            "fake = importlib.util.module_from_spec(spec); spec.loader.exec_module(fake)\n"
+            "opened = []\n"
+            "def hook(event, args):\n"
+            "    if event == 'open' and args[0] is not None and not isinstance(args[0], int):\n"
+            "        mode, flags = args[1], args[2]\n"
+            "        writes = any(c in mode for c in 'wax+') if isinstance(mode, str) else bool(\n"
+            "            flags & (os.O_WRONLY | os.O_RDWR))\n"
+            "        if writes:\n"
+            "            opened.append(os.path.abspath(os.fsdecode(args[0])))\n"
+            "sys.addaudithook(hook)\n"
+            "fake.publish_pid(final, 4242)\n"
+            "print(json.dumps(opened))\n")
+        result = subprocess.run([sys.executable, "-c", code, str(FAKES / "fake_orca.py"), str(final)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        opened = [pathlib.Path(path) for path in json.loads(result.stdout)]
+        self.assertTrue(opened, "publishing a PID writes a temporary file first")
+        self.assertNotIn(final.resolve(), [path.resolve() for path in opened])
+        self.assertTrue(all(path.parent.resolve() == final.parent.resolve() for path in opened),
+                        "the temporary file sits in the same folder so os.replace stays atomic")
+        self.assertEqual(final.read_text(encoding="utf-8"), "4242\n")
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["term_x.pid"])
+
+    def test_concurrent_reader_never_sees_a_partial_pid(self):
+        count = 300
+        pids = [7 ** (index % 12) + index for index in range(count)]
+        seen: list[str] = []
+        failures: list[str] = []
+
+        def reader():
+            for index in range(count):
+                path = self.folder / f"term_{index}.pid"
+                deadline = time.monotonic() + 15
+                while not path.exists():
+                    if time.monotonic() > deadline:
+                        failures.append(f"{path.name} never appeared")
+                        return
+                seen.append(path.read_bytes().decode("utf-8"))
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        for index, pid in enumerate(pids):
+            self.fake.publish_pid(self.folder / f"term_{index}.pid", pid)
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(seen, [f"{pid}\n" for pid in pids])
+
+    def test_reader_waits_for_a_complete_integer(self):
+        path = self.folder / "term_y.pid"
+        self.assertIsNone(self.fake.read_pid(path))
+        path.write_bytes(b"")
+        self.assertIsNone(self.fake.read_pid(path), "an empty file is not a PID yet")
+        path.write_bytes(b"12")
+        self.assertIsNone(self.fake.read_pid(path), "digits without the newline may be a partial write")
+        path.write_bytes(b"x\n")
+        self.assertIsNone(self.fake.read_pid(path))
+        self.fake.publish_pid(path, 1234)
+        self.assertEqual(self.fake.read_pid(path), 1234)
+        path.write_bytes(b"0\r\n")
+        self.assertEqual(self.fake.read_pid(path), 0, "a CRLF line ending is still a complete record")
 
 
 class OrcaProject:
