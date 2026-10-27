@@ -25,11 +25,10 @@ from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, RepoInfo, repo_info, run_git, state_dir
 from oah.scope import ScopeError, normalize_scope
 from oah.unlazy import UnlazyError
+from oah.wiki.store import WIKI_MAINTENANCE_OUTPUTS
 
 EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 1, 2, 69
 GATE_ENVIRONMENT_CODES = {"OAH_UNLAZY_FAILED"}
-# The only wiki files `oah wiki maintain` may change outside a task's scope (a log archive only when new).
-WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:log|index)\.md|docs/wiki/log_archive_[0-9]{2}\.md")
 _AC_STATUS = re.compile(r"(AC[1-9][0-9]*): (met|unmet|deferred) (?:—|--) \S")
 COMMANDS = ("start", "renew", "status", "finish", "release", "log")
 

@@ -401,6 +401,29 @@ class MaintenanceCheckOutputsTest(unittest.TestCase):
         check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log\x00.md": self.DIGEST}})
         self.assertIsNone(check.outputs)
 
+    def test_only_plain_allowlisted_output_paths_are_accepted(self):
+        class StringSubclass(str):
+            pass
+
+        paths = ("docs/wiki/log\x00.md", "docs/wiki/\ud800.md", "docs/wiki/\udfff.md",
+                 "/docs/wiki/log.md", "../docs/wiki/log.md", "docs/wiki/../log.md",
+                 "docs/wiki/./log.md", "docs//wiki/log.md", "docs\\wiki\\log.md",
+                 "C:/docs/wiki/log.md", "C:docs/wiki/log.md", "\\\\server\\wiki\\log.md",
+                 "docs/wiki/page.md", "docs/wiki/log.md\n", "docs/wiki/log.md/extra",
+                 "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md",
+                 "docs/wiki/log_archive_\u0660\u0661.md", None, 1, b"docs/wiki/log.md",
+                 StringSubclass("docs/wiki/log.md"))
+        for path in paths:
+            with self.subTest(path=path):
+                outputs = {"docs/wiki/index.md": self.DIGEST, path: self.DIGEST}
+                self.assertIsNone(MaintenanceCheck(ok=True, record={"outputs": outputs}).outputs)
+
+        for path in ("docs/wiki/log.md", "docs/wiki/index.md", "docs/wiki/log_archive_01.md",
+                     "docs/wiki/log_archive_99.md"):
+            with self.subTest(valid_path=path):
+                check = MaintenanceCheck(ok=True, record={"outputs": {path: self.DIGEST}})
+                self.assertEqual(check.outputs, [(path, self.DIGEST)])
+
 
 class WikiMaintenanceTest(unittest.TestCase):
     """finish exempts only verified `oah wiki maintain` outputs; a stub verify_maintenance returns real checks."""
@@ -464,7 +487,8 @@ class WikiMaintenanceTest(unittest.TestCase):
         self.assertEqual(self.last_event()["wiki_maintenance"], {"task": "t1", "exempt": sorted(outputs)})
 
     def test_other_wiki_edits_still_need_scope(self):
-        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/page.md", "edited\n")]
+        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n")]
+        self.write("docs/wiki/page.md", "edited\n")
         self.check = real_check(True, outputs)
         refused = self.finish()
         self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)

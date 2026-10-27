@@ -30,6 +30,8 @@ JOURNAL = "rollover-journal.json"
 MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+# The recorded maintenance paths, also used by finish for scope exemptions.
+WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:log|index)\.md|docs/wiki/log_archive_[0-9]{2}\.md")
 RESOLVED = "resolved-records"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
@@ -100,7 +102,7 @@ class MaintenanceCheck:
         outputs = self.record.get("outputs") if isinstance(self.record, dict) else None
         if not isinstance(outputs, dict):
             return None
-        if not all(isinstance(rel, str) and rel and "\x00" not in rel
+        if not all(type(rel) is str and WIKI_MAINTENANCE_OUTPUTS.fullmatch(rel)
                    and isinstance(digest, str) and _DIGEST.fullmatch(digest)
                    for rel, digest in outputs.items()):
             return None

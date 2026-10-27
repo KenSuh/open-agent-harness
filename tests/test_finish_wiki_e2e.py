@@ -115,6 +115,67 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
                          {"task": "t1", "override": True, "problems": check.problems})
         self.assertEqual(records.read_bytes(), data)
 
+    def test_json_encoded_surrogate_path_refuses_with_and_without_override(self):
+        self.maintain_after_edit()
+        records = self.state / "wiki" / "maintenance.jsonl"
+        lines = [json.loads(line) for line in records.read_bytes().splitlines()]
+        lines[-1]["outputs"]["docs/wiki/\ud800.md"] = "0" * 64
+        data = b"".join((json.dumps(line, ensure_ascii=True) + "\n").encode("ascii") for line in lines)
+        self.assertIn(b"docs/wiki/\\ud800.md", data)
+        records.write_bytes(data)
+
+        for extra, code in (((), "OAH_WIKI_MAINTENANCE_MISSING"),
+                            (("--allow-missing-wiki-maintenance",), "OAH_SCOPE_EXCEEDED")):
+            with self.subTest(extra=extra):
+                result = self.finish(*extra)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertTrue(result.stderr.startswith(code), result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                if not extra:
+                    self.assertIn("OAH_WIKI_MAINTENANCE_STALE", result.stderr)
+                    self.assertIn("oah wiki maintain --task t1", result.stderr)
+
+        check = verify_maintenance(self.repo, "t1", env=self.env)
+        self.assertFalse(check.ok)
+        self.assertIsNone(check.outputs)
+        self.assertTrue(any(problem.startswith("OAH_WIKI_MAINTENANCE_STALE") for problem in check.problems),
+                        check.problems)
+        self.assertEqual(records.read_bytes(), data)
+
+    def test_disallowed_output_paths_refuse_with_and_without_override(self):
+        self.maintain_after_edit()
+        records = self.state / "wiki" / "maintenance.jsonl"
+        lines = [json.loads(line) for line in records.read_bytes().splitlines()]
+        valid = dict(lines[-1]["outputs"])
+        paths = ("docs/wiki/log\x00.md", "docs/wiki/\ud800.md", "docs/wiki/\udfff.md",
+                 str(self.repo / "src" / "a.py"), "../docs/wiki/log.md", "docs/wiki/../log.md",
+                 "docs/wiki/./log.md", "docs//wiki/log.md", "docs\\wiki\\log.md",
+                 "C:/docs/wiki/log.md", "C:docs/wiki/log.md", "\\\\server\\wiki\\log.md",
+                 "docs/wiki/page.md", "docs/wiki/log.md\n", "docs/wiki/log.md/extra",
+                 "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md", None, 1)
+        for path in paths:
+            lines[-1]["outputs"] = {**valid, path: "0" * 64}
+            # JSON object keys become strings; the property test covers non-str keys before serialization.
+            data = b"".join((json.dumps(line, ensure_ascii=True) + "\n").encode("ascii") for line in lines)
+            records.write_bytes(data)
+            with self.subTest(path=path, verifier=True):
+                check = verify_maintenance(self.repo, "t1", env=self.env)
+                self.assertFalse(check.ok)
+                self.assertIsNone(check.outputs)
+                self.assertTrue(any(problem.startswith("OAH_WIKI_MAINTENANCE_STALE")
+                                    and "malformed outputs" in problem for problem in check.problems), check.problems)
+            for extra, code in (((), "OAH_WIKI_MAINTENANCE_MISSING"),
+                                (("--allow-missing-wiki-maintenance",), "OAH_SCOPE_EXCEEDED")):
+                with self.subTest(path=path, extra=extra):
+                    result = self.finish(*extra)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertTrue(result.stderr.startswith(code), result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+                    if not extra:
+                        self.assertIn("OAH_WIKI_MAINTENANCE_STALE", result.stderr)
+                        self.assertIn("oah wiki maintain --task t1", result.stderr)
+            self.assertEqual(records.read_bytes(), data)
+
 
 if __name__ == "__main__":
     unittest.main()
