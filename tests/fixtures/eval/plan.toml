@@ -5,12 +5,12 @@ used_for_development = false
 
 [[variant]]
 name = "baseline"
-command = ["{python}", "{plan_dir}/variants/fake_variant.py", "miss"]
+command = ["{python}", "fake_variant.py", "miss"]
 fake = true
 timeout_seconds = 120
 
 [[variant]]
 name = "improved"
-command = ["{python}", "{plan_dir}/variants/fake_variant.py", "catch"]
+command = ["{python}", "fake_variant.py", "catch"]
 fake = true
 timeout_seconds = 120

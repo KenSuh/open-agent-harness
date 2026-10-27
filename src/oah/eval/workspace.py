@@ -193,15 +193,51 @@ def _extract_archive(case: Case, repo: pathlib.Path) -> None:
                 _write_member(target, archive.read(info), bool((info.external_attr >> 16) & 0o111))
 
 
+def _inject_config(repo: pathlib.Path, text: str) -> None:
+    """Replace snapshot-controlled links before creating the injected file; never follow them."""
+    def remove(path: pathlib.Path) -> None:
+        if _is_link(path):
+            # Junctions need rmdir on Windows; neither operation traverses the target.
+            if path.is_symlink() or not path.is_dir():
+                path.unlink()
+            else:
+                path.rmdir()
+        elif path.is_dir():
+            remove_tree(path)
+        else:
+            path.unlink()
+
+    try:
+        # Only .oah and config.toml belong to the injection. Never replace the repo root.
+        if not repo.is_dir() or any(_is_link(path) for path in (repo, *repo.parents)):
+            raise OSError("unsafe repository ancestor")
+        parent = repo / ".oah"
+        if os.path.lexists(parent) and (_is_link(parent) or not parent.is_dir()):
+            remove(parent)
+        parent.mkdir(exist_ok=True)
+        if _is_link(parent):
+            raise OSError("unsafe config parent")
+        config = parent / "config.toml"
+        if os.path.lexists(config):
+            remove(config)
+        # EXCL also refuses a link when O_NOFOLLOW is unavailable (native Windows).
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(config, flags, 0o600), "wb") as handle:
+            handle.write(text.encode("utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        raise EvalError("OAH_EVAL_ISOLATION", "the injected config destination is unsafe or unwritable; "
+                        "replace snapshot links and special files with regular directories/files, then run again") from None
+
+
 def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str | None = None) -> Workspace:
     """A fresh repository with one parentless commit of the snapshot tree, plus inputs, requirement and output."""
     case = snapshot.case
-    root = pathlib.Path(root)
+    root = pathlib.Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if any(root.iterdir()):
         raise EvalError("OAH_EVAL_WORKSPACE", f"{root} is not empty; a workspace must start from an empty folder")
     repo = root / "repo"
-    _git_ok(root, "init", "-q", f"--initial-branch={BRANCH}", str(repo))
+    _git_ok(root, "init", "-q", "--template=", f"--initial-branch={BRANCH}", str(repo))
     _git_ok(repo, "config", "core.autocrlf", "false")
     if snapshot.extract is not None:
         listing = _git_ok(snapshot.extract, "rev-list", "--objects", snapshot.tree)
@@ -216,9 +252,7 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
     _git_ok(repo, "update-ref", f"refs/heads/{BRANCH}", commit)
     _git_ok(repo, "reset", "-q", "--hard", commit)
     if config_text is not None:
-        config = repo / ".oah" / "config.toml"
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_bytes(config_text.encode("utf-8"))
+        _inject_config(repo, config_text)
     inputs = root / "inputs"
     for path in (case.inputs, case.requirement, case.prompt):
         if _is_link(path):
@@ -284,6 +318,10 @@ def _safe_link(path: pathlib.Path, base: pathlib.Path, target: str | None = None
 def _history_container(path: pathlib.Path) -> bool:
     with path.open("rb") as handle:
         header = handle.read(128)
+    return _history_header(header)
+
+
+def _history_header(header: bytes) -> bool:
     if (header[:8] in (b"PACK\x00\x00\x00\x02", b"PACK\x00\x00\x00\x03")
             or header.startswith((b"# v2 git bundle\n", b"# v3 git bundle\n"))):
         return True
@@ -326,19 +364,18 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
     dependencies: dict[str, str] = {}
     visited: set[tuple[pathlib.Path, bool]] = set()
 
-    def refuse(channel: str, *, unchecked: bool = False) -> None:
-        code = "OAH_EVAL_CHANNEL_UNCHECKED" if unchecked else "OAH_EVAL_ISOLATION"
-        reason = "cannot be checked" if unchecked else "exposes an oracle's contents or location"
-        raise EvalError(code, f"variant channel {channel} {reason}; remove the reference or supply readable "
-                        "literal files and TOML/JSON configs, then preregister and run again. No variant was started")
+    executable = None
+    boundary = ws.root.resolve()
 
-    def check(channel: str, raw: bytes) -> None:
-        if len(raw) > NORMALIZE_LIMIT:
-            refuse(channel, unchecked=True)
-        if content_hashes(raw) & hashes:
-            refuse(channel)
-        # Hash candidate substrings, so a path embedded in prose, code or --flag=value
-        # is checked without keeping the path itself in the frozen registration.
+    def refuse(channel: str, *, unchecked: bool = False, history: bool = False) -> None:
+        code = "OAH_EVAL_CHANNEL_UNCHECKED" if unchecked else "OAH_EVAL_ISOLATION"
+        reason = ("cannot be checked" if unchecked else "contains a Git history container" if history
+                  else "exposes an oracle or an existing external path")
+        raise EvalError(code, f"variant channel {channel} {reason}; remove the reference or supply readable "
+                        "literal files and TOML/JSON configs, then preregister and run again. No variant was started") from None
+
+    def fingerprints(channel: str, raw: bytes) -> None:
+        # Keep locations out of preregistration and errors, including resolved aliases.
         normal = raw.replace(b"\\", b"/")
         if os.name == "nt":
             normal = normal.decode("utf-8", "surrogateescape").casefold().encode("utf-8", "surrogateescape")
@@ -353,6 +390,52 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                    for start in starts):
                 refuse(channel)
 
+    def literal(channel: str, token: str, base: pathlib.Path) -> None:
+        # NAME=VALUE can be a filename or an assignment. Check both interpretations.
+        values = (token, token.partition("=")[2]) if "=" in token else (token,)
+        for value in values:
+            if not value:
+                continue
+            path = pathlib.Path(value)
+            if not ("/" in value or "\\" in value or path.suffix or value.startswith(".")
+                    or (base / path).exists()):
+                continue
+            # Foreign absolute paths cannot be resolved using this host's path rules.
+            if os.name != "nt" and pathlib.PureWindowsPath(value).drive:
+                refuse(channel, unchecked=True)
+            candidate = path if path.is_absolute() else base / path
+            try:
+                resolved = pathlib.Path(os.path.realpath(candidate, strict=True))
+                exists = True
+            except FileNotFoundError:
+                resolved = pathlib.Path(os.path.realpath(candidate))
+                exists = False
+            fingerprints(channel, _path_bytes(str(resolved)))
+            if (exists and channel != "environment" and not resolved.is_relative_to(boundary)
+                    and resolved != executable):
+                refuse(channel)
+
+    def check(channel: str, raw: bytes, *, base: pathlib.Path = ws.repo, paths: bool = True) -> None:
+        if len(raw) > NORMALIZE_LIMIT:
+            refuse(channel, unchecked=True)
+        if content_hashes(raw) & hashes:
+            refuse(channel)
+        fingerprints(channel, raw)
+        if not paths:
+            return
+        try:
+            text = raw.decode("utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig")
+        except UnicodeError:
+            # Binary files still receive exact content/path fingerprints and container checks.
+            return
+        # Preserve quoted paths with spaces, and also inspect literals embedded in prose/code.
+        for match in re.finditer(r"""["']([^"'\r\n]*)["']|([^\s"'`<>()\[\]{},;]+)""", text):
+            token = match.group(1) if match.group(1) is not None else match.group(2)
+            literal(channel, token, base)
+            if match.group(1) is not None:
+                for part in token.split():
+                    literal(channel, part, base)
+
     def read(path: pathlib.Path, channel: str) -> bytes:
         try:
             if not path.is_file() or path.stat().st_size > NORMALIZE_LIMIT:
@@ -365,7 +448,8 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
 
     def reference(value: str, channel: str, base: pathlib.Path, *, required: bool = False,
                   destination: bool = False, config: bool = False) -> None:
-        check(channel, value.encode("utf-8"))
+        check(channel, value.encode("utf-8"), base=base)
+        literal(channel, value, base)
         if not value:
             return
         path = pathlib.Path(value)
@@ -380,7 +464,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             refuse(channel, unchecked=True)
         try:
             path = path if path.is_absolute() else base / path
-            check(channel, _path_bytes(str(path.resolve())))
+            fingerprints(channel, _path_bytes(str(path.resolve())))
             if not path.exists():
                 if destination:
                     return
@@ -433,21 +517,27 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
         walk(data)
 
     try:
+        if argv:
+            executable = pathlib.Path(os.path.realpath(ws.repo / argv[0], strict=True))
         check("prompt", prompt)
         for index, arg in enumerate(argv):
-            check(f"argument[{index}]", arg.encode("utf-8"))
+            flag, equal, value = arg.partition("=")
+            is_option = re.fullmatch(r"--[A-Za-z][A-Za-z0-9_-]*|-[A-Za-z]", flag) is not None
+            if flag in ("-c", "-e", "-m", "--eval", "--command") or arg.startswith("@"):
+                refuse("argument", unchecked=True)
             if "\x00" in arg:
                 refuse("argument", unchecked=True)
-            if arg in ("-c", "-m", "--eval", "--command") or arg.startswith("@"):
-                refuse("argument", unchecked=True)
-            flag, equal, value = arg.partition("=")
+            check("argument", arg.encode("utf-8"))
+            literal("argument", arg, ws.repo)
             previous = argv[index - 1] if index else ""
-            option = flag if equal else previous
-            if arg.startswith("-") and not equal:
-                if not re.fullmatch(r"--[A-Za-z][A-Za-z0-9_-]*|-[A-Za-z]", arg):
+            option = flag if is_option else (previous if re.fullmatch(
+                r"--[A-Za-z][A-Za-z0-9_-]*|-[A-Za-z]", previous) else "")
+            if arg.startswith("-"):
+                if not is_option:
                     refuse("argument", unchecked=True)
-                continue
-            reference(value if equal else arg, "reference", ws.repo,
+                if not equal:
+                    continue
+            reference(value if is_option and equal else arg, "reference", ws.repo,
                       required=index == 0 or any(word in option.lower() for word in ("file", "config", "include")),
                       destination=option in ("--output", "--output-dir", "--marker", "--record-dir"),
                       config="config" in option.lower())
@@ -456,8 +546,11 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                 refuse("environment", unchecked=True)
             if "\x00" in key or "\x00" in value or "=" in key:
                 refuse("environment", unchecked=True)
-            check("environment", key.encode("utf-8"))
-            check("environment", value.encode("utf-8"))
+            check("environment", key.encode("utf-8"), paths=False)
+            check("environment", value.encode("utf-8"), paths=False)
+            # Runtime directories are explicitly allowed, but never oracle aliases.
+            for entry in value.split(os.pathsep) if key == "PATH" else (value,):
+                literal("environment", entry, ws.repo)
         if config_text is not None:
             config_values(config_text.encode("utf-8"), pathlib.Path(plan_dir) if plan_dir else ws.repo)
         listing = _git_ok(ws.repo, "cat-file", "--batch-all-objects",
@@ -474,11 +567,13 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                                     capture_output=True, env=git_env, timeout=GIT_TIMEOUT)
             if result.returncode or len(result.stdout) != int(size):
                 refuse("git-blob", unchecked=True)
+            if _history_header(result.stdout[:128]):
+                refuse("git-blob", history=True)
             check("git-blob", result.stdout)
         for base in (ws.repo, ws.inputs, ws.requirement, ws.output):
             for path in _files(base):
                 check("working-file", _path_bytes(str(path)))
-                label = "working-file " + path.relative_to(ws.root).as_posix()
+                label = "working-file"
                 if _is_link(path):
                     check(label, _path_bytes(os.readlink(path)))
                     if not _safe_link(path, base if base.is_dir() else ws.root):

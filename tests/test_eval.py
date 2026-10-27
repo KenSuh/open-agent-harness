@@ -10,9 +10,11 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import unittest
 import zipfile
+import zlib
 from unittest import mock
 
 from oah.eval import case as case_mod
@@ -21,7 +23,7 @@ from oah.eval.errors import EvalError
 from tests.helpers import directory_alias, make_tmp_dir
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "eval"
-SNAPSHOT = "11ac4e9c014277808ff6cba43db7ee4adfa650aa"
+SNAPSHOT = "e485fa382909fe7dedb3d0a437d7e8b6b14ca10c"
 SUPERIORITY = re.compile(r"\b(better|best|superior|wins?|winner|outperform\w*|beats?)\b", re.IGNORECASE)
 
 
@@ -30,6 +32,14 @@ def fixture_copy(test: unittest.TestCase) -> pathlib.Path:
     target = make_tmp_dir(test) / "eval"
     shutil.copytree(FIXTURE, target, ignore=shutil.ignore_patterns("__pycache__"))
     return target
+
+
+def variant_script(root: pathlib.Path) -> pathlib.Path:
+    """Stage an editable fake script in case inputs, inside every workspace boundary."""
+    script = case_dir(root) / "inputs" / "fake_variant.py"
+    shutil.copyfile(root / "variants" / "fake_variant.py", script)
+    set_plan(root, '"fake_variant.py"', '"../inputs/fake_variant.py"')
+    return script
 
 
 def case_dir(root: pathlib.Path) -> pathlib.Path:
@@ -65,7 +75,7 @@ def objects(repo: pathlib.Path) -> set[str]:
 
 
 def snapshot_tree() -> str:
-    return "11ac4e9c014277808ff6cba43db7ee4adfa650aa^{tree}"
+    return "e485fa382909fe7dedb3d0a437d7e8b6b14ca10c^{tree}"
 
 
 class Env:
@@ -76,7 +86,6 @@ class Env:
         self.runs = base / "runs"
         self.marker = base / "marker.txt"
         self.records = base / "records"
-        self.records.mkdir()
         self.env = dict(os.environ, FAKE_EVAL_MARKER=str(self.marker), FAKE_EVAL_RECORD_DIR=str(self.records))
         self.env.pop("FAKE_EVAL_EXIT", None)
 
@@ -187,7 +196,7 @@ class WorkspaceTest(unittest.TestCase):
         found = objects(ws.repo)
         self.assertEqual(found & snapshot.history_objects, set())
         self.assertIn(SNAPSHOT, snapshot.history_objects)
-        self.assertIn("7ffdbf7207603fcb7a806aa45147c55a9dc9315e", snapshot.history_objects)  # the later fix
+        self.assertIn("2bb04a8c3c3255a3338a36e652687afceeb94d1b", snapshot.history_objects)  # the later fix
         self.assertEqual(found - {ws.commit}, set(snapshot.tree_objects))
         self.assertFalse(any(ws.root.rglob("*.bundle")))
         workspace.scan_workspace(ws, snapshot, oracle_hashes=workspace.content_hashes(
@@ -358,7 +367,7 @@ class IsolationTest(unittest.TestCase):
         (case_dir(self.root) / "inputs" / "hint.toml").write_bytes(self.oracle)
         message = self.refused(*self.build())
         self.assertIn("oracle", message)
-        self.assertIn("hint.toml", message)
+        self.assertIn("working-file", message)
 
     def test_oracle_in_primary_git_metadata_still_refused(self):
         snapshot, ws = self.build()
@@ -369,7 +378,7 @@ class IsolationTest(unittest.TestCase):
         snapshot, ws = self.build()
         (ws.repo / "notes" ).mkdir()
         (ws.repo / "notes" / "answers.toml").write_bytes(self.oracle.replace(b"\n", b"\r\n"))
-        self.assertIn("notes/answers.toml", self.refused(snapshot, ws))
+        self.assertIn("working-file", self.refused(snapshot, ws))
 
     def test_history_object_refused(self):
         snapshot, ws = self.build()
@@ -524,9 +533,10 @@ class PreregTest(unittest.TestCase):
         self.assertEqual(entry["oracle_sha256"], hashlib.sha256(oracle_path(self.root).read_bytes()).hexdigest())
         self.assertNotIn(str(oracle_path(self.root)), raw.decode("utf-8"))
         self.assertEqual([v["name"] for v in data["variants"]], ["baseline", "improved"])
-        self.assertEqual(data["variants"][0]["command"], ["{python}", "{plan_dir}/variants/fake_variant.py", "miss"])
+        self.assertEqual(data["variants"][0]["command"], ["{python}", "fake_variant.py", "miss"])
         self.assertTrue(data["variants"][0]["fake"])
-        self.assertIn("variants/fake_variant.py", json.dumps(data["variants"][0]["files"]))
+        self.assertIn("{workspace}/repo/fake_variant.py",
+                      data["variants"][0]["channel_files"]["derived-index"])
         self.assertIn("matched", data["metrics"])
         self.assertEqual(data["grader"]["unmatched_findings"], "human-judgement")
         frozen = plan.load_frozen(self.out)
@@ -580,7 +590,7 @@ class PreregTest(unittest.TestCase):
 
     def test_plan_errors(self):
         for old, new in (('name = "improved"', 'name = "baseline"'),
-                         ('command = ["{python}", "{plan_dir}/variants/fake_variant.py", "miss"]', "command = []"),
+                         ('command = ["{python}", "fake_variant.py", "miss"]', "command = []"),
                          ("fake = true\ntimeout_seconds = 120\n\n[[variant]]", "fake = 1\n\n[[variant]]")):
             with self.subTest(new=new):
                 root = fixture_copy(self)
@@ -628,13 +638,13 @@ class RunTest(unittest.TestCase):
 
     def test_changed_variant_script_refused(self):
         out = self.root / "p.json"
+        script = variant_script(self.root)
         plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
-        script = self.root / "variants" / "fake_variant.py"
         script.write_text(script.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
         with self.assertRaises(EvalError) as caught:
             runner.run_eval(plan.load_run_source(out), self.env.runs, env=self.env.env, timeout_seconds=60)
         self.assertEqual(caught.exception.code, "OAH_EVAL_PREREG_MISMATCH")
-        self.assertIn("fake_variant.py", str(caught.exception))
+        self.assertIn("case derived-index", str(caught.exception))
 
     def test_isolation_refused_before_any_variant(self):
         (case_dir(self.root) / "inputs" / "hint.toml").write_bytes(oracle_path(self.root).read_bytes())
@@ -676,11 +686,18 @@ class RunTest(unittest.TestCase):
     def test_launch_uses_the_prompt_bytes_that_were_scanned(self):
         prompt = case_dir(self.root) / "task.md"
         prompt.write_bytes(b"\xef\xbb\xbfThe same prompt\r\n")
-        script = self.root / "variants" / "fake_variant.py"
+        script = variant_script(self.root)
         script.write_text('# 프롬프트 입력 고정 확인\nimport pathlib, sys\n'
                           'print(sys.stdin.buffer.read().hex())\n'
-                          f'pathlib.Path({str(prompt)!r}).write_bytes(b"changed after scan")\n', encoding="utf-8")
-        run_dir = run_fixture(self, self.root, self.env)
+                          'sys.stdin.close()\n', encoding="utf-8")
+        launch = runner._launch
+
+        def change_prompt_then_launch(*args, **kwargs):
+            prompt.write_bytes(b"changed after scan")
+            return launch(*args, **kwargs)
+
+        with mock.patch.object(runner, "_launch", side_effect=change_prompt_then_launch):
+            run_dir = run_fixture(self, self.root, self.env)
         for name in ("baseline", "improved"):
             out = run_dir / "cases" / "derived-index" / name / "stdout.txt"
             self.assertEqual(out.read_text(encoding="utf-8").strip(), b"The same prompt\r\n".hex())
@@ -706,7 +723,7 @@ class RunTest(unittest.TestCase):
         self.assertFalse(self.env.runs.exists())
 
     def test_variant_environment_excludes_caller_metadata(self):
-        script = self.root / "variants" / "fake_variant.py"
+        script = variant_script(self.root)
         script.write_text('# 환경 경계 확인\nimport json, os, sys\n'
                           'print(json.dumps({"leaked": any(k.upper() in '
                           '{"ORACLE_PATH", "CALLER_METADATA", "GIT_DIR", "OAH_STATE_DIR", "PYTHONPATH"} '
@@ -722,7 +739,7 @@ class RunTest(unittest.TestCase):
             self.assertEqual(seen, {"leaked": False, "workspace": True, "path": True})
 
     def test_missing_command_refused_before_any_variant(self):
-        set_plan(self.root, '["{python}", "{plan_dir}/variants/fake_variant.py", "catch"]',
+        set_plan(self.root, '["{python}", "fake_variant.py", "catch"]',
                  '["oah-eval-no-such-tool-xyz"]')
         with self.assertRaises(EvalError) as caught:
             run_fixture(self, self.root, self.env)
@@ -759,10 +776,10 @@ class RunTest(unittest.TestCase):
         self.assertTrue((run_dir / "cases" / "derived-index" / "baseline" / "stdout.txt").is_file())
 
     def test_real_engine_label_and_missing_output(self):
-        script = self.root / "variants" / "silent.py"
+        script = case_dir(self.root) / "inputs" / "silent.py"
         script.write_text("# 출력 없는 변형\nimport sys\nsys.stdin.read()\n", encoding="utf-8")
-        set_plan(self.root, '["{python}", "{plan_dir}/variants/fake_variant.py", "catch"]\nfake = true',
-                 '["{python}", "{plan_dir}/variants/silent.py"]\nfake = false')
+        set_plan(self.root, '["{python}", "fake_variant.py", "catch"]\nfake = true',
+                 '["{python}", "../inputs/silent.py"]\nfake = false')
         run_dir = run_fixture(self, self.root, self.env)
         silent = read_result(run_dir, "improved")
         self.assertEqual(silent["label"], "engine-run")
@@ -1094,9 +1111,9 @@ class CorrectionC2Test(unittest.TestCase):
                                              env=dict(self.env.env, LANG="bad\x00value"), timeout_seconds=60))
 
     def test_referenced_file_digest_is_frozen(self):
-        config = self.root / "extra.json"
+        config = case_dir(self.root) / "inputs" / "extra.json"
         config.write_bytes(b'{"review": {"rounds": 1}}\n')
-        self.argument("--config=" + str(config))
+        self.argument("--config=../inputs/extra.json")
         self.prereg()
         config.write_bytes(b'{"review": {"rounds": 2}}\n')
         with self.assertRaises(EvalError) as caught:
@@ -1128,9 +1145,8 @@ class CorrectionC2Test(unittest.TestCase):
         self.assertFalse(self.out.exists())
 
     def test_runtime_checks_new_reference_contents_before_launch(self):
-        copy = self.root / "copy.txt"
-        copy.write_bytes(b"ordinary input\n")
-        self.argument("--prompt-file=" + str(copy))
+        copy = self.root / "new-destination.txt"
+        self.argument("--marker=" + str(copy))
         self.prereg()
         copy.write_bytes(oracle_path(self.root).read_bytes())
         self.refused(lambda: runner.run_eval(plan.load_frozen(self.out), self.env.runs,
@@ -1185,6 +1201,266 @@ class CorrectionC2Test(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "native Windows junction ancestors")
     def test_windows_named_case_junction_refused(self):
         self.test_linked_named_case_ancestors_refused()
+
+
+class CorrectionC3Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+        self.scratch = make_tmp_dir(self)
+
+    def snapshot(self, files):
+        repo = self.scratch / "original"
+        git(repo.parent, "init", "-q", "-b", "main", str(repo))
+        for name, (mode, raw) in files.items():
+            oid = subprocess.run(["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+                                 input=raw, capture_output=True, check=True).stdout.decode("utf-8").strip()
+            git(repo, "update-index", "--add", "--cacheinfo", mode, oid, name)
+        tree = git(repo, "write-tree")
+        commit = subprocess.run(["git", "-C", str(repo), "commit-tree", tree, "-m", "snapshot"],
+                                env=dict(os.environ, **workspace.IDENTITY), capture_output=True,
+                                text=True, check=True).stdout.strip()
+        git(repo, "update-ref", "refs/heads/main", commit)
+        bundle = case_dir(self.root) / "snapshot.bundle"
+        bundle.unlink()
+        git(repo, "bundle", "create", str(bundle), "main")
+        set_case(self.root, SNAPSHOT, commit)
+        return self.source()
+
+    def source(self):
+        return workspace.open_snapshot(case_mod.load_case(case_dir(self.root)),
+                                       make_tmp_dir(self) / "source")
+
+    def build(self, source=None, *, config_text=None):
+        return workspace.build_workspace(source or self.source(), make_tmp_dir(self) / "ws",
+                                         config_text=config_text)
+
+    def refused(self, action):
+        with self.assertRaises(EvalError) as caught:
+            action()
+        self.assertIn(caught.exception.code, ("OAH_EVAL_ISOLATION", "OAH_EVAL_CHANNEL_UNCHECKED"))
+        self.assertNotIn(str(oracle_path(self.root)), str(caught.exception))
+        return caught.exception
+
+    def test_config_file_link_never_overwrites_external_file(self):
+        external = self.scratch / "private.toml"
+        external.write_bytes(b"keep these bytes exactly\r\n")
+        source = self.snapshot({".oah/config.toml": ("120000", str(external).encode("utf-8"))})
+        try:
+            ws = self.build(source, config_text="[review]\nmax_rounds = 3\n")
+        except EvalError:
+            pass
+        else:
+            self.refused(lambda: workspace.scan_workspace(ws, source))
+        self.assertEqual(external.read_bytes(), b"keep these bytes exactly\r\n")
+
+    def test_config_parent_link_never_overwrites_external_file(self):
+        external = self.scratch / "private"
+        external.mkdir()
+        target = external / "config.toml"
+        target.write_bytes(b"keep parent target\n")
+        source = self.snapshot({".oah": ("120000", str(external).encode("utf-8"))})
+        try:
+            ws = self.build(source, config_text="[review]\nmax_rounds = 3\n")
+        except EvalError:
+            pass
+        else:
+            self.refused(lambda: workspace.scan_workspace(ws, source))
+        self.assertEqual(target.read_bytes(), b"keep parent target\n")
+
+    def test_oracle_dotdot_alias_in_text_channels_refused(self):
+        oracle = oracle_path(self.root)
+        alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name)
+        ws = self.build()
+        checks = workspace.oracle_path_checks([oracle])
+        for channel in ("prompt", "working-file", "config"):
+            with self.subTest(channel=channel):
+                kwargs = {"oracle_paths": checks}
+                if channel == "working-file":
+                    target = ws.inputs / "alias.txt"
+                    target.write_bytes(('read "' + alias + '"\n').encode("utf-8"))
+                elif channel == "config":
+                    kwargs["config_text"] = "description = " + json.dumps("read " + alias)
+                else:
+                    kwargs["prompt"] = ('read "' + alias + '"\n').encode("utf-8")
+                try:
+                    self.refused(lambda: workspace.check_variant_channels(ws, **kwargs))
+                finally:
+                    if channel == "working-file":
+                        target.unlink()
+
+    def test_positional_filename_with_equals_checked_whole(self):
+        ws = self.build()
+        target = ws.repo / "answers=copy"
+        target.write_bytes(oracle_path(self.root).read_bytes())
+        # The working-file scan already finds this; use an external file to isolate argv parsing.
+        external = self.scratch / "answers=copy"
+        target.rename(external)
+        self.refused(lambda: workspace.check_variant_channels(
+            ws, argv=[sys.executable, str(external)], oracle_hashes=workspace.content_hashes(external.read_bytes())))
+
+    def test_retained_config_history_containers_refused(self):
+        bundle = (case_dir(self.root) / "snapshot.bundle").read_bytes()
+        payloads = (bundle, b"PACK\x00\x00\x00\x02\x00\x00\x00\x00",
+                    zlib.compress(b"commit 4\x00test"))
+        for raw in payloads:
+            with self.subTest(header=raw[:8]):
+                # Each subcase needs its own source tree and bundle.
+                if (self.scratch / "original").exists():
+                    workspace.remove_tree(self.scratch / "original")
+                    manifest = case_dir(self.root) / "case.toml"
+                    text = manifest.read_text(encoding="utf-8")
+                    text = re.sub(r'commit = "[0-9a-f]+"', 'commit = "' + SNAPSHOT + '"', text)
+                    manifest.write_text(text, encoding="utf-8")
+                source = self.snapshot({".oah/config.toml": ("100644", raw)})
+                ws = self.build(source, config_text="[review]\nmax_rounds = 3\n")
+                retained = subprocess.run(["git", "-C", str(ws.repo), "show", "HEAD:.oah/config.toml"],
+                                          capture_output=True, check=True).stdout
+                self.assertEqual(retained, raw)
+                self.refused(lambda: workspace.scan_workspace(ws, source))
+
+    def test_inline_code_option_names_refused_before_values(self):
+        ws = self.build()
+        for option in ("--eval", "--command", "-c", "-e"):
+            for tail in ("", '=require("fs")["readFileSync"](process["env"]["HOME"])'):
+                with self.subTest(option=option + tail):
+                    self.refused(lambda: workspace.check_variant_channels(ws, argv=[sys.executable, option + tail]))
+
+    def test_existing_external_paths_refused_in_every_text_channel(self):
+        ws = self.build()
+        external = self.scratch / "public.txt"
+        external.write_bytes(b"ordinary public material\n")
+        alias = str(external.parent / ".." / external.parent.name / external.name)
+        for channel in ("argument", "prompt", "config", "working-file"):
+            for value in (alias, "NAME=" + alias):
+                with self.subTest(channel=channel, assignment=value.startswith("NAME=")):
+                    kwargs = {}
+                    if channel == "argument":
+                        kwargs["argv"] = [sys.executable, value]
+                    elif channel == "prompt":
+                        kwargs["prompt"] = ("Read " + value).encode("utf-8")
+                    elif channel == "config":
+                        kwargs["config_text"] = "description = " + json.dumps("Read " + value)
+                    else:
+                        target = ws.inputs / "external.txt"
+                        target.write_bytes(("Read " + value).encode("utf-8"))
+                    try:
+                        self.refused(lambda: workspace.check_variant_channels(ws, **kwargs))
+                    finally:
+                        if channel == "working-file":
+                            target.unlink()
+
+    def test_external_executable_is_the_only_exception(self):
+        ws = self.build()
+        workspace.check_variant_channels(ws, argv=[sys.executable])
+        self.refused(lambda: workspace.check_variant_channels(ws, argv=[sys.executable, str(self.scratch)]))
+
+    def test_text_oracle_alias_with_prose_punctuation_refused(self):
+        ws = self.build()
+        oracle = oracle_path(self.root)
+        alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name)
+        for suffix in (".", ":", "!"):
+            with self.subTest(punctuation=suffix):
+                self.refused(lambda: workspace.check_variant_channels(
+                    ws, prompt=("Read " + alias + suffix).encode("utf-8"),
+                    oracle_paths=workspace.oracle_path_checks([oracle])))
+
+    def test_root_directory_in_prompt_refused(self):
+        ws = self.build()
+        self.refused(lambda: workspace.check_variant_channels(ws, prompt=b"Read /"))
+
+    def test_aliased_oracle_environment_refused_at_run(self):
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        oracle = oracle_path(self.root)
+        alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name)
+        runs = self.scratch / "runs"
+        self.refused(lambda: runner.run_eval(plan.load_frozen(out), runs,
+                                             env=dict(os.environ, LC_CTYPE=alias), timeout_seconds=60))
+        self.assertFalse(runs.exists())
+
+    def test_positional_equals_file_is_read_and_frozen(self):
+        ws = self.build()
+        target = ws.repo / "notes=copy"
+        target.write_bytes(b"ordinary input\n")
+        files = workspace.check_variant_channels(ws, argv=[sys.executable, "notes=copy"])
+        self.assertEqual(files["{workspace}/repo/notes=copy"], hashlib.sha256(target.read_bytes()).hexdigest())
+
+    def test_injection_refuses_linked_repository_ancestor(self):
+        target = self.scratch / "target"
+        repo = target / "repo"
+        config = repo / ".oah" / "config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(b"preserve ancestor target\n")
+        alias = self.scratch / "ancestor"
+        try:
+            directory_alias(target, alias)
+        except OSError:
+            self.skipTest("directory links are unavailable")
+        self.refused(lambda: workspace._inject_config(alias / "repo", "[review]\nmax_rounds = 3\n"))
+        self.assertEqual(config.read_bytes(), b"preserve ancestor target\n")
+
+    def test_prereg_config_link_cannot_overwrite_oracle(self):
+        oracle = oracle_path(self.root)
+        original = oracle.read_bytes()
+        self.snapshot({".oah/config.toml": ("120000", str(oracle).encode("utf-8"))})
+        (self.root / "injected.toml").write_bytes(b"[review]\nmax_rounds = 3\n")
+        set_plan(self.root, 'name = "baseline"', 'name = "baseline"\nconfig = "injected.toml"')
+        out = self.root / "prereg.json"
+        self.refused(lambda: plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out))
+        self.assertEqual(oracle.read_bytes(), original)
+        self.assertFalse(out.exists())
+        self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_injection_replaces_internal_file_link_without_writing_through(self):
+        source = self.snapshot({".oah/config.toml": ("120000", b"../original.toml"),
+                                "original.toml": ("100644", b"preserve original\n")})
+        ws = self.build(source, config_text="[review]\nmax_rounds = 3\n")
+        self.assertFalse(workspace._is_link(ws.repo / ".oah" / "config.toml"))
+        self.assertFalse(workspace._is_link(ws.repo / ".oah"))
+        self.assertEqual((ws.repo / "original.toml").read_bytes(), b"preserve original\n")
+        self.assertEqual((ws.repo / ".oah" / "config.toml").read_bytes(), b"[review]\nmax_rounds = 3\n")
+        workspace.scan_workspace(ws, source)
+
+    def test_unreferenced_history_blob_refused(self):
+        ws = self.build()
+        pack = subprocess.run(["git", "-C", str(ws.repo), "pack-objects", "--stdout"],
+                              input=b"", capture_output=True, check=True).stdout
+        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                       input=pack, capture_output=True, check=True)
+        self.refused(lambda: workspace.check_variant_channels(ws))
+
+    def test_unresolvable_text_path_is_a_named_refusal(self):
+        ws = self.build()
+        loop = self.scratch / "loop"
+        try:
+            loop.symlink_to(loop)
+        except OSError:
+            self.skipTest("file symlinks are unavailable")
+        error = self.refused(lambda: workspace.check_variant_channels(ws, prompt=("Read " + str(loop)).encode("utf-8")))
+        self.assertEqual(error.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+        self.assertTrue(error.__suppress_context__)
+        self.assertNotIn(str(loop), str(error))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows junction config parent")
+    def test_windows_config_junction_cannot_redirect_injection(self):
+        repo = self.scratch / "junction-repo"
+        repo.mkdir()
+        external = self.scratch / "junction-target"
+        external.mkdir()
+        target = external / "config.toml"
+        target.write_bytes(b"preserve junction target\r\n")
+        directory_alias(external, repo / ".oah")
+        workspace._inject_config(repo, "[review]\nmax_rounds = 3\n")
+        self.assertEqual(target.read_bytes(), b"preserve junction target\r\n")
+        self.assertFalse(workspace._is_link(repo / ".oah"))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows path aliases in text")
+    def test_windows_oracle_alias_in_prompt_refused(self):
+        ws = self.build()
+        oracle = oracle_path(self.root)
+        alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name).upper().replace("\\", "/")
+        self.refused(lambda: workspace.check_variant_channels(
+            ws, prompt=("Read " + alias).encode("utf-8"), oracle_paths=workspace.oracle_path_checks([oracle])))
 
 
 class FixtureTest(unittest.TestCase):

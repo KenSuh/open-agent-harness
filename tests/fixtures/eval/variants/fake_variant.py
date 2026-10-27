@@ -33,6 +33,7 @@ def main(mode: str, *, marker: str | None = None, record_dir: str | None = None,
         with open(marker, "a", encoding="utf-8") as handle:
             handle.write(mode + "\n")
     if record_dir:
+        pathlib.Path(record_dir).mkdir(parents=True, exist_ok=True)
         seen = {"prompt": prompt, "cwd": os.getcwd(),
                 "requirement": pathlib.Path(os.environ["OAH_EVAL_REQUIREMENT"]).read_text(encoding="utf-8"),
                 "inputs": _tree_digest(pathlib.Path(os.environ["OAH_EVAL_INPUTS"])),
@@ -49,7 +50,7 @@ def main(mode: str, *, marker: str | None = None, record_dir: str | None = None,
                   "usage": {"input_tokens": 120, "output_tokens": 30},
                   "findings": [{"id": "F1", "file": "index.txt",
                                 "summary": "index.txt is stale: it was not regenerated after words.txt changed"}]}
-    out = pathlib.Path(os.environ["OAH_EVAL_OUTPUT"]) / "result.json"
+    out = pathlib.Path(os.environ["OAH_EVAL_OUTPUT"]).joinpath("result.json")
     out.write_text(json.dumps(result), encoding="utf-8")
     return exit_code
 

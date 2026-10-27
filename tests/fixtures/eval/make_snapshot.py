@@ -50,7 +50,8 @@ to `words.txt`; `python check_index.py` fails when it is stale.
 """
 
 INITIAL = {"README.md": README, "build_index.py": BUILD, "check_index.py": CHECK,
-           "words.txt": "banana\napple\ncherry\n", "index.txt": "count=3\napple\nbanana\ncherry\n"}
+           "words.txt": "banana\napple\ncherry\n", "index.txt": "count=3\napple\nbanana\ncherry\n",
+           "fake_variant.py": (pathlib.Path(__file__).parent / "variants" / "fake_variant.py").read_text(encoding="utf-8")}
 SNAPSHOT = {"words.txt": "banana\napple\ncherry\nkiwi\nfig\n"}
 FIX = {"index.txt": "count=5\napple\nbanana\ncherry\nfig\nkiwi\n"}
 

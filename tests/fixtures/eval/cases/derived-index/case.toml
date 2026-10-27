@@ -8,4 +8,4 @@ forbidden = ["*.orig", "fix.patch"]
 [snapshot]
 file = "snapshot.bundle"
 format = "bundle"
-commit = "11ac4e9c014277808ff6cba43db7ee4adfa650aa"
+commit = "e485fa382909fe7dedb3d0a437d7e8b6b14ca10c"

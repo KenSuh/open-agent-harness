@@ -95,7 +95,7 @@ used_for_development = false
 
 [[variant]]
 name = "baseline"
-command = ["{python}", "{plan_dir}/variants/run_baseline.py"]
+command = ["{python}", "../inputs/run_baseline.py"]
 fake = false                     # true marks a fake engine: results are control-flow-only
 timeout_seconds = 1800           # optional; default [eval] timeout_seconds
 config = "configs/improved.toml" # optional oah configuration, written to .oah/config.toml in the workspace
@@ -103,7 +103,8 @@ config = "configs/improved.toml" # optional oah configuration, written to .oah/c
 
 A variant is a named command, or an `oah` configuration that its command uses. All variants get identical
 inputs. The program is resolved through PATH like every `oah` tool, and Windows batch files are never
-launched.
+launched. Put script arguments in the snapshot or case `inputs/`; existing external input files
+are refused even when their contents are ordinary. Only the registered executable may be external.
 
 ### What a variant sees
 
@@ -162,7 +163,8 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
   and blobs, or the snapshot commit itself for archives;
 - borrowed objects (`.git/objects/info/alternates`);
 - embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
-  or loose Git objects in visible inputs;
+  or loose Git objects in visible inputs or any retained raw Git blob, including overwritten configs
+  and unreferenced blobs;
 - a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
 - a copy of the snapshot file;
@@ -180,19 +182,31 @@ One default-deny checker is shared by preregistration and run. Its explicit chan
 raw Git blob, every working file (including repository metadata and output files), stdin prompt bytes,
 each resolved command argument, each passed environment name/value, injected config text, and literal
 files/configs named by command arguments or config string values. Every channel is compared against
-all oracle hashes and supplied/resolved oracle path fingerprints. Paths embedded in text and resolved
-file aliases are checked too. A variant config cannot hide an oracle blob by overwriting its checkout.
+all oracle hashes and supplied/resolved oracle path fingerprints. Literal path tokens in arguments,
+prompt, config and working files are resolved with `realpath` before comparison; for `NAME=VALUE`,
+both the whole token and `VALUE` are checked. An existing path outside the workspace refuses unless it
+resolves to the registered variant executable. Unresolvable paths refuse. Allowed runtime environment
+paths may be external, but resolved oracle aliases in those values still refuse. Binary channels retain
+content/path fingerprint checks; retained blobs also receive history-container checks.
+
+Config injection checks every repository ancestor, replaces snapshot links/reparse points at `.oah`
+and `.oah/config.toml`, creates real directories and exclusively creates the file without following
+links. It never writes through a snapshot link. The original blobs remain available to the checker, so
+config replacement cannot hide oracle data or history containers. Fresh workspace initialization uses
+no Git templates, preventing host template hooks from adding external file references.
 
 Command file references use separate arguments or `--option=value`; relative command paths use the
 workspace repository. Config file references must be absolute: engine config loaders can resolve
-relative paths against different folders, so oah refuses that ambiguity. Referenced files, including the resolved executable and nested config
-dependencies, are hashed per case and checked again at run. Values with a path separator, a suffix or
-a file/path/include/config option or key are conservatively treated as file references.
+relative paths against different folders, so oah refuses that ambiguity. Referenced workspace files and
+the resolved executable, including nested config dependencies, are hashed per case and checked again
+at run. Values with a path separator, a suffix or a file/path/include/config option or key are conservatively treated as file references.
 Only literal references and TOML/JSON configs can be checked. Dynamic paths, response files, inline
-code/module launch switches, attached short options, unsupported config formats, missing/unreadable
-files, directory inputs and channels larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`.
-Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing or empty
-directories; an existing destination file is checked and frozen like any other file.
+code/module launch switches (including `--eval`, `--command`, `-c`, `-e` and their `=` forms), attached
+short options, unsupported config formats, missing/unreadable files, directory inputs and channels
+larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`.
+Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing. Existing
+empty directories inside the workspace are allowed; an existing external destination is refused. A
+workspace destination file is checked and frozen like any other file.
 
 The oracle comparison needs the preregistered oracle hash. An exploratory run records `oracle: not-checked`.
 
