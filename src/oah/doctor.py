@@ -163,7 +163,33 @@ def _install_texts(name: str, platform: str) -> tuple[list[str], str]:
     raise KeyError(name)
 
 
-def render_text(statuses: Sequence[ToolStatus], platform: str) -> str:
+def mcp_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]:
+    """The last recorded MCP pin notice per catalog entry, read from the update log; no network."""
+    if root is None:
+        return []
+    from oah.paths import GitMissing, NotARepo, repo_info, state_dir
+    from oah.toolkit.catalog import CatalogError, load_catalog
+    from oah.toolkit.update import last_mcp_notices
+
+    try:
+        return last_mcp_notices(state_dir(repo_info(root), env), load_catalog())
+    except (NotARepo, GitMissing, CatalogError, OSError):
+        return []
+
+
+def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
+    if not notices:
+        return []
+    lines = ["", "MCP template pins with a newer npm version (from the last oah skills update; no network used):"]
+    for notice in notices:
+        checked = f" (checked {notice['checked']})" if notice.get("checked") else ""
+        lines.append(f"  {notice['item']}: {notice['package']} {notice['pinned']} -> {notice['latest']}{checked}")
+    lines.append("      you: change the version in your MCP config when you choose to; oah never edits it")
+    lines.append("      kit maintainers: bump the mcp/ templates and the catalog entry")
+    return lines
+
+
+def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = ()) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -180,17 +206,19 @@ def render_text(statuses: Sequence[ToolStatus], platform: str) -> str:
             alternatives = "".join(f"   (or: {command})" for command in commands[1:])
             lines.append(f"  {status.name}{optional}: {commands[0] if commands else 'see'}{alternatives}")
             lines.append(f"      {url}")
+    lines += _mcp_lines(mcp_notices)
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
     lines += ["", "DOCTOR_OK" if missing_required == 0 else f"DOCTOR_MISSING required={missing_required}"]
     return "\n".join(lines)
 
 
-def render_json(statuses: Sequence[ToolStatus], platform: str) -> str:
+def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = ()) -> str:
     rows = []
     for status in statuses:
         commands, url = _install_texts(status.name, platform)
         rows.append(dict(dataclasses.asdict(status), install=commands, url=url))
-    payload = {"ok": exit_code(statuses) == 0, "platform": platform, "tools": rows}
+    payload = {"ok": exit_code(statuses) == 0, "platform": platform, "tools": rows,
+               "mcp_notices": [dict(notice) for notice in mcp_notices]}
     return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
@@ -224,7 +252,9 @@ def project_root(search_path: str | None, *, cwd: pathlib.Path | None = None) ->
 
 def doctor_main(*, json_output: bool) -> int:
     """`oah doctor` against the real machine."""
+    root = project_root(None)
     statuses = check_tools(search_path=None, env=os.environ, home=pathlib.Path.home(),
-                           repo_root=project_root(None), platform=sys.platform)
-    print(render_json(statuses, sys.platform) if json_output else render_text(statuses, sys.platform))
+                           repo_root=root, platform=sys.platform)
+    notices = mcp_notices(root, os.environ)
+    print(render_json(statuses, sys.platform, notices) if json_output else render_text(statuses, sys.platform, notices))
     return exit_code(statuses)

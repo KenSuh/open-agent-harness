@@ -15,6 +15,11 @@ Each run first prepares: it fetches every item's tracked ref once, stages it, an
 installed, nothing suspicious). A copy that fails keeps its last good pin. Then it publishes inside a
 guard (for shared copies: the state lock, with no lease active) and swaps the passing copies in; a
 failed swap restores the old copy. unlazy is never updated here; the gates lane pins it.
+
+The same run asks the npm registry for each catalog MCP template pin (refresh, --check, --vendored and
+the automatic check) and reports a newer version as a `notice`. Pins stay pins: nothing here edits
+`mcp/`, the catalog or a user's MCP config because of a notice. An unreachable or odd registry gives
+`unused(offline)` or `unused(registry error)` and never changes the exit code.
 """
 from __future__ import annotations
 
@@ -26,11 +31,13 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, ContextManager, Iterator, Mapping, Sequence
 
-from oah.atomic import append_jsonl, read_json, write_json_atomic, write_text_atomic
+from oah.atomic import (StateCorrupt, StorageError, append_jsonl, read_json, read_jsonl, write_json_atomic,
+                        write_text_atomic)
 from oah.engines.proc import Resolved, UnsupportedBatchShim, resolve_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
-from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Upstream, read_upstream
+from oah.toolkit import npm
+from oah.toolkit.catalog import Bundled, Catalog, CatalogError, Mcp, Upstream, read_upstream
 from oah.toolkit.checks import DiffSummary, diff_summary, identify_license, privacy_problems, suspicious, text_digest
 from oah.toolkit.fetch import FetchError, StageError, Tree, copy_tree, fetch, manifest_problems, stage_item
 from oah.toolkit.install import (KIT_MARK, InstallError, _identity, build_copy, installed_executables,
@@ -48,6 +55,8 @@ LOCK_TIMEOUT = 10.0
 
 Fetcher = Callable[..., Tree]
 Guard = Callable[[], ContextManager[None]]
+Registry = Callable[[str], str]  # npm package -> its latest version; raises npm.RegistryOffline/RegistryInvalid
+CATALOG_FILE = "src/oah/templates/toolkit/upstreams.json"
 
 
 class LeasesActive(Exception):
@@ -83,14 +92,22 @@ class Destination:
 @dataclass
 class UpdateResult:
     item: str
-    status: str   # current, available, blocked, advanced, seeded, rolled-back, failed, deferred, pinned
+    status: str   # current, available, blocked, advanced, seeded, rolled-back, failed, deferred, pinned;
+                  # MCP pins: current, notice, unused(offline), unused(registry error)
     destination: str = ""
     old_commit: str = ""
     new_commit: str = ""
     diff: DiffSummary | None = None
     reasons: list[str] = field(default_factory=list)
+    kind: str = "skill"   # "skill" or "mcp"
+    old_version: str = ""  # MCP pins only: the catalog pin and the registry's validated latest version
+    new_version: str = ""
 
     def describe(self) -> str:
+        if self.kind == "mcp":
+            head = (f"OAH_MCP_UPDATE_AVAILABLE {self.item} {self.old_version} -> {self.new_version}"
+                    if self.status == "notice" else f"{self.status:11} {self.item} {self.old_version} (MCP template pin)")
+            return head + "".join(f"\n            - {reason}" for reason in self.reasons)
         parts = [f"{self.status:11} {self.item}"]
         if self.old_commit or self.new_commit:
             parts.append(f"{self.old_commit[:12] or '-'} -> {self.new_commit[:12] or '-'}")
@@ -101,6 +118,9 @@ class UpdateResult:
         return " ".join(parts) + "".join(f"\n            - {reason}" for reason in self.reasons)
 
     def to_json(self) -> dict:
+        if self.kind == "mcp":
+            return {"item": self.item, "kind": "mcp", "status": self.status, "old_version": self.old_version,
+                    "new_version": self.new_version, "reasons": list(self.reasons)}
         data = {"item": self.item, "status": self.status, "destination": self.destination,
                 "old_commit": self.old_commit, "new_commit": self.new_commit, "reasons": list(self.reasons)}
         if self.diff is not None:
@@ -220,15 +240,49 @@ def no_guard() -> Iterator[None]:
     yield
 
 
+def check_mcp(entries: Sequence[Mcp], *, registry: Registry | None = None) -> list[UpdateResult]:
+    """One result per MCP template pin: notice, current or unused. Reads the registry; writes nothing."""
+    query = registry if registry is not None else npm.latest_version
+    results = []
+    for entry in entries:
+        kept = f"the pin stays {entry.version} and the next check asks again"
+        try:
+            latest = query(entry.package)
+            if not npm.is_semver(latest):
+                raise npm.RegistryInvalid("the registry answer's version field is not a plain semver version")
+        except npm.RegistryOffline as exc:
+            results.append(UpdateResult(entry.name, "unused(offline)", kind="mcp", old_version=entry.version,
+                                        reasons=[f"{exc}; {kept}"]))
+            continue
+        except (npm.RegistryInvalid, OSError, ValueError) as exc:
+            reason = str(exc) if isinstance(exc, npm.RegistryInvalid) else "the registry query failed"
+            results.append(UpdateResult(entry.name, "unused(registry error)", kind="mcp", old_version=entry.version,
+                                        reasons=[f"{reason}; {kept}"]))
+            continue
+        if not npm.newer(latest, entry.version):
+            results.append(UpdateResult(entry.name, "current", kind="mcp", old_version=entry.version,
+                                        new_version=latest))
+            continue
+        results.append(UpdateResult(entry.name, "notice", kind="mcp", old_version=entry.version, new_version=latest,
+                                    reasons=[f"you: when you choose to, change {entry.spec} to {entry.package}@{latest} "
+                                             "in your MCP config (.mcp.json, ~/.claude.json or .codex/config.toml); "
+                                             "oah never edits it",
+                                             f"kit maintainer: bump {' and '.join(entry.templates)}, the catalog mcp entry in "
+                                             f"{CATALOG_FILE} and its docs/toolkit.md row to {latest}"]))
+    return results
+
+
 def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_only: bool, settings: Mapping,
                now: dt.datetime, gitleaks: Resolved | None, fetcher: Fetcher = fetch,
                catalog_path: pathlib.Path | None = None, guard: Guard = no_guard,
                after_publish: Callable[[list[UpdateResult]], None] | None = None,
-               home: pathlib.Path | None = None) -> list[UpdateResult]:
+               home: pathlib.Path | None = None, mcp: Sequence[Mcp] = (),
+               registry: Registry | None = None) -> list[UpdateResult]:
     """Snapshot preparation inputs and publish passing copies inside guard().
 
     guard holds the repository state lock, before the per-user lock for every copy.
     after_publish runs inside the same guard once publication ends (never for --check).
+    mcp pins are checked during preparation and reported after the skill results; they never publish.
     """
     results: list[UpdateResult] = []
     ready: list[tuple[UpdateResult, Destination, Bundled, pathlib.Path]] = []
@@ -322,13 +376,14 @@ def run_update(*, catalog: Catalog, destinations: Sequence[Destination], check_o
                         result.reasons = [f"not in {destination.level} yet; the next update copies it there"]
                 else:
                     ready.append((result, destination, entry, new))
+        results.extend(check_mcp(mcp, registry=registry))
         if check_only:
             return results
         try:
             with guard(), user_lock():
                 if any(_identity(path) != identity for path, identity in identities.items()):
                     for result in results:
-                        if result.status not in ("", "current"):
+                        if result.kind != "skill" or result.status not in ("", "current"):
                             continue
                         result.status = "deferred"
                         result.reasons = ["destination or baseline changed during preparation; run the update again"]
@@ -421,7 +476,7 @@ def find_gitleaks(search_path: str | None = None) -> Resolved | None:
 
 def refresh_cache(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: pathlib.Path | None,
                   settings: Mapping, now: dt.datetime, check_only: bool = False, gitleaks: Resolved | None = None,
-                  fetcher: Fetcher = fetch, why: str = "automatic") -> list[UpdateResult]:
+                  fetcher: Fetcher = fetch, why: str = "automatic", registry: Registry | None = None) -> list[UpdateResult]:
     """Bring the kit cache up to date; publication and the run record happen under the state lock with no
     lease active. Raises LeasesActive (nothing written) when a lease is active at publication."""
     initial_state = read_state(state_dir)
@@ -438,12 +493,13 @@ def refresh_cache(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: path
 
     return run_update(catalog=catalog, destinations=destinations, check_only=check_only, settings=settings,
                       now=now, gitleaks=gitleaks, fetcher=fetcher, guard=publication_guard,
-                      after_publish=lambda results: record_run(state_dir, now, results, why))
+                      after_publish=lambda results: record_run(state_dir, now, results, why),
+                      mcp=catalog.mcp, registry=registry)
 
 
 def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: pathlib.Path | None,
                      settings: Mapping, now: dt.datetime, gitleaks: Resolved | None = None,
-                     fetcher: Fetcher = fetch) -> tuple[str, list[UpdateResult]]:
+                     fetcher: Fetcher = fetch, registry: Registry | None = None) -> tuple[str, list[UpdateResult]]:
     """The automatic check: refreshes only the kit cache, at most once per interval, never under a lease.
 
     Returns (state, results); state is 'disabled', 'not-due', 'deferred', 'busy' or 'ran'. A deferred
@@ -459,7 +515,7 @@ def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: p
         return "deferred", [UpdateResult("*", "deferred", reasons=[f"waiting for active leases: {', '.join(holders)}"])]
     try:
         results = refresh_cache(catalog=catalog, state_dir=state_dir, bundle_dir=bundle_dir, settings=settings,
-                                now=now, gitleaks=gitleaks, fetcher=fetcher)
+                                now=now, gitleaks=gitleaks, fetcher=fetcher, registry=registry)
     except LeasesActive as exc:
         return "deferred", [UpdateResult("*", "deferred", reasons=[f"waiting for active leases: {', '.join(exc.holders)}"])]
     except LockTimeout:
@@ -471,3 +527,30 @@ def scheduled_update(*, catalog: Catalog, state_dir: pathlib.Path, bundle_dir: p
     except CheckNotDue:
         return "not-due", []
     return "ran", results
+
+
+def last_mcp_notices(state_dir: pathlib.Path, catalog: Catalog) -> list[dict]:
+    """The newest logged notice per catalog MCP entry whose new version is still above the pin.
+
+    Reads updates.jsonl only, never the network. A missing or corrupt log, an unknown entry or a
+    value that is not plain semver yields nothing for it, so a tampered log is never echoed.
+    """
+    try:
+        records = read_jsonl(pathlib.Path(state_dir) / STATE_FOLDER / LOG_FILE)
+    except (StateCorrupt, StorageError, OSError):
+        return []
+    pins = {entry.name: entry for entry in catalog.mcp}
+    latest: dict[str, dict] = {}
+    for record in records:
+        if record.get("kind") == "mcp" and record.get("status") == "notice" and record.get("item") in pins:
+            latest[record["item"]] = record
+    notices = []
+    for name, entry in pins.items():
+        record = latest.get(name)
+        if record is None or not npm.is_semver(record.get("new_version")) or not npm.newer(record["new_version"], entry.version):
+            continue
+        when = _parse_time(record.get("ts"))
+        notices.append({"item": name, "package": entry.package, "pinned": entry.version,
+                        "latest": record["new_version"], "checked": _stamp(when) if when is not None else "",
+                        "templates": list(entry.templates)})
+    return notices

@@ -1,6 +1,7 @@
 # oah doctor 검사 — 가짜 해석기·실행기로 설치 상태 판정, 설치 안내, 요약 줄, 종료 코드를 확인한다.
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from oah.console import make_safe
 from oah.doctor import check_tools, exit_code, gates_in_use, project_root, python_status, render_json, render_text
@@ -343,6 +345,80 @@ class DoctorTest(unittest.TestCase):
         stream.write(render_text(self.check(), "darwin"))
         stream.flush()
         self.assertIn("\\ufffd", raw.getvalue().decode("cp949"))
+
+
+class McpNoticeDoctorTest(unittest.TestCase):
+    """oah doctor shows the last recorded MCP pin notice per entry, from updates.jsonl, offline."""
+
+    def setUp(self):
+        from tests.fixtures.toolkit.registry import forbid_network
+
+        forbid_network(self)
+        self.repo = make_git_repo(self)
+        self.state = make_tmp_dir(self) / "state"
+        self.log = self.state / "toolkit" / "updates.jsonl"
+        self.log.parent.mkdir(parents=True)
+
+    def write_log(self, *records):
+        self.log.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    def notice(self, item="context7", old="4.4.4", new="4.5.0", ts="2026-10-27T09:00:00Z"):
+        return {"item": item, "kind": "mcp", "status": "notice", "old_version": old, "new_version": new,
+                "reasons": [], "ts": ts, "why": "update"}
+
+    def doctor(self, *, json_output=False):
+        import oah.doctor as doctor
+
+        out = io.StringIO()
+        statuses = [python_status((3, 12, 0))]
+        with mock.patch.object(doctor, "check_tools", return_value=statuses), \
+                mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                mock.patch.dict(os.environ, {"OAH_STATE_DIR": str(self.state)}), \
+                contextlib.redirect_stdout(out):
+            code = doctor.doctor_main(json_output=json_output)
+        return code, out.getvalue()
+
+    def test_doctor_shows_last_mcp_notice_without_network(self):
+        self.write_log(self.notice(new="4.4.9", ts="2026-10-26T09:00:00Z"),
+                       {"item": "context7", "kind": "mcp", "status": "unused(offline)", "old_version": "4.4.4",
+                        "new_version": "", "reasons": [], "ts": "2026-10-26T10:00:00Z", "why": "automatic"},
+                       self.notice(), {"item": "demo", "status": "advanced", "old_commit": "a" * 40,
+                                       "new_commit": "b" * 40, "reasons": [], "ts": "2026-10-27T09:00:00Z"})
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn("context7", out)
+        self.assertIn("4.4.4 -> 4.5.0", out)
+        self.assertNotIn("4.4.9", out)
+        self.assertIn("MCP config", out)
+        code, out = self.doctor(json_output=True)
+        notices = json.loads(out)["mcp_notices"]
+        self.assertEqual([(n["item"], n["pinned"], n["latest"]) for n in notices], [("context7", "4.4.4", "4.5.0")])
+
+    def test_doctor_hides_notice_once_the_pin_is_bumped(self):
+        from oah.toolkit.catalog import load_catalog
+
+        pinned = {entry.name: entry.version for entry in load_catalog().mcp}["context7"]
+        self.write_log(self.notice(old="4.4.0", new=pinned))
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(json.loads(out)["mcp_notices"], [])
+        _, text = self.doctor()
+        self.assertNotIn("MCP", text)
+
+    def test_doctor_ignores_a_corrupt_or_tampered_log(self):
+        for body in ("{not json\n", json.dumps(self.notice(new="9.9.9 \x1b[2J")) + "\n",
+                     json.dumps(self.notice(item="unknown-server")) + "\n", "\xff\n"):
+            with self.subTest(body=body):
+                self.log.write_text(body, encoding="utf-8")
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("9.9.9", out)
+                self.assertNotIn("unknown-server", out)
+                self.assertNotIn("\x1b", out)
+
+    def test_doctor_without_a_log_shows_no_mcp_block(self):
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("MCP", out)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from oah.toolkit.schedule import TASK_NS, install_entry, plan_entry, remove_entr
 from oah.toolkit.catalog import load_catalog, read_upstream
 from oah.toolkit.locate import locate_skill
 from oah.toolkit.update import cache_dir
+from tests.fixtures.toolkit.registry import FakeRegistry, closed_port_url, latest_answer, without_proxies
 from tests.fixtures.toolkit.upstream import TODAY, bundled, commit, linked, make_upstream, write_catalog
 from tests.helpers import make_git_repo, make_tmp_dir, write_posix_tool
 
@@ -672,6 +673,117 @@ class ScheduleTest(unittest.TestCase):
         self.assertTrue(seen["bytes"].startswith(b"\xff\xfe"))
         self.assertIn("--scheduled", seen["bytes"].decode("utf-16"))
         self.assertTrue(remove_entry(entry, runner=runner))
+
+
+class McpNoticeTest(CliFixture):
+    """MCP template pins: notices only. Nothing in mcp/, the catalog or a user MCP config changes."""
+
+    PACKAGE, PIN, LATEST = "@upstash/context7-mcp", "4.4.4", "4.5.0"
+
+    def setUp(self):
+        super().setUp()
+        without_proxies(self)
+        data = json.loads(self.catalog.read_text(encoding="utf-8"))
+        data["mcp"] = [{"name": "context7", "package": self.PACKAGE, "version": self.PIN,
+                        "templates": ["mcp/claude/context7.json", "mcp/codex/context7.toml"],
+                        "source": "https://github.com/upstash/context7", "license": "MIT",
+                        "purpose": "Up-to-date library documentation."}]
+        self.catalog.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.registry = FakeRegistry(self, {f"/{self.PACKAGE}/latest": (200, latest_answer(self.PACKAGE, self.LATEST))})
+        self.use_registry(self.registry.url)
+        spec = f"{self.PACKAGE}@{self.PIN}"
+        self.user_configs = [self.home / ".claude.json", self.project / ".mcp.json",
+                             self.home / ".codex" / "config.toml"]
+        for path in self.user_configs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        claude = json.dumps({"mcpServers": {"context7": {"command": "npx", "args": ["-y", spec]}}})
+        self.user_configs[0].write_text(claude, encoding="utf-8")
+        self.user_configs[1].write_text(claude, encoding="utf-8")
+        self.user_configs[2].write_text(f'[mcp_servers.context7]\ncommand = "npx"\nargs = ["-y", "{spec}"]\n',
+                                        encoding="utf-8")
+
+    def use_registry(self, url: str) -> None:
+        patcher = mock.patch("oah.toolkit.npm.REGISTRY", url)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def protected(self) -> dict[str, bytes]:
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        paths = [*sorted((repo / "mcp").rglob("*")), repo / "src" / "oah" / "templates" / "toolkit" / "upstreams.json",
+                 self.catalog, *self.user_configs]
+        return {str(path): path.read_bytes() for path in paths if path.is_file()}
+
+    def log(self) -> list[dict]:
+        path = self.state / "toolkit" / "updates.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_list_shows_mcp_templates_read_only(self):
+        before = self.protected()
+        code, out, _ = self.oah("list", "--json")
+        self.assertEqual(code, 0)
+        rows = [row for row in json.loads(out)["skills"] if row["name"] == "context7"]
+        self.assertEqual([(row["status"], row["version"], row["license"], row["source"]) for row in rows],
+                         [("mcp template (pinned)", f"{self.PACKAGE}@{self.PIN}", "MIT",
+                           "https://github.com/upstash/context7")])
+        self.assertIn("mcp/claude/context7.json", rows[0]["location"])
+        self.assertEqual(self.registry.requests, [], "listing reads only; it never asks the registry")
+        self.assertEqual(self.protected(), before)
+
+    def test_update_prints_notice_logs_it_and_writes_nothing_else(self):
+        before = self.protected()
+        code, out, err = self.oah("update")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn(f"OAH_MCP_UPDATE_AVAILABLE context7 {self.PIN} -> {self.LATEST}", out)
+        self.assertIn("your MCP config", out)
+        self.assertIn("kit maintainer", out)
+        notices = [r for r in self.log() if r.get("kind") == "mcp"]
+        self.assertEqual([(r["item"], r["status"], r["old_version"], r["new_version"]) for r in notices],
+                         [("context7", "notice", self.PIN, self.LATEST)])
+        self.assertTrue((cache_dir(self.state) / "demo" / "UPSTREAM.json").exists(), "skills still refresh")
+        self.assertEqual(self.protected(), before)
+
+    def test_check_reports_notice_and_writes_nothing(self):
+        before = self.protected()
+        code, out, err = self.oah("update", "--check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_MCP_UPDATE_AVAILABLE context7", out)
+        self.assertFalse((self.state / "toolkit").exists())
+        self.assertEqual(self.protected(), before)
+
+    def test_offline_registry_exits_zero_with_unused_offline(self):
+        self.use_registry(closed_port_url())
+        before = self.protected()
+        code, out, err = self.oah("update")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("unused(offline) context7", out)
+        self.assertNotIn("OAH_MCP_UPDATE_AVAILABLE", out)
+        self.assertTrue((cache_dir(self.state) / "demo" / "UPSTREAM.json").exists(), "the rest of the check continues")
+        self.assertEqual([r["status"] for r in self.log() if r.get("kind") == "mcp"], ["unused(offline)"])
+        self.assertEqual(self.protected(), before)
+
+    def test_invalid_registry_answer_is_reported_not_echoed(self):
+        self.registry.answers[f"/{self.PACKAGE}/latest"] = (200, latest_answer(self.PACKAGE, "9.9.9 \x1b[2J evil"))
+        code, out, err = self.oah("update", "--check")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("unused(registry error) context7", out)
+        self.assertNotIn("evil", out + err)
+        self.assertNotIn("9.9.9", out + err)
+
+    def test_scheduled_check_reports_mcp_notice(self):
+        self.configure("auto_update = true")
+        code, out, err = self.oah("update", "--scheduled")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("OAH_MCP_UPDATE_AVAILABLE context7", out)
+        self.assertEqual([r["why"] for r in self.log() if r.get("kind") == "mcp"], ["automatic"])
+
+    def test_project_update_does_not_query_the_registry(self):
+        self.assertEqual(self.oah("install", "demo", "--target", "claude")[0], 0)
+        code, out, err = self.oah("update", "--project", "--check")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("context7", out)
+        self.assertEqual(self.registry.requests, [])
 
 
 def skills_plist(entry) -> bytes:

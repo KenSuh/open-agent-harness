@@ -156,7 +156,10 @@ def _list(args: argparse.Namespace) -> int:
 def _report_scheduled(state: str, results: list) -> None:
     if state == "ran":
         changed = [r for r in results if r.status != "current"]
-        print(f"OAH_SKILLS_AUTO_UPDATE kit cache checked {len(results)} items, {len(changed)} changed or held back")
+        items = sum(1 for r in results if r.kind == "skill")
+        pins = len(results) - items
+        print(f"OAH_SKILLS_AUTO_UPDATE kit cache checked {items} items" + (f" and {pins} MCP pins" if pins else "")
+              + f", {len(changed)} changed, held back or noted")
         for result in changed:
             print(result.describe())
     elif state == "deferred":
@@ -280,11 +283,11 @@ def _update(args: argparse.Namespace) -> int:
         if any(not d.path.resolve().is_relative_to(info.root.resolve()) for d in destinations):
             raise Refused("OAH_SKILLS_NOT_KIT", "a vendored destination points outside the checkout; remove the alias and retry")
         if args.check:
-            return _print(run_update(destinations=destinations, **common))
+            return _print(run_update(destinations=destinations, mcp=catalog.mcp, **common))
         _confirm("This updates the kit's skills and upstream catalog.", args)
         with own_lease(info, state, (), "oah skills update --vendored",
                        paths=("skills", "src/oah/templates/toolkit/upstreams.json")) as lease:
-            results = run_update(destinations=destinations, catalog_path=catalog_path,
+            results = run_update(destinations=destinations, catalog_path=catalog_path, mcp=catalog.mcp,
                                  guard=lambda: _leased_publication(state, lease), **common)
         if not args.check:
             log_results(state, now, results, "update --vendored")
