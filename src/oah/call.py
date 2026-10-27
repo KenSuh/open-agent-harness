@@ -11,7 +11,7 @@
   `--tier` or the packet's `## Plan` tier), an enabled re-ranker with a key picks one pair from
   `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
   the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
-  (with the candidate `mode`, the allowed models left out and why, and why the model is not judged);
+  (with the candidate `mode`, the pool or allowed models left out and why, and why the model is not judged);
 - the brief (`briefs.build`) and the argv; a review is always read-only.
 `execute` refuses a Codex header model other than the launched one (`OAH_MODEL_MISMATCH`), like the
 effort check, and holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
@@ -80,6 +80,7 @@ ENGINE_DEFAULTS = {
         "quality_order": ["opus", "sonnet", "haiku"],
         "allowed_models": [],
         "effort_caps": {},
+        "tier_pools": {},
         "permission_mode": claude.DEFAULT_PERMISSION_MODE,
         "tools": list(claude.DEFAULT_TOOLS),
         "tiers": {tier: {"model": "", "effort": tier, "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
@@ -89,6 +90,7 @@ ENGINE_DEFAULTS = {
         "quality_order": [],
         "allowed_models": [],
         "effort_caps": {},
+        "tier_pools": {},
         "tiers": {tier: {"model": "", "effort": "highest" if tier == "max" else tier,
                          "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
     },
@@ -123,6 +125,13 @@ class Settings:
             if not all(isinstance(item, str) and item for item in section["allowed_models"]):
                 raise invalid(f"engines.{engine}.allowed_models must list model names as strings, or be empty "
                               "to allow every model the CLI lists")
+            for tier, names in section["tier_pools"].items():
+                if tier not in routing.TIERS:
+                    raise invalid(f"engines.{engine}.tier_pools.{tier} is not a tier; use one of: "
+                                  f"{', '.join(routing.TIERS)}")
+                if not isinstance(names, list) or not all(isinstance(item, str) and item for item in names):
+                    raise invalid(f"engines.{engine}.tier_pools.{tier} must list model names as strings, such as "
+                                  f'{tier} = ["<model>"], or be empty')
             for model, cap in section["effort_caps"].items():
                 if cap not in ORDINARY:
                     raise invalid(f"engines.{engine}.effort_caps.{model} = {cap!r} is not an effort level; use one "
@@ -256,7 +265,8 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
         check((dataclasses.asdict(freshness), effective))
     fresh = bool(entry.models) and entry.checked_at is not None and not any(
         warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
-    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh)
+    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh,
+                                     pools=section["tier_pools"])
     model, source, effort = _deterministic(engine, tier, settings, entry, effective)
     why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
@@ -299,9 +309,10 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     except EngineError:
         return record("unused(floor-unresolved)")
     candidates = models.build_candidates(
-        engine, entry=entry, deterministic=deterministic, floor_tier=floor_tier,
+        engine, entry=entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
         floor=models.Pair(floor_model, floor_effort.launch), quality_order=section["quality_order"],
-        allowed_models=section["allowed_models"], effort_caps=section["effort_caps"])
+        allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
+        tier_pools=section["tier_pools"])
     choice["floor"] = {"tier": floor_tier, "model": floor_model, "effort": floor_effort.launch}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
     choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))

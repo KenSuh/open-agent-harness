@@ -100,10 +100,13 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(engine=engine):
                 self.assertEqual(engines[engine]["allowed_models"], [])
                 self.assertEqual(engines[engine]["effort_caps"], {})
+                self.assertEqual(engines[engine]["tier_pools"], {})
                 self.assertIn(f"[engines.{engine}.effort_caps]", text)
+                self.assertIn(f"[engines.{engine}.tier_pools]", text)
         self.assertIn("allowed_models = []", text)
         self.assertIn("never below", text)
-        self.assertIn("equal peers", text)
+        self.assertIn("qualified", text)
+        self.assertNotIn("equal peers", text)
         self.assertEqual(text, init.render_config(branch="main", how="the current branch", jev=True,
                                                   skill_updates=True, today=TODAY))
 

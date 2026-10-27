@@ -35,7 +35,7 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
     report = {"cli_version": entry.cli_version, "checked_at": entry.checked_at, "source": entry.source,
               "refreshed": checked[1].refreshed, "warnings": list(checked[1].warnings),
               "models": [model.to_json() for model in entry.models], "allowed_models": list(section["allowed_models"]),
-              "effort_caps": dict(section["effort_caps"]), "tiers": {}}
+              "effort_caps": dict(section["effort_caps"]), "tier_pools": dict(section["tier_pools"]), "tiers": {}}
     for tier in routing.TIERS:
         try:
             resolution = call.resolve_engine(engine, tier, settings, root=root, state_dir=state, env=os.environ,
@@ -46,10 +46,10 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
         report["warnings"] += [warning for warning in resolution.warnings if warning not in report["warnings"]]
         # The candidates a judge may pick from for a call whose floor tier is this tier (amendment 6).
         pair = models.Pair(resolution.model, resolution.launch_effort)
-        candidates = models.build_candidates(engine, entry=entry, deterministic=pair, floor_tier=tier, floor=pair,
-                                             quality_order=section["quality_order"],
+        candidates = models.build_candidates(engine, entry=entry, deterministic=pair, tier=tier, floor_tier=tier,
+                                             floor=pair, quality_order=section["quality_order"],
                                              allowed_models=section["allowed_models"],
-                                             effort_caps=section["effort_caps"])
+                                             effort_caps=section["effort_caps"], tier_pools=section["tier_pools"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
                                  "floor": {"tier": tier, **pair.to_json()}, "mode": candidates.mode,
@@ -92,7 +92,8 @@ def run(args: argparse.Namespace) -> int:
         names = ", ".join(model["name"] for model in report["models"]) or "none reported"
         print(f"{engine}: CLI {report['cli_version']} · checked {report['checked_at']} · models: {names}")
         caps = ", ".join(f"{model}={effort}" for model, effort in report["effort_caps"].items()) or "none"
-        print(f"  judge: allowed {', '.join(report['allowed_models']) or 'none (with quality_order: every ranked model)'} · caps {caps}")
+        pools = "; ".join(f"{tier}: {', '.join(names)}" for tier, names in report["tier_pools"].items() if names)
+        print(f"  judge: allowed {', '.join(report['allowed_models']) or 'any'} · caps {caps} · pools {pools or 'none'}")
         for tier, row in report["tiers"].items():
             if "error" in row:
                 print(f"  {tier:6} {row['error']}")

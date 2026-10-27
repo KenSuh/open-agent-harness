@@ -21,15 +21,17 @@ Candidates (amendment 6)
     models, intersected with `allowed_models` (empty = all), each with its supported ordinary efforts at
     most the model's `effort_caps` entry. With a ranking (`quality_order` names listed models, including
     the floor tier's model), no model weaker than the floor tier's deterministic model; always, no
-    effort below the floor tier's effort. Without a ranking (Revision 2), the listed models named in
-    `allowed_models` are unranked peers in the user's order: the judge may pick any of them, no rank is
-    inferred between them, and the floor bounds only the effort; a peer whose efforts cannot meet the
-    floor or its cap is left out and `excluded` says why. Without a ranking and without
-    `allowed_models` the model stays the deterministic one, only the effort is judged, and `note` says
-    why. `CandidateSet.reject_reason` is the one rule: the candidate list is every listed pair it
-    accepts, and a judged answer is used only when it accepts that answer too.
-    `check_caps` warns about capped or allowed models the catalog does not list, and refuses when a
-    fresh catalog lists none of the capped models.
+    effort below the floor tier's effort. Without a ranking (Revision 3), `tier_pools` declares which
+    models the user qualifies for each tier: a model is a candidate only when it is in the pool of the
+    call's floor tier and of the call's tier. Models in a pool are peers, in the user's order, with no
+    rank inferred; `allowed_models` only filters and never qualifies a model. Pool models left out (below
+    the floor effort, above a cap, hidden) and allowed models in no applicable pool are in `excluded`
+    with the rule. Without a ranking and without both pools, the model stays the deterministic one,
+    only the effort is judged, and `note` says why. `CandidateSet.reject_reason` is the one rule: the
+    candidate list is every listed pair it accepts, and a judged answer is used only when it accepts
+    that answer too.
+    `check_caps` warns about capped, allowed or pooled models the catalog does not list, and refuses
+    when a fresh catalog lists none of the capped models.
 
 Changes
     `Catalog.record_resolution` stores the last resolved model and effort per engine and tier in
@@ -285,15 +287,19 @@ class CandidateSet:
     deterministic: Pair
     floor_tier: str
     floor: Pair
-    # "ranked": quality_order ranks the models; "peers": the allowed models, unranked; "deterministic": effort only.
+    # "ranked": quality_order ranks the models; "pools": the user's tier pools, unranked peers;
+    # "deterministic": the effort only.
     mode: str
     order: tuple[str, ...]  # the ranked listed models, strongest first (empty without a ranking)
     allowed: tuple[str, ...]
     caps: tuple[tuple[str, str], ...]
     entry: Entry | None
     pairs: tuple[Pair, ...] = ()
-    excluded: tuple[tuple[str, str], ...] = ()  # allowed models with no candidate pair, and the rule why
+    excluded: tuple[tuple[str, str], ...] = ()  # pool or allowed models with no candidate pair, and the rule why
     note: str | None = None  # why the model is not judged ("model choice off: ...")
+    tier: str = ""
+    pools: tuple[tuple[str, tuple[str, ...]], ...] = ()  # the configured tier pools, as given
+    qualified: tuple[str, ...] = ()  # in both the floor tier's and the call tier's pool (pools mode)
 
     @property
     def ranked(self) -> bool:
@@ -313,7 +319,10 @@ class CandidateSet:
                 return "unranked-model"
             if self.order.index(model) > self.order.index(self.floor.model):
                 return "below-floor"
-        elif self.mode == "deterministic" and model != self.deterministic.model:
+        elif self.mode == "pools":
+            if model not in self.qualified:
+                return "not-in-tier-pool"
+        elif model != self.deterministic.model:
             return "outside-candidates"
         floor_rank = rank(self.floor.effort)
         if floor_rank is None:
@@ -330,44 +339,60 @@ class CandidateSet:
         return {"deterministic": self.deterministic.to_json(),
                 "floor": {"tier": self.floor_tier, **self.floor.to_json()}, "ranked": self.ranked,
                 "mode": self.mode, "note": self.note, "allowed_models": list(self.allowed), "caps": dict(self.caps),
+                "tier_pools": {tier: list(names) for tier, names in self.pools},
                 "candidates": [[pair.model, pair.effort] for pair in self.pairs], "excluded": dict(self.excluded)}
 
 
-def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, floor_tier: str, floor: Pair,
-                     quality_order: Sequence[str], allowed_models: Sequence[str],
-                     effort_caps: Mapping[str, str]) -> CandidateSet:
+def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, tier: str, floor_tier: str,
+                     floor: Pair, quality_order: Sequence[str], allowed_models: Sequence[str],
+                     effort_caps: Mapping[str, str], tier_pools: Mapping[str, Sequence[str]]) -> CandidateSet:
     """The closed candidate set for one call (see Candidates above)."""
     listed = [model.name for model in entry.models if model.listed] if entry else []
     order = tuple(name for name in quality_order if name in listed)
     ranked = bool(order) and floor.model in order
     allowed = tuple(dict.fromkeys(allowed_models))
-    mode = "ranked" if ranked else "peers" if allowed else "deterministic"
+    pools = tuple((name, tuple(dict.fromkeys(tier_pools[name]))) for name in tier_pools)
+    pool = dict(pools)
+    applicable = tuple(dict.fromkeys((floor_tier, tier)))
+    pooled = all(pool.get(name) for name in applicable)
+    mode = "ranked" if ranked else "pools" if pooled else "deterministic"
     note = None
     if mode == "deterministic":
-        note = (f"model choice off: quality_order does not rank {floor.model} and no allowed_models" if order
-                else "model choice off: no ranking and no allowed_models")
+        missing = " and ".join(name for name in applicable if not pool.get(name))
+        why = f"no tier pool for {missing}" if pools else "no tier pools"
+        note = (f"model choice off: quality_order does not rank {floor.model} and {why}" if order
+                else f"model choice off: no ranking and {why}")
+    # Peers keep the call tier's pool order; a model must be in every applicable pool.
+    qualified = tuple(name for name in pool.get(tier, ()) if all(name in pool[t] for t in applicable)) \
+        if mode == "pools" else ()
     rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
-                        tuple(sorted(effort_caps.items())), entry, note=note)
-    names = list(order) if ranked else list(allowed) if allowed else [deterministic.model]
+                        tuple(sorted(effort_caps.items())), entry, note=note, tier=tier, pools=pools,
+                        qualified=qualified)
+    names = list(order) if ranked else list(qualified) if mode == "pools" else [deterministic.model]
     found: list[Pair] = []
     excluded: list[tuple[str, str]] = []
-    for name in names:
+    others = [name for name in dict.fromkeys([*(n for t in applicable for n in pool.get(t, ())), *allowed])
+              if name not in names] if mode == "pools" else []
+    for name in [*names, *others]:
         info = entry.model(name) if entry is not None else None
         efforts = info.efforts if info is not None else ()
         reasons = [rule.reject_reason(name, effort) for effort in efforts]
-        found += [Pair(name, effort) for effort, reason in zip(efforts, reasons) if reason is None]
-        if mode == "peers" and None not in reasons:
-            # A cap is the reason only when some effort met the floor; otherwise the floor or the listing is.
-            why = next((r for r in ("above-cap", "below-floor", "unsupported-effort") if r in reasons),
-                       "outside-candidates")
+        if name in names:
+            found += [Pair(name, effort) for effort, reason in zip(efforts, reasons) if reason is None]
+        if mode == "pools" and None not in reasons:
+            # The first rule that applies: unlisted, not allowed, not qualified, then a cap only when some
+            # effort met the floor, then the floor.
+            why = next((r for r in ("outside-candidates", "not-allowed", "not-in-tier-pool", "above-cap",
+                                    "below-floor", "unsupported-effort") if r in reasons), "outside-candidates")
             excluded.append((name, why if info is not None and info.listed else "outside-candidates"))
     found.sort(key=lambda pair: (names.index(pair.model), rank(pair.effort)))
     return replace(rule, pairs=tuple(found), excluded=tuple(excluded))
 
 
 def check_caps(engine: str, caps: Mapping[str, str], allowed: Sequence[str], entry: Entry | None, *,
-               fresh: bool) -> list[str]:
-    """Warnings for capped or allowed models the catalog does not list; refuse when a fresh catalog lists none."""
+               fresh: bool, pools: Mapping[str, Sequence[str]] | None = None) -> list[str]:
+    """Warnings for capped, allowed or pooled models the catalog does not list; refuse when a fresh catalog lists
+    none of the capped models."""
     listed = {model.name for model in entry.models if model.listed} if entry else set()
     warnings: list[str] = []
     unknown = sorted(name for name in caps if name not in listed)
@@ -384,4 +409,11 @@ def check_caps(engine: str, caps: Mapping[str, str], allowed: Sequence[str], ent
         warnings.append(f"OAH_MODEL_ALLOWED_UNKNOWN: [engines.{engine}] allowed_models names {', '.join(missing)}, "
                         f"which the {engine} CLI does not list now, so the judge cannot pick them. Run "
                         "`oah models --refresh` to check, or remove them from .oah/config.toml")
+    for tier, names in (pools or {}).items():
+        unlisted = [name for name in names if name not in listed]
+        if unlisted:
+            warnings.append(f"OAH_MODEL_POOL_UNKNOWN: [engines.{engine}.tier_pools] {tier} names "
+                            f"{', '.join(unlisted)}, which the {engine} CLI does not list now, so the judge cannot "
+                            f"pick them for tier_pools.{tier}. Run `oah models --refresh` to check, or remove them "
+                            "from .oah/config.toml")
     return warnings

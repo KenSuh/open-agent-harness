@@ -64,7 +64,7 @@ _CORRECTION_ENUMS = frozenset({
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
     "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
     *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
-                                        "below-floor", "above-cap")),
+                                        "not-in-tier-pool", "below-floor", "above-cap")),
 })
 _CORRECTION_FORMS = re.compile(
     r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"

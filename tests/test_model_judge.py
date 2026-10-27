@@ -114,6 +114,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(settings.engines["codex"]["allowed_models"], ["m-a"])
         self.assertEqual(settings.engines["codex"]["effort_caps"], {"m-a": "high"})
 
+    def test_tier_pools_load_and_default_empty(self):
+        self.assertEqual(call.Settings.defaults().engines["codex"]["tier_pools"], {})
+        self.assertEqual(call.Settings.defaults().engines["claude"]["tier_pools"], {})
+        project = calls.Project(self, '[engines.codex.tier_pools]\nhigh = ["m-a", "m-b"]\n')
+        settings = call_cli.load_settings(project.repo)
+        self.assertEqual(settings.engines["codex"]["tier_pools"], {"high": ["m-a", "m-b"]})
+
     def test_invalid_caps_refuse(self):
         rows = [
             ('[engines.codex.effort_caps]\n"m-a" = "turbo"\n', "turbo"),
@@ -122,6 +129,9 @@ class ConfigTest(unittest.TestCase):
             ('[engines.codex.effort_caps]\n"m-a" = 3\n', "m-a"),
             ('allowed_models = ["m-a", 2]\n', "allowed_models"),
             ('[engines.claude.effort_caps]\n"m-a" = "max-ish"\n', "max-ish"),
+            ('[engines.codex.tier_pools]\nhuge = ["m-a"]\n', "huge"),
+            ('[engines.codex.tier_pools]\nhigh = "m-a"\n', "tier_pools.high"),
+            ('[engines.codex.tier_pools]\nhigh = ["m-a", 3]\n', "tier_pools.high"),
         ]
         for text, named in rows:
             with self.subTest(text=text):
@@ -275,40 +285,57 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["model_choice"]["deterministic"]["source"], "cli_default")
                 self.assertEqual({pair[0] for pair in data["model_choice"]["candidates"]}, {"m-strong"})
                 self.assertEqual((data["model_choice"]["mode"], data["model_choice"]["note"]),
-                                 ("deterministic", "model choice off: no ranking and no allowed_models"))
+                                 ("deterministic", "model choice off: no ranking and no tier pools"))
                 self.assertEqual(launched(project), expected)
 
-    def test_unranked_allowed_models_are_peers(self):
-        # AC8 (Revision 2): three unranked peers and one cap give a multi-model candidate set. A review call
-        # is tier medium with floor medium; without a ranking the deterministic choice is the CLI default.
-        peers = ('allowed_models = ["m-strong", "m-mid", "m-light"]\n'
-                 '[engines.codex.effort_caps]\n"m-mid" = "medium"\n')
+    def test_tier_pools_qualify_peers_for_a_high_floor_call(self):
+        # AC8 (Revision 3): a security review has floor high; without a ranking the deterministic choice is the
+        # CLI default at high. Only models the user put in the high pool are candidates, as unordered peers.
+        pools = '[engines.codex.tier_pools]\nhigh = ["m-strong", "m-extra"]\nmax = ["m-strong", "m-extra"]\n'
         rows = [
-            (("m-light", "medium"), "used", ("m-light", "medium")),
-            (("m-mid", "medium"), "used", ("m-mid", "medium")),
-            (("m-extra", "high"), "rejected(not-allowed)", ("m-strong", "medium")),
-            (("m-hidden", "high"), "rejected(outside-candidates)", ("m-strong", "medium")),
-            (("m-light", "low"), "rejected(below-floor)", ("m-strong", "medium")),
-            (("m-mid", "high"), "rejected(above-cap)", ("m-strong", "medium")),
+            ("a pool peer other than the deterministic model", ("m-extra", "high"), "", "used", ("m-extra", "high")),
+            ("the other peer at a higher effort", ("m-strong", "xhigh"), "", "used", ("m-strong", "xhigh")),
+            ("allowed and supports high, but not in the high pool", ("m-mid", "high"), "",
+             "rejected(not-in-tier-pool)", ("m-strong", "high")),
+            ("allowed, in no pool at all", ("m-light", "medium"), 'allowed_models = ["m-strong", "m-extra", "m-light"]\n',
+             "rejected(not-in-tier-pool)", ("m-strong", "high")),
+            ("below the floor effort", ("m-strong", "medium"), "", "rejected(below-floor)", ("m-strong", "high")),
+            ("hidden", ("m-hidden", "high"), "", "rejected(outside-candidates)", ("m-strong", "high")),
+            ("capped at medium", ("m-extra", "high"), '[engines.codex.effort_caps]\n"m-extra" = "medium"\n',
+             "rejected(above-cap)", ("m-strong", "high")),
         ]
-        for answer, status, expected in rows:
-            with self.subTest(answer=answer):
-                project = judged_project(self, ranked=False, extra=peers)
+        for name, answer, extra, status, expected in rows:
+            with self.subTest(name):
+                # allowed_models belongs to [engines.codex], so it precedes the tables.
+                text = extra + pools if extra.startswith("allowed_models") else pools + extra
+                project = judged_project(self, ranked=False, extra=text)
                 provider = FakeJudge(answer)
                 with judge(project, provider):
-                    data = project.run(stage="review")
+                    data = project.run(stage="review", axes={"kind": "security"})
                 self.assertEqual(data["status"], "finished")
-                self.assertEqual(data["model_judge"], status)
+                self.assertEqual((data["tier"], data["model_judge"]), ("high", status))
                 choice = data["model_choice"]
-                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "medium",
-                                                           "source": "cli_default"})
-                self.assertEqual((choice["mode"], choice["note"], choice["excluded"]), ("peers", None, {}))
-                self.assertEqual(choice["candidates"], [["m-strong", e] for e in ("medium", "high", "xhigh", "max")]
-                                 + [["m-mid", "medium"], ["m-light", "medium"]])
+                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "high", "source": "cli_default"})
+                self.assertEqual(choice["floor"], {"tier": "high", "model": "m-strong", "effort": "high"})
+                self.assertEqual((choice["mode"], choice["note"]), ("pools", None))
+                capped = "effort_caps" in extra
+                self.assertEqual(choice["candidates"], [["m-strong", e] for e in ("high", "xhigh", "max")]
+                                 + ([] if capped else [["m-extra", "high"]]))
+                self.assertEqual(choice["excluded"], {"m-extra": "above-cap"} if capped
+                                 else {"m-light": "not-in-tier-pool"} if "m-light" in extra else {})
                 self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in choice["candidates"]})
                 self.assertEqual((data["resolved_model"], data["launch_effort"]), expected)
                 self.assertEqual(data["model_source"], "judge" if status == "used" else "cli_default")
                 self.assertEqual(launched(project), expected)
+
+    def test_a_pin_overrides_any_pool(self):
+        project = judged_project(self, ranked=False, extra='[engines.codex.tier_pools]\nhigh = ["m-extra"]\n')
+        provider = FakeJudge(("m-extra", "high"))
+        with judge(project, provider):
+            data = project.run(stage="review", tier="high")
+        self.assertEqual(data["model_judge"], "unused(pinned)")
+        self.assertEqual(launched(project), ("m-strong", "high"))
+        self.assertEqual(provider.calls, [])
 
     def test_unknown_cap_models_warn_or_refuse(self):
         project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-typo" = "high"\n')

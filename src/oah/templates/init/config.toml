@@ -12,15 +12,19 @@ command = ["claude"]
 # Strongest first. These are Claude Code's own aliases, so new models arrive without edits here.
 quality_order = ["opus", "sonnet", "haiku"]
 # When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the
-# CLI lists, never below the floor the task kind needs. With quality_order, empty allows every ranked
-# model; name models to allow only those. Without quality_order, the models named here are equal peers
-# the re-ranker may choose among (no order is assumed between them); empty keeps the tier's model and
-# lets it choose only the effort.
+# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models
+# to allow only those. This list only filters: it never makes a model qualified for a tier.
 allowed_models = []
 
 # The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".
 # Empty: no cap. The tier's own model and effort below are never lowered by a cap.
 [engines.claude.effort_caps]
+
+# Without quality_order, the models you have checked are qualified for a tier, one line per tier,
+# such as high = ["<model>", "<model>"]. A call may use a model only when it is in the pool of its
+# floor tier and of its own tier; models in one pool are equals. Empty: the tier's model is kept and
+# only the effort is chosen.
+[engines.claude.tier_pools]
 
 # Difficulty tiers: model = "" follows quality_order (low takes the last, medium the second, high and
 # max the first); a model name pins that tier.
@@ -35,15 +39,19 @@ command = ["codex"]
 # Empty: the model your Codex configuration uses, or a newer one Codex marks as its default.
 quality_order = []
 # When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the
-# CLI lists, never below the floor the task kind needs. With quality_order, empty allows every ranked
-# model; name models to allow only those. Without quality_order, the models named here are equal peers
-# the re-ranker may choose among (no order is assumed between them); empty keeps the tier's model and
-# lets it choose only the effort.
+# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models
+# to allow only those. This list only filters: it never makes a model qualified for a tier.
 allowed_models = []
 
 # The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".
 # Empty: no cap. The tier's own model and effort below are never lowered by a cap.
 [engines.codex.effort_caps]
+
+# Without quality_order, the models you have checked are qualified for a tier, one line per tier,
+# such as high = ["<model>", "<model>"]. A call may use a model only when it is in the pool of its
+# floor tier and of its own tier; models in one pool are equals. Empty: the tier's model is kept and
+# only the effort is chosen.
+[engines.codex.tier_pools]
 
 # "highest" is the highest reasoning effort the resolved model supports.
 [engines.codex.tiers]
