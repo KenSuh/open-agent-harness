@@ -144,8 +144,8 @@ class Wiki:
                  lock_timeout: float = 10.0) -> None:
         self.root = pathlib.Path(root)
         self.lock_timeout = lock_timeout
-        self.settings = settings
-        self.dir = self.root / settings.dir
+        self.settings = settings.for_root(self.root)
+        self.dir = self.root / self.settings.dir
         self.state = pathlib.Path(state) / "wiki"
         self.lock_path = self.state / ".lock"
         self.journal_path = self.state / JOURNAL

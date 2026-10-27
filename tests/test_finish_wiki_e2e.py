@@ -74,6 +74,51 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
                     for rel in ("notes/index.md", "notes/log.md")]
         self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
 
+    @unittest.skipUnless(os.name != "nt", "POSIX absolute paths")
+    def test_finish_uses_absolute_posix_wiki_directory(self):
+        self.check_absolute_wiki_directory()
+
+    @unittest.skipUnless(os.name == "nt", "native Windows drive-letter paths")
+    def test_finish_uses_absolute_windows_wiki_directory(self):
+        self.assertTrue(self.repo.drive.endswith(":"), self.repo)
+        self.check_absolute_wiki_directory()
+
+    def check_absolute_wiki_directory(self):
+        folder = self.repo / "notes"
+        (self.repo / "docs" / "wiki").rename(folder)
+        # JSON string escaping is also valid TOML, including native Windows backslashes.
+        config = '[wiki]\ndir = ' + json.dumps(str(folder)) + '\n'
+        git_commit(self.repo, {".oah/config.toml": config.encode("utf-8")})
+        self.maintain_after_edit()
+        check = verify_maintenance(self.repo, "t1", settings=WikiSettings(dir=str(folder)), env=self.env)
+        self.assertTrue(check.ok, check.problems)
+        expected = [[rel, hashlib.sha256((self.repo / rel).read_bytes()).hexdigest()]
+                    for rel in ("notes/index.md", "notes/log.md")]
+        self.assertEqual(check.outputs, [tuple(pair) for pair in expected])
+        finished = self.finish()
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.assertIn("OAH_LEASE_FINISHED task=t1 agent=claude changed=1", finished.stdout)
+        self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
+
+    def test_outside_wiki_directory_refuses_even_with_override(self):
+        folder = make_tmp_dir(self) / "notes"
+        (self.repo / "docs" / "wiki").rename(folder)
+        before = {p.relative_to(folder): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+        config = '[wiki]\ndir = ' + json.dumps(str(folder)) + '\n'
+        git_commit(self.repo, {".oah/config.toml": config.encode("utf-8")})
+        self.ok("start", "--task", "t1", "--agent", "claude", "--scope", "src")
+        for extra in ((), ("--allow-missing-wiki-maintenance",)):
+            with self.subTest(extra=extra):
+                refused = self.finish(*extra)
+                self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+                self.assertTrue(refused.stderr.startswith("OAH_WIKI_MISSING"), refused.stderr)
+                self.assertNotIn("Traceback", refused.stderr)
+        refused = self.oah("wiki", "maintain", "--task", "t1")
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertTrue(refused.stderr.startswith("OAH_WIKI_MISSING"), refused.stderr)
+        self.assertFalse((self.state / "wiki" / "maintenance.jsonl").exists())
+        self.assertEqual({p.relative_to(folder): p.read_bytes() for p in folder.rglob("*") if p.is_file()}, before)
+
     def test_finish_records_task_entry_page_but_keeps_exemptions_restricted(self):
         archive = "docs/wiki/log_archive_001.md"
         page = (b"# Log archive 1\n\n<!-- OAH:LOG_INSERT_BELOW -->\n"

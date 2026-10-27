@@ -287,7 +287,7 @@ def _existed_at_start(root: pathlib.Path, lease: Lease, path: str) -> bool:
 
 def _wiki_maintenance(root: pathlib.Path, lease: Lease, allow_missing: bool) -> tuple[set[str], dict | None]:
     """Wiki maintenance outputs exempt from the scope check, and the record for the finish event."""
-    settings = WikiSettings.from_mapping(load_config(root).section("wiki", WIKI_DEFAULTS))
+    settings = WikiSettings.from_mapping(load_config(root).section("wiki", WIKI_DEFAULTS)).for_root(root)
     if not (root / settings.dir).is_dir():
         return set(), None
     try:
