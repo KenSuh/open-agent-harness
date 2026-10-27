@@ -6,21 +6,23 @@ with its source and license. It ships three kinds of item:
 - **Bundled skills** are vendored under `skills/<name>/`, byte for byte as published upstream at a
   pinned commit, with the upstream license file and an `UPSTREAM.json` provenance record. Only skills
   whose license permits redistribution are bundled. An **opt-in** item is never installed by `--all` and
-  is selected only for the tasks it names (for example `humanize-korean` for Korean prose).
+  is selected only for the tasks it names. A **regional** item serves one language (for example
+  `humanize-korean`, labelled "regional: Korean", for Korean prose); it is also opt-in.
 - **Linked items** ship only their official install command and source, because their license does not
   allow redistribution or a file would fail this repository's privacy scan unchanged.
 - **MCP templates** in `mcp/` start a server for Claude Code or Codex. They hold `${NAME}` placeholders
   (Claude) or `env_vars` names (Codex), never a value. `mcp/README.md` says where your keys live.
+  Each template pins an npm version; the update check tells you when a newer one exists.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `oah skills list` | Shows bundled, cached, linked and installed skills with version or commit, source, license and location. Reads only. |
+| `oah skills list` | Shows bundled, cached, linked and installed skills with version or commit, source, license and location, and the MCP template pins. Reads only. |
 | `oah skills install <name>` | Copies a bundled skill into this project's `.claude/skills/` and `.agents/skills/` (`--target claude\|codex\|both`), under its own short lease. Shows the plan first. |
 | `oah skills install <name> --global` | Copies into your user folders `~/.claude/skills/` and `~/.agents/skills/`. These are global files, so it asks first (`--yes` agrees). |
 | `oah skills install <linked name>` | Runs the item's official install command after asking, or prints the step you type into Claude Code. |
-| `oah skills update` | Refreshes the kit cache now. `--check` only reports. |
+| `oah skills update` | Refreshes the kit cache now and reports newer versions of the MCP template pins. `--check` only reports. |
 | `oah skills update --project` | Updates this project's tracked skill copies, as its own leased task. |
 | `oah skills update --global` | Updates your user-level copies, after confirmation. |
 | `oah skills schedule install\|remove\|status` | Adds or removes a daily launchd agent (macOS) or Task Scheduler task (Windows) for the automatic check, with your consent. |
@@ -69,6 +71,16 @@ For the same skill name, `oah` uses the first copy it finds:
 - **A failed or suspicious update keeps the last good copy** and is reported with the reason. A failed
   swap restores the previous copy. Every result is logged with old and new commits, when and why in
   `toolkit/updates.jsonl` in oah's state folder.
+- **MCP template pins stay pins; oah only notifies.** `oah skills update`, `--check`, `--vendored` and
+  the automatic check ask the npm registry (`registry.npmjs.org`, the one extra network address) for
+  the latest version of each catalog MCP entry, with the same allowlisted proxy rule and timeout as
+  skill fetches. A newer version prints `OAH_MCP_UPDATE_AVAILABLE <name> <pinned> -> <latest>` with
+  two steps: you change the version in your own MCP config when you choose to, and a kit maintainer
+  bumps the template and the catalog. oah never edits `mcp/`, the catalog or your MCP config. The
+  notice is logged in `toolkit/updates.jsonl` (status `notice`, old and new versions), and `oah doctor`
+  shows the last one per server without going online. A version is printed only when it is a plain
+  semver version; any other answer reads `unused(registry error)`, and no connection reads
+  `unused(offline)`. Neither fails the command.
 - **Kit maintainers** run `oah skills update --vendored --yes` from the actual kit checkout with its
   local installation. This takes a lease on `skills/` and the catalog; conflicting work must finish first.
 
@@ -84,7 +96,7 @@ For the same skill name, `oah` uses the first copy it finds:
 | `mattpocock-skills` | <https://github.com/mattpocock/skills> `skills` | `49dd158d1076` | MIT | vendor | `oah skills install mattpocock-skills` |
 | `codex-plugin-cc` | <https://github.com/openai/codex-plugin-cc> `plugins/codex` | `db52e28f4d9d` | Apache-2.0 | vendor | `oah skills install codex-plugin-cc` |
 | `ponytail` | <https://github.com/DietrichGebert/ponytail> `skills` | `2ed6c52c9d7e` | MIT | vendor | `oah skills install ponytail` |
-| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, opt-in (selected only for: korean-prose) | `oah skills install humanize-korean` |
+| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, opt-in, regional: Korean (selected only for: korean-prose) | `oah skills install humanize-korean` |
 
 ## Linked skills and plugins
 
@@ -102,10 +114,15 @@ For the same skill name, `oah` uses the first copy it finds:
 
 ## MCP servers
 
+context7 gives the coding agent up-to-date library and framework documentation on demand. The
+documentation is always current because it comes from the context7 service; the template pins only
+the small client package that talks to it, and its key (`CONTEXT7_API_KEY`) is optional. When npm
+publishes a newer client, `oah skills update` prints `OAH_MCP_UPDATE_AVAILABLE` with the version to
+change in your MCP config; oah never edits the pin for you.
+
 | Name | Source | Version | License | Verdict | Install |
 |---|---|---|---|---|---|
 | `context7` | <https://github.com/upstash/context7> | `@upstash/context7-mcp@4.4.4` | MIT | template | `mcp/claude/context7.json`, `mcp/codex/context7.toml` |
-| `korean-law` | <https://github.com/chrisryugj/korean-law-mcp> | `korean-law-mcp@4.15.9` | MIT | template | `mcp/claude/korean-law.json`, `mcp/codex/korean-law.toml` |
 | `mcp-openai` | <https://github.com/mzxrai/mcp-openai> | `@mzxrai/mcp-openai@0.1.1` | MIT | template | `mcp/claude/mcp-openai.json`, `mcp/codex/mcp-openai.toml` |
 | `aside` | <https://aside.com/> | CLI 1.26.1010.1739 | LicenseRef-Proprietary | link | Download it from <https://aside.com/download>, then run `aside mcp` to register it |
 | `openaiDeveloperDocs` | <https://developers.openai.com/mcp> | hosted service | NOASSERTION | link | `codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp` |

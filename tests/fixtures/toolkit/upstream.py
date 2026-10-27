@@ -99,7 +99,7 @@ def linked(name: str = "helper", steps=(Step(run=("python3", "-c", "print('ok')"
                   license="MIT", steps=tuple(steps), reason="its upstream installs it", purpose="Helps.")
 
 
-def catalog_json(entries_bundled=(), entries_linked=()) -> dict:
+def catalog_json(entries_bundled=(), entries_linked=(), entries_mcp=()) -> dict:
     def as_json(entry) -> dict:
         data = dataclasses.asdict(entry)
         if "steps" in data:
@@ -107,11 +107,15 @@ def catalog_json(entries_bundled=(), entries_linked=()) -> dict:
                              for step in data["steps"]]
         return {key: list(value) if isinstance(value, tuple) else value for key, value in data.items()}
 
-    return {"version": 1, "bundled": [as_json(e) for e in entries_bundled],
+    data = {"version": 1, "bundled": [as_json(e) for e in entries_bundled],
             "linked": [as_json(e) for e in entries_linked]}
+    if entries_mcp:
+        data["mcp"] = [as_json(e) for e in entries_mcp]
+    return data
 
 
-def write_catalog(folder: pathlib.Path, entries_bundled=(), entries_linked=()) -> pathlib.Path:
+def write_catalog(folder: pathlib.Path, entries_bundled=(), entries_linked=(), entries_mcp=()) -> pathlib.Path:
     path = folder / "upstreams.json"
-    path.write_text(json.dumps(catalog_json(entries_bundled, entries_linked), indent=2), encoding="utf-8")
+    path.write_text(json.dumps(catalog_json(entries_bundled, entries_linked, entries_mcp), indent=2),
+                    encoding="utf-8")
     return path

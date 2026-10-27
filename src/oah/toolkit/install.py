@@ -389,7 +389,7 @@ def _item_row(entry: Bundled, folder: pathlib.Path, status: str) -> Row:
 
 def list_rows(*, catalog: Catalog, bundle_dir: pathlib.Path | None, cache_dir: pathlib.Path | None,
               project_root: pathlib.Path, home: pathlib.Path) -> list[Row]:
-    """Bundled, cached, linked and installed skills; reads only."""
+    """Bundled, cached, linked and installed skills, and MCP template pins; reads only."""
     rows: list[Row] = []
     for entry in catalog.bundled:
         bundled_copy = item_source(entry.name, [bundle_dir])
@@ -402,6 +402,9 @@ def list_rows(*, catalog: Catalog, bundle_dir: pathlib.Path | None, cache_dir: p
     for entry in catalog.linked:
         rows.append(Row(entry.name, "linked", entry.version, entry.source, entry.license,
                         "install: " + " && ".join(step.describe() for step in entry.steps)))
+    for entry in catalog.mcp:  # read-only: the update check reports newer versions, never edits a pin
+        rows.append(Row(entry.name, "mcp template (pinned)", entry.spec, entry.source, entry.license,
+                        "templates: " + ", ".join(entry.templates)))
     for level, label in (("project", "project"), ("user", "global")):
         for engine, folder in installed_skills(target_dirs("both", level, project_root=project_root, home=home)):
             try:

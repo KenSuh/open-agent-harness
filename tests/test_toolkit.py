@@ -22,8 +22,8 @@ from oah.toolkit.catalog import CatalogError, item_skill_dirs, load_catalog, rea
 from oah.toolkit.checks import (blob_id, builtin_privacy_problems, diff_summary, identify_license, privacy_problems,
                                 suspicious, text_digest)
 from oah.toolkit.fetch import GIT_SAFE_CONFIG, FetchError, StageError, fetch, git_env, stage_item
-from tests.fixtures.toolkit.upstream import (APACHE_TEXT, MIT_TEXT, TODAY, bundled, commit, make_executable,
-                                             make_upstream, write_catalog)
+from tests.fixtures.toolkit.upstream import (APACHE_TEXT, MIT_TEXT, TODAY, bundled, catalog_json, commit,
+                                             make_executable, make_upstream, write_catalog)
 from tests.helpers import make_tmp_dir, write_posix_tool
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -177,6 +177,36 @@ class CatalogTest(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(CatalogError) as caught:
                 load_catalog(path)
             self.assertTrue(str(caught.exception).startswith("OAH_TOOLKIT_CATALOG_INVALID"))
+
+    def test_catalog_without_mcp_still_loads(self):
+        path = make_tmp_dir(self) / "upstreams.json"
+        path.write_text(json.dumps(catalog_json()), encoding="utf-8")
+        self.assertEqual(load_catalog(path).mcp, ())
+
+    def test_catalog_validates_mcp_entries(self):
+        good = {"name": "demo", "package": "@scope/demo-mcp", "version": "1.2.3",
+                "templates": ["mcp/claude/demo.json", "mcp/codex/demo.toml"],
+                "source": "https://github.com/example/demo-mcp", "license": "MIT", "purpose": "A demo server."}
+        path = make_tmp_dir(self) / "upstreams.json"
+        path.write_text(json.dumps(dict(catalog_json(), mcp=[good])), encoding="utf-8")
+        [entry] = load_catalog(path).mcp
+        self.assertEqual((entry.name, entry.spec, entry.templates),
+                         ("demo", "@scope/demo-mcp@1.2.3", ("mcp/claude/demo.json", "mcp/codex/demo.toml")))
+        broken = [{"version": "latest"}, {"version": "1.2"}, {"version": "1.2.3-rc.1"}, {"package": "Demo"},
+                  {"package": "@scope/demo/extra"}, {"package": "demo mcp"}, {"name": "Bad Name"},
+                  {"templates": ["mcp/claude/demo.json"]}, {"templates": ["mcp/claude/other.json", "mcp/codex/demo.toml"]},
+                  {"templates": ["../mcp/claude/demo.json", "mcp/codex/demo.toml"]}, {"source": USERINFO_URL},
+                  {"source": "http://github.com/example/demo-mcp"}, {"license": ""}, {"purpose": 3}]
+        for change in broken:
+            path.write_text(json.dumps(dict(catalog_json(), mcp=[dict(good, **change)])), encoding="utf-8")
+            with self.subTest(change=change), self.assertRaises(CatalogError) as caught:
+                load_catalog(path)
+            self.assertTrue(str(caught.exception).startswith("OAH_TOOLKIT_CATALOG_INVALID"))
+        missing = {key: value for key, value in good.items() if key != "package"}
+        for data in ([missing], [good, good], "not a list"):
+            path.write_text(json.dumps(dict(catalog_json(), mcp=data)), encoding="utf-8")
+            with self.subTest(data=data), self.assertRaises(CatalogError):
+                load_catalog(path)
 
 
 class FetchStageTest(unittest.TestCase):
@@ -595,6 +625,7 @@ class ChecksTest(unittest.TestCase):
 INVENTORY_NAMES = {"skill-creator (Anthropic)": "skill-creator", "superpowers@claude-plugins-official": "superpowers",
                    "codex@openai-codex": "codex-plugin-cc", "ponytail@ponytail": "ponytail",
                    "omo@sisyphuslabs (LazyCodex)": "lazycodex", "openai (mcp-openai)": "mcp-openai"}
+REMOVED_BY_OWNER = {"korean-law"}  # owner decision 2026-10-25: dropped from the kit; the PLAN inventory keeps its row
 PLACEHOLDER = re.compile(r"\$\{[A-Z_][A-Z0-9_]*(?::-)?\}")
 
 
@@ -606,7 +637,9 @@ def inventory_rows() -> list[tuple[str, str, str]]:
     for line in section.splitlines():
         cells = [cell.strip() for cell in line.split("|")]
         if len(cells) > 8 and cells[1] in ("skill", "plugin", "mcp", "cli"):
-            rows.append((cells[1], INVENTORY_NAMES.get(cells[2], cells[2]), cells[-2]))
+            name = INVENTORY_NAMES.get(cells[2], cells[2])
+            if name not in REMOVED_BY_OWNER:
+                rows.append((cells[1], name, cells[-2]))
     return rows
 
 
@@ -628,6 +661,8 @@ class ShippedToolkitTest(unittest.TestCase):
         self.assertEqual((korean.default, korean.select_for), (False, ("korean-prose",)),
                          "humanize-korean is opt-in and chosen only for Korean prose tasks")
         self.assertEqual([entry.name for entry in catalog.bundled if not entry.default], ["humanize-korean"])
+        self.assertEqual([(entry.name, entry.regional) for entry in catalog.bundled if entry.regional],
+                         [("humanize-korean", "Korean")], "humanize-korean is labelled regional: Korean")
         for entry in catalog.bundled:
             with self.subTest(item=entry.name):
                 record = read_upstream(REPO / "skills" / entry.name)
@@ -704,6 +739,12 @@ class ShippedToolkitTest(unittest.TestCase):
                 elif kind == "cli":
                     self.assertIn(name, clis)
 
+    def test_toolkit_page_labels_humanize_korean_regional(self):
+        text = (REPO / "docs" / "toolkit.md").read_text(encoding="utf-8")
+        [row] = [line for line in text.splitlines() if line.startswith("| `humanize-korean` |")]
+        self.assertIn("regional: Korean", row)
+        self.assertIn("opt-in", row)
+
     def test_toolkit_pages_list_every_item_and_no_excluded_name(self):
         catalog = load_catalog()
         names = [entry.name for entry in (*catalog.bundled, *catalog.linked, *catalog.clis)]
@@ -726,7 +767,7 @@ class McpTemplateTest(unittest.TestCase):
         claude = sorted((REPO / "mcp" / "claude").glob("*.json"))
         codex = sorted((REPO / "mcp" / "codex").glob("*.toml"))
         self.assertEqual([p.stem for p in claude], [p.stem for p in codex])
-        self.assertEqual(len(claude), 3)
+        self.assertEqual(len(claude), 2)
         for path in claude:
             with self.subTest(path=path.name):
                 servers = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]

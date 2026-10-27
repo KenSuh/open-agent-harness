@@ -197,7 +197,8 @@
         "skills/humanize-korean": [
           "scripts"
         ]
-      }
+      },
+      "regional": "Korean"
     }
   ],
   "linked": [
@@ -503,6 +504,32 @@
       "license": "Unlicense OR MIT",
       "install_macos": "brew install ripgrep",
       "purpose": "ripgrep fast search."
+    }
+  ],
+  "mcp": [
+    {
+      "name": "context7",
+      "package": "@upstash/context7-mcp",
+      "version": "4.4.4",
+      "templates": [
+        "mcp/claude/context7.json",
+        "mcp/codex/context7.toml"
+      ],
+      "source": "https://github.com/upstash/context7",
+      "license": "MIT",
+      "purpose": "Gives the coding agent up-to-date library and framework documentation on demand. Its key is optional."
+    },
+    {
+      "name": "mcp-openai",
+      "package": "@mzxrai/mcp-openai",
+      "version": "0.1.1",
+      "templates": [
+        "mcp/claude/mcp-openai.json",
+        "mcp/codex/mcp-openai.toml"
+      ],
+      "source": "https://github.com/mzxrai/mcp-openai",
+      "license": "MIT",
+      "purpose": "Lets an agent query OpenAI chat models as a tool. Needs OPENAI_API_KEY in your environment."
     }
   ]
 }

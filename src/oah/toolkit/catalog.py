@@ -3,7 +3,8 @@
 
 `src/oah/templates/toolkit/upstreams.json` ships with the kit. Only the repositories it names are ever
 fetched. A bundled item lives in `skills/<name>/` with an `UPSTREAM.json` that records where every file
-came from; its `commit` is the pin.
+came from; its `commit` is the pin. Its `mcp` list names the npm package and version each `mcp/`
+template pins; the update check only reports newer versions of those, it never edits a pin.
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ KIT_ENV = "OAH_KIT_DIR"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 KINDS = ("skill", "plugin")
+NPM_PACKAGE_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*")
+PIN_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 class CatalogError(Exception):
@@ -50,6 +53,7 @@ class Bundled:
     default: bool = True                 # False: --all skips it, and the selector never picks it by default
     select_for: tuple[str, ...] = ()     # task tags the selector may pick it for, e.g. "korean-prose"
     support: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # skill -> item folders copied into it
+    regional: str = ""                   # a regional item's language, e.g. "Korean"; shown as "regional: Korean"
 
     def fetch_paths(self) -> tuple[str, ...]:
         """Upstream paths a fetch needs: the vendored part, the license and the notices."""
@@ -93,10 +97,28 @@ class Cli:
 
 
 @dataclass(frozen=True)
+class Mcp:
+    """An npm-launched MCP server template in mcp/; the version is the pin oah reports on, never edits."""
+
+    name: str
+    package: str
+    version: str
+    templates: tuple[str, ...]  # mcp/claude/<name>.json and mcp/codex/<name>.toml
+    source: str
+    license: str
+    purpose: str
+
+    @property
+    def spec(self) -> str:
+        return f"{self.package}@{self.version}"
+
+
+@dataclass(frozen=True)
 class Catalog:
     bundled: tuple[Bundled, ...]
     linked: tuple[Linked, ...]
     clis: tuple[Cli, ...] = ()
+    mcp: tuple[Mcp, ...] = ()
 
     def find(self, name: str) -> Bundled | Linked | None:
         for entry in (*self.bundled, *self.linked):
@@ -221,7 +243,8 @@ def _bundled(data: object, where: str) -> Bundled:
                         include=tuple(_relative(p, where) for p in _strings(data, "include", where)),
                         default=data.get("default", True),
                         select_for=_strings(data, "select_for", where),
-                        support=_support(data.get("support", {}), where))
+                        support=_support(data.get("support", {}), where),
+                        regional=_str(data, "regional", where, empty=True) if "regional" in data else "")
     except KeyError as exc:
         raise CatalogError(f"{where}: missing {exc}") from None
     if not isinstance(entry.default, bool):
@@ -283,6 +306,28 @@ def _cli(data: object, where: str) -> Cli:
         raise CatalogError(f"{where}: missing {exc}") from None
 
 
+def _mcp(data: object, where: str) -> Mcp:
+    if not isinstance(data, dict):
+        raise CatalogError(f"{where}: expected an object")
+    try:
+        entry = Mcp(name=_str(data, "name", where), package=_str(data, "package", where),
+                    version=_str(data, "version", where), templates=_strings(data, "templates", where),
+                    source=validate_repository(_str(data, "source", where), where),
+                    license=_str(data, "license", where), purpose=_str(data, "purpose", where))
+    except KeyError as exc:
+        raise CatalogError(f"{where}: missing {exc}") from None
+    if not NAME_RE.fullmatch(entry.name) or not NPM_PACKAGE_RE.fullmatch(entry.package):
+        raise CatalogError(f"{where}: name must be lowercase letters, digits, '.', '_' or '-', and package an "
+                           "npm name such as @scope/name")
+    if not PIN_RE.fullmatch(entry.version):
+        raise CatalogError(f"{where}: version must be the plain X.Y.Z the templates pin")
+    if entry.templates != (f"mcp/claude/{entry.name}.json", f"mcp/codex/{entry.name}.toml"):
+        raise CatalogError(f"{where}: templates must be mcp/claude/{entry.name}.json and mcp/codex/{entry.name}.toml")
+    if not entry.source.startswith("https://"):
+        raise CatalogError(f"{where}: source must be the project's https URL")
+    return entry
+
+
 def load_catalog(path: pathlib.Path | None = None) -> Catalog:
     """Read and validate the allowlist; the shipped one when path is None."""
     path = pathlib.Path(path) if path is not None else CATALOG_PATH
@@ -295,11 +340,17 @@ def load_catalog(path: pathlib.Path | None = None) -> Catalog:
     bundled = tuple(_bundled(item, f"{path} bundled[{n}]") for n, item in enumerate(data.get("bundled", [])))
     linked = tuple(_linked(item, f"{path} linked[{n}]") for n, item in enumerate(data.get("linked", [])))
     clis = tuple(_cli(item, f"{path} clis[{n}]") for n, item in enumerate(data.get("clis", [])))
+    if not isinstance(data.get("mcp", []), list):
+        raise CatalogError(f"{path}: mcp must be a list")
+    mcp = tuple(_mcp(item, f"{path} mcp[{n}]") for n, item in enumerate(data.get("mcp", [])))
+    servers = [entry.name for entry in mcp]
+    if len(set(servers)) != len(servers):
+        raise CatalogError(f"{path}: duplicate mcp names")
     names = [entry.name for entry in (*bundled, *linked)]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise CatalogError(f"{path}: duplicate names {', '.join(duplicates)}")
-    return Catalog(bundled=bundled, linked=linked, clis=clis)
+    return Catalog(bundled=bundled, linked=linked, clis=clis, mcp=mcp)
 
 
 def read_upstream(item_dir: pathlib.Path) -> Upstream:

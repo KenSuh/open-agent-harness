@@ -5,11 +5,12 @@ Launch templates for the MCP servers in the toolkit (see `docs/toolkit.md`), one
 | Server | Claude Code | Codex | Key it reads | Upstream |
 |---|---|---|---|---|
 | context7 | `claude/context7.json` | `codex/context7.toml` | `CONTEXT7_API_KEY` (optional) | <https://github.com/upstash/context7> (MIT) |
-| korean-law | `claude/korean-law.json` | `codex/korean-law.toml` | `LAW_OC` | <https://github.com/chrisryugj/korean-law-mcp> (MIT) |
 | mcp-openai | `claude/mcp-openai.json` | `codex/mcp-openai.toml` | `OPENAI_API_KEY` | <https://github.com/mzxrai/mcp-openai> (MIT) |
 
-Each template pins the npm version the toolkit was checked with. To move to a newer version, change the
-`@<version>` suffix yourself.
+Each template pins the npm version the toolkit was checked with, and the toolkit catalog lists the same
+pin. `oah skills update` asks the npm registry and prints `OAH_MCP_UPDATE_AVAILABLE <name> <pinned> ->
+<latest>` when a newer version exists. To move to it, change the `@<version>` suffix in your own MCP
+config yourself; oah never edits these templates or your config.
 
 ## Using a template
 
@@ -28,8 +29,8 @@ Each template pins the npm version the toolkit was checked with. To move to a ne
 Keys never go into project files, these templates, or anything you commit. Keep them in one of these:
 
 - **Environment variables** set in your shell profile or your user environment, outside the project.
-  - macOS (zsh): add `export LAW_OC=...` to `~/.zshrc`.
-  - Windows: set the variable for your user in System Settings, or with `setx LAW_OC "..."` in a
+  - macOS (zsh): add `export OPENAI_API_KEY=...` to `~/.zshrc`.
+  - Windows: set the variable for your user in System Settings, or with `setx OPENAI_API_KEY "..."` in a
     terminal you then reopen.
 - **The OS keychain** (macOS Keychain, Windows Credential Manager), read at runtime by the one lookup oah
   provides for keys. A feature whose key is missing stays off and reports `unused(no key)`.
