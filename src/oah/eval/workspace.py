@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pathlib
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
+import tomllib
 import unicodedata
 import zipfile
 import zlib
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Iterable
+from typing import Iterable, Mapping, Sequence
 
 from oah.engines.proc import RunResult, run_command
 from oah.eval.case import Case, file_sha256
@@ -30,6 +33,17 @@ IDENTITY = {"GIT_AUTHOR_NAME": "oah eval", "GIT_AUTHOR_EMAIL": "eval@oah.invalid
             "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"}
 NORMALIZE_LIMIT = 64 << 20
 _HEX = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+VARIANT_CHANNELS = ("git-blob", "working-file", "prompt", "argument", "environment", "reference", "config")
+RUNTIME_ENV = frozenset(("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOME", "USERPROFILE",
+                         "APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"))
+
+
+def variant_environment(env: Mapping[str, str], ws: Workspace | None = None) -> dict[str, str]:
+    result = {key.upper(): value for key, value in env.items() if key.upper() in RUNTIME_ENV}
+    if ws is not None:
+        result.update(OAH_EVAL_INPUTS=str(ws.inputs), OAH_EVAL_REQUIREMENT=str(ws.requirement),
+                      OAH_EVAL_OUTPUT=str(ws.output))
+    return result
 
 
 @dataclass(frozen=True)
@@ -282,16 +296,212 @@ def _history_container(path: pathlib.Path) -> bool:
     return re.match(rb"(?:commit|tree|blob|tag) [0-9]+\x00", loose) is not None
 
 
+def _path_bytes(value: str) -> bytes:
+    value = value.replace("\\", "/")
+    return (value.casefold() if os.name == "nt" else value).encode("utf-8")
+
+
+def oracle_path_checks(paths: Iterable[pathlib.Path]) -> list[dict]:
+    """Retain exact/supplied and resolved path fingerprints, never oracle locations."""
+    checks = {}
+    for path in paths:
+        for value in (str(path), str(path.absolute()), str(path.resolve())):
+            raw = _path_bytes(value)
+            checks[raw] = {"length": len(raw), "separator": raw.find(b"/"),
+                           "sha256": hashlib.sha256(raw).hexdigest()}
+    return list(checks.values())
+
+
+def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
+                           oracle_paths: Sequence[Mapping] = (), prompt: bytes = b"",
+                           argv: Sequence[str] = (), env: Mapping[str, str] | None = None,
+                           config_text: str | None = None, plan_dir: str | None = None) -> dict[str, str]:
+    """The single default-deny boundary for every enumerated variant channel.
+
+    File references are literal argv values (also --key=value), and TOML/JSON config
+    string values. Opaque/dynamic references refuse. Runtime discovery by a program
+    is outside this contents scan, which is not a sandbox.
+    """
+    hashes = frozenset(oracle_hashes)
+    dependencies: dict[str, str] = {}
+    visited: set[tuple[pathlib.Path, bool]] = set()
+
+    def refuse(channel: str, *, unchecked: bool = False) -> None:
+        code = "OAH_EVAL_CHANNEL_UNCHECKED" if unchecked else "OAH_EVAL_ISOLATION"
+        reason = "cannot be checked" if unchecked else "exposes an oracle's contents or location"
+        raise EvalError(code, f"variant channel {channel} {reason}; remove the reference or supply readable "
+                        "literal files and TOML/JSON configs, then preregister and run again. No variant was started")
+
+    def check(channel: str, raw: bytes) -> None:
+        if len(raw) > NORMALIZE_LIMIT:
+            refuse(channel, unchecked=True)
+        if content_hashes(raw) & hashes:
+            refuse(channel)
+        # Hash candidate substrings, so a path embedded in prose, code or --flag=value
+        # is checked without keeping the path itself in the frozen registration.
+        normal = raw.replace(b"\\", b"/")
+        if os.name == "nt":
+            normal = normal.decode("utf-8", "surrogateescape").casefold().encode("utf-8", "surrogateescape")
+        for fingerprint in oracle_paths:
+            size, separator = fingerprint["length"], fingerprint["separator"]
+            if separator < 0:
+                starts = range(max(0, len(normal) - size + 1))
+            else:
+                starts = (match.start() - separator for match in re.finditer(b"/", normal)
+                          if separator <= match.start() <= len(normal) - size + separator)
+            if any(hashlib.sha256(normal[start:start + size]).hexdigest() == fingerprint["sha256"]
+                   for start in starts):
+                refuse(channel)
+
+    def read(path: pathlib.Path, channel: str) -> bytes:
+        try:
+            if not path.is_file() or path.stat().st_size > NORMALIZE_LIMIT:
+                refuse(channel, unchecked=True)
+            raw = path.read_bytes()
+            check(channel, raw)
+            return raw
+        except (OSError, ValueError, RuntimeError):
+            refuse(channel, unchecked=True)
+
+    def reference(value: str, channel: str, base: pathlib.Path, *, required: bool = False,
+                  destination: bool = False, config: bool = False) -> None:
+        check(channel, value.encode("utf-8"))
+        if not value:
+            return
+        path = pathlib.Path(value)
+        if any(part in value for part in ("{", "}", "$", "*", "?", "\x00", "://")) or value.startswith("~"):
+            refuse(channel, unchecked=True)
+        pathlike = (required or path.is_absolute() or "/" in value or "\\" in value or value.startswith(".")
+                    or bool(path.suffix))
+        if not pathlike and not (base / path).exists():
+            return
+        if channel == "config" and not path.is_absolute():
+            # Engine config loaders disagree about the base of relative paths.
+            refuse(channel, unchecked=True)
+        try:
+            path = path if path.is_absolute() else base / path
+            check(channel, _path_bytes(str(path.resolve())))
+            if not path.exists():
+                if destination:
+                    return
+                refuse(channel, unchecked=True)
+            if path.is_dir():
+                if not destination or any(path.iterdir()):
+                    # A directory is an open-ended reference, not an enumerated file.
+                    refuse(channel, unchecked=True)
+                return
+            resolved = path.resolve(strict=True)
+            if path.suffix.lower() in (".yaml", ".yml", ".ini", ".cfg", ".conf"):
+                refuse("config", unchecked=True)
+            parse_config = config or path.suffix.lower() in (".toml", ".json")
+            identity = (resolved, parse_config)
+            if identity in visited:
+                return
+            visited.add(identity)
+            raw = read(path, channel)
+            name = ("{workspace}/" + path.relative_to(ws.root).as_posix()
+                    if path.is_relative_to(ws.root) else str(path.absolute()))
+            dependencies[name] = hashlib.sha256(raw).hexdigest()
+            if parse_config:
+                config_values(raw, path.parent)
+        except (OSError, ValueError, RuntimeError):
+            refuse(channel, unchecked=True)
+
+    def config_values(raw: bytes, base: pathlib.Path) -> None:
+        check("config", raw)
+        try:
+            text = raw.decode("utf-8-sig")
+            try:
+                data = tomllib.loads(text)
+            except tomllib.TOMLDecodeError:
+                data = json.loads(text)
+        except (UnicodeError, ValueError):
+            refuse("config", unchecked=True)
+
+        def walk(value, key: str = "") -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    check("config", str(key).encode("utf-8"))
+                    walk(item, str(key))
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item, key)
+            elif isinstance(value, str):
+                reference(value, "config", base,
+                          required=any(word in key.lower() for word in ("file", "path", "include", "config")),
+                          config=any(word in key.lower() for word in ("include", "config")))
+        walk(data)
+
+    try:
+        check("prompt", prompt)
+        for index, arg in enumerate(argv):
+            check(f"argument[{index}]", arg.encode("utf-8"))
+            if "\x00" in arg:
+                refuse("argument", unchecked=True)
+            if arg in ("-c", "-m", "--eval", "--command") or arg.startswith("@"):
+                refuse("argument", unchecked=True)
+            flag, equal, value = arg.partition("=")
+            previous = argv[index - 1] if index else ""
+            option = flag if equal else previous
+            if arg.startswith("-") and not equal:
+                if not re.fullmatch(r"--[A-Za-z][A-Za-z0-9_-]*|-[A-Za-z]", arg):
+                    refuse("argument", unchecked=True)
+                continue
+            reference(value if equal else arg, "reference", ws.repo,
+                      required=index == 0 or any(word in option.lower() for word in ("file", "config", "include")),
+                      destination=option in ("--output", "--output-dir", "--marker", "--record-dir"),
+                      config="config" in option.lower())
+        for key, value in (env or {}).items():
+            if key not in RUNTIME_ENV and key not in ("OAH_EVAL_INPUTS", "OAH_EVAL_REQUIREMENT", "OAH_EVAL_OUTPUT"):
+                refuse("environment", unchecked=True)
+            if "\x00" in key or "\x00" in value or "=" in key:
+                refuse("environment", unchecked=True)
+            check("environment", key.encode("utf-8"))
+            check("environment", value.encode("utf-8"))
+        if config_text is not None:
+            config_values(config_text.encode("utf-8"), pathlib.Path(plan_dir) if plan_dir else ws.repo)
+        listing = _git_ok(ws.repo, "cat-file", "--batch-all-objects",
+                          "--batch-check=%(objectname) %(objecttype) %(objectsize)")
+        for line in listing.splitlines():
+            oid, kind, size = line.split()
+            if kind != "blob":
+                continue
+            if int(size) > NORMALIZE_LIMIT:
+                refuse("git-blob", unchecked=True)
+            # run_command decodes output; raw blobs must bypass text decoding and filters.
+            git_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+            result = subprocess.run([*git_argv(), "-C", str(ws.repo), "cat-file", "blob", oid],
+                                    capture_output=True, env=git_env, timeout=GIT_TIMEOUT)
+            if result.returncode or len(result.stdout) != int(size):
+                refuse("git-blob", unchecked=True)
+            check("git-blob", result.stdout)
+        for base in (ws.repo, ws.inputs, ws.requirement, ws.output):
+            for path in _files(base):
+                check("working-file", _path_bytes(str(path)))
+                label = "working-file " + path.relative_to(ws.root).as_posix()
+                if _is_link(path):
+                    check(label, _path_bytes(os.readlink(path)))
+                    if not _safe_link(path, base if base.is_dir() else ws.root):
+                        refuse("working-file", unchecked=True)
+                elif path.is_file():
+                    read(path, label)
+                elif not path.is_dir():
+                    refuse("working-file", unchecked=True)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        refuse("unreadable", unchecked=True)
+    return dependencies
+
+
 def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable[str] = (),
-                   prompt: bytes | None = None) -> dict:
+                   prompt: bytes | None = None, oracle_paths: Sequence[Mapping] = (),
+                   argv: Sequence[str] = (), env: Mapping[str, str] | None = None,
+                   config_text: str | None = None, plan_dir: str | None = None) -> dict:
     """Refuse oracle copies, history, unsafe links or forbidden inputs before launching."""
     oracle_hashes = frozenset(oracle_hashes)
     case = snapshot.case
     problems: list[str] = []
 
     def check_content(shown: str, hashes: frozenset[str]) -> None:
-        if hashes & oracle_hashes:
-            problems.append(f"a copy of the oracle file at {shown}")
         if snapshot.snapshot_sha256 in hashes:
             problems.append(f"a copy of the snapshot file, which holds the original history, at {shown}")
 
@@ -352,8 +562,12 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
                         f"the workspace for case {case.id} is not isolated: " + "; ".join(problems) +
                         ". No variant was started. Remove these from the case folder or its snapshot, then run "
                         "again.")
+    dependencies = check_variant_channels(ws, oracle_hashes=oracle_hashes, oracle_paths=oracle_paths,
+                                          prompt=prompt, argv=argv, env=env, config_text=config_text,
+                                          plan_dir=plan_dir)
     return {"objects": "checked", "oracle": "checked" if oracle_hashes else "not-checked",
-            "forbidden_patterns": len(case.forbidden)}
+            "forbidden_patterns": len(case.forbidden), "channels": list(VARIANT_CHANNELS),
+            "channel_files": dependencies}
 
 
 def remove_tree(path: pathlib.Path) -> None:

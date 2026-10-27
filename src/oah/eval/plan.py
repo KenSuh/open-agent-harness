@@ -4,17 +4,20 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
 import re
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from oah.atomic import StorageError, write_text_atomic
 from oah.eval.case import case_digest, file_sha256, is_inside, load_case, read_toml
-from oah.eval.commands import substitute
+from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import load_oracle
-from oah.eval.workspace import content_hashes
+from oah.eval.workspace import (build_workspace, content_hashes, open_snapshot, oracle_path_checks,
+                                remove_tree, scan_workspace, variant_environment)
 
 FORMAT = "oah-eval-prereg/1"
 METRICS = ("matched", "missed", "unmatched", "human_verdicts", "tests_fixed", "exit_code", "timed_out",
@@ -169,6 +172,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
     if out.exists():
         raise EvalError("OAH_EVAL_PREREG_EXISTS", f"{out} already exists; a preregistration is never rewritten, "
                                                   "so choose a new --out file")
+    oracle_paths = tuple(pathlib.Path(path) for path in oracle_paths)
     oracles = {}
     for path in oracle_paths:
         oracle = load_oracle(pathlib.Path(path))
@@ -191,7 +195,34 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
                 raise EvalError("OAH_EVAL_ORACLE_IN_CASE",
                                 f"{oracle.path} is inside the case folder {folder}, where agents would see it; "
                                 "move it outside the case folder")
+    path_checks = oracle_path_checks(oracle_paths)
+    hashes = {digest for oracle in oracles.values() for digest in content_hashes(oracle.path.read_bytes())}
+    channel_files = {variant.name: {} for variant in plan.variants}
+    # Check every available launch channel before writing either frozen file.
+    scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-prereg-"))
+    try:
+        for index, planned in enumerate(plan.cases):
+            case = load_case(planned.path)
+            snapshot = open_snapshot(case, scratch / f"source-{index}")
+            try:
+                prompt = case.prompt.read_bytes().decode("utf-8-sig").encode("utf-8")
+            except (OSError, UnicodeError):
+                raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "prompt cannot be read as UTF-8; supply a regular "
+                                "UTF-8 prompt and preregister again") from None
+            for variant in plan.variants:
+                ws = build_workspace(snapshot, scratch / f"ws-{index}-{variant.name}", config_text=variant.config_text)
+                env = variant_environment(os.environ, ws)
+                argv = resolve_argv([substitute(arg, str(plan.folder)) for arg in variant.command], env, "variant")
+                checked = scan_workspace(ws, snapshot, oracle_hashes=hashes, oracle_paths=path_checks,
+                                         prompt=prompt, argv=argv, env=env, config_text=variant.config_text,
+                                         plan_dir=str(plan.folder))
+                channel_files[variant.name][case.id] = checked["channel_files"]
+    finally:
+        remove_tree(scratch)
     data = _source_data(plan, oracles)
+    data["oracle_path_checks"] = path_checks
+    for variant in data["variants"]:
+        variant["channel_files"] = channel_files[variant["name"]]
     data["created_at"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()

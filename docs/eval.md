@@ -46,7 +46,10 @@ format = "bundle"                   # bundle | tar | zip
 commit = "<the full commit id before the fix>"
 ```
 
-All paths stay inside the case folder. A bundle may hold the whole history, including the fix, because
+All named files resolve inside the case folder and have no linked ancestors, including symlinks or
+Windows junctions. The same rule applies to `case.toml` and the `inputs/` root. The case digest walks
+regular directories without following directory links and hashes every consumed input file.
+A bundle may hold the whole history, including the fix, because
 only the snapshot commit's tree reaches a workspace. A tar or zip archive must be the snapshot tree. When
 `git archive` recorded a commit id in it, that id must equal `commit`. Archives may hold only regular files
 and folders. Every archive member is validated before extraction. Git metadata names at any depth,
@@ -138,6 +141,7 @@ engines through their own local runtime setup.
   `used_for_development` and the SHA-256 of its oracle;
 - the variants, with their exact commands, the SHA-256 of every file a command names, and any config
   text;
+- fingerprints of the supplied and resolved oracle paths, without recording their locations;
 - the metrics and the grader rules.
 
 The file is never rewritten. To change anything, preregister again to a new file. Keep the hash somewhere
@@ -145,6 +149,9 @@ the agents cannot change; `oah eval run --expect-sha256 HASH` checks against it.
 
 `oah eval run` refuses (`OAH_EVAL_PREREG_MISMATCH`) when a case folder or a variant script changed after
 preregistration. Every result records the preregistration hash.
+Preregistration also builds and scans every workspace, without launching a variant. Known leaks are
+refused before either preregistration file is written. Older preregistrations without path checks must
+be recreated.
 
 ## Isolation
 
@@ -156,7 +163,8 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - borrowed objects (`.git/objects/info/alternates`);
 - embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
   or loose Git objects in visible inputs;
-- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization;
+- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization,
+  in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
 - a copy of the snapshot file;
 - a file or link matching a `forbidden` pattern;
 - a link leaving its workspace input tree, or a directory link. Committed symlink modes are checked
@@ -168,9 +176,27 @@ checked prompt is retained for launch. Every workspace uses the union of all pre
 hashes. Construction and scan Git subprocesses discard caller `GIT_*` variables so repository context
 cannot redirect their operations.
 
+One default-deny checker is shared by preregistration and run. Its explicit channels are every retained
+raw Git blob, every working file (including repository metadata and output files), stdin prompt bytes,
+each resolved command argument, each passed environment name/value, injected config text, and literal
+files/configs named by command arguments or config string values. Every channel is compared against
+all oracle hashes and supplied/resolved oracle path fingerprints. Paths embedded in text and resolved
+file aliases are checked too. A variant config cannot hide an oracle blob by overwriting its checkout.
+
+Command file references use separate arguments or `--option=value`; relative command paths use the
+workspace repository. Config file references must be absolute: engine config loaders can resolve
+relative paths against different folders, so oah refuses that ambiguity. Referenced files, including the resolved executable and nested config
+dependencies, are hashed per case and checked again at run. Values with a path separator, a suffix or
+a file/path/include/config option or key are conservatively treated as file references.
+Only literal references and TOML/JSON configs can be checked. Dynamic paths, response files, inline
+code/module launch switches, attached short options, unsupported config formats, missing/unreadable
+files, directory inputs and channels larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`.
+Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing or empty
+directories; an existing destination file is checked and frozen like any other file.
+
 The oracle comparison needs the preregistered oracle hash. An exploratory run records `oracle: not-checked`.
 
-**Limit:** the scan checks what each workspace contains. It is not a sandbox. A variant that reads other
+**Limit:** the scan checks the enumerated launch channels. It is not a sandbox. A variant that reads other
 paths on the machine, including the oracle's real location, is not stopped. Keep oracles where the agents'
 tools are not pointed at them.
 
@@ -250,6 +276,7 @@ Refusals exit 1. A missing tool or an unwritable folder exits 69.
 | `OAH_EVAL_CASE_INVALID` / `OAH_EVAL_PLAN_INVALID` / `OAH_EVAL_ORACLE_INVALID` | a file is malformed; the message names the field |
 | `OAH_EVAL_SNAPSHOT` | the snapshot file is unreadable, lacks the commit, or holds unsafe archive members |
 | `OAH_EVAL_ISOLATION` | a workspace is not isolated; no variant was started |
+| `OAH_EVAL_CHANNEL_UNCHECKED` | a launch channel cannot be checked; supply literal readable inputs and TOML/JSON configs, then preregister again |
 | `OAH_EVAL_PREREG_REQUIRED` | a holdout case needs a preregistration |
 | `OAH_EVAL_PREREG_HASH` | the preregistration changed after it was frozen, or there is no hash to check |
 | `OAH_EVAL_PREREG_MISMATCH` | a case or variant file changed since preregistration |

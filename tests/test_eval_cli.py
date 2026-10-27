@@ -105,10 +105,10 @@ class EvalCliTest(unittest.TestCase):
     def test_isolation_refusal_via_cli(self):
         (case_dir(self.root) / "inputs" / "answers.toml").write_bytes(oracle_path(self.root).read_bytes())
         prereg = self.root / "prereg.json"
-        self.assertEqual(self.cli("eval", "prereg", str(self.root / "plan.toml"), "--oracle",
-                                  str(oracle_path(self.root)), "--out", str(prereg))[0], 0)
-        code, out, err = self.cli("eval", "run", str(prereg))
+        code, out, err = self.cli("eval", "prereg", str(self.root / "plan.toml"), "--oracle",
+                                  str(oracle_path(self.root)), "--out", str(prereg))
         self.assertEqual(code, 1)
+        self.assertFalse(prereg.exists())
         self.assertTrue(err.startswith("OAH_EVAL_ISOLATION"), err)
         self.assertIn("answers.toml", err)
         self.assertEqual(self.launched(), [])

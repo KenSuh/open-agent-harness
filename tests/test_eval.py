@@ -698,10 +698,10 @@ class RunTest(unittest.TestCase):
         with (self.root / "plan.toml").open("a", encoding="utf-8") as handle:
             handle.write('\n[[case]]\npath = "cases/holdout"\n')
         prereg = self.root / "p.json"
-        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root), other_oracle], prereg)
         with self.assertRaises(EvalError) as caught:
-            runner.run_eval(plan.load_frozen(prereg), self.env.runs, env=self.env.env, timeout_seconds=60)
+            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root), other_oracle], prereg)
         self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertFalse(prereg.exists())
         self.assertEqual(self.env.launched(), [])
         self.assertFalse(self.env.runs.exists())
 
@@ -974,6 +974,217 @@ class ReportTest(unittest.TestCase):
         self.assertIn("unknown metrics: baseline: usage, rounds, corrections", text)
         self.assertIn("awaiting human judgement", text)
         self.assertIsNone(SUPERIORITY.search(text), text)
+
+
+class CorrectionC2Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+        self.env = Env(self)
+        self.out = self.root / "prereg.json"
+
+    def prereg(self):
+        return plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], self.out)
+
+    def refused(self, action):
+        with self.assertRaises(EvalError) as caught:
+            action()
+        self.assertIn(caught.exception.code, ("OAH_EVAL_ISOLATION", "OAH_EVAL_CHANNEL_UNCHECKED",
+                                              "OAH_EVAL_CASE_INVALID"))
+        self.assertEqual(self.env.launched(), [])
+        self.assertFalse(self.env.runs.exists())
+        return str(caught.exception)
+
+    def argument(self, value):
+        set_plan(self.root, '"miss"]', '"miss", ' + json.dumps(value) + ']')
+
+    def oracle_snapshot(self, name, *, encoding=False):
+        repo = make_tmp_dir(self) / "repo"
+        git(repo.parent, "init", "-q", "-b", "main", str(repo))
+        data = oracle_path(self.root).read_bytes()
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if encoding:
+            (repo / ".gitattributes").write_bytes(b"answers.txt working-tree-encoding=UTF-16\n")
+            target.write_bytes(data.decode("utf-8").encode("utf-16"))
+        else:
+            target.write_bytes(data)
+        git(repo, "add", "-A")
+        tree = git(repo, "write-tree")
+        commit = subprocess.run(["git", "-C", str(repo), "commit-tree", tree, "-m", "snapshot"],
+                                env=dict(os.environ, **workspace.IDENTITY), capture_output=True,
+                                text=True, check=True).stdout.strip()
+        git(repo, "update-ref", "refs/heads/main", commit)
+        bundle = case_dir(self.root) / "snapshot.bundle"
+        bundle.unlink()
+        git(repo, "bundle", "create", str(bundle), "main")
+        set_case(self.root, SNAPSHOT, commit)
+
+    def test_raw_utf16_checkout_blob_refused(self):
+        self.oracle_snapshot("answers.txt", encoding=True)
+        scratch = make_tmp_dir(self)
+        source = workspace.open_snapshot(case_mod.load_case(case_dir(self.root)), scratch / "source")
+        ws = workspace.build_workspace(source, scratch / "ws")
+        self.assertNotEqual((ws.repo / "answers.txt").read_bytes(), oracle_path(self.root).read_bytes())
+        self.assertEqual(subprocess.run(["git", "-C", str(ws.repo), "show", "HEAD:answers.txt"],
+                                       capture_output=True, check=True).stdout, oracle_path(self.root).read_bytes())
+        self.refused(lambda: workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
+            oracle_path(self.root).read_bytes())))
+        self.refused(self.prereg)
+        self.assertFalse(self.out.exists())
+
+    def test_overwritten_committed_config_blob_refused(self):
+        self.oracle_snapshot(".oah/config.toml")
+        scratch = make_tmp_dir(self)
+        source = workspace.open_snapshot(case_mod.load_case(case_dir(self.root)), scratch / "source")
+        ws = workspace.build_workspace(source, scratch / "ws", config_text="[review]\nmax_rounds = 3\n")
+        self.refused(lambda: workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
+            oracle_path(self.root).read_bytes())))
+
+    def test_oracle_argument_refused_before_freeze(self):
+        self.argument(str(oracle_path(self.root)))
+        message = self.refused(self.prereg)
+        self.assertNotIn(str(oracle_path(self.root)), message)
+        self.assertFalse(self.out.exists())
+
+    def test_oracle_argument_contents_refused(self):
+        self.argument(oracle_path(self.root).read_bytes().decode("utf-8"))
+        self.refused(self.prereg)
+
+    def test_oracle_option_equals_and_resolved_alias_refused(self):
+        alias = self.root / "alias.toml"
+        try:
+            alias.symlink_to(oracle_path(self.root))
+        except OSError:
+            self.skipTest("file symlinks are unavailable")
+        self.argument("--prompt-file=" + str(alias))
+        self.refused(self.prereg)
+
+    def test_referenced_oracle_copy_refused(self):
+        copy = self.root / "copy.txt"
+        copy.write_bytes(oracle_path(self.root).read_bytes())
+        self.argument("--prompt-file=" + str(copy))
+        self.refused(self.prereg)
+
+    def test_config_oracle_path_and_nested_reference_refused(self):
+        nested = self.root / "nested.toml"
+        nested.write_bytes(('prompt_file = ' + json.dumps(str(oracle_path(self.root))) + '\n').encode("utf-8"))
+        config = self.root / "variant.toml"
+        config.write_bytes(('include = ' + json.dumps(str(nested)) + '\n').encode("utf-8"))
+        set_plan(self.root, 'name = "baseline"', 'name = "baseline"\nconfig = "variant.toml"')
+        self.refused(self.prereg)
+
+    def test_uncheckable_reference_refused(self):
+        self.argument("--prompt-file={plan_dir}/missing.txt")
+        self.assertIn("OAH_EVAL_CHANNEL_UNCHECKED", self.refused(self.prereg))
+
+    def test_attached_short_file_option_refused(self):
+        copy = self.root / "copy.txt"
+        copy.write_bytes(oracle_path(self.root).read_bytes())
+        self.argument("-F" + str(copy))
+        self.refused(self.prereg)
+
+    def test_missing_config_string_reference_refused(self):
+        (self.root / "variant.toml").write_bytes(b'prompt_file = "missing.txt"\n')
+        set_plan(self.root, 'name = "baseline"', 'name = "baseline"\nconfig = "variant.toml"')
+        self.refused(self.prereg)
+
+    def test_unlaunchable_environment_refused_before_run_folder(self):
+        self.prereg()
+        self.refused(lambda: runner.run_eval(plan.load_frozen(self.out), self.env.runs,
+                                             env=dict(self.env.env, LANG="bad\x00value"), timeout_seconds=60))
+
+    def test_referenced_file_digest_is_frozen(self):
+        config = self.root / "extra.json"
+        config.write_bytes(b'{"review": {"rounds": 1}}\n')
+        self.argument("--config=" + str(config))
+        self.prereg()
+        config.write_bytes(b'{"review": {"rounds": 2}}\n')
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(self.out), self.env.runs, env=self.env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_PREREG_MISMATCH")
+        self.assertFalse(self.env.runs.exists())
+
+    def test_prompt_and_working_file_paths_refused_before_freeze(self):
+        for name in ("task.md", "inputs/notes.md"):
+            with self.subTest(channel=name):
+                path = case_dir(self.root) / name
+                original = path.read_bytes()
+                path.write_bytes(('read ' + str(oracle_path(self.root)) + '\n').encode("utf-8"))
+                self.refused(self.prereg)
+                path.write_bytes(original)
+
+    def test_allowed_environment_oracle_path_and_contents_refused(self):
+        self.prereg()
+        for key, value in (("LANG", str(oracle_path(self.root))),
+                           ("LC_ALL", oracle_path(self.root).read_bytes().decode("utf-8"))):
+            with self.subTest(channel=key):
+                env = dict(self.env.env, **{key: value})
+                self.refused(lambda: runner.run_eval(plan.load_frozen(self.out), self.env.runs,
+                                                     env=env, timeout_seconds=60))
+
+    def test_environment_checked_before_freeze(self):
+        with mock.patch.dict(os.environ, {"LC_CTYPE": str(oracle_path(self.root))}):
+            self.refused(self.prereg)
+        self.assertFalse(self.out.exists())
+
+    def test_runtime_checks_new_reference_contents_before_launch(self):
+        copy = self.root / "copy.txt"
+        copy.write_bytes(b"ordinary input\n")
+        self.argument("--prompt-file=" + str(copy))
+        self.prereg()
+        copy.write_bytes(oracle_path(self.root).read_bytes())
+        self.refused(lambda: runner.run_eval(plan.load_frozen(self.out), self.env.runs,
+                                             env=self.env.env, timeout_seconds=60))
+
+    def test_non_utf8_prompt_is_a_named_refusal(self):
+        (case_dir(self.root) / "task.md").write_bytes(b"\xff\xfe\x00")
+        self.assertIn("OAH_EVAL_CHANNEL_UNCHECKED", self.refused(self.prereg))
+
+    def test_internal_named_ancestor_link_also_refused(self):
+        original = case_dir(self.root) / "original"
+        original.mkdir()
+        shutil.copyfile(case_dir(self.root) / "requirement.md", original / "requirement.md")
+        try:
+            directory_alias(original, case_dir(self.root) / "linked")
+        except OSError:
+            self.skipTest("directory links are unavailable")
+        set_case(self.root, 'requirement = "requirement.md"', 'requirement = "linked/requirement.md"')
+        self.refused(self.prereg)
+
+    def test_nested_named_input_is_in_frozen_digest(self):
+        nested = case_dir(self.root) / "regular"
+        nested.mkdir()
+        shutil.copyfile(case_dir(self.root) / "requirement.md", nested / "requirement.md")
+        set_case(self.root, 'requirement = "requirement.md"', 'requirement = "regular/requirement.md"')
+        self.prereg()
+        (nested / "requirement.md").write_bytes(b"changed consumed input\n")
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(self.out), self.env.runs, env=self.env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_PREREG_MISMATCH")
+        self.assertFalse(self.env.runs.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows path case and separators")
+    def test_windows_oracle_path_alias_refused(self):
+        self.argument(str(oracle_path(self.root)).upper().replace("\\", "/"))
+        self.refused(self.prereg)
+
+    def test_linked_named_case_ancestors_refused(self):
+        outside = make_tmp_dir(self)
+        for name in ("requirement.md", "task.md", "snapshot.bundle"):
+            shutil.copyfile(case_dir(self.root) / name, outside / name)
+        try:
+            directory_alias(outside, case_dir(self.root) / "linked")
+        except OSError:
+            self.skipTest("directory links are unavailable")
+        for key, name in (("requirement", "requirement.md"), ("prompt", "task.md"), ("file", "snapshot.bundle")):
+            with self.subTest(field=key):
+                set_case(self.root, f'{key} = "{name}"', f'{key} = "linked/{name}"')
+                self.refused(lambda: case_mod.load_case(case_dir(self.root)))
+                set_case(self.root, f'{key} = "linked/{name}"', f'{key} = "{name}"')
+
+    @unittest.skipUnless(os.name == "nt", "native Windows junction ancestors")
+    def test_windows_named_case_junction_refused(self):
+        self.test_linked_named_case_ancestors_refused()
 
 
 class FixtureTest(unittest.TestCase):

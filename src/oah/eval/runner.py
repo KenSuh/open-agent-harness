@@ -18,15 +18,15 @@ from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import RUN_FILE, normalize_finding
 from oah.eval.plan import Source
-from oah.eval.workspace import Workspace, build_workspace, open_snapshot, remove_tree, scan_workspace
+from oah.eval.workspace import (RUNTIME_ENV, Workspace, build_workspace, open_snapshot, remove_tree,
+                                scan_workspace, variant_environment)
 
 DEFAULTS = {"timeout_seconds": 1800.0, "test_timeout_seconds": 300.0}
 RESULT_FILE = "result.json"
 OUTPUT_FILE = "result.json"
 UNKNOWN = "unknown"
 CONTROL_FLOW_ONLY = "control-flow-only"
-_RUNTIME_ENV = frozenset(("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOME", "USERPROFILE",
-                          "APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"))
+_RUNTIME_ENV = RUNTIME_ENV
 
 
 @dataclass
@@ -119,8 +119,7 @@ def _launch(item: _Prepared, run_dir: pathlib.Path, prereg: str | None, env: Map
     ws, variant = item.workspace, item.variant
     folder = run_dir / "cases" / item.case.id / variant["name"]
     folder.mkdir(parents=True)
-    variant_env = dict(_variant_env(env), OAH_EVAL_INPUTS=str(ws.inputs), OAH_EVAL_REQUIREMENT=str(ws.requirement),
-                       OAH_EVAL_OUTPUT=str(ws.output))
+    variant_env = variant_environment(env, ws)
     started = time.monotonic()
     launch_error = None
     try:
@@ -154,16 +153,20 @@ def _launch(item: _Prepared, run_dir: pathlib.Path, prereg: str | None, env: Map
 
 def _variant_env(env: Mapping[str, str]) -> dict[str, str]:
     """Only runtime settings cross the variant boundary; no arbitrary caller metadata."""
-    return {key.upper(): value for key, value in env.items() if key.upper() in _RUNTIME_ENV}
+    return variant_environment(env)
 
 
 def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str], timeout_seconds: float,
              run_id: str | None = None) -> pathlib.Path:
     """Run every variant on every case; nothing launches unless every workspace passed the isolation scan."""
     cases = _check_cases(source)
+    if source.sha256 is not None and "oracle_path_checks" not in source.data:
+        raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration has no oracle path checks; "
+                        "preregister again before running")
     env = _variant_env(env)
     variants = _check_variants(source, env)
-    oracle_hashes = {digest for entry, _ in cases for digest in entry.get("oracle_match_sha256", ())}
+    oracle_hashes = {digest for entry, _ in cases for digest in
+                     (*entry.get("oracle_match_sha256", ()), entry.get("oracle_sha256")) if digest}
     temporary: list[pathlib.Path] = []
     try:
         prepared: list[_Prepared] = []
@@ -171,14 +174,28 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
             scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-src-"))
             temporary.append(scratch)
             snapshot = open_snapshot(case, scratch)
-            prompt = case.prompt.read_bytes().decode("utf-8-sig")
+            try:
+                prompt = case.prompt.read_bytes().decode("utf-8-sig")
+            except (OSError, UnicodeError):
+                raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "prompt cannot be read as UTF-8; supply a regular "
+                                "UTF-8 prompt and preregister again") from None
             commits = set()
             for variant, argv in variants:
                 # Each workspace is its own temporary folder, so no variant sits next to another's work.
                 root = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-ws-"))
                 temporary.append(root)
                 ws = build_workspace(snapshot, root, config_text=variant.get("config_text"))
-                isolation = scan_workspace(ws, snapshot, oracle_hashes=oracle_hashes, prompt=prompt.encode("utf-8"))
+                isolation = scan_workspace(ws, snapshot, oracle_hashes=oracle_hashes, prompt=prompt.encode("utf-8"),
+                                           oracle_paths=source.data.get("oracle_path_checks", ()), argv=argv,
+                                           env=variant_environment(env, ws), config_text=variant.get("config_text"),
+                                           plan_dir=source.data["plan_dir"])
+                if source.sha256 is not None:
+                    frozen_files = variant.get("channel_files", {}).get(case.id)
+                    if frozen_files is None or any(frozen_files.get(path) != digest for path, digest in
+                                                   isolation["channel_files"].items()):
+                        raise EvalError("OAH_EVAL_PREREG_MISMATCH", "a variant file reference changed since "
+                                        "preregistration; restore it or preregister again")
+                isolation.pop("channel_files")
                 commits.add(ws.commit)
                 prepared.append(_Prepared(entry, case, variant, argv, ws, isolation, prompt))
             if len(commits) != 1:
