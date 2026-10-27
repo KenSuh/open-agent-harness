@@ -51,7 +51,8 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import briefs, launchers, models, routing, runs, skillsel
 from oah.engines import claude, codex
-from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_rules, verify_inference
+from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
+                                verify_inference)
 from oah.engines.proc import run_command
 
 WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
@@ -70,6 +71,8 @@ ENGINE_DEFAULTS = {
     "claude": {
         "command": ["claude"],
         "quality_order": ["opus", "sonnet", "haiku"],
+        "allowed_models": [],
+        "effort_caps": {},
         "permission_mode": claude.DEFAULT_PERMISSION_MODE,
         "tools": list(claude.DEFAULT_TOOLS),
         "tiers": {tier: {"model": "", "effort": tier, "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
@@ -77,6 +80,8 @@ ENGINE_DEFAULTS = {
     "codex": {
         "command": ["codex"],
         "quality_order": [],
+        "allowed_models": [],
+        "effort_caps": {},
         "tiers": {tier: {"model": "", "effort": "highest" if tier == "max" else tier,
                          "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
     },
@@ -108,6 +113,13 @@ class Settings:
         for engine, section in engines.items():
             if not all(isinstance(item, str) for item in section["quality_order"]):
                 raise invalid(f"engines.{engine}.quality_order must list model names as strings")
+            if not all(isinstance(item, str) and item for item in section["allowed_models"]):
+                raise invalid(f"engines.{engine}.allowed_models must list model names as strings, or be empty "
+                              "to allow every model the CLI lists")
+            for model, cap in section["effort_caps"].items():
+                if cap not in ORDINARY:
+                    raise invalid(f"engines.{engine}.effort_caps.{model} = {cap!r} is not an effort level; use one "
+                                  f"of: {', '.join(ORDINARY)}, or remove the entry")
             for tier, values in section["tiers"].items():
                 if values["timeout_min"] <= 0:
                     raise invalid(f"engines.{engine}.tiers.{tier}.timeout_min must be a positive number of minutes")

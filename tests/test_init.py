@@ -92,6 +92,20 @@ class ConfigTest(unittest.TestCase):
                     self.assertIn("2026-10-25", text)
                     self.assertNotIn("{{", text)
 
+    def test_judge_keys_are_documented_with_empty_defaults(self):
+        text = init.render_config(branch="main", how="the current branch", jev=True, skill_updates=True,
+                                  today=TODAY)
+        engines = sections(text)["call"].engines
+        for engine in ("claude", "codex"):
+            with self.subTest(engine=engine):
+                self.assertEqual(engines[engine]["allowed_models"], [])
+                self.assertEqual(engines[engine]["effort_caps"], {})
+                self.assertIn(f"[engines.{engine}.effort_caps]", text)
+        self.assertIn("allowed_models = []", text)
+        self.assertIn("never below", text)
+        self.assertEqual(text, init.render_config(branch="main", how="the current branch", jev=True,
+                                                  skill_updates=True, today=TODAY))
+
     def test_branch_name_is_quoted_safely(self):
         text = init.render_config(branch='odd"name\\x', how="the current branch", jev=False, skill_updates=True,
                                   today=TODAY)
