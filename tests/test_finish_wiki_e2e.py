@@ -64,6 +64,32 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
                     for rel in ("docs/wiki/index.md", "docs/wiki/log.md")]
         self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": "t1", "exempt": expected})
 
+    def test_maintain_and_finish_across_archive_99_to_100(self):
+        git_commit(self.repo, {
+            ".oah/config.toml": "[wiki]\nrollover_trigger_bytes = 1500\nrollover_target_bytes = 700\n",
+            "docs/wiki/log_archive_98.md": b"# Log archive 98\n\n<!-- OAH:LOG_INSERT_BELOW -->\n",
+        })
+        for number in (99, 100):
+            task = f"t{number}"
+            rel = f"docs/wiki/log_archive_{number}.md"
+            self.ok("start", "--task", task, "--agent", "claude", "--scope", "src")
+            (self.repo / "src" / "a.py").write_bytes(f"a = {number}\n".encode("ascii"))
+            maintained = self.ok("wiki", "maintain", "--task", task, "--title", f"Work {number}",
+                                 "--body", "x" * 1800)
+            self.assertIn(f"rollover=log_archive_{number}.md", maintained.stdout)
+            self.commit()
+            expected = [[path, hashlib.sha256((self.repo / path).read_bytes()).hexdigest()]
+                        for path in ("docs/wiki/index.md", "docs/wiki/log.md", rel)]
+            with self.subTest(number=number, step="verify"):
+                check = verify_maintenance(self.repo, task, env=self.env)
+                self.assertTrue(check.ok, check.problems)
+                self.assertEqual(check.outputs, [tuple(pair) for pair in expected])
+            with self.subTest(number=number, step="finish"):
+                finished = self.oah("finish", "--task", task, "--agent", "claude", "--summary", "done")
+                self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+                self.assertIn(f"OAH_LEASE_FINISHED task={task} agent=claude changed=1", finished.stdout)
+                self.assertEqual(self.last_finish()["wiki_maintenance"], {"task": task, "exempt": expected})
+
     def test_tampered_record_outputs_refuse_by_name(self):
         self.maintain_after_edit()
         records = self.state / "wiki" / "maintenance.jsonl"
@@ -152,7 +178,9 @@ class FinishAfterWikiMaintainTest(unittest.TestCase):
                  "docs/wiki/./log.md", "docs//wiki/log.md", "docs\\wiki\\log.md",
                  "C:/docs/wiki/log.md", "C:docs/wiki/log.md", "\\\\server\\wiki\\log.md",
                  "docs/wiki/page.md", "docs/wiki/log.md\n", "docs/wiki/log.md/extra",
-                 "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md", None, 1)
+                 "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md",
+                 "docs/wiki/log_archive_00.md", "docs/wiki/log_archive_000.md",
+                 "docs/wiki/log_archive_010.md", "docs/wiki/log_archive_100.md\n", None, 1)
         for path in paths:
             lines[-1]["outputs"] = {**valid, path: "0" * 64}
             # JSON object keys become strings; the property test covers non-str keys before serialization.

@@ -411,6 +411,8 @@ class MaintenanceCheckOutputsTest(unittest.TestCase):
                  "C:/docs/wiki/log.md", "C:docs/wiki/log.md", "\\\\server\\wiki\\log.md",
                  "docs/wiki/page.md", "docs/wiki/log.md\n", "docs/wiki/log.md/extra",
                  "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md",
+                 "docs/wiki/log_archive_00.md", "docs/wiki/log_archive_000.md",
+                 "docs/wiki/log_archive_010.md", "docs/wiki/log_archive_100.md\n",
                  "docs/wiki/log_archive_\u0660\u0661.md", None, 1, b"docs/wiki/log.md",
                  StringSubclass("docs/wiki/log.md"))
         for path in paths:
@@ -419,7 +421,8 @@ class MaintenanceCheckOutputsTest(unittest.TestCase):
                 self.assertIsNone(MaintenanceCheck(ok=True, record={"outputs": outputs}).outputs)
 
         for path in ("docs/wiki/log.md", "docs/wiki/index.md", "docs/wiki/log_archive_01.md",
-                     "docs/wiki/log_archive_99.md"):
+                     "docs/wiki/log_archive_99.md", "docs/wiki/log_archive_100.md",
+                     "docs/wiki/log_archive_999.md", "docs/wiki/log_archive_1000.md"):
             with self.subTest(valid_path=path):
                 check = MaintenanceCheck(ok=True, record={"outputs": {path: self.DIGEST}})
                 self.assertEqual(check.outputs, [(path, self.DIGEST)])

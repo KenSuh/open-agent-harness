@@ -31,7 +31,8 @@ MAINTENANCE = "maintenance.jsonl"
 RESOLUTIONS = "recovery-resolutions.jsonl"
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 # The recorded maintenance paths, also used by finish for scope exemptions.
-WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:log|index)\.md|docs/wiki/log_archive_[0-9]{2}\.md")
+WIKI_MAINTENANCE_OUTPUTS = re.compile(r"docs/wiki/(?:(?:log|index)\.md|"
+                                      + log_module.DEFAULT_NAMING.output_pattern + ")")
 RESOLVED = "resolved-records"  # resolved rollover journals, kept with a UTC time stamp in their name
 Fault = Callable[[str], None]
 
