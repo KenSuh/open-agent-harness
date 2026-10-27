@@ -1,9 +1,9 @@
 # 영향 범위 보고 — 층마다 분석했는지·못했는지와 이유, 분석하지 못한 목록, 빈 결과 문구, 불완전할 때의 대체 점검(약한 결속)을 만든다.
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import re
-from difflib import SequenceMatcher
 from typing import Iterable, Mapping, Sequence
 
 from oah.impact import lexical
@@ -15,6 +15,7 @@ DYNAMIC_NOTE = ("dynamic calls, reflection and string-built paths (such as impor
                 "at run time) are not traced")
 EMPTY = "nothing found in the analysed scope; this is not proof of no impact"
 CONFIGURED = "[impact] fallback_checks"
+_RENAME_SIZE_LIMIT = 256 * 1024
 _UNAVAILABLE = re.compile(r"\Aunavailable \((.*)\)\Z", re.S)
 
 
@@ -59,6 +60,8 @@ def _ambiguous_item(item: Mapping) -> dict:
 
 
 def _rename_item(item: Mapping) -> dict:
+    if item.get("kind") == "possible-rename-unchecked":
+        return dict(item)
     how = "same file name" if item["similarity"] is None else f"content similarity {item['similarity']}%"
     detail = (f"{item['from']} -> {item['to']} looks like a rename ({how}); impact read it as a separate delete "
               "and add, so re-check references to both paths")
@@ -97,10 +100,18 @@ def lines(scope: Mapping) -> list[str]:
     return out
 
 
+def _rename_content(body: bytes) -> tuple[bytes, set[bytes] | None]:
+    lines = body.splitlines()
+    # Hash normalized lines first, including above the similarity cap (LF and CRLF are equivalent).
+    identity = hashlib.sha256(b"\n".join(lines) + (b"\n" if lines else b"")).digest()
+    return identity, set(lines) if len(body) <= _RENAME_SIZE_LIMIT else None
+
+
 def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: float) -> list[dict]:
     """Deleted and added paths that look like one rename: git's -M pairs, matching names or similar content.
 
-    Without ref the worktree is compared, and untracked files count as added."""
+    Without ref the worktree is compared, and untracked files count as added. Nonmatching hashes above
+    the size cap return possible-rename-unchecked records so the report retains the analysis gap."""
     from oah.impact.mapstore import _git, _safe_worktree_path
 
     fields = [field for field in _git(root, "diff", "-M", "--name-status", "-z", since, *([ref] if ref else []),
@@ -124,7 +135,7 @@ def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: 
     untracked = ([name for name in _git(root, "ls-files", "--others", "--exclude-standard", "-z",
                                        timeout=timeout).split("\0") if name] if ref is None else [])
     added += untracked
-    contents = {name: (root / name).read_bytes() for name in untracked
+    contents = {name: _rename_content((root / name).read_bytes()) for name in untracked
                 if deleted and _safe_worktree_path(root, name) and (root / name).is_file()}
     for old in deleted:
         name = old.rsplit("/", 1)[-1]
@@ -132,24 +143,35 @@ def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: 
         candidates = {new: body for new, body in contents.items() if new.rsplit("/", 1)[-1] != name}
         if not candidates:
             continue
-        original = _git(root, "cat-file", "blob", f"{since}:{old}", timeout=timeout,
-                        encoding="latin-1").encode("latin-1")
-        for new, body in candidates.items():
-            similarity = SequenceMatcher(None, original.splitlines(), body.splitlines(),
-                                         autojunk=False).ratio()
+        identity, original = _rename_content(_git(root, "cat-file", "blob", f"{since}:{old}", timeout=timeout,
+                                                  encoding="latin-1").encode("latin-1"))
+        for new, (new_identity, body) in candidates.items():
+            if identity == new_identity:
+                similarity = 1.0
+            elif original is None or body is None:
+                pairs.append({"kind": "possible-rename-unchecked", "from": old, "to": new,
+                              "detail": f"OAH_IMPACT_RENAME_UNCHECKED: {old} -> {new} similarity was not "
+                                        f"checked because a file exceeds the {_RENAME_SIZE_LIMIT}-byte "
+                                        "comparison limit; review references to both paths manually"})
+                continue
+            else:
+                # Line-set Jaccard is linear in bounded input size, even for repetitive files.
+                similarity = len(original & body) / len(original | body)
             if similarity >= 0.5:
                 pairs.append({"from": old, "to": new, "similarity": int(similarity * 100)})
     return sorted(pairs, key=lambda pair: (pair["from"], pair["to"]))
 
 
 def fallback_needles(target: str) -> set[str]:
-    """The folder (as a path and dotted) and the dotted module names, down to two segments, of a file target."""
+    """The folder and dotted modules down to two segments, or the sole segment of a root module."""
     parts = pathlib.PurePosixPath(target).parts
     if not parts:
         return set()
     folder = list(parts[:-1])
     needles = {"/".join(folder), ".".join(folder)} if folder else set()
     dotted = folder + [pathlib.PurePosixPath(parts[-1]).stem]
+    if not folder:
+        needles.add(dotted[0])
     needles.update(".".join(dotted[i:]) for i in range(len(dotted) - 1))
     return {needle for needle in needles if needle}
 

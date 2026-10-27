@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -12,7 +13,7 @@ from oah.impact import gatebind, query, scope
 from oah.impact.defaults import effective
 from tests.helpers import git_commit, git_env, make_git_repo
 from tests.test_impact_default_branch import RemoteFixture, git
-from tests.test_impact_map import head, run_impact
+from tests.test_impact_map import SRC, head, run_impact
 
 LAYER_NAMES = ["gates", "lexical", "db", "graph", "cochange"]
 
@@ -141,6 +142,49 @@ class LayersTest(unittest.TestCase):
 
 
 class RenameTest(unittest.TestCase):
+    def test_repetitive_rename_similarity_finishes_within_budget(self):
+        repo = make_git_repo(self)
+        body = b"VALUE = 1\n" * 12000
+        base = git_commit(repo, {".gitattributes": b"* -text\n", "old.py": body})
+        (repo / "old.py").unlink()
+        (repo / "new.py").write_bytes(body + b"EXTRA = 2\n")
+        result = subprocess.run(
+            [sys.executable, "-B", "-c",
+             "import json, pathlib, sys; from oah.impact.scope import likely_renames; "
+             "print(json.dumps(likely_renames(pathlib.Path.cwd(), sys.argv[1], None, timeout=2)))", base],
+            cwd=repo, capture_output=True, text=True, encoding="utf-8", timeout=5,
+            env=dict(os.environ, PYTHONPATH=SRC))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [{"from": "old.py", "to": "new.py", "similarity": 50}])
+
+    def test_large_rename_candidates_are_unchecked_unless_hashes_match(self):
+        for large_old, large_new, identical in ((True, False, False), (False, True, False),
+                                               (True, True, True)):
+            with self.subTest(large_old=large_old, large_new=large_new, identical=identical):
+                repo = make_git_repo(self)
+                small = b"VALUE = 1\n"
+                large = b"".join(f"VALUE_{i} = {i}\n".encode("ascii") for i in range(20000))
+                base = git_commit(repo, {".gitattributes": b"* -text\n",
+                                         "old.py": large if large_old else small})
+                (repo / "old.py").unlink()
+                # Exact normalized hashes still detect large LF / CRLF renames.
+                body = large if large_new else small
+                (repo / "new.py").write_bytes(body.replace(b"\n", b"\r\n") if identical else body)
+                items = scope.likely_renames(repo, base, None, timeout=60.0)
+                self.assertEqual(len(items), 1, items)
+                item = items[0]
+                self.assertEqual((item["from"], item["to"]), ("old.py", "new.py"))
+                if identical:
+                    self.assertEqual(item["similarity"], 100)
+                else:
+                    self.assertEqual(item["kind"], "possible-rename-unchecked")
+                    self.assertIn("262144", item["detail"])
+                    self.assertIn("review", item["detail"])
+                    fresh = {name: {"status": "analysed", "reason": "fresh"} for name in LAYER_NAMES}
+                    report = scope.report(fresh, [], items, rows_found=0)
+                    self.assertFalse(report["complete"])
+                    self.assertEqual(report["unanalysed"], [item, {"kind": "dynamic", "detail": scope.DYNAMIC_NOTE}])
+
     def test_untracked_rename_matches_crlf_checkout_to_lf_blob(self):
         repo = make_git_repo(self)
         body = b"FIRST = 1\nSECOND = 2\n"
@@ -399,6 +443,26 @@ class ScopeCliTest(unittest.TestCase):
         self.assertFalse(block["complete"])
         self.assertEqual(report["changed_since"]["files"], ["src/lib/helpers.py", "src/lib/util.py"])
 
+    def test_unchecked_rename_makes_fresh_layers_incomplete(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n",
+                          ".gitattributes": b"* -text\n",
+                          ".oah/config.toml": b'[impact]\nfallback_checks = ["python -m unittest"]\n',
+                          "old.py": b"VALUE = 1\n" * 30000})
+        base = head(repo)
+        (repo / "old.py").unlink()
+        (repo / "new.py").write_bytes(b"VALUE = 1\n")
+        write_graph(repo, {"nodes": [], "links": [], "commit": base})
+        report, text = self.impact(repo, "--changed-since", base)
+        block = self.assert_shape(report, text)
+        self.assertTrue(all(layer["status"] == "analysed" for layer in block["layers"].values()))
+        self.assertFalse(block["complete"])
+        unchecked = [item for item in block["unanalysed"] if item["kind"] == "possible-rename-unchecked"]
+        self.assertEqual(len(unchecked), 1, block)
+        self.assertEqual((unchecked[0]["from"], unchecked[0]["to"]), ("old.py", "new.py"))
+        self.assertIn(unchecked[0]["detail"], text)
+        for plan in (report["fallback"], report["changed_since"]["fallback"]):
+            self.assertEqual([item["check"] for item in plan], ["python -m unittest"])
+
     def test_entity_only_query_includes_configured_fallback(self):
         repo = self.repo({".oah/config.toml": '[impact]\nfallback_checks = ["python -m unittest"]\n'})
         report, text = self.impact(repo, "db_table:users")
@@ -468,6 +532,26 @@ PLUGIN_LEDGER = (".oah/tasks/plugins/GATES.md", "- [ ] G1: every plugin loads\n 
 
 
 class MissedCaseTest(unittest.TestCase):
+    def test_root_module_invoked_with_python_m_gets_fallback(self):
+        repo = make_git_repo(self)
+        ledger = ".oah/tasks/root/GATES.md"
+        base = git_commit(repo, {"alpha.py": b"VALUE = 1\n", ledger:
+                                 b"- [ ] G1: root module runs\n  CHECK: python -m alpha\n  EXPECT: OK\n"
+                                 b"- [ ] G2: companion check\n  CHECK: python -m unittest\n  EXPECT: OK\n"})
+        (repo / "alpha.py").write_bytes(b"VALUE = 2\n")
+        report_result = run_impact(repo, "--changed-since", base, "--json")
+        self.assertEqual(report_result.returncode, 0, report_result.stderr)
+        report = json.loads(report_result.stdout)
+        self.assertEqual(report["changed_since"]["rerun"], [])
+        self.assertFalse(report["scope"]["complete"])
+        for plan in (report["fallback"], report["changed_since"]["fallback"]):
+            self.assertEqual([(item["source"], item["binding"], item["targets"]) for item in plan],
+                             [(ledger + "#G1", "fallback", ["alpha.py"]),
+                              (ledger + "#G2", "fallback", ["alpha.py"])])
+        self.assertEqual(scope.fallback_needles("alpha.py"), {"alpha"})
+        self.assertEqual(scope.fallback([gatebind.GateRef("miss/GATES.md", "G1", "python -m alphabet", "OK")],
+                                        ["alpha.py"], strong=[], checks=[]), [])
+
     def test_string_built_dependency_is_caught_by_fallback(self):
         repo = make_git_repo(self)
         git_commit(repo, {"src/plugins/__init__.py": "", "src/plugins/loader.py": PLUGIN_LOADER,
