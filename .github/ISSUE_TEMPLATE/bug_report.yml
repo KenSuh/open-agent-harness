@@ -1,0 +1,69 @@
+name: Bug report
+description: Report something in oah that does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste an API key, token, password, cookie or account identifier, not even a revoked one.
+        Remove personal paths and user names from logs. Report security problems through the security policy, not here.
+  - type: input
+    id: version
+    attributes:
+      label: oah version
+      description: Output of `oah --version`, or the commit you installed from.
+      placeholder: oah 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python3 --version` (or `py --version` on Windows).
+      placeholder: Python 3.11.9
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead, including any OAH_ code printed.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Relevant output with secrets, personal paths and user names removed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed every secret, personal path and user name from this report.
+          required: true
