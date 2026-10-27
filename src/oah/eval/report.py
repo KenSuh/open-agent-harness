@@ -100,9 +100,11 @@ def _limits(run: Mapping[str, Any], rows: list[dict]) -> list[str]:
     limits.append(f"findings awaiting human judgement: {waiting}; they are not counted as false positives")
     if not run.get("prereg_sha256"):
         limits.append("no preregistration: this run is exploratory, and holdout cases could not run")
-    limits.append("the isolation scan checks enumerated launch channels (raw Git blobs, working files, prompt, "
-                  "arguments, environment and literal config/file references); it is not a sandbox, so a variant that "
-                  "reads other paths on this machine is not stopped")
+    limits.append("the isolation scan checks enumerated launch channels for honest-author mistakes with physically "
+                  "separate grader-only folders (raw Git blobs, working files, prompt, arguments, environment and "
+                  "literal config/file references); it does not interpret free-text path aliases. It is not a sandbox: "
+                  "a malicious case author or an agent that explores the filesystem is not prevented; that requires "
+                  "a sandbox")
     limits.append("these numbers describe these cases and variants only; they are not a general ranking")
     return limits
 

@@ -16,7 +16,8 @@ def substitute(arg: str, plan_dir: str) -> str:
     return arg.replace("{python}", sys.executable).replace("{plan_dir}", plan_dir)
 
 
-def resolve_argv(argv: Sequence[str], env: Mapping[str, str], what: str) -> list[str]:
+def resolve_argv(argv: Sequence[str], env: Mapping[str, str], what: str, *,
+                 cwd: pathlib.Path | None = None) -> list[str]:
     """argv with its program resolved; a missing program or a Windows batch file is refused before launch."""
     program, rest = argv[0], list(argv[1:])
     hint = f"install it or change the command of {what}"
@@ -25,10 +26,13 @@ def resolve_argv(argv: Sequence[str], env: Mapping[str, str], what: str) -> list
                         f"{what} names the batch file {program}, which oah never launches; use a native "
                         "executable or an explicit [\"node.exe\", \"<script>\"] command", EXIT_ENVIRONMENT)
     if os.path.isabs(program) or "/" in program or "\\" in program:
-        if not pathlib.Path(program).is_file():
+        path = pathlib.Path(program)
+        if not path.is_absolute():
+            path = (cwd or pathlib.Path.cwd()) / path
+        if not path.is_file():
             raise EvalError("OAH_EVAL_COMMAND_MISSING", f"{what}: {program} does not exist; {hint}",
                             EXIT_ENVIRONMENT)
-        return [program, *rest]
+        return [str(path.absolute()), *rest]
     try:
         found = resolve_command(program, env.get("PATH"))
     except UnsupportedBatchShim as exc:

@@ -66,8 +66,10 @@ and stream aliases, are refused.
 
 ## The oracle (expected answers)
 
-The oracle is a TOML file **outside every case folder**. Only `oah eval prereg`, which hashes it, and
-`oah eval grade` read it. No agent is given its path.
+The oracle is a TOML file in a **grader-only folder**, physically separate from every case and
+workspace. Its resolved parent folder must neither contain nor be contained by any case or workspace
+folder (nor equal one); preregistration and run refuse overlaps with `OAH_EVAL_ORACLE_FOLDER`. Only
+`oah eval prereg`, which hashes it, and `oah eval grade` read it. No agent is given its path.
 
 ```toml
 case = "case-a"
@@ -102,9 +104,10 @@ config = "configs/improved.toml" # optional oah configuration, written to .oah/c
 ```
 
 A variant is a named command, or an `oah` configuration that its command uses. All variants get identical
-inputs. The program is resolved through PATH like every `oah` tool, and Windows batch files are never
-launched. Put script arguments in the snapshot or case `inputs/`; existing external input files
-are refused even when their contents are ordinary. Only the registered executable may be external.
+inputs. Bare program names resolve through PATH like every `oah` tool. Relative executable paths such as
+`./run_variant` resolve inside each constructed workspace repository, including oracle tests. Windows
+batch files are never launched. Put script arguments in the snapshot or case `inputs/`; existing external
+input files are refused even when their contents are ordinary. Only the registered executable may be external.
 
 ### What a variant sees
 
@@ -142,7 +145,8 @@ engines through their own local runtime setup.
   `used_for_development` and the SHA-256 of its oracle;
 - the variants, with their exact commands, the SHA-256 of every file a command names, and any config
   text;
-- fingerprints of the supplied and resolved oracle paths, without recording their locations;
+- fingerprints of the supplied/resolved oracle paths and canonical grader-folder paths, with hashed
+  ancestry for separation checks, without recording their locations;
 - the metrics and the grader rules.
 
 The file is never rewritten. To change anything, preregister again to a new file. Keep the hash somewhere
@@ -151,8 +155,8 @@ the agents cannot change; `oah eval run --expect-sha256 HASH` checks against it.
 `oah eval run` refuses (`OAH_EVAL_PREREG_MISMATCH`) when a case folder or a variant script changed after
 preregistration. Every result records the preregistration hash.
 Preregistration also builds and scans every workspace, without launching a variant. Known leaks are
-refused before either preregistration file is written. Older preregistrations without path checks must
-be recreated.
+refused before either preregistration file is written. Older preregistrations without grader-folder checks
+must be recreated.
 
 ## Isolation
 
@@ -168,7 +172,8 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
 - a copy of the snapshot file;
-- a file or link matching a `forbidden` pattern;
+- a file, link or retained Git tree entry matching a `forbidden` pattern, including entries whose
+  checkout was removed by config injection and entries in unreferenced trees;
 - a link leaving its workspace input tree, or a directory link. Committed symlink modes are checked
   even when Windows checks them out as ordinary files. Case input roots, requirement and prompt
   must be regular directories/files.
@@ -182,12 +187,14 @@ One default-deny checker is shared by preregistration and run. Its explicit chan
 raw Git blob, every working file (including repository metadata and output files), stdin prompt bytes,
 each resolved command argument, each passed environment name/value, injected config text, and literal
 files/configs named by command arguments or config string values. Every channel is compared against
-all oracle hashes and supplied/resolved oracle path fingerprints. Literal path tokens in arguments,
-prompt, config and working files are resolved with `realpath` before comparison; for `NAME=VALUE`,
-both the whole token and `VALUE` are checked. An existing path outside the workspace refuses unless it
-resolves to the registered variant executable. Unresolvable paths refuse. Allowed runtime environment
-paths may be external, but resolved oracle aliases in those values still refuse. Binary channels retain
-content/path fingerprint checks; retained blobs also receive history-container checks.
+all oracle content hashes and supplied/resolved oracle path fingerprints. A literal occurrence of a
+grader folder's canonical real path (including normalized separators/case on Windows) refuses in every
+channel, even inside `@/absolute/path` or `file://` text. UTF-16 files also receive this literal check.
+Free text is never parsed for path aliases: prefixes, `..` and paths inside prose are not resolved.
+Only actual file references in command arguments and structured config values are resolved; existing
+external references refuse except the registered executable. Binary channels retain content/path
+fingerprint checks; retained blobs also receive history-container checks. Runtime environment values
+receive content and literal path checks without interpreting free-text aliases.
 
 Config injection checks every repository ancestor, replaces snapshot links/reparse points at `.oah`
 and `.oah/config.toml`, creates real directories and exclusively creates the file without following
@@ -210,9 +217,10 @@ workspace destination file is checked and frozen like any other file.
 
 The oracle comparison needs the preregistered oracle hash. An exploratory run records `oracle: not-checked`.
 
-**Limit:** the scan checks the enumerated launch channels. It is not a sandbox. A variant that reads other
-paths on the machine, including the oracle's real location, is not stopped. Keep oracles where the agents'
-tools are not pointed at them.
+**Limit:** the threat model is honest-author mistakes, with oracles physically separated in grader-only
+folders. The scan checks only the enumerated launch channels and literal folder paths. It is not a
+sandbox. A malicious case author or an agent that explores the filesystem, including the oracle's real
+location, is not prevented; that requires a sandbox. Keep the grader folders out of agents' tools.
 
 ## Grading
 
@@ -223,7 +231,10 @@ tools are not pointed at them.
 - **Unmatched findings:** listed as `needs-human-judgement`. They are **never** counted as false
   positives automatically.
 - **Tests:** each test must fail on a fresh starting snapshot. If it passes there, it is reported as
-  `oracle-invalid`. A test that passes on a copy of the variant's final workspace counts as `fixed`.
+  `oracle-invalid`. A test that passes on a copy of the variant's final repository counts as `fixed`.
+  Each test gets a fresh complete workspace: case inputs, requirement, an empty output folder and the repository. Variant
+  grading overlays the saved final repository onto that layout. Both starting and variant tests receive
+  `OAH_EVAL_INPUTS`, `OAH_EVAL_REQUIREMENT` and `OAH_EVAL_OUTPUT` pointing to their grading workspace.
 
 A human verdict file marks unmatched findings:
 
@@ -296,6 +307,7 @@ Refusals exit 1. A missing tool or an unwritable folder exits 69.
 | `OAH_EVAL_PREREG_MISMATCH` | a case or variant file changed since preregistration |
 | `OAH_EVAL_PREREG_EXISTS` | the preregistration file already exists |
 | `OAH_EVAL_HOLDOUT_USED` | a case used for development cannot be holdout |
+| `OAH_EVAL_ORACLE_FOLDER` | a grader-only folder overlaps a resolved case/workspace folder; move oracles to a disjoint folder and preregister again |
 | `OAH_EVAL_ORACLE_MISSING` / `OAH_EVAL_ORACLE_IN_CASE` / `OAH_EVAL_ORACLE_CHANGED` | oracle missing, inside a case folder, or changed since preregistration |
 | `OAH_EVAL_CASE_CHANGED` | the case folder changed between run and grade |
 | `OAH_EVAL_VERDICT_INVALID` | a human verdict is unknown, duplicated or names no unmatched finding |

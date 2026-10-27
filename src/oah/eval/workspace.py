@@ -340,14 +340,34 @@ def _path_bytes(value: str) -> bytes:
 
 
 def oracle_path_checks(paths: Iterable[pathlib.Path]) -> list[dict]:
-    """Retain exact/supplied and resolved path fingerprints, never oracle locations."""
+    """Retain oracle and canonical grader-folder fingerprints, never their locations."""
     checks = {}
     for path in paths:
         for value in (str(path), str(path.absolute()), str(path.resolve())):
             raw = _path_bytes(value)
             checks[raw] = {"length": len(raw), "separator": raw.find(b"/"),
                            "sha256": hashlib.sha256(raw).hexdigest()}
+        folder = path.resolve().parent
+        raw = _path_bytes(str(folder))
+        checks[raw] = {"length": len(raw), "separator": raw.find(b"/"),
+                       "sha256": hashlib.sha256(raw).hexdigest(), "folder": True,
+                       "ancestors": [hashlib.sha256(_path_bytes(str(parent))).hexdigest()
+                                     for parent in (folder, *folder.parents)]}
     return list(checks.values())
+
+
+def check_grader_separation(folders: Iterable[pathlib.Path], checks: Sequence[Mapping]) -> None:
+    """Grader folders and case/workspace folders must have no resolved containment in either direction."""
+    for folder in folders:
+        resolved = pathlib.Path(folder).resolve()
+        ancestors = {hashlib.sha256(_path_bytes(str(parent))).hexdigest()
+                     for parent in (resolved, *resolved.parents)}
+        own = hashlib.sha256(_path_bytes(str(resolved))).hexdigest()
+        if any(check.get("folder") and (check["sha256"] in ancestors or own in check["ancestors"])
+               for check in checks):
+            raise EvalError("OAH_EVAL_ORACLE_FOLDER", "a grader-only folder overlaps a case or workspace; "
+                            "move oracles to a separate folder disjoint from every case and workspace, "
+                            "then preregister again")
 
 
 def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
@@ -361,6 +381,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
     is outside this contents scan, which is not a sandbox.
     """
     hashes = frozenset(oracle_hashes)
+    check_grader_separation((ws.root,), oracle_paths)
     dependencies: dict[str, str] = {}
     visited: set[tuple[pathlib.Path, bool]] = set()
 
@@ -415,26 +436,18 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                     and resolved != executable):
                 refuse(channel)
 
-    def check(channel: str, raw: bytes, *, base: pathlib.Path = ws.repo, paths: bool = True) -> None:
+    def check(channel: str, raw: bytes) -> None:
         if len(raw) > NORMALIZE_LIMIT:
             refuse(channel, unchecked=True)
         if content_hashes(raw) & hashes:
             refuse(channel)
         fingerprints(channel, raw)
-        if not paths:
-            return
-        try:
-            text = raw.decode("utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig")
-        except UnicodeError:
-            # Binary files still receive exact content/path fingerprints and container checks.
-            return
-        # Preserve quoted paths with spaces, and also inspect literals embedded in prose/code.
-        for match in re.finditer(r"""["']([^"'\r\n]*)["']|([^\s"'`<>()\[\]{},;]+)""", text):
-            token = match.group(1) if match.group(1) is not None else match.group(2)
-            literal(channel, token, base)
-            if match.group(1) is not None:
-                for part in token.split():
-                    literal(channel, part, base)
+        # Check literal folder text in UTF-16 files too; never interpret prose as path aliases.
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            try:
+                fingerprints(channel, _path_bytes(raw.decode("utf-16")))
+            except UnicodeError:
+                pass
 
     def read(path: pathlib.Path, channel: str) -> bytes:
         try:
@@ -448,7 +461,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
 
     def reference(value: str, channel: str, base: pathlib.Path, *, required: bool = False,
                   destination: bool = False, config: bool = False) -> None:
-        check(channel, value.encode("utf-8"), base=base)
+        check(channel, value.encode("utf-8"))
         literal(channel, value, base)
         if not value:
             return
@@ -528,7 +541,6 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             if "\x00" in arg:
                 refuse("argument", unchecked=True)
             check("argument", arg.encode("utf-8"))
-            literal("argument", arg, ws.repo)
             previous = argv[index - 1] if index else ""
             option = flag if is_option else (previous if re.fullmatch(
                 r"--[A-Za-z][A-Za-z0-9_-]*|-[A-Za-z]", previous) else "")
@@ -546,11 +558,8 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                 refuse("environment", unchecked=True)
             if "\x00" in key or "\x00" in value or "=" in key:
                 refuse("environment", unchecked=True)
-            check("environment", key.encode("utf-8"), paths=False)
-            check("environment", value.encode("utf-8"), paths=False)
-            # Runtime directories are explicitly allowed, but never oracle aliases.
-            for entry in value.split(os.pathsep) if key == "PATH" else (value,):
-                literal("environment", entry, ws.repo)
+            check("environment", key.encode("utf-8"))
+            check("environment", value.encode("utf-8"))
         if config_text is not None:
             config_values(config_text.encode("utf-8"), pathlib.Path(plan_dir) if plan_dir else ws.repo)
         listing = _git_ok(ws.repo, "cat-file", "--batch-all-objects",
@@ -594,6 +603,7 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
     """Refuse oracle copies, history, unsafe links or forbidden inputs before launching."""
     oracle_hashes = frozenset(oracle_hashes)
     case = snapshot.case
+    check_grader_separation((case.folder, ws.root), oracle_paths)
     problems: list[str] = []
 
     def check_content(shown: str, hashes: frozenset[str]) -> None:
@@ -613,10 +623,21 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
     alternates = ws.repo / ".git" / "objects" / "info" / "alternates"
     if alternates.exists():
         problems.append("the repository borrows objects from elsewhere (.git/objects/info/alternates)")
-    found = set(_git_ok(ws.repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)").split())
+    retained = [line.split() for line in _git_ok(ws.repo, "cat-file", "--batch-all-objects",
+                                                "--batch-check=%(objectname) %(objecttype)").splitlines()]
+    found = {oid for oid, _ in retained}
     leaked = sorted(found & snapshot.history_objects)
     if leaked:
         problems.append(f"{len(leaked)} object(s) from the original history, such as {leaked[0]}")
+    # Config injection can remove checkout nodes; unreachable trees remain readable too.
+    retained_names = set()
+    for oid, kind in retained:
+        if kind == "tree":
+            for entry in _git_ok(ws.repo, "ls-tree", "-rtz", oid).split("\0"):
+                if entry:
+                    retained_names.add(entry.split("\t", 1)[1])
+    for name in sorted(retained_names):
+        check_name(f"repo/{name}", name)
     # core.symlinks=false on Windows materializes these as ordinary files.
     for entry in _git_ok(ws.repo, "ls-tree", "-rz", "HEAD").split("\0"):
         if not entry:
@@ -624,7 +645,6 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
         info, name = entry.split("\t", 1)
         mode, _, oid = info.split()
         if mode == "120000":
-            check_name(f"repo/{name}", name)
             target = _git_ok(ws.repo, "cat-file", "blob", oid)
             if not _safe_link(ws.repo / name, ws.repo, target):
                 problems.append("a committed link leaves the repository or names a directory")

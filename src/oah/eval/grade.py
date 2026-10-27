@@ -13,7 +13,7 @@ from oah.engines.proc import run_command
 from oah.eval.case import case_digest, file_sha256, is_inside, load_case, read_toml
 from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
-from oah.eval.workspace import build_workspace, open_snapshot, remove_tree
+from oah.eval.workspace import build_workspace, open_snapshot, remove_tree, variant_environment
 
 GRADE_FILE = "grade.json"
 RUN_FILE = "run.json"
@@ -184,7 +184,7 @@ def load_result(run_dir: pathlib.Path, entry: Mapping[str, Any]) -> dict:
 
 def _run_test(rule: TestRule, repo: pathlib.Path, env: Mapping[str, str], timeout: float) -> tuple[bool, bool]:
     """(passed, timed_out) for one test command in `repo`."""
-    argv = resolve_argv([substitute(arg, "") for arg in rule.command], env, f"test {rule.id}")
+    argv = resolve_argv([substitute(arg, "") for arg in rule.command], env, f"test {rule.id}", cwd=repo)
     try:
         result = run_command(argv, timeout=rule.timeout_seconds or timeout, cwd=str(repo), env=dict(env))
     except OSError as exc:
@@ -202,7 +202,7 @@ def _snapshot_tests(oracle: Oracle, case_path: pathlib.Path, env: Mapping[str, s
         out = []
         for rule in oracle.tests:
             ws = build_workspace(snapshot, scratch / f"snapshot-{rule.id}")
-            passed, timed_out = _run_test(rule, ws.repo, env, timeout)
+            passed, timed_out = _run_test(rule, ws.repo, {**env, **variant_environment({}, ws)}, timeout)
             status = "fails" if not passed and not timed_out else (
                 "timed out (oracle-invalid)" if timed_out else "passes (oracle-invalid)")
             out.append({"id": rule.id, "snapshot": status})
@@ -212,7 +212,7 @@ def _snapshot_tests(oracle: Oracle, case_path: pathlib.Path, env: Mapping[str, s
 
 
 def _variant_tests(oracle: Oracle, snapshot_tests: list[dict], workspace: pathlib.Path,
-                   env: Mapping[str, str], timeout: float) -> list[dict]:
+                   env: Mapping[str, str], timeout: float, *, case_path: pathlib.Path) -> list[dict]:
     out = []
     for rule, before in zip(oracle.tests, snapshot_tests):
         if before["snapshot"] != "fails":
@@ -223,9 +223,11 @@ def _variant_tests(oracle: Oracle, snapshot_tests: list[dict], workspace: pathli
             continue
         scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-grade-"))
         try:
-            copy = scratch / "repo"
-            shutil.copytree(workspace, copy, symlinks=True)
-            passed, timed_out = _run_test(rule, copy, env, timeout)
+            snapshot = open_snapshot(load_case(case_path), scratch / "source")
+            ws = build_workspace(snapshot, scratch / "workspace")
+            remove_tree(ws.repo)
+            shutil.copytree(workspace, ws.repo, symlinks=True)
+            passed, timed_out = _run_test(rule, ws.repo, {**env, **variant_environment({}, ws)}, timeout)
         finally:
             remove_tree(scratch)
         out.append({"id": rule.id, "result": "fixed" if passed else ("timed-out" if timed_out else "not-fixed")})
@@ -284,7 +286,8 @@ def grade_run(run_dir: pathlib.Path, oracle_paths: Iterable[pathlib.Path], *,
                                     "unmatched findings, so remove that verdict")
             workspace = run_dir / pathlib.Path(result_entry["path"]).parent / "workspace"
             variants[name] = {**matched, "label": result.get("label"),
-                              "tests": _variant_tests(oracle, snapshot_tests, workspace, env, timeout_seconds)}
+                              "tests": _variant_tests(oracle, snapshot_tests, workspace, env, timeout_seconds,
+                                                      case_path=pathlib.Path(entry["path"]))}
         graded_cases[entry["id"]] = {"split": entry["split"], "expected": [d.id for d in oracle.defects],
                                      "tests": snapshot_tests, "variants": variants}
     stray = sorted(set(verdicts) - used_verdicts)

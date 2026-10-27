@@ -18,8 +18,8 @@ from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import RUN_FILE, normalize_finding
 from oah.eval.plan import Source
-from oah.eval.workspace import (RUNTIME_ENV, Workspace, build_workspace, open_snapshot, remove_tree,
-                                scan_workspace, variant_environment)
+from oah.eval.workspace import (RUNTIME_ENV, Workspace, build_workspace, check_grader_separation,
+                                open_snapshot, remove_tree, scan_workspace, variant_environment)
 
 DEFAULTS = {"timeout_seconds": 1800.0, "test_timeout_seconds": 300.0}
 RESULT_FILE = "result.json"
@@ -84,7 +84,7 @@ def _check_variants(source: Source, env: Mapping[str, str]) -> list[tuple[Mappin
                                     f"variant {variant['name']}: {path} changed since preregistration; restore it or "
                                     "preregister again")
         argv = [substitute(arg, plan_dir) for arg in variant["command"]]
-        checked.append((variant, resolve_argv(argv, env, f"variant {variant['name']}")))
+        checked.append((variant, argv))
     return checked
 
 
@@ -159,10 +159,15 @@ def _variant_env(env: Mapping[str, str]) -> dict[str, str]:
 def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str], timeout_seconds: float,
              run_id: str | None = None) -> pathlib.Path:
     """Run every variant on every case; nothing launches unless every workspace passed the isolation scan."""
-    cases = _check_cases(source)
-    if source.sha256 is not None and "oracle_path_checks" not in source.data:
+    path_checks = source.data.get("oracle_path_checks", ())
+    if source.sha256 is not None and not any(check.get("folder") for check in path_checks):
         raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration has no oracle path checks; "
                         "preregister again before running")
+    run_id = run_id or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
+    run_dir = pathlib.Path(runs_root) / run_id
+    check_grader_separation([pathlib.Path(entry["path"]) for entry in source.data["cases"]] + [run_dir],
+                            path_checks)
+    cases = _check_cases(source)
     env = _variant_env(env)
     variants = _check_variants(source, env)
     oracle_hashes = {digest for entry, _ in cases for digest in
@@ -180,11 +185,12 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
                 raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "prompt cannot be read as UTF-8; supply a regular "
                                 "UTF-8 prompt and preregister again") from None
             commits = set()
-            for variant, argv in variants:
+            for variant, command in variants:
                 # Each workspace is its own temporary folder, so no variant sits next to another's work.
                 root = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-ws-"))
                 temporary.append(root)
                 ws = build_workspace(snapshot, root, config_text=variant.get("config_text"))
+                argv = resolve_argv(command, env, f"variant {variant['name']}", cwd=ws.repo)
                 isolation = scan_workspace(ws, snapshot, oracle_hashes=oracle_hashes, prompt=prompt.encode("utf-8"),
                                            oracle_paths=source.data.get("oracle_path_checks", ()), argv=argv,
                                            env=variant_environment(env, ws), config_text=variant.get("config_text"),
@@ -201,8 +207,6 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
             if len(commits) != 1:
                 raise EvalError("OAH_EVAL_WORKSPACE", f"case {case.id}: the variants did not get the same starting "
                                                       "commit; report this as an oah bug")
-        run_id = run_id or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
-        run_dir = pathlib.Path(runs_root) / run_id
         started = _now()
         try:
             run_dir.mkdir(parents=True)

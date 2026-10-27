@@ -16,8 +16,8 @@ from oah.eval.case import case_digest, file_sha256, is_inside, load_case, read_t
 from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import load_oracle
-from oah.eval.workspace import (build_workspace, content_hashes, open_snapshot, oracle_path_checks,
-                                remove_tree, scan_workspace, variant_environment)
+from oah.eval.workspace import (build_workspace, check_grader_separation, content_hashes, open_snapshot,
+                                oracle_path_checks, remove_tree, scan_workspace, variant_environment)
 
 FORMAT = "oah-eval-prereg/1"
 METRICS = ("matched", "missed", "unmatched", "human_verdicts", "tests_fixed", "exit_code", "timed_out",
@@ -196,6 +196,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
                                 f"{oracle.path} is inside the case folder {folder}, where agents would see it; "
                                 "move it outside the case folder")
     path_checks = oracle_path_checks(oracle_paths)
+    check_grader_separation(case_folders.values(), path_checks)
     hashes = {digest for oracle in oracles.values() for digest in content_hashes(oracle.path.read_bytes())}
     channel_files = {variant.name: {} for variant in plan.variants}
     # Check every available launch channel before writing either frozen file.
@@ -212,7 +213,8 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
             for variant in plan.variants:
                 ws = build_workspace(snapshot, scratch / f"ws-{index}-{variant.name}", config_text=variant.config_text)
                 env = variant_environment(os.environ, ws)
-                argv = resolve_argv([substitute(arg, str(plan.folder)) for arg in variant.command], env, "variant")
+                argv = resolve_argv([substitute(arg, str(plan.folder)) for arg in variant.command], env, "variant",
+                                    cwd=ws.repo)
                 checked = scan_workspace(ws, snapshot, oracle_hashes=hashes, oracle_paths=path_checks,
                                          prompt=prompt, argv=argv, env=env, config_text=variant.config_text,
                                          plan_dir=str(plan.folder))

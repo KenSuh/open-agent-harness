@@ -66,19 +66,23 @@ class EvalCliTest(unittest.TestCase):
 
     def test_oracle_path_alias_refused_without_persisting_its_location(self):
         oracle = oracle_path(self.root)
-        alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name)
-        (case_dir(self.root) / "task.md").write_bytes(("Read " + alias).encode("utf-8"))
-        prereg = self.root / "prereg.json"
-        code, out, err = self.cli("eval", "prereg", str(self.root / "plan.toml"), "--oracle",
-                                  str(oracle), "--out", str(prereg))
-        self.assertEqual(code, 1)
-        self.assertIn("OAH_EVAL_ISOLATION", err)
-        self.assertNotIn(alias, out + err)
-        self.assertNotIn(str(oracle), out + err)
-        self.assertFalse(prereg.exists())
-        self.assertFalse(prereg.with_suffix(".json.sha256").exists())
-        self.assertFalse(self.state.exists())
-        self.assertEqual(self.launched(), [])
+        aliases = (str(oracle.parent / ".." / oracle.parent.name / oracle.name),
+                   "@" + str(oracle.parent / "answers-link"),
+                   "file://" + str(oracle.parent / "answers-link"))
+        for alias in aliases:
+            with self.subTest(prefix=alias.split(":", 1)[0] if "://" in alias else alias[:1]):
+                (case_dir(self.root) / "task.md").write_bytes(("Read " + alias).encode("utf-8"))
+                prereg = self.root / "prereg.json"
+                code, out, err = self.cli("eval", "prereg", str(self.root / "plan.toml"), "--oracle",
+                                          str(oracle), "--out", str(prereg))
+                self.assertEqual(code, 1)
+                self.assertIn("OAH_EVAL_ISOLATION", err)
+                self.assertNotIn(alias, out + err)
+                self.assertNotIn(str(oracle.parent), out + err)
+                self.assertFalse(prereg.exists())
+                self.assertFalse(prereg.with_suffix(".json.sha256").exists())
+                self.assertFalse(self.state.exists())
+                self.assertEqual(self.launched(), [])
 
     def test_end_to_end_fixture(self):
         prereg = self.root / "prereg.json"

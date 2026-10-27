@@ -1325,29 +1325,20 @@ class CorrectionC3Test(unittest.TestCase):
                 with self.subTest(option=option + tail):
                     self.refused(lambda: workspace.check_variant_channels(ws, argv=[sys.executable, option + tail]))
 
-    def test_existing_external_paths_refused_in_every_text_channel(self):
+    def test_existing_external_file_arguments_and_config_values_refused(self):
         ws = self.build()
         external = self.scratch / "public.txt"
         external.write_bytes(b"ordinary public material\n")
         alias = str(external.parent / ".." / external.parent.name / external.name)
-        for channel in ("argument", "prompt", "config", "working-file"):
+        for channel in ("argument", "config"):
             for value in (alias, "NAME=" + alias):
                 with self.subTest(channel=channel, assignment=value.startswith("NAME=")):
                     kwargs = {}
                     if channel == "argument":
                         kwargs["argv"] = [sys.executable, value]
-                    elif channel == "prompt":
-                        kwargs["prompt"] = ("Read " + value).encode("utf-8")
-                    elif channel == "config":
-                        kwargs["config_text"] = "description = " + json.dumps("Read " + value)
                     else:
-                        target = ws.inputs / "external.txt"
-                        target.write_bytes(("Read " + value).encode("utf-8"))
-                    try:
-                        self.refused(lambda: workspace.check_variant_channels(ws, **kwargs))
-                    finally:
-                        if channel == "working-file":
-                            target.unlink()
+                        kwargs["config_text"] = "input_file = " + json.dumps(value)
+                    self.refused(lambda: workspace.check_variant_channels(ws, **kwargs))
 
     def test_external_executable_is_the_only_exception(self):
         ws = self.build()
@@ -1364,9 +1355,9 @@ class CorrectionC3Test(unittest.TestCase):
                     ws, prompt=("Read " + alias + suffix).encode("utf-8"),
                     oracle_paths=workspace.oracle_path_checks([oracle])))
 
-    def test_root_directory_in_prompt_refused(self):
+    def test_root_directory_in_prompt_is_ordinary_prose(self):
         ws = self.build()
-        self.refused(lambda: workspace.check_variant_channels(ws, prompt=b"Read /"))
+        workspace.check_variant_channels(ws, prompt=b"Read /")
 
     def test_aliased_oracle_environment_refused_at_run(self):
         out = self.root / "prereg.json"
@@ -1429,14 +1420,14 @@ class CorrectionC3Test(unittest.TestCase):
                        input=pack, capture_output=True, check=True)
         self.refused(lambda: workspace.check_variant_channels(ws))
 
-    def test_unresolvable_text_path_is_a_named_refusal(self):
+    def test_unresolvable_file_argument_is_a_named_refusal(self):
         ws = self.build()
         loop = self.scratch / "loop"
         try:
             loop.symlink_to(loop)
         except OSError:
             self.skipTest("file symlinks are unavailable")
-        error = self.refused(lambda: workspace.check_variant_channels(ws, prompt=("Read " + str(loop)).encode("utf-8")))
+        error = self.refused(lambda: workspace.check_variant_channels(ws, argv=[sys.executable, str(loop)]))
         self.assertEqual(error.code, "OAH_EVAL_CHANNEL_UNCHECKED")
         self.assertTrue(error.__suppress_context__)
         self.assertNotIn(str(loop), str(error))
@@ -1461,6 +1452,189 @@ class CorrectionC3Test(unittest.TestCase):
         alias = str(oracle.parent / ".." / oracle.parent.name / oracle.name).upper().replace("\\", "/")
         self.refused(lambda: workspace.check_variant_channels(
             ws, prompt=("Read " + alias).encode("utf-8"), oracle_paths=workspace.oracle_path_checks([oracle])))
+
+
+class CorrectionC4Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+        self.scratch = make_tmp_dir(self)
+        self.env = Env(self)
+
+    snapshot = CorrectionC3Test.snapshot
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def prereg(self, oracle=None):
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle or oracle_path(self.root)], out)
+        return out
+
+    def test_grader_folder_prefixes_refused_in_all_content_channels(self):
+        ws = self.build()
+        oracle = oracle_path(self.root)
+        # The filename is different: only the grader-folder literal identifies this leak.
+        alias = oracle.parent / "answers-link"
+        try:
+            alias.symlink_to(oracle)
+        except OSError:
+            # Literal folder checks also cover missing aliases on hosts without symlink privileges.
+            pass
+        checks = workspace.oracle_path_checks([oracle])
+        for prefix in ("@", "file://"):
+            value = "Read " + prefix + str(oracle.parent / "answers-link")
+            for channel in ("prompt", "working-file", "git-blob", "argument"):
+                with self.subTest(prefix=prefix, channel=channel):
+                    kwargs = {"oracle_paths": checks}
+                    if channel == "prompt":
+                        kwargs["prompt"] = value.encode("utf-8")
+                    elif channel == "working-file":
+                        (ws.inputs / "reference.md").write_bytes(value.encode("utf-8"))
+                    elif channel == "git-blob":
+                        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                                       input=value.encode("utf-8"), capture_output=True, check=True)
+                    else:
+                        kwargs["argv"] = [sys.executable, "--description=" + value]
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, **kwargs)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertNotIn(str(oracle.parent), str(caught.exception))
+                    # A fresh workspace keeps each subcase independent, including unreachable blobs.
+                    ws = self.build()
+
+    def test_ordinary_prose_is_not_interpreted_as_filesystem_paths(self):
+        ws = self.build()
+        external = self.scratch / "public.txt"
+        external.write_bytes(b"public material\n")
+        loop = self.scratch / "loop"
+        try:
+            loop.symlink_to(loop)
+        except OSError:
+            loop = external
+        prose = f"Read @{external} or file://{external}; ../notes.md is prose. Read / and {loop}."
+        (ws.inputs / "notes.md").write_bytes(prose.encode("utf-8"))
+        workspace.check_variant_channels(ws, prompt=prose.encode("utf-8"))
+
+    def test_variant_grading_reconstructs_inputs_requirement_and_environment(self):
+        check = case_dir(self.root) / "inputs" / "check.py"
+        check.write_bytes(b"import os, pathlib, sys\n"
+                          b"root = pathlib.Path.cwd().parent\n"
+                          b"assert pathlib.Path(os.environ['OAH_EVAL_INPUTS']) == root.joinpath('inputs')\n"
+                          b"assert pathlib.Path(os.environ['OAH_EVAL_REQUIREMENT']).read_bytes() == "
+                          b"root.joinpath('requirement.md').read_bytes()\n"
+                          b"assert pathlib.Path(os.environ['OAH_EVAL_OUTPUT']) == root.joinpath('output')\n"
+                          b"assert root.joinpath('output').is_dir()\n"
+                          b"sys.exit(0 if 'kiwi' in pathlib.Path('index.txt').read_text() else 1)\n")
+        oracle = oracle_path(self.root)
+        oracle.write_bytes(oracle.read_bytes().replace(b'"check_index.py"', b'"../inputs/check.py"'))
+        run_dir = run_fixture(self, self.root, self.env)
+        graded = grade.grade_run(run_dir, [oracle], env=self.env.env)
+        case = graded["cases"]["derived-index"]
+        self.assertEqual(case["tests"], [{"id": "T1", "snapshot": "fails"}])
+        self.assertEqual(case["variants"]["baseline"]["tests"], [{"id": "T1", "result": "not-fixed"}])
+        self.assertEqual(case["variants"]["improved"]["tests"], [{"id": "T1", "result": "fixed"}])
+
+    @unittest.skipUnless(os.name != "nt", "POSIX executable scripts; native Windows uses exe files")
+    def test_relative_snapshot_executables_resolve_per_workspace(self):
+        self.snapshot({"run_variant": ("100755", b"#!/bin/sh\necho launched > ../output/launched.txt\n"),
+                       "oracle_test": ("100755", b"#!/bin/sh\ntest -f fixed\n")})
+        set_plan(self.root, '["{python}", "fake_variant.py", "miss"]', '["./run_variant"]')
+        set_plan(self.root, '["{python}", "fake_variant.py", "catch"]', '["./run_variant"]')
+        oracle = oracle_path(self.root)
+        oracle.write_bytes(b'case = "derived-index"\n[[test]]\nid = "T1"\ncommand = ["./oracle_test"]\n')
+        out = self.prereg()
+        run_dir = runner.run_eval(plan.load_frozen(out), self.env.runs, env=self.env.env, timeout_seconds=60)
+        for name in ("baseline", "improved"):
+            folder = run_dir / "cases" / "derived-index" / name
+            self.assertEqual((folder / "output" / "launched.txt").read_bytes(), b"launched\n")
+        improved = run_dir / "cases" / "derived-index" / "improved" / "workspace"
+        (improved / "fixed").write_bytes(b"fixed\n")
+        graded = grade.grade_run(run_dir, [oracle], env=self.env.env)
+        self.assertEqual(graded["cases"]["derived-index"]["variants"]["improved"]["tests"],
+                         [{"id": "T1", "result": "fixed"}])
+
+    @unittest.skipUnless(os.name == "nt", "native Windows relative executable")
+    def test_windows_relative_executable_resolves_against_repo(self):
+        from oah.eval.commands import resolve_argv
+        repo = self.scratch / "repo"
+        repo.mkdir()
+        shutil.copyfile(sys.executable, repo / "variant.exe")
+        # Resolution must not depend on the caller cwd; no batch shim is involved.
+        argv = resolve_argv([r".\variant.exe"], os.environ, "variant", cwd=repo)
+        self.assertEqual(pathlib.Path(argv[0]), repo / "variant.exe")
+
+    def test_retained_regular_git_names_checked_after_config_replacement(self):
+        source = self.snapshot({".oah/config.toml/fix.patch": ("100644", b"ordinary bytes\n")})
+        ws = self.build(source, config_text="[review]\nmax_rounds = 3\n")
+        self.assertTrue((ws.repo / ".oah" / "config.toml").is_file())
+        self.assertEqual(git(ws.repo, "show", "HEAD:.oah/config.toml/fix.patch"), "ordinary bytes")
+        with self.assertRaises(EvalError) as caught:
+            workspace.scan_workspace(ws, source)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertIn("forbidden", str(caught.exception))
+
+    def test_unreferenced_retained_tree_names_are_also_checked(self):
+        source = self.source()
+        ws = self.build(source)
+        oid = subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                             input=b"ordinary bytes\n", capture_output=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", str(ws.repo), "mktree"],
+                       input=b"100644 blob " + oid + b"\tfix.patch\n", capture_output=True, check=True)
+        with self.assertRaises(EvalError) as caught:
+            workspace.scan_workspace(ws, source)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_grader_folder_cannot_contain_a_case(self):
+        oracle = self.root / "answers.toml"
+        shutil.copyfile(oracle_path(self.root), oracle)
+        with self.assertRaises(EvalError) as caught:
+            self.prereg(oracle)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ORACLE_FOLDER")
+        self.assertFalse((self.root / "prereg.json").exists())
+
+    def test_grader_folder_cannot_equal_or_be_inside_a_case(self):
+        for folder in (case_dir(self.root), case_dir(self.root) / "grader"):
+            with self.subTest(folder=folder.name):
+                folder.mkdir(exist_ok=True)
+                oracle = folder / "answers.toml"
+                shutil.copyfile(oracle_path(self.root), oracle)
+                with self.assertRaises(EvalError) as caught:
+                    self.prereg(oracle)
+                self.assertIn(caught.exception.code, ("OAH_EVAL_ORACLE_IN_CASE", "OAH_EVAL_ORACLE_FOLDER"))
+
+    def test_run_rechecks_case_and_saved_workspace_separation(self):
+        out = self.prereg()
+        source = plan.load_frozen(out)
+        relocated = oracle_path(self.root).parent / "case"
+        shutil.copytree(case_dir(self.root), relocated)
+        source.data["cases"][0]["path"] = str(relocated)
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(source, self.env.runs, env=self.env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ORACLE_FOLDER")
+        self.assertFalse(self.env.runs.exists())
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(out), oracle_path(self.root).parent / "runs",
+                            env=self.env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ORACLE_FOLDER")
+
+    def test_grader_folder_and_workspace_are_disjoint_in_both_directions(self):
+        ws = self.build()
+        for folder in (ws.root, ws.root / "grader", ws.root.parent):
+            with self.subTest(folder=folder.name):
+                folder.mkdir(exist_ok=True)
+                oracle = folder / "answers.toml"
+                oracle.write_bytes(oracle_path(self.root).read_bytes())
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(ws, oracle_paths=workspace.oracle_path_checks([oracle]))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ORACLE_FOLDER")
+                oracle.unlink()
+
+    def test_report_names_honest_author_and_sandbox_limits(self):
+        run_dir = run_fixture(self, self.root, self.env)
+        grade.grade_run(run_dir, [oracle_path(self.root)], env=self.env.env)
+        limits = " ".join(report.build_report(run_dir)["limits"])
+        self.assertIn("honest", limits)
+        self.assertIn("malicious case author", limits)
+        self.assertIn("sandbox", limits)
 
 
 class FixtureTest(unittest.TestCase):
