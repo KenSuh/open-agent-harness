@@ -1932,6 +1932,38 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_model_choice_schema_hashes_individual_untrusted_values(self):
+        key = "fake-" + token_source.token_hex(20)
+        digest = "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
+        pair = {"model": key, "effort": "high"}
+        choice = {"deterministic": dict(pair, source="cli_default"),
+                  "floor": dict(pair, tier="high"), "mode": "pools", "note": key,
+                  "candidates": [[key, "high"]], "excluded": {key: "above-cap"},
+                  "proposal": pair, "provider": key, "requested": pair}
+        fields = {"model_choice": choice, "model_judge": "unused(error:timeout)",
+                  "header_code": "OAH_MODEL_MISMATCH", "error": "OAH_MODEL_MISMATCH: " + key}
+        closed = runs._correction_record(fields, runs.RESULT_FIELDS)
+        run = runs.new_run(make_tmp_dir(self), "t1", "codex", "correction")
+        run.result(**closed)
+        saved = json.loads(run.result_path.read_bytes())
+        self.assertEqual(saved["model_choice"], {
+            "deterministic": {"model": digest, "effort": "high", "source": "cli_default"},
+            "floor": {"model": digest, "effort": "high", "tier": "high"}, "mode": "pools", "note": digest,
+            "candidates": [[digest, "high"]], "excluded": {digest: "above-cap"},
+            "proposal": {"model": digest, "effort": "high"}, "provider": digest,
+            "requested": {"model": digest, "effort": "high"}})
+        self.assertEqual(saved["model_judge"], "unused(error:timeout)")
+        self.assertEqual((saved["header_code"], saved["error"]), ("OAH_MODEL_MISMATCH", "OAH_MODEL_MISMATCH"))
+        self.assertNotIn(key.encode("utf-8"), run.result_path.read_bytes())
+        self.assertEqual(runs._correction_record(closed, runs.RESULT_FIELDS), closed)
+        for status in ("unused(error:" + key + ")", "rejected(" + key + ")"):
+            safe = runs._correction_record({"model_judge": status}, runs.RESULT_FIELDS)
+            self.assertNotIn(key, json.dumps(safe))
+        # Unknown structural keys remain opaque; a provider cannot extend the retained schema.
+        unsafe = runs._correction_record({"model_choice": {key: pair}}, runs.RESULT_FIELDS)
+        self.assertIsInstance(unsafe["model_choice"], str)
+        self.assertNotIn(key, json.dumps(unsafe))
+
     def test_start_publication_failure_preserves_index_and_settles_attempt(self):
         for point in ("before-run", "prompt"):
             with self.subTest(point=point):
@@ -2240,11 +2272,15 @@ class SecretTest(unittest.TestCase):
                  "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
                  "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
                  "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
+                 "ranked", "pools", "deterministic", "unused(error:timeout)",
+                 "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
+                 "not-in-tier-pool", "below-floor", "above-cap",
                  *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort",
                                                      "unranked-model", "not-in-tier-pool", "below-floor",
                                                      "above-cap"))}
         codes = {"OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED",
                  "OAH_FIX_WARNING", "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
+                 "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED",
                  *fix._ERROR_DIAGNOSTICS}
         forms = re.compile(r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"
                            r"A[1-9][0-9]*|R[1-9][0-9]*(?:-[FC][1-9][0-9]*)?|R[1-9][0-9]*\.json|"

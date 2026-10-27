@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import secrets as token_source
 import unittest
+from importlib import resources
 from unittest import mock
 
 from oah import call, call_cli, rerank
@@ -106,6 +108,13 @@ class ConfigTest(unittest.TestCase):
             with self.subTest(engine=engine):
                 self.assertEqual(settings.engines[engine]["allowed_models"], [])
                 self.assertEqual(settings.engines[engine]["effort_caps"], {})
+
+    def test_template_documents_caps_for_every_launch(self):
+        template = resources.files("oah").joinpath("templates/init/config.toml").read_text(encoding="utf-8")
+        self.assertEqual(template.count("The highest effort any call may use"), 2)
+        self.assertEqual(template.count("including for model pins and without Jev"), 2)
+        self.assertEqual(template.count("floor effort refuses with OAH_CONFIG_INVALID"), 2)
+        self.assertNotIn("never lowered by a cap", template)
 
     def test_configured_keys_load(self):
         # The fixture's config ends inside [engines.codex], so its keys follow without a header.
@@ -257,8 +266,6 @@ class JudgeCallTest(unittest.TestCase):
     def test_pins_are_never_judged(self):
         rows = [
             ("config tier model", '[engines.codex.tiers.medium]\nmodel = "m-light"\n', {}, ("m-light", "medium")),
-            ("--tier", "", {"tier": "high"}, ("m-strong", "high")),
-            ("packet plan tier", "", {"plan": "- review → codex → high\n"}, ("m-strong", "high")),
         ]
         for name, extra, fields, expected in rows:
             with self.subTest(name):
@@ -273,6 +280,95 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual((data["resolved_model"], data["launch_effort"]), expected)
                 self.assertEqual(launched(project), expected)
                 self.assertEqual(provider.calls, [])
+
+    def test_tier_selectors_still_judge_pool_peers(self):
+        pools = '[engines.codex.tier_pools]\nhigh = ["m-strong", "m-extra"]\n'
+        for selector in ("flag", "packet"):
+            with self.subTest(selector=selector):
+                project = judged_project(self, ranked=False, extra=pools)
+                fields = {"axes": {"kind": "security"}}
+                if selector == "flag":
+                    fields["tier"] = "high"
+                else:
+                    project.packet("## Scope\n- src/a.py\n## Plan\n- review → codex → high\n")
+                provider = FakeJudge(("m-extra", "high"))
+                with judge(project, provider):
+                    data = project.run(stage="review", **fields)
+                self.assertEqual((data["tier"], data["tier_source"]), ("high", selector))
+                self.assertEqual(data["model_judge"], "used")
+                self.assertEqual(launched(project), ("m-extra", "high"))
+                self.assertEqual(len(provider.calls), 1)
+
+    def test_caps_bind_deterministic_fallbacks_and_model_pins(self):
+        for mode in ("disabled", "rejected", "pinned", "used"):
+            with self.subTest(mode=mode):
+                extra = '[engines.codex.effort_caps]\n"m-strong" = "medium"\n'
+                if mode == "pinned":
+                    extra += '[engines.codex.tiers.high]\nmodel = "m-strong"\n'
+                project = judged_project(self, extra=extra, jev=mode != "disabled")
+                provider = FakeJudge(("m-strong", "high") if mode == "rejected" else ("m-mid", "high"))
+                with judge(project, provider):
+                    data = project.run(stage="review", axes={"reasoning": "high"})
+                expected = ("m-mid", "high") if mode == "used" else ("m-strong", "medium")
+                self.assertEqual(launched(project), expected)
+                self.assertEqual(data["requested_effort"], "high")
+                self.assertEqual(data["model_choice"]["deterministic"]["effort"], "medium")
+                self.assertTrue(any(w.startswith("OAH_EFFORT_CAPPED:") for w in data["warnings"]))
+                self.assertEqual(data["model_judge"], {"disabled": "unused(not-enabled)",
+                    "rejected": "rejected(above-cap)", "pinned": "unused(pinned)", "used": "used"}[mode])
+
+    def test_cap_below_kind_floor_refuses_before_launch_in_every_mode(self):
+        for mode in ("disabled", "rejected", "pinned", "used"):
+            with self.subTest(mode=mode):
+                extra = '[engines.codex.effort_caps]\n"m-strong" = "medium"\n'
+                if mode == "pinned":
+                    extra += '[engines.codex.tiers.high]\nmodel = "m-strong"\n'
+                project = judged_project(self, extra=extra, jev=mode != "disabled")
+                provider = FakeJudge(("m-extra", "high"))
+                with judge(project, provider), self.assertRaises(EngineError) as caught:
+                    project.run(stage="review", axes={"kind": "security"})
+                self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+                self.assertIn("effort_caps", str(caught.exception))
+                self.assertIn("floor", str(caught.exception))
+                self.assertIn(".oah/config.toml", str(caught.exception))
+                self.assertEqual(provider.calls, [])
+                self.assertFalse(project.record.exists())
+                self.assertEqual(project.runs(), [])
+
+    def test_clamp_uses_a_supported_effort_below_the_cap(self):
+        project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "xhigh"\n', jev=False)
+        catalog = json.loads((project.home / "models_cache.json").read_bytes())
+        catalog["models"][0]["supported_reasoning_levels"] = [{"effort": e} for e in ("low", "medium", "high", "max")]
+        (project.home / "models_cache.json").write_bytes(json.dumps(catalog).encode("utf-8"))
+        data = project.run(stage="review", axes={"reasoning": "max"})
+        self.assertEqual((data["requested_effort"], data["launch_effort"]), ("highest", "high"))
+        self.assertEqual(launched(project), ("m-strong", "high"))
+
+    def test_claude_cap_binds_a_pinned_model(self):
+        project = judged_project(self, extra='[engines.claude.effort_caps]\n"opus" = "medium"\n'
+                                 '[engines.claude.tiers.high]\nmodel = "opus"\n', jev=False)
+        data = project.run(engine="claude", stage="initial", axes={"reasoning": "high"})
+        self.assertEqual((data["requested_effort"], data["launch_effort"]), ("high", "medium"))
+        argv = project.recorded()["argv"]
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+
+    def test_cap_refuses_when_no_supported_effort_can_meet_the_floor(self):
+        project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "medium"\n', jev=False)
+        catalog = json.loads((project.home / "models_cache.json").read_bytes())
+        catalog["models"][0]["supported_reasoning_levels"] = [{"effort": e} for e in ("low", "high", "max")]
+        (project.home / "models_cache.json").write_bytes(json.dumps(catalog).encode("utf-8"))
+        with self.assertRaises(EngineError) as caught:
+            project.run(stage="review", axes={"reasoning": "high"})
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertFalse(project.record.exists())
+
+    def test_cap_does_not_guess_an_order_for_behaviour_changing_effort(self):
+        project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "high"\n'
+                                 '[engines.codex.tiers.high]\neffort = "ultra"\n', jev=False)
+        with self.assertRaises(EngineError) as caught:
+            project.run(stage="review", axes={"reasoning": "high"})
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertFalse(project.record.exists())
 
     def test_without_a_ranking_only_the_effort_is_judged(self):
         for answer, status, expected in ((("m-strong", "xhigh"), "used", ("m-strong", "xhigh")),
@@ -329,7 +425,8 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(launched(project), expected)
 
     def test_a_pin_overrides_any_pool(self):
-        project = judged_project(self, ranked=False, extra='[engines.codex.tier_pools]\nhigh = ["m-extra"]\n')
+        project = judged_project(self, ranked=False, extra='[engines.codex.tier_pools]\nhigh = ["m-extra"]\n'
+                                 '[engines.codex.tiers.high]\nmodel = "m-strong"\n')
         provider = FakeJudge(("m-extra", "high"))
         with judge(project, provider):
             data = project.run(stage="review", tier="high")
@@ -407,11 +504,11 @@ class FixPathTest(unittest.TestCase):
     Fix hands prepare the corrector's credential-free environment, so its re-ranker key comes from the
     keychain, as for the advisory tier and skill re-ranking; the fixture's keychain holds a fake key."""
 
-    def corrected(self, provider: FakeJudge, **fields):
+    def corrected(self, provider: FakeJudge, *, step=None, **fields):
         project = fix_tests.FixProject(self, config=f"quality_order = {RANKING}\n" + JEV_ON)
         write_catalog(project.home)
         project.changes_requested()
-        project.queue_fix({"write": fix_tests.FIXED})
+        project.queue_fix({"write": fix_tests.FIXED} if step is None else step)
         key = fake_key()
         with contextlib.chdir(project.repo), mock.patch.dict(rerank.PROVIDERS, {"fake": provider}), \
                 mock.patch.object(NoKeychain, "lookup", lambda self, name: key if name == KEY_NAME else None):
@@ -427,9 +524,42 @@ class FixPathTest(unittest.TestCase):
         self.assertEqual(launched_pair, ("m-strong", "high"))
         self.assertEqual((data["model_judge"], data["model_source"], data["launch_effort"]), ("used", "judge", "high"))
 
-    def test_fix_keeps_the_deterministic_pair_when_rejected_or_pinned(self):
+    def test_fix_persists_structured_choice_evidence(self):
+        result, _, data = self.corrected(FakeJudge(("m-strong", "high")), tier=None)
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        hashed = lambda value: "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        choice = data["model_choice"]
+        self.assertIsInstance(choice, dict)
+        self.assertEqual(choice["deterministic"], {"model": hashed("m-mid"), "effort": "medium", "source": "quality_order"})
+        self.assertEqual(choice["floor"], {"tier": "medium", "model": hashed("m-mid"), "effort": "medium"})
+        self.assertEqual(choice["proposal"], {"model": hashed("m-strong"), "effort": "high"})
+        self.assertEqual(choice["requested"], choice["proposal"])
+        self.assertIn([hashed("m-strong"), "high"], choice["candidates"])
+        self.assertEqual((choice["mode"], choice["provider"]), ("ranked", hashed("fake")))
+
+    def test_fix_preserves_provider_timeout_status(self):
+        result, _, data = self.corrected(FakeJudge(error=rerank.ProviderError("timeout")), tier=None)
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        self.assertEqual(data["model_judge"], "unused(error:timeout)")
+
+    def test_fix_preserves_model_mismatch_code(self):
+        # An earlier model line exercises the real header parser without changing the corrector fixture.
+        result, _, data = self.corrected(FakeJudge(("m-strong", "high")), tier=None,
+                                        step={"header_workdir": "unused\r\nmodel: m-other"})
+        self.assertEqual(result.code, "OAH_FIX_FAILED", result.message)
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["header_code"], "OAH_MODEL_MISMATCH")
+        self.assertEqual(data["error"], "OAH_MODEL_MISMATCH")
+
+    def test_explicit_correction_tier_still_uses_judged_pair(self):
+        result, launched_pair, data = self.corrected(FakeJudge(("m-mid", "high")), tier="high")
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        self.assertEqual((data["tier_source"], data["model_judge"]), ("flag", "used"))
+        self.assertEqual(launched_pair, ("m-mid", "high"))
+
+    def test_fix_keeps_the_deterministic_pair_when_rejected(self):
         for fields, status, expected in (({"tier": None}, "rejected(below-floor)", ("m-mid", "medium")),
-                                         ({"tier": "high"}, "unused(pinned)", ("m-strong", "high"))):
+                                         ({"tier": "high"}, "rejected(below-floor)", ("m-strong", "high"))):
             with self.subTest(status=status):
                 result, launched_pair, data = self.corrected(FakeJudge(("m-light", "low")), **fields)
                 self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)

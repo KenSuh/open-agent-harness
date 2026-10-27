@@ -59,7 +59,10 @@ _CORRECTION_ENUMS = frozenset({
     "adversarial-review", "migration", "security", "high-risk-review",
     "OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED", "OAH_FIX_WARNING",
     "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
-    # The model judge's fixed statuses (amendment 6); error statuses and model names stay hashed.
+    # The model judge's fixed vocabulary; model/provider identities and notes stay hashed.
+    "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED", "ranked", "pools", "deterministic",
+    "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model", "not-in-tier-pool",
+    "below-floor", "above-cap",
     "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
     "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
@@ -72,6 +75,9 @@ _CORRECTION_FORMS = re.compile(
     r"A[1-9][0-9]*-(?:start|outcome|head)\.json|\[file [1-9][0-9]*\]|"
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
 _CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256"})
+_CORRECTION_JUDGE_ERROR = re.compile(
+    r"unused\(error:(?:timeout|rate-limited|unauthorized|overloaded|network|insecure-url|invalid-header|"
+    r"bad-request|bad-response|key-name|internal|provider|http-[1-5][0-9]{2})\)")
 
 
 def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
@@ -98,11 +104,33 @@ def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
             return value
         raise RunError("OAH_RUN_FIELD_UNKNOWN", "correction record values are invalid; update oah before retrying")
 
+    def model_choice(value):
+        pairs = {"deterministic": {"model", "effort", "source"}, "floor": {"tier", "model", "effort"},
+                 "proposal": {"model", "effort"}, "requested": {"model", "effort"}}
+        if not isinstance(value, dict) or set(value) - {*pairs, "mode", "note", "candidates", "excluded", "provider"}:
+            return closed(value)
+        result = {}
+        for name, item in value.items():
+            if name in pairs and isinstance(item, dict) and set(item) <= pairs[name]:
+                result[name] = {key: closed(text) for key, text in item.items()}
+            elif name == "candidates" and isinstance(item, (list, tuple)):
+                result[name] = [closed(pair) for pair in item]
+            elif name == "excluded" and isinstance(item, dict):
+                # Model names are dynamic keys here: hash them just like model values, preserving the rule.
+                result[name] = {closed(model): closed(rule) for model, rule in item.items()}
+            else:
+                result[name] = closed(item)
+        return result
+
     out = {key: closed(value) for key, value in record.items()}
+    if "model_choice" in record:
+        out["model_choice"] = model_choice(record["model_choice"])
+    if isinstance(record.get("model_judge"), str) and _CORRECTION_JUDGE_ERROR.fullmatch(record["model_judge"]):
+        out["model_judge"] = record["model_judge"]
     if record.get("tier_reasons") is not None:
         out["tier_reasons"] = ["OAH_FIX_ROUTING_RULE" for _ in record["tier_reasons"]]
     if record.get("warnings") is not None:
-        out["warnings"] = [value if value in _ERROR_DIAGNOSTICS else "OAH_FIX_WARNING"
+        out["warnings"] = [value if value in _ERROR_DIAGNOSTICS or value == "OAH_EFFORT_CAPPED" else "OAH_FIX_WARNING"
                            for value in (str(item).partition(":")[0] for item in record["warnings"])]
     if record.get("advisory") is not None:
         out["advisory"] = ("OAH_FIX_ADVISORY_USED" if record["advisory"] == "OAH_FIX_ADVISORY_USED"
@@ -113,7 +141,7 @@ def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
         out["commands"] = ["OAH_FIX_COMMIT_COMMAND" for _ in record["commands"]]
     if record.get("error") is not None:
         code = str(record["error"]).partition(":")[0]
-        out["error"] = code if code in _ERROR_DIAGNOSTICS else "OAH_FIX_FAILED"
+        out["error"] = code if code in _ERROR_DIAGNOSTICS or code == "OAH_MODEL_MISMATCH" else "OAH_FIX_FAILED"
     return out
 
 

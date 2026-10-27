@@ -16,8 +16,9 @@ quality_order = ["opus", "sonnet", "haiku"]
 # to allow only those. This list only filters: it never makes a model qualified for a tier.
 allowed_models = []
 
-# The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".
-# Empty: no cap. The tier's own model and effort below are never lowered by a cap.
+# The highest effort any call may use for a model, one line each, such as "<model>" = "high".
+# Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.
+# A cap below the task kind's floor effort refuses with OAH_CONFIG_INVALID; raise or remove that cap.
 [engines.claude.effort_caps]
 
 # Without quality_order, the models you have checked are qualified for a tier, one line per tier,
@@ -43,8 +44,9 @@ quality_order = []
 # to allow only those. This list only filters: it never makes a model qualified for a tier.
 allowed_models = []
 
-# The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".
-# Empty: no cap. The tier's own model and effort below are never lowered by a cap.
+# The highest effort any call may use for a model, one line each, such as "<model>" = "high".
+# Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.
+# A cap below the task kind's floor effort refuses with OAH_CONFIG_INVALID; raise or remove that cap.
 [engines.codex.effort_caps]
 
 # Without quality_order, the models you have checked are qualified for a tier, one line per tier,

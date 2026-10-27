@@ -7,8 +7,8 @@
   rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given). The re-ranker's
   advisory judgement is recorded next to it and never changes the tier;
 - the model through the catalog (`models.map_tier`) and the launch effort through the adapter;
-- the judged model and effort (`judge_engine`, amendment 6): unless the tier is pinned (a tier model,
-  `--tier` or the packet's `## Plan` tier), an enabled re-ranker with a key picks one pair from
+- the judged model and effort (`judge_engine`, amendment 6): unless a tier model is explicitly pinned,
+  an enabled re-ranker with a key picks one pair from
   `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
   the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
   (with the candidate `mode`, the pool or allowed models left out and why, and why the model is not judged);
@@ -57,7 +57,7 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import briefs, launchers, models, routing, runs, skillsel
 from oah.engines import claude, codex
-from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
+from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, highest, load_rules, rank,
                                 verify_inference)
 from oah.engines.proc import run_command
 
@@ -268,6 +268,22 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
     cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh,
                                      pools=section["tier_pools"])
     model, source, effort = _deterministic(engine, tier, settings, entry, effective)
+    cap = section["effort_caps"].get(model)
+    if cap is not None:
+        if rank(effort.launch) is None:
+            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot bound effort "
+                              f"{effort.launch} for {model}; set an ordinary tier effort or remove the cap in "
+                              ".oah/config.toml")
+        if rank(effort.launch) > rank(cap):
+            launch = highest([level for level in effort.levels or (cap,)
+                              if rank(level) is not None and rank(level) <= rank(cap)])
+            if launch is None:
+                raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] leaves no supported "
+                                  f"effort for {model}; raise or remove its cap in .oah/config.toml")
+            cap_warnings.append(f"OAH_EFFORT_CAPPED: {model} effort {effort.launch} is capped to {launch}; "
+                                f"raise or remove its [engines.{engine}.effort_caps] entry in .oah/config.toml "
+                                "to permit a higher effort")
+            effort = dataclasses.replace(effort, launch=launch)
     why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
@@ -300,14 +316,25 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
             check(choice)
         return chosen, {"model_judge": status, "model_choice": choice}
 
-    if pinned:
+    section = settings.engines[engine]
+    cap = section["effort_caps"].get(resolution.model)
+    if pinned and cap is None:
         return record("unused(pinned)")
     floor_tier = routing.floor_tier(axes.kind)
-    section = settings.engines[engine]
     try:
         floor_model, _, floor_effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
     except EngineError:
+        if cap is not None:
+            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
+                              f"the {floor_tier} floor; set a resolvable floor model and effort in .oah/config.toml") from None
         return record("unused(floor-unresolved)")
+    if cap is not None and (rank(floor_effort.launch) is None or rank(cap) < rank(floor_effort.launch)
+                            or rank(resolution.launch_effort) < rank(floor_effort.launch)):
+        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] for {resolution.model} cannot "
+                          f"meet the {floor_tier} floor effort {floor_effort.launch}; raise or remove its cap "
+                          "in .oah/config.toml before calling again")
+    if pinned:
+        return record("unused(pinned)")
     candidates = models.build_candidates(
         engine, entry=entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
         floor=models.Pair(floor_model, floor_effort.launch), quality_order=section["quality_order"],
@@ -934,8 +961,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env, now=now,
                                 checked=checked)
     warnings.extend(resolution.warnings)
-    pinned = (bool(request.tier) or tier_source == "packet"
-              or bool(settings.engines[request.engine]["tiers"][tier]["model"]))
+    pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
                                      entry=checked[1].entry, root=root, env=env, brief_disabled=disabled,
                                      keychain=keychain)
