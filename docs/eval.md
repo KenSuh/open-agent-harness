@@ -145,7 +145,8 @@ engines through their own local runtime setup.
 `oah eval prereg` writes a frozen JSON and `<file>.sha256`, and prints the hash. The JSON holds:
 
 - the cases, each with its split, a SHA-256 of the case folder, the snapshot commit,
-  `used_for_development` and the SHA-256 of its oracle;
+  `used_for_development`, the SHA-256 of its oracle and normalized oracle-block fingerprints
+  (length, rolling hash and SHA-256; no expected-answer text);
 - the variants, with their exact commands, the SHA-256 of every file a command names, and any config
   text;
 - fingerprints of the supplied/resolved oracle paths and canonical grader-folder paths, with hashed
@@ -159,7 +160,7 @@ the agents cannot change; `oah eval run --expect-sha256 HASH` checks against it.
 preregistration. Every result records the preregistration hash.
 Preregistration also builds and scans every workspace, without launching a variant. Known leaks are
 refused before either preregistration file is written. Older preregistrations without grader-folder checks
-must be recreated.
+must be recreated. Preregistrations without oracle-block fingerprints must also be recreated.
 
 ## Isolation
 
@@ -172,9 +173,12 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
   or loose Git objects in visible inputs or any retained raw Git blob, including overwritten configs
   and unreferenced blobs;
-- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8/UTF-16 BOM normalization
-  plus plausible BOM-less UTF-16 LE/BE decoding,
-  in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs;
+- a copy of any preregistered oracle, including a complete oracle block pasted within other text,
+  in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs.
+  Text comparison normalizes LF/CRLF, strips trailing whitespace per line and accepts UTF-8/UTF-16
+  with or without BOM (plausible BOM-less UTF-16 LE/BE decoding as below). Blocks of at least 64
+  normalized UTF-8 bytes match anywhere in a channel; shorter oracles require whole-channel equality.
+  Raw-byte hashes remain checked too;
 - a copy of the snapshot file;
 - a file, link or retained Git tree entry matching a `forbidden` pattern, including entries whose
   checkout was removed by config injection and entries in unreferenced trees;
@@ -184,16 +188,17 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 
 The exact UTF-8 task prompt sent on stdin is scanned too, including its forbidden filename, and the
 checked prompt is retained for launch. Every workspace uses the union of all preregistered oracle
-hashes. Construction and scan Git subprocesses discard caller `GIT_*` variables so repository context
-cannot redirect their operations.
+hashes and block fingerprints. Construction and scan Git subprocesses discard caller `GIT_*` variables
+so repository context cannot redirect their operations.
 
 One default-deny checker is shared by preregistration and run. Its explicit channels are every retained
 raw Git blob, every working file (including repository metadata and output files), stdin prompt bytes,
 each resolved command argument, each passed environment name/value, injected config text, and literal
 files/configs named by command arguments or config string values. Every channel is compared against
-all oracle content hashes and supplied/resolved oracle path fingerprints. A literal occurrence of a
-grader folder's canonical real path (including normalized separators/case on Windows) refuses in every
-channel, even inside `@/absolute/path` or `file://` text. UTF-16 files also receive this literal check.
+all oracle content hashes, normalized block fingerprints and supplied/resolved oracle path fingerprints.
+A literal occurrence of a grader folder's canonical real path (including normalized separators/case on
+Windows) refuses in every channel, even inside `@/absolute/path` or `file://` text. Every valid text decoding used for content
+comparison also receives this literal check, including BOM-less UTF-16 LE/BE files and retained blobs.
 Free text is never parsed for path aliases: prefixes, `..` and paths inside prose are not resolved.
 Only actual file references in command arguments and structured config values are resolved; existing
 external references refuse except the registered executable and its verified npm entry script. Binary
@@ -226,7 +231,7 @@ Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations 
 empty directories inside the workspace are allowed; an existing external destination is refused. A
 workspace destination file is checked and frozen like any other file.
 
-The oracle comparison needs the preregistered oracle hash. An exploratory run records `oracle: not-checked`.
+The oracle comparison needs the preregistered oracle fingerprints. An exploratory run records `oracle: not-checked`.
 
 **Limit:** the threat model is honest-author mistakes, with oracles physically separated in grader-only
 folders. The scan checks only the enumerated launch channels and literal folder paths. It is not a

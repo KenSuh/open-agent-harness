@@ -17,7 +17,8 @@ from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import load_oracle
 from oah.eval.workspace import (build_workspace, check_grader_separation, content_hashes, open_snapshot,
-                                oracle_path_checks, remove_tree, scan_workspace, variant_environment)
+                                oracle_block_checks, oracle_path_checks, remove_tree, scan_workspace,
+                                variant_environment)
 
 FORMAT = "oah-eval-prereg/1"
 METRICS = ("matched", "missed", "unmatched", "human_verdicts", "tests_fixed", "exit_code", "timed_out",
@@ -158,6 +159,7 @@ def _source_data(plan: Plan, oracles: Mapping[str, Any] | None) -> dict:
             oracle = oracles[case.id]
             entry["oracle_sha256"] = oracle.sha256
             entry["oracle_match_sha256"] = sorted(content_hashes(oracle.path.read_bytes()))
+            entry["oracle_block_checks"] = oracle_block_checks(oracle.path.read_bytes())
         cases.append(entry)
     plan_dir = str(plan.folder)
     variants = [{"name": v.name, "command": list(v.command), "fake": v.fake, "timeout_seconds": v.timeout_seconds,
@@ -198,6 +200,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
     path_checks = oracle_path_checks(oracle_paths)
     check_grader_separation(case_folders.values(), path_checks)
     hashes = {digest for oracle in oracles.values() for digest in content_hashes(oracle.path.read_bytes())}
+    blocks = [block for oracle in oracles.values() for block in oracle_block_checks(oracle.path.read_bytes())]
     channel_files = {variant.name: {} for variant in plan.variants}
     # Check every available launch channel before writing either frozen file.
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-prereg-"))
@@ -217,7 +220,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
                                     cwd=ws.repo)
                 checked = scan_workspace(ws, snapshot, oracle_hashes=hashes, oracle_paths=path_checks,
                                          prompt=prompt, argv=argv, env=env, config_text=variant.config_text,
-                                         plan_dir=str(plan.folder))
+                                         plan_dir=str(plan.folder), oracle_blocks=blocks)
                 channel_files[variant.name][case.id] = checked["channel_files"]
     finally:
         remove_tree(scratch)

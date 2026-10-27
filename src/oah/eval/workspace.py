@@ -33,6 +33,8 @@ IDENTITY = {"GIT_AUTHOR_NAME": "oah eval", "GIT_AUTHOR_EMAIL": "eval@oah.invalid
             "GIT_COMMITTER_NAME": "oah eval", "GIT_COMMITTER_EMAIL": "eval@oah.invalid",
             "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"}
 NORMALIZE_LIMIT = 64 << 20
+ORACLE_BLOCK_MIN = 64
+_ROLL_BASE, _ROLL_MOD = 257, 1 << 64
 _HEX = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 VARIANT_CHANNELS = ("git-blob", "working-file", "prompt", "argument", "environment", "reference", "config")
 RUNTIME_ENV = frozenset(("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOME", "USERPROFILE",
@@ -272,11 +274,12 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
     return Workspace(root=root, repo=repo, inputs=inputs, requirement=requirement, output=output, commit=commit)
 
 
-def content_hashes(data: bytes) -> frozenset[str]:
-    """SHA-256 of original bytes and plausible UTF-8/UTF-16 text normalized to UTF-8/LF."""
-    plain = data.removeprefix(b"\xef\xbb\xbf")
-    hashes = {hashlib.sha256(value).hexdigest() for value in
-              (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n"))}
+def _decoded_texts(data: bytes) -> Iterable[str]:
+    """The shared set of valid UTF-8 and plausible UTF-16 channel decodings."""
+    try:
+        yield data.decode("utf-8-sig")
+    except UnicodeError:
+        pass
     encodings = ()
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         encodings = ("utf-16",)
@@ -285,14 +288,63 @@ def content_hashes(data: bytes) -> frozenset[str]:
         encodings = ("utf-16-le", "utf-16-be")
     for encoding in encodings:
         try:
-            plain = data.decode(encoding).encode("utf-8")
+            yield data.decode(encoding)
         except UnicodeError:
             # A heuristic candidate can be binary or valid only in the other byte order.
             # The channel checker still refuses malformed BOM-marked text separately.
             continue
+
+
+def _normalized_text(text: str) -> bytes:
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).encode("utf-8")
+
+
+def content_hashes(data: bytes) -> frozenset[str]:
+    """SHA-256 of raw bytes and UTF-8/UTF-16 text, including LF/per-line whitespace normalization."""
+    plain = data.removeprefix(b"\xef\xbb\xbf")
+    hashes = {hashlib.sha256(value).hexdigest() for value in
+              (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n"))}
+    for text in _decoded_texts(data):
+        plain = text.encode("utf-8")
         hashes.update(hashlib.sha256(value).hexdigest() for value in
-                      (plain, plain.replace(b"\r\n", b"\n")))
+                      (plain, plain.replace(b"\r\n", b"\n"), _normalized_text(text)))
     return frozenset(hashes)
+
+
+def _rolling_hash(data: bytes) -> int:
+    value = 0
+    for byte in data:
+        value = (value * _ROLL_BASE + byte) % _ROLL_MOD
+    return value
+
+
+def oracle_block_checks(data: bytes) -> list[dict]:
+    """Freeze only normalized block fingerprints, never expected-answer text or its location."""
+    blocks = {_normalized_text(text) for text in _decoded_texts(data)}
+    return [{"length": len(block), "rolling": _rolling_hash(block),
+             "sha256": hashlib.sha256(block).hexdigest()} for block in sorted(blocks)
+            if len(block) >= ORACLE_BLOCK_MIN]
+
+
+def _contains_block(data: bytes, block: Mapping) -> bool:
+    """Rabin-Karp substring search with a linear SHA-256 verification budget."""
+    size = block["length"]
+    if size < ORACLE_BLOCK_MIN or size > len(data):
+        return False
+    value = _rolling_hash(data[:size])
+    power = pow(_ROLL_BASE, size - 1, _ROLL_MOD)
+    verified = 0
+    for start in range(len(data) - size + 1):
+        if value == block["rolling"]:
+            verified += size
+            if verified > len(data):
+                raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "oracle block comparison exceeded its work limit; "
+                                "simplify the channel input, then preregister and run again. No variant was started")
+            if hashlib.sha256(data[start:start + size]).hexdigest() == block["sha256"]:
+                return True
+        if start + size < len(data):
+            value = ((value - data[start] * power) * _ROLL_BASE + data[start + size]) % _ROLL_MOD
+    return False
 
 
 def _file_hashes(path: pathlib.Path) -> frozenset[str]:
@@ -390,7 +442,8 @@ def check_grader_separation(folders: Iterable[pathlib.Path], checks: Sequence[Ma
 def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                            oracle_paths: Sequence[Mapping] = (), prompt: bytes = b"",
                            argv: Sequence[str] = (), env: Mapping[str, str] | None = None,
-                           config_text: str | None = None, plan_dir: str | None = None) -> dict[str, str]:
+                           config_text: str | None = None, plan_dir: str | None = None,
+                           oracle_blocks: Sequence[Mapping] = ()) -> dict[str, str]:
     """The single default-deny boundary for every enumerated variant channel.
 
     File references are literal argv values (also --key=value), and TOML/JSON config
@@ -459,12 +512,15 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
         if content_hashes(raw) & hashes:
             refuse(channel)
         fingerprints(channel, raw)
-        # Check literal folder text in UTF-16 files too; never interpret prose as path aliases.
-        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-            try:
-                fingerprints(channel, _path_bytes(raw.decode("utf-16")))
-            except UnicodeError:
-                refuse(channel, unchecked=True)
+        # Use the same valid decodings as content checks, including BOM-less UTF-16.
+        texts = tuple(_decoded_texts(raw))
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")) and not texts:
+            refuse(channel, unchecked=True)
+        for text in texts:
+            normal = _normalized_text(text)
+            if any(_contains_block(normal, block) for block in oracle_blocks):
+                refuse(channel)
+            fingerprints(channel, _path_bytes(text))
 
     def read(path: pathlib.Path, channel: str) -> bytes:
         try:
@@ -621,7 +677,8 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
 def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable[str] = (),
                    prompt: bytes | None = None, oracle_paths: Sequence[Mapping] = (),
                    argv: Sequence[str] = (), env: Mapping[str, str] | None = None,
-                   config_text: str | None = None, plan_dir: str | None = None) -> dict:
+                   config_text: str | None = None, plan_dir: str | None = None,
+                   oracle_blocks: Sequence[Mapping] = ()) -> dict:
     """Refuse oracle copies, history, unsafe links or forbidden inputs before launching."""
     oracle_hashes = frozenset(oracle_hashes)
     case = snapshot.case
@@ -701,7 +758,7 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
                         "again.")
     dependencies = check_variant_channels(ws, oracle_hashes=oracle_hashes, oracle_paths=oracle_paths,
                                           prompt=prompt, argv=argv, env=env, config_text=config_text,
-                                          plan_dir=plan_dir)
+                                          plan_dir=plan_dir, oracle_blocks=oracle_blocks)
     return {"objects": "checked", "oracle": "checked" if oracle_hashes else "not-checked",
             "forbidden_patterns": len(case.forbidden), "channels": list(VARIANT_CHANNELS),
             "channel_files": dependencies}

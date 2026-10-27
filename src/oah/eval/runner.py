@@ -164,6 +164,9 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
     if source.sha256 is not None and not any(check.get("folder") for check in path_checks):
         raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration has no oracle path checks; "
                         "preregister again before running")
+    if source.sha256 is not None and any("oracle_block_checks" not in entry for entry in source.data["cases"]):
+        raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration has no oracle block checks; "
+                        "preregister again before running")
     run_id = run_id or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
     run_dir = pathlib.Path(runs_root) / run_id
     check_grader_separation([pathlib.Path(entry["path"]) for entry in source.data["cases"]] + [run_dir],
@@ -173,6 +176,7 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
     variants = _check_variants(source, env)
     oracle_hashes = {digest for entry, _ in cases for digest in
                      (*entry.get("oracle_match_sha256", ()), entry.get("oracle_sha256")) if digest}
+    oracle_blocks = [block for entry, _ in cases for block in entry.get("oracle_block_checks", ())]
     temporary: list[pathlib.Path] = []
     try:
         prepared: list[_Prepared] = []
@@ -195,7 +199,7 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
                 isolation = scan_workspace(ws, snapshot, oracle_hashes=oracle_hashes, prompt=prompt.encode("utf-8"),
                                            oracle_paths=source.data.get("oracle_path_checks", ()), argv=argv,
                                            env=variant_environment(env, ws), config_text=variant.get("config_text"),
-                                           plan_dir=source.data["plan_dir"])
+                                           plan_dir=source.data["plan_dir"], oracle_blocks=oracle_blocks)
                 if source.sha256 is not None:
                     frozen_files = variant.get("channel_files", {}).get(case.id)
                     if frozen_files is None or any(frozen_files.get(path) != digest for path, digest in

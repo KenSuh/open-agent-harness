@@ -1849,6 +1849,177 @@ class CorrectionC6Test(unittest.TestCase):
         self.assertIsNone(caught.exception.__cause__)
 
 
+class CorrectionC7Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_oracle_blocks_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        text = oracle.read_bytes().decode("utf-8")
+        oracle.write_bytes("\n".join(line + " \t" for line in text.split("\n")).encode("utf-8"))
+        shapes = (text + "\n", "# Notes\n\n" + text + "\nEnd of notes\n",
+                  "# Notes\n" + "\n".join(line + " \t" for line in text.split("\n")) + "\n")
+        encodings = (("utf-8", b""), ("utf-8", b"\xef\xbb\xbf"), ("utf-16-le", b""),
+                     ("utf-16-be", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff"))
+        for index, content in enumerate(shapes):
+            for encoding, bom in encodings:
+                with self.subTest(shape=index, encoding=encoding, bom=bool(bom)):
+                    out = self.root / f"blocks-{index}-{encoding}-{bool(bom)}.json"
+                    (case_dir(self.root) / "inputs" / "notes.md").write_bytes(
+                        bom + content.replace("\r\n", "\n").replace("\n", "\r\n").encode(encoding))
+                    with self.assertRaises(EvalError) as caught:
+                        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertNotIn(str(oracle.parent), str(caught.exception))
+                    self.assertFalse(out.exists())
+                    self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_oracle_blocks_refused_before_any_run_launch(self):
+        text = oracle_path(self.root).read_bytes().decode("utf-8")
+        for value in (text + "\n", "# Notes\n\n" + text + "\nEnd of notes\n"):
+            with self.subTest(heading=value.startswith("#")):
+                root, env = fixture_copy(self), Env(self)
+                configure_fixture(root, env.env)
+                out = root / "prereg.json"
+                oracle = oracle_path(root)
+                plan.preregister(plan.load_plan(root / "plan.toml"), [oracle], out)
+                with self.assertRaises(EvalError) as caught:
+                    runner.run_eval(plan.load_frozen(out), env.runs, env=dict(env.env, LANG=value),
+                                    timeout_seconds=60)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(str(oracle.parent), str(caught.exception))
+                self.assertEqual(env.launched(), [])
+                self.assertFalse(env.runs.exists())
+
+    def test_short_oracle_embedded_in_notes_is_allowed_but_whole_copy_refuses(self):
+        oracle = oracle_path(self.root)
+        raw = b'case="derived-index"\n[[defect]]\nid="D"\nkeywords=["x"]\n'
+        self.assertLess(len(raw), 64)
+        oracle.write_bytes(raw)
+        (case_dir(self.root) / "inputs" / "notes.md").write_bytes(b"# Notes\n" + raw + b"Other text\n")
+        env = Env(self)
+        run_fixture(self, self.root, env, frozen=True)
+        self.assertEqual(env.launched(), ["miss", "catch"])
+        ws = self.build()
+        (ws.inputs / "notes.md").write_bytes(raw)
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_oracle_hash_normalization_strips_trailing_whitespace_per_line(self):
+        normalized = b"first line\nsecond line\n"
+        digest = hashlib.sha256(normalized).hexdigest()
+        for encoding in ("utf-8", "utf-16", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                raw = "first line \t\r\nsecond line\t \r\n".encode(encoding)
+                self.assertIn(digest, workspace.content_hashes(raw))
+
+    def test_embedded_oracle_blocks_refused_in_retained_blobs_and_working_files(self):
+        source = self.source()
+        raw = oracle_path(self.root).read_bytes()
+        hashes, blocks = workspace.content_hashes(raw), workspace.oracle_block_checks(raw)
+        text = "Introduction: " + raw.decode("utf-8") + "\nOther text\n"
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            for channel in ("working-file", "git-blob"):
+                with self.subTest(encoding=encoding, channel=channel):
+                    ws = self.build(source)
+                    data = text.encode(encoding)
+                    if channel == "working-file":
+                        (ws.inputs / "notes.md").write_bytes(data)
+                    else:
+                        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                                       input=data, capture_output=True, check=True)
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.scan_workspace(ws, source, oracle_hashes=hashes, oracle_blocks=blocks)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertIn(channel, str(caught.exception))
+
+    def test_preregistration_keeps_only_block_fingerprints_and_legacy_run_refuses(self):
+        env = Env(self)
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        data = plan.load_frozen(out).data
+        checks = data["cases"][0].pop("oracle_block_checks")
+        self.assertTrue(checks)
+        for check in checks:
+            self.assertEqual(set(check), {"length", "rolling", "sha256"})
+            self.assertIsInstance(check["length"], int)
+            self.assertIsInstance(check["rolling"], int)
+            self.assertRegex(check["sha256"], r"^[0-9a-f]{64}$")
+        # Recreate the previous format with a valid sidecar, so run must request a fresh preregistration.
+        raw = json.dumps(data).encode("utf-8")
+        out.write_bytes(raw)
+        out.with_suffix(".json.sha256").write_text(hashlib.sha256(raw).hexdigest(), encoding="utf-8")
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(out), env.runs, env=env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+        self.assertIn("preregister again", str(caught.exception))
+        self.assertEqual(env.launched(), [])
+        self.assertFalse(env.runs.exists())
+
+    def test_repeated_rolling_collisions_refuse_with_bounded_verification_work(self):
+        ws = self.build()
+        # These base-257 digits encode 49 * 2**64: a real rolling collision with 64 NULs.
+        raw = b"\0" * 55 + bytes((47, 127, 76, 96, 78, 88, 85, 122, 49))
+        blocks = workspace.oracle_block_checks(raw)
+        self.assertTrue(any(block["length"] == 64 and block["rolling"] == 0 for block in blocks))
+        (ws.inputs / "notes.md").write_bytes(b"\0" * 4096)
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                             oracle_blocks=blocks)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+        self.assertIn("work limit", str(caught.exception))
+
+    def test_bomless_utf16_grader_path_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        text = "Read file://" + str(oracle.parent / "other-name") + "\n"
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                out = self.root / (encoding + ".json")
+                (case_dir(self.root) / "inputs" / "notes.md").write_bytes(text.encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(str(oracle.parent), str(caught.exception))
+                self.assertFalse(out.exists())
+                self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_bomless_utf16_grader_path_refused_in_files_and_retained_blobs(self):
+        source = self.source()
+        oracle = oracle_path(self.root)
+        text = "Read @" + str(oracle.parent / "other-name") + "\n"
+        for encoding in ("utf-16-le", "utf-16-be"):
+            for channel in ("working-file", "git-blob"):
+                with self.subTest(encoding=encoding, channel=channel):
+                    ws = self.build(source)
+                    raw = text.encode(encoding)
+                    if channel == "working-file":
+                        (ws.inputs / "notes.md").write_bytes(raw)
+                    else:
+                        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                                       input=raw, capture_output=True, check=True)
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.scan_workspace(ws, source, oracle_paths=workspace.oracle_path_checks([oracle]))
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertIn(channel, str(caught.exception))
+                    self.assertNotIn(str(oracle.parent), str(caught.exception))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows UTF-16 grader path case/separator folding")
+    def test_windows_bomless_utf16_grader_path_refused(self):
+        ws = self.build()
+        oracle = oracle_path(self.root)
+        text = "Read file://" + str(oracle.parent / "other-name").upper().replace("\\", "/")
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                (ws.inputs / "notes.md").write_bytes(text.encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(ws, oracle_paths=workspace.oracle_path_checks([oracle]))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+
 class FixtureTest(unittest.TestCase):
     def test_fixture_bundle_is_reproducible(self):
         spec = importlib.util.spec_from_file_location("make_snapshot", FIXTURE / "make_snapshot.py")
