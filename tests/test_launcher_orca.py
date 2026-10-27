@@ -198,6 +198,35 @@ class OrcaProject:
             self.host.kill()
             self.host.wait()
 
+    def start_blocked_host(self) -> pathlib.Path:
+        release = self.orca_state / "release"
+        self.start_host(FAKE_ORCA_RELEASE=str(release))
+        self.test.addCleanup(release.write_bytes, b"")
+        return release
+
+    @contextlib.contextmanager
+    def release_on_terminal_wait(self, release: pathlib.Path, *, finish_before_wait: bool = False):
+        """Signal once, after the follower reads the running record and enters its terminal wait."""
+        original = orca.Orca.json
+        released = False
+
+        def invoke(client, *args, **kwargs):
+            nonlocal released
+            if args[:2] == ("terminal", "wait") and not released:
+                self.test.assertFalse(release.exists())
+                self.test.assertFalse(self.record.exists())
+                release.write_bytes(b"")
+                released = True
+                if finish_before_wait:
+                    self.stop_host()  # Join the worker before making the real terminal-wait RPC.
+                    handle = args[args.index("--terminal") + 1]
+                    self.test.assertTrue((self.orca_state / "terminals" / f"{handle}.exit").exists())
+            return original(client, *args, **kwargs)
+
+        with mock.patch.object(orca.Orca, "json", new=invoke):
+            yield
+        self.test.assertTrue(released, "the follower must exercise terminal wait")
+
     def cli(self, *argv: str, env: dict | None = None, cwd: pathlib.Path | None = None) -> tuple[int, str, str]:
         self.orca_state.mkdir(parents=True, exist_ok=True)
         (self.orca_state / "controls.json").write_text(json.dumps(
@@ -343,8 +372,14 @@ class UnavailableTest(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_every_orca_invocation_gets_only_the_allowlisted_environment(self):
+        self.assert_allowlisted_environment(follower_after_completion=False)
+
+    def test_allowlisted_environment_when_follower_starts_after_completion(self):
+        self.assert_allowlisted_environment(follower_after_completion=True)
+
+    def assert_allowlisted_environment(self, *, follower_after_completion):
         project = OrcaProject(self)
-        project.start_host(FAKE_SLEEP="0.5")
+        release = project.start_blocked_host()
         secret = secrets.token_hex(32)
         additions = {name: secret for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ORCA_PAIRING_TOKEN",
                                                 "ORCA_ACCOUNT_ID", "UNRELATED", "NODE_OPTIONS", "PYTHONPATH")}
@@ -358,9 +393,27 @@ class UnavailableTest(unittest.TestCase):
             code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
                                          "--launcher", "orca", "--background", env=additions)
             self.assertEqual(code, 0, err)
-            code, out, err = project.cli("wait", started_run(out), "--timeout-seconds", "60", env=additions)
+            run_id = started_run(out)
+            launch_count = len(seen)
+            self.assertEqual(launch_count, 3)
+            if follower_after_completion:
+                self.assertFalse(project.record.exists())
+                release.write_bytes(b"")
+                project.stop_host()
+                self.assertEqual(find_run(project.state, run_id).read()["status"], "finished")
+                follow = contextlib.nullcontext()
+            else:
+                follow = project.release_on_terminal_wait(release)
+            with follow:
+                code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60", env=additions)
             self.assertEqual(code, 0, err)
-        self.assertGreaterEqual(len(seen), 6)
+        if follower_after_completion:
+            self.assertEqual(len(seen), launch_count, "a finished run needs no Orca follower invocations")
+        else:
+            self.assertGreaterEqual(len(seen) - launch_count, 3)
+            commands = [argv[:2] for argv in project.orca_calls()[launch_count:]]
+            for command in (["terminal", "wait"], ["terminal", "read"], ["terminal", "show"]):
+                self.assertIn(command, commands)
         for env in seen:
             self.assertTrue(set(env).isdisjoint(additions), set(env) & set(additions))
             self.assertNotIn(secret, env.values())
@@ -743,11 +796,17 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(record["argv"][record["argv"].index("--permission-mode") + 1], "plan")
 
     def test_concurrent_worker_starts_execute_exactly_once(self):
+        self.assert_workers_execute_once(finish_before_follower=False)
+
+    def test_concurrent_worker_finishes_before_the_other_claims(self):
+        self.assert_workers_execute_once(finish_before_follower=True)
+
+    def assert_workers_execute_once(self, *, finish_before_follower):
         project = OrcaProject(self)
         prepared = project.queued("claude", "initial")
         rendezvous = make_tmp_dir(self)
-        script = '''import argparse, os, pathlib, sys, time
-from oah import call_cli, runs
+        script = '''import argparse, contextlib, io, json, pathlib, sys, time
+from oah import call, call_cli, runs
 original = runs.Run.read
 first = True
 def read(self):
@@ -760,21 +819,47 @@ def read(self):
         while len(list(pathlib.Path(sys.argv[2]).glob("*.ready"))) < 2:
             if time.monotonic() > deadline: raise RuntimeError("rendezvous timed out")
             time.sleep(0.01)
+        if sys.argv[4] == "True" and sys.argv[3] == "1":
+            print("captured", file=sys.__stdout__, flush=True)
+            if sys.stdin.read(1) != "x": raise RuntimeError("missing follower release")
     return data
 runs.Run.read = read
+execute = call.execute
+def gated_execute(*args, **kwargs):
+    print("claimed", file=sys.__stdout__, flush=True)
+    if sys.stdin.read(1) != "x": raise RuntimeError("missing engine release")
+    return execute(*args, **kwargs)
+call.execute = gated_execute
 parser = argparse.ArgumentParser()
 call_cli.register(parser.add_subparsers(dest="command"))
-raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--stage", "initial"])))
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    code = call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--stage", "initial"]))
+print(json.dumps({"code": code, "out": out.getvalue(), "err": err.getvalue()}), flush=True)
+raise SystemExit(code)
 '''
         children = []
         for index in range(2):
-            env = dict(project.env, PYTHONPATH=SRC, FAKE_SLEEP="0.5",
+            env = dict(project.env, PYTHONPATH=SRC,
                        FAKE_RECORD=str(rendezvous / f"engine-{index}.json"))
-            child = subprocess.Popen([sys.executable, "-c", script, prepared.run_id, str(rendezvous), str(index)],
-                                     cwd=project.repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            child = subprocess.Popen([sys.executable, "-c", script, prepared.run_id, str(rendezvous), str(index),
+                                      str(finish_before_follower)], cwd=project.repo, env=env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             children.append(child)
             self.addCleanup(lambda child=child: child.kill() if child.poll() is None else None)
-        results = [child.communicate(timeout=30) for child in children]
+        signals = [child.stdout.readline().decode("utf-8").strip() for child in children]
+        self.assertEqual(signals.count("claimed"), 1, signals)
+        self.assertEqual(prepared.run.read()["status"], "running")
+        self.assertEqual(list(rendezvous.glob("engine-*.json")), [])
+        winner = signals.index("claimed")
+        follower = 1 - winner
+        if finish_before_follower:
+            self.assertEqual(signals[follower], "captured")
+        else:
+            self.assertEqual(json.loads(signals[follower])["code"], 1)
+        results = [children[winner].communicate(b"x", timeout=30)]
+        self.assertEqual(prepared.run.read()["status"], "finished")
+        results.append(children[follower].communicate(b"x" if finish_before_follower else None, timeout=30))
         self.assertEqual(sorted(child.returncode for child in children), [0, 1], results)
         self.assertEqual(len(list(rendezvous.glob("engine-*.json"))), 1)
         self.assertEqual(prepared.run.read()["status"], "finished")
@@ -1322,9 +1407,7 @@ with StateLock(pathlib.Path(sys.argv[1])):
 
     def test_wait_returns_75_while_running_then_the_final_record(self):
         project = OrcaProject(self)
-        release = project.orca_state / "release"
-        project.start_host(FAKE_ORCA_RELEASE=str(release))
-        self.addCleanup(release.write_bytes, b"")
+        release = project.start_blocked_host()
         code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low", "--launcher", "orca",
                                      "--background")
         self.assertEqual(code, 0, err)
@@ -1336,8 +1419,14 @@ with StateLock(pathlib.Path(sys.argv[1])):
         self.assertTrue(out.startswith(f"OAH_RUN_RUNNING run={run_id}"), out)
         self.assertIn(f"oah wait {run_id}", err)
         self.assertFalse(project.record.exists(), "the terminal command must stay blocked until release")
-        release.write_bytes(b"")
-        code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        original_wait = call_cli._wait
+
+        def wait(*args, **kwargs):
+            self.assertFalse(release.exists(), "release must follow the follower's running-state read")
+            return original_wait(*args, **kwargs)
+
+        with mock.patch.object(call_cli, "_wait", side_effect=wait), project.release_on_terminal_wait(release):
+            code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
         log = find_run(project.state, run_id).file_path(orca.TERMINAL_LOG)
@@ -1348,6 +1437,42 @@ with StateLock(pathlib.Path(sys.argv[1])):
         reads = [argv for argv in project.orca_calls() if argv[:2] == ["terminal", "read"]]
         self.assertTrue(reads)
         self.assertTrue(all(int(argv[argv.index("--limit") + 1]) <= orca.READ_LIMIT for argv in reads))
+
+    def test_wait_collects_output_when_completion_precedes_terminal_wait(self):
+        project = OrcaProject(self)
+        release = project.start_blocked_host()
+        code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
+                                     "--launcher", "orca", "--background")
+        self.assertEqual(code, 0, err)
+        run_id = started_run(out)
+        run = find_run(project.state, run_id)
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists())
+        with project.release_on_terminal_wait(release, finish_before_wait=True):
+            code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
+        self.assertEqual(run.read()["status"], "finished")
+        self.assertIn(f"oah worker {run_id}", run.file_path(orca.TERMINAL_LOG).read_text(encoding="utf-8"))
+
+    def test_wait_returns_finished_record_when_completion_precedes_follower(self):
+        project = OrcaProject(self)
+        release = project.start_blocked_host()
+        code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
+                                     "--launcher", "orca", "--background")
+        self.assertEqual(code, 0, err)
+        run_id = started_run(out)
+        self.assertFalse(project.record.exists())
+        release.write_bytes(b"")
+        project.stop_host()
+        run = find_run(project.state, run_id)
+        self.assertEqual(run.read()["status"], "finished")
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists())
+        before = project.orca_calls()
+        code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
+        self.assertEqual(project.orca_calls(), before)
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists(), "a finished record needs no log collection")
 
     def test_wait_never_asks_orca_for_more_than_the_bound(self):
         state = make_tmp_dir(self)
