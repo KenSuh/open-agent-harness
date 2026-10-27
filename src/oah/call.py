@@ -10,7 +10,8 @@
 - the judged model and effort (`judge_engine`, amendment 6): unless the tier is pinned (a tier model,
   `--tier` or the packet's `## Plan` tier), an enabled re-ranker with a key picks one pair from
   `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
-  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`;
+  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
+  (with the candidate `mode`, the allowed models left out and why, and why the model is not judged);
 - the brief (`briefs.build`) and the argv; a review is always read-only.
 `execute` refuses a Codex header model other than the launched one (`OAH_MODEL_MISMATCH`), like the
 effort check, and holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
@@ -279,7 +280,8 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     engine, tier = resolution.engine, resolution.tier
     deterministic = models.Pair(resolution.model, resolution.launch_effort)
     choice = {"deterministic": dict(deterministic.to_json(), source=resolution.model_source), "floor": None,
-              "candidates": [], "proposal": None, "provider": None, "requested": deterministic.to_json()}
+              "mode": None, "note": None, "candidates": [], "excluded": {}, "proposal": None, "provider": None,
+              "requested": deterministic.to_json()}
 
     def record(status: str, chosen: Resolution = resolution) -> tuple[Resolution, dict]:
         choice["requested"] = {"model": chosen.model, "effort": chosen.launch_effort}
@@ -302,6 +304,7 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         allowed_models=section["allowed_models"], effort_caps=section["effort_caps"])
     choice["floor"] = {"tier": floor_tier, "model": floor_model, "effort": floor_effort.launch}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
+    choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))
     try:
         rerank = importlib.import_module("oah.rerank")
         inputs = _CORRECTION_INPUTS.get()

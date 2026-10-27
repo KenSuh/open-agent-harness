@@ -103,6 +103,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertIn(f"[engines.{engine}.effort_caps]", text)
         self.assertIn("allowed_models = []", text)
         self.assertIn("never below", text)
+        self.assertIn("equal peers", text)
         self.assertEqual(text, init.render_config(branch="main", how="the current branch", jev=True,
                                                   skill_updates=True, today=TODAY))
 

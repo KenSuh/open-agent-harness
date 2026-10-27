@@ -52,8 +52,10 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
                                              effort_caps=section["effort_caps"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
-                                 "floor": {"tier": tier, **pair.to_json()},
-                                 "candidates": [[item.model, item.effort] for item in candidates.pairs]}
+                                 "floor": {"tier": tier, **pair.to_json()}, "mode": candidates.mode,
+                                 "note": candidates.note,
+                                 "candidates": [[item.model, item.effort] for item in candidates.pairs],
+                                 "excluded": dict(candidates.excluded)}
     return report
 
 
@@ -90,7 +92,7 @@ def run(args: argparse.Namespace) -> int:
         names = ", ".join(model["name"] for model in report["models"]) or "none reported"
         print(f"{engine}: CLI {report['cli_version']} · checked {report['checked_at']} · models: {names}")
         caps = ", ".join(f"{model}={effort}" for model, effort in report["effort_caps"].items()) or "none"
-        print(f"  judge: allowed {', '.join(report['allowed_models']) or 'every listed model'} · caps {caps}")
+        print(f"  judge: allowed {', '.join(report['allowed_models']) or 'none (with quality_order: every ranked model)'} · caps {caps}")
         for tier, row in report["tiers"].items():
             if "error" in row:
                 print(f"  {tier:6} {row['error']}")
@@ -98,4 +100,9 @@ def run(args: argparse.Namespace) -> int:
                 print(f"  {tier:6} {row['model']} ({row['model_source']}) effort {row['effort']}"
                       f"{'' if row['effort'] == row['requested_effort'] else ' from ' + row['requested_effort']}")
                 print(f"         candidates at floor {tier}: {_candidates_text(row['candidates'])}")
+                if row["excluded"]:
+                    left = " · ".join(f"{model} ({rule})" for model, rule in row["excluded"].items())
+                    print(f"         not candidates at floor {tier}: {left}")
+                if row["note"]:
+                    print(f"         {row['note']}")
     return EXIT_OK

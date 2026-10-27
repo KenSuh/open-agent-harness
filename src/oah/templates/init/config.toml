@@ -12,8 +12,10 @@ command = ["claude"]
 # Strongest first. These are Claude Code's own aliases, so new models arrive without edits here.
 quality_order = ["opus", "sonnet", "haiku"]
 # When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the
-# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models
-# to allow only those.
+# CLI lists, never below the floor the task kind needs. With quality_order, empty allows every ranked
+# model; name models to allow only those. Without quality_order, the models named here are equal peers
+# the re-ranker may choose among (no order is assumed between them); empty keeps the tier's model and
+# lets it choose only the effort.
 allowed_models = []
 
 # The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".
@@ -33,8 +35,10 @@ command = ["codex"]
 # Empty: the model your Codex configuration uses, or a newer one Codex marks as its default.
 quality_order = []
 # When the re-ranker ([rerank], Jev) is on, it picks each call's model and effort from the models the
-# CLI lists, never below the floor the task kind needs. Empty allows every listed model; name models
-# to allow only those.
+# CLI lists, never below the floor the task kind needs. With quality_order, empty allows every ranked
+# model; name models to allow only those. Without quality_order, the models named here are equal peers
+# the re-ranker may choose among (no order is assumed between them); empty keeps the tier's model and
+# lets it choose only the effort.
 allowed_models = []
 
 # The highest effort the re-ranker may pick for a model, one line each, such as "<model>" = "high".

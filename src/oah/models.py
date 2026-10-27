@@ -21,9 +21,13 @@ Candidates (amendment 6)
     models, intersected with `allowed_models` (empty = all), each with its supported ordinary efforts at
     most the model's `effort_caps` entry. With a ranking (`quality_order` names listed models, including
     the floor tier's model), no model weaker than the floor tier's deterministic model; always, no
-    effort below the floor tier's effort. Without a ranking the model stays the deterministic one and
-    only the effort is judged. `CandidateSet.reject_reason` is the one rule: the candidate list is every
-    listed pair it accepts, and a judged answer is used only when it accepts that answer too.
+    effort below the floor tier's effort. Without a ranking (Revision 2), the listed models named in
+    `allowed_models` are unranked peers in the user's order: the judge may pick any of them, no rank is
+    inferred between them, and the floor bounds only the effort; a peer whose efforts cannot meet the
+    floor or its cap is left out and `excluded` says why. Without a ranking and without
+    `allowed_models` the model stays the deterministic one, only the effort is judged, and `note` says
+    why. `CandidateSet.reject_reason` is the one rule: the candidate list is every listed pair it
+    accepts, and a judged answer is used only when it accepts that answer too.
     `check_caps` warns about capped or allowed models the catalog does not list, and refuses when a
     fresh catalog lists none of the capped models.
 
@@ -281,12 +285,19 @@ class CandidateSet:
     deterministic: Pair
     floor_tier: str
     floor: Pair
-    ranked: bool  # True: quality_order ranks the models, so the model is judged as well as the effort
+    # "ranked": quality_order ranks the models; "peers": the allowed models, unranked; "deterministic": effort only.
+    mode: str
     order: tuple[str, ...]  # the ranked listed models, strongest first (empty without a ranking)
     allowed: tuple[str, ...]
     caps: tuple[tuple[str, str], ...]
     entry: Entry | None
     pairs: tuple[Pair, ...] = ()
+    excluded: tuple[tuple[str, str], ...] = ()  # allowed models with no candidate pair, and the rule why
+    note: str | None = None  # why the model is not judged ("model choice off: ...")
+
+    @property
+    def ranked(self) -> bool:
+        return self.mode == "ranked"
 
     def reject_reason(self, model: str, effort: str) -> str | None:
         """None when (model, effort) is a candidate, else the rule it breaks."""
@@ -302,7 +313,7 @@ class CandidateSet:
                 return "unranked-model"
             if self.order.index(model) > self.order.index(self.floor.model):
                 return "below-floor"
-        elif model != self.deterministic.model:
+        elif self.mode == "deterministic" and model != self.deterministic.model:
             return "outside-candidates"
         floor_rank = rank(self.floor.effort)
         if floor_rank is None:
@@ -318,8 +329,8 @@ class CandidateSet:
     def to_json(self) -> dict:
         return {"deterministic": self.deterministic.to_json(),
                 "floor": {"tier": self.floor_tier, **self.floor.to_json()}, "ranked": self.ranked,
-                "allowed_models": list(self.allowed), "caps": dict(self.caps),
-                "candidates": [[pair.model, pair.effort] for pair in self.pairs]}
+                "mode": self.mode, "note": self.note, "allowed_models": list(self.allowed), "caps": dict(self.caps),
+                "candidates": [[pair.model, pair.effort] for pair in self.pairs], "excluded": dict(self.excluded)}
 
 
 def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, floor_tier: str, floor: Pair,
@@ -329,13 +340,29 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, f
     listed = [model.name for model in entry.models if model.listed] if entry else []
     order = tuple(name for name in quality_order if name in listed)
     ranked = bool(order) and floor.model in order
-    rule = CandidateSet(engine, deterministic, floor_tier, floor, ranked, order if ranked else (),
-                        tuple(allowed_models), tuple(sorted(effort_caps.items())), entry)
-    names = list(order) if ranked else [deterministic.model]
-    found = [Pair(name, effort) for name in names if entry is not None and entry.model(name) is not None
-             for effort in entry.model(name).efforts if rule.reject_reason(name, effort) is None]
+    allowed = tuple(dict.fromkeys(allowed_models))
+    mode = "ranked" if ranked else "peers" if allowed else "deterministic"
+    note = None
+    if mode == "deterministic":
+        note = (f"model choice off: quality_order does not rank {floor.model} and no allowed_models" if order
+                else "model choice off: no ranking and no allowed_models")
+    rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
+                        tuple(sorted(effort_caps.items())), entry, note=note)
+    names = list(order) if ranked else list(allowed) if allowed else [deterministic.model]
+    found: list[Pair] = []
+    excluded: list[tuple[str, str]] = []
+    for name in names:
+        info = entry.model(name) if entry is not None else None
+        efforts = info.efforts if info is not None else ()
+        reasons = [rule.reject_reason(name, effort) for effort in efforts]
+        found += [Pair(name, effort) for effort, reason in zip(efforts, reasons) if reason is None]
+        if mode == "peers" and None not in reasons:
+            # A cap is the reason only when some effort met the floor; otherwise the floor or the listing is.
+            why = next((r for r in ("above-cap", "below-floor", "unsupported-effort") if r in reasons),
+                       "outside-candidates")
+            excluded.append((name, why if info is not None and info.listed else "outside-candidates"))
     found.sort(key=lambda pair: (names.index(pair.model), rank(pair.effort)))
-    return replace(rule, pairs=tuple(found))
+    return replace(rule, pairs=tuple(found), excluded=tuple(excluded))
 
 
 def check_caps(engine: str, caps: Mapping[str, str], allowed: Sequence[str], entry: Entry | None, *,

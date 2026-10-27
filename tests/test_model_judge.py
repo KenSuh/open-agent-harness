@@ -144,6 +144,7 @@ def write_catalog(home) -> None:
         {"slug": "m-mid", "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high")]},
         {"slug": "m-light", "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium")]},
         {"slug": "m-hidden", "visibility": "hide", "supported_reasoning_levels": [{"effort": e} for e in ALL]},
+        {"slug": "m-extra", "supported_reasoning_levels": [{"effort": e} for e in ("medium", "high")]},
     ]}), encoding="utf-8")
 
 
@@ -273,6 +274,40 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["model_judge"], status)
                 self.assertEqual(data["model_choice"]["deterministic"]["source"], "cli_default")
                 self.assertEqual({pair[0] for pair in data["model_choice"]["candidates"]}, {"m-strong"})
+                self.assertEqual((data["model_choice"]["mode"], data["model_choice"]["note"]),
+                                 ("deterministic", "model choice off: no ranking and no allowed_models"))
+                self.assertEqual(launched(project), expected)
+
+    def test_unranked_allowed_models_are_peers(self):
+        # AC8 (Revision 2): three unranked peers and one cap give a multi-model candidate set. A review call
+        # is tier medium with floor medium; without a ranking the deterministic choice is the CLI default.
+        peers = ('allowed_models = ["m-strong", "m-mid", "m-light"]\n'
+                 '[engines.codex.effort_caps]\n"m-mid" = "medium"\n')
+        rows = [
+            (("m-light", "medium"), "used", ("m-light", "medium")),
+            (("m-mid", "medium"), "used", ("m-mid", "medium")),
+            (("m-extra", "high"), "rejected(not-allowed)", ("m-strong", "medium")),
+            (("m-hidden", "high"), "rejected(outside-candidates)", ("m-strong", "medium")),
+            (("m-light", "low"), "rejected(below-floor)", ("m-strong", "medium")),
+            (("m-mid", "high"), "rejected(above-cap)", ("m-strong", "medium")),
+        ]
+        for answer, status, expected in rows:
+            with self.subTest(answer=answer):
+                project = judged_project(self, ranked=False, extra=peers)
+                provider = FakeJudge(answer)
+                with judge(project, provider):
+                    data = project.run(stage="review")
+                self.assertEqual(data["status"], "finished")
+                self.assertEqual(data["model_judge"], status)
+                choice = data["model_choice"]
+                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "medium",
+                                                           "source": "cli_default"})
+                self.assertEqual((choice["mode"], choice["note"], choice["excluded"]), ("peers", None, {}))
+                self.assertEqual(choice["candidates"], [["m-strong", e] for e in ("medium", "high", "xhigh", "max")]
+                                 + [["m-mid", "medium"], ["m-light", "medium"]])
+                self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in choice["candidates"]})
+                self.assertEqual((data["resolved_model"], data["launch_effort"]), expected)
+                self.assertEqual(data["model_source"], "judge" if status == "used" else "cli_default")
                 self.assertEqual(launched(project), expected)
 
     def test_unknown_cap_models_warn_or_refuse(self):
