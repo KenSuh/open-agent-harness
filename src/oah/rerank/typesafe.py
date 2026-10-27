@@ -10,7 +10,9 @@ Data sent, and nothing else:
 - re-rank: the task kind, the caller's query, and each candidate's name and description (cut to
   DESCRIPTION_LIMIT characters), with one yes/no (Noul) question per candidate in one request;
 - difficulty advice: the four difficulty axes and the task summary (cut to TASK_LIMIT characters),
-  with one Choice question over the tiers.
+  with one Choice question over the tiers;
+- model judgement: the stage, the tier, the four axes and the candidate (model, effort) pairs, with
+  one Choice question over the candidates. No task text, code or paths.
 
 The key goes only into the Authorization header. Errors carry a short code, never response text.
 """
@@ -190,6 +192,52 @@ def _parse_advice_response(body: object) -> tuple[tuple[str, float | None] | Non
         return (answer["choice"], _number(answer.get("confidence"))), None
     finally:
         del body, answers, answer
+
+
+def build_model_request(model: str, request: Mapping[str, object], candidates: Sequence[tuple[str, str]]) -> dict:
+    axes = request.get("axes") if isinstance(request.get("axes"), Mapping) else {}
+    state = {
+        "stage": request.get("stage"),
+        "tier": request.get("tier"),
+        "axes": {name: axes[name] for name in ("kind", "intensity", "reasoning", "risk") if name in axes},
+        "candidates": [{"model": name, "effort": effort} for name, effort in candidates],
+    }
+    questions = {
+        "pair": {
+            "type": "choice",
+            "instructions": ("Which candidate model and reasoning effort fits a `stage` call at difficulty `tier` "
+                             "with these `axes`? Match capability to difficulty: lighter for routine work, "
+                             "stronger for hard or risky work."),
+            "criteria": {f"c{index}": f"`candidates[{index}]`: model {name} at effort {effort}."
+                         for index, (name, effort) in enumerate(candidates)},
+        }
+    }
+    return {"model": model, "state": state, "questions": questions}
+
+
+def parse_model_response(body: object, count: int) -> int:
+    result = code = None
+    try:
+        try:
+            result, code = _outcome(_parse_model_response, body, count)
+        finally:
+            del body, count
+        return _finish(result, code)
+    finally:
+        del result, code
+
+
+def _parse_model_response(body: object, count: int) -> tuple[int | None, str | None]:
+    answers = answer = None
+    try:
+        answers = _answers(body)
+        answer = answers.get("pair") if answers is not None else None
+        keys = [f"c{index}" for index in range(count)]
+        if not isinstance(answer, Mapping) or answer.get("type") != "choice" or answer.get("choice") not in keys:
+            return None, "bad-response"
+        return keys.index(answer["choice"]), None
+    finally:
+        del body, count, answers, answer
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -395,6 +443,34 @@ class TypeSafeProvider:
             return _parse_advice_response(body)
         finally:
             del self, axes, task, key, config, model, body
+
+    def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
+                     config: Mapping) -> tuple[str, str]:
+        result = code = None
+        try:
+            try:
+                result, code = _outcome(self._choose_model, request, candidates, key=key, config=config)
+            finally:
+                del self, request, candidates, key, config
+            return _finish(result, code)
+        finally:
+            del result, code
+
+    def _choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
+                      config: Mapping) -> tuple[tuple[str, str] | None, str | None]:
+        model = body = index = None
+        try:
+            pairs = tuple(candidates)
+            model = str(self._settings(config).get("model") or DEFAULT_MODEL)
+            body, code = self._post_result(build_model_request(model, request, pairs), key, config)
+            if code is not None:
+                return None, code
+            index, code = _parse_model_response(body, len(pairs))
+            if code is not None:
+                return None, code
+            return tuple(pairs[index]), None
+        finally:
+            del self, request, candidates, key, config, model, body, index
 
     def __repr__(self) -> str:
         return "TypeSafeProvider()"

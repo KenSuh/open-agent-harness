@@ -625,6 +625,60 @@ class TypeSafeHttpTest(unittest.TestCase):
         self.assertEqual(len(body["state"]["task"]), typesafe.TASK_LIMIT)
 
 
+
+JUDGE_REQUEST = {"stage": "review", "tier": "high", "task": "never sent",
+                 "axes": {"kind": "review", "intensity": "low", "reasoning": "high", "risk": "normal",
+                          "tier": "high"}}
+JUDGE_PAIRS = [("m-strong", "high"), ("m-strong", "max"), ("m-mid", "high")]
+
+
+def choice_answer(choice):
+    def respond(path, body):
+        return 200, {"model": "jev-test", "usage": {"input_tokens": 1, "output_tokens": 1},
+                     "answers": {"pair": {"type": "choice", "choice": choice, "confidence": 0.7}}}, 0, {}
+    return respond
+
+
+class TypeSafeModelTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.key = fake_key()
+        self.env = {"TYPESAFE_API_KEY": self.key}
+
+    def judge(self, server: FakeServer, **overrides) -> rerank.ModelJudgement:
+        return rerank.judge_model(JUDGE_REQUEST, JUDGE_PAIRS, config=typesafe_config(server.url(), **overrides),
+                                  env=self.env, keychain=NoKeychain())
+
+    def test_request_carries_only_axes_tier_and_candidates(self) -> None:
+        server = FakeServer(self, choice_answer("c0"))
+        self.judge(server)
+        body = server.requests[0]["body"]
+        self.assertEqual(sorted(body["state"]), ["axes", "candidates", "stage", "tier"])
+        self.assertEqual(body["state"]["axes"], {"kind": "review", "intensity": "low", "reasoning": "high",
+                                                 "risk": "normal"})
+        self.assertEqual((body["state"]["stage"], body["state"]["tier"]), ("review", "high"))
+        self.assertEqual(body["state"]["candidates"], [{"model": m, "effort": e} for m, e in JUDGE_PAIRS])
+        question = body["questions"]["pair"]
+        self.assertEqual(question["type"], "choice")
+        self.assertEqual(sorted(question["criteria"]), ["c0", "c1", "c2"])
+        self.assertNotIn("never sent", json.dumps(body))
+        self.assertEqual(server.requests[0]["headers"]["Authorization"], f"Bearer {self.key}")
+
+    def test_answer_maps_back_to_the_pair(self) -> None:
+        judged = self.judge(FakeServer(self, choice_answer("c2")))
+        self.assertEqual((judged.status, judged.proposal, judged.provider), ("used", ("m-mid", "high"), "typesafe"))
+
+    def test_unknown_choice_is_bad_response(self) -> None:
+        for answer in ("c9", "m-mid", None):
+            with self.subTest(answer=answer):
+                judged = self.judge(FakeServer(self, choice_answer(answer)))
+                self.assertEqual((judged.status, judged.proposal), ("unused(error:bad-response)", None))
+
+    def test_timeout_is_unused(self) -> None:
+        def slow(path, body):
+            return 200, {"answers": {}}, 1.0, {}
+        judged = self.judge(FakeServer(self, slow), timeout_seconds=0.2)
+        self.assertEqual((judged.status, judged.proposal), ("unused(error:timeout)", None))
+
 class KeyLeakTest(unittest.TestCase):
     def assert_private_values_absent(self, values, key: str, response_text: str) -> None:
         pending = list(values)
