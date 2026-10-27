@@ -146,7 +146,8 @@ def _read(path: str) -> str:
 
 
 def _summary(data: dict) -> str:
-    fields = ("status", "engine", "stage", "tier", "tier_source", "resolved_model", "launch_effort", "header_check")
+    fields = ("status", "engine", "stage", "tier", "tier_source", "resolved_model", "launch_effort", "model_judge",
+              "header_check")
     return f"run={data.get('run_id')} " + " ".join(f"{name}={data.get(name)}" for name in fields)
 
 

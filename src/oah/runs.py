@@ -37,11 +37,12 @@ RUN_ID_RE = re.compile(r"r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 TERMINAL = ("finished", "failed", "timed_out", "refused", "lost")
 _PROGRESS = {status: n for n, status in enumerate(("created", "prepared", "queued", "running"))}
 UNVERIFIED_FIELDS = ("cli_version", "resolved_model", "requested_effort", "launch_effort", "header_effort",
-                     "header_check", "resolved_inference_effort", "normalization_basis", "detached")
+                     "header_check", "resolved_inference_effort", "normalization_basis", "detached", "header_model")
 RESULT_FIELDS = (
     "run_id", "task", "engine", "stage", "status", "created_at", "started_at", "finished_at", "duration_s",
     "exit_code", "timed_out", "pid", "command", "cwd", "read_only", "cli_path", "cli_version",
-    "requested_model", "resolved_model", "model_source", "observed_models",
+    "requested_model", "resolved_model", "model_source", "observed_models", "model_judge", "model_choice",
+    "header_model",
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
     "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
@@ -58,6 +59,12 @@ _CORRECTION_ENUMS = frozenset({
     "adversarial-review", "migration", "security", "high-risk-review",
     "OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED", "OAH_FIX_WARNING",
     "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
+    # The model judge's fixed statuses (amendment 6); error statuses and model names stay hashed.
+    "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
+    "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
+    "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
+    *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
+                                        "below-floor", "above-cap")),
 })
 _CORRECTION_FORMS = re.compile(
     r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"

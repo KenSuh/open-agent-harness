@@ -7,8 +7,13 @@
   rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given). The re-ranker's
   advisory judgement is recorded next to it and never changes the tier;
 - the model through the catalog (`models.map_tier`) and the launch effort through the adapter;
+- the judged model and effort (`judge_engine`, amendment 6): unless the tier is pinned (a tier model,
+  `--tier` or the packet's `## Plan` tier), an enabled re-ranker with a key picks one pair from
+  `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
+  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`;
 - the brief (`briefs.build`) and the argv; a review is always read-only.
-`execute` holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
+`execute` refuses a Codex header model other than the launched one (`OAH_MODEL_MISMATCH`), like the
+effort check, and holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
 (prompt on stdin, the process tree killed on timeout), recording the exit code, logs, header check and
 inference normalization. It waits in `POLL_SECONDS` slices, so Ctrl-C is handled while the worker runs on
 every OS; an interruption stops the worker's process tree and records the run as failed
@@ -65,6 +70,7 @@ _CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
+MODEL_MISMATCH = "OAH_MODEL_MISMATCH"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
 ENGINE_DEFAULTS = {
@@ -213,19 +219,15 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     return base, freshness
 
 
-def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
-                   env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
-                   checked: tuple[list[str], models.Freshness] | None = None) -> Resolution:
-    """Model and effort for one engine and tier; the change log records anything that differs from last time."""
+def _effective(engine: str, root: pathlib.Path, env: Mapping[str, str]) -> str | None:
+    return codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
+
+
+def _deterministic(engine: str, tier: str, settings: Settings, entry: models.Entry | None,
+                   effective: str | None):
+    """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
     section = settings.engines[engine]
     tier_settings = section["tiers"][tier]
-    base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
-    catalog = _catalog(state_dir)
-    entry = freshness.entry
-    effective = codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
-    check = _CORRECTION_INPUT_CHECK.get()
-    if check is not None:
-        check((dataclasses.asdict(freshness), effective))
     model, source = models.map_tier(engine, tier, pin=tier_settings["model"], quality_order=section["quality_order"],
                                     entry=entry, effective=effective)
     info = entry.model(model) if entry else None
@@ -235,6 +237,26 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
         effort = codex.resolve_effort(model, tier_settings["effort"], cache=cache)
     else:
         effort = claude.resolve_effort(tier_settings["effort"], efforts=levels, model=model)
+    return model, source, effort
+
+
+def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+                   env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
+                   checked: tuple[list[str], models.Freshness] | None = None) -> Resolution:
+    """Model and effort for one engine and tier; the change log records anything that differs from last time."""
+    section = settings.engines[engine]
+    tier_settings = section["tiers"][tier]
+    base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
+    catalog = _catalog(state_dir)
+    entry = freshness.entry
+    effective = _effective(engine, root, env)
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is not None:
+        check((dataclasses.asdict(freshness), effective))
+    fresh = bool(entry.models) and entry.checked_at is not None and not any(
+        warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
+    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh)
+    model, source, effort = _deterministic(engine, tier, settings, entry, effective)
     why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
@@ -243,8 +265,66 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
     return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.launch_version,
                       requested_model=tier_settings["model"], model=model, model_source=source,
                       requested_effort=effort.requested, launch_effort=effort.launch,
-                      timeout_s=float(tier_settings["timeout_min"]) * 60, warnings=freshness.warnings,
-                      changes=tuple(changes))
+                      timeout_s=float(tier_settings["timeout_min"]) * 60,
+                      warnings=(*freshness.warnings, *cap_warnings), changes=tuple(changes))
+
+
+def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
+                 entry: models.Entry | None, root: pathlib.Path, env: Mapping[str, str], brief_disabled: bool = False,
+                 keychain=None) -> tuple[Resolution, dict]:
+    """The call's model and effort after the re-ranker's judgement, and the `model_judge`/`model_choice` record.
+
+    The deterministic resolution is kept unless the judged pair passes `CandidateSet.reject_reason`.
+    A plugin failure never blocks a launch: it is recorded as `unused(error: <type>)`."""
+    engine, tier = resolution.engine, resolution.tier
+    deterministic = models.Pair(resolution.model, resolution.launch_effort)
+    choice = {"deterministic": dict(deterministic.to_json(), source=resolution.model_source), "floor": None,
+              "candidates": [], "proposal": None, "provider": None, "requested": deterministic.to_json()}
+
+    def record(status: str, chosen: Resolution = resolution) -> tuple[Resolution, dict]:
+        choice["requested"] = {"model": chosen.model, "effort": chosen.launch_effort}
+        check = _CORRECTION_INPUT_CHECK.get()
+        if check is not None:
+            check(choice)
+        return chosen, {"model_judge": status, "model_choice": choice}
+
+    if pinned:
+        return record("unused(pinned)")
+    floor_tier = routing.floor_tier(axes.kind)
+    section = settings.engines[engine]
+    try:
+        floor_model, _, floor_effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
+    except EngineError:
+        return record("unused(floor-unresolved)")
+    candidates = models.build_candidates(
+        engine, entry=entry, deterministic=deterministic, floor_tier=floor_tier,
+        floor=models.Pair(floor_model, floor_effort.launch), quality_order=section["quality_order"],
+        allowed_models=section["allowed_models"], effort_caps=section["effort_caps"])
+    choice["floor"] = {"tier": floor_tier, "model": floor_model, "effort": floor_effort.launch}
+    choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
+    try:
+        rerank = importlib.import_module("oah.rerank")
+        inputs = _CORRECTION_INPUTS.get()
+        source = inputs.config if inputs is not None else None
+        if source is None:
+            from oah.config import load_config
+
+            source = load_config(root)
+        judged = rerank.judge_model({"stage": stage, "tier": tier, "axes": axes.to_json()},
+                                    [(pair.model, pair.effort) for pair in candidates.pairs],
+                                    config=source.section("rerank", rerank.DEFAULTS), brief_disabled=brief_disabled,
+                                    env=env, keychain=keychain)
+    except Exception as exc:  # a plugin failure must never block a launch
+        return record(f"unused(error: {type(exc).__name__})")
+    choice["provider"] = judged.provider
+    if judged.status != "used" or judged.proposal is None:
+        return record(judged.status)
+    model, effort = judged.proposal
+    choice["proposal"] = {"model": model, "effort": effort}
+    rule = candidates.reject_reason(model, effort)
+    if rule is not None:
+        return record(f"rejected({rule})")
+    return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -835,12 +915,20 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
                               state_dir=state_dir, env=env, keychain=keychain,
                               brief_disabled=disabled, now=now)
-    resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
-                                refresh=request.refresh_models, now=now)
+    checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
+                            now=now)
+    resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env, now=now,
+                                checked=checked)
     warnings.extend(resolution.warnings)
+    pinned = (bool(request.tier) or tier_source == "packet"
+              or bool(settings.engines[request.engine]["tiers"][tier]["model"]))
+    resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
+                                     entry=checked[1].entry, root=root, env=env, brief_disabled=disabled,
+                                     keychain=keychain)
     fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
                   has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
-                  reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder)
+                  reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder,
+                  judge=judge)
     plan = None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
@@ -892,7 +980,8 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                     state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
-                    warnings: list[str], selection: tuple | None = None, checked_lease=None) -> _CallPlan:
+                    warnings: list[str], selection: tuple | None = None, checked_lease=None,
+                    judge: dict | None = None) -> _CallPlan:
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease)
     read_only = request.stage == "review"
@@ -921,7 +1010,7 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                model_source=resolution.model_source, requested_effort=resolution.requested_effort,
                launch_effort=resolution.launch_effort,
                axes=axes.to_json() if axes else None, tier=tier, tier_source=tier_source, tier_reasons=reasons,
-               advisory=advisory, override_stage=request.override_stage, warnings=warnings)
+               advisory=advisory, override_stage=request.override_stage, warnings=warnings, **(judge or {}))
     if _CORRECTION_INPUT_CHECK.get() is not None:
         result_fields = runs._correction_record(result_fields, runs.RESULT_FIELDS)
     skills_record = {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None
@@ -943,7 +1032,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
-                    plan: _CallPlan | None = None) -> Prepared:
+                    plan: _CallPlan | None = None, judge: dict | None = None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -954,7 +1043,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         plan = _plan_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
                              stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
                              tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                             warnings=warnings, selection=selection, checked_lease=checked_lease)
+                             warnings=warnings, selection=selection, checked_lease=checked_lease, judge=judge)
     run.write_prompt(plan.prompt)
     if plan.skills_record is not None:
         from oah.atomic import write_json_atomic
@@ -976,12 +1065,18 @@ def _effort_fields(prepared: Prepared, stdout: str, stderr: str, rules: Sequence
         inference = verify_inference("codex", prepared.cli_version, prepared.model, prepared.launch_effort, header,
                                      rules)
         code = inference.code or header.code
-        return {"header_effort": header.header_effort, "header_check": header.status, "header_code": code,
+        if header.header_model is not None and header.header_model != prepared.model:
+            code = MODEL_MISMATCH  # the effective model is checked first, like the effort (amendment 6)
+        return {"header_model": header.header_model or runs.UNVERIFIED,
+                "header_effort": header.header_effort, "header_check": header.status, "header_code": code,
                 "resolved_inference_effort": inference.resolved_inference_effort,
                 "normalization_basis": inference.normalization_basis, "effort_verified": inference.effort_verified,
                 "effort_observable": header.status != "unverified"}
     observed = claude.observe(stdout)
-    fields = {"observed_models": list(observed.models), "effort_observable": observed.effort_observable}
+    # Claude Code takes aliases that it resolves itself, so a requested alias cannot be compared with the
+    # full names in modelUsage; the effective model stays unverified (observed_models keeps them).
+    fields = {"observed_models": list(observed.models), "effort_observable": observed.effort_observable,
+              "header_model": runs.UNVERIFIED}
     if not observed.effort_observable:
         return dict(fields, header_effort=runs.UNVERIFIED, header_check=runs.UNVERIFIED, header_code=None,
                     resolved_inference_effort=runs.UNVERIFIED,
@@ -1044,6 +1139,8 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if fields.get("header_effort") not in (*ORDINARY, *BEHAVIOUR_CHANGING, prepared.launch_effort):
             fields["header_effort"] = runs.UNVERIFIED
             fields["normalization_basis"] = "unverified: the header effort is unknown"
+        if fields.get("header_model") != prepared.model:
+            fields["header_model"] = runs.UNVERIFIED  # the mismatch stays in header_code
         fields["worker_output"] = result.worker_output
     fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
     if result.timed_out:
@@ -1055,6 +1152,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if not prepared.retain_worker_text:
             error = (f"OAH_ENGINE_FAILED: {prepared.engine} exited with {result.returncode}; inspect the live "
                      "terminal output and retry the correction")
+    elif fields.get("header_code") == MODEL_MISMATCH:
+        status, error = "failed", (f"{MODEL_MISMATCH}: the engine reported model {fields['header_model']} for the "
+                                   f"requested model {prepared.model}; this run does not count. Check the Codex "
+                                   "configuration (a profile or model override) and call again")
     elif fields.get("header_code"):
         status, error = "failed", (f"{fields['header_code']}: the engine reported effort {fields['header_effort']} "
                                    f"(normalized {fields['resolved_inference_effort']}) for launch effort "
