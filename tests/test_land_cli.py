@@ -448,6 +448,99 @@ class LandCliTest(unittest.TestCase):
         self.assertEqual(json.loads(offline.stdout)["code"], "OAH_LAND_IMPACT_STALE")
         self.assertTrue(offline.stderr.startswith("OAH_LAND_IMPACT_STALE:"), offline.stderr)
 
+    def test_unverified_ci_refuses_check_and_merge_with_named_code(self):
+        project = LandProject(self)
+        for setup in (lambda: project.ci([]), lambda: setattr(project, "gh_argv", None)):
+            setup()
+            done = land_command(project, "--check", "--task", "t1")
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertTrue(done.stderr.startswith("OAH_LAND_CI_UNVERIFIED: "), done.stderr)
+            self.assertIn('--accept-unverified-ci "<reason>"', done.stderr)
+            self.assertIn("ci: unverified OAH_LAND_CI_UNVERIFIED — ", done.stdout)
+            self.assertNotIn("OAH_LAND_READY", done.stdout + done.stderr)
+            shown = json.loads(land_command(project, "--check", "--task", "t1", "--json").stdout)
+            self.assertEqual((shown["code"], shown["exit_code"], shown["assessment"]["ready"]),
+                             ("OAH_LAND_CI_UNVERIFIED", 1, False))
+            merged = land_command(project, "--merge", "--task", "t1", "--confirm", project.head)
+            self.assertEqual(merged.returncode, 1, merged.stdout + merged.stderr)
+            self.assertTrue(merged.stderr.startswith("OAH_LAND_CI_UNVERIFIED: "), merged.stderr)
+            self.assertIn("Nothing was pushed.", merged.stderr)
+            self.assertEqual(project.remote_main(), project.base)
+        self.assertIn("gh auth login", done.stderr)
+        self.assertEqual({(item["code"], item["ready"]) for item in records(project)},
+                         {("OAH_LAND_CI_UNVERIFIED", False)})
+
+    def test_accept_unverified_ci_lands_with_distinct_code_and_record(self):
+        project = LandProject(self)
+        git(project.repo, "config", "user.name", "Fake Lander")
+        project.gh_argv = None
+        reason = ("--accept-unverified-ci", "CI is not set up yet")
+        done = land_command(project, "--check", "--task", "t1", *reason)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("ci: unverified OAH_LAND_CI_UNVERIFIED — ", done.stdout)
+        last = done.stdout.splitlines()[-1]
+        self.assertTrue(last.startswith("OAH_LAND_READY_WITH_CI_EXCEPTION: "), last)
+        self.assertIn("unverified, not passed", last)
+        self.assertNotIn("OAH_LAND_READY:", done.stdout)
+        shown = json.loads(land_command(project, "--check", "--task", "t1", "--json", *reason).stdout)
+        self.assertEqual(shown["code"], "OAH_LAND_READY_WITH_CI_EXCEPTION")
+        self.assertEqual([c["state"] for c in shown["assessment"]["checks"] if c["name"] == "ci"], ["unverified"])
+        prompts = []
+
+        def decline(prompt):
+            prompts.append(prompt)
+            return "n\n"
+
+        land_command(project, "--merge", "--task", "t1", *reason, interactive=True, ask=decline)
+        self.assertIn("recorded CI exception", prompts[0])
+        landed = land_command(project, "--merge", "--task", "t1", "--confirm", project.head, "--json", *reason)
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(json.loads(landed.stdout)["code"], "OAH_LAND_LANDED_WITH_CI_EXCEPTION")
+        self.assertEqual(project.remote_main(), project.head)
+        saved = records(project)
+        self.assertEqual([item["code"] for item in saved],
+                         ["OAH_LAND_READY_WITH_CI_EXCEPTION"] * 2 + ["OAH_LAND_CANCELLED",
+                                                                    "OAH_LAND_LANDED_WITH_CI_EXCEPTION"])
+        self.assertTrue(all([c["state"] for c in item["checks"] if c["name"] == "ci"] == ["unverified"]
+                            for item in saved))
+        path = project.state / "land" / "t1" / "ci-exceptions.jsonl"
+        noted = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(item["mode"], item["code"]) for item in noted],
+                         [("check", "OAH_LAND_READY_WITH_CI_EXCEPTION")] * 2
+                         + [("merge", "OAH_LAND_CANCELLED"), ("merge", "OAH_LAND_LANDED_WITH_CI_EXCEPTION")])
+        self.assertEqual({(item["reason"], item["head"], item["user"]) for item in noted},
+                         {("CI is not set up yet", project.head, "Fake Lander")})
+
+    def test_accept_unverified_ci_needs_a_reason(self):
+        project = LandProject(self)
+        project.gh_argv = None
+        for args in (("--accept-unverified-ci", ""), ("--accept-unverified-ci", "  \t"), ("--accept-unverified-ci",)):
+            with self.subTest(args=args):
+                done = land_command(project, "--check", "--task", "t1", *args)
+                self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+                self.assertTrue(done.stderr.startswith("OAH_USAGE: "), done.stderr)
+        self.assertIn("non-empty reason", land_command(project, "--check", "--task", "t1",
+                                                       "--accept-unverified-ci", " ").stderr)
+        self.assertEqual(records(project), [])
+
+    def test_accept_unverified_ci_does_not_override_failed_or_pending(self):
+        project = LandProject(self)
+        for runs, code in (([{"name": "tests", "status": "completed", "conclusion": "failure"}], "OAH_LAND_CI_FAILED"),
+                           ([{"name": "tests", "status": "in_progress", "conclusion": None}], "OAH_LAND_CI_PENDING")):
+            project.ci(runs)
+            done = land_command(project, "--merge", "--task", "t1", "--confirm", project.head,
+                                "--accept-unverified-ci", "CI is flaky")
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertTrue(done.stderr.startswith(code + ": "), done.stderr)
+            self.assertEqual(project.remote_main(), project.base)
+        self.assertFalse((project.state / "land" / "t1" / "ci-exceptions.jsonl").exists())
+
+    def test_invalid_land_config_exits_69(self):
+        project = LandProject(self, config='[land]\nci_unverified = "warn"\n')
+        done = land_command(project, "--check", "--task", "t1")
+        self.assertEqual(done.returncode, 69, done.stdout + done.stderr)
+        self.assertTrue(done.stderr.startswith("OAH_CONFIG_INVALID: "), done.stderr)
+
     def test_merge_moved_branch_lands_nothing(self):
         project = LandProject(self)
         checked = land_command(project, "--check", "--task", "t1")

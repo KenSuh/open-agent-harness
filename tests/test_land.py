@@ -1,6 +1,7 @@
 # oah land 핵심 검사 — 실제 저장소·로컬 bare 원격·가짜 gh·gitleaks·unlazy 로 리뷰·게이트·영향·새로 걸린 검사·비밀 검사·CI 판정과 조건부 푸시, 기록을 본다.
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -131,8 +132,8 @@ class LandProject:
         done = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(answer))
         self.test.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
-    def ci(self, runs: list[dict] | None = None, **script) -> None:
-        body = {"check_runs": {self.head: runs or []}, **script}
+    def ci(self, runs: list[dict] | None = None, statuses: list[dict] | None = None, **script) -> None:
+        body = {"check_runs": {self.head: runs or []}, "statuses": {self.head: statuses or []}, **script}
         self.gh_script.write_text(json.dumps(body), encoding="utf-8")
 
     def advance_main(self, files: dict, message: str = "elsewhere") -> str:
@@ -330,7 +331,8 @@ class AssessTest(unittest.TestCase):
                         for index in range(1, count + 1)])
             complete = project.assess()
             self.assertTrue(complete.ready, describe(complete))
-            self.assertEqual(complete.check("ci").detail, {"runs": count})
+            self.assertEqual(complete.check("ci").detail, {"runs": count, "statuses": 0, "required": [],
+                                                           "unverified": []})
             for failed_position in (None, 1, count):
                 with self.subTest(count=count, failed_position=failed_position):
                     runs = [{"id": index, "status": "completed", "conclusion": "success"}
@@ -647,8 +649,9 @@ class AssessTest(unittest.TestCase):
         scanned = json.loads(project.gitleaks_log.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(scanned[scanned.index("--log-opts") + 1], f"{project.base}..{project.head}")
         self.assertIn("--redact", scanned)
-        asked = json.loads(project.gh_log.read_text(encoding="utf-8").splitlines()[-1])
-        self.assertIn(f"repos/{{owner}}/{{repo}}/commits/{project.head}/check-runs?per_page=100&page=1", asked)
+        asked = [json.loads(line) for line in project.gh_log.read_text(encoding="utf-8").splitlines()[-2:]]
+        self.assertIn(f"repos/{{owner}}/{{repo}}/commits/{project.head}/check-runs?per_page=100&page=1", asked[0])
+        self.assertIn(f"repos/{{owner}}/{{repo}}/commits/{project.head}/status?per_page=100&page=1", asked[1])
         self.assertEqual(result.check("review").detail["round"], 1)
         data = result.to_json()
         self.assertTrue(data["ready"])
@@ -805,9 +808,9 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(result.failure.code, "OAH_LAND_CI_PENDING", describe(result))
         project.ci([])
         result = project.assess()
-        self.assertTrue(result.ready, describe(result))
-        self.assertEqual(project.check(result, "ci").state, "unverified")
-        self.assertIn("no CI check runs", project.check(result, "ci").message)
+        self.assertFalse(result.ready, describe(result))
+        self.assertEqual((project.check(result, "ci").state, result.code), ("unverified", "OAH_LAND_CI_UNVERIFIED"))
+        self.assertIn("no CI check runs or commit statuses", project.check(result, "ci").message)
         project.ci([{"name": f"job {k}", "status": "completed", "conclusion": "success"} for k in range(101)]
                    + [{"name": "late", "status": "completed", "conclusion": "cancelled"}])
         result = project.assess()
@@ -825,7 +828,8 @@ class AssessTest(unittest.TestCase):
         self.assertNotIn("decoy-owner-login", describe(result) + json.dumps(result.to_json()))
         project.gh_argv = None
         result = project.assess()
-        self.assertTrue(result.ready, describe(result))
+        self.assertFalse(result.ready, describe(result))
+        self.assertEqual((project.check(result, "ci").state, result.code), ("unverified", "OAH_LAND_CI_UNVERIFIED"))
         self.assertIn("gh is not installed", project.check(result, "ci").message)
 
     def test_open_lease_dirty_tree_and_workers_refuse(self):
@@ -872,6 +876,287 @@ class AssessTest(unittest.TestCase):
                     git(project.repo, "update-index", "--no-assume-unchanged", "--", "src/app.py")
                     git(project.repo, "update-index", "--no-skip-worktree", "--", "src/app.py")
                     path.write_bytes(committed)
+
+
+SUCCESS = {"name": "tests", "status": "completed", "conclusion": "success"}
+EXCEPTION_FIELDS = {"schema", "at", "mode", "code", "reason", "source", "repository", "head", "unverified", "ci",
+                    "user"}
+
+
+def read_ci(project: LandProject, required: tuple[str, ...] = ()) -> land.Check:
+    """The ci check alone, through the fake gh, for the project's assessed destination."""
+    with project.patched():
+        return land._ci_check(project.repo, project.head, dict(project.env), destination=str(project.remote),
+                              required=required)
+
+
+def exceptions(project: LandProject) -> list[dict]:
+    path = project.state / "land" / "t1" / "ci-exceptions.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def exported(checked: land.Check) -> str:
+    return checked.message + json.dumps(checked.to_json())
+
+
+class CiTest(unittest.TestCase):
+    def test_ci_unverified_blocks_by_default(self):
+        project = LandProject(self)
+        project.ci([])
+        for setup, kind, hint in ((lambda: None, "no-results", "push the task branch"),
+                                  (lambda: setattr(project, "gh_argv", None), "gh-missing", "gh auth login")):
+            setup()
+            with self.subTest(kind=kind):
+                result = project.assess()
+                checked = result.check("ci")
+                self.assertEqual((checked.state, checked.code), ("unverified", "OAH_LAND_CI_UNVERIFIED"))
+                self.assertFalse(result.ready, describe(result))
+                self.assertEqual(result.code, "OAH_LAND_CI_UNVERIFIED")
+                self.assertIs(result.failure, checked)
+                self.assertEqual(checked.detail["unverified"], [{"kind": kind}])
+                self.assertIn(hint, checked.message)
+                self.assertIn('--accept-unverified-ci "<reason>"', checked.message)
+                self.assertIn("not passed", checked.message)
+                self.assertEqual({c.state for c in result.checks if c.name != "ci"}, {"passed"}, describe(result))
+                self.assertFalse(result.to_json()["ready"])
+
+    def test_ci_statuses_only_success_passes(self):
+        project = LandProject(self)
+        project.ci([], statuses=[{"context": "ci/build", "state": "success"}])
+        checked = read_ci(project)
+        self.assertEqual(checked.state, "passed", checked.message)
+        self.assertEqual((checked.detail["runs"], checked.detail["statuses"]), (0, 1))
+        self.assertIn("1 commit status", checked.message)
+        asked = [json.loads(line) for line in project.gh_log.read_text(encoding="utf-8").splitlines()]
+        self.assertIn([f"repos/{{owner}}/{{repo}}/commits/{project.head}/status?per_page=100&page=1"],
+                      [[arg for arg in call if arg.startswith("repos/")] for call in asked])
+        self.assertTrue(project.assess().ready)
+
+    def test_ci_status_failure_error_and_pending(self):
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(12)
+        for state, code in (("failure", "OAH_LAND_CI_FAILED"), ("error", "OAH_LAND_CI_FAILED"),
+                            ("pending", "OAH_LAND_CI_PENDING")):
+            with self.subTest(state=state):
+                project.ci([SUCCESS], statuses=[{"context": "ok", "state": "success"},
+                                                {"context": private, "state": state}])
+                checked = read_ci(project)
+                self.assertEqual(checked.code, code, checked.message)
+                self.assertIn("commit status(es)", checked.message)
+                self.assertIn("positions 2", checked.message)
+                for value in (private, "decoy-owner-login", "decoy description", "example.invalid"):
+                    self.assertNotIn(value, exported(checked))
+
+    def test_ci_required_missing_is_unverified_and_named(self):
+        project = LandProject(self)
+        project.ci([SUCCESS], statuses=[{"context": "lint", "state": "success"}])
+        checked = read_ci(project, ("tests", "lint", "build"))
+        self.assertEqual((checked.state, checked.code), ("unverified", "OAH_LAND_CI_UNVERIFIED"), checked.message)
+        self.assertEqual(checked.detail["unverified"], [{"kind": "required-missing", "name": "build"}])
+        self.assertEqual(checked.detail["required"], ["tests", "lint", "build"])
+        self.assertIn("required check build has no result", checked.message)
+        self.assertEqual(read_ci(project, ("tests", "lint")).state, "passed")
+
+    def test_ci_required_failing_is_failed(self):
+        project = LandProject(self)
+        project.ci([{"name": "tests", "status": "completed", "conclusion": "failure"},
+                    {"name": "other", "status": "completed", "conclusion": "success"}])
+        checked = read_ci(project, ("tests",))
+        self.assertEqual(checked.code, "OAH_LAND_CI_FAILED", checked.message)
+        self.assertIn("required check(s) failed: tests", checked.message)
+        project.ci([SUCCESS], statuses=[{"context": "lint", "state": "error"}])
+        checked = read_ci(project, ("lint",))
+        self.assertEqual(checked.code, "OAH_LAND_CI_FAILED", checked.message)
+        self.assertIn("required check(s) failed: lint", checked.message)
+
+    def test_ci_latest_rerun_wins(self):
+        project = LandProject(self)
+        failed = {"name": "tests", "status": "completed", "conclusion": "failure"}
+        cases = [
+            ([dict(failed, id=10), dict(SUCCESS, id=11)], [], "passed"),
+            ([dict(failed, id=11), dict(SUCCESS, id=10)], [], "failed"),
+            ([dict(SUCCESS, id=1), {"name": "tests", "status": "in_progress", "conclusion": None, "id": 2}], [],
+             "failed"),
+            ([SUCCESS], [{"context": "ci", "state": "failure", "id": 5},
+                         {"context": "ci", "state": "success", "id": 6}], "passed"),
+            ([SUCCESS], [{"context": "ci", "state": "success", "id": 6},
+                         {"context": "ci", "state": "error", "id": 7}], "failed"),
+        ]
+        for runs, statuses, expected in cases:
+            with self.subTest(runs=runs, statuses=statuses):
+                project.ci(runs, statuses=statuses)
+                checked = read_ci(project, ("tests",))
+                self.assertEqual(checked.state, expected, checked.message)
+        project.ci([dict(SUCCESS, id=1), {"name": "tests", "status": "in_progress", "conclusion": None, "id": 2}])
+        self.assertEqual(read_ci(project).code, "OAH_LAND_CI_PENDING")
+        project.ci([dict(failed, id=3), dict(SUCCESS, id=4), dict(failed, name="lint", id=5)])
+        checked = read_ci(project)
+        self.assertIn("1 CI check run(s) failed", checked.message)
+        self.assertIn("positions 3", checked.message)
+
+    def test_ci_statuses_count_only_the_exact_head(self):
+        project = LandProject(self)
+        project.ci([SUCCESS], statuses=[{"context": "ci", "state": "success"}], status_script={"sha": "e" * 40})
+        checked = read_ci(project)
+        self.assertEqual(checked.code, "OAH_LAND_CI_PENDING", checked.message)
+        self.assertIn("incomplete", checked.message)
+        project.gh_script.write_text(json.dumps({"check_runs": {project.head: [SUCCESS]},
+                                                 "statuses": {"e" * 40: [{"context": "ci", "state": "failure"}]}}),
+                                     encoding="utf-8")
+        checked = read_ci(project)
+        self.assertEqual((checked.state, checked.detail["statuses"]), ("passed", 0), checked.message)
+
+    def test_ci_status_read_errors_refuse_without_disclosure(self):
+        project = LandProject(self)
+        token = "gh" + "o_" + secrets.token_hex(18)
+        private = "account-" + secrets.token_hex(12)
+        many = [{"context": f"s{k}", "state": "success"} for k in range(101)]
+        errors = ({"exit": 1, "stderr": f"HTTP 401 {token}"}, {"raw": "invalid JSON"}, {"raw": "[]"},
+                  {"raw": json.dumps({"sha": project.head, "total_count": 1, "statuses": {}})},
+                  {"total_count": 3}, {"total_count": True}, {"pages": {"2": {"exit": 1}}})
+        for error in errors:
+            with self.subTest(error=error):
+                project.ci([SUCCESS], statuses=many, status_script=error)
+                checked = read_ci(project)
+                self.assertEqual(checked.code, "OAH_LAND_CI_PENDING", checked.message)
+                self.assertIn("incomplete", checked.message)
+                self.assertNotIn(token, exported(checked))
+        for item in ({"context": private, "state": private}, {"context": private, "state": "success", "id": "x"},
+                     {"context": 7, "state": "success"}, {"context": private, "state": ["success"]}):
+            with self.subTest(item=item):
+                project.ci([SUCCESS], statuses=[item])
+                checked = read_ci(project)
+                self.assertEqual(checked.code, "OAH_LAND_CI_PENDING", checked.message)
+                self.assertNotIn(private, exported(checked))
+        project.ci([SUCCESS], statuses=[{"context": "a", "state": "success", "id": 9},
+                                        {"context": "b", "state": "success", "id": 9}])
+        self.assertEqual(read_ci(project).code, "OAH_LAND_CI_PENDING")
+        project.ci([SUCCESS], statuses=[{"context": private, "state": "failure"}], status_script={"total_count": 5})
+        checked = read_ci(project)
+        self.assertEqual(checked.code, "OAH_LAND_CI_FAILED", checked.message)
+        self.assertIn("incomplete", checked.message)
+        self.assertNotIn(private, exported(checked))
+
+    def test_ci_exception_accepted_records_every_field(self):
+        project = LandProject(self)
+        git(project.repo, "config", "user.name", "Fake Lander")
+        project.gh_argv = None
+        result = project.assess(accept_unverified_ci="CI is not set up yet")
+        checked = result.check("ci")
+        self.assertTrue(result.ready, describe(result))
+        self.assertEqual((checked.state, checked.code), ("unverified", "OAH_LAND_CI_UNVERIFIED"))
+        self.assertEqual(result.code, "OAH_LAND_READY_WITH_CI_EXCEPTION")
+        self.assertIsNone(result.failure)
+        data = result.to_json()
+        self.assertEqual((data["code"], data["ready"]), ("OAH_LAND_READY_WITH_CI_EXCEPTION", True))
+        self.assertEqual(data["ci_exception"], {"source": "flag", "head": project.head})
+        self.assertEqual([c["state"] for c in data["checks"] if c["name"] == "ci"], ["unverified"])
+        with project.patched():
+            land.record(project.state, result, "check", None)
+        line = json.loads((project.state / "land/t1/records.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(line["code"], "OAH_LAND_READY_WITH_CI_EXCEPTION")
+        self.assertEqual([c["state"] for c in line["checks"] if c["name"] == "ci"], ["unverified"])
+        self.assertNotIn("CI is not set up yet", json.dumps(line))
+        [saved] = exceptions(project)
+        self.assertEqual(set(saved), EXCEPTION_FIELDS)
+        self.assertEqual((saved["reason"], saved["source"], saved["head"], saved["user"], saved["mode"]),
+                         ("CI is not set up yet", "flag", project.head, "Fake Lander", "check"))
+        self.assertEqual(saved["repository"], str(project.remote))
+        self.assertEqual(saved["unverified"], [{"kind": "gh-missing"}])
+        self.assertEqual(saved["ci"], {"gh": "missing", "runs": 0, "statuses": 0, "required": []})
+        self.assertEqual(saved["code"], "OAH_LAND_READY_WITH_CI_EXCEPTION")
+        self.assertRegex(saved["at"], r"\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z\Z")
+
+        git(project.repo, "config", "--unset", "user.name")
+        project.env.update(XDG_CONFIG_HOME=str(project.home), GIT_CONFIG_NOSYSTEM="1")
+        project.gh_argv = (sys.executable, str(FAKE_GH))
+        project.ci([SUCCESS])
+        passing = project.assess(accept_unverified_ci="CI is not set up yet")
+        self.assertEqual((passing.code, passing.ci_exception), ("OAH_LAND_READY", None))
+        project.ci([])
+        result = project.assess(accept_unverified_ci="still none")
+        self.assertEqual(result.ci_exception["user"], "unknown")
+        self.assertEqual(result.check("ci").detail["unverified"], [{"kind": "no-results"}])
+        with project.patched():
+            land.record(project.state, passing, "check", None)
+            land.record(project.state, result, "check", None)
+        self.assertEqual([item["reason"] for item in exceptions(project)], ["CI is not set up yet", "still none"])
+        self.assertEqual(exceptions(project)[-1]["ci"], {"gh": "found", "runs": 0, "statuses": 0, "required": []})
+        with self.assertRaises(land.LandError) as raised:
+            project.assess(accept_unverified_ci="  ")
+        self.assertEqual(raised.exception.code, "OAH_USAGE")
+
+    def test_ci_exception_never_applies_to_failed_or_pending(self):
+        project = LandProject(self)
+        for runs, statuses, code in (([{"name": "t", "status": "completed", "conclusion": "failure"}], [],
+                                      "OAH_LAND_CI_FAILED"),
+                                     ([{"name": "t", "status": "queued", "conclusion": None}], [],
+                                      "OAH_LAND_CI_PENDING"),
+                                     ([], [{"context": "c", "state": "pending"}], "OAH_LAND_CI_PENDING")):
+            with self.subTest(code=code, runs=runs):
+                project.ci(runs, statuses=statuses)
+                result = project.assess(accept_unverified_ci="CI is flaky")
+                self.assertFalse(result.ready, describe(result))
+                self.assertEqual((result.code, result.ci_exception), (code, None))
+                with project.patched():
+                    land.record(project.state, result, "check", None)
+                self.assertEqual(exceptions(project), [])
+
+    def test_repository_url_loses_credentials(self):
+        token = secrets.token_hex(12)
+        cases = {f"https://someone:{token}@github.com/owner/project.git?access={token}#x":
+                 "https://github.com/owner/project.git",
+                 f"https://{token}@example.invalid:8443/owner/project": "https://example.invalid:8443/owner/project",
+                 "ssh://git@github.com/owner/project.git": "ssh://github.com/owner/project.git",
+                 f"{token}@github.com:owner/project.git": "github.com:owner/project.git",
+                 "github.com:owner/project.git": "github.com:owner/project.git"}
+        for given, expected in cases.items():
+            with self.subTest(given=expected):
+                self.assertEqual(land._credential_free(given), expected)
+        for local in ("/srv/git/project.git", "C:\\git\\project.git"):
+            self.assertEqual(land._credential_free(local), local)
+
+    def test_config_policy_exception_records_config_policy(self):
+        project = LandProject(self, config='[land]\nci_unverified = "exception"\n')
+        project.ci([])
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        self.assertEqual(result.code, "OAH_LAND_READY_WITH_CI_EXCEPTION")
+        self.assertEqual(result.check("ci").state, "unverified")
+        self.assertEqual((result.ci_exception["reason"], result.ci_exception["source"]), ("config policy", "config"))
+        with project.patched():
+            land.record(project.state, result, "check", None)
+            land.record(project.state, result, "check", None)
+        self.assertEqual([item["reason"] for item in exceptions(project)], ["config policy"] * 2)
+        given = project.assess(accept_unverified_ci="my reason")
+        self.assertEqual((given.ci_exception["reason"], given.ci_exception["source"]), ("my reason", "flag"))
+        project.ci([{"name": "t", "status": "completed", "conclusion": "failure"}])
+        self.assertEqual(project.assess().code, "OAH_LAND_CI_FAILED")
+
+    def test_config_rejects_unknown_policy_and_bad_required_checks(self):
+        from oah.config import ConfigError, parse_config
+
+        self.assertEqual(land.land_settings(parse_config(b"")), {"ci_unverified": "block", "required_checks": []})
+        self.assertEqual(land.land_settings(parse_config(b'[land]\nrequired_checks = ["tests"]\n'))["required_checks"],
+                         ["tests"])
+        invalid = ('ci_unverified = "warn"', "ci_unverified = 1", "required_checks = [1]", 'required_checks = [""]',
+                   'required_checks = "tests"')
+        cases = (*((text, "OAH_CONFIG_INVALID") for text in invalid), ("other = 1", "OAH_CONFIG_UNKNOWN_KEY"))
+        for text, code in cases:
+            with self.subTest(text=text):
+                with self.assertRaises(ConfigError) as raised:
+                    land.land_settings(parse_config(f"[land]\n{text}\n".encode("utf-8")))
+                self.assertEqual(raised.exception.code, code)
+                self.assertIn("land.other" if code == "OAH_CONFIG_UNKNOWN_KEY" else "land.", str(raised.exception))
+
+    def test_config_required_checks_apply_to_assessment(self):
+        project = LandProject(self, config='[land]\nrequired_checks = ["tests", "build"]\n')
+        result = project.assess()
+        checked = result.check("ci")
+        self.assertEqual((result.ready, result.code), (False, "OAH_LAND_CI_UNVERIFIED"), describe(result))
+        self.assertEqual(checked.detail["unverified"], [{"kind": "required-missing", "name": "build"}])
+        project.ci([SUCCESS], statuses=[{"context": "build", "state": "success"}])
+        self.assertTrue(project.assess().ready)
 
 
 class PushTest(unittest.TestCase):
@@ -1195,6 +1480,60 @@ class PushTest(unittest.TestCase):
             pushed = land.push(project.repo, result, env=dict(project.env))
         self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_IMPACT_STALE"), pushed.message)
         self.assertEqual(project.remote_main(), racer)
+
+    def test_ci_exception_binds_to_the_exact_head(self):
+        project = LandProject(self)
+        project.gh_argv = None
+        result = project.assess(accept_unverified_ci="no CI yet")
+        self.assertTrue(result.ready, describe(result))
+        moved = dataclasses.replace(result)
+        moved.ci_exception = dict(result.ci_exception, head="f" * 40)
+        self.assertFalse(moved.ready)
+        assessed = project.head
+        project.commit({"docs/later.md": "later\n"}, "later")
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_AUTHORIZATION_CHANGED"), pushed.message)
+        self.assertEqual(project.remote_main(), project.base)
+        self.assertEqual(result.ci_exception["head"], assessed)
+        again = project.assess()
+        self.assertEqual((again.check("ci").code, again.ci_exception), ("OAH_LAND_CI_UNVERIFIED", None))
+
+    def test_ci_exception_landing_has_its_own_code(self):
+        project = LandProject(self)
+        project.gh_argv = None
+        result = project.assess(accept_unverified_ci="no CI yet")
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (True, "OAH_LAND_LANDED_WITH_CI_EXCEPTION"), pushed.message)
+        self.assertIn("unverified", pushed.message)
+        self.assertEqual(project.remote_main(), project.head)
+
+    def test_push_rereads_ci_after_confirmation(self):
+        project = LandProject(self)
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        changes = (("failed", lambda: project.ci([{"name": "tests", "status": "completed", "conclusion": "failure"}]),
+                    "OAH_LAND_CI_FAILED"),
+                   ("pending", lambda: project.ci([SUCCESS], statuses=[{"context": "c", "state": "pending"}]),
+                    "OAH_LAND_CI_PENDING"),
+                   ("unverified", lambda: setattr(project, "gh_argv", None), "OAH_LAND_CI_UNVERIFIED"),
+                   ("changed", lambda: project.ci([SUCCESS], statuses=[{"context": "c", "state": "success"}]),
+                    "OAH_LAND_AUTHORIZATION_CHANGED"))
+        for name, change, code in changes:
+            with self.subTest(change=name):
+                project.gh_argv = (sys.executable, str(FAKE_GH))
+                project.ci([SUCCESS])
+                change()
+                with project.patched():
+                    pushed = land.push(project.repo, result, env=dict(project.env))
+                self.assertEqual((pushed.landed, pushed.code), (False, code), pushed.message)
+                self.assertEqual(project.remote_main(), project.base)
+        project.gh_argv = (sys.executable, str(FAKE_GH))
+        project.ci([SUCCESS])
+        with project.patched():
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (True, "OAH_LAND_LANDED"), pushed.message)
 
     def test_records_hold_shas_digests_and_codes_only(self):
         project = LandProject(self)
