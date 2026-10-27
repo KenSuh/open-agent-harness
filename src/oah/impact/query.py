@@ -89,11 +89,30 @@ def _owners(files: Iterable[str], min_needle: int) -> dict[str, int]:
     return owners
 
 
+def is_ambiguous(needle: str, via: str, owners: Mapping[str, int], settings: Mapping) -> bool:
+    """A file name or stem shared by more than max_ambiguity files is not searched; a full path always is."""
+    return via != "path" and owners.get(needle, 0) > settings["max_ambiguity"]
+
+
+def ambiguous(data: Mapping, targets: Sequence[str], settings: Mapping) -> list[dict]:
+    """The names the lexical layer skipped for each file target, with how many files share each name."""
+    owners = _owners(data["files"], settings["min_needle"])
+    skipped = []
+    for target in targets:
+        if normalize_entity(target):
+            continue
+        for needle, via in lexical.needles_for(target, settings["min_needle"]).items():
+            if is_ambiguous(needle, via, owners, settings):
+                skipped.append({"target": target, "name": needle, "via": via, "files": owners[needle],
+                                "limit": settings["max_ambiguity"]})
+    return skipped
+
+
 def _lexical(data: Mapping, target: str, owners: Mapping[str, int], settings: Mapping) -> list[Row]:
     best: dict[tuple[str, str], list] = {}
     commands: dict[tuple[str, str, int], list] = {}
     for needle, via in lexical.needles_for(target, settings["min_needle"]).items():
-        if via != "path" and owners.get(needle, 0) > settings["max_ambiguity"]:
+        if is_ambiguous(needle, via, owners, settings):
             continue
         for source, line, flag in data["hits"].get(needle, []):
             if source == target:
@@ -141,8 +160,15 @@ def _cochange(data: Mapping, target: str, settings: Mapping) -> list[Row]:
 
 def load_graph(root: pathlib.Path, settings: Mapping) -> dict | None:
     """graphify's output as {"files": {node: file}, "edges": [[a, b, relation]]}; None when absent or unreadable."""
+    return read_graph(root, settings)[0]
+
+
+def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None) -> tuple[dict | None, str, str]:
+    """(graph, status, reason). The status is analysed only when the graph records commit; a graph with no
+    checkable commit identity is stale-unknown, never assumed fresh."""
+    name = settings["graph_file"]
     try:
-        raw = json.loads((pathlib.Path(root) / settings["graph_file"]).read_bytes().decode("utf-8"))
+        raw = json.loads((pathlib.Path(root) / name).read_bytes().decode("utf-8"))
         files = {}
         for node in raw.get("nodes", []):
             file = node.get("source_file") or node.get("file") or node.get("path")
@@ -150,9 +176,24 @@ def load_graph(root: pathlib.Path, settings: Mapping) -> dict | None:
                 files[str(node["id"])] = file.replace("\\", "/")
         edges = [[str(e["source"]), str(e["target"]), str(e.get("relation") or e.get("label") or "")]
                  for e in raw.get("links", raw.get("edges", [])) if "source" in e and "target" in e]
-        return {"files": files, "edges": edges}
+        meta = raw.get("graph")
+        recorded = raw.get("commit") or (meta.get("commit") if isinstance(meta, dict) else None)
+    except FileNotFoundError:
+        return None, "unavailable", f"{name} is missing; run oah graph update to build it"
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
-        return None
+        return None, "unavailable", f"{name} cannot be read as a graph; run oah graph update to rebuild it"
+    graph = {"files": files, "edges": edges}
+    if recorded is None:
+        return graph, "stale-unknown", (f"{name} records no commit, so its freshness cannot be checked; "
+                                        "re-check graph neighbours by hand")
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", recorded):
+        return graph, "stale-unknown", (f"{name} records {str(recorded)[:40]!r}, which is not a full commit id, so "
+                                        "its freshness cannot be checked; re-check graph neighbours by hand")
+    recorded = recorded.lower()
+    if commit is not None and recorded != commit.lower():
+        return graph, "stale", (f"{name} was built at commit {recorded[:12]}, not {commit[:12]}; run oah graph "
+                                "update to rebuild it")
+    return graph, "analysed", f"{name} built at commit {recorded[:12]}"
 
 
 def _graph(graph: Mapping | None, data: Mapping, target: str) -> list[Row]:
