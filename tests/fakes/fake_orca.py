@@ -12,6 +12,7 @@ FAKE_ORCA_DISABLED  "1": --version fails, as when Orca's command-line tool is no
 FAKE_ORCA_FAIL      one command such as "terminal create" that answers ok:false
 FAKE_ORCA_OAH       (host) JSON argv run in place of the word `oah` in a terminal command
 FAKE_ORCA_HOLD      "1": leave a queued terminal for direct worker-run tests
+FAKE_ORCA_RELEASE   (host) wait for this file before starting the terminal command
 
 CLI controls come from <folder>/controls.json, so production need not forward any FAKE_* variables.
 Optional command/reply/exit_code controls inject malformed replies for contract tests.
@@ -247,6 +248,13 @@ def run_terminal(handle: str) -> None:
     words = request["command"][:-len("; exit")].split(" ")
     if words[0] == "oah" and os.environ.get("FAKE_ORCA_OAH"):
         words = json.loads(os.environ["FAKE_ORCA_OAH"]) + words[1:]
+    if release := os.environ.get("FAKE_ORCA_RELEASE"):
+        # Publish the waiting process's PID normally, but keep the worker blocked until the test releases it.
+        gate = ("import pathlib, subprocess, sys, time\n"
+                "while not pathlib.Path(sys.argv[1]).exists():\n"
+                "    time.sleep(0.02)\n"
+                "raise SystemExit(subprocess.call(sys.argv[2:]))\n")
+        words = [sys.executable, "-c", gate, release, *words]
     env = {key: value for key, value in os.environ.items() if not key.startswith("OAH_")}
     with open(folder / f"{handle}.log", "wb") as log:
         try:

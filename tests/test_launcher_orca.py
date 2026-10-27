@@ -1322,7 +1322,9 @@ with StateLock(pathlib.Path(sys.argv[1])):
 
     def test_wait_returns_75_while_running_then_the_final_record(self):
         project = OrcaProject(self)
-        project.start_host(FAKE_SLEEP="4")
+        release = project.orca_state / "release"
+        project.start_host(FAKE_ORCA_RELEASE=str(release))
+        self.addCleanup(release.write_bytes, b"")
         code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low", "--launcher", "orca",
                                      "--background")
         self.assertEqual(code, 0, err)
@@ -1333,6 +1335,8 @@ with StateLock(pathlib.Path(sys.argv[1])):
         self.assertEqual(code, 75, err)
         self.assertTrue(out.startswith(f"OAH_RUN_RUNNING run={run_id}"), out)
         self.assertIn(f"oah wait {run_id}", err)
+        self.assertFalse(project.record.exists(), "the terminal command must stay blocked until release")
+        release.write_bytes(b"")
         code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
