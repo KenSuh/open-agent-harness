@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -12,11 +13,12 @@ import subprocess
 import tarfile
 import unittest
 import zipfile
+from unittest import mock
 
 from oah.eval import case as case_mod
 from oah.eval import grade, plan, report, runner, workspace
 from oah.eval.errors import EvalError
-from tests.helpers import make_tmp_dir
+from tests.helpers import directory_alias, make_tmp_dir
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "eval"
 SNAPSHOT = "11ac4e9c014277808ff6cba43db7ee4adfa650aa"
@@ -83,11 +85,25 @@ class Env:
 
 
 def run_fixture(test: unittest.TestCase, root: pathlib.Path, env: Env, *, frozen: bool = False):
+    configure_fixture(root, env.env)
     source = root / "plan.toml"
     if frozen:
         source = root / "prereg.json"
         plan.preregister(plan.load_plan(root / "plan.toml"), [oracle_path(root)], source)
     return runner.run_eval(plan.load_run_source(source), env.runs, env=env.env, timeout_seconds=120)
+
+
+def configure_fixture(root: pathlib.Path, env: dict) -> None:
+    """Test instrumentation is explicit command input, never an environment exemption."""
+    args = ["--exit-code", env.get("FAKE_EVAL_EXIT", "0")]
+    for key, flag in (("FAKE_EVAL_MARKER", "--marker"), ("FAKE_EVAL_RECORD_DIR", "--record-dir")):
+        if env.get(key):
+            args.extend((flag, env[key]))
+    path = root / "plan.toml"
+    text = path.read_text(encoding="utf-8")
+    for mode in ("miss", "catch"):
+        text = text.replace(f'"{mode}"]', f'"{mode}", ' + ", ".join(json.dumps(arg) for arg in args) + "]")
+    path.write_text(text, encoding="utf-8")
 
 
 def read_result(run_dir: pathlib.Path, variant: str) -> dict:
@@ -245,6 +261,82 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_EVAL_SNAPSHOT")
         self.assertIn("0" * 40, str(caught.exception))
 
+    def test_archive_git_metadata_aliases_refused_before_extraction(self):
+        aliases = (".GIT/config", ".git./config", ".git /config", "GIT~1/config",
+                   ".git::$INDEX_ALLOCATION/config", ".git:stream", ".g\u200cit/config",
+                   "nested/.GiT/config", "nested\\.GIT\\config")
+        for fmt in ("tar", "zip"):
+            for name in aliases:
+                with self.subTest(fmt=fmt, name=name):
+                    root = fixture_copy(self)
+                    archive = case_dir(root) / f"snapshot.{fmt}"
+                    members = (("first.txt", b"must not be extracted"), (name, b"[core]\n"))
+                    if fmt == "tar":
+                        with tarfile.open(archive, "w") as handle:
+                            for member_name, data in members:
+                                info = tarfile.TarInfo(member_name)
+                                info.size = len(data)
+                                handle.addfile(info, io.BytesIO(data))
+                    else:
+                        with zipfile.ZipFile(archive, "w") as handle:
+                            for member_name, data in members:
+                                handle.writestr(member_name, data)
+                    set_case(root, 'file = "snapshot.bundle"', f'file = "snapshot.{fmt}"')
+                    set_case(root, 'format = "bundle"', f'format = "{fmt}"')
+                    scratch = make_tmp_dir(self)
+                    source = workspace.open_snapshot(case_mod.load_case(case_dir(root)), scratch / "src")
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.build_workspace(source, scratch / "ws")
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_SNAPSHOT")
+                    self.assertFalse((scratch / "ws" / "repo" / "first.txt").exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows path aliases")
+    def test_windows_git_metadata_aliases_refused(self):
+        self.test_archive_git_metadata_aliases_refused_before_extraction()
+
+    def test_caller_git_context_is_removed(self):
+        _, caller = self.build("caller")
+        before = {p.relative_to(caller.repo).as_posix(): p.read_bytes()
+                  for p in caller.repo.rglob("*") if p.is_file()}
+        hostile = {"GIT_DIR": str(caller.repo / ".git"), "GIT_WORK_TREE": str(caller.repo),
+                   "GIT_COMMON_DIR": str(caller.repo / ".git"),
+                   "GIT_INDEX_FILE": str(caller.repo / ".git" / "index"),
+                   "GIT_OBJECT_DIRECTORY": str(caller.repo / ".git" / "objects"),
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(caller.repo / ".git" / "objects"),
+                   "GIT_NAMESPACE": "caller", "GIT_PREFIX": "caller/"}
+        for key, value in hostile.items():
+            with self.subTest(key=key):
+                with mock.patch.dict(os.environ, {key: value}):
+                    source = workspace.open_snapshot(case_mod.load_case(case_dir(self.root)),
+                                                     self.scratch / key / "src")
+                    ws = workspace.build_workspace(source, self.scratch / key / "ws")
+                    workspace.scan_workspace(ws, source)
+                self.assertEqual(git(ws.repo, "rev-list", "--all", "--count"), "1")
+                self.assertEqual({p.relative_to(caller.repo).as_posix(): p.read_bytes()
+                                  for p in caller.repo.rglob("*") if p.is_file()}, before)
+
+    def test_git_config_environment_cannot_redirect_workspace(self):
+        _, caller = self.build("caller")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+                                          "GIT_CONFIG_VALUE_0": str(caller.repo)}):
+            source, ws = self.build("fresh")
+            workspace.scan_workspace(ws, source)
+        self.assertEqual(pathlib.Path(git(ws.repo, "rev-parse", "--show-toplevel")).resolve(), ws.repo.resolve())
+        self.assertTrue((ws.repo / "words.txt").is_file())
+
+    def test_input_directory_link_refused_before_copy(self):
+        target = self.scratch / "external"
+        target.mkdir()
+        (target / "note.txt").write_bytes(b"must not be copied\n")
+        try:
+            directory_alias(target, case_dir(self.root) / "inputs" / "reference")
+        except OSError:
+            self.skipTest("directory links are unavailable")
+        with self.assertRaises(EvalError) as caught:
+            self.build()
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertFalse((self.scratch / "ws" / "inputs").exists())
+
 
 class IsolationTest(unittest.TestCase):
     def setUp(self):
@@ -267,6 +359,11 @@ class IsolationTest(unittest.TestCase):
         message = self.refused(*self.build())
         self.assertIn("oracle", message)
         self.assertIn("hint.toml", message)
+
+    def test_oracle_in_primary_git_metadata_still_refused(self):
+        snapshot, ws = self.build()
+        (ws.repo / ".git" / "answers.toml").write_bytes(self.oracle)
+        self.assertIn("oracle", self.refused(snapshot, ws))
 
     def test_oracle_copy_with_crlf_refused(self):
         snapshot, ws = self.build()
@@ -298,6 +395,114 @@ class IsolationTest(unittest.TestCase):
         message = self.refused(snapshot, ws)
         self.assertIn("fix.patch", message)
         self.assertIn("words.txt.orig", message)
+
+    def test_forbidden_symlink_refused(self):
+        snapshot, ws = self.build()
+        try:
+            (ws.repo / "fix.patch").symlink_to("words.txt")
+        except OSError:
+            self.skipTest("file symlinks are unavailable")
+        self.assertIn("forbidden", self.refused(snapshot, ws))
+
+    def test_external_input_symlink_refused_without_disclosing_target(self):
+        link = case_dir(self.root) / "inputs" / "hint"
+        try:
+            link.symlink_to(oracle_path(self.root))
+        except OSError:
+            self.skipTest("file symlinks are unavailable")
+        message = self.refused(*self.build())
+        self.assertIn("link", message)
+        self.assertNotIn(str(oracle_path(self.root)), message)
+
+    def test_external_directory_symlink_refused(self):
+        snapshot, ws = self.build()
+        try:
+            (ws.inputs / "reference").symlink_to(self.root / "oracles", target_is_directory=True)
+        except OSError:
+            self.skipTest("directory symlinks are unavailable")
+        self.assertIn("link", self.refused(snapshot, ws))
+
+    def test_internal_file_symlink_remains_allowed(self):
+        snapshot, ws = self.build()
+        try:
+            (ws.repo / "words-link").symlink_to("words.txt")
+        except OSError:
+            self.skipTest("file symlinks are unavailable")
+        workspace.scan_workspace(ws, snapshot)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows junction")
+    def test_external_windows_junction_refused(self):
+        snapshot, ws = self.build()
+        directory_alias(self.root / "oracles", ws.inputs / "reference")
+        self.assertIn("link", self.refused(snapshot, ws))
+
+    def test_committed_symlink_mode_refused_even_as_plain_file(self):
+        snapshot, ws = self.build()
+        # update-index writes a real mode-120000 entry without requiring symlink privileges.
+        for name, target in (("hint", str(oracle_path(self.root))), ("fix.patch", "words.txt")):
+            with self.subTest(name=name):
+                (ws.repo / name).write_bytes(target.encode("utf-8"))
+                blob = git(ws.repo, "hash-object", "-w", str(ws.repo / name))
+                git(ws.repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{name}")
+        git(ws.repo, "-c", "user.name=fixture", "-c", "user.email=fixture@oah.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "link modes")
+        message = self.refused(snapshot, ws)
+        self.assertIn("link", message)
+        self.assertIn("forbidden", message)
+        self.assertNotIn(str(oracle_path(self.root)), message)
+
+    @unittest.skipUnless(os.name == "nt", "Windows core.symlinks=false checkout")
+    def test_windows_committed_symlink_plain_checkout_refused(self):
+        snapshot, ws = self.build()
+        path = ws.repo / "hint"
+        path.write_bytes(str(oracle_path(self.root)).encode("utf-8"))
+        blob = git(ws.repo, "hash-object", "-w", str(path))
+        git(ws.repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},hint")
+        git(ws.repo, "-c", "user.name=fixture", "-c", "user.email=fixture@oah.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "link mode")
+        git(ws.repo, "config", "core.symlinks", "false")
+        path.unlink()
+        git(ws.repo, "checkout-index", "-f", "hint")
+        self.assertFalse(path.is_symlink())
+        self.assertIn("link", self.refused(snapshot, ws))
+
+    def test_nested_clone_refused(self):
+        snapshot, ws = self.build()
+        git(ws.inputs, "clone", "-q", str(case_dir(self.root) / "snapshot.bundle"), "reference")
+        self.assertIn("embedded", self.refused(snapshot, ws))
+
+    def test_embedded_bare_repository_refused(self):
+        snapshot, ws = self.build()
+        git(ws.inputs, "clone", "-q", "--bare", str(case_dir(self.root) / "snapshot.bundle"), "reference")
+        self.assertIn("embedded", self.refused(snapshot, ws))
+
+    def test_renamed_history_containers_refused(self):
+        snapshot, ws = self.build()
+        git(ws.inputs, "clone", "-q", "--bare", str(case_dir(self.root) / "snapshot.bundle"), "reference")
+        git(ws.inputs / "reference", "repack", "-ad")
+        pack = next((ws.inputs / "reference" / "objects" / "pack").glob("*.pack")).read_bytes()
+        bundle = (case_dir(self.root) / "snapshot.bundle").read_bytes() + b"\n"
+        workspace.remove_tree(ws.inputs / "reference")
+        for data in (pack, bundle):
+            with self.subTest(header=data[:12]):
+                (ws.inputs / "reference.bin").write_bytes(data)
+                self.assertIn("history container", self.refused(snapshot, ws))
+
+    def test_loose_git_object_store_refused(self):
+        snapshot, ws = self.build()
+        bare = self.scratch / "loose.git"
+        git(self.scratch, "init", "-q", "--bare", str(bare))
+        commit = subprocess.run(["git", "-C", str(snapshot.extract), "cat-file", "commit", SNAPSHOT],
+                                capture_output=True, check=True).stdout
+        subprocess.run(["git", "-C", str(bare), "hash-object", "-t", "commit", "-w", "--stdin"],
+                       input=commit, capture_output=True, check=True)
+        shutil.copytree(bare / "objects", ws.inputs / "reference")
+        self.assertIn("history container", self.refused(snapshot, ws))
+
+    def test_package_text_is_not_a_git_pack(self):
+        snapshot, ws = self.build()
+        (ws.inputs / "package.txt").write_bytes(b"PACKAGE documentation\n")
+        workspace.scan_workspace(ws, snapshot)
 
 
 class PreregTest(unittest.TestCase):
@@ -438,6 +643,84 @@ class RunTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
         self.assertEqual(self.env.launched(), [])
 
+    def test_oracle_in_prompt_refused_before_any_variant(self):
+        for prefix in (b"", b"\xef\xbb\xbf"):
+            with self.subTest(prefix=prefix):
+                root = fixture_copy(self)
+                (case_dir(root) / "task.md").write_bytes(prefix + oracle_path(root).read_bytes().replace(
+                    b"\n", b"\r\n"))
+                with self.assertRaises(EvalError) as caught:
+                    run_fixture(self, root, self.env, frozen=True)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertIn("prompt", str(caught.exception))
+                self.assertEqual(self.env.launched(), [])
+                self.assertFalse(self.env.runs.exists())
+
+    def test_forbidden_prompt_name_refused(self):
+        (case_dir(self.root) / "task.md").rename(case_dir(self.root) / "fix.patch")
+        set_case(self.root, 'prompt = "task.md"', 'prompt = "fix.patch"')
+        with self.assertRaises(EvalError) as caught:
+            run_fixture(self, self.root, self.env)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertEqual(self.env.launched(), [])
+
+    def test_bom_oracle_in_prompt_refused(self):
+        oracle = oracle_path(self.root)
+        oracle.write_bytes(b"\xef\xbb\xbf" + oracle.read_bytes())
+        (case_dir(self.root) / "task.md").write_bytes(oracle.read_bytes())
+        with self.assertRaises(EvalError) as caught:
+            run_fixture(self, self.root, self.env, frozen=True)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertEqual(self.env.launched(), [])
+
+    def test_launch_uses_the_prompt_bytes_that_were_scanned(self):
+        prompt = case_dir(self.root) / "task.md"
+        prompt.write_bytes(b"\xef\xbb\xbfThe same prompt\r\n")
+        script = self.root / "variants" / "fake_variant.py"
+        script.write_text('# 프롬프트 입력 고정 확인\nimport pathlib, sys\n'
+                          'print(sys.stdin.buffer.read().hex())\n'
+                          f'pathlib.Path({str(prompt)!r}).write_bytes(b"changed after scan")\n', encoding="utf-8")
+        run_dir = run_fixture(self, self.root, self.env)
+        for name in ("baseline", "improved"):
+            out = run_dir / "cases" / "derived-index" / name / "stdout.txt"
+            self.assertEqual(out.read_text(encoding="utf-8").strip(), b"The same prompt\r\n".hex())
+
+    def test_other_case_oracle_refused_in_every_workspace(self):
+        second = self.root / "cases" / "holdout"
+        shutil.copytree(case_dir(self.root), second)
+        manifest = second / "case.toml"
+        manifest.write_bytes(manifest.read_bytes().replace(b'id = "derived-index"', b'id = "holdout"').replace(
+            b'split = "control"', b'split = "holdout"'))
+        other_oracle = self.root / "oracles" / "holdout.toml"
+        other_oracle.write_bytes(oracle_path(self.root).read_bytes().replace(
+            b'case = "derived-index"', b'case = "holdout"'))
+        (case_dir(self.root) / "inputs" / "hint.toml").write_bytes(other_oracle.read_bytes())
+        with (self.root / "plan.toml").open("a", encoding="utf-8") as handle:
+            handle.write('\n[[case]]\npath = "cases/holdout"\n')
+        prereg = self.root / "p.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root), other_oracle], prereg)
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(prereg), self.env.runs, env=self.env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertEqual(self.env.launched(), [])
+        self.assertFalse(self.env.runs.exists())
+
+    def test_variant_environment_excludes_caller_metadata(self):
+        script = self.root / "variants" / "fake_variant.py"
+        script.write_text('# 환경 경계 확인\nimport json, os, sys\n'
+                          'print(json.dumps({"leaked": any(k.upper() in '
+                          '{"ORACLE_PATH", "CALLER_METADATA", "GIT_DIR", "OAH_STATE_DIR", "PYTHONPATH"} '
+                          'for k in os.environ), "workspace": all(os.environ.get(k) for k in '
+                          '["OAH_EVAL_INPUTS", "OAH_EVAL_REQUIREMENT", "OAH_EVAL_OUTPUT"]), '
+                          '"path": bool(os.environ.get("PATH"))}))\nsys.stdin.read()\n', encoding="utf-8")
+        self.env.env.update(ORACLE_PATH=str(oracle_path(self.root)), CALLER_METADATA="private",
+                            GIT_DIR="caller", OAH_STATE_DIR="caller", PYTHONPATH="caller")
+        run_dir = run_fixture(self, self.root, self.env)
+        for name in ("baseline", "improved"):
+            seen = json.loads((run_dir / "cases" / "derived-index" / name / "stdout.txt").read_text(
+                encoding="utf-8"))
+            self.assertEqual(seen, {"leaked": False, "workspace": True, "path": True})
+
     def test_missing_command_refused_before_any_variant(self):
         set_plan(self.root, '["{python}", "{plan_dir}/variants/fake_variant.py", "catch"]',
                  '["oah-eval-no-such-tool-xyz"]')
@@ -524,6 +807,31 @@ class GradeTest(unittest.TestCase):
                 self.assertEqual([m["defect"] for m in result["matched"]], matched)
                 self.assertEqual(result["missed"], [] if matched else ["D1"])
                 self.assertEqual(len(result["unmatched"]), 0 if matched else 1)
+
+    def test_duplicate_finding_ids_refused(self):
+        defects = [grade.Defect("D1", "", ("index.txt",), ("stale",))]
+        for first, second in (("F1", "F1"), (1, "1"), ("F2", None)):
+            with self.subTest(ids=(first, second)):
+                findings = [self.finding("index.txt", "stale", first),
+                            self.finding("words.txt", "unrelated", second)]
+                with self.assertRaises(EvalError) as caught:
+                    grade.match_findings(defects, findings)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_FINDING_DUPLICATE")
+                self.assertIn("unique", str(caught.exception))
+
+    def test_duplicate_ids_refused_before_human_verdicts(self):
+        run_dir = run_fixture(self, self.root, self.env)
+        path = run_dir / "cases" / "derived-index" / "improved" / "result.json"
+        result = json.loads(path.read_text(encoding="utf-8"))
+        result["findings"].append(self.finding("words.txt", "unrelated", "F1"))
+        path.write_text(json.dumps(result), encoding="utf-8")
+        verdicts = self.root / "verdicts.toml"
+        verdicts.write_bytes(b'[[verdict]]\ncase = "derived-index"\nvariant = "improved"\n'
+                             b'finding = "F1"\nverdict = "false-positive"\n')
+        with self.assertRaises(EvalError) as caught:
+            grade.grade_run(run_dir, [oracle_path(self.root)], verdicts_path=verdicts, env=self.env.env)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_FINDING_DUPLICATE")
+        self.assertFalse((run_dir / "grade.json").exists())
 
     def test_unmatched_findings_need_human(self):
         run_dir = run_fixture(self, self.root, self.env, frozen=True)
@@ -615,6 +923,31 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_EVAL_NOT_GRADED")
         self.assertIn("oah eval grade", str(caught.exception))
 
+    def test_usage_totals_track_each_field_completeness(self):
+        grade.grade_run(self.run_dir, [oracle_path(self.root)], env=self.env.env)
+        run_path = self.run_dir / "run.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        for i, usage in enumerate(({"input_tokens": 10, "cost_usd": 0.01}, {"input_tokens": 20})):
+            path = self.run_dir / run["results"][i]["path"]
+            result = json.loads(path.read_text(encoding="utf-8"))
+            result.update(variant="baseline", usage=usage)
+            path.write_text(json.dumps(result), encoding="utf-8")
+            run["results"][i]["variant"] = "baseline"
+        run_path.write_text(json.dumps(run), encoding="utf-8")
+        data = report.build_report(self.run_dir)
+        [row] = data["rows"]
+        self.assertEqual(row["usage"]["input_tokens"], 30)
+        self.assertEqual(row["usage"]["cost_usd"], "unknown (1 of 2 recorded)")
+        self.assertIn("usage.cost_usd", "\n".join(data["limits"]))
+        self.assertIn("cost_usd=unknown (1 of 2 recorded)", report.render(data))
+
+    def test_usage_missing_whole_record_still_tracks_fields(self):
+        total = report._sum_usage([{"input_tokens": 10, "cost_usd": 0}, "unknown"])
+        self.assertIsInstance(total, dict)
+        self.assertEqual(total["input_tokens"], "unknown (1 of 2 recorded)")
+        self.assertEqual(total["cost_usd"], "unknown (1 of 2 recorded)")
+        self.assertEqual(report._sum_usage(["unknown", "unknown"]), "unknown")
+
     def test_aggregates_by_split_and_variant(self):
         grade.grade_run(self.run_dir, [oracle_path(self.root)], env=self.env.env)
         data = report.build_report(self.run_dir)
@@ -627,7 +960,7 @@ class ReportTest(unittest.TestCase):
         self.assertEqual((improved["matched"], improved["tests_fixed"]), (1, 1))
         self.assertEqual((base["rounds"], base["corrections"], base["usage"]), ("unknown", "unknown", "unknown"))
         self.assertEqual((improved["rounds"], improved["corrections"]), (1, 1))
-        self.assertEqual(improved["usage"], {"input_tokens": 120, "output_tokens": 30})
+        self.assertEqual(improved["usage"], {"input_tokens": 120, "output_tokens": 30, "cost_usd": "unknown"})
         self.assertTrue(base["control_flow_only"])
         self.assertIsInstance(base["wall_seconds"], float)
 

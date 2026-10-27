@@ -49,7 +49,9 @@ commit = "<the full commit id before the fix>"
 All paths stay inside the case folder. A bundle may hold the whole history, including the fix, because
 only the snapshot commit's tree reaches a workspace. A tar or zip archive must be the snapshot tree. When
 `git archive` recorded a commit id in it, that id must equal `commit`. Archives may hold only regular files
-and folders.
+and folders. Every archive member is validated before extraction. Git metadata names at any depth,
+including case variants, macOS ignored format characters and Windows short-name, trailing-dot/space
+and stream aliases, are refused.
 
 ### Splits
 
@@ -119,6 +121,14 @@ launched.
 Every field is optional. A finding can also carry `files`, `title`, `detail` and `evidence`. Usage, rounds
 and corrections are reported only when the variant records them; otherwise they are `unknown`.
 `"engine": "fake"` (or `fake = true` in the plan) labels the result `control-flow-only`.
+Finding IDs must be unique within a variant result after normalization (a missing ID becomes
+`F<position>`); duplicate IDs are refused during grading.
+
+Variants receive an explicit runtime environment: `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `COMSPEC`,
+`HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TMP`, `TEMP`, `TMPDIR`, `LANG`, `LC_ALL`, `LC_CTYPE`
+and `TZ` when present, plus the three `OAH_EVAL_*` workspace variables above. Other caller variables,
+including oracle locations, API keys, Git context and `OAH_STATE_DIR`, are not forwarded. Configure
+engines through their own local runtime setup.
 
 ## Preregistration
 
@@ -144,9 +154,19 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - an object of the original history: any object of the bundle other than the snapshot tree's own trees
   and blobs, or the snapshot commit itself for archives;
 - borrowed objects (`.git/objects/info/alternates`);
-- a copy of the oracle, compared by SHA-256 with LF and CRLF line endings;
+- embedded Git repository metadata (including nested clones and bare repositories), bundles, packs
+  or loose Git objects in visible inputs;
+- a copy of any preregistered oracle, compared by SHA-256 with LF/CRLF and UTF-8 BOM normalization;
 - a copy of the snapshot file;
-- a file matching a `forbidden` pattern.
+- a file or link matching a `forbidden` pattern;
+- a link leaving its workspace input tree, or a directory link. Committed symlink modes are checked
+  even when Windows checks them out as ordinary files. Case input roots, requirement and prompt
+  must be regular directories/files.
+
+The exact UTF-8 task prompt sent on stdin is scanned too, including its forbidden filename, and the
+checked prompt is retained for launch. Every workspace uses the union of all preregistered oracle
+hashes. Construction and scan Git subprocesses discard caller `GIT_*` variables so repository context
+cannot redirect their operations.
 
 The oracle comparison needs the preregistered oracle hash. An exploratory run records `oracle: not-checked`.
 
@@ -198,6 +218,11 @@ A total that is only partly recorded reads `unknown (k of n recorded)`. The repo
 
 It never prints a superiority claim.
 
+Usage completeness is tracked separately for each field. For example, if both cases record tokens but
+only one records cost, token totals remain available and `cost_usd` is `unknown (1 of 2 recorded)`.
+Unrecorded input tokens, output tokens and cost stay unknown; missing fields never contribute zero.
+Unknown usage fields also appear individually in the report's limits.
+
 ## Configuration
 
 `.oah/config.toml` may set:
@@ -233,6 +258,7 @@ Refusals exit 1. A missing tool or an unwritable folder exits 69.
 | `OAH_EVAL_ORACLE_MISSING` / `OAH_EVAL_ORACLE_IN_CASE` / `OAH_EVAL_ORACLE_CHANGED` | oracle missing, inside a case folder, or changed since preregistration |
 | `OAH_EVAL_CASE_CHANGED` | the case folder changed between run and grade |
 | `OAH_EVAL_VERDICT_INVALID` | a human verdict is unknown, duplicated or names no unmatched finding |
+| `OAH_EVAL_FINDING_DUPLICATE` | finding IDs repeat after normalization; give each finding a unique ID and grade again |
 | `OAH_EVAL_RUN_INVALID` / `OAH_EVAL_NOT_GRADED` | not a run folder / not graded yet |
 | `OAH_EVAL_COMMAND_MISSING` (69) | a variant or test program is not installed |
 | `OAH_EVAL_GIT` / `OAH_EVAL_IO` / `OAH_EVAL_NO_STATE` (69) | git failed, a file could not be written, or there is no place for run folders |

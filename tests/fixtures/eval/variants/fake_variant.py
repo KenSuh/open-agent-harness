@@ -3,12 +3,13 @@
 
 MODE miss   reports an unrelated finding about words.txt; records no usage
 MODE catch  regenerates index.txt and reports it as stale; records usage, rounds and corrections
-FAKE_EVAL_MARKER      path: append the mode on launch (proves whether a variant ran)
-FAKE_EVAL_RECORD_DIR  folder: write <mode>.json with what the variant saw
-FAKE_EVAL_EXIT        exit code (default 0)
+--marker PATH        append the mode on launch (proves whether a variant ran)
+--record-dir FOLDER  write <mode>.json with what the variant saw
+--exit-code N        exit code (default 0)
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -26,13 +27,11 @@ def _git(*args: str) -> str:
     return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
-def main(mode: str) -> int:
+def main(mode: str, *, marker: str | None = None, record_dir: str | None = None, exit_code: int = 0) -> int:
     prompt = sys.stdin.buffer.read().decode("utf-8")
-    marker = os.environ.get("FAKE_EVAL_MARKER")
     if marker:
         with open(marker, "a", encoding="utf-8") as handle:
             handle.write(mode + "\n")
-    record_dir = os.environ.get("FAKE_EVAL_RECORD_DIR")
     if record_dir:
         seen = {"prompt": prompt, "cwd": os.getcwd(),
                 "requirement": pathlib.Path(os.environ["OAH_EVAL_REQUIREMENT"]).read_text(encoding="utf-8"),
@@ -52,8 +51,14 @@ def main(mode: str) -> int:
                                 "summary": "index.txt is stale: it was not regenerated after words.txt changed"}]}
     out = pathlib.Path(os.environ["OAH_EVAL_OUTPUT"]) / "result.json"
     out.write_text(json.dumps(result), encoding="utf-8")
-    return int(os.environ.get("FAKE_EVAL_EXIT", "0") or 0)
+    return exit_code
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("miss", "catch"))
+    parser.add_argument("--marker")
+    parser.add_argument("--record-dir")
+    parser.add_argument("--exit-code", type=int, default=0)
+    args = parser.parse_args()
+    sys.exit(main(args.mode, marker=args.marker, record_dir=args.record_dir, exit_code=args.exit_code))

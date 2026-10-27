@@ -126,6 +126,10 @@ def _matches(defect: Defect, finding: Mapping[str, Any]) -> bool:
 def match_findings(defects: Iterable[Defect], findings: Iterable[Mapping[str, Any]]) -> dict:
     """Matched expected defects, missed ones, and unmatched findings (left for human judgement)."""
     normalized = [normalize_finding(item, n) for n, item in enumerate(findings, 1)]
+    ids = [finding["id"] for finding in normalized]
+    if len(ids) != len(set(ids)):
+        raise EvalError("OAH_EVAL_FINDING_DUPLICATE", "finding IDs repeat after normalization; give every finding "
+                        "in this variant result a unique ID, then grade again")
     matched, missed, used = [], [], set()
     for defect in defects:
         hits = [f["id"] for f in normalized if _matches(defect, f)]

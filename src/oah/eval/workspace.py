@@ -9,7 +9,9 @@ import shutil
 import stat
 import sys
 import tarfile
+import unicodedata
 import zipfile
+import zlib
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Iterable
@@ -55,7 +57,10 @@ def _git(cwd: pathlib.Path, *args: str, stdin: str | None = None, env: dict | No
         argv = git_argv()
     except GitMissing as exc:
         raise EvalError("OAH_EVAL_GIT", f"{exc}; install git and run again", EXIT_ENVIRONMENT) from exc
-    full_env = dict(os.environ, **env) if env else None
+    # Like review snapshots, do not let caller context override -C. Config and
+    # trace variables are excluded too: they can redirect writes or record data.
+    full_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    full_env.update(env or {})
     return run_command(argv + ("-C", str(cwd), *args), timeout=GIT_TIMEOUT, env=full_env, stdin_text=stdin)
 
 
@@ -118,10 +123,18 @@ def _archive_commit(case: Case) -> str | None:
     return comment if _HEX.match(comment) else None
 
 
+def _git_metadata(name: str) -> bool:
+    # HFS ignores format characters; Win32 folds case, trims dots/spaces and
+    # accepts NTFS streams and the short name GIT~1 for .git.
+    folded = "".join(c for c in name.casefold() if unicodedata.category(c) != "Cf")
+    folded = folded.split(":", 1)[0].rstrip(" .")
+    return folded == ".git" or re.fullmatch(r"git~[0-9]+", folded) is not None
+
+
 def _member_path(case: Case, name: str) -> pathlib.PurePosixPath:
     pure = pathlib.PurePosixPath(name.replace("\\", "/"))
     if (pure.is_absolute() or ".." in pure.parts or re.match(r"^[A-Za-z]:", name) or not pure.parts
-            or ".git" in pure.parts):
+            or any(_git_metadata(part) or ":" in part or not part.rstrip(" .") for part in pure.parts)):
         raise _snapshot_error(case, f"archive member {name!r} is outside the snapshot or is git metadata; "
                                     "recreate the archive with git archive")
     return pure
@@ -138,21 +151,27 @@ def _extract_archive(case: Case, repo: pathlib.Path) -> None:
     """Unpack regular files and folders only; links and special files are refused."""
     if case.snapshot_format == "tar":
         with tarfile.open(case.snapshot_file, "r:*") as tar:
-            for member in tar.getmembers():
-                pure = _member_path(case, member.name)
+            members = [(member, _member_path(case, member.name)) for member in tar.getmembers()]
+            for member, _ in members:
+                if not (member.isdir() or member.isfile()):
+                    raise _snapshot_error(case, "archive holds a link or special file; "
+                                                "use a bundle snapshot for repositories with links")
+            for member, pure in members:
                 target = repo.joinpath(*pure.parts)
                 if member.isdir():
                     target.mkdir(parents=True, exist_ok=True)
                 elif member.isfile():
                     handle = tar.extractfile(member)
                     _write_member(target, handle.read() if handle else b"", bool(member.mode & 0o111))
-                else:
-                    raise _snapshot_error(case, f"archive member {member.name!r} is a link or special file; "
-                                                "use a bundle snapshot for repositories with links")
         return
     with zipfile.ZipFile(case.snapshot_file) as archive:
-        for info in archive.infolist():
-            pure = _member_path(case, info.filename)
+        members = [(info, _member_path(case, info.filename)) for info in archive.infolist()]
+        for info, _ in members:
+            kind = stat.S_IFMT(info.external_attr >> 16)
+            if kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise _snapshot_error(case, "archive holds a link or special file; use a bundle snapshot "
+                                            "for repositories with links")
+        for info, pure in members:
             target = repo.joinpath(*pure.parts)
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -187,7 +206,16 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_bytes(config_text.encode("utf-8"))
     inputs = root / "inputs"
-    shutil.copytree(case.inputs, inputs)
+    for path in (case.inputs, case.requirement, case.prompt):
+        if _is_link(path):
+            raise EvalError("OAH_EVAL_ISOLATION", "a case input root, requirement or prompt is a link; replace "
+                            "it with a regular file or directory inside the case folder, then run again")
+    # Python 3.11 copytree follows Windows junctions even with symlinks=True.
+    for path in _files(case.inputs):
+        if _is_link(path) and (path.is_dir() or not path.is_symlink()):
+            raise EvalError("OAH_EVAL_ISOLATION", "case inputs contain a directory link or reparse point; "
+                            "replace it with regular input files, then run again")
+    shutil.copytree(case.inputs, inputs, symlinks=True)
     requirement = root / f"requirement{case.requirement.suffix}"
     shutil.copyfile(case.requirement, requirement)
     output = root / "output"
@@ -196,8 +224,10 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
 
 
 def content_hashes(data: bytes) -> frozenset[str]:
-    """SHA-256 of the bytes as given and with CRLF line endings turned into LF."""
-    return frozenset({hashlib.sha256(data).hexdigest(), hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()})
+    """SHA-256 of original bytes and UTF-8 BOM/CRLF-normalized copies."""
+    plain = data.removeprefix(b"\xef\xbb\xbf")
+    return frozenset(hashlib.sha256(value).hexdigest() for value in
+                     (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n")))
 
 
 def _file_hashes(path: pathlib.Path) -> frozenset[str]:
@@ -206,20 +236,75 @@ def _file_hashes(path: pathlib.Path) -> frozenset[str]:
     return content_hashes(path.read_bytes())
 
 
+def _is_link(path: pathlib.Path) -> bool:
+    # Reparse points also cover Windows junctions on Python 3.11.
+    return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0)
+                                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
 def _files(base: pathlib.Path) -> Iterable[pathlib.Path]:
-    if base.is_file():
+    """Files, directories and links, without traversing links (including junctions)."""
+    if _is_link(base) or not base.is_dir():
         yield base
         return
-    for path in sorted(base.rglob("*")):
-        if path.is_file() and not path.is_symlink():
-            yield path
+    for path in sorted(base.iterdir()):
+        yield path
+        if not _is_link(path) and path.is_dir():
+            yield from _files(path)
 
 
-def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable[str] = ()) -> dict:
-    """Refuse with OAH_EVAL_ISOLATION when the workspace holds an oracle copy, history or a forbidden file."""
+def _safe_link(path: pathlib.Path, base: pathlib.Path, target: str | None = None) -> bool:
+    try:
+        if target is not None:
+            # Treat Windows absolute/drive paths as external on every host.
+            if pathlib.PureWindowsPath(target).drive or target.startswith(("/", "\\")):
+                return False
+            resolved = (path.parent / target.replace("\\", "/")).resolve()
+        else:
+            resolved = path.resolve()
+        return resolved.is_relative_to(base.resolve()) and not resolved.is_dir()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _history_container(path: pathlib.Path) -> bool:
+    with path.open("rb") as handle:
+        header = handle.read(128)
+    if (header[:8] in (b"PACK\x00\x00\x00\x02", b"PACK\x00\x00\x00\x03")
+            or header.startswith((b"# v2 git bundle\n", b"# v3 git bundle\n"))):
+        return True
+    # Loose Git objects can carry the same history without refs, HEAD or packs.
+    # Bound decompression: a compressed input must not allocate unbounded memory.
+    try:
+        loose = zlib.decompressobj().decompress(header, 64)
+    except zlib.error:
+        return False
+    return re.match(rb"(?:commit|tree|blob|tag) [0-9]+\x00", loose) is not None
+
+
+def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable[str] = (),
+                   prompt: bytes | None = None) -> dict:
+    """Refuse oracle copies, history, unsafe links or forbidden inputs before launching."""
     oracle_hashes = frozenset(oracle_hashes)
     case = snapshot.case
     problems: list[str] = []
+
+    def check_content(shown: str, hashes: frozenset[str]) -> None:
+        if hashes & oracle_hashes:
+            problems.append(f"a copy of the oracle file at {shown}")
+        if snapshot.snapshot_sha256 in hashes:
+            problems.append(f"a copy of the snapshot file, which holds the original history, at {shown}")
+
+    def check_name(shown: str, relative: str) -> None:
+        for pattern in case.forbidden:
+            if fnmatchcase(relative, pattern) or fnmatchcase(relative.rsplit("/", 1)[-1], pattern):
+                problems.append(f"{shown} matches the forbidden pattern {pattern!r}")
+
+    # Match the actual UTF-8 stdin bytes, including the runner's BOM removal.
+    if prompt is None:
+        prompt = case.prompt.read_bytes().decode("utf-8-sig").encode("utf-8")
+    check_content("prompt", content_hashes(prompt))
+    check_name("prompt", case.prompt.relative_to(case.folder).as_posix())
     alternates = ws.repo / ".git" / "objects" / "info" / "alternates"
     if alternates.exists():
         problems.append("the repository borrows objects from elsewhere (.git/objects/info/alternates)")
@@ -227,20 +312,41 @@ def scan_workspace(ws: Workspace, snapshot: Snapshot, *, oracle_hashes: Iterable
     leaked = sorted(found & snapshot.history_objects)
     if leaked:
         problems.append(f"{len(leaked)} object(s) from the original history, such as {leaked[0]}")
+    # core.symlinks=false on Windows materializes these as ordinary files.
+    for entry in _git_ok(ws.repo, "ls-tree", "-rz", "HEAD").split("\0"):
+        if not entry:
+            continue
+        info, name = entry.split("\t", 1)
+        mode, _, oid = info.split()
+        if mode == "120000":
+            check_name(f"repo/{name}", name)
+            target = _git_ok(ws.repo, "cat-file", "blob", oid)
+            if not _safe_link(ws.repo / name, ws.repo, target):
+                problems.append("a committed link leaves the repository or names a directory")
     for label, base in (("repo", ws.repo), ("inputs", ws.inputs), ("requirement", ws.requirement)):
         for path in _files(base):
             relative = path.relative_to(base).as_posix() if base.is_dir() else path.name
             shown = f"{label}/{relative}" if base.is_dir() else relative
-            hashes = _file_hashes(path)
-            if hashes & oracle_hashes:
-                problems.append(f"a copy of the oracle file at {shown}")
-            if snapshot.snapshot_sha256 in hashes:
-                problems.append(f"a copy of the snapshot file, which holds the original history, at {shown}")
             if label == "repo" and relative.split("/", 1)[0] == ".git":
+                if _is_link(path):
+                    if not _safe_link(path, ws.repo):
+                        problems.append("a link in repository metadata leaves the repository or names a directory")
+                elif path.is_file():
+                    check_content(shown, _file_hashes(path))
                 continue
-            for pattern in case.forbidden:
-                if fnmatchcase(relative, pattern) or fnmatchcase(path.name, pattern):
-                    problems.append(f"{shown} matches the forbidden pattern {pattern!r}")
+            check_name(shown, relative)
+            if _is_link(path):
+                if not _safe_link(path, base if base.is_dir() else ws.root):
+                    problems.append(f"a link at {shown} leaves its workspace input or names a directory")
+                # Never follow links when reading content or reporting a refusal.
+                continue
+            if _git_metadata(path.name) or (path.is_dir() and (path / "objects").is_dir()
+                                           and ((path / "HEAD").is_file() or (path / "refs").is_dir())):
+                problems.append(f"embedded Git repository metadata at {shown}")
+            if path.is_file():
+                check_content(shown, _file_hashes(path))
+                if _history_container(path):
+                    problems.append(f"a Git history container at {shown}")
     if problems:
         raise EvalError("OAH_EVAL_ISOLATION",
                         f"the workspace for case {case.id} is not isolated: " + "; ".join(problems) +

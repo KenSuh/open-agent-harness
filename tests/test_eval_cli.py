@@ -12,7 +12,7 @@ import unittest
 from oah import eval_cli
 from oah.cli import _command_table, command_modules, main
 from tests.helpers import make_git_repo, make_tmp_dir
-from tests.test_eval import SUPERIORITY, case_dir, fixture_copy, oracle_path, set_case, set_plan
+from tests.test_eval import SUPERIORITY, case_dir, configure_fixture, fixture_copy, oracle_path, set_case, set_plan
 
 ENV_KEYS = ("OAH_STATE_DIR", "FAKE_EVAL_MARKER", "FAKE_EVAL_RECORD_DIR", "FAKE_EVAL_EXIT")
 
@@ -46,6 +46,7 @@ class EvalCliTest(unittest.TestCase):
         self.marker = base / "marker.txt"
         self.state = base / "state"
         self.env = {"OAH_STATE_DIR": str(self.state), "FAKE_EVAL_MARKER": str(self.marker)}
+        configure_fixture(self.root, self.env)
 
     def cli(self, *argv: str):
         return run_cli(self.repo, *argv, env=self.env)

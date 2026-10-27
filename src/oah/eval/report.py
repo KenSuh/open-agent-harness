@@ -26,13 +26,9 @@ def _sum_usage(values: list[Any]) -> Any:
     known = [v for v in values if isinstance(v, dict)]
     if not known:
         return UNKNOWN
-    if len(known) < len(values):
-        return f"unknown ({len(known)} of {len(values)} recorded)"
-    total: dict[str, float] = {}
-    for usage in known:
-        for key, value in usage.items():
-            total[key] = total.get(key, 0) + value
-    return total
+    keys = {"input_tokens", "output_tokens", "cost_usd"} | {key for usage in known for key in usage}
+    return {key: _sum_known([value.get(key, UNKNOWN) if isinstance(value, dict) else UNKNOWN
+                            for value in values]) for key in sorted(keys)}
 
 
 def build_report(run_dir: pathlib.Path) -> dict:
@@ -92,8 +88,11 @@ def _limits(run: Mapping[str, Any], rows: list[dict]) -> list[str]:
                       "not whether real defects are found")
     unknown: dict[str, list[str]] = {}
     for row in rows:
-        for metric in ("usage", *_REWORK):
-            if not isinstance(row[metric], (int, float, dict)) and metric not in unknown.setdefault(row["variant"], []):
+        metrics = {metric: row[metric] for metric in ("usage", *_REWORK)}
+        if isinstance(row["usage"], dict):
+            metrics.update({f"usage.{key}": value for key, value in row["usage"].items()})
+        for metric, value in metrics.items():
+            if not isinstance(value, (int, float, dict)) and metric not in unknown.setdefault(row["variant"], []):
                 unknown[row["variant"]].append(metric)
     listed = "; ".join(f"{variant}: {', '.join(metrics)}" for variant, metrics in sorted(unknown.items()) if metrics)
     limits.append(f"unknown metrics: {listed or 'none'}")

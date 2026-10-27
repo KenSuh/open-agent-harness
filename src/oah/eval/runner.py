@@ -25,6 +25,8 @@ RESULT_FILE = "result.json"
 OUTPUT_FILE = "result.json"
 UNKNOWN = "unknown"
 CONTROL_FLOW_ONLY = "control-flow-only"
+_RUNTIME_ENV = frozenset(("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "HOME", "USERPROFILE",
+                          "APPDATA", "LOCALAPPDATA", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"))
 
 
 @dataclass
@@ -35,6 +37,7 @@ class _Prepared:
     argv: list[str]
     workspace: Workspace
     isolation: dict
+    prompt: str
 
 
 def _now() -> str:
@@ -116,14 +119,13 @@ def _launch(item: _Prepared, run_dir: pathlib.Path, prereg: str | None, env: Map
     ws, variant = item.workspace, item.variant
     folder = run_dir / "cases" / item.case.id / variant["name"]
     folder.mkdir(parents=True)
-    variant_env = dict(env, OAH_EVAL_INPUTS=str(ws.inputs), OAH_EVAL_REQUIREMENT=str(ws.requirement),
+    variant_env = dict(_variant_env(env), OAH_EVAL_INPUTS=str(ws.inputs), OAH_EVAL_REQUIREMENT=str(ws.requirement),
                        OAH_EVAL_OUTPUT=str(ws.output))
-    prompt = item.case.prompt.read_bytes().decode("utf-8-sig")
     started = time.monotonic()
     launch_error = None
     try:
         result = run_command(item.argv, timeout=variant.get("timeout_seconds") or timeout_seconds,
-                             cwd=str(ws.repo), env=variant_env, stdin_text=prompt)
+                             cwd=str(ws.repo), env=variant_env, stdin_text=item.prompt)
         exit_code, timed_out, stdout, stderr = result.returncode, result.timed_out, result.stdout, result.stderr
     except OSError as exc:
         exit_code, timed_out, stdout, stderr = None, False, "", ""
@@ -150,11 +152,18 @@ def _launch(item: _Prepared, run_dir: pathlib.Path, prereg: str | None, env: Map
             "path": (folder / RESULT_FILE).relative_to(run_dir).as_posix()}
 
 
+def _variant_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Only runtime settings cross the variant boundary; no arbitrary caller metadata."""
+    return {key.upper(): value for key, value in env.items() if key.upper() in _RUNTIME_ENV}
+
+
 def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str], timeout_seconds: float,
              run_id: str | None = None) -> pathlib.Path:
     """Run every variant on every case; nothing launches unless every workspace passed the isolation scan."""
     cases = _check_cases(source)
+    env = _variant_env(env)
     variants = _check_variants(source, env)
+    oracle_hashes = {digest for entry, _ in cases for digest in entry.get("oracle_match_sha256", ())}
     temporary: list[pathlib.Path] = []
     try:
         prepared: list[_Prepared] = []
@@ -162,15 +171,16 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
             scratch = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-src-"))
             temporary.append(scratch)
             snapshot = open_snapshot(case, scratch)
+            prompt = case.prompt.read_bytes().decode("utf-8-sig")
             commits = set()
             for variant, argv in variants:
                 # Each workspace is its own temporary folder, so no variant sits next to another's work.
                 root = pathlib.Path(tempfile.mkdtemp(prefix="oah-eval-ws-"))
                 temporary.append(root)
                 ws = build_workspace(snapshot, root, config_text=variant.get("config_text"))
-                isolation = scan_workspace(ws, snapshot, oracle_hashes=entry.get("oracle_match_sha256", ()))
+                isolation = scan_workspace(ws, snapshot, oracle_hashes=oracle_hashes, prompt=prompt.encode("utf-8"))
                 commits.add(ws.commit)
-                prepared.append(_Prepared(entry, case, variant, argv, ws, isolation))
+                prepared.append(_Prepared(entry, case, variant, argv, ws, isolation, prompt))
             if len(commits) != 1:
                 raise EvalError("OAH_EVAL_WORKSPACE", f"case {case.id}: the variants did not get the same starting "
                                                       "commit; report this as an oah bug")
