@@ -1932,6 +1932,15 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_no_pool_status_survives_correction_record_writes(self):
+        status = "unused(no-pool-for-tier)"
+        closed = runs._correction_record({"model_judge": status}, runs.RESULT_FIELDS)
+        run = runs.new_run(make_tmp_dir(self), "t1", "codex", "correction")
+        run.result(**closed)
+        run.result(**closed)
+        self.assertEqual(run.read()["model_judge"], status)
+        self.assertEqual(runs._correction_record(closed, runs.RESULT_FIELDS), closed)
+
     def test_model_choice_schema_hashes_individual_untrusted_values(self):
         key = "fake-" + token_source.token_hex(20)
         digest = "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
@@ -2271,7 +2280,7 @@ class SecretTest(unittest.TestCase):
                  "implementation", "pin", "quality_order", "quality_order(unconfirmed)", "cli_default", "effective_config",
                  "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
                  "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
-                 "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
+                 "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
                  "ranked", "pools", "deterministic", "unused(error:timeout)",
                  "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
                  "not-in-tier-pool", "below-floor", "above-cap",

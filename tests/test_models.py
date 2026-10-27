@@ -311,6 +311,29 @@ class ModelsCliTest(unittest.TestCase):
         self.assertIn("OAH_MODEL_UNRESOLVED", out)
         self.assertIn("OAH_MODELS_REFRESH_FAILED", err)
 
+    def test_cap_conflicts_report_the_same_uncapped_floor_as_calls(self):
+        from tests import test_call as calls
+
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                model = "m-default" if engine == "codex" else "opus"
+                project = calls.Project(self, f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n')
+                write_cache(project.home, ("m-default", ["low", "medium", "high", "max"], True))
+                with inside(project.repo, project.env):
+                    code, out, err = run_models("--json")
+                    _, text, _ = run_models()
+                    with self.assertRaises(EngineError) as caught:
+                        project.prepare(engine=engine, stage="review" if engine == "codex" else "initial",
+                                        axes={"kind": "security"})
+                self.assertEqual(code, 0, err)
+                rows = json.loads(out)["engines"][engine]["tiers"]
+                self.assertEqual(rows["high"], {"error": str(caught.exception)})
+                self.assertIn("OAH_CONFIG_INVALID", rows["max"]["error"])
+                self.assertIn("floor effort high", text)
+                self.assertIn(".oah/config.toml", rows["high"]["error"])
+                self.assertEqual(rows["medium"]["floor"]["effort"], "medium")
+                self.assertFalse(project.record.exists())
+
 
 ALL = ("low", "medium", "high", "xhigh", "max", "ultra")
 JUDGE_ENTRY = Entry("codex", "0.163.0", "2026-10-23T12:00:00Z", (
@@ -396,10 +419,10 @@ class CandidateTableTest(unittest.TestCase):
             ("a pool model below the floor effort is not a candidate",
              {"ranking": [], "floor": ("m-strong", "high"), "floor_tier": "high",
               "pools": {"high": ["m-mid", "m-light"]}}, [("m-mid", "high")]),
-            ("no pool for the call tier: the model stays deterministic",
+            ("no pool for the call tier: no judged candidates",
              {"ranking": [], "floor": ("m-strong", "medium"), "deterministic": ("m-strong", "medium"),
               "tier": "medium", "pools": {"low": ["m-light"], "high": ["m-mid"]}},
-             [("m-strong", e) for e in ("medium", "high", "xhigh", "max")]),
+             []),
             ("allowed_models alone qualifies nothing",
              {"ranking": [], "floor": ("m-strong", "medium"), "deterministic": ("m-strong", "medium"),
               "tier": "medium", "allowed": ["m-mid", "m-light"]}, []),
@@ -410,6 +433,21 @@ class CandidateTableTest(unittest.TestCase):
                 self.assertEqual(pairs(built), expected)
                 for pair in built.pairs:
                     self.assertIsNone(built.reject_reason(pair.model, pair.effort))
+
+    def test_missing_or_empty_applicable_pool_has_no_candidates(self):
+        for ranking in ([], RANKING):
+            for absent in ("high", "max"):
+                for empty in (False, True):
+                    with self.subTest(ranking=ranking, absent=absent, empty=empty):
+                        pools = {"high": ["m-mid"], "max": ["m-mid"]}
+                        pools.pop(absent)
+                        if empty:
+                            pools[absent] = []
+                        built = candidates(ranking=ranking, floor=("m-strong", "high"), floor_tier="high",
+                                           tier="max", pools=pools)
+                        self.assertEqual(pairs(built), [])
+                        self.assertEqual(built.reject_reason("m-strong", "high"), "not-in-tier-pool")
+                        self.assertEqual(built.reject_reason("m-mid", "high"), "not-in-tier-pool")
 
     def test_reject_reasons_table(self):
         ranked, unranked = candidates(caps={"m-strong": "high"}), candidates(ranking=[], floor=("m-strong", "medium"))

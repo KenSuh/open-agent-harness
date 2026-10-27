@@ -26,8 +26,9 @@ Candidates (amendment 6)
     call's floor tier and of the call's tier. Models in a pool are peers, in the user's order, with no
     rank inferred; `allowed_models` only filters and never qualifies a model. Pool models left out (below
     the floor effort, above a cap, hidden) and allowed models in no applicable pool are in `excluded`
-    with the rule. Without a ranking and without both pools, the model stays the deterministic one,
-    only the effort is judged, and `note` says why. `CandidateSet.reject_reason` is the one rule: the
+    with the rule. Configured pools always require both memberships; a missing or empty applicable pool
+    leaves no judged candidates. When neither pools nor a usable ranking are configured, only the
+    deterministic model's effort is judged. `CandidateSet.reject_reason` is the one rule: the
     candidate list is every listed pair it accepts, and a judged answer is used only when it accepts
     that answer too.
     `check_caps` warns about capped, allowed or pooled models the catalog does not list, and refuses
@@ -288,7 +289,7 @@ class CandidateSet:
     floor_tier: str
     floor: Pair
     # "ranked": quality_order ranks the models; "pools": the user's tier pools, unranked peers;
-    # "deterministic": the effort only.
+    # "deterministic": effort only without pools; no candidates when an applicable pool is missing.
     mode: str
     order: tuple[str, ...]  # the ranked listed models, strongest first (empty without a ranking)
     allowed: tuple[str, ...]
@@ -314,6 +315,10 @@ class CandidateSet:
             return "not-allowed"
         if effort not in info.efforts or effort in BEHAVIOUR_CHANGING or rank(effort) is None:
             return "unsupported-effort"
+        if self.pools:
+            pools = dict(self.pools)
+            if any(model not in pools.get(tier, ()) for tier in (self.floor_tier, self.tier)):
+                return "not-in-tier-pool"
         if self.ranked:
             if model not in self.order:
                 return "unranked-model"

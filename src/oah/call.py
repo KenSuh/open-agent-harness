@@ -296,6 +296,26 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
                       warnings=(*freshness.warnings, *cap_warnings), changes=tuple(changes))
 
 
+def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: str, entry: models.Entry | None,
+                   root: pathlib.Path, env: Mapping[str, str]) -> models.Pair:
+    """Resolve the uncapped floor and check the launch cap against it, for calls and model reports."""
+    engine = resolution.engine
+    cap = settings.engines[engine]["effort_caps"].get(resolution.model)
+    try:
+        model, _, effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
+    except EngineError:
+        if cap is not None:
+            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
+                              f"the {floor_tier} floor; set a resolvable floor model and effort in .oah/config.toml") from None
+        raise
+    if cap is not None and (rank(effort.launch) is None or rank(cap) < rank(effort.launch)
+                            or rank(resolution.launch_effort) < rank(effort.launch)):
+        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] for {resolution.model} cannot "
+                          f"meet the {floor_tier} floor effort {effort.launch}; raise or remove its cap "
+                          "in .oah/config.toml before calling again")
+    return models.Pair(model, effort.launch)
+
+
 def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
                  entry: models.Entry | None, root: pathlib.Path, env: Mapping[str, str], brief_disabled: bool = False,
                  keychain=None) -> tuple[Resolution, dict]:
@@ -322,27 +342,23 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         return record("unused(pinned)")
     floor_tier = routing.floor_tier(axes.kind)
     try:
-        floor_model, _, floor_effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
+        floor = _resolve_floor(resolution, settings, floor_tier=floor_tier, entry=entry, root=root, env=env)
     except EngineError:
         if cap is not None:
-            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
-                              f"the {floor_tier} floor; set a resolvable floor model and effort in .oah/config.toml") from None
+            raise
         return record("unused(floor-unresolved)")
-    if cap is not None and (rank(floor_effort.launch) is None or rank(cap) < rank(floor_effort.launch)
-                            or rank(resolution.launch_effort) < rank(floor_effort.launch)):
-        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] for {resolution.model} cannot "
-                          f"meet the {floor_tier} floor effort {floor_effort.launch}; raise or remove its cap "
-                          "in .oah/config.toml before calling again")
     if pinned:
         return record("unused(pinned)")
     candidates = models.build_candidates(
         engine, entry=entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
-        floor=models.Pair(floor_model, floor_effort.launch), quality_order=section["quality_order"],
+        floor=floor, quality_order=section["quality_order"],
         allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
         tier_pools=section["tier_pools"])
-    choice["floor"] = {"tier": floor_tier, "model": floor_model, "effort": floor_effort.launch}
+    choice["floor"] = {"tier": floor_tier, **floor.to_json()}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
     choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))
+    if section["tier_pools"] and any(not section["tier_pools"].get(t) for t in (floor_tier, tier)):
+        return record("unused(no-pool-for-tier)")
     try:
         rerank = importlib.import_module("oah.rerank")
         inputs = _CORRECTION_INPUTS.get()

@@ -370,6 +370,29 @@ class JudgeCallTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
         self.assertFalse(project.record.exists())
 
+    def test_missing_or_empty_applicable_pool_skips_judging(self):
+        for ranked, cap in ((False, None), (False, "high"), (True, None)):
+            for absent in ("high", "max"):
+                for empty in (False, True):
+                    with self.subTest(ranked=ranked, cap=cap, absent=absent, empty=empty):
+                        pools = {"high": ["m-extra"], "max": ["m-extra"]}
+                        pools.pop(absent)
+                        if empty:
+                            pools[absent] = []
+                        extra = '[engines.codex.tier_pools]\n' + "".join(
+                            f"{tier} = {json.dumps(names)}\n" for tier, names in pools.items())
+                        if cap is not None:
+                            extra += f'[engines.codex.effort_caps]\n"m-strong" = "{cap}"\n'
+                        project = judged_project(self, ranked=ranked, extra=extra)
+                        provider = FakeJudge(("m-strong", "high"))
+                        with judge(project, provider):
+                            data = project.run(stage="review", tier="max", axes={"kind": "security"})
+                        self.assertEqual(data["model_judge"], "unused(no-pool-for-tier)")
+                        self.assertEqual(data["model_choice"]["candidates"], [])
+                        self.assertIsNone(data["model_choice"]["proposal"])
+                        self.assertEqual(provider.calls, [])
+                        self.assertEqual(launched(project), ("m-strong", cap or "max"))
+
     def test_without_a_ranking_only_the_effort_is_judged(self):
         for answer, status, expected in ((("m-strong", "xhigh"), "used", ("m-strong", "xhigh")),
                                          (("m-mid", "high"), "rejected(outside-candidates)", ("m-strong", "medium"))):

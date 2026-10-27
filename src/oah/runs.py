@@ -65,7 +65,7 @@ _CORRECTION_ENUMS = frozenset({
     "below-floor", "above-cap",
     "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
-    "unused(no-candidates)", "unused(one-candidate)", "unused(too-many-candidates)",
+    "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
     *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
                                         "not-in-tier-pool", "below-floor", "above-cap")),
 })
