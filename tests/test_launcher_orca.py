@@ -99,20 +99,60 @@ class FakeOrcaPidFileTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["term_x.pid"])
 
     def test_concurrent_reader_never_sees_a_partial_pid(self):
+        self._assert_concurrent_pid_sequence()
+
+    def test_concurrent_reader_retries_permission_error(self):
+        self._assert_reader_retries_open_error(PermissionError)
+
+    def test_concurrent_reader_retries_file_not_found(self):
+        self._assert_reader_retries_open_error(FileNotFoundError)
+
+    def _assert_reader_retries_open_error(self, error):
+        with self._fail_first_published_open(error) as denied:
+            self._assert_concurrent_pid_sequence()
+        self.assertEqual(denied, [True], "the published PID must fail its first open")
+
+    def test_concurrent_reader_surfaces_unexpected_exception(self):
+        with self._fail_first_published_open(ValueError):
+            with self.assertRaisesRegex(AssertionError, "ValueError while reading term_15.pid"):
+                self._assert_concurrent_pid_sequence()
+
+    @contextlib.contextmanager
+    def _fail_first_published_open(self, error):
+        original = pathlib.Path.open
+        target = self.folder / "term_15.pid"
+        denied = []
+
+        def open_path(path, *args, **kwargs):
+            handle = original(path, *args, **kwargs)
+            if path == target and not denied:
+                handle.close()  # Only inject once the real published file can be opened.
+                denied.append(True)
+                raise error("injected PID open failure")
+            return handle
+
+        with mock.patch.object(pathlib.Path, "open", new=open_path):
+            yield denied
+
+    def _assert_concurrent_pid_sequence(self):
         count = 300
         pids = [7 ** (index % 12) + index for index in range(count)]
-        seen: list[str] = []
+        seen: list[int] = []
         failures: list[str] = []
 
         def reader():
             for index in range(count):
                 path = self.folder / f"term_{index}.pid"
                 deadline = time.monotonic() + 15
-                while not path.exists():
-                    if time.monotonic() > deadline:
-                        failures.append(f"{path.name} never appeared")
-                        return
-                seen.append(path.read_bytes().decode("utf-8"))
+                try:
+                    while (pid := self.fake.read_pid(path)) is None:
+                        if time.monotonic() > deadline:
+                            failures.append(f"{path.name} never became readable")
+                            return
+                    seen.append(pid)
+                except Exception as exc:
+                    failures.append(f"{type(exc).__name__} while reading {path.name}")
+                    return
 
         thread = threading.Thread(target=reader)
         thread.start()
@@ -121,7 +161,7 @@ class FakeOrcaPidFileTest(unittest.TestCase):
         thread.join(timeout=30)
         self.assertFalse(thread.is_alive())
         self.assertEqual(failures, [])
-        self.assertEqual(seen, [f"{pid}\n" for pid in pids])
+        self.assertEqual(seen, pids)
 
     def test_reader_waits_for_a_complete_integer(self):
         path = self.folder / "term_y.pid"
