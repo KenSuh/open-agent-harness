@@ -38,6 +38,8 @@ class GraphStatusTest(unittest.TestCase):
         self.assertIn("graphify-out/graph.json", query.read_graph(repo, settings, commit)[2])
         cases = [
             ("{broken", "unavailable", "cannot be read"),
+            ({"commit": commit}, "unavailable", "cannot be read"),
+            ({"nodes": "", "links": "", "commit": commit}, "unavailable", "cannot be read"),
             (nodes, "stale-unknown", "records no commit"),
             (dict(nodes, commit="main"), "stale-unknown", "not a full commit id"),
             (dict(nodes, commit="b" * 40), "stale", "bbbbbbbbbbbb"),
@@ -52,6 +54,30 @@ class GraphStatusTest(unittest.TestCase):
                 self.assertIn(reason, why)
                 self.assertEqual(graph is None, status == "unavailable")
                 self.assertEqual(query.load_graph(repo, settings) is None, status == "unavailable")
+
+    def test_graph_collections_must_be_lists_of_records(self):
+        repo = make_git_repo(self)
+        settings = effective(None)
+        commit = "a" * 40
+        for edge_key in ("links", "edges"):
+            for collections in ({}, {"nodes": []}, {edge_key: []},
+                                {"nodes": "", edge_key: ""},
+                                {"nodes": {}, edge_key: []}, {"nodes": [], edge_key: {}},
+                                {"nodes": None, edge_key: []}, {"nodes": [], edge_key: None},
+                                {"nodes": [[]], edge_key: []}, {"nodes": [], edge_key: [[]]},
+                                {"nodes": [{}], edge_key: []}, {"nodes": [], edge_key: [{}]}):
+                with self.subTest(edge_key=edge_key, collections=collections):
+                    write_graph(repo, dict(collections, commit=commit))
+                    graph, status, reason = query.read_graph(repo, settings, commit)
+                    self.assertIsNone(graph)
+                    self.assertEqual(status, "unavailable")
+                    self.assertTrue(reason.startswith("OAH_"), reason)
+                    self.assertIn("oah graph update", reason)
+                    self.assertIsNone(query.load_graph(repo, settings))
+            with self.subTest(valid_empty=edge_key):
+                write_graph(repo, {"nodes": [], edge_key: [], "commit": commit})
+                self.assertEqual(query.read_graph(repo, settings, commit)[:2],
+                                 ({"files": {}, "edges": []}, "analysed"))
 
     def test_ambiguous_report_matches_lexical_skip(self):
         files = {f"pkg{i}/util.py": "code" for i in range(4)}
@@ -367,6 +393,31 @@ class ScopeCliTest(unittest.TestCase):
                 self.assertEqual(("layer", "graph") in kinds, not complete)
                 if not complete:
                     self.assertIn(block["layers"]["graph"]["reason"], text)
+
+    def test_malformed_graph_keeps_scope_incomplete_and_configured_fallback(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n",
+                          ".oah/config.toml": b'[impact]\nfallback_checks = ["python -m unittest"]\n'})
+        commit = head(repo)
+        for collections in ({"nodes": [], "links": []}, {}, {"nodes": "", "links": ""}):
+            with self.subTest(collections=collections):
+                write_graph(repo, dict(collections, commit=commit))
+                report, text = self.impact(repo, "tools/check.py")
+                block = self.assert_shape(report, text)
+                valid = collections == {"nodes": [], "links": []}
+                self.assertEqual(block["complete"], valid)
+                self.assertTrue(all(layer["status"] == "analysed" for name, layer in block["layers"].items()
+                                    if name != "graph"))
+                self.assertEqual(block["layers"]["graph"]["status"], "analysed" if valid else "unavailable")
+                gaps = [item for item in block["unanalysed"] if item.get("layer") == "graph"]
+                if valid:
+                    self.assertEqual(gaps, [])
+                    self.assertEqual(report["fallback"], [])
+                else:
+                    self.assertEqual(len(gaps), 1)
+                    self.assertEqual(gaps[0]["status"], "unavailable")
+                    self.assertIn("oah graph update", gaps[0]["detail"])
+                    self.assertEqual([item["check"] for item in report["fallback"]], ["python -m unittest"])
+                    self.assertIn("re-run (fallback): python -m unittest", text)
 
     def test_ambiguous_skip_with_count(self):
         repo = self.repo({f"pkg{i}/shared.py": f"N = {i}\n" for i in range(4)})

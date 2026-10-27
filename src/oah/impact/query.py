@@ -169,19 +169,27 @@ def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None)
     name = settings["graph_file"]
     try:
         raw = json.loads((pathlib.Path(root) / name).read_bytes().decode("utf-8"))
+        nodes = raw.get("nodes")
+        links = raw.get("links", raw.get("edges"))
+        if (not isinstance(nodes, list) or not isinstance(links, list)
+                or any(not isinstance(node, dict) or "id" not in node for node in nodes)
+                or any(not isinstance(edge, dict) or "source" not in edge or "target" not in edge
+                       for edge in links)):
+            raise ValueError("invalid graph collections")
         files = {}
-        for node in raw.get("nodes", []):
+        for node in nodes:
             file = node.get("source_file") or node.get("file") or node.get("path")
-            if isinstance(file, str) and "id" in node:
+            if isinstance(file, str):
                 files[str(node["id"])] = file.replace("\\", "/")
         edges = [[str(e["source"]), str(e["target"]), str(e.get("relation") or e.get("label") or "")]
-                 for e in raw.get("links", raw.get("edges", [])) if "source" in e and "target" in e]
+                 for e in links]
         meta = raw.get("graph")
         recorded = raw.get("commit") or (meta.get("commit") if isinstance(meta, dict) else None)
     except FileNotFoundError:
         return None, "unavailable", f"{name} is missing; run oah graph update to build it"
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
-        return None, "unavailable", f"{name} cannot be read as a graph; run oah graph update to rebuild it"
+        return None, "unavailable", (f"OAH_IMPACT_GRAPH_UNAVAILABLE: {name} cannot be read as a graph; "
+                                     "run oah graph update to rebuild it")
     graph = {"files": files, "edges": edges}
     if recorded is None:
         return graph, "stale-unknown", (f"{name} records no commit, so its freshness cannot be checked; "
