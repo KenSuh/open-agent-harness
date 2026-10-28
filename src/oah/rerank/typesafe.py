@@ -36,6 +36,7 @@ DEFAULT_KEY_NAME = "TYPESAFE_API_KEY"
 DESCRIPTION_LIMIT = 200
 TASK_LIMIT = 500
 RESPONSE_LIMIT = 4 * 1024 * 1024
+PROBABILITY_SUM_TOLERANCE = 0.01
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 STATUS_CODES = {401: "unauthorized", 429: "rate-limited", 529: "overloaded"}
 
@@ -228,16 +229,33 @@ def parse_model_response(body: object, count: int) -> int:
 
 
 def _parse_model_response(body: object, count: int) -> tuple[int | None, str | None]:
-    answers = answer = None
+    answers = answer = probabilities = None
     try:
         answers = _answers(body)
         answer = answers.get("pair") if answers is not None else None
         keys = [f"c{index}" for index in range(count)]
         if not isinstance(answer, Mapping) or answer.get("type") != "choice" or answer.get("choice") not in keys:
             return None, "bad-response"
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, Mapping) or set(probabilities) != set(keys):
+            return None, "bad-response"
+        scores = []
+        for key in keys:
+            score = _number(probabilities[key])
+            if score is None or not 0.0 <= score <= 1.0:
+                return None, "bad-response"
+            scores.append(score)
+        if not 1.0 - PROBABILITY_SUM_TOLERANCE <= math.fsum(scores) <= 1.0 + PROBABILITY_SUM_TOLERANCE:
+            return None, "bad-response"
+        if scores[keys.index(answer["choice"])] != max(scores):
+            return None, "bad-response"
+        if "confidence" in answer:
+            confidence = _number(answer["confidence"])
+            if confidence is None or not 0.0 <= confidence <= 1.0:
+                return None, "bad-response"
         return keys.index(answer["choice"]), None
     finally:
-        del body, count, answers, answer
+        del body, count, answers, answer, probabilities
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

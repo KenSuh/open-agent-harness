@@ -11,6 +11,7 @@ from unittest import mock
 
 from oah import call, call_cli, rerank
 from oah.engines.effort import EngineError
+from oah.rerank import typesafe
 from oah.secrets import NoKeychain
 from tests import test_call as calls
 from tests import test_fix as fix_tests
@@ -99,6 +100,67 @@ class JudgeGateTest(unittest.TestCase):
                     provider = type("NoJudge", (), {"name": "fake", "key_name": lambda self, config: KEY_NAME})()
                 judged = self.judge(provider)
                 self.assertEqual((judged.status, judged.proposal), (status, None))
+
+
+class ModelResponseTest(unittest.TestCase):
+    def test_choice_distribution_boundaries(self):
+        rows = [
+            ("missing probabilities", {}, None),
+            ("not a mapping", {"probabilities": [0.5, 0.5]}, None),
+            ("missing key", {"probabilities": {"c0": 1}}, None),
+            ("extra key", {"probabilities": {"c0": 1, "c1": 0, "c2": 0}}, None),
+            ("true", {"probabilities": {"c0": True, "c1": 0}}, None),
+            ("false", {"probabilities": {"c0": 1, "c1": False}}, None),
+            ("NaN", {"probabilities": {"c0": float("nan"), "c1": 0}}, None),
+            ("infinity", {"probabilities": {"c0": float("inf"), "c1": 0}}, None),
+            ("negative infinity", {"probabilities": {"c0": 1, "c1": -float("inf")}}, None),
+            ("out of range", {"probabilities": {"c0": 2, "c1": -1}}, None),
+            ("oversized integer", {"probabilities": {"c0": 10**400, "c1": 0}}, None),
+            ("string", {"probabilities": {"c0": "1", "c1": 0}}, None),
+            ("sum too low", {"probabilities": {"c0": 0.49, "c1": 0.49}}, None),
+            ("sum too high", {"probabilities": {"c0": 0.51, "c1": 0.51}}, None),
+            ("choice not argmax", {"probabilities": {"c0": 0, "c1": 1}}, None),
+            ("valid tie", {"probabilities": {"c0": 0.5, "c1": 0.5}}, 0),
+            ("valid second tie", {"choice": "c1", "probabilities": {"c0": 0.5, "c1": 0.5}}, 1),
+            ("valid diffuse", {"probabilities": {"c0": 0.51, "c1": 0.49}}, 0),
+            ("rounded low boundary", {"probabilities": {"c0": 0.5, "c1": 0.49}}, 0),
+            ("rounded high boundary", {"probabilities": {"c0": 0.51, "c1": 0.5}}, 0),
+            ("valid integers", {"probabilities": {"c0": 1, "c1": 0}}, 0),
+            ("wrong type", {"type": "noul", "probabilities": {"c0": 1, "c1": 0}}, None),
+            ("unknown choice", {"choice": "c2", "probabilities": {"c0": 1, "c1": 0}}, None),
+        ]
+        for confidence in (True, False, None, "0.5", -0.1, 1.1, float("nan"), float("inf"), 10**400):
+            rows.append(("bad confidence", {"probabilities": {"c0": 1, "c1": 0},
+                                             "confidence": confidence}, None))
+        for confidence in (0, 0.2, 1):
+            rows.append(("valid confidence", {"probabilities": {"c0": 0.5, "c1": 0.5},
+                                               "confidence": confidence}, 0))
+        for name, fields, expected in rows:
+            with self.subTest(name=name, confidence=fields.get("confidence")):
+                body = {"answers": {"pair": {"type": "choice", "choice": "c0"}}}
+                body["answers"]["pair"].update(fields)
+                if expected is None:
+                    with self.assertRaises(rerank.ProviderError) as caught:
+                        typesafe.parse_model_response(body, 2)
+                    self.assertEqual(caught.exception.code, "bad-response")
+                    self.assertEqual(str(caught.exception), "OAH_RERANK_PROVIDER_ERROR: bad-response")
+                else:
+                    self.assertEqual(typesafe.parse_model_response(body, 2), expected)
+        body = {"answers": {"pair": {"type": "choice", "choice": "c2",
+                                     "probabilities": {"c0": 0.33, "c1": 0.33, "c2": 0.33}}}}
+        self.assertEqual(typesafe.parse_model_response(body, 3), 2)
+
+    def test_malformed_choice_keeps_the_deterministic_launch(self):
+        project = judged_project(self)
+        project.env["TYPESAFE_API_KEY"] = fake_key()
+        provider = typesafe.TypeSafeProvider()
+        body = {"answers": {"pair": {"type": "choice", "choice": "c0"}}}
+        with mock.patch.object(provider, "_post_result", return_value=(body, None)), judge(project, provider):
+            data = project.run(stage="review")
+        self.assertEqual(data["status"], "finished")
+        self.assertEqual(data["model_judge"], "unused(error:bad-response)")
+        self.assertIsNone(data["model_choice"]["proposal"])
+        self.assertEqual(launched(project), ("m-mid", "medium"))
 
 
 class ConfigTest(unittest.TestCase):

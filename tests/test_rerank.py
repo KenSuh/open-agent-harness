@@ -635,7 +635,9 @@ JUDGE_PAIRS = [("m-strong", "high"), ("m-strong", "max"), ("m-mid", "high")]
 def choice_answer(choice):
     def respond(path, body):
         return 200, {"model": "jev-test", "usage": {"input_tokens": 1, "output_tokens": 1},
-                     "answers": {"pair": {"type": "choice", "choice": choice, "confidence": 0.7}}}, 0, {}
+                     "answers": {"pair": {"type": "choice", "choice": choice, "confidence": 0.7,
+                                          "probabilities": {f"c{i}": int(choice == f"c{i}")
+                                                            for i in range(len(JUDGE_PAIRS))}}}}, 0, {}
     return respond
 
 
