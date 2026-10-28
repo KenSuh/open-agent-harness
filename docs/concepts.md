@@ -77,6 +77,38 @@ Lease state lives in `oah/` inside the repository's git folder, shared by every 
 renews, releases or finishes a lease (`OAH_WORKER_LEASE_REFUSED`). Implementation and correction workers run
 in your leased worktree; a read-only review may run anywhere.
 
+```mermaid
+stateDiagram-v2
+    state "Active" as Active
+    state "STALE (expired)" as Stale
+    state "Finished" as Finished
+    state "Released" as Released
+    state finish_check <<choice>>
+
+    [*] --> Active : oah start, or oah start --packet
+    Active --> finish_check : oah finish
+    Stale --> finish_check : oah finish
+    finish_check --> Finished : return, wiki, gates and scope pass, or allow flags (recorded)
+    finish_check --> Active : refused, lease still active
+    finish_check --> Stale : refused, lease expired
+    Active --> Released : oah release --reason
+    Stale --> Released : oah release --reason
+    Active --> Stale : TTL passes, 4 hours by default
+    Stale --> [*] : pruned by the next oah start
+    Finished --> [*]
+    Released --> [*]
+    Active --> Active : oah renew, oah start --packet (raised Revision), oah log
+
+    note left of Active
+        oah status only reads. It shows each lease as active or STALE.
+        start is refused with OAH_LEASE_CONFLICT on overlap, OAH_LEASE_EXISTS for your own task.
+        renew on a STALE lease is refused with OAH_LEASE_EXPIRED.
+        release needs --force for another agent's lease (else OAH_LEASE_NOT_YOURS).
+        finish refusals: OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING,
+        OAH_GATES_UNMET, OAH_SCOPE_EXCEEDED.
+    end note
+```
+
 ## Packets and intent
 
 A **packet** (`.oah/tasks/<task>/PACKET.md`) holds everything about one task: the intent, the scope, the plan,
@@ -123,6 +155,37 @@ each engine.
 The optional TypeSafe Jev re-ranker may add advice about the tier. It is recorded next to the rule result and
 never lowers the tier.
 
+```mermaid
+flowchart TD
+    task["Task: stage, kind and Scope paths<br/>axes you give explicitly win"]
+    score["Fixed rules score four axes<br/>kind, intensity, reasoning, risk"]
+    tier["Tier: low, medium, high or max<br/>risk critical = max, migration, security = at least high"]
+    pick["Packet stage tier, or oah call --tier<br/>source recorded: rules, packet or flag"]
+    model["Model and effort the CLI supports<br/>an effort that cannot be observed is recorded as unverified<br/>a lower launch effort fails: OAH_EFFORT_DOWNGRADED"]
+    skills["Deterministic skill list<br/>with a reason for each skill"]
+    ask{"Not --no-rerank, enabled by you,<br/>provider set AND key present?"}
+    jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops"]
+    used["rerank=used"]
+    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error"]
+    brief["Packet plan, brief and run record"]
+
+    task --> score --> tier --> pick --> model --> brief
+    task --> skills
+    skills --> ask
+    ask -->|"yes"| jev --> used
+    ask -->|"no"| unused
+    used --> brief
+    unused --> brief
+    tier -.->|"advisory tier, recorded, never applied"| jev
+
+    classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef note fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    class score,tier,pick,model,skills rule
+    class jev,used ai
+    class unused note
+```
+
 ## Skill selection
 
 Skills are instruction folders that Claude Code and Codex load. `oah` picks them for each brief so you do not
@@ -164,6 +227,40 @@ oah impact --changed-since origin/main
 - **The latest default branch counts too.** Before a query, `oah impact` fetches the remote's default branch,
   read-only, and keeps a second map for it. The output labels both with their commit SHAs. `--offline`, or a
   failed fetch, uses the last fetched commit and labels it stale.
+
+```mermaid
+flowchart LR
+    change["You change a file<br/>for example a SQL migration"]
+    fresh{"Worktree map fresh?<br/>HEAD, index, dirty files, ledgers, config, tool"}
+    refresh["Refresh it incrementally"]
+    stale["OAH_IMPACT_STALE<br/>never used silently"]
+    dflt["Default-branch map<br/>fetched read-only, --offline or a failed fetch is labelled stale"]
+
+    subgraph ranked["Ranked results"]
+        pinR["pin: a gate EXPECT names it, or a gate CHECK<br/>or workflow, manifest or config command hashes or greps it"]
+        execR["exec: a gate CHECK or such a command runs it"]
+        linkR["link: its full path is named in code, tests, workflows,<br/>wiki or a gate CHECK, migrations that define a SQL object"]
+        mentionR["mention: file name or stem match, co-change,<br/>graph neighbour"]
+    end
+
+    rerun["Exact gates and commands to re-run<br/>re-run lines with --changed-since"]
+
+    change --> fresh
+    fresh -->|"yes"| pinR
+    fresh -->|"no"| refresh --> pinR
+    fresh -.->|"--no-refresh, or inputs keep moving"| stale
+    dflt --> pinR
+    pinR --> execR --> linkR --> mentionR
+    pinR --> rerun
+    execR --> rerun
+
+    classDef strong fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef weak fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
+    class pinR,execR,rerun strong
+    class linkR,mentionR weak
+    class stale stop
+```
 
 ## The project wiki
 
@@ -287,6 +384,46 @@ The fetched target branch’s committed `.oah/config.toml` supplies `[land]` pol
 `config policy`. `required_checks = []` uses discovered results (zero is unverified); list check-run
 names or status contexts to require them. Loosening this policy in the task head refuses with
 `OAH_LAND_POLICY_LOOSENED`; land that policy change separately on the default branch first.
+
+```mermaid
+flowchart LR
+    subgraph local["On your machine, all hooks opt-in"]
+        gcommit["git commit"]
+        pc["pre-commit<br/>wiki commit check"]
+        post["post-commit, post-merge<br/>refresh the impact map"]
+        gpush["git push"]
+        pp["pre-push<br/>lease open, active or stale? gitleaks on pushed commits"]
+        cc["Claude Code Stop and SessionStart hooks"]
+    end
+
+    pr["Pull request to main"]
+
+    subgraph actions["GitHub Actions in this repository"]
+        tests["ci: tests, install, oah --version, privacy scan<br/>macOS and Windows, PRs to main except docs/** and *.md, manual run"]
+        secrets["secrets: gitleaks and privacy scan, full history<br/>every pull request and push, manual run"]
+    end
+
+    land{"oah land --check, exact HEAD<br/>lease, intent, review, gates, impact,<br/>required-checks, fast-forward, scan, ci"}
+    exc["Unverified CI blocks: OAH_LAND_CI_UNVERIFIED<br/>unless --accept-unverified-ci reason, recorded for that head"]
+    landed["oah land --merge<br/>checks again, you confirm,<br/>fast-forward push of HEAD"]
+
+    gcommit --> pc
+    gcommit --> post
+    gpush --> pp
+    pp -->|"push"| secrets
+    pp --> pr
+    pr --> tests
+    pr --> secrets
+    tests -->|"gh reads HEAD's check runs"| land
+    secrets -->|"gh reads HEAD's check runs"| land
+    land -.-> exc
+    land --> landed
+
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
+    class tests,secrets,post,pp,pc,cc,land,landed avail
+    class exc stop
+```
 
 ## Model and skill updates
 

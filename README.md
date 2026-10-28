@@ -82,6 +82,9 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 
 - [Purpose: a harness that keeps adapting](#purpose-a-harness-that-keeps-adapting)
 - [Next update](#next-update)
+- [How it fits together](#how-it-fits-together)
+- [Strengths](#strengths)
+- [Beginner mistakes oah guards against](#beginner-mistakes-oah-guards-against)
 - [Install](#install)
 - [First run](#first-run)
 - [The loop](#the-loop)
@@ -101,6 +104,98 @@ These four features are in review for the next update and are **not available in
 - Impact reports say which scope was analysed and which was not, with conservative fallback checks.
 - Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
 - A review budget covers the whole task, with ways to stop, resume and increase it.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    you(["You, or your Claude Code session as the lead"])
+
+    subgraph engines["AI engines you install and sign in to"]
+        claude["Claude Code<br/>initial implementation"]
+        codex["Codex CLI<br/>review and correction"]
+    end
+
+    subgraph judge["AI judge you enable, recommended"]
+        jev["TypeSafe Jev<br/>re-orders the rule-chosen skills"]
+    end
+
+    subgraph core["oah"]
+        intent["Packets and intent"]
+        lease["Leases and preflight"]
+        route["Difficulty, models, skills"]
+        gates["Evidence gates"]
+        impact["Impact map"]
+        wiki["Project wiki"]
+        rloop["Review loop until convergence<br/>oah review, oah fix"]
+        land["oah land<br/>--check, then --merge after you confirm"]
+    end
+
+    subgraph git["git and GitHub"]
+        hooks["Local git hooks, opt-in"]
+        remote["Pull request and CI"]
+    end
+
+    you --> intent
+    intent --> lease
+    lease --> route
+    route -->|"brief, tier, skills"| claude
+    route -.->|"skills to re-order, when you enable it"| jev
+    claude --> gates
+    gates -.-> wiki
+    impact -->|"pin and exec gate bindings"| gates
+    gates --> rloop
+    rloop -->|"read-only snapshot, canary, receipt"| codex
+    rloop -->|"oah finish, git push"| hooks
+    hooks --> remote
+    remote -->|"CI results of HEAD via gh"| land
+    rloop -->|"converged review of HEAD"| land
+    impact -.->|"default branch reassessed"| land
+    land -->|"fast-forward push"| remote
+
+    classDef ext fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    class you,claude,codex,jev,remote ext
+    class lease,intent,route,gates,impact,hooks,wiki,rloop,land avail
+```
+
+Purple boxes are tools outside oah that you install and sign in to; green boxes are parts of oah. Dashed arrows
+are optional. Each part is explained in [Concepts](docs/concepts.md).
+
+## Strengths
+
+- **Engines by stage.** Claude Code writes the first version; Codex CLI reviews, corrects and re-reviews. A call
+  for the wrong engine at a stage is refused (`OAH_STAGE_ENGINE_MISMATCH`) unless you override it, and the
+  override is recorded.
+- **Difficulty picks the model and effort.** Fixed rules score four axes and choose a tier; an effort the CLI
+  cannot prove is recorded as unverified, and a lower launch effort fails (`OAH_EFFORT_DOWNGRADED`).
+- **Skills chosen for the task,** each with a reason. An optional judge, TypeSafe Jev, only re-orders that list.
+- **An impact map** lists the gates and commands that pin or run a changed file, so you re-run exactly those.
+- **A project wiki** records decisions next to the code, and `oah finish` checks that it was maintained.
+- **Evidence gates.** A task is done when its gates pass with recorded evidence, not when an agent says so.
+- **Intent that travels** from the packet into the lease and the brief of every call.
+- **Leases and preflight** keep parallel sessions off each other's files and off a stale base.
+- **Reviews that converge.** Codex reviews a read-only snapshot, corrections are bound to their findings, and a
+  repeat or a design question stops for your decision.
+- **No secrets in the repository.** Keys are read at runtime only; `oah land` requires a gitleaks scan.
+- **A toolkit with provenance** for skills and MCP templates, with exact pins and safe updates.
+- **Easy setup:** one-command installers, `oah doctor`, and a guided `oah init` that shows its plan first.
+
+## Beginner mistakes oah guards against
+
+| Mistake | What oah does |
+|---|---|
+| Committing an API key | `oah init` adds `.env`, `*.pem`, `*.key` and similar to `.gitignore`; the opt-in pre-push hook scans pushed commits with gitleaks; `oah land` refuses without a scan (`OAH_LAND_SCAN_REQUIRED`). |
+| Starting on a stale branch | `oah preflight` aborts when the base is behind and says which `git rebase` to run. |
+| Starting with uncommitted changes | `oah preflight` aborts and names them. |
+| Two AI sessions on the same files | `oah start` refuses an overlapping lease (`OAH_LEASE_CONFLICT`); `oah finish` compares the real changes with the scope (`OAH_SCOPE_EXCEEDED`). |
+| Pushing in the middle of a task | The opt-in pre-push hook refuses while any lease, active or stale, is recorded for this worktree (`OAH_PUSH_REFUSED`). |
+| Letting an agent push or force-push | The shared rules block tells agents not to; landing is a command you confirm. |
+| Calling work "done" with no evidence | `oah finish` and the Stop hook refuse unmet gates (`OAH_GATES_UNMET`). |
+| Not knowing what a change breaks | `oah impact --changed-since` lists what to re-check, including untracked files, with `re-run:` lines. |
+| Merging without review or CI | `oah land --check` checks the lease, intent, review, gates, impact, required checks, fast-forward, a gitleaks scan and CI at the exact head. Unverified CI blocks (`OAH_LAND_CI_UNVERIFIED`) unless you record an explicit exception. |
+| Losing track of why a change was made | Packets keep the intent, review receipts keep the findings, and the wiki keeps the decisions. |
+| No CI, or CI on one OS only | `oah ci init` writes a starter workflow for the runners you choose (macOS, Windows, Linux), after you confirm. |
 
 ## Install
 
@@ -402,6 +497,97 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 - 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
 - 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
 - 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
+
+### 한눈에 보는 구조
+
+```mermaid
+flowchart LR
+    you(["나, 또는 리드 역할의 Claude Code 세션"])
+
+    subgraph engines["직접 설치하고 로그인하는 AI 엔진"]
+        claude["Claude Code<br/>1차 구현"]
+        codex["Codex CLI<br/>리뷰와 수정"]
+    end
+
+    subgraph judge["켜서 쓰는 AI 판정기, 권장"]
+        jev["TypeSafe Jev<br/>규칙이 고른 스킬의 순서만 조정"]
+    end
+
+    subgraph core["oah"]
+        intent["패킷과 의도"]
+        lease["리스와 사전 점검"]
+        route["난이도, 모델, 스킬"]
+        gates["증거 게이트"]
+        impact["영향 지도"]
+        wiki["프로젝트 위키"]
+        rloop["수렴할 때까지 리뷰 루프<br/>oah review, oah fix"]
+        land["oah land<br/>--check, 확인 뒤 --merge"]
+    end
+
+    subgraph git["git과 GitHub"]
+        hooks["로컬 git 훅, 선택 설치"]
+        remote["풀 리퀘스트와 CI"]
+    end
+
+    you --> intent
+    intent --> lease
+    lease --> route
+    route -->|"브리프, tier, 스킬"| claude
+    route -.->|"켰을 때만, 스킬 순서 조정"| jev
+    claude --> gates
+    gates -.-> wiki
+    impact -->|"pin과 exec 게이트 연결"| gates
+    gates --> rloop
+    rloop -->|"읽기 전용 스냅샷, 카나리, 영수증"| codex
+    rloop -->|"oah finish, git push"| hooks
+    hooks --> remote
+    remote -->|"gh로 읽은 HEAD의 CI 결과"| land
+    rloop -->|"HEAD에 대한 수렴한 리뷰"| land
+    impact -.->|"기본 브랜치 다시 평가"| land
+    land -->|"fast-forward push"| remote
+
+    classDef ext fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    class you,claude,codex,jev,remote ext
+    class lease,intent,route,gates,impact,hooks,wiki,rloop,land avail
+```
+
+보라색 상자는 직접 설치하고 로그인하는 oah 밖의 도구이고, 초록색 상자는 oah의 부품이다. 점선 화살표는 선택
+사항이다. 각 부품의 설명은 [개념](docs/ko/concepts.md)에 있다.
+
+### 강점
+
+- **단계별 엔진.** Claude Code가 1차 구현을 하고 Codex CLI가 리뷰, 수정, 재리뷰를 한다. 단계에 맞지 않는 엔진
+  호출은 거절되고(`OAH_STAGE_ENGINE_MISMATCH`), 직접 덮어쓰면 그 사실이 기록된다.
+- **난이도가 모델과 추론 강도를 정한다.** 고정 규칙이 네 축에 점수를 매겨 tier를 고른다. CLI가 증명하지 못하는
+  강도는 미검증으로 기록되고, 더 낮은 강도로 실행되면 실패한다(`OAH_EFFORT_DOWNGRADED`).
+- **작업에 맞게 고른 스킬.** 각 스킬에 이유가 붙는다. 선택 사항인 판정기 TypeSafe Jev는 그 목록의 순서만 바꾼다.
+- **영향 지도**는 바뀐 파일을 고정하거나 실행하는 게이트와 명령을 알려 줘서, 정확히 그것만 다시 돌리게 한다.
+- **프로젝트 위키**가 결정을 코드 옆에 남기고, `oah finish`가 위키 정리 여부를 확인한다.
+- **증거 게이트.** 에이전트가 끝났다고 말할 때가 아니라, 게이트가 증거와 함께 통과할 때 작업이 끝난다.
+- **따라다니는 의도.** 패킷의 의도가 리스와 모든 호출의 브리프로 이어진다.
+- **리스와 사전 점검**이 병렬 세션이 서로의 파일이나 낡은 기준점에서 작업하지 않게 막는다.
+- **수렴하는 리뷰.** Codex가 읽기 전용 스냅샷을 리뷰하고, 수정은 해당 지적에 묶이며, 같은 종류가 반복되거나
+  설계 판단이 필요하면 멈추고 사용자에게 묻는다.
+- **저장소에 비밀값이 없다.** 키는 실행할 때만 읽는다. `oah land`는 gitleaks 검사를 요구한다.
+- **출처가 남는 툴킷.** 스킬과 MCP 템플릿을 정확한 버전으로 고정하고 안전하게 업데이트한다.
+- **쉬운 설치.** 한 줄 설치 스크립트, `oah doctor`, 그리고 계획을 먼저 보여 주는 안내형 `oah init`이 있다.
+
+### 초보자가 자주 하는 실수와 oah
+
+| 실수 | oah가 하는 일 |
+|---|---|
+| API 키를 커밋함 | `oah init`이 `.env`, `*.pem`, `*.key` 같은 항목을 `.gitignore`에 넣는다. 선택 설치하는 pre-push 훅이 푸시할 커밋을 gitleaks로 검사한다. `oah land`는 검사 없이는 거절한다(`OAH_LAND_SCAN_REQUIRED`). |
+| 낡은 브랜치에서 시작함 | `oah preflight`가 기준점이 뒤처졌으면 중단하고 어떤 `git rebase`를 할지 알려 준다. |
+| 커밋하지 않은 변경을 두고 시작함 | `oah preflight`가 중단하고 그 파일을 알려 준다. |
+| 두 AI 세션이 같은 파일을 고침 | `oah start`가 겹치는 리스를 거절한다(`OAH_LEASE_CONFLICT`). `oah finish`가 실제 변경을 범위와 비교한다(`OAH_SCOPE_EXCEEDED`). |
+| 작업 중간에 푸시함 | 선택 설치하는 pre-push 훅이 이 워크트리에 리스가 남아 있는 동안, 활성이든 만료든 푸시를 거절한다(`OAH_PUSH_REFUSED`). |
+| 에이전트가 푸시나 강제 푸시를 함 | 공유 규칙 블록이 에이전트에게 금지하고, 반영은 사용자가 확인하는 명령이다. |
+| 증거 없이 "끝났다"고 함 | `oah finish`와 Stop 훅이 미충족 게이트를 거절한다(`OAH_GATES_UNMET`). |
+| 변경이 무엇을 깨는지 모름 | `oah impact --changed-since`가 추적하지 않은 파일까지 포함해 다시 볼 것을 `re-run:` 줄로 알려 준다. |
+| 리뷰나 CI 없이 합침 | `oah land --check`가 정확한 HEAD에서 리스, 의도, 리뷰, 게이트, 영향, 필수 검사, fast-forward, gitleaks 검사, CI를 확인한다. 검증되지 않은 CI는 명시적 예외를 기록하지 않는 한 막힌다(`OAH_LAND_CI_UNVERIFIED`). |
+| 왜 바꿨는지 잊어버림 | 패킷이 의도를, 리뷰 영수증이 지적을, 위키가 결정을 남긴다. |
+| CI가 없거나 한 OS에서만 돎 | `oah ci init`이 확인을 받은 뒤 고른 러너(macOS, Windows, Linux)용 기본 워크플로를 만든다. |
 
 ### 설치
 

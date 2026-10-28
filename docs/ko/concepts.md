@@ -74,6 +74,38 @@ AI 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 동시�
 내려놓거나 끝내지 않는다(`OAH_WORKER_LEASE_REFUSED`). 구현과 수정 워커는 사용자가 리스를 잡은 워크트리에서
 돌고, 읽기만 하는 리뷰는 어디서 돌아도 된다.
 
+```mermaid
+stateDiagram-v2
+    state "활성" as Active
+    state "STALE (만료)" as Stale
+    state "끝남" as Finished
+    state "해제됨" as Released
+    state finish_check <<choice>>
+
+    [*] --> Active : oah start, 또는 oah start --packet
+    Active --> finish_check : oah finish
+    Stale --> finish_check : oah finish
+    finish_check --> Finished : 반환, 위키, 게이트, 범위 통과, 또는 허용 옵션(기록됨)
+    finish_check --> Active : 거절, 리스는 그대로 활성
+    finish_check --> Stale : 거절, 리스는 만료
+    Active --> Released : oah release --reason
+    Stale --> Released : oah release --reason
+    Active --> Stale : TTL 경과, 기본 4시간
+    Stale --> [*] : 다음 oah start가 정리
+    Finished --> [*]
+    Released --> [*]
+    Active --> Active : oah renew, oah start --packet(올린 Revision), oah log
+
+    note left of Active
+        oah status는 읽기만 한다. 각 리스를 active 또는 STALE로 보여 준다.
+        start는 겹치면 OAH_LEASE_CONFLICT, 내 작업이면 OAH_LEASE_EXISTS로 거절된다.
+        STALE 리스의 renew는 OAH_LEASE_EXPIRED로 거절된다.
+        다른 에이전트의 리스 release에는 --force가 필요하다(없으면 OAH_LEASE_NOT_YOURS).
+        finish 거절 코드는 OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING,
+        OAH_GATES_UNMET, OAH_SCOPE_EXCEEDED다.
+    end note
+```
+
 ## 패킷과 의도
 
 **패킷**(`.oah/tasks/<task>/PACKET.md`)에는 작업 하나에 관한 모든 것이 들어 있다. 의도, 범위, 계획, 완료 게이트,
@@ -115,6 +147,37 @@ AI 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 동시�
 선택 기능인 TypeSafe Jev 재정렬기가 tier에 의견을 더할 수 있다. 의견은 규칙 결과 옆에 기록되고 tier를 낮추지는
 않는다.
 
+```mermaid
+flowchart TD
+    task["작업: 단계, 종류, Scope 경로<br/>직접 준 축이 우선"]
+    score["고정 규칙이 네 축에 점수를 매김<br/>종류, 작업량, 추론, 위험"]
+    tier["tier: low, medium, high, max<br/>위험 critical은 max, 마이그레이션과 보안은 최소 high"]
+    pick["패킷의 단계별 tier, 또는 oah call --tier<br/>출처 기록: rules, packet, flag"]
+    model["CLI가 지원하는 모델과 추론 강도<br/>관찰할 수 없는 강도는 미검증으로 기록<br/>더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED"]
+    skills["결정적인 스킬 목록<br/>스킬마다 이유"]
+    ask{"--no-rerank가 아니고, 직접 켰고,<br/>제공자 설정과 키가 있는가?"}
+    jev["TypeSafe Jev 제공자<br/>순서만 바꾸고 더하거나 빼지 않음"]
+    used["rerank=used"]
+    unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error"]
+    brief["패킷 계획, 브리프, 실행 기록"]
+
+    task --> score --> tier --> pick --> model --> brief
+    task --> skills
+    skills --> ask
+    ask -->|"예"| jev --> used
+    ask -->|"아니오"| unused
+    used --> brief
+    unused --> brief
+    tier -.->|"참고용 tier, 기록만 하고 적용하지 않음"| jev
+
+    classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
+    classDef note fill:#fff1c2,stroke:#9a6700,color:#3d2a00
+    class score,tier,pick,model,skills rule
+    class jev,used ai
+    class unused note
+```
+
 ## 스킬 선택
 
 스킬은 Claude Code와 Codex가 읽어 들이는 지침 폴더다. `oah`가 지시문마다 스킬을 골라 주므로 사용자가 고르지
@@ -153,6 +216,40 @@ oah impact --changed-since origin/main
 - **최신 기본 브랜치도 본다.** 질의 전에 `oah impact`는 원격의 기본 브랜치를 읽기 전용으로 가져와 지도를 하나 더
   둔다. 출력은 두 지도에 커밋 SHA를 붙인다. `--offline`이거나 가져오기에 실패하면 마지막으로 가져온 커밋을
   쓰고 낡았다고 표시한다.
+
+```mermaid
+flowchart LR
+    change["파일을 바꿈<br/>예: SQL 마이그레이션"]
+    fresh{"워크트리 지도가 최신인가?<br/>HEAD, 인덱스, 수정 파일, 원장, 설정, 도구"}
+    refresh["증분으로 갱신"]
+    stale["OAH_IMPACT_STALE<br/>몰래 쓰지 않음"]
+    dflt["기본 브랜치 지도<br/>읽기 전용으로 가져옴, --offline이나 가져오기 실패는 stale로 표시"]
+
+    subgraph ranked["순위가 매겨진 결과"]
+        pinR["pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK<br/>또는 workflow, manifest, config 명령이 해시하거나 grep함"]
+        execR["exec: 게이트 CHECK나 그런 명령이 실행함"]
+        linkR["link: 코드, 테스트, workflow, 위키, 게이트 CHECK에<br/>전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션"]
+        mentionR["mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,<br/>그래프 이웃"]
+    end
+
+    rerun["다시 돌릴 정확한 게이트와 명령<br/>--changed-since일 때 re-run 줄"]
+
+    change --> fresh
+    fresh -->|"예"| pinR
+    fresh -->|"아니오"| refresh --> pinR
+    fresh -.->|"--no-refresh, 또는 입력이 계속 바뀜"| stale
+    dflt --> pinR
+    pinR --> execR --> linkR --> mentionR
+    pinR --> rerun
+    execR --> rerun
+
+    classDef strong fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef weak fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
+    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
+    class pinR,execR,rerun strong
+    class linkR,mentionR weak
+    class stale stop
+```
 
 ## 프로젝트 위키
 
@@ -269,6 +366,46 @@ CI 미검증을 명시적으로 받아들이려면 확인과 반영 명령 양�
 `required_checks = []`이면 발견한 결과를 쓰며 0개면 미검증이다. 필수로 만들 check run 이름이나 status context를
 목록에 넣을 수 있다. 작업 head에서 정책을 느슨하게 하면 `OAH_LAND_POLICY_LOOSENED`로 거절한다. 정책 변경을
 먼저 기본 브랜치에 따로 반영한다.
+
+```mermaid
+flowchart LR
+    subgraph local["내 컴퓨터, 모든 훅은 선택 설치"]
+        gcommit["git commit"]
+        pc["pre-commit<br/>위키 커밋 검사"]
+        post["post-commit, post-merge<br/>영향 지도 갱신"]
+        gpush["git push"]
+        pp["pre-push<br/>리스가 남았는가(활성 또는 만료), 푸시할 커밋 gitleaks"]
+        cc["Claude Code Stop, SessionStart 훅"]
+    end
+
+    pr["main으로 가는 풀 리퀘스트"]
+
+    subgraph actions["이 저장소의 GitHub Actions"]
+        tests["ci: 테스트, 설치, oah --version, 개인정보 검사<br/>macOS, Windows, docs/**와 *.md만 바뀐 PR은 제외, 수동 실행"]
+        secrets["secrets: gitleaks와 개인정보 검사, 전체 기록<br/>모든 풀 리퀘스트와 푸시, 수동 실행"]
+    end
+
+    land{"oah land --check, 정확한 HEAD<br/>리스, 의도, 리뷰, 게이트, 영향,<br/>필수 검사, fast-forward, 검사, CI"}
+    exc["검증 안 된 CI는 막힘: OAH_LAND_CI_UNVERIFIED<br/>--accept-unverified-ci 이유로 그 head에 예외를 기록할 때만 통과"]
+    landed["oah land --merge<br/>다시 확인하고, 사용자가 확인하면<br/>HEAD를 fast-forward push"]
+
+    gcommit --> pc
+    gcommit --> post
+    gpush --> pp
+    pp -->|"푸시"| secrets
+    pp --> pr
+    pr --> tests
+    pr --> secrets
+    tests -->|"gh가 HEAD의 check run을 읽음"| land
+    secrets -->|"gh가 HEAD의 check run을 읽음"| land
+    land -.-> exc
+    land --> landed
+
+    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
+    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
+    class tests,secrets,post,pp,pc,cc,land,landed avail
+    class exc stop
+```
 
 ## 모델과 스킬 업데이트
 
