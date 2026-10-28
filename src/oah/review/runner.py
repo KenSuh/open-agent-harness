@@ -500,6 +500,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         "findings": [finding.to_json() for finding in output.findings],
         "classes": [item.to_json() for item in output.classes], "outcome": judged.outcome,
         "follow_ups": list(judged.follow_ups), "decision_stop_reason": judged.stop_reason,
+        "new_instances": list(judged.new_instances),
         "decision": {"text": decision, "after": s.task_latest.name if s.task_latest else None} if decision else None,
         "extra_round": extra, "extra_attempt": extra_attempt,
         "history": s.history_items(), "history_digest": s.history_digest(),
@@ -536,7 +537,8 @@ def _headline(code: str, receipt: dict, task: str) -> str:
     else:
         rest = (f"requested changes ({counts}). Correct them (oah fix --task {task} runs Codex for that), commit, "
                 f"then run oah review --task {task} again")
-    return f"{code}: {summary} {rest}"
+    marks = "; " + "; ".join(receipt["new_instances"]) if receipt.get("new_instances") else ""
+    return f"{code}: {summary} {rest}{marks}"
 
 
 def _lines(receipt: dict, digest: str, name: str, conf: review_settings.ReviewSettings, task: str) -> list[str]:
