@@ -325,6 +325,27 @@ class FallbackTest(unittest.TestCase):
     def gate(self, gate_id, check, expect="OK", ledger=".oah/tasks/t/GATES.md"):
         return gatebind.GateRef(ledger, gate_id, check, expect)
 
+    def test_quoted_fallback_paths_preserve_spaces_and_boundaries(self):
+        for separator in ("/", "\\"):
+            for quote in ('"', "'"):
+                for field in ("check", "expect"):
+                    with self.subTest(separator=separator, quote=quote, field=field):
+                        path = separator.join((".", "src", "plugin pack", "loader.py"))
+                        text = f"python {quote}{path}{quote}"
+                        gates = [self.gate("G1", text if field == "check" else "echo OK",
+                                           text if field == "expect" else "OK"),
+                                 self.gate("G2", "python -m unittest")]
+                        found = scope.fallback(gates, ["src/plugin pack/alpha.py"], strong=[], checks=[])
+                        self.assertEqual([item["source"] for item in found],
+                                         [gate.label for gate in gates])
+                        self.assertTrue(all(item["targets"] == ["src/plugin pack/alpha.py"]
+                                            and item["binding"] == "fallback" for item in found))
+                        for folder in ("plugin packs", "myplugin pack"):
+                            other = separator.join(("src", folder, "loader.py"))
+                            miss = [self.gate("G1", f"python {quote}{other}{quote}")]
+                            self.assertEqual(scope.fallback(miss, ["src/plugin pack/alpha.py"],
+                                                            strong=[], checks=[]), [])
+
     def test_fallback_needles(self):
         gates = [self.gate("G1", "python src/plugins/loader.py"), self.gate("G2", "echo unrelated"),
                  self.gate("G1", "python -m src.plugins.loader", ledger="other/GATES.md"),
@@ -669,6 +690,30 @@ PLUGIN_LEDGER = (".oah/tasks/plugins/GATES.md", "- [ ] G1: every plugin loads\n 
 
 
 class MissedCaseTest(unittest.TestCase):
+    def test_quoted_directory_gets_every_ledger_gate_as_fallback(self):
+        for separator in ("/", "\\"):
+            with self.subTest(separator=separator):
+                repo = make_git_repo(self)
+                ledger = ".oah/tasks/quoted/GATES.md"
+                loader = separator.join(("src", "plugin pack", "loader.py"))
+                check = f'python "{loader}"'
+                base = git_commit(repo, {"src/plugin pack/alpha.py": b"VALUE = 1\n",
+                                         "src/plugin pack/loader.py": b"print('loaded')\n",
+                                         ledger: (f"- [ ] G1: load plugins\n  CHECK: {check}\n  EXPECT: loaded\n"
+                                                  "- [ ] G2: companion check\n  CHECK: python -m unittest\n"
+                                                  "  EXPECT: OK\n").encode("utf-8")})
+                (repo / "src/plugin pack/alpha.py").write_bytes(b"VALUE = 2\n")
+                result = run_impact(repo, "--changed-since", base, "--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertFalse(report["scope"]["complete"])
+                self.assertEqual(report["changed_since"]["rerun"], [])
+                for plan in (report["fallback"], report["changed_since"]["fallback"]):
+                    self.assertEqual([(item["source"], item["binding"], item["targets"]) for item in plan],
+                                     [(ledger + "#G1", "fallback", ["src/plugin pack/alpha.py"]),
+                                      (ledger + "#G2", "fallback", ["src/plugin pack/alpha.py"])])
+                    self.assertEqual(plan[0]["check"], check)
+
     def test_root_module_invoked_with_python_m_gets_fallback(self):
         repo = make_git_repo(self)
         ledger = ".oah/tasks/root/GATES.md"

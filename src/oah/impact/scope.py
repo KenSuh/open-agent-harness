@@ -178,8 +178,11 @@ def fallback_needles(target: str) -> set[str]:
 
 def _names(text: str, needles: Iterable[str]) -> list[str]:
     found = set()
-    for match in lexical._TOKEN.finditer(text):
-        token = match.group().replace("\\", "/")
+    tokens = lexical._TOKEN.findall(text)
+    # Keep quoted paths whole without interpreting Windows backslashes as shell escapes.
+    tokens += [match.group(2) for match in re.finditer(r"""(["'])([^\r\n]*?)\1""", text)]
+    for token in tokens:
+        token = token.replace("\\", "/")
         for needle in needles:
             if re.search(r"(?:\A|[/.])" + re.escape(needle) + r"(?=\Z|[/.])", token):
                 found.add(needle)
