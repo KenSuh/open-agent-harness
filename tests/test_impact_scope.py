@@ -229,6 +229,26 @@ class LayersTest(unittest.TestCase):
 
 
 class RenameTest(unittest.TestCase):
+    def test_deleted_gitlink_with_untracked_file_is_unchecked(self):
+        for missing_object in (False, True):
+            with self.subTest(missing_object=missing_object):
+                repo = make_git_repo(self)
+                commit = git_commit(repo, {"keep.py": b"VALUE = 1\n"})
+                git(repo, "update-index", "--add", "--cacheinfo",
+                    f"160000,{'f' * 40 if missing_object else commit},vendor/sub module")
+                git(repo, "-c", "commit.gpgsign=false", "commit", "-qm", "add gitlink")
+                base = head(repo)
+                git(repo, "update-index", "--force-remove", "vendor/sub module")
+                (repo / "notes.txt").write_bytes(b"unrelated notes\n")
+                items = scope.likely_renames(repo, base, None, timeout=60.0)
+                self.assertEqual(len(items), 1, items)
+                self.assertEqual((items[0]["kind"], items[0]["from"], items[0]["to"]),
+                                 ("possible-rename-unchecked", "vendor/sub module", "notes.txt"))
+                self.assertTrue(items[0]["detail"].startswith("OAH_IMPACT_RENAME_UNCHECKED:"))
+                self.assertIn("review references to both paths manually", items[0]["detail"])
+                self.assertEqual(scope.likely_renames(repo, base, base, timeout=60.0), [],
+                                 "--ref still ignores untracked files")
+
     def test_repetitive_rename_similarity_finishes_within_budget(self):
         repo = make_git_repo(self)
         body = b"VALUE = 1\n" * 12000
@@ -670,6 +690,28 @@ class ScopeCliTest(unittest.TestCase):
         self.assertEqual(len(unchecked), 1, block)
         self.assertEqual((unchecked[0]["from"], unchecked[0]["to"]), ("old.py", "new.py"))
         self.assertIn(unchecked[0]["detail"], text)
+        for plan in (report["fallback"], report["changed_since"]["fallback"]):
+            self.assertEqual([item["check"] for item in plan], ["python -m unittest"])
+
+    def test_deleted_gitlink_keeps_scope_and_fallback_output(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n",
+                          ".oah/config.toml": b'[impact]\nfallback_checks = ["python -m unittest"]\n'})
+        git(repo, "update-index", "--add", "--cacheinfo", f"160000,{'f' * 40},vendor/sub module")
+        git(repo, "-c", "commit.gpgsign=false", "commit", "-qm", "add gitlink")
+        base = head(repo)
+        git(repo, "update-index", "--force-remove", "vendor/sub module")
+        (repo / "notes.txt").write_bytes(b"unrelated notes\n")
+        write_graph(repo, {"nodes": [], "links": [], "commit": base})
+        report, text = self.impact(repo, "--changed-since", base)
+        block = self.assert_shape(report, text)
+        self.assertTrue(all(layer["status"] == "analysed" for layer in block["layers"].values()))
+        self.assertFalse(block["complete"])
+        self.assertEqual(report["changed_since"]["files"], ["notes.txt", "vendor/sub module"])
+        unchecked = [item for item in block["unanalysed"] if item["kind"] == "possible-rename-unchecked"]
+        self.assertEqual(len(unchecked), 1, block)
+        self.assertEqual((unchecked[0]["from"], unchecked[0]["to"]), ("vendor/sub module", "notes.txt"))
+        self.assertIn(unchecked[0]["detail"], text)
+        self.assertIn("re-run (fallback): python -m unittest", text)
         for plan in (report["fallback"], report["changed_since"]["fallback"]):
             self.assertEqual([item["check"] for item in plan], ["python -m unittest"])
 

@@ -110,7 +110,7 @@ def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: 
     """Deleted and added paths that look like one rename: git's -M pairs, matching names or similar content.
 
     Without ref the worktree is compared, and untracked files count as added. Nonmatching hashes above
-    the size cap return possible-rename-unchecked records so the report retains the analysis gap."""
+    the size cap and non-blob deleted entries return possible-rename-unchecked records to retain the gap."""
     from oah.impact.mapstore import _git, _safe_worktree_path
 
     fields = [field for field in _git(root, "diff", "-M", "--name-status", "-z", since, *([ref] if ref else []),
@@ -141,6 +141,14 @@ def likely_renames(root: pathlib.Path, since: str, ref: str | None, *, timeout: 
         pairs += [{"from": old, "to": new, "similarity": None} for new in added if new.rsplit("/", 1)[-1] == name]
         candidates = {new: body for new, body in contents.items() if new.rsplit("/", 1)[-1] != name}
         if not candidates:
+            continue
+        # A gitlink's commit may not exist locally; inspect its tree entry without opening the object.
+        entry = _git(root, "ls-tree", "-z", since, "--", old, timeout=timeout)
+        if entry.split(" ", 2)[1:2] != ["blob"]:
+            pairs += [{"kind": "possible-rename-unchecked", "from": old, "to": new,
+                       "detail": f"OAH_IMPACT_RENAME_UNCHECKED: {old} -> {new} similarity was not "
+                                 "checked because the deleted entry is not a blob; review references "
+                                 "to both paths manually"} for new in candidates]
             continue
         identity, original = _rename_content(_git(root, "cat-file", "blob", f"{since}:{old}", timeout=timeout,
                                                   encoding="latin-1").encode("latin-1"))
