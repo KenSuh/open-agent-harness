@@ -1811,7 +1811,7 @@ class CorrectionC6Test(unittest.TestCase):
                         b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n")))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
 
-    def test_binary_without_utf16_nul_pattern_remains_accepted(self):
+    def test_binary_without_utf16_nul_pattern_keeps_valid_decodings_and_raw_checks(self):
         source = self.source()
         ws = self.build(source)
         # Even length, invalid UTF-16 LE, but fewer than one quarter NULs in either byte lane.
@@ -1819,7 +1819,10 @@ class CorrectionC6Test(unittest.TestCase):
         (ws.inputs / "binary.dat").write_bytes(raw)
         workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
             oracle_path(self.root).read_bytes()))
-        self.assertEqual(workspace.content_hashes(raw), frozenset({hashlib.sha256(raw).hexdigest()}))
+        with self.assertRaises(UnicodeError):
+            raw.decode("utf-16-le")
+        self.assertEqual(workspace.content_hashes(raw), frozenset({hashlib.sha256(raw).hexdigest(),
+                         hashlib.sha256(raw.decode("utf-16-be").encode("utf-8")).hexdigest()}))
 
     def test_bomless_utf16_accepts_one_valid_byte_order(self):
         ws = self.build()
@@ -2018,6 +2021,99 @@ class CorrectionC7Test(unittest.TestCase):
                 with self.assertRaises(EvalError) as caught:
                     workspace.check_variant_channels(ws, oracle_paths=workspace.oracle_path_checks([oracle]))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+
+class CorrectionC8Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_multilingual_utf16_oracle_copies_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        public = oracle.read_bytes().decode("utf-8")
+        for index, language in enumerate(("가나다라마바사아자차카타파하", "日本語中文漢字資料説明")):
+            localized = public.replace('summary = "', 'summary = "' + language * 500, 1)
+            for shape, expected, notes in (("localized", localized, localized),
+                                           ("embedded", public, language * 500 + "\n" + public + language * 500)):
+                oracle.write_bytes(expected.encode("utf-8"))
+                for encoding in ("utf-16-le", "utf-16-be"):
+                    with self.subTest(language=language, shape=shape, encoding=encoding):
+                        raw = notes.replace("\n", "\r\n").encode(encoding)
+                        self.assertLess(max(raw[::2].count(0), raw[1::2].count(0)) * 4, len(raw) // 2)
+                        (case_dir(self.root) / "inputs" / "notes.md").write_bytes(raw)
+                        out = self.root / f"prereg-{index}-{shape}-{encoding}.json"
+                        with self.assertRaises(EvalError) as caught:
+                            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                        self.assertNotIn(str(oracle.parent), str(caught.exception))
+                        self.assertFalse(out.exists())
+                        self.assertFalse(out.with_suffix(".json.sha256").exists())
+
+    def test_multilingual_utf16_oracle_blocks_refused_in_files_and_blobs(self):
+        source = self.source()
+        raw = oracle_path(self.root).read_bytes()
+        hashes, blocks = workspace.content_hashes(raw), workspace.oracle_block_checks(raw)
+        notes = "한국어日本語漢字" * 500 + "\n" + raw.decode("utf-8") + "\n" + "日本語한국어" * 500
+        for encoding in ("utf-16-le", "utf-16-be"):
+            for channel in ("working-file", "git-blob"):
+                with self.subTest(encoding=encoding, channel=channel):
+                    ws = self.build(source)
+                    data = notes.encode(encoding)
+                    if channel == "working-file":
+                        (ws.inputs / "notes.md").write_bytes(data)
+                    else:
+                        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                                       input=data, capture_output=True, check=True)
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, oracle_hashes=hashes, oracle_blocks=blocks)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertIn(channel, str(caught.exception))
+
+    def test_dotted_model_settings_preregister_and_run(self):
+        config = ('[engines.codex.tiers]\n'
+                  'high = { model = "gpt-6.1-sol", effort = "high", timeout_min = 60 }\n'
+                  'low = { model = "gpt-6-luna", effort = "low", timeout_min = 10 }\n'
+                  '[metadata]\nversion = "1.2.3"\nlabel = "ordinary.words"\nchannel = ".preview"\n')
+        (self.root / "variant.toml").write_bytes(config.encode("utf-8"))
+        set_plan(self.root, 'name = "baseline"', 'name = "baseline"\nconfig = "variant.toml"')
+        env = Env(self)
+        run_dir = run_fixture(self, self.root, env, frozen=True)
+        self.assertEqual(env.launched(), ["miss", "catch"])
+        injected = run_dir / "cases" / "derived-index" / "baseline" / "workspace" / ".oah" / "config.toml"
+        self.assertEqual(injected.read_bytes(), config.encode("utf-8"))
+
+    def test_dotted_argument_values_are_plain_text(self):
+        ws = self.build()
+        workspace.check_variant_channels(ws, argv=[sys.executable, "--model=gpt-6.1-sol", "1.2.3", ".preview"])
+
+    def test_scalar_settings_still_check_actual_file_references(self):
+        ws = self.build()
+        target = ws.inputs / "gpt-6.1-sol"
+        target.write_bytes(b"ordinary model notes\n")
+        dependencies = workspace.check_variant_channels(ws, config_text="model = " + json.dumps(str(target)))
+        self.assertEqual(dependencies["{workspace}/inputs/gpt-6.1-sol"], hashlib.sha256(target.read_bytes()).hexdigest())
+        for value in ("missing/file", "./missing", "../missing", "~missing", "C:missing", target.name):
+            with self.subTest(value=value):
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(ws, config_text="model = " + json.dumps(value),
+                                                     plan_dir=str(ws.inputs))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+
+    def test_scalar_settings_keep_oracle_content_and_literal_path_checks(self):
+        ws = self.build()
+        oracle = oracle_path(self.root)
+        raw = oracle.read_bytes()
+        for value in (raw.decode("utf-8"), "Read file://" + str(oracle.parent / "other-name")):
+            with self.subTest(content=value.startswith("#")):
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(
+                        ws, config_text="model = " + json.dumps(value),
+                        oracle_hashes=workspace.content_hashes(raw), oracle_blocks=workspace.oracle_block_checks(raw),
+                        oracle_paths=workspace.oracle_path_checks([oracle]))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(str(oracle.parent), str(caught.exception))
 
 
 class FixtureTest(unittest.TestCase):

@@ -275,7 +275,7 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
 
 
 def _decoded_texts(data: bytes) -> Iterable[str]:
-    """The shared set of valid UTF-8 and plausible UTF-16 channel decodings."""
+    """The shared set of valid UTF-8 and UTF-16 channel decodings."""
     try:
         yield data.decode("utf-8-sig")
     except UnicodeError:
@@ -283,14 +283,13 @@ def _decoded_texts(data: bytes) -> Iterable[str]:
     encodings = ()
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         encodings = ("utf-16",)
-    elif (data and len(data) % 2 == 0 and len(data) <= NORMALIZE_LIMIT
-          and max(data[::2].count(0), data[1::2].count(0)) * 4 >= len(data) // 2):
+    elif len(data) % 2 == 0 and len(data) <= NORMALIZE_LIMIT:
         encodings = ("utf-16-le", "utf-16-be")
     for encoding in encodings:
         try:
             yield data.decode(encoding)
         except UnicodeError:
-            # A heuristic candidate can be binary or valid only in the other byte order.
+            # A candidate can be binary or valid only in the other byte order.
             # The channel checker still refuses malformed BOM-marked text separately.
             continue
 
@@ -488,7 +487,8 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             if not value:
                 continue
             path = pathlib.Path(value)
-            if not ("/" in value or "\\" in value or path.suffix or value.startswith(".")
+            if not ("/" in value or "\\" in value or value.startswith("~")
+                    or pathlib.PureWindowsPath(value).drive
                     or (base / path).exists()):
                 continue
             # Foreign absolute paths cannot be resolved using this host's path rules.
@@ -541,8 +541,8 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
         path = pathlib.Path(value)
         if any(part in value for part in ("{", "}", "$", "*", "?", "\x00", "://")) or value.startswith("~"):
             refuse(channel, unchecked=True)
-        pathlike = (required or path.is_absolute() or "/" in value or "\\" in value or value.startswith(".")
-                    or bool(path.suffix))
+        pathlike = (required or path.is_absolute() or "/" in value or "\\" in value
+                    or bool(pathlib.PureWindowsPath(value).drive))
         if not pathlike and not (base / path).exists():
             return
         if channel == "config" and not path.is_absolute():

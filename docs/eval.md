@@ -176,7 +176,7 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
 - a copy of any preregistered oracle, including a complete oracle block pasted within other text,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs.
   Text comparison normalizes LF/CRLF, strips trailing whitespace per line and accepts UTF-8/UTF-16
-  with or without BOM (plausible BOM-less UTF-16 LE/BE decoding as below). Blocks of at least 64
+  with or without BOM (strict BOM-less UTF-16 LE/BE decoding as below). Blocks of at least 64
   normalized UTF-8 bytes match anywhere in a channel; shorter oracles require whole-channel equality.
   Raw-byte hashes remain checked too;
 - a copy of the snapshot file;
@@ -215,17 +215,20 @@ Command file references use separate arguments or `--option=value`; relative com
 workspace repository. Config file references must be absolute: engine config loaders can resolve
 relative paths against different folders, so oah refuses that ambiguity. Referenced workspace files,
 the resolved executable and verified npm entry script, including nested config dependencies, are hashed
-per case and checked again at run. Values with a path separator, a suffix or a file/path/include/config
-option or key are conservatively treated as file references.
+per case and checked again at run. Explicit file/path/include/config options or keys still require file
+references. Other tokens are treated as file references only when they contain a path separator,
+start with `./`, `../`, `~` or a drive letter, or resolve to an existing path. Dotted model identifiers,
+version strings and ordinary words remain plain text; content and literal grader-path checks still apply.
 Only literal references and TOML/JSON configs can be checked. Dynamic paths, response files, inline
 code/module launch switches (including `--eval`, `--command`, `-c`, `-e` and their `=` forms), attached
 short options, unsupported config formats, missing/unreadable files, directory inputs and channels
 larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`. Malformed BOM-marked UTF-16 also refuses
 as unchecked.
 
-For even-length BOM-less content within the 64 MiB limit, a NUL in at least a quarter of either
-the even or odd byte positions triggers comparison of both UTF-16 LE and BE decodings, normalized
-to UTF-8/LF. Invalid candidate decodings are skipped; raw byte checks still apply to binary files.
+For every even-length BOM-less channel within the 64 MiB limit, both strict UTF-16 LE and BE decodings
+are attempted alongside UTF-8, regardless of NUL density or language. Every valid decoding receives
+the same normalized content and literal grader-path checks. Invalid candidate decodings are skipped;
+raw byte checks still apply to binary files.
 
 Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing. Existing
 empty directories inside the workspace are allowed; an existing external destination is refused. A
