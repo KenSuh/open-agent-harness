@@ -167,7 +167,7 @@ class CaseTest(unittest.TestCase):
 
     def test_accepts_crlf(self):
         path = case_dir(self.root) / "case.toml"
-        path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+        path.write_bytes(path.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8"))
         self.assertEqual(case_mod.load_case(case_dir(self.root)).id, "derived-index")
 
 
@@ -213,13 +213,15 @@ class WorkspaceTest(unittest.TestCase):
     def test_tar_and_zip_snapshots(self):
         snapshot, _ = self.build()
         extract = make_tmp_dir(self) / "src"
-        subprocess.run(["git", "clone", "-q", str(case_dir(self.root) / "snapshot.bundle"), str(extract)],
+        subprocess.run(["git", "-c", "init.defaultBranch=host-default", "clone", "-q", "--branch=main",
+                        str(case_dir(self.root) / "snapshot.bundle"), str(extract)],
                        check=True)
+        git(extract, "config", "core.autocrlf", "true")
         for fmt in ("tar", "zip"):
             with self.subTest(fmt=fmt):
                 root = fixture_copy(self)
                 archive = case_dir(root) / f"snapshot.{fmt}"
-                git(extract, "archive", f"--format={fmt}", "-o", str(archive), SNAPSHOT)
+                git(extract, "-c", "core.autocrlf=false", "archive", f"--format={fmt}", "-o", str(archive), SNAPSHOT)
                 (case_dir(root) / "snapshot.bundle").unlink()
                 set_case(root, 'file = "snapshot.bundle"', f'file = "snapshot.{fmt}"')
                 set_case(root, 'format = "bundle"', f'format = "{fmt}"')
@@ -231,9 +233,11 @@ class WorkspaceTest(unittest.TestCase):
 
     def test_tar_with_another_commit_id_refused(self):
         extract = make_tmp_dir(self) / "src"
-        subprocess.run(["git", "clone", "-q", str(case_dir(self.root) / "snapshot.bundle"), str(extract)],
+        subprocess.run(["git", "-c", "init.defaultBranch=host-default", "clone", "-q", "--branch=main",
+                        str(case_dir(self.root) / "snapshot.bundle"), str(extract)],
                        check=True)
-        git(extract, "archive", "--format=tar", "-o", str(case_dir(self.root) / "snapshot.tar"), "main")
+        git(extract, "-c", "core.autocrlf=false", "archive", "--format=tar", "-o",
+            str(case_dir(self.root) / "snapshot.tar"), "main")
         set_case(self.root, 'file = "snapshot.bundle"', 'file = "snapshot.tar"')
         set_case(self.root, 'format = "bundle"', 'format = "tar"')
         with self.assertRaises(EvalError) as caught:
@@ -379,7 +383,8 @@ class IsolationTest(unittest.TestCase):
     def test_oracle_copy_with_crlf_refused(self):
         snapshot, ws = self.build()
         (ws.repo / "notes" ).mkdir()
-        (ws.repo / "notes" / "answers.toml").write_bytes(self.oracle.replace(b"\n", b"\r\n"))
+        raw = self.oracle.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        (ws.repo / "notes" / "answers.toml").write_bytes(raw)
         self.assertIn("working-file", self.refused(snapshot, ws))
 
     def test_history_object_refused(self):
@@ -545,7 +550,7 @@ class PreregTest(unittest.TestCase):
         self.assertEqual(frozen.sha256, digest)
 
     def test_embeds_variant_config(self):
-        (self.root / "variant.toml").write_text("[review]\nmax_rounds = 3\n", encoding="utf-8")
+        (self.root / "variant.toml").write_bytes(b"[review]\nmax_rounds = 3\n")
         set_plan(self.root, 'name = "improved"', 'name = "improved"\nconfig = "variant.toml"')
         plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], self.out)
         data = json.loads(self.out.read_text(encoding="utf-8"))
@@ -659,8 +664,8 @@ class RunTest(unittest.TestCase):
         for prefix in (b"", b"\xef\xbb\xbf"):
             with self.subTest(prefix=prefix):
                 root = fixture_copy(self)
-                (case_dir(root) / "task.md").write_bytes(prefix + oracle_path(root).read_bytes().replace(
-                    b"\n", b"\r\n"))
+                (case_dir(root) / "task.md").write_bytes(prefix + oracle_path(root).read_text(
+                    encoding="utf-8").replace("\n", "\r\n").encode("utf-8"))
                 with self.assertRaises(EvalError) as caught:
                     run_fixture(self, root, self.env, frozen=True)
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
@@ -1019,6 +1024,7 @@ class CorrectionC2Test(unittest.TestCase):
     def oracle_snapshot(self, name, *, encoding=False):
         repo = make_tmp_dir(self) / "repo"
         git(repo.parent, "init", "-q", "-b", "main", str(repo))
+        git(repo, "config", "core.autocrlf", "false")
         data = oracle_path(self.root).read_bytes()
         target = repo / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1672,7 +1678,7 @@ class CorrectionC5Test(unittest.TestCase):
                 (ws.inputs / "notes.md").write_bytes(bom + raw.decode("utf-8").encode(encoding))
                 with self.assertRaises(EvalError) as caught:
                     workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
-                        b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n")))
+                        b"\xef\xbb\xbf" + raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
 
     def test_utf16_input_requires_valid_text_and_allows_non_oracle_text(self):
@@ -1808,7 +1814,7 @@ class CorrectionC6Test(unittest.TestCase):
                 (ws.inputs / "notes.md").write_bytes(raw.decode("utf-8").encode(encoding))
                 with self.assertRaises(EvalError) as caught:
                     workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(
-                        b"\xef\xbb\xbf" + raw.replace(b"\n", b"\r\n")))
+                        b"\xef\xbb\xbf" + raw.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
 
     def test_binary_without_utf16_nul_pattern_keeps_valid_decodings_and_raw_checks(self):
@@ -1861,7 +1867,7 @@ class CorrectionC7Test(unittest.TestCase):
 
     def test_oracle_blocks_refused_before_freeze(self):
         oracle = oracle_path(self.root)
-        text = oracle.read_bytes().decode("utf-8")
+        text = oracle.read_text(encoding="utf-8")
         oracle.write_bytes("\n".join(line + " \t" for line in text.split("\n")).encode("utf-8"))
         shapes = (text + "\n", "# Notes\n\n" + text + "\nEnd of notes\n",
                   "# Notes\n" + "\n".join(line + " \t" for line in text.split("\n")) + "\n")
@@ -2035,7 +2041,7 @@ class CorrectionC8Test(unittest.TestCase):
 
     def test_multilingual_utf16_oracle_copies_refused_before_freeze(self):
         oracle = oracle_path(self.root)
-        public = oracle.read_bytes().decode("utf-8")
+        public = oracle.read_text(encoding="utf-8")
         for index, language in enumerate(("가나다라마바사아자차카타파하", "日本語中文漢字資料説明")):
             localized = public.replace('summary = "', 'summary = "' + language * 500, 1)
             for shape, expected, notes in (("localized", localized, localized),
@@ -2279,7 +2285,7 @@ class CorrectionC9Test(unittest.TestCase):
     def test_binary_regions_keep_oracle_checks_despite_invalid_surrounding_bytes(self):
         ws = self.build()
         raw = oracle_path(self.root).read_bytes()
-        text = raw.decode("utf-8").rstrip()
+        text = oracle_path(self.root).read_text(encoding="utf-8").rstrip()
         for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
             with self.subTest(encoding=encoding):
                 invalid = b"\xff\xff\x00\xd8\xd8\x00"
@@ -2371,7 +2377,7 @@ class CorrectionC9Test(unittest.TestCase):
 
     def test_streamed_working_files_and_retained_blobs_share_canonical_checks(self):
         raw = oracle_path(self.root).read_bytes()
-        text = raw.decode("utf-8").rstrip()
+        text = oracle_path(self.root).read_text(encoding="utf-8").rstrip()
         source = self.source()
         for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
             for channel in ("working-file", "git-blob"):
@@ -2420,7 +2426,7 @@ class CorrectionC9Test(unittest.TestCase):
 
     def test_stream_normalization_across_long_whitespace_and_decoder_boundaries(self):
         raw = oracle_path(self.root).read_bytes()
-        text = raw.decode("utf-8").rstrip()
+        text = oracle_path(self.root).read_text(encoding="utf-8").rstrip()
         ws = self.build()
         for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
             with self.subTest(encoding=encoding):
@@ -2431,6 +2437,67 @@ class CorrectionC9Test(unittest.TestCase):
                         workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
                                                          oracle_blocks=workspace.oracle_block_checks(raw))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+
+class CorrectionC10Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_fixture_checkout_keeps_lf_under_autocrlf(self):
+        repo = make_tmp_dir(self) / "repo"
+        shutil.copytree(FIXTURE, repo, ignore=shutil.ignore_patterns("__pycache__"))
+        git(repo, "init", "-q", "-b", "main")
+        git(repo, "config", "core.autocrlf", "true")
+        git(repo, "add", "-f", ".")
+        for path in repo.rglob("*"):
+            if path.is_file() and ".git" not in path.relative_to(repo).parts:
+                path.unlink()
+        git(repo, "checkout-index", "--all", "--force")
+        for path in FIXTURE.rglob("*"):
+            if path.is_file() and path.suffix in (".py", ".md", ".toml"):
+                with self.subTest(file=path.relative_to(FIXTURE).as_posix()):
+                    expected = path.read_bytes().replace(b"\r\n", b"\n")
+                    self.assertEqual((repo / path.relative_to(FIXTURE)).read_bytes(), expected)
+        self.assertEqual((case_dir(repo) / "snapshot.bundle").read_bytes(),
+                         (case_dir(FIXTURE) / "snapshot.bundle").read_bytes())
+
+    def test_config_preregistration_and_injection_preserve_line_endings(self):
+        set_plan(self.root, 'name = "improved"', 'name = "improved"\nconfig = "variant.toml"')
+        for label, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
+            with self.subTest(newline=label):
+                raw = newline.join((b"[review]", b"max_rounds = 3", b""))
+                (self.root / "variant.toml").write_bytes(raw)
+                loaded = plan.load_plan(self.root / "plan.toml")
+                out = self.root / (label + ".json")
+                plan.preregister(loaded, [oracle_path(self.root)], out)
+                text = plan.load_frozen(out).data["variants"][1]["config_text"]
+                self.assertEqual(text.encode("utf-8"), raw)
+                ws = self.build(config_text=text)
+                self.assertEqual((ws.repo / ".oah" / "config.toml").read_bytes(), raw)
+
+    def test_crlf_oracles_refuse_lf_and_crlf_copies_in_all_text_encodings(self):
+        oracle = oracle_path(self.root)
+        text = oracle.read_text(encoding="utf-8")
+        raw = text.replace("\n", "\r\n").encode("utf-8")
+        oracle.write_bytes(raw)
+        source = self.source()
+        ws = self.build(source)
+        hashes, blocks = workspace.content_hashes(raw), workspace.oracle_block_checks(raw)
+        for newline in ("\n", "\r\n"):
+            for encoding, bom in (("utf-8", b""), ("utf-8", b"\xef\xbb\xbf"),
+                                  ("utf-16-le", b""), ("utf-16-be", b""),
+                                  ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+                with self.subTest(newline=repr(newline), encoding=encoding, bom=bool(bom)):
+                    data = bom + text.replace("\n", newline).encode(encoding)
+                    (ws.inputs / "notes.md").write_bytes(data)
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.scan_workspace(ws, source, oracle_hashes=hashes, oracle_blocks=blocks)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertIn("working-file", str(caught.exception))
+                    self.assertNotIn(str(oracle.parent), str(caught.exception))
 
 
 class FixtureTest(unittest.TestCase):

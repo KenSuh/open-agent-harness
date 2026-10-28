@@ -56,6 +56,9 @@ and folders. Every archive member is validated before extraction. Git metadata n
 including case variants, macOS ignored format characters and Windows short-name, trailing-dot/space
 and stream aliases, are refused.
 
+Create archives with `git -c core.autocrlf=false archive ...` so host line-ending settings do not
+rewrite text. Eval preserves archive bytes; it does not guess the original line endings.
+
 ### Splits
 
 - **dev:** cases you look at while changing the implementation.
@@ -111,6 +114,9 @@ input files are refused even when their contents are ordinary. Only the register
 npm entry script verified by `oah.engines.proc` may be external. Windows npm commands retain that
 resolver provenance; their entry script is scanned and frozen as an executable dependency. An explicit
 `node.exe /external/script.js` command receives no such exception.
+
+Config text is decoded from UTF-8 bytes without newline translation. Preregistration and workspace
+injection retain the supplied LF or CRLF exactly, on every platform.
 
 ### What a variant sees
 
