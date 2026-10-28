@@ -158,7 +158,7 @@ flowchart TD
     ask{"--no-rerank가 아니고, 직접 켰고,<br/>제공자 설정과 키가 있는가?"}
     jev["TypeSafe Jev 제공자<br/>순서만 바꾸고 더하거나 빼지 않음"]
     used["rerank=used"]
-    unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:<code>"]
+    unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:CODE"]
     brief["패킷 계획, 브리프, 실행 기록"]
 
     task --> score --> tier --> pick --> model --> brief

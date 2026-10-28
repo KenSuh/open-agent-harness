@@ -166,7 +166,7 @@ flowchart TD
     ask{"Not --no-rerank, enabled by you,<br/>provider set AND key present?"}
     jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops"]
     used["rerank=used"]
-    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:<code>"]
+    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:CODE"]
     brief["Packet plan, brief and run record"]
 
     task --> score --> tier --> pick --> model --> brief
