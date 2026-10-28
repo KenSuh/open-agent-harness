@@ -534,6 +534,18 @@ def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetim
 
 def _log_round_unlocked(state, task, entry, *, now=None):
     """The caller already holds the state lock (including ordinary call process creation)."""
+    publication = _CORRECTION_PUBLICATION.get()
+    if publication is not None and publication["state"] == state and publication["task"] == task:
+        from oah.runs import _CORRECTION_CAPTURE
+
+        # Start publication already compared these captured bytes. Never reopen inputs after writing.
+        path = _path(state, task, ROUNDS_NAME)
+        capture = _CORRECTION_CAPTURE.get()
+        contents = (capture[path] or b"") + (json.dumps({"at": _iso(now), **entry, "task": task},
+                                                        sort_keys=True) + "\n").encode("utf-8")
+        write_text_atomic(path, contents.decode("utf-8"))
+        capture[path] = contents
+        return
     read_round_log(state, task)
     review_dir(state, task).mkdir(parents=True, exist_ok=True)
     append_jsonl(_path(state, task, ROUNDS_NAME), {"at": _iso(now), **entry, "task": task})
@@ -560,18 +572,21 @@ def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
 
 def _round_shape(line, task):
     """Accept landed logs without a task field; validate all fields used to authorize spending."""
+    from oah.runs import RUN_ID_RE
+
     def count(value):
         return type(value) is int and value >= 1
 
     if not isinstance(line, dict) or line.get("task", task) != task:
         return False
     event = line.get("event")
-    if event not in ("start", "finish", "dispatch"):
+    if event not in ("start", "finish", "dispatch", "reservation"):
         return False
     if "max_rounds" in line and line["max_rounds"] is not None and not count(line["max_rounds"]):
         return False
-    if event == "dispatch":
-        from oah.runs import RUN_ID_RE
+    if "run_id" in line and not (isinstance(line["run_id"], str) and RUN_ID_RE.fullmatch(line["run_id"])):
+        return False
+    if event in ("dispatch", "reservation"):
         return (line.get("stage") in ("initial", "review", "correction")
                 and isinstance(line.get("run_id"), str) and RUN_ID_RE.fullmatch(line["run_id"]) is not None
                 and "max_rounds" in line and line.get("task") == task)

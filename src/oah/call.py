@@ -68,6 +68,7 @@ POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
 _CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
+_PREPARATION_RUN = ContextVar("oah_preparation_run", default=None)
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
@@ -595,13 +596,13 @@ def _paid_dispatch(prepared):
         lock.__exit__(None, None, None)
 
 
-def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None):
+def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None, reserve=False):
     from oah.review import ReviewError, rounds
 
     if rounds._MANAGED_DISPATCH.get() == task:
         return
     try:
-        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id)
+        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id, reserve=reserve)
     except ReviewError as exc:
         raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
 
@@ -774,6 +775,7 @@ class _CallPlan:
     model_writes: tuple[tuple[pathlib.Path, str], ...] = ()
     binding_record: str | None = None
     lease_record: str | None = None
+    dispatch_record: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -819,6 +821,7 @@ class _CorrectionInputs:
     catalog: _CorrectionCatalog
     config: object
     metadata_json: str
+    max_rounds: int | None = None
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
@@ -842,8 +845,10 @@ class _CorrectionInputs:
     def publish_run(self):
         """Consume only the scanned plan, after the attempt start is durable."""
         from oah.atomic import write_json_atomic, write_text_atomic
+        from oah.review import receipts
 
         plan = self.plan
+        receipts._log_round_unlocked(self.state, self.run.task, json.loads(plan.dispatch_record))
         # Only start publication depends on model inputs, including when a later write fails.
         for path in self.catalog.original:
             runs._CORRECTION_CAPTURE.get().pop(path, None)
@@ -889,12 +894,12 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json):
+def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
-                                   metadata_json)
+                                   metadata_json, max_rounds=max_rounds)
         snapshot = _CORRECTION_INPUTS.set(inputs)
         try:
             yield inputs
@@ -948,6 +953,32 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             parse_intent: Callable[[str], object] | None = None,
             read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None,
             keychain=None) -> Prepared:
+    """Serialize task authorization and all optional paid preparation, before handing off a reserved run."""
+    from oah.lockfile import LockTimeout, StateLock
+    from oah.review import receipts, rounds
+
+    managed = _CORRECTION_INPUTS.get() is not None or rounds._MANAGED_DISPATCH.get() == request.task
+    lock = None if managed else StateLock(receipts.task_lock_path(state_dir, request.task), timeout=0)
+    if lock is not None:
+        try:
+            lock.__enter__()
+        except LockTimeout:
+            raise EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid preparation owns this task; wait "
+                              "for it to finish, then retry oah call") from None
+    try:
+        return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                        has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
+                        keychain=keychain)
+    finally:
+        if lock is not None:
+            lock.__exit__(None, None, None)
+
+
+def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
+             parse_intent: Callable[[str], object] | None = None,
+             read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None,
+             keychain=None) -> Prepared:
     """Decide engine, tier, model and effort; write the run folder and brief. Raises before any launch.
 
     `keychain` is passed to the re-ranker's key lookup (`oah.secrets`); None means the OS keychain."""
@@ -990,6 +1021,16 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     given = recorded.to_json() if recorded is not None else {}
     given.update({axis: value for axis, value in request.axes.items() if value is not None})
     scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+    planned_run = None
+    if inputs is None:
+        from oah.lease import Store
+
+        planned_run = _PREPARATION_RUN.get() or runs._plan_run(
+            state_dir, request.task, request.engine, request.stage, now=now)
+        with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
+            _check_dispatch_lease(live, root, stage=request.stage)
+            _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
+                                reserve=True, run_id=planned_run[0].id)
     axes = scored.axes if recorded is not None else None
     reasons = None
     advisory = "unused(tier-given)"
@@ -1046,7 +1087,9 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             model_writes=tuple(inputs.catalog.writes.items()), binding_record=binding_record,
             lease_record=json.dumps(runs._correction_record(
                 {"id": holder.id, "generation": holder.generation, "intent": holder.intent},
-                ("id", "generation", "intent"))) + "\n")
+                ("id", "generation", "intent"))) + "\n",
+            dispatch_record=json.dumps({"event": "dispatch", "stage": request.stage, "run_id": run.id,
+                                        "max_rounds": inputs.max_rounds}))
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
                     "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
@@ -1065,7 +1108,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         inputs.run = _CorrectionRun(id=run.id, task=run.task, path=run.path, record=dict(plan.initial_record))
         return plan.prepared
     else:
-        run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
+        run = runs._create_run(*planned_run)
     try:
         return _finish_prepare(request, settings, run, plan=plan, **fields)
     except (EngineError, briefs.BriefError) as exc:

@@ -12,8 +12,8 @@ Series
     (an amend, squash or rebase), the user decides.
 Gate, before any paid call
     `task_gate` shares decision stops and the task-wide limit across all dispatch paths. `dispatch_gate`
-    loads that state for ordinary calls; review-stage calls reserve a counted round at actual spawn.
-    Structured review receipts count once, across bases, and retain the additional checks below.
+    loads that state for ordinary calls; review-stage calls reserve a counted round before preparation.
+    Structured starts retain spent reservations; successful receipts reconcile them once, across bases.
     `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the task waits
     for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
     findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
@@ -91,8 +91,11 @@ class Series:
 
     @property
     def counted_rounds(self) -> int:
-        return len(self.task_receipts) + sum(line.get("event") == "dispatch" and line.get("stage") == "review"
-                                             for line in self.log)
+        published = {entry.record.get("reviewer", {}).get("run_id") for entry in self.task_receipts}
+        reserved = {line.get("run_id", ("start", index)) for index, line in enumerate(self.log)
+                    if (line.get("event") == "start" or
+                        line.get("event") in ("reservation", "dispatch") and line.get("stage") == "review")}
+        return len(self.task_receipts) + len(reserved - published)
 
     def history_items(self) -> list[dict]:
         return [{"kind": entry.kind, "name": entry.name, "digest": entry.digest} for entry in self.history]
@@ -263,8 +266,8 @@ def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = Non
                           "--extra-round to authorize and record one additional round")
 
 
-def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, records=None, log=None):
-    """Check any ordinary paid call. At spawn the caller holds both task and state locks."""
+def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, records=None, log=None, reserve=False):
+    """Authorize preparation or launch under task/state locks; a run spends its reservation once."""
     from oah.review import context, receipts, settings
 
     conf = settings.load(root)
@@ -277,14 +280,34 @@ def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, record
             else latest.record["head"] if latest else "")
     s = series(history, lines, latest.record["base"] if latest else head, head=head,
                is_ancestor=lambda a, b: context._git(root, "merge-base", "--is-ancestor", a, b, ok=(0, 1))[0] == 0)
-    task_gate(s, settings=conf)
+    effective = task_limit(s, conf)
+    # The run may spend the slot it already reserved, but it still observes every later stop and limit.
+    own = [line for line in lines if line.get("event") == "reservation" and line.get("run_id") == run_id
+           and line.get("stage") == stage]
+    authorized = dataclasses.replace(s, log=tuple(line for line in s.log if line not in own))
+    task_gate(authorized, settings=dataclasses.replace(conf, max_rounds=effective))
     if record:
         if any(line.get("event") == "dispatch" and line.get("run_id") == run_id for line in lines):
             raise ReviewError("OAH_RUN_LAUNCH_INVALID", "this run already dispatched; prepare a new oah call instead "
                               "of replaying its saved launch")
         receipts._log_round_unlocked(state, task, {"event": "dispatch", "stage": stage, "run_id": run_id,
-                                                   "max_rounds": task_limit(s, conf)})
+                                                   "max_rounds": effective})
+    elif reserve:
+        receipts._log_round_unlocked(state, task, {"event": "reservation", "stage": stage, "run_id": run_id,
+                                                   "max_rounds": effective})
     return s
+
+
+def _approval_current(s: Series, latest: Entry) -> bool:
+    """The matching start/finish brackets publication under the task lock, including legacy dispatches."""
+    run_id = latest.record.get("reviewer", {}).get("run_id")
+    boundary = max((index for index, line in enumerate(s.log)
+                    if (line.get("event") == "start" and run_id is not None and line.get("run_id") == run_id)
+                    or (line.get("event") == "finish" and line.get("counted") is True
+                        and line.get("receipt") == latest.name)), default=-1)
+    return all(index <= boundary if line.get("event") in ("reservation", "dispatch") else
+               line.get("round", s.next_number) <= latest.record["round"]
+               for index, line in enumerate(s.log))
 
 
 def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings,
@@ -305,7 +328,7 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
             and latest.record.get("intent") == binding.to_json()
             # Receipt numbering is task-wide. Publication supersedes that round's attempts;
             # any higher-numbered call is a later, unfinished round, whatever its base.
-            and all(line.get("round", s.next_number) <= latest.record["round"] for line in s.log)):
+            and _approval_current(s, latest)):
         return CONVERGED
     task_gate(s, settings=settings, decision=decision, extra_round=extra_round)
     if reason is not None and decision is None:

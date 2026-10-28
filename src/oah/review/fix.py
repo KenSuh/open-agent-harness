@@ -69,7 +69,7 @@ from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock, _try_lock
 from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
-from oah.review import ReviewError, authors, receipts, rounds, runner
+from oah.review import ReviewError, authors, receipts, rounds, runner, settings as review_settings
 from oah.review.schema import BLOCKING
 from oah.scope import outside
 from oah.toolkit.checks import CONTENT_RULES, UTF16_BOMS
@@ -1165,7 +1165,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, LAUNCHED)
         round_log = receipts.read_round_log(t.state, t.name)
-        rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=round_log)
+        gated = rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=round_log)
+        limit = rounds.task_limit(gated, review_settings.from_config(config))
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)
@@ -1201,7 +1202,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             final = scratch / "last-message.md"
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
-                                         metadata_json=json.dumps(metadata)) as inputs:
+                                         metadata_json=json.dumps(metadata), max_rounds=limit) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,

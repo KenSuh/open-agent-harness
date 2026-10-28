@@ -20,8 +20,8 @@ config and rules ignored, and an allowlisted environment plus the worker variabl
 variables never pass through (in any letter case); sign in through `codex login`, including
 `codex login --with-api-key`. Structured output is redacted once, after JSON decoding and before retention
 or validation. The snapshot is removed as soon as the reviewer exits. A validated round publishes
-`R<n>.json` and its index line; every other call
-is an uncounted attempt in `rounds.jsonl`.
+`R<n>.json` and its index line; every other call has no validated receipt in `rounds.jsonl`.
+The start reservation is durable before preparation; failed and interrupted calls retain that spend.
 """
 from __future__ import annotations
 
@@ -413,18 +413,9 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                             for class_id, tried in s.attempted().items()),
             decision=decision, stopped=stopped if decision else None, extra_round=extra,
             impact=impact, impact_rows=impact_rows)
-        prepared = call.prepare(
-            call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
-                             round_instructions=redact(prompt.round_instructions(context_)), output_schema=str(schema_path),
-                             ephemeral=True, isolated=True, timeout_s=request.timeout_s,
-                             output_last_message=str(final_path)),
-            call_settings, root=snap.tree, state_dir=state,
-            env=launch_env,
-            footer=tools.footer, has_footer=tools.has_footer,
-            parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
-        warnings.extend(prepared.warnings)
+        planned_run = runs._plan_run(state, task, ENGINE, "review")
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
-                 "run_id": prepared.run_id}
+                 "run_id": planned_run[0].id}
         receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
                                          "extra_attempt": extra_attempt, "decision": request.decision,
                                          "max_rounds": conf.max_rounds,
@@ -437,6 +428,19 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             Store(state).log(task=task, agent=lease.agent,
                              message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
         try:
+            token = call._PREPARATION_RUN.set(planned_run)
+            try:
+                prepared = call.prepare(
+                    call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
+                                     round_instructions=redact(prompt.round_instructions(context_)),
+                                     output_schema=str(schema_path), ephemeral=True, isolated=True,
+                                     timeout_s=request.timeout_s, output_last_message=str(final_path)),
+                    call_settings, root=snap.tree, state_dir=state, env=launch_env,
+                    footer=tools.footer, has_footer=tools.has_footer,
+                    parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
+            finally:
+                call._PREPARATION_RUN.reset(token)
+            warnings.extend(prepared.warnings)
             run = call.execute(prepared, base_env=launch_env, rules=rules, redact=redact)
         except BaseException as exc:
             receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
@@ -478,10 +482,13 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})
         left = conf.round_attempts - attempt
-        budget = (f" This was attempt {attempt} of {conf.round_attempts} for round {s.series_round} of this series; "
-                  + (f"run oah review --task {task} again to retry." if left > 0 else
-                     f"the budget is spent; fix the cause, then run oah review --task {task} --base {span.base} "
-                     "--extra-attempt to permit one more call (recorded)."))
+        retry = f"oah review --task {task} --base {span.base}"
+        if conf.max_rounds is not None and s.counted_rounds + 1 >= conf.max_rounds:
+            retry += " --extra-round"
+        if left <= 0:
+            retry += " --extra-attempt"
+        budget = (f" Its reserved round remains spent. This was attempt {attempt} of {conf.round_attempts} for "
+                  f"round {s.series_round} of this series; fix the cause, then run {retry} to retry (recorded).")
         return Result(code, 1, message + budget, lines=[f"run folder: {prepared.run_dir}"], warnings=warnings,
                       run_dir=prepared.run_dir)
     judged = rounds.decide(output, s)
