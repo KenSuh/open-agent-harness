@@ -179,6 +179,9 @@ def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None)
                               for key in ("source_file", "file", "path")) for node in nodes)):
             raise ValueError("invalid graph collections")
         declared = {node["id"] for node in nodes}
+        if len(declared) != len(nodes):
+            return None, "unavailable", (f"OAH_IMPACT_GRAPH_UNAVAILABLE: {name} has duplicate node IDs; "
+                                         "run oah graph update to rebuild it")
         if any(not isinstance(edge, dict)
                or any(not isinstance(edge.get(key), str) or edge[key] not in declared
                       for key in ("source", "target")) for edge in links):

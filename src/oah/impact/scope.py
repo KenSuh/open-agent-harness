@@ -6,7 +6,6 @@ import pathlib
 import re
 from typing import Iterable, Mapping, Sequence
 
-from oah.impact import lexical
 from oah.impact.query import normalize_entity
 
 DEPTH = 1
@@ -177,16 +176,12 @@ def fallback_needles(target: str) -> set[str]:
 
 
 def _names(text: str, needles: Iterable[str]) -> list[str]:
-    found = set()
-    tokens = lexical._TOKEN.findall(text)
-    # Keep quoted paths whole without interpreting Windows backslashes as shell escapes.
-    tokens += [match.group(2) for match in re.finditer(r"""(["'])([^\r\n]*?)\1""", text)]
-    for token in tokens:
-        token = token.replace("\\", "/")
-        for needle in needles:
-            if re.search(r"(?:\A|[/.])" + re.escape(needle) + r"(?=\Z|[/.])", token):
-                found.add(needle)
-    return sorted(found)
+    # Search raw ledger text, preserving spaces and nested literals without parsing commands.
+    text = text.replace("\\", "/")
+    boundary = r"""[/.\s"'(),;=:]"""
+    return sorted({needle for needle in needles
+                   if re.search(r"(?:\A|" + boundary + ")" + re.escape(needle)
+                                + r"(?=\Z|" + boundary + ")", text)})
 
 
 def fallback(gates: Sequence, targets: Sequence[str], *, strong: Sequence[Mapping],

@@ -87,6 +87,8 @@ class GraphStatusTest(unittest.TestCase):
         edge = {"source": "n1", "target": "n2"}
         for edge_key in ("links", "edges"):
             cases = [("valid", {"nodes": nodes, edge_key: [edge]}, True)]
+            for duplicate in (nodes[0], {"id": "n1", "file": "c.py"}, {"id": "n1"}):
+                cases.append(("duplicate node id", {"nodes": nodes + [duplicate], edge_key: [edge]}, False))
             for bad in (None, {}, "", 1):
                 cases += [("nodes collection", {"nodes": bad, edge_key: []}, False),
                           ("edge collection", {"nodes": nodes, edge_key: bad}, False)]
@@ -325,6 +327,24 @@ class FallbackTest(unittest.TestCase):
     def gate(self, gate_id, check, expect="OK", ledger=".oah/tasks/t/GATES.md"):
         return gatebind.GateRef(ledger, gate_id, check, expect)
 
+    def test_raw_fallback_text_uses_path_boundaries(self):
+        for left, right in (("", ""), ("/", "/"), (" ", " "), ("\t", "\n"), ('"', '"'),
+                            ("'", "'"), ("(", ")"), (",", ","), (";", ";"), ("=", ":")):
+            for field in ("check", "expect"):
+                with self.subTest(left=left, right=right, field=field):
+                    text = left + "plugin pack" + right
+                    gates = [self.gate("G1", text if field == "check" else "echo OK",
+                                       text if field == "expect" else "OK"),
+                             self.gate("G2", "python -m unittest")]
+                    self.assertEqual([item["source"] for item in scope.fallback(
+                        gates, ["plugin pack/alpha.py"], strong=[], checks=[])],
+                        [gate.label for gate in gates])
+        for text in ("plugin pack2", "myplugin pack", "plugin packs", "plugin pack_extra",
+                     "plugin pack-extra", "my-plugin pack", "plugin+pack"):
+            with self.subTest(miss=text):
+                self.assertEqual(scope.fallback([self.gate("G1", text)], ["plugin pack/alpha.py"],
+                                                strong=[], checks=[]), [])
+
     def test_quoted_fallback_paths_preserve_spaces_and_boundaries(self):
         for separator in ("/", "\\"):
             for quote in ('"', "'"):
@@ -526,6 +546,38 @@ class ScopeCliTest(unittest.TestCase):
                         self.assertEqual([item["check"] for item in report["fallback"]], ["python -m unittest"])
                         self.assertIn("re-run (fallback): python -m unittest", text)
 
+    def test_duplicate_graph_ids_keep_scope_incomplete_and_configured_fallback(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n",
+                          ".oah/config.toml": b'[impact]\nfallback_checks = ["python -m unittest"]\n',
+                          "a.py": b"A = 1\n", "b.py": b"B = 2\n", "c.py": b"C = 3\n"})
+        commit = head(repo)
+        nodes = [{"id": "n1", "source_file": "a.py"}, {"id": "n2", "file": "c.py"}]
+        for edge_key in ("links", "edges"):
+            for duplicate in (False, True):
+                with self.subTest(edge_key=edge_key, duplicate=duplicate):
+                    write_graph(repo, {"nodes": nodes + ([{"id": "n1", "file": "b.py"}] if duplicate else []),
+                                       edge_key: [{"source": "n1", "target": "n2"}], "commit": commit})
+                    report, text = self.impact(repo, "a.py")
+                    block = self.assert_shape(report, text)
+                    self.assertTrue(all(layer["status"] == "analysed"
+                                        for name, layer in block["layers"].items() if name != "graph"))
+                    self.assertEqual(block["complete"], not duplicate)
+                    graph_rows = [row["source"] for row in report["rows"] if row["layer"] == "graph"]
+                    if duplicate:
+                        self.assertEqual(block["layers"]["graph"]["status"], "unavailable")
+                        reason = block["layers"]["graph"]["reason"]
+                        self.assertTrue(reason.startswith("OAH_IMPACT_GRAPH_UNAVAILABLE:"), reason)
+                        self.assertIn("duplicate node IDs", reason)
+                        self.assertIn("oah graph update", reason)
+                        self.assertEqual([item["layer"] for item in block["unanalysed"]
+                                          if item["kind"] == "layer"], ["graph"])
+                        self.assertEqual(graph_rows, [])
+                        self.assertEqual([item["check"] for item in report["fallback"]], ["python -m unittest"])
+                    else:
+                        self.assertEqual(block["layers"]["graph"]["status"], "analysed")
+                        self.assertEqual(graph_rows, ["c.py"])
+                        self.assertEqual(report["fallback"], [])
+
     def test_ambiguous_skip_with_count(self):
         repo = self.repo({f"pkg{i}/shared.py": f"N = {i}\n" for i in range(4)})
         report, text = self.impact(repo, "pkg0/shared.py")
@@ -690,6 +742,57 @@ PLUGIN_LEDGER = (".oah/tasks/plugins/GATES.md", "- [ ] G1: every plugin loads\n 
 
 
 class MissedCaseTest(unittest.TestCase):
+    def test_nested_quoted_paths_get_every_ledger_gate_as_fallback(self):
+        for separator in ("/", "\\"):
+            for field in ("CHECK", "EXPECT"):
+                with self.subTest(separator=separator, field=field):
+                    repo = make_git_repo(self)
+                    ledger = ".oah/tasks/nested/GATES.md"
+                    loader = separator.join(("src", "plugin pack", "loader.py"))
+                    text = f'python -c "import runpy; runpy.run_path(\'{loader}\')"'
+                    check = text if field == "CHECK" else "echo OK"
+                    expect = text if field == "EXPECT" else "OK"
+                    base = git_commit(repo, {"src/plugin pack/alpha.py": b"VALUE = 1\n",
+                                             "src/plugin pack/loader.py": b"print('loaded')\n",
+                                             ledger: (f"- [ ] G1: load plugins\n  CHECK: {check}\n"
+                                                      f"  EXPECT: {expect}\n- [ ] G2: companion check\n"
+                                                      "  CHECK: python -m unittest\n  EXPECT: OK\n").encode("utf-8")})
+                    (repo / "src/plugin pack/alpha.py").write_bytes(b"VALUE = 2\n")
+                    result = run_impact(repo, "--changed-since", base, "--json")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    report = json.loads(result.stdout)
+                    self.assertFalse(report["scope"]["complete"])
+                    self.assertEqual(report["changed_since"]["rerun"], [])
+                    for plan in (report["fallback"], report["changed_since"]["fallback"]):
+                        self.assertEqual([(item["source"], item["binding"], item["targets"]) for item in plan],
+                                         [(ledger + "#G1", "fallback", ["src/plugin pack/alpha.py"]),
+                                          (ledger + "#G2", "fallback", ["src/plugin pack/alpha.py"])])
+                        self.assertEqual(plan[0]["check"], check)
+
+    def test_raw_text_gets_every_matching_ledger_gate_as_fallback(self):
+        for text in ("pack", "python pack/loader.py", r"python pack\loader.py", "python plugin pack/loader.py"):
+            with self.subTest(text=text):
+                repo = make_git_repo(self)
+                ledger = ".oah/tasks/raw/GATES.md"
+                miss = ".oah/tasks/miss/GATES.md"
+                target = "plugin pack/alpha.py" if "plugin pack" in text else "pack/alpha.py"
+                base = git_commit(repo, {target: b"VALUE = 1\n",
+                                         ledger: (f"- [ ] G1: load plugins\n  CHECK: {text}\n  EXPECT: OK\n"
+                                                  "- [ ] G2: companion check\n  CHECK: python -m unittest\n"
+                                                  "  EXPECT: OK\n").encode("utf-8"),
+                                         miss: b"- [ ] G1: other plugins\n  CHECK: python pack2/loader.py\n"
+                                               b"  EXPECT: OK\n"})
+                (repo / target).write_bytes(b"VALUE = 2\n")
+                result = run_impact(repo, "--changed-since", base, "--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertFalse(report["scope"]["complete"])
+                self.assertEqual(report["changed_since"]["rerun"], [])
+                for plan in (report["fallback"], report["changed_since"]["fallback"]):
+                    self.assertEqual([(item["source"], item["binding"], item["targets"]) for item in plan],
+                                     [(ledger + "#G1", "fallback", [target]),
+                                      (ledger + "#G2", "fallback", [target])])
+
     def test_quoted_directory_gets_every_ledger_gate_as_fallback(self):
         for separator in ("/", "\\"):
             with self.subTest(separator=separator):
