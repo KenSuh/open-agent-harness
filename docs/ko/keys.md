@@ -23,7 +23,7 @@ API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 프�
 | Claude Code 로그인 | Claude Code. `oah`는 `claude auth status`로 확인만 하고 읽지 않는다. | `oah call claude`를 실행할 수 없다 |
 | Codex 로그인 | Codex CLI. `oah`는 `codex login status`로 확인만 하고 읽지 않는다. | `oah review`와 `oah fix`를 실행할 수 없다 |
 | `TYPESAFE_API_KEY` | 선택 기능인 TypeSafe Jev 재정렬기 | `rerank=unused(no key)`. 정해진 규칙만으로 판단한다 |
-| `CONTEXT7_API_KEY`, `LAW_OC`, `OPENAI_API_KEY` | 툴킷의 `mcp/` 템플릿으로 띄우는 MCP 서버. 서버를 띄울 때 Claude Code나 Codex가 읽는다 | 그 서버가 뜨지 않거나 선택 키 없이 돈다. [툴킷](toolkit.md) 참고 |
+| `CONTEXT7_API_KEY`, `OPENAI_API_KEY` | 툴킷의 `mcp/` 템플릿으로 띄우는 MCP 서버. 서버를 띄울 때 Claude Code나 Codex가 읽는다 | 그 서버가 뜨지 않거나 선택 키 없이 돈다. [툴킷](toolkit.md) 참고 |
 
 ## Claude Code와 Codex는 각자 로그인한다
 

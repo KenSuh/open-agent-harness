@@ -238,8 +238,9 @@ refusal.
 | `oah hooks` | Installs or removes the opt-in Claude Code and git hooks. |
 | `oah ci` | Sets up GitHub Actions checks for your project. |
 
-Every command takes `--help`. Exit codes are `0` done, `1` refused, `2` usage and `69` environment, and every
-refusal starts with an `OAH_*` code and says what to run next.
+Every command takes `--help`. Exit codes are `0` done, `1` refused, `2` usage or an `ABORT` verdict from
+`oah preflight`, `69` environment and `75` when `oah wait` reaches its timeout with the run still active
+(run `oah wait <run-id>` again). Every refusal starts with an `OAH_*` code and says what to run next.
 
 ## Requirements
 
@@ -358,15 +359,21 @@ graphify, Claude Code and Codex CLI, are listed with their licenses in
 
 ### oah는 무엇인가
 
-`oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 규율 있게 한 팀으로 일하도록 돕는 작은 명령줄 도구다.
-판정기로 **TypeSafe Jev**를 선택해서 쓸 수 있다. git과 pull request에 익숙하고, AI 코딩에서도 실무 수준의 리뷰
-규율을 내 컴퓨터에서 갖추고 싶은 개발자와 작은 팀을 위해 만든다.
+`oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 한 팀처럼 일하게 해 주는 작은 명령줄 도구예요. 작업에 쓸 스킬의 순서를 정할 때는 **TypeSafe Jev**가 판정을 돕습니다.
+
+AI로 프로그램을 만들면서 «원하는 결과가 잘 안 나온다»고 느끼는 분, 그리고 AI 작업 환경(하네스)을 이제 막 꾸려 보려는 분을 가장 먼저 생각하고 만들었어요.
 
 | 역할 | 도구 | 하는 일 |
 |---|---|---|
-| 구현 | **Claude Code** | 모든 작업의 1차 구현을 맡는다. |
-| 리뷰와 수정 | **Codex CLI** | 리뷰가 수렴할 때까지 리뷰하고 고친 뒤 다시 리뷰한다. |
-| 판정(켰을 때만) | **TypeSafe Jev** | 정해진 규칙이 만든 닫힌 목록(작업에 쓸 스킬 등)의 순서를 다시 매긴다. 후보를 더하거나 빼지는 않는다. |
+| 만들기 | **Claude Code** | 모든 작업의 첫 버전을 만듭니다. |
+| 검토와 수정 | **Codex CLI** | 더 고칠 곳이 없을 때까지 검토하고, 고치고, 다시 검토합니다. |
+| 판정 | **TypeSafe Jev** | 정해진 규칙이 먼저 후보를 고르면, Jev는 그 안에서 순서만 정합니다. 후보를 새로 넣거나 빼지는 않아요. 지금은 «작업에 쓸 스킬 고르기»에 쓰이고, «영향 범위 결과 정렬»은 준비 중입니다. |
+
+Jev는 함께 쓰기를 권하지만 꼭 필요하지는 않아요. 사용자가 직접 켜고 Jev 키가 있을 때만 작동해요.
+
+- 처음 설정할 때 `oah init`이 Jev를 쓸지 한 번 물어봐요. 나중에 설정 파일에서 켜도 돼요.
+- `oah doctor`는 아직 Jev 상태를 점검하지 않아요. 대신 각 작업 결과에 Jev를 썼는지가 표시돼요.
+- Jev가 없으면 정해진 규칙만으로 판단해요.
 
 AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 동시에 고친다. "끝났다"는 에이전트의 말뿐이고 리뷰는
 언제 끝나는지 정한 규칙이 없다. `oah`는 두 엔진에 같은 규칙을 적용한다.
@@ -504,8 +511,9 @@ oah init
 | `oah hooks` | 선택형 Claude Code 훅과 git 훅을 설치하거나 지운다. |
 | `oah ci` | 내 프로젝트의 GitHub Actions 검사를 설정한다. |
 
-모든 명령은 `--help`를 받는다. 종료 코드는 `0` 완료, `1` 거절, `2` 사용법 오류, `69` 환경 문제다. 거절할 때는 언제나
-`OAH_*` 코드로 시작하고 다음에 실행할 것을 알려 준다.
+모든 명령은 `--help`를 받는다. 종료 코드는 `0` 완료, `1` 거절, `2` 사용법 오류 또는 `oah preflight`의 `ABORT` 판정,
+`69` 환경 문제다. `75`는 `oah wait`의 제한 시간이 끝나도 실행이 진행 중임을 뜻한다. `75`이면
+`oah wait <run-id>`를 다시 실행한다. 거절할 때는 언제나 `OAH_*` 코드로 시작하고 다음에 실행할 것을 알려 준다.
 
 ### 요구 사항
 

@@ -31,9 +31,12 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1 -SkipTools
 `--skip-tools` (`-SkipTools`) skips the tool checks and only reinstalls `oah`. Leave it out to check the tools
 too.
 
-**From a release,** run the one-command installer again with the new version in place of `<version>`, as in
-[Install on macOS](install-macos.md) or [Install on Windows](install-windows.md). It checks the archive's
-SHA-256 against the release before it unpacks anything.
+**From a release,** download the new tag's source archive and `SHA256SUMS` from the repository's release page.
+Before extraction, compare the archive's full SHA-256 with its entry in `SHA256SUMS`; stop if the entry is
+missing or the digests differ. Only after they match, extract it and run the included installer from the
+extracted source folder: `bash install/install.sh --skip-tools` on macOS, or
+`powershell -ExecutionPolicy Bypass -File .\install\install.ps1 -SkipTools` on Windows. The checksum commands
+are in [Install on macOS](install-macos.md) and [Install on Windows](install-windows.md).
 
 Then open a new terminal and check:
 

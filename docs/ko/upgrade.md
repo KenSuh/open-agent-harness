@@ -30,9 +30,12 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1 -SkipTools
 
 `--skip-tools`(`-SkipTools`)는 도구 확인을 건너뛰고 `oah`만 다시 설치한다. 도구도 확인하려면 빼고 실행한다.
 
-**릴리스로 설치했다면** 한 줄 설치 명령을 `<version>` 자리에 새 버전을 넣어 다시 실행한다.
-[macOS에 설치하기](install-macos.md)나 [Windows에 설치하기](install-windows.md)에 있는 명령이다. 압축을 풀기 전에
-릴리스의 SHA-256과 대조한다.
+**릴리스로 설치했다면** 저장소의 릴리스 페이지에서 새 태그의 소스 압축 파일과 `SHA256SUMS`를 받는다.
+압축을 풀기 전에 압축 파일의 전체 SHA-256을 `SHA256SUMS`의 해당 파일 항목과 대조한다. 항목이 없거나 지문이
+다르면 멈춘다. 일치한 뒤에만 압축을 풀고 추출된 소스 폴더에서 포함된 설치 프로그램을 실행한다. macOS에서는
+`bash install/install.sh --skip-tools`, Windows에서는
+`powershell -ExecutionPolicy Bypass -File .\install\install.ps1 -SkipTools`를 쓴다. 지문 확인 명령은
+[macOS에 설치하기](install-macos.md)와 [Windows에 설치하기](install-windows.md)에 있다.
 
 그다음 새 터미널을 열고 확인한다.
 

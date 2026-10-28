@@ -25,7 +25,7 @@ fixtures.
 | your Claude Code sign-in | Claude Code. `oah` checks it with `claude auth status` and never reads it. | `oah call claude` cannot run |
 | your Codex sign-in | Codex CLI. `oah` checks it with `codex login status` and never reads it. | `oah review` and `oah fix` cannot run |
 | `TYPESAFE_API_KEY` | the optional TypeSafe Jev re-ranker | `rerank=unused(no key)`: the fixed rules decide alone |
-| `CONTEXT7_API_KEY`, `LAW_OC`, `OPENAI_API_KEY` | MCP servers from the toolkit's templates in `mcp/`, read by Claude Code or Codex when they start the server | that server does not start, or runs without the optional key; see [Toolkit](toolkit.md) |
+| `CONTEXT7_API_KEY`, `OPENAI_API_KEY` | MCP servers from the toolkit's templates in `mcp/`, read by Claude Code or Codex when they start the server | that server does not start, or runs without the optional key; see [Toolkit](toolkit.md) |
 
 ## Claude Code and Codex use their own sign-ins
 

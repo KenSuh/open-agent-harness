@@ -15,8 +15,10 @@ cannot point at a code that is gone.
   one that is missing.
 - **Read the whole message.** It names the file, the lease or the gate involved, and the command to run.
 - **Exit codes:** `0` done, `1` refused (fix what the message says and run the command again), `2` usage
-  (a wrong or missing option; add `--help` to the command), `69` environment (a missing tool, a broken
-  config file, or a folder that is not a repository).
+  (a wrong or missing option; add `--help` to the command), except that `oah preflight` also returns `2`
+  for an `ABORT` verdict (fix each `[abort]` line and retry). `69` means environment (a missing tool, a
+  broken config file, or a folder that is not a repository). `75` means `oah wait` reached its timeout
+  with the run still active; run `oah wait <run-id>` again.
 
 ## Setup and configuration
 
