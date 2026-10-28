@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 from oah.gates import guard, summary
 from oah.gates.context import GateTools
+from oah.wiki.base import WikiSettings
+from oah.wiki.store import MaintenanceCheck, maintenance_output_paths
 from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
@@ -367,13 +369,80 @@ class FinishGuardTest(unittest.TestCase):
         self.assertIn(".oah/tasks/t2/GATES.summary.md", refused.stderr)
 
 
-class FakeCheck:
-    def __init__(self, ok, outputs=(), problems=()):
-        self.ok, self.outputs, self.problems = ok, list(outputs), list(problems)
+def real_check(ok, outputs=(), problems=()):
+    """The real MaintenanceCheck, its record shaped as `oah wiki maintain` writes it, so the two cannot drift."""
+    record = {"task": "t1", "outputs": dict(outputs)} if ok else None
+    return MaintenanceCheck(ok=ok, problems=list(problems), record=record)
+
+
+class MaintenanceCheckOutputsTest(unittest.TestCase):
+    """MaintenanceCheck.outputs is the one reader of record["outputs"]; a malformed record gives None."""
+
+    DIGEST = "0" * 64
+
+    def test_outputs_are_sorted_pairs(self):
+        check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log.md": self.DIGEST,
+                                                              "docs/wiki/index.md": self.DIGEST}})
+        self.assertEqual(check.outputs, [("docs/wiki/index.md", self.DIGEST), ("docs/wiki/log.md", self.DIGEST)])
+        self.assertEqual(MaintenanceCheck(ok=True, record={"outputs": {}}).outputs, [])
+
+    def test_shared_definition_accepts_task_pages_independently_of_archive_names(self):
+        settings = WikiSettings(dir="notes")
+        task_pages = ("task-t1.md", "log_archive_001.md")
+        paths = maintenance_output_paths(settings, archives=("log_archive_100.md",), task_pages=task_pages)
+        self.assertEqual(paths, {"notes/log.md", "notes/index.md", "notes/log_archive_100.md",
+                                 "notes/task-t1.md", "notes/log_archive_001.md"})
+        check = MaintenanceCheck(ok=True, settings=settings, task_pages=task_pages,
+                                 record={"outputs": {path: self.DIGEST for path in paths}})
+        self.assertEqual(check.outputs, sorted((path, self.DIGEST) for path in paths))
+        restricted = maintenance_output_paths(settings, archives=task_pages)
+        self.assertEqual(restricted, {"notes/log.md", "notes/index.md"})
+
+    def test_malformed_outputs_are_none(self):
+        for record in (None, [], {}, {"outputs": None}, {"outputs": [["docs/wiki/log.md", self.DIGEST]]},
+                       {"outputs": {"docs/wiki/log.md": 1}}, {"outputs": {"docs/wiki/log.md": "abc"}},
+                       {"outputs": {"docs/wiki/log.md": self.DIGEST.upper().replace("0", "A")}},
+                       {"outputs": {"": self.DIGEST}}):
+            with self.subTest(record=record):
+                self.assertIsNone(MaintenanceCheck(ok=True, record=record).outputs)
+
+    def test_mixed_output_keys_are_none(self):
+        check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log.md": self.DIGEST, 1: self.DIGEST}})
+        self.assertIsNone(check.outputs)
+
+    def test_nul_output_path_is_none(self):
+        check = MaintenanceCheck(ok=True, record={"outputs": {"docs/wiki/log\x00.md": self.DIGEST}})
+        self.assertIsNone(check.outputs)
+
+    def test_only_plain_allowlisted_output_paths_are_accepted(self):
+        class StringSubclass(str):
+            pass
+
+        paths = ("docs/wiki/log\x00.md", "docs/wiki/\ud800.md", "docs/wiki/\udfff.md",
+                 "/docs/wiki/log.md", "../docs/wiki/log.md", "docs/wiki/../log.md",
+                 "docs/wiki/./log.md", "docs//wiki/log.md", "docs\\wiki\\log.md",
+                 "C:/docs/wiki/log.md", "C:docs/wiki/log.md", "\\\\server\\wiki\\log.md",
+                 "docs/wiki/page.md", "docs/wiki/log.md\n", "docs/wiki/log.md/extra",
+                 "docs/wiki/log_archive_1.md", "docs/wiki/log_archive_001.md",
+                 "docs/wiki/log_archive_00.md", "docs/wiki/log_archive_000.md",
+                 "docs/wiki/log_archive_010.md", "docs/wiki/log_archive_100.md\n",
+                 "docs/wiki/log_archive_\u0660\u0661.md", None, 1, b"docs/wiki/log.md",
+                 StringSubclass("docs/wiki/log.md"))
+        for path in paths:
+            with self.subTest(path=path):
+                outputs = {"docs/wiki/index.md": self.DIGEST, path: self.DIGEST}
+                self.assertIsNone(MaintenanceCheck(ok=True, record={"outputs": outputs}).outputs)
+
+        for path in ("docs/wiki/log.md", "docs/wiki/index.md", "docs/wiki/log_archive_01.md",
+                     "docs/wiki/log_archive_99.md", "docs/wiki/log_archive_100.md",
+                     "docs/wiki/log_archive_999.md", "docs/wiki/log_archive_1000.md"):
+            with self.subTest(valid_path=path):
+                check = MaintenanceCheck(ok=True, record={"outputs": {path: self.DIGEST}})
+                self.assertEqual(check.outputs, [(path, self.DIGEST)])
 
 
 class WikiMaintenanceTest(unittest.TestCase):
-    """finish exempts only verified `oah wiki maintain` outputs; a fake oah.wiki stands in for lane P7a."""
+    """finish exempts only verified `oah wiki maintain` outputs; a stub verify_maintenance returns real checks."""
 
     def setUp(self):
         self.repo = make_git_repo(self)
@@ -381,10 +450,10 @@ class WikiMaintenanceTest(unittest.TestCase):
                                "docs/wiki/log_archive_01.md": "# Old\n", "docs/wiki/page.md": "x\n"})
         self.state = make_tmp_dir(self) / "state"
         self.env = dict(os.environ, OAH_STATE_DIR=str(self.state), OAH_UNLAZY_DIR=str(self.state / "absent"))
-        self.check = FakeCheck(True)
+        self.check = real_check(True)
         self.calls = []
 
-        def verify_maintenance(root, task):
+        def verify_maintenance(root, task, *, settings):
             self.calls.append((pathlib.Path(root), task))
             return self.check
 
@@ -427,15 +496,16 @@ class WikiMaintenanceTest(unittest.TestCase):
     def test_verified_outputs_are_exempt_and_recorded(self):
         outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/index.md", "# Index\nnew\n"),
                    self.write("docs/wiki/log_archive_02.md", "# Archive\n")]
-        self.check = FakeCheck(True, outputs)
+        self.check = real_check(True, outputs)
         finished = self.finish()
         self.assertEqual(finished.returncode, 0, finished.stderr)
         self.assertEqual(self.calls, [(self.repo, "t1")])
-        self.assertEqual(self.last_event()["wiki_maintenance"], {"task": "t1", "exempt": outputs})
+        self.assertEqual(self.last_event()["wiki_maintenance"], {"task": "t1", "exempt": sorted(outputs)})
 
     def test_other_wiki_edits_still_need_scope(self):
-        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n"), self.write("docs/wiki/page.md", "edited\n")]
-        self.check = FakeCheck(True, outputs)
+        outputs = [self.write("docs/wiki/log.md", "# Log\n- t1\n")]
+        self.write("docs/wiki/page.md", "edited\n")
+        self.check = real_check(True, outputs)
         refused = self.finish()
         self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
         self.assertIn("docs/wiki/page.md", refused.stderr)
@@ -445,14 +515,14 @@ class WikiMaintenanceTest(unittest.TestCase):
         stale = self.write("docs/wiki/log.md", "# Log\n- t1\n")
         self.write("docs/wiki/log.md", "# Log\n- changed after maintain\n")
         archive = self.write("docs/wiki/log_archive_01.md", "# Old, rewritten\n")
-        self.check = FakeCheck(True, [stale, archive])
+        self.check = real_check(True, [stale, archive])
         refused = self.finish()
         self.assertTrue(refused.stderr.startswith("OAH_SCOPE_EXCEEDED"), refused.stderr)
         self.assertIn("docs/wiki/log.md", refused.stderr)
         self.assertIn("docs/wiki/log_archive_01.md", refused.stderr)
 
     def test_missing_maintenance_refuses_unless_overridden(self):
-        self.check = FakeCheck(False, problems=["no maintenance record for t1"])
+        self.check = real_check(False, problems=["no maintenance record for t1"])
         refused = self.finish()
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"), refused.stderr)
@@ -463,12 +533,23 @@ class WikiMaintenanceTest(unittest.TestCase):
         self.assertEqual(self.last_event()["wiki_maintenance"],
                          {"task": "t1", "override": True, "problems": ["no maintenance record for t1"]})
 
+    def test_ok_check_without_readable_outputs_refuses_by_name(self):
+        self.write("docs/wiki/log.md", "# Log\n- t1\n")
+        self.check = MaintenanceCheck(ok=True, record={"task": "t1", "outputs": ["docs/wiki/log.md"]})
+        refused = self.finish()
+        self.assertEqual(refused.returncode, 1)
+        self.assertTrue(refused.stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"), refused.stderr)
+        self.assertIn("oah wiki maintain --task t1", refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+        self.check = MaintenanceCheck(ok=True)
+        self.assertTrue(self.finish().stderr.startswith("OAH_WIKI_MAINTENANCE_MISSING"))
+
     def test_no_wiki_folder_means_no_check(self):
         import shutil
 
         shutil.rmtree(self.repo / "docs" / "wiki")
         git_commit(self.repo, {}, "drop wiki")
-        self.check = FakeCheck(False)
+        self.check = real_check(False)
         self.oah("renew", "--task", "t1", "--agent", "claude", "--scope", "src", "--scope", "docs")
         finished = self.finish()
         self.assertEqual(finished.returncode, 0, finished.stderr)
