@@ -145,13 +145,13 @@ Inside your project (a git repository with a remote), run the guided setup:
 oah init
 ```
 
-`oah init` prints its whole plan before it writes anything, then:
+`oah init` first asks once about each option: tier agents, hooks, unlazy (the gate checker), the knowledge
+graph, the CI starter, the companion apps Orca and Aside, the TypeSafe Jev re-ranker and automatic skill
+updates. Then inspect the complete plan and confirm the changes before they are applied. It:
 
 - checks every tool and installs only what you confirm;
 - checks your Claude Code and Codex sign-ins with their own status commands, and shows the command to run
   when one is missing;
-- asks once about each option: tier agents, hooks, unlazy (the gate checker), the knowledge graph, the CI
-  starter, the companion apps Orca and Aside, the TypeSafe Jev re-ranker and automatic skill updates;
 - writes `.oah/config.toml`, the rules block in `AGENTS.md` (imported by `CLAUDE.md`), the wiki in
   `docs/wiki/`, templates in `.oah/templates/` and `.gitignore` entries for local secret files;
 - builds the first impact map.
@@ -446,12 +446,12 @@ oah 0.1.0
 oah init
 ```
 
-`oah init`은 무엇을 쓸지 전체 계획을 먼저 출력하고 다음 일을 한다.
+`oah init`은 먼저 선택 사항마다 한 번씩 묻는다. 단계별 에이전트 파일, 훅, 게이트 검사기 unlazy, 지식 그래프,
+CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스킬 자동 업데이트다. 선택을 마친 뒤 전체 계획을
+살펴보고 승인해야 변경이 적용된다. 설정 과정에서는 다음 일을 한다.
 
 - 도구를 모두 확인하고 사용자가 확인한 것만 설치한다.
 - Claude Code와 Codex 로그인을 각 도구의 상태 명령으로 확인하고, 빠졌으면 실행할 명령을 알려 준다.
-- 선택 사항마다 한 번씩 묻는다. 단계별 에이전트 파일, 훅, 게이트 검사기 unlazy, 지식 그래프, CI 시작 워크플로,
-  동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스킬 자동 업데이트다.
 - `.oah/config.toml`, `AGENTS.md`의 규칙 블록(`CLAUDE.md`가 불러온다), `docs/wiki/`의 위키, `.oah/templates/`의
   템플릿, 로컬 비밀 파일을 위한 `.gitignore` 항목을 쓴다.
 - 첫 영향 지도를 만든다.
