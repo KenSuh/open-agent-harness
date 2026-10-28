@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import pathlib
 import shutil
@@ -136,6 +137,58 @@ class PrivacyScanTest(unittest.TestCase):
                     self.assertEqual(self.scanner.scan_text(address, []), [("email", 1, address)])
             for allowed in (domain, "docs." + domain):
                 self.assertEqual(self.scanner.scan_text("alice" + "@" + allowed, []), [])
+
+    def test_email_after_backslash_escape_is_not_an_address(self):
+        for text in ("data = b\"intro\\n" + "@" + "AGENTS.md\\n\"",
+                     "\\r\\n" + "@" + "AGENTS.md",
+                     "b\"\\t" + "@" + "x.md\"",
+                     "\\" * 3 + "n" + "@" + "notes.md",
+                     "\\" * 5 + "t" + "@" + "notes.md"):
+            with self.subTest(text=text):
+                self.assertEqual(self.scanner.scan_text(text, []), [])
+
+    def test_literal_backslashes_preserve_real_email_local_parts(self):
+        addresses = ["n" + "@" + "corp.dev", "anoreply" + "@" + "github.com",
+                     "agit" + "@" + "github.com", "n" + "@" + "notes.md"]
+        for address in addresses:
+            for pairs in (1, 2, 3):
+                with self.subTest(address=address, pairs=pairs):
+                    text = json.dumps("\\" * pairs + address)
+                    self.assertEqual(text.encode("utf-8"), b'"' + b"\\\\" * pairs
+                                     + address.encode("utf-8") + b'"')
+                    self.assertEqual(self.scanner.scan_text(text, []), [("email", 1, address)])
+
+    def test_escape_trimming_cannot_create_an_allowed_mailbox(self):
+        for local in ("anoreply", "agit"):
+            address = local + "@" + "github.com"
+            with self.subTest(local=local):
+                self.assertEqual(self.scanner.scan_text("\\" + address, []), [("email", 1, address)])
+        address = "oreply" + "@" + "github.com"
+        self.assertEqual(self.scanner.scan_text("\\n" + address, []), [("email", 1, address)])
+
+    def test_json_email_fixture_is_reported_without_allowlist_collision(self):
+        repo = make_repo(self)
+        addresses = ["n" + "@" + "corp.dev", "anoreply" + "@" + "github.com",
+                     "agit" + "@" + "github.com"]
+        content = json.dumps(["\\" + address for address in addresses]).encode("utf-8")
+        commit(repo, {"contacts.json": content})
+        code, out, _ = self.run_scan(repo)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.count("PRIVACY_HIT email contacts.json:1:"), len(addresses))
+        for address in addresses:
+            self.assertNotIn(address, out)
+
+    def test_real_emails_next_to_punctuation_and_escapes_are_found(self):
+        address = PERSONAL_EMAIL
+        for text in (f"({address})", f"<{address}>", f"\"{address}\"", f"'{address}',", f"mail {address}.",
+                     f"{address};", f"[{address}]", f"x\\n{address}", f"b\"\\t{address}\""):
+            with self.subTest(text=text):
+                self.assertEqual(self.scanner.scan_text(text, []), [("email", 1, address)])
+        single = "z" + "@" + "corp.dev"
+        self.assertEqual(self.scanner.scan_text("\\" + single, []), [("email", 1, single)],
+                         "a backslash before a letter that is not an escape keeps the whole address")
+        self.assertEqual([rule for rule, _, _ in self.scanner.scan_text("\\" + address, [])], ["email"],
+                         "an address whose first letter reads as an escape is still reported")
 
     def test_env_secret_assignment_hit(self):
         repo = make_repo(self)

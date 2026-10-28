@@ -12,6 +12,7 @@ FAKE_ORCA_DISABLED  "1": --version fails, as when Orca's command-line tool is no
 FAKE_ORCA_FAIL      one command such as "terminal create" that answers ok:false
 FAKE_ORCA_OAH       (host) JSON argv run in place of the word `oah` in a terminal command
 FAKE_ORCA_HOLD      "1": leave a queued terminal for direct worker-run tests
+FAKE_ORCA_RELEASE   (host) wait for this file before starting the terminal command
 
 CLI controls come from <folder>/controls.json, so production need not forward any FAKE_* variables.
 Optional command/reply/exit_code controls inject malformed replies for contract tests.
@@ -32,6 +33,7 @@ import threading
 import time
 
 COMMAND = re.compile(r"(?:[A-Za-z0-9._/-]+ )*[A-Za-z0-9._/-]+; exit")
+PID_RECORD = re.compile(r"(\d+)\r?\n")
 
 
 def state() -> pathlib.Path:
@@ -56,6 +58,22 @@ def save(name: str, data: dict) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(data), encoding="utf-8")
     os.replace(temp, path)
+
+
+def publish_pid(path: pathlib.Path, pid: int) -> None:
+    """Write `<pid>\\n` to a temporary file beside path, then replace path, so no reader sees a partial file."""
+    temp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temp.write_text(f"{pid}\n", encoding="utf-8", newline="\n")
+    os.replace(temp, path)
+
+
+def read_pid(path: pathlib.Path) -> int | None:
+    """The published PID, or None while the file is missing, empty or not yet a complete record."""
+    try:
+        match = PID_RECORD.fullmatch(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, PermissionError):
+        return None
+    return int(match.group(1)) if match else None
 
 
 def flags(argv: list[str]) -> dict:
@@ -136,15 +154,15 @@ def terminal_create(options: dict) -> int:
     os.replace(request.with_suffix(".tmp"), request)
     pidfile = terminals() / f"{handle}.pid"
     if os.environ.get("FAKE_ORCA_HOLD") == "1":
-        pidfile.write_text("0", encoding="utf-8")
+        publish_pid(pidfile, 0)
     deadline = time.monotonic() + 15
-    while not pidfile.exists():
+    while (pid := read_pid(pidfile)) is None:
         if time.monotonic() > deadline:
             return reply(code="host_unreachable", message="the fake Orca host did not start the terminal")
         time.sleep(0.02)
     return reply({"terminal": {"handle": handle, "worktreeId": worktree["id"], "title": options.get("title"),
                                "executionHostId": "local", "hostPlatform": sys.platform,
-                               "processId": int(pidfile.read_text(encoding="utf-8")), "surface": "visible"}})
+                               "processId": pid, "surface": "visible"}})
 
 
 def _lines(handle: str) -> list[str]:
@@ -230,6 +248,13 @@ def run_terminal(handle: str) -> None:
     words = request["command"][:-len("; exit")].split(" ")
     if words[0] == "oah" and os.environ.get("FAKE_ORCA_OAH"):
         words = json.loads(os.environ["FAKE_ORCA_OAH"]) + words[1:]
+    if release := os.environ.get("FAKE_ORCA_RELEASE"):
+        # Publish the waiting process's PID normally, but keep the worker blocked until the test releases it.
+        gate = ("import pathlib, subprocess, sys, time\n"
+                "while not pathlib.Path(sys.argv[1]).exists():\n"
+                "    time.sleep(0.02)\n"
+                "raise SystemExit(subprocess.call(sys.argv[2:]))\n")
+        words = [sys.executable, "-c", gate, release, *words]
     env = {key: value for key, value in os.environ.items() if not key.startswith("OAH_")}
     with open(folder / f"{handle}.log", "wb") as log:
         try:
@@ -237,10 +262,10 @@ def run_terminal(handle: str) -> None:
                                      stderr=subprocess.STDOUT)
         except OSError as exc:
             log.write(f"fake shell: {exc}\n".encode("utf-8"))
-            (folder / f"{handle}.pid").write_text("0", encoding="utf-8")
+            publish_pid(folder / f"{handle}.pid", 0)
             (folder / f"{handle}.exit").write_text("127", encoding="utf-8")
             return
-        (folder / f"{handle}.pid").write_text(str(child.pid), encoding="utf-8")
+        publish_pid(folder / f"{handle}.pid", child.pid)
         code = child.wait()
     (folder / f"{handle}.exit").write_text(str(code), encoding="utf-8")
 

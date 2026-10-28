@@ -940,20 +940,26 @@ print(json.dumps({"state": result.state, "commit": result.commit, "files": sorte
     def test_timed_out_fetch_generations_are_discarded_before_retry(self):
         saved = defaultbranch.refresh(self.fx.lane, self.settings, env={})
         mirror = defaultbranch._mirror_path(self.fx.lane, {})
-        marker = self.fx.tmp / "fetch-held-ref-lock"
-        hooks = self.fx.tmp / "timeout-hooks"
-        hooks.mkdir()
-        hook = hooks / "reference-transaction"
-        pause = ("import pathlib, sys, time; " + f"p = pathlib.Path({str(marker)!r}); "
-                 "remote_ref = any(' refs/remotes/' in line for line in sys.stdin); "
-                 "p.touch() if remote_ref else None; time.sleep(30 if remote_ref else 0)")
-        hook.write_text('#!/bin/sh\nif [ "$1" = prepared ]; then\nexec ' +
-                        shlex.join([pathlib.Path(sys.executable).as_posix(), "-c", pause]) + "\nfi\n",
-                        encoding="utf-8")
-        hook.chmod(0o755)
         expected = self.fx.advance(RELEASE)
-        config = self.fx.tmp / "timeout-config"
-        git(self.fx.lane, "config", "--file", str(config), "core.hooksPath", hooks.as_posix())
+
+        # Each attempt gets its own hook, marker and global config, so every attempt has to prove on its own
+        # that its real Git fetch reached the prepared ref transaction.
+        def attempt_config(number):
+            marker = self.fx.tmp / f"fetch-held-ref-lock-{number}"
+            hooks = self.fx.tmp / f"timeout-hooks-{number}"
+            hooks.mkdir()
+            hook = hooks / "reference-transaction"
+            pause = ("import pathlib, sys, time; " + f"p = pathlib.Path({str(marker)!r}); "
+                     "remote_ref = any(' refs/remotes/' in line for line in sys.stdin); "
+                     "p.touch() if remote_ref else None; time.sleep(30 if remote_ref else 0)")
+            hook.write_text('#!/bin/sh\nif [ "$1" = prepared ]; then\nexec ' +
+                            shlex.join([pathlib.Path(sys.executable).as_posix(), "-c", pause]) + "\nfi\n",
+                            encoding="utf-8")
+            hook.chmod(0o755)
+            config = self.fx.tmp / f"timeout-config-{number}"
+            git(self.fx.lane, "config", "--file", str(config), "core.hooksPath", hooks.as_posix())
+            return marker, config
+
         attempts = []
         original = defaultbranch._fetch
 
@@ -963,14 +969,17 @@ print(json.dumps({"state": result.state, "commit": result.commit, "files": sorte
             attempts.append(generation)
             return original(generation, *args[:-1], 5.0, **kwargs)
 
-        for _ in range(3):
+        for number in range(3):
+            marker, config = attempt_config(number)
             with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}), \
                     patch("oah.impact.defaultbranch._fetch", side_effect=fetch):
                 interrupted = defaultbranch.refresh(self.fx.lane, self.settings, env={})
             self.assertEqual((interrupted.state, interrupted.reason, interrupted.commit),
                              ("stale", "fetch timed out", saved.commit))
             self.assertEqual(defaultbranch._mirror_path(self.fx.lane, {}), mirror)
-        self.assertTrue(marker.exists(), "a real Git fetch must reach its prepared ref transaction")
+            self.assertEqual(len(attempts), number + 1, "each refresh makes exactly one fetch attempt")
+            self.assertTrue(marker.exists(), f"attempt {number + 1}'s real Git fetch must reach its prepared ref "
+                                             "transaction")
         self.assertEqual(len(set(attempts)), 3)
         self.assertTrue(all(not p.exists() for p in attempts), "completed timeouts must not accumulate on disk")
         retried = defaultbranch.refresh(self.fx.lane, self.settings, env={})

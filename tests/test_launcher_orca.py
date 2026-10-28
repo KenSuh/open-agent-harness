@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -51,6 +53,129 @@ def _minimal_path(*extra: pathlib.Path) -> str:
         if tool and str(pathlib.Path(tool).parent) not in folders:
             folders.append(str(pathlib.Path(tool).parent))
     return os.pathsep.join(folders)
+
+
+def _load_fake_orca():
+    spec = importlib.util.spec_from_file_location("fake_orca", FAKES / "fake_orca.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeOrcaPidFileTest(unittest.TestCase):
+    """The fake Orca publishes PID files atomically, so a reader never acts on an empty or partial one."""
+
+    def setUp(self):
+        self.fake = _load_fake_orca()
+        self.folder = make_tmp_dir(self)
+
+    def test_publish_never_opens_the_final_path_for_writing(self):
+        final = self.folder / "term_x.pid"
+        code = (
+            "import importlib.util, json, os, pathlib, sys\n"
+            "final = pathlib.Path(sys.argv[2])\n"
+            "spec = importlib.util.spec_from_file_location('fake_orca', sys.argv[1])\n"
+            "fake = importlib.util.module_from_spec(spec); spec.loader.exec_module(fake)\n"
+            "opened = []\n"
+            "def hook(event, args):\n"
+            "    if event == 'open' and args[0] is not None and not isinstance(args[0], int):\n"
+            "        mode, flags = args[1], args[2]\n"
+            "        writes = any(c in mode for c in 'wax+') if isinstance(mode, str) else bool(\n"
+            "            flags & (os.O_WRONLY | os.O_RDWR))\n"
+            "        if writes:\n"
+            "            opened.append(os.path.abspath(os.fsdecode(args[0])))\n"
+            "sys.addaudithook(hook)\n"
+            "fake.publish_pid(final, 4242)\n"
+            "print(json.dumps(opened))\n")
+        result = subprocess.run([sys.executable, "-c", code, str(FAKES / "fake_orca.py"), str(final)],
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        opened = [pathlib.Path(path) for path in json.loads(result.stdout)]
+        self.assertTrue(opened, "publishing a PID writes a temporary file first")
+        self.assertNotIn(final.resolve(), [path.resolve() for path in opened])
+        self.assertTrue(all(path.parent.resolve() == final.parent.resolve() for path in opened),
+                        "the temporary file sits in the same folder so os.replace stays atomic")
+        self.assertEqual(final.read_text(encoding="utf-8"), "4242\n")
+        self.assertEqual(sorted(p.name for p in self.folder.iterdir()), ["term_x.pid"])
+
+    def test_concurrent_reader_never_sees_a_partial_pid(self):
+        self._assert_concurrent_pid_sequence()
+
+    def test_concurrent_reader_retries_permission_error(self):
+        self._assert_reader_retries_open_error(PermissionError)
+
+    def test_concurrent_reader_retries_file_not_found(self):
+        self._assert_reader_retries_open_error(FileNotFoundError)
+
+    def _assert_reader_retries_open_error(self, error):
+        with self._fail_first_published_open(error) as denied:
+            self._assert_concurrent_pid_sequence()
+        self.assertEqual(denied, [True], "the published PID must fail its first open")
+
+    def test_concurrent_reader_surfaces_unexpected_exception(self):
+        with self._fail_first_published_open(ValueError):
+            with self.assertRaisesRegex(AssertionError, "ValueError while reading term_15.pid"):
+                self._assert_concurrent_pid_sequence()
+
+    @contextlib.contextmanager
+    def _fail_first_published_open(self, error):
+        original = pathlib.Path.open
+        target = self.folder / "term_15.pid"
+        denied = []
+
+        def open_path(path, *args, **kwargs):
+            handle = original(path, *args, **kwargs)
+            if path == target and not denied:
+                handle.close()  # Only inject once the real published file can be opened.
+                denied.append(True)
+                raise error("injected PID open failure")
+            return handle
+
+        with mock.patch.object(pathlib.Path, "open", new=open_path):
+            yield denied
+
+    def _assert_concurrent_pid_sequence(self):
+        count = 300
+        pids = [7 ** (index % 12) + index for index in range(count)]
+        seen: list[int] = []
+        failures: list[str] = []
+
+        def reader():
+            for index in range(count):
+                path = self.folder / f"term_{index}.pid"
+                deadline = time.monotonic() + 15
+                try:
+                    while (pid := self.fake.read_pid(path)) is None:
+                        if time.monotonic() > deadline:
+                            failures.append(f"{path.name} never became readable")
+                            return
+                    seen.append(pid)
+                except Exception as exc:
+                    failures.append(f"{type(exc).__name__} while reading {path.name}")
+                    return
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        for index, pid in enumerate(pids):
+            self.fake.publish_pid(self.folder / f"term_{index}.pid", pid)
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(seen, pids)
+
+    def test_reader_waits_for_a_complete_integer(self):
+        path = self.folder / "term_y.pid"
+        self.assertIsNone(self.fake.read_pid(path))
+        path.write_bytes(b"")
+        self.assertIsNone(self.fake.read_pid(path), "an empty file is not a PID yet")
+        path.write_bytes(b"12")
+        self.assertIsNone(self.fake.read_pid(path), "digits without the newline may be a partial write")
+        path.write_bytes(b"x\n")
+        self.assertIsNone(self.fake.read_pid(path))
+        self.fake.publish_pid(path, 1234)
+        self.assertEqual(self.fake.read_pid(path), 1234)
+        path.write_bytes(b"0\r\n")
+        self.assertEqual(self.fake.read_pid(path), 0, "a CRLF line ending is still a complete record")
 
 
 class OrcaProject:
@@ -112,6 +237,35 @@ class OrcaProject:
         except subprocess.TimeoutExpired:
             self.host.kill()
             self.host.wait()
+
+    def start_blocked_host(self) -> pathlib.Path:
+        release = self.orca_state / "release"
+        self.start_host(FAKE_ORCA_RELEASE=str(release))
+        self.test.addCleanup(release.write_bytes, b"")
+        return release
+
+    @contextlib.contextmanager
+    def release_on_terminal_wait(self, release: pathlib.Path, *, finish_before_wait: bool = False):
+        """Signal once, after the follower reads the running record and enters its terminal wait."""
+        original = orca.Orca.json
+        released = False
+
+        def invoke(client, *args, **kwargs):
+            nonlocal released
+            if args[:2] == ("terminal", "wait") and not released:
+                self.test.assertFalse(release.exists())
+                self.test.assertFalse(self.record.exists())
+                release.write_bytes(b"")
+                released = True
+                if finish_before_wait:
+                    self.stop_host()  # Join the worker before making the real terminal-wait RPC.
+                    handle = args[args.index("--terminal") + 1]
+                    self.test.assertTrue((self.orca_state / "terminals" / f"{handle}.exit").exists())
+            return original(client, *args, **kwargs)
+
+        with mock.patch.object(orca.Orca, "json", new=invoke):
+            yield
+        self.test.assertTrue(released, "the follower must exercise terminal wait")
 
     def cli(self, *argv: str, env: dict | None = None, cwd: pathlib.Path | None = None) -> tuple[int, str, str]:
         self.orca_state.mkdir(parents=True, exist_ok=True)
@@ -258,8 +412,14 @@ class UnavailableTest(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_every_orca_invocation_gets_only_the_allowlisted_environment(self):
+        self.assert_allowlisted_environment(follower_after_completion=False)
+
+    def test_allowlisted_environment_when_follower_starts_after_completion(self):
+        self.assert_allowlisted_environment(follower_after_completion=True)
+
+    def assert_allowlisted_environment(self, *, follower_after_completion):
         project = OrcaProject(self)
-        project.start_host(FAKE_SLEEP="0.5")
+        release = project.start_blocked_host()
         secret = secrets.token_hex(32)
         additions = {name: secret for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ORCA_PAIRING_TOKEN",
                                                 "ORCA_ACCOUNT_ID", "UNRELATED", "NODE_OPTIONS", "PYTHONPATH")}
@@ -273,9 +433,27 @@ class UnavailableTest(unittest.TestCase):
             code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
                                          "--launcher", "orca", "--background", env=additions)
             self.assertEqual(code, 0, err)
-            code, out, err = project.cli("wait", started_run(out), "--timeout-seconds", "60", env=additions)
+            run_id = started_run(out)
+            launch_count = len(seen)
+            self.assertEqual(launch_count, 3)
+            if follower_after_completion:
+                self.assertFalse(project.record.exists())
+                release.write_bytes(b"")
+                project.stop_host()
+                self.assertEqual(find_run(project.state, run_id).read()["status"], "finished")
+                follow = contextlib.nullcontext()
+            else:
+                follow = project.release_on_terminal_wait(release)
+            with follow:
+                code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60", env=additions)
             self.assertEqual(code, 0, err)
-        self.assertGreaterEqual(len(seen), 6)
+        if follower_after_completion:
+            self.assertEqual(len(seen), launch_count, "a finished run needs no Orca follower invocations")
+        else:
+            self.assertGreaterEqual(len(seen) - launch_count, 3)
+            commands = [argv[:2] for argv in project.orca_calls()[launch_count:]]
+            for command in (["terminal", "wait"], ["terminal", "read"], ["terminal", "show"]):
+                self.assertIn(command, commands)
         for env in seen:
             self.assertTrue(set(env).isdisjoint(additions), set(env) & set(additions))
             self.assertNotIn(secret, env.values())
@@ -658,11 +836,17 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(record["argv"][record["argv"].index("--permission-mode") + 1], "plan")
 
     def test_concurrent_worker_starts_execute_exactly_once(self):
+        self.assert_workers_execute_once(finish_before_follower=False)
+
+    def test_concurrent_worker_finishes_before_the_other_claims(self):
+        self.assert_workers_execute_once(finish_before_follower=True)
+
+    def assert_workers_execute_once(self, *, finish_before_follower):
         project = OrcaProject(self)
         prepared = project.queued("claude", "initial")
         rendezvous = make_tmp_dir(self)
-        script = '''import argparse, os, pathlib, sys, time
-from oah import call_cli, runs
+        script = '''import argparse, contextlib, io, json, pathlib, sys, time
+from oah import call, call_cli, runs
 original = runs.Run.read
 first = True
 def read(self):
@@ -675,21 +859,47 @@ def read(self):
         while len(list(pathlib.Path(sys.argv[2]).glob("*.ready"))) < 2:
             if time.monotonic() > deadline: raise RuntimeError("rendezvous timed out")
             time.sleep(0.01)
+        if sys.argv[4] == "True" and sys.argv[3] == "1":
+            print("captured", file=sys.__stdout__, flush=True)
+            if sys.stdin.read(1) != "x": raise RuntimeError("missing follower release")
     return data
 runs.Run.read = read
+execute = call.execute
+def gated_execute(*args, **kwargs):
+    print("claimed", file=sys.__stdout__, flush=True)
+    if sys.stdin.read(1) != "x": raise RuntimeError("missing engine release")
+    return execute(*args, **kwargs)
+call.execute = gated_execute
 parser = argparse.ArgumentParser()
 call_cli.register(parser.add_subparsers(dest="command"))
-raise SystemExit(call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--stage", "initial"])))
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    code = call_cli.run(parser.parse_args(["worker-run", sys.argv[1], "--stage", "initial"]))
+print(json.dumps({"code": code, "out": out.getvalue(), "err": err.getvalue()}), flush=True)
+raise SystemExit(code)
 '''
         children = []
         for index in range(2):
-            env = dict(project.env, PYTHONPATH=SRC, FAKE_SLEEP="0.5",
+            env = dict(project.env, PYTHONPATH=SRC,
                        FAKE_RECORD=str(rendezvous / f"engine-{index}.json"))
-            child = subprocess.Popen([sys.executable, "-c", script, prepared.run_id, str(rendezvous), str(index)],
-                                     cwd=project.repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            child = subprocess.Popen([sys.executable, "-c", script, prepared.run_id, str(rendezvous), str(index),
+                                      str(finish_before_follower)], cwd=project.repo, env=env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             children.append(child)
             self.addCleanup(lambda child=child: child.kill() if child.poll() is None else None)
-        results = [child.communicate(timeout=30) for child in children]
+        signals = [child.stdout.readline().decode("utf-8").strip() for child in children]
+        self.assertEqual(signals.count("claimed"), 1, signals)
+        self.assertEqual(prepared.run.read()["status"], "running")
+        self.assertEqual(list(rendezvous.glob("engine-*.json")), [])
+        winner = signals.index("claimed")
+        follower = 1 - winner
+        if finish_before_follower:
+            self.assertEqual(signals[follower], "captured")
+        else:
+            self.assertEqual(json.loads(signals[follower])["code"], 1)
+        results = [children[winner].communicate(b"x", timeout=30)]
+        self.assertEqual(prepared.run.read()["status"], "finished")
+        results.append(children[follower].communicate(b"x" if finish_before_follower else None, timeout=30))
         self.assertEqual(sorted(child.returncode for child in children), [0, 1], results)
         self.assertEqual(len(list(rendezvous.glob("engine-*.json"))), 1)
         self.assertEqual(prepared.run.read()["status"], "finished")
@@ -1237,7 +1447,7 @@ with StateLock(pathlib.Path(sys.argv[1])):
 
     def test_wait_returns_75_while_running_then_the_final_record(self):
         project = OrcaProject(self)
-        project.start_host(FAKE_SLEEP="4")
+        release = project.start_blocked_host()
         code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low", "--launcher", "orca",
                                      "--background")
         self.assertEqual(code, 0, err)
@@ -1248,7 +1458,15 @@ with StateLock(pathlib.Path(sys.argv[1])):
         self.assertEqual(code, 75, err)
         self.assertTrue(out.startswith(f"OAH_RUN_RUNNING run={run_id}"), out)
         self.assertIn(f"oah wait {run_id}", err)
-        code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        self.assertFalse(project.record.exists(), "the terminal command must stay blocked until release")
+        original_wait = call_cli._wait
+
+        def wait(*args, **kwargs):
+            self.assertFalse(release.exists(), "release must follow the follower's running-state read")
+            return original_wait(*args, **kwargs)
+
+        with mock.patch.object(call_cli, "_wait", side_effect=wait), project.release_on_terminal_wait(release):
+            code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
         log = find_run(project.state, run_id).file_path(orca.TERMINAL_LOG)
@@ -1259,6 +1477,42 @@ with StateLock(pathlib.Path(sys.argv[1])):
         reads = [argv for argv in project.orca_calls() if argv[:2] == ["terminal", "read"]]
         self.assertTrue(reads)
         self.assertTrue(all(int(argv[argv.index("--limit") + 1]) <= orca.READ_LIMIT for argv in reads))
+
+    def test_wait_collects_output_when_completion_precedes_terminal_wait(self):
+        project = OrcaProject(self)
+        release = project.start_blocked_host()
+        code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
+                                     "--launcher", "orca", "--background")
+        self.assertEqual(code, 0, err)
+        run_id = started_run(out)
+        run = find_run(project.state, run_id)
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists())
+        with project.release_on_terminal_wait(release, finish_before_wait=True):
+            code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
+        self.assertEqual(run.read()["status"], "finished")
+        self.assertIn(f"oah worker {run_id}", run.file_path(orca.TERMINAL_LOG).read_text(encoding="utf-8"))
+
+    def test_wait_returns_finished_record_when_completion_precedes_follower(self):
+        project = OrcaProject(self)
+        release = project.start_blocked_host()
+        code, out, err = project.cli("call", "claude", "--stage", "initial", "--tier", "low",
+                                     "--launcher", "orca", "--background")
+        self.assertEqual(code, 0, err)
+        run_id = started_run(out)
+        self.assertFalse(project.record.exists())
+        release.write_bytes(b"")
+        project.stop_host()
+        run = find_run(project.state, run_id)
+        self.assertEqual(run.read()["status"], "finished")
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists())
+        before = project.orca_calls()
+        code, out, err = project.cli("wait", run_id, "--timeout-seconds", "60")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"OAH_RUN_FINISHED run={run_id}"), out)
+        self.assertEqual(project.orca_calls(), before)
+        self.assertFalse(run.file_path(orca.TERMINAL_LOG).exists(), "a finished record needs no log collection")
 
     def test_wait_never_asks_orca_for_more_than_the_bound(self):
         state = make_tmp_dir(self)

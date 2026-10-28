@@ -42,7 +42,9 @@ CONTENT_RULES: list[tuple[str, re.Pattern[str]]] = [
                               + r"(?:'[^'\r\n]{12,}'|\"[^\"\r\n]{12,}\"|(?!['\"])\S{12,})")),
     ("keychain", re.compile(r"secu" + r"rity\s+find-(?:generic|internet)-password")),
 ]
-EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Group 1 counts consecutive backslashes; only an odd count introduces an escape.
+# Group 2 keeps the complete local part for allowlist checks before any escape letter is removed.
+EMAIL = re.compile(r"(\\*)([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 ALLOWED_EMAILS = {"noreply@github.com", "noreply@anthropic.com", "git@github.com"}
 ALLOWED_EMAIL_DOMAINS = ("users.noreply.github.com", "example.com", "example.org", "example.net")
 ALLOWED_EMAIL_TLDS = (".example", ".test", ".invalid", ".localhost")
@@ -125,7 +127,17 @@ def scan_text(text: str, terms: Iterable[Term]) -> list[tuple[str, int, str]]:
     for number, line in enumerate(text.splitlines(), start=1):
         for rule, pattern in CONTENT_RULES:
             found.extend((rule, number, m.group(0)) for m in pattern.finditer(line))
-        found.extend(("email", number, m.group(0)) for m in EMAIL.finditer(line) if not _email_allowed(m.group(0)))
+        for match in EMAIL.finditer(line):
+            address = match.group(2)
+            if len(match.group(1)) % 2 and address[0] in "abfnrtv":
+                trimmed = address[1:]
+                if trimmed.startswith("@"):
+                    continue  # An escape followed directly by @ has no local part.
+                # Ambiguous escapes must not turn a private mailbox into an allowed one.
+                if not _email_allowed(trimmed):
+                    address = trimmed
+            if not _email_allowed(address):
+                found.append(("email", number, address))
         for pattern in term_patterns:
             found.extend(("private-term", number, m.group(0)) for m in pattern.finditer(line))
     return found
