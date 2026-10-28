@@ -571,6 +571,42 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
 
 
 @contextmanager
+def _paid_dispatch(prepared):
+    """Serialize ordinary paid starts with reviews; managed review/fix already owns this lock."""
+    from oah.lockfile import LockTimeout, StateLock
+    from oah.review import receipts, rounds
+
+    if _CORRECTION_PUBLICATION.get() is not None or rounds._MANAGED_DISPATCH.get() == prepared.task:
+        yield
+        return
+    lock = StateLock(receipts.task_lock_path(prepared.run.path.parents[2], prepared.task), timeout=0)
+    try:
+        lock.__enter__()
+    except LockTimeout:
+        error = EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid start owns this task; wait for it to "
+                            "finish, then retry oah call")
+        prepared.run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
+        raise error from None
+    token = rounds._PAID_SPAWN.set(True)
+    try:
+        yield
+    finally:
+        rounds._PAID_SPAWN.reset(token)
+        lock.__exit__(None, None, None)
+
+
+def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None):
+    from oah.review import ReviewError, rounds
+
+    if rounds._MANAGED_DISPATCH.get() == task:
+        return
+    try:
+        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id)
+    except ReviewError as exc:
+        raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
+
+
+@contextmanager
 def dispatch_guard(prepared: Prepared):
     """Revalidate the prepared lease and source under the state lock, through a short launch only."""
     from oah.lease import LeaseError, Store
@@ -595,6 +631,9 @@ def dispatch_guard(prepared: Prepared):
         with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
                                                generation=saved["generation"]) as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+            from oah.review import rounds
+            _task_dispatch_gate(run.path.parents[2], prepared.task, pathlib.Path(live.worktree), stage=prepared.stage,
+                                record=rounds._PAID_SPAWN.get(), run_id=prepared.run_id)
             yield
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
@@ -930,6 +969,8 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
                           f"oah start --task {request.task} --agent {request.engine} --packet "
                           f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then call again")
     _check_dispatch_lease(holder, root, stage=request.stage)
+    if inputs is None:
+        _task_dispatch_gate(state_dir, request.task, pathlib.Path(holder.worktree), stage=request.stage)
     leased = holder.binding()
     bound = json.loads(inputs.bound_json) if inputs is not None else dispatch_binding(state_dir, request.task)
     default_source = bound["source"] if bound else leased.source
@@ -1531,7 +1572,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     child = None
     communicator = None
     try:
-        with dispatch_guard(prepared):
+        with _paid_dispatch(prepared), dispatch_guard(prepared):
             with _deferred_creation_signals():
                 try:
                     child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1632,7 +1673,9 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     text = launched.stdout.decode("utf-8", errors="replace").strip()
     detail = launched.stderr.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
-        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ")):
+        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ",
+                              "OAH_REVIEW_NEEDS_DECISION: ", "OAH_REVIEW_ROUNDS_EXHAUSTED: ",
+                              "OAH_REVIEW_STATE_INVALID: ", "OAH_REVIEW_SERIES_BUSY: ")):
             code, message = detail.split(": ", 1)
             raise EngineError(code, message)
         if detail.startswith("OAH_RUN_DETACH_FAILED:"):

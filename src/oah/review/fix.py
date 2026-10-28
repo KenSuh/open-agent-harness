@@ -145,6 +145,11 @@ _ERROR_DIAGNOSTICS = {
     "OAH_REVIEW_GIT_FAILED": "review Git inspection failed; check Git access and the worktree, then retry.",
     "OAH_REVIEW_RECORD_EXISTS": "a review record already exists; inspect the task history before retrying.",
     "OAH_REVIEW_NEEDS_DECISION": "review needs a decision; inspect the task history and use oah review --decision.",
+    "OAH_REVIEW_ROUNDS_EXHAUSTED": "the task reached its max_rounds limit; use oah review --extra-round to "
+                                     "authorize and record one additional round.",
+    "OAH_REVIEW_STATE_INVALID": "saved task stop, limit or count state is invalid; restore the original "
+                                 "rounds.jsonl against the task receipts, preserving spent rounds and pending "
+                                 "stops, then retry.",
     "OAH_WORKTREE_UNRESOLVED": "the leased worktree cannot be resolved; restore that worktree, then retry.",
     "OAH_WORKTREE_LEASE_MISMATCH": "the worktree does not match the lease; retry in the leased worktree.",
     "OAH_LEASE_CHANGED": "the dispatch lease changed; check oah status and bind the accepted packet before retrying.",
@@ -1160,6 +1165,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, LAUNCHED)
         round_log = receipts.read_round_log(t.state, t.name)
+        rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=round_log)
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)

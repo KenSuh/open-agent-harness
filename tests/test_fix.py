@@ -563,7 +563,7 @@ class RefusalTest(unittest.TestCase):
         project = FixProject(self)
         project.queue({"findings": [bug(fix_kind="design")]})
         self.assertEqual(project.review().code, "OAH_REVIEW_NEEDS_DECISION")
-        error = project.refused("OAH_FIX_NOT_REQUESTED", project.fix)
+        error = project.refused("OAH_REVIEW_NEEDS_DECISION", project.fix)
         self.assertIn("--decision", str(error))
         project.refused("OAH_FIX_NOT_REQUESTED", project.manual, "human")
 
@@ -1637,9 +1637,10 @@ class ManualTest(unittest.TestCase):
                 self.assertNotEqual(project.head, original)
                 action = project.fix if operation == "fix" else lambda: project.manual("human")
                 # Check correction before review logs a stop: ancestry alone must refuse it.
-                project.refused("OAH_FIX_NOT_REQUESTED", action)
+                code = "OAH_REVIEW_NEEDS_DECISION" if operation == "fix" else "OAH_FIX_NOT_REQUESTED"
+                project.refused(code, action)
                 project.refused("OAH_REVIEW_NEEDS_DECISION", project.review)
-                project.refused("OAH_FIX_NOT_REQUESTED", action)
+                project.refused(code, action)
                 # A decision attached to this receipt settles the same gate, even if the
                 # subsequent reviewer fails without publishing another receipt.
                 project.queue({"exit": 3})
@@ -1674,7 +1675,7 @@ class ManualTest(unittest.TestCase):
         stopped = project.review(decision="inspect another review", base=other_base)
         self.assertEqual(stopped.code, "OAH_REVIEW_NEEDS_DECISION", stopped.message)
         self.assertEqual(project.names(), ["R1.json"], "the stop did not count a receipt")
-        project.refused("OAH_FIX_NOT_REQUESTED", project.fix)
+        project.refused("OAH_REVIEW_NEEDS_DECISION", project.fix)
         project.commit(FIXED, trailer=HUMAN_TRAILER)
         project.refused("OAH_FIX_NOT_REQUESTED", project.manual, "human")
         project.queue({"exit": 3})
@@ -1913,7 +1914,7 @@ class EndToEndTest(unittest.TestCase):
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
         self.assertIn("A1 (applied)", project.receipt(2)["decision_stop_reason"])
-        project.refused("OAH_FIX_NOT_REQUESTED", project.fix)
+        project.refused("OAH_REVIEW_NEEDS_DECISION", project.fix)
 
     def test_unfinished_attempt_stops_the_next_review(self):
         project = FixProject(self)

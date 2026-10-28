@@ -33,7 +33,8 @@ Record format (`schema: 1`; every record also has `kind`, `task` and, for attemp
     unfinished, and an applied attempt without a new bound commit is incomplete: both are problems.
 Round log
     `rounds.jsonl` records the start and finish of every dispatched round attempt. It is not history; the
-    attempt budget and sticky decision stops are read from it.
+    attempt budget, sticky decision stops and recorded task limit are read from it. Ordinary calls append
+    a `dispatch` reservation immediately before spawn; review-stage reservations also spend a task round.
 """
 from __future__ import annotations
 
@@ -229,11 +230,11 @@ def _record_problem(name: str, kind: str, ident: int | str, record: object, task
         return f"{name} has kind {record.get('kind')!r}, not {kind!r}"
     if record.get("task") != task and not (kind != "receipt" and record.get("task") == digest(task.encode("utf-8"))):
         return f"{name} belongs to task {record.get('task')!r}, not {task!r}"
-    if kind == "receipt" and record.get("round") != ident:
+    if kind == "receipt" and (type(record.get("round")) is not int or record.get("round") != ident):
         return f"{name} holds round {record.get('round')!r}, not {ident}"
     if kind != "receipt" and record.get("attempt_id") != ident:
         return f"{name} holds attempt {record.get('attempt_id')!r}, not {ident}"
-    if record.get("schema") != SCHEMA:
+    if type(record.get("schema")) is not int or record.get("schema") != SCHEMA:
         return f"{name} has schema {record.get('schema')!r}, not {SCHEMA}"
     why = _receipt_shape(record) if kind == "receipt" else _attempt_shape(kind, record)
     return f"{name} is not a valid {kind} record: {why}" if why else None
@@ -524,21 +525,71 @@ def attempts(records: Records) -> list[Attempt]:
 
 def log_round(state: pathlib.Path, task: str, entry: Mapping, *, now: dt.datetime | None = None) -> None:
     """Append one start or finish line to the round-attempt log under the state lock."""
-    folder = review_dir(state, task)
-    line = {"at": _iso(now), **entry}
     try:
         with StateLock(_contained_path(state, ".lock")):
-            folder.mkdir(parents=True, exist_ok=True)
-            append_jsonl(_path(state, task, ROUNDS_NAME), line)
+            _log_round_unlocked(state, task, entry, now=now)
     except RunError as exc:
         raise ReviewError(exc.code, str(exc).split(": ", 1)[1]) from None
 
 
+def _log_round_unlocked(state, task, entry, *, now=None):
+    """The caller already holds the state lock (including ordinary call process creation)."""
+    read_round_log(state, task)
+    review_dir(state, task).mkdir(parents=True, exist_ok=True)
+    append_jsonl(_path(state, task, ROUNDS_NAME), {"at": _iso(now), **entry, "task": task})
+
+
 def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
-    """The round-attempt log; a torn or invalid log raises StateCorrupt (never repaired)."""
+    """A torn, foreign or invalid stop/budget log refuses with OAH_REVIEW_STATE_INVALID; never repaired."""
     from oah.runs import _CORRECTION_CAPTURE
     path = _path(state, task, ROUNDS_NAME)
-    return _captured_state(path, jsonl=True)[1] if _CORRECTION_CAPTURE.get() is not None else read_jsonl(path)
+    try:
+        lines = (_captured_state(path, jsonl=True)[1] if _CORRECTION_CAPTURE.get() is not None else read_jsonl(path))
+        if not lines and path.exists():
+            raise ValueError  # an existing empty log can be a truncation, never a fresh task
+        for line in lines:
+            if not _round_shape(line, task):
+                raise ValueError
+    except (StateCorrupt, OSError, ValueError, TypeError):
+        raise ReviewError("OAH_REVIEW_STATE_INVALID", "saved task stop, limit or count state cannot be validated; "
+                          "nothing was launched. Restore the original rounds.jsonl from a trusted backup or "
+                          "repair it against the task's receipts, preserving spent rounds and pending stops; "
+                          "then retry (oah preserves the file)") from None
+    return lines
+
+
+def _round_shape(line, task):
+    """Accept landed logs without a task field; validate all fields used to authorize spending."""
+    def count(value):
+        return type(value) is int and value >= 1
+
+    if not isinstance(line, dict) or line.get("task", task) != task:
+        return False
+    event = line.get("event")
+    if event not in ("start", "finish", "dispatch"):
+        return False
+    if "max_rounds" in line and line["max_rounds"] is not None and not count(line["max_rounds"]):
+        return False
+    if event == "dispatch":
+        from oah.runs import RUN_ID_RE
+        return (line.get("stage") in ("initial", "review", "correction")
+                and isinstance(line.get("run_id"), str) and RUN_ID_RE.fullmatch(line["run_id"]) is not None
+                and "max_rounds" in line and line.get("task") == task)
+    if not _sha(line.get("base")) or not all(count(line.get(key)) for key in ("round", "series_round")):
+        return False
+    if "attempt" in line and not count(line["attempt"]):
+        return False
+    if event == "start" and (not count(line.get("attempt"))
+                             or line.get("decision") is not None and not _text(line["decision"])):
+        return False
+    if any(key in line and type(line[key]) is not bool for key in ("extra_round", "extra_attempt", "counted")):
+        return False
+    if "decision_for" in line and line["decision_for"] is not None and not (
+            isinstance(line["decision_for"], str) and DIGEST_RE.fullmatch(line["decision_for"])):
+        return False
+    if event == "finish" and (type(line.get("counted")) is not bool or not _text(line.get("code"))):
+        return False
+    return True
 
 
 def task_lock_path(state: pathlib.Path, task: str) -> pathlib.Path:

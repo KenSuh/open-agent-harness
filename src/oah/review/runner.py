@@ -299,9 +299,10 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
             raise ReviewError("OAH_REVIEW_SERIES_BUSY", f"another oah review of task {request.task} is running "
                               "against another base; wait for it to finish, then run oah review again") from None
         try:
-            return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
-                          call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
-                          rules=rules, ensure_impact=ensure_impact)
+            with rounds._managed_dispatch(request.task):
+                return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
+                              call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
+                              rules=rules, ensure_impact=ensure_impact)
         finally:
             task_lock.__exit__(None, None, None)
     finally:
@@ -349,6 +350,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     records = receipts.load(state, task)
     s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
                       is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
+    conf = dataclasses.replace(conf, max_rounds=rounds.task_limit(s, conf))
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
                    settings=conf, extra_attempt=request.extra_attempt, binding=binding) == rounds.CONVERGED:
         latest = s.latest
@@ -356,7 +358,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                       f"{span.head}; nothing was launched",
                       lines=_lines(latest.record, latest.digest, latest.name, conf, task), receipt=latest.record,
                       receipt_path=receipts.review_dir(state, task) / latest.name)
-    extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
+    extra = bool(request.extra_round and conf.max_rounds is not None and s.counted_rounds >= conf.max_rounds)
     extra_attempt = request.extra_attempt
     warnings: list[str] = []
     stopped = rounds.waiting(s, settled=False)
@@ -364,7 +366,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         warnings.append("OAH_REVIEW_DECISION_UNUSED: no decision was pending for this round; your note is recorded "
                         "with it anyway")
     if request.extra_round and not extra:
-        warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this series is below [review] max_rounds, so --extra-round "
+        warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this task is below [review] max_rounds, so --extra-round "
                         "changed nothing")
     decision = request.decision or rounds.round_decision(s)
     command = models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"])
@@ -425,6 +427,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                  "run_id": prepared.run_id}
         receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
                                          "extra_attempt": extra_attempt, "decision": request.decision,
+                                         "max_rounds": conf.max_rounds,
                                          "decision_for": s.task_latest.digest if s.task_latest else None})
         for note in ([f"review R{number}: the user's decision before this round: {request.decision}"]
                      if request.decision else []) + ([f"review R{number} runs beyond [review] max_rounds = "
@@ -558,7 +561,7 @@ def _lines(receipt: dict, digest: str, name: str, conf: review_settings.ReviewSe
     lines += [f"{item['finding_id']} {item['severity']} {item['axis']} {item['location']} — {item['title']}"
               for item in receipt["findings"]]
     if (receipt["outcome"] == "changes-requested" and conf.max_rounds is not None
-            and receipt["series_round"] >= conf.max_rounds):
-        lines.append(f"OAH_REVIEW_ROUNDS_EXHAUSTED: this series reached [review] max_rounds = {conf.max_rounds}; the "
+            and receipt["round"] >= conf.max_rounds):
+        lines.append(f"OAH_REVIEW_ROUNDS_EXHAUSTED: this task reached [review] max_rounds = {conf.max_rounds}; the "
                      f"next round needs oah review --task {task} --extra-round")
     return lines
