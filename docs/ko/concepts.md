@@ -158,14 +158,17 @@ flowchart TD
     ask{"--no-rerank가 아니고, 직접 켰고,<br/>제공자 설정과 키가 있는가?"}
     jev["TypeSafe Jev 제공자<br/>순서만 바꾸고 더하거나 빼지 않음"]
     used["rerank=used"]
-    unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error"]
+    unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:<code>"]
     brief["패킷 계획, 브리프, 실행 기록"]
 
     task --> score --> tier --> pick --> model --> brief
     task --> skills
     skills --> ask
-    ask -->|"예"| jev --> used
+    ask -->|"예, 후보 있음"| jev
+    ask -->|"예, 후보 없음"| unused
     ask -->|"아니오"| unused
+    jev -->|"점수 계산 성공"| used
+    jev -->|"오류, 기존 순서 유지"| unused
     used --> brief
     unused --> brief
     tier -.->|"참고용 tier, 기록만 하고 적용하지 않음"| jev
@@ -221,7 +224,7 @@ oah impact --changed-since origin/main
 flowchart LR
     change["파일을 바꿈<br/>예: SQL 마이그레이션"]
     fresh{"워크트리 지도가 최신인가?<br/>HEAD, 인덱스, 수정 파일, 원장, 설정, 도구"}
-    refresh["증분으로 갱신"]
+    refresh["가능하면 증분 갱신<br/>그렇지 않으면 전체 재생성"]
     stale["OAH_IMPACT_STALE<br/>몰래 쓰지 않음"]
     dflt["기본 브랜치 지도<br/>읽기 전용으로 가져옴, --offline이나 가져오기 실패는 stale로 표시"]
 
@@ -374,7 +377,7 @@ flowchart LR
         pc["pre-commit<br/>위키 커밋 검사"]
         post["post-commit, post-merge<br/>영향 지도 갱신"]
         gpush["git push"]
-        pp["pre-push<br/>리스가 남았는가(활성 또는 만료), 푸시할 커밋 gitleaks"]
+        pp["pre-push<br/>리스가 남았는가(활성 또는 만료)<br/>gitleaks가 설치돼 있으면 푸시할 커밋 검사<br/>없으면 경고 후 검사 없이 푸시 허용"]
         cc["Claude Code Stop, SessionStart 훅"]
     end
 

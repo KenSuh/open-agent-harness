@@ -150,7 +150,7 @@ flowchart LR
     hooks --> remote
     remote -->|"CI results of HEAD via gh"| land
     rloop -->|"converged review of HEAD"| land
-    impact -.->|"default branch reassessed"| land
+    impact -->|"default branch reassessed"| land
     land -->|"fast-forward push"| remote
 
     classDef ext fill:#f3e8ff,stroke:#8250df,color:#2e1065
@@ -185,9 +185,9 @@ are optional. Each part is explained in [Concepts](docs/concepts.md).
 
 | Mistake | What oah does |
 |---|---|
-| Committing an API key | `oah init` adds `.env`, `*.pem`, `*.key` and similar to `.gitignore`; the opt-in pre-push hook scans pushed commits with gitleaks; `oah land` refuses without a scan (`OAH_LAND_SCAN_REQUIRED`). |
+| Committing an API key | `oah init` adds `.env`, `*.pem`, `*.key` and similar to `.gitignore`; the opt-in pre-push hook scans pushed commits only when gitleaks is installed, otherwise warns and permits an unscanned push; `oah land` refuses without a scan (`OAH_LAND_SCAN_REQUIRED`). |
 | Starting on a stale branch | `oah preflight` aborts when the base is behind and says which `git rebase` to run. |
-| Starting with uncommitted changes | `oah preflight` aborts and names them. |
+| Starting with uncommitted changes | `oah preflight` warns, lists the files and allows proceeding if no other check aborts. |
 | Two AI sessions on the same files | `oah start` refuses an overlapping lease (`OAH_LEASE_CONFLICT`); `oah finish` compares the real changes with the scope (`OAH_SCOPE_EXCEEDED`). |
 | Pushing in the middle of a task | The opt-in pre-push hook refuses while any lease, active or stale, is recorded for this worktree (`OAH_PUSH_REFUSED`). |
 | Letting an agent push or force-push | The shared rules block tells agents not to; landing is a command you confirm. |
@@ -543,7 +543,7 @@ flowchart LR
     hooks --> remote
     remote -->|"gh로 읽은 HEAD의 CI 결과"| land
     rloop -->|"HEAD에 대한 수렴한 리뷰"| land
-    impact -.->|"기본 브랜치 다시 평가"| land
+    impact -->|"기본 브랜치 다시 평가"| land
     land -->|"fast-forward push"| remote
 
     classDef ext fill:#f3e8ff,stroke:#8250df,color:#2e1065
@@ -577,9 +577,9 @@ flowchart LR
 
 | 실수 | oah가 하는 일 |
 |---|---|
-| API 키를 커밋함 | `oah init`이 `.env`, `*.pem`, `*.key` 같은 항목을 `.gitignore`에 넣는다. 선택 설치하는 pre-push 훅이 푸시할 커밋을 gitleaks로 검사한다. `oah land`는 검사 없이는 거절한다(`OAH_LAND_SCAN_REQUIRED`). |
+| API 키를 커밋함 | `oah init`이 `.env`, `*.pem`, `*.key` 같은 항목을 `.gitignore`에 넣는다. 선택 설치하는 pre-push 훅은 gitleaks가 설치돼 있을 때만 푸시할 커밋을 검사하고, 없으면 경고한 뒤 검사 없이 푸시를 허용한다. `oah land`는 검사 없이는 거절한다(`OAH_LAND_SCAN_REQUIRED`). |
 | 낡은 브랜치에서 시작함 | `oah preflight`가 기준점이 뒤처졌으면 중단하고 어떤 `git rebase`를 할지 알려 준다. |
-| 커밋하지 않은 변경을 두고 시작함 | `oah preflight`가 중단하고 그 파일을 알려 준다. |
+| 커밋하지 않은 변경을 두고 시작함 | `oah preflight`가 경고와 파일 목록을 보여 주며, 다른 검사에서 중단하지 않으면 계속 진행할 수 있다. |
 | 두 AI 세션이 같은 파일을 고침 | `oah start`가 겹치는 리스를 거절한다(`OAH_LEASE_CONFLICT`). `oah finish`가 실제 변경을 범위와 비교한다(`OAH_SCOPE_EXCEEDED`). |
 | 작업 중간에 푸시함 | 선택 설치하는 pre-push 훅이 이 워크트리에 리스가 남아 있는 동안, 활성이든 만료든 푸시를 거절한다(`OAH_PUSH_REFUSED`). |
 | 에이전트가 푸시나 강제 푸시를 함 | 공유 규칙 블록이 에이전트에게 금지하고, 반영은 사용자가 확인하는 명령이다. |

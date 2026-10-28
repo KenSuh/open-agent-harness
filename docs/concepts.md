@@ -166,14 +166,17 @@ flowchart TD
     ask{"Not --no-rerank, enabled by you,<br/>provider set AND key present?"}
     jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops"]
     used["rerank=used"]
-    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error"]
+    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:<code>"]
     brief["Packet plan, brief and run record"]
 
     task --> score --> tier --> pick --> model --> brief
     task --> skills
     skills --> ask
-    ask -->|"yes"| jev --> used
+    ask -->|"yes, candidates present"| jev
+    ask -->|"yes, no candidates"| unused
     ask -->|"no"| unused
+    jev -->|"scoring succeeds"| used
+    jev -->|"error, original order kept"| unused
     used --> brief
     unused --> brief
     tier -.->|"advisory tier, recorded, never applied"| jev
@@ -232,7 +235,7 @@ oah impact --changed-since origin/main
 flowchart LR
     change["You change a file<br/>for example a SQL migration"]
     fresh{"Worktree map fresh?<br/>HEAD, index, dirty files, ledgers, config, tool"}
-    refresh["Refresh it incrementally"]
+    refresh["Refresh incrementally when possible<br/>rebuild otherwise"]
     stale["OAH_IMPACT_STALE<br/>never used silently"]
     dflt["Default-branch map<br/>fetched read-only, --offline or a failed fetch is labelled stale"]
 
@@ -392,7 +395,7 @@ flowchart LR
         pc["pre-commit<br/>wiki commit check"]
         post["post-commit, post-merge<br/>refresh the impact map"]
         gpush["git push"]
-        pp["pre-push<br/>lease open, active or stale? gitleaks on pushed commits"]
+        pp["pre-push<br/>lease open, active or stale?<br/>gitleaks installed: scan pushed commits<br/>otherwise warn and allow unscanned push"]
         cc["Claude Code Stop and SessionStart hooks"]
     end
 
