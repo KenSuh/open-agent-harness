@@ -19,7 +19,7 @@ walkthrough uses a local remote and stops before landing; it does not verify Git
 - Claude Code and Codex CLI are installed and signed in. `oah doctor` checks both.
 - For the gates: Node.js, and unlazy, which `oah init` offers to install.
 - For landing: gitleaks, and for the GitHub route, gh signed in with `gh auth login`. Missing gitleaks stops
-  the scan; missing gh leaves CI unverified.
+  the scan; missing gh leaves CI unverified and blocks landing by default.
 
 Every command below runs in a terminal. macOS lines work in zsh or bash. Where Windows PowerShell needs a
 different line, it is shown next to it.
@@ -59,7 +59,7 @@ On Windows PowerShell, write `$HOME\hello-remote.git` instead of `~/hello-remote
 or an absolute path: landing refuses a relative path such as `../hello-remote.git`.
 The local alternative cannot complete step 9 with gh installed: gh cannot query GitHub CI for a disk path,
 so landing refuses with `OAH_LAND_CI_PENDING`. Use the GitHub route for landing. Without gh, CI is
-`unverified`, which does not prove CI passed; removing gh is not a CI verification procedure.
+`unverified` and blocks by default with `OAH_LAND_CI_UNVERIFIED`; removing gh is not a CI verification procedure.
 
 ## 2. Set up oah in the project
 
@@ -69,8 +69,10 @@ oah init
 
 `oah init` prints its whole plan first, then asks a few questions: tier agents, hooks, unlazy, the knowledge
 graph, the CI starter, the companion apps Orca and Aside, the TypeSafe Jev re-ranker and skill updates. For
-this example, say yes to unlazy and no to the rest; you can add any of them later. It installs nothing you
-did not confirm, and it checks your Claude Code and Codex sign-ins with their own status commands.
+this example, say yes to unlazy. For GitHub landing in step 9, also say yes to the CI starter and confirm
+its Python test command; for local practice through step 8, say no to CI. Say no to the other options.
+You can add them later. It installs nothing you did not confirm, and it checks your Claude Code and Codex
+sign-ins with their own status commands.
 
 It writes `.oah/config.toml`, the rules block in `AGENTS.md` (which `CLAUDE.md` imports), the wiki in
 `docs/wiki/`, templates in `.oah/templates/` and `.gitignore` entries, then builds the first impact map. The
@@ -308,7 +310,13 @@ oah review summary --task hello-name
 The summary is a block for the pull request description: the rounds, their verdicts and the gates. With gh
 installed you can open the pull request with `gh pr create --fill` and paste the block in.
 
-When CI has run, check whether the exact reviewed head may land, then land it:
+If you enabled the CI starter in step 2, wait for CI on the exact reviewed head, then check and land it.
+If you disabled CI, this new repository has no workflow: waiting alone will not produce results, even
+with gh installed, and landing blocks with `OAH_LAND_CI_UNVERIFIED`. To get verified CI, return to step 2
+and enable the starter before starting the task; adding it after review changes the head and needs gates
+and a new review. An explicit unverified-CI exception is described below.
+
+With CI results available, run:
 
 ```sh
 oah land --check --task hello-name
@@ -321,7 +329,11 @@ fast-forwards the remote default branch to exactly your reviewed head. GitHub th
 merged.
 
 Without gitleaks the scan line fails with `OAH_LAND_SCAN_REQUIRED` and nothing is pushed. Without gh, the CI
-line says `unverified`: CI was not checked, and `oah` says so instead of calling it passed.
+line says `unverified` and blocks with `OAH_LAND_CI_UNVERIFIED`; no results or a missing required check
+also blocks. If you accept that risk, add `--accept-unverified-ci "<reason>"` to both commands above.
+The exception and reason are recorded for that exact head; a new head needs its own exception. CI
+stays `unverified`, never a pass, and failed or pending CI still blocks. Use a non-secret reason.
+See [Landing](../../docs/concepts.md#landing) for the target branch’s CI policy.
 
 ## What you did
 

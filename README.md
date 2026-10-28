@@ -39,13 +39,13 @@ says, and a review has no rule for when it is finished. `oah` gives both engines
 not replace Claude Code or Codex: it drives them and keeps the records that make their work trustworthy.
 
 > [!NOTE]
-> **Pre-release.** Everything this README describes works on `main` and is tested on macOS and Windows in
-> CI. There is no `v0.1.0` release yet, so you install from a clone. Commands and file formats may still change
-> before 0.1.0.
+> **v0.1.0 is the first release.** It is for developers fluent with git and pull requests, on macOS and
+> native Windows. Linux is not yet supported.
 
 ## Contents
 
 - [Purpose: a harness that keeps adapting](#purpose-a-harness-that-keeps-adapting)
+- [Next update](#next-update)
 - [Install](#install)
 - [First run](#first-run)
 - [The loop](#the-loop)
@@ -80,10 +80,22 @@ needed, adds the ones that are, and changes its rules to match.
 So `oah` prefers defaults you can understand and change over checks you cannot turn off. When a rule gets in
 the way of your work or of a newer model, the project treats that as a design problem to fix.
 
+## Next update
+
+These four features are in review for the next update and are **not available in v0.1.0**.
+
+- Jev chooses the model and effort for each call within the tier pools you allow.
+- Impact reports say which scope was analysed and which was not, with conservative fallback checks.
+- Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
+- A review budget covers the whole task, with ways to stop, resume and increase it.
+
 ## Install
 
 One command per OS installs `oah`. It asks before it installs any missing tool, shows the official command
-for each one, and never sees your passwords or keys. While the repository is private, run it from a clone.
+for each one, and never sees your passwords or keys. To install from a clone, run the commands below.
+For v0.1.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
+page. Refuse to unpack it unless its SHA-256 matches that archive’s digest in `SHA256SUMS`; then run the
+included installer. The OS guides below show how to check it.
 
 macOS (you need git first: `xcode-select --install`):
 
@@ -109,7 +121,7 @@ Then open a new terminal and check:
 
 ```console
 $ oah --version
-oah 0.1.0.dev0
+oah 0.1.0
 ```
 
 ## First run
@@ -153,12 +165,13 @@ sequenceDiagram
     You->>O: oah preflight, oah start --packet
     O->>C: oah call claude --stage initial
     C-->>You: the implementation
-    You->>O: oah gates check, oah wiki maintain, commit
+    You->>O: oah wiki maintain, oah gates check --approve, commit
     loop until the review converges
         O->>X: oah review on a clean, read-only snapshot
         X-->>O: receipt with verdict and findings
         O->>X: oah fix for P0 and P1 findings
-        X-->>You: a diff to inspect and commit, then oah fix --bind
+        X-->>You: a diff to inspect
+        You->>O: oah wiki maintain, oah gates check --approve, commit, oah fix --bind
     end
     You->>O: oah finish checks scope, gates, wiki and the return
     You->>G: push, open a pull request
@@ -171,10 +184,17 @@ sequenceDiagram
 | Describe the task | `oah packet new`, `oah packet check`, `oah gates new` | The goal and its success conditions are written and accepted before work starts. |
 | Start safely | `oah preflight`, `oah start --packet` | Your branch is fresh, and no other session holds your paths. |
 | Implement | `oah call claude --stage initial`, or your own Claude Code session | Claude works from the packet, with the tier's model, effort and skills. |
-| Prove it | `oah gates check`, `oah wiki maintain` | Every success condition has a command and recorded evidence. |
+| Prove it | `oah wiki maintain`, `oah gates check --approve`, commit | Every success condition has a command and recorded evidence. |
 | Review and correct | `oah review`, `oah fix`, `oah fix --bind` | Codex reviews until the review converges; each round leaves a receipt. |
 | Finish | `oah finish --return` | Changes stayed in scope, gates are met, and the return matches the intent. |
-| Land | `oah land --check`, `oah land --merge` | The exact reviewed head lands, after a secret scan and CI, when you confirm. |
+| Land | `oah land --check`, `oah land --merge` | The exact reviewed head lands after a secret scan and CI verification (or a recorded CI exception), when you confirm. |
+
+Maintain the wiki, run the final approved gate check and commit in that order, including after every
+correction. Unverified CI blocks landing by default: missing `gh`, no CI results, or a required check
+missing for HEAD produces `OAH_LAND_CI_UNVERIFIED`. To accept that risk, pass
+`--accept-unverified-ci "<reason>"` to `oah land --check` and `oah land --merge`. The exception and reason
+are recorded for that exact head; CI stays `unverified` and never counts as a pass. Failed or pending CI
+still blocks landing. See [Landing](docs/concepts.md#landing) for the target branch’s CI policy.
 
 [Concepts](docs/concepts.md) explains each step; [Troubleshooting](docs/troubleshooting.md) explains each
 refusal.
@@ -212,7 +232,7 @@ refusal starts with an `OAH_*` code and says what to run next.
 
 | | Requirement | Needed for |
 |---|---|---|
-| OS | **macOS 13+** or **Windows 11**, natively; no WSL. Windows 10 22H2 is best effort. Linux probably works but is not tested. | everything |
+| OS | **macOS 13+** or **Windows 11**, natively; no WSL. Windows 10 22H2 is best effort. Linux is not yet supported. | everything |
 | Runtime | **Python 3.11+**. No third-party Python packages at runtime. | everything |
 | Version control | **git**, and a remote such as a GitHub repository | everything |
 | Engines | **Claude Code** and **Codex CLI**, installed and signed in by you | implementation, review and correction |
@@ -316,8 +336,8 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 �
 Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을 수 있게 하는 기록을 남긴다.
 
 > [!NOTE]
-> **정식 출시 전이다.** 이 문서가 설명하는 것은 모두 `main`에서 동작하고 CI에서 macOS와 Windows로 테스트한다.
-> 아직 `v0.1.0` 릴리스가 없으므로 클론해서 설치한다. 0.1.0 전까지 명령과 파일 형식이 바뀔 수 있다.
+> **v0.1.0은 첫 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
+> 지원한다. Linux는 아직 지원하지 않는다.
 
 ### 이 프로젝트의 목적
 
@@ -342,10 +362,21 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 그래서 `oah`는 끌 수 없는 검사보다 이해하고 바꿀 수 있는 기본값을 고른다. 규칙이 사용자의 작업이나 새 모델을
 가로막으면 이 프로젝트는 그것을 고쳐야 할 설계 문제로 다룬다.
 
+### 다음 업데이트
+
+다음 네 기능은 다음 업데이트를 위해 리뷰 중이며 **v0.1.0에서는 아직 쓸 수 없다**.
+
+- 호출마다 사용자가 허용한 tier별 후보 안에서 Jev가 모델과 추론 강도를 고른다.
+- 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
+- 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
+- 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
+
 ### 설치
 
 OS마다 명령 하나로 `oah`를 설치한다. 빠진 도구는 설치하기 전에 묻고 도구마다 공식 명령을 보여 주며, 사용자의
-비밀번호나 키는 보지 않는다. 저장소가 비공개인 동안에는 클론해서 실행한다.
+비밀번호나 키는 보지 않는다. 클론에서 설치하려면 아래 명령을 실행한다. v0.1.0은 저장소의 릴리스 페이지에서
+태그의 소스 압축 파일과 `SHA256SUMS`를 받는 방법도 있다. 압축 파일의 SHA-256이 `SHA256SUMS`의 해당 파일
+지문과 일치할 때만 풀고 안의 설치 프로그램을 실행한다. 확인 방법은 아래 OS별 안내에 있다.
 
 macOS에서는 먼저 git이 있어야 한다(`xcode-select --install`).
 
@@ -372,7 +403,7 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 
 ```console
 $ oah --version
-oah 0.1.0.dev0
+oah 0.1.0
 ```
 
 ### 처음 실행하기
@@ -408,10 +439,16 @@ oah init
 | 작업 적기 | `oah packet new`, `oah packet check`, `oah gates new` | 일을 시작하기 전에 목표와 성공 조건을 적고 승인한다. |
 | 안전하게 시작 | `oah preflight`, `oah start --packet` | 브랜치가 최신이고 다른 세션이 내 경로를 잡고 있지 않다. |
 | 구현 | `oah call claude --stage initial`, 또는 직접 연 Claude Code 세션 | Claude가 패킷을 보고 tier에 맞는 모델, 추론 강도, 스킬로 일한다. |
-| 증명 | `oah gates check`, `oah wiki maintain` | 성공 조건마다 명령과 기록된 증거가 있다. |
+| 증명 | `oah wiki maintain`, `oah gates check --approve`, 커밋 | 성공 조건마다 명령과 기록된 증거가 있다. |
 | 리뷰와 수정 | `oah review`, `oah fix`, `oah fix --bind` | Codex가 리뷰가 수렴할 때까지 리뷰하고 라운드마다 영수증을 남긴다. |
 | 끝내기 | `oah finish --return` | 변경이 범위 안에 있고, 게이트를 충족했고, 보고가 의도와 맞는다. |
-| 반영 | `oah land --check`, `oah land --merge` | 비밀 스캔과 CI를 거친 뒤, 사용자가 확인하면 리뷰한 head 그대로 반영된다. |
+| 반영 | `oah land --check`, `oah land --merge` | 비밀 스캔과 CI 검증(또는 기록된 CI 예외)을 거친 뒤 사용자가 확인하면 리뷰한 head 그대로 반영된다. |
+
+수정한 뒤에도 위키 정리, 최종 승인된 게이트 검사, 커밋 순서를 지킨다. 기본적으로 CI 미검증은 반영을 막는다.
+`gh`가 없거나 HEAD의 CI 결과 또는 필수 검사 결과가 없으면 `OAH_LAND_CI_UNVERIFIED`로 거절한다. 이 위험을
+받아들이려면 `oah land --check`와 `oah land --merge`에 `--accept-unverified-ci "<reason>"`을 붙인다.
+예외와 사유는 해당 head에만 기록되고 CI는 `unverified`로 남아 통과로 세지 않는다. 실패하거나 진행 중인 CI는
+여전히 반영을 막는다. 대상 브랜치의 CI 정책은 [반영](docs/ko/concepts.md#반영)을 참고한다.
 
 각 단계의 이유는 [개념](docs/ko/concepts.md)에, 거절 메시지마다의 해결법은 [문제 해결](docs/ko/troubleshooting.md)에
 있다.
@@ -449,7 +486,7 @@ oah init
 
 | 항목 | 요구 사항 | 필요한 곳 |
 |---|---|---|
-| 운영체제 | **macOS 13 이상**이나 **Windows 11** 네이티브(WSL 불필요). Windows 10 22H2는 되는 데까지만 지원한다. Linux는 아마 되지만 테스트하지 않는다. | 전부 |
+| 운영체제 | **macOS 13 이상**이나 **Windows 11** 네이티브(WSL 불필요). Windows 10 22H2는 되는 데까지만 지원한다. Linux는 아직 지원하지 않는다. | 전부 |
 | 런타임 | **Python 3.11 이상**. 실행에 외부 파이썬 패키지가 필요 없다. | 전부 |
 | 버전 관리 | **git**과 GitHub 저장소 같은 원격 | 전부 |
 | 엔진 | 사용자가 설치하고 로그인한 **Claude Code**와 **Codex CLI** | 구현, 리뷰, 수정 |

@@ -74,7 +74,6 @@ NAME_TEST = '''
 FINDING = {"title": "an empty name prints 'Hello, !'", "location": "hello.py:7"}
 UNAPPROVED = {"stdout": "APPROVAL REQUIRED GATES:G1\n    NOT RUN: inspect\nAPPROVAL REQUIRED GATES:G2\n"
                         "    NOT RUN: inspect\nGATES.md: 2 gates\nUNMET: 2 (met: 0)\n  GATES:G1\n  GATES:G2\n", "code": 1}
-KNOWN_FINISH_DEFECT = "'MaintenanceCheck' object has no attribute 'outputs'"
 
 
 def readme_commands(path: pathlib.Path) -> list[str]:
@@ -300,15 +299,7 @@ class WalkthroughTest(unittest.TestCase):
         (self.tmp / f"{TASK}-return.txt").write_text(
             f"{intent_line}\nAC1: met — gate G1\nAC2: met — gate G2\n", encoding="utf-8")
         finish = f'oah finish --task {TASK} --agent claude --summary "greet a name" --return ../{TASK}-return.txt'
-        try:
-            self.assertIn("gates=met", self.oah(finish))
-        except AttributeError as exc:
-            if KNOWN_FINISH_DEFECT not in str(exc):
-                raise
-            # Reported to the coordinator: oah finish reads check.outputs, which MaintenanceCheck lacks, so it
-            # crashes after a recorded oah wiki maintain. Remove this branch when it is fixed; the rest runs then.
-            self.assertEqual(self.ran, readme_commands(EXAMPLE / "README.md")[:len(self.ran)])
-            self.skipTest("oah finish crashes after oah wiki maintain (MaintenanceCheck has no outputs)")
+        self.assertIn("gates=met", self.oah(finish))
 
         # 9. Local refusal checks only. The real GitHub landing route needs signed-in gh and CI.
         git(work, "push", "-q", "-u", "origin", TASK)
@@ -318,6 +309,8 @@ class WalkthroughTest(unittest.TestCase):
         for name in ("lease", "intent", "review", "gates", "impact", "fast-forward"):
             self.assertIn(f"\n{name}: passed", "\n" + check)
         self.assertIn("OAH_LAND_SCAN_REQUIRED", check)
+        self.assertIn("ci: unverified", check)
+        self.assertIn("OAH_LAND_CI_UNVERIFIED", check)
         merge = self.oah(f"oah land --merge --task {TASK}", "--confirm", git(work, "rev-parse", "HEAD").strip(), code=1)
         self.assertIn("Nothing was pushed.", merge)
         self.assertEqual(git(self.remote, "rev-parse", "main"), landed_before)

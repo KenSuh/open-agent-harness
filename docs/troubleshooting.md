@@ -104,6 +104,8 @@ cannot point at a code that is gone.
 | `OAH_LAND_REVIEW_REQUIRED` | No converged review approves this exact head. | Run `oah review --task <task>` until it converges. A commit after the converged review needs a new round. |
 | `OAH_LAND_SCAN_REQUIRED` | gitleaks is not installed, so the commits that would land were not scanned. | Install gitleaks (`oah doctor` prints the command), then `oah land --check` again. |
 | `OAH_LAND_CI_FAILED` | A CI check run failed for this head. | Open the run on GitHub, fix the cause, push, wait for CI, then check again. See [Reading CI results](ci-starter.md#read-the-results-on-github). |
+| `OAH_LAND_CI_UNVERIFIED` | Missing gh, no results, or a required check missing for this head; landing blocks by default. | Install/sign in to gh, push the workflow and task branch, wait and retry; or add `--accept-unverified-ci "<reason>"` to check and merge. The exception is recorded per head; CI stays unverified, never passed. |
+| `OAH_LAND_CI_PENDING` | CI is unfinished or its results could not be read. | Wait for results, check `gh auth status` and the pushed branch, then retry. A CI exception cannot bypass this. |
 | `OAH_LAND_IMPACT_STALE` | The default branch could not be fetched or reassessed, for example with `--offline` or a remote that is a relative path. | Use a remote with a URL or an absolute path, run `oah impact refresh`, then `oah land --check` again. |
 | `OAH_LAND_CHECKS_REQUIRED` | The latest default branch binds checks to files you changed, and they have no passing evidence for your head. | Add a gate with the same CHECK and EXPECT to your ledger, run `oah gates check <task>`, commit, then check again. |
 

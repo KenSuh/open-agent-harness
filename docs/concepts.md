@@ -233,7 +233,7 @@ flowchart TD
   class across rounds.
 - **There is no fixed number of rounds.** Rounds continue while each brings new findings in scope. A round that
   approves, or reports only P2 and P3 findings, ends the series; the follow-ups are recorded. If you want a
-  budget, set `[review] max_rounds`; reaching it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`, and `--extra-round`
+  round limit, set `[review] max_rounds`; reaching it stops with `OAH_REVIEW_ROUNDS_EXHAUSTED`, and `--extra-round`
   continues and is recorded.
 - **The loop asks you only when it must.** It stops with `OAH_REVIEW_NEEDS_DECISION` when a finding repeats a
   kind an earlier correction already tried to fix, or when the fix needs a design or stored-format change.
@@ -264,12 +264,29 @@ flowchart TD
 | required-checks | checks that the latest default branch binds to your changed paths have passing evidence |
 | fast-forward | the default branch can move to HEAD without a merge |
 | scan | gitleaks finds nothing in the commits that would land |
-| ci | the CI check runs for HEAD passed (read through `gh`; without `gh` it says `unverified`) |
+| ci | `gh` reads HEAD’s check runs and commit statuses; all latest results are successful (check runs may also be neutral or skipped), with a result for every configured required check |
 
 `oah land --merge --task T` runs every check again, asks you to confirm, and then fast-forwards the remote's
 default branch to exactly HEAD, on the condition that it still equals the commit just checked. If someone else
 landed first, nothing is pushed: fetch, reassess and try again. Landing needs a remote with a URL or an absolute
 path.
+
+Missing `gh`, no check runs or commit statuses, or a missing required check result makes CI `unverified`
+and blocks landing by default with `OAH_LAND_CI_UNVERIFIED`. Install and sign in to `gh`, push the workflow
+and task branch, and wait for results. Failed CI (`OAH_LAND_CI_FAILED`) or pending/unreadable CI
+(`OAH_LAND_CI_PENDING`) also blocks landing.
+
+If you explicitly accept unverified CI, add `--accept-unverified-ci "<reason>"` to both the check and merge
+commands. The exception and reason are recorded for that exact head in the state folder’s
+`land/<task>/ci-exceptions.jsonl`; a new head needs its own exception. CI stays `unverified`, never a pass.
+The result is `OAH_LAND_READY_WITH_CI_EXCEPTION`, then `OAH_LAND_LANDED_WITH_CI_EXCEPTION` after landing.
+This exception cannot bypass failed or pending CI or any other failed check. Use a non-secret reason.
+
+The fetched target branch’s committed `.oah/config.toml` supplies `[land]` policy:
+`ci_unverified = "block"` is the default; `"exception"` records an exception per head with reason
+`config policy`. `required_checks = []` uses discovered results (zero is unverified); list check-run
+names or status contexts to require them. Loosening this policy in the task head refuses with
+`OAH_LAND_POLICY_LOOSENED`; land that policy change separately on the default branch first.
 
 ## Model and skill updates
 
@@ -313,7 +330,8 @@ existing workflow is never overwritten without showing the difference and asking
   it to see which job failed and its log. See [Read the results on GitHub](ci-starter.md#read-the-results-on-github).
 - **Required checks:** `oah` never changes repository settings. To block merges until the checks pass, add a
   branch rule on GitHub as described in [Make the checks required](ci-starter.md#make-the-checks-required).
-- `oah land --check` reads the CI runs for your head through `gh` before it lets the head land.
+- `oah land --check` reads the check runs and commit statuses for your exact head through `gh`. Unverified CI
+  blocks by default; an explicit exception stays unverified. See [Landing](#landing).
 
 ## Companion apps: Orca and Aside
 

@@ -19,7 +19,7 @@ unlazy 대역으로 아래의 수정 요청 예시 경로를 검증한다. 오�
 - Claude Code와 Codex CLI가 설치돼 있고 로그인돼 있어야 한다. `oah doctor`가 둘 다 확인한다.
 - 게이트에는 Node.js와 unlazy가 필요하다. unlazy는 `oah init`이 설치를 제안한다.
 - 반영 단계에는 gitleaks가 필요하고 GitHub 경로에는 `gh auth login`으로 로그인한 gh도 필요하다. gitleaks가
-  없으면 스캔에서 멈추고 gh가 없으면 CI는 미검증으로 남는다.
+  없으면 스캔에서 멈추고 gh가 없으면 CI는 미검증으로 남아 기본적으로 반영을 막는다.
 
 아래 명령은 모두 터미널에서 실행한다. macOS 명령은 zsh와 bash에서 그대로 된다. Windows PowerShell에서 다르게
 써야 하는 줄은 옆에 따로 적었다.
@@ -59,7 +59,7 @@ Windows PowerShell에서는 `~/hello-remote.git` 대신 `$HOME\hello-remote.git`
 절대 경로여야 한다. `../hello-remote.git` 같은 상대 경로는 반영 단계에서 거절된다.
 gh가 설치돼 있으면 로컬 대안으로는 9단계를 끝낼 수 없다. gh가 디스크 경로의 GitHub CI를 조회할 수 없어
 `OAH_LAND_CI_PENDING`으로 반영이 거절된다. 반영에는 GitHub 경로를 쓴다. gh가 없으면 CI는 `unverified`이고
-CI 통과를 증명하지 않는다. gh를 제거하는 것은 CI 검증 방법이 아니다.
+기본적으로 `OAH_LAND_CI_UNVERIFIED`로 반영을 막는다. gh를 제거하는 것은 CI 검증 방법이 아니다.
 
 ## 2. 프로젝트에 oah 설정하기
 
@@ -68,9 +68,11 @@ oah init
 ```
 
 `oah init`은 먼저 전체 계획을 출력한 다음 몇 가지를 묻는다. 단계별 에이전트 파일, 훅, unlazy, 지식 그래프,
-CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스킬 업데이트다. 이 예제에서는 unlazy만
-예라고 답하고 나머지는 아니오라고 답한다. 나머지는 나중에 언제든 더할 수 있다. 사용자가 확인하지 않은
-것은 설치하지 않는다. Claude Code와 Codex 로그인은 각 도구의 상태 명령으로 확인한다.
+CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스킬 업데이트다. 이 예제에서는 unlazy에
+예라고 답한다. 9단계에서 GitHub에 반영하려면 CI 시작 워크플로에도 예라고 답하고 Python 테스트 명령을
+확인한다. 8단계까지 로컬에서 연습하려면 CI에 아니오라고 답한다. 다른 선택 사항은 아니오라고 답한다.
+나중에 언제든 더할 수 있다. 사용자가 확인하지 않은 것은 설치하지 않는다. Claude Code와 Codex 로그인은
+각 도구의 상태 명령으로 확인한다.
 
 `oah init`은 `.oah/config.toml`, `AGENTS.md`의 규칙 블록(`CLAUDE.md`가 불러온다), `docs/wiki/`의 위키,
 `.oah/templates/`의 템플릿, `.gitignore` 항목을 쓰고 첫 영향 지도를 만든다. 마지막 줄은 `OAH_INIT_DONE`이다.
@@ -307,7 +309,13 @@ oah review summary --task hello-name
 요약은 pull request 설명에 붙일 블록이다. 라운드와 판정, 게이트가 들어 있다. gh가 있으면
 `gh pr create --fill`로 pull request를 열고 이 블록을 붙여 넣는다.
 
-CI가 돌고 나면 리뷰한 head 그대로 반영할 수 있는지 확인하고 반영한다.
+2단계에서 CI 시작 워크플로를 켰다면 리뷰한 head의 CI 결과를 기다리고 확인한 뒤 반영한다. CI를 껐다면 이
+새 저장소에는 워크플로가 없다. gh가 있어도 기다리는 것만으로 결과가 생기지 않고
+`OAH_LAND_CI_UNVERIFIED`로 반영을 막는다. CI를 검증하려면 작업을 시작하기 전인 2단계로 돌아가 시작
+워크플로를 켠다. 리뷰 뒤에 더하면 head가 바뀌므로 게이트와 새 리뷰가 필요하다. 명시적 CI 미검증 예외는
+아래에 설명한다.
+
+CI 결과가 있으면 다음을 실행한다.
 
 ```sh
 oah land --check --task hello-name
@@ -319,7 +327,11 @@ oah land --merge --task hello-name
 브랜치를 리뷰한 head로 정확히 fast-forward한다. 그러면 GitHub는 pull request를 병합됨으로 표시한다.
 
 gitleaks가 없으면 스캔 줄이 `OAH_LAND_SCAN_REQUIRED`로 실패하고 아무것도 push하지 않는다. gh가 없으면 CI 줄이
-`unverified`라고 나온다. CI를 확인하지 못했다는 뜻이고 `oah`는 이를 통과라고 부르지 않는다.
+`unverified`로 남고 `OAH_LAND_CI_UNVERIFIED`로 반영을 막는다. 결과가 없거나 필수 검사 결과가 빠져도 같다.
+이 위험을 받아들이려면 위의 두 명령에 `--accept-unverified-ci "<reason>"`을 붙인다. 예외와 사유는 정확히
+해당 head에 기록하며 새 head에는 별도 예외가 필요하다. CI는 `unverified`로 남아 통과로 세지 않고, 실패하거나
+진행 중인 CI는 여전히 반영을 막는다. 사유에는 비밀을 넣지 않는다. 대상 브랜치의 CI 정책은
+[반영](../../docs/ko/concepts.md#반영)을 참고한다.
 
 ## 한 일 정리
 
