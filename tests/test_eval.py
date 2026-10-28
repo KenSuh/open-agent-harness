@@ -1828,7 +1828,7 @@ class CorrectionC6Test(unittest.TestCase):
         ws = self.build()
         hashes = workspace.content_hashes(oracle_path(self.root).read_bytes())
         text = "Ø ordinary notes\r\n"
-        normalized = hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+        normalized = hashlib.sha256(text.replace("\r\n", "\n").rstrip().encode("utf-8")).hexdigest()
         for encoding, other in (("utf-16-le", "utf-16-be"), ("utf-16-be", "utf-16-le")):
             with self.subTest(encoding=encoding):
                 raw = text.encode(encoding)
@@ -1913,7 +1913,7 @@ class CorrectionC7Test(unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
 
     def test_oracle_hash_normalization_strips_trailing_whitespace_per_line(self):
-        normalized = b"first line\nsecond line\n"
+        normalized = b"first line\nsecond line"
         digest = hashlib.sha256(normalized).hexdigest()
         for encoding in ("utf-8", "utf-16", "utf-16-le", "utf-16-be"):
             with self.subTest(encoding=encoding):
@@ -1967,8 +1967,11 @@ class CorrectionC7Test(unittest.TestCase):
         ws = self.build()
         # These base-257 digits encode 49 * 2**64: a real rolling collision with 64 NULs.
         raw = b"\0" * 55 + bytes((47, 127, 76, 96, 78, 88, 85, 122, 49))
-        blocks = workspace.oracle_block_checks(raw)
-        self.assertTrue(any(block["length"] == 64 and block["rolling"] == 0 for block in blocks))
+        # Supply the synthetic long fingerprint directly: interpreting these
+        # non-TOML bytes in UTF-16 also produces short forms under the new rule.
+        blocks = [{"length": len(raw), "rolling": workspace._rolling_hash(raw),
+                   "sha256": hashlib.sha256(raw).hexdigest()}]
+        self.assertEqual(blocks[0]["rolling"], 0)
         (ws.inputs / "notes.md").write_bytes(b"\0" * 4096)
         with self.assertRaises(EvalError) as caught:
             workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
@@ -2114,6 +2117,320 @@ class CorrectionC8Test(unittest.TestCase):
                         oracle_paths=workspace.oracle_path_checks([oracle]))
                 self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
                 self.assertNotIn(str(oracle.parent), str(caught.exception))
+
+
+class CorrectionC9Test(unittest.TestCase):
+    def setUp(self):
+        self.root = fixture_copy(self)
+
+    source = CorrectionC3Test.source
+    build = CorrectionC3Test.build
+
+    def test_rstripped_oracle_copies_refused_before_freeze(self):
+        oracle = oracle_path(self.root)
+        text = oracle.read_text(encoding="utf-8").rstrip()
+        for heading in ("", "# Notes\n\n"):
+            for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+                with self.subTest(heading=bool(heading), encoding=encoding):
+                    (case_dir(self.root) / "inputs" / "notes.md").write_bytes((heading + text).encode(encoding))
+                    out = self.root / f"refused-{bool(heading)}-{encoding}.json"
+                    with self.assertRaises(EvalError) as caught:
+                        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], out)
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertFalse(out.exists())
+                    self.assertFalse(out.with_suffix(".json.sha256").exists())
+        (case_dir(self.root) / "inputs" / "notes.md").write_bytes(b"ordinary notes")
+        (case_dir(self.root) / "task.md").write_bytes(text.encode("utf-8"))
+        with self.assertRaises(EvalError) as caught:
+            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle], self.root / "prompt.json")
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_rstripped_oracle_copies_refused_by_frozen_run_scanner(self):
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        entry = plan.load_frozen(out).data["cases"][0]
+        text = oracle_path(self.root).read_text(encoding="utf-8").rstrip()
+        source = self.source()
+        for heading in ("", "# Notes\n\n"):
+            for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+                with self.subTest(heading=bool(heading), encoding=encoding):
+                    ws = self.build(source)
+                    (ws.inputs / "notes.md").write_bytes((heading + text).encode(encoding))
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.scan_workspace(ws, source, oracle_hashes=entry["oracle_match_sha256"],
+                                                 oracle_blocks=entry["oracle_block_checks"])
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        env = Env(self)
+        for heading in ("", "# Notes\n\n"):
+            with self.subTest(launch=True, heading=bool(heading)):
+                with self.assertRaises(EvalError) as caught:
+                    runner.run_eval(plan.load_frozen(out), env.runs, env=dict(env.env, LANG=heading + text),
+                                    timeout_seconds=60)
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertEqual(env.launched(), [])
+                self.assertFalse(env.runs.exists())
+
+    def test_one_canonical_form_for_hashes_blocks_short_oracles_and_paths(self):
+        canonical = 'case="derived-index"\n[[defect]]\nid="D"\nkeywords=["x"]'
+        decorated = "\r\n \t\r" + canonical.replace("\n", " \t\r") + "\t \r\n\r"
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.assertLess(len(canonical.encode("utf-8")), workspace.ORACLE_BLOCK_MIN)
+        ws = self.build()
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                raw = decorated.encode(encoding)
+                self.assertIn(digest, workspace.content_hashes(raw))
+                self.assertEqual(workspace.oracle_block_checks(raw), [])
+                (ws.inputs / "notes.md").write_bytes(raw)
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(
+                        canonical.encode("utf-8")))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        path = oracle_path(self.root)
+        path_text = "\r\n" + str(path.parent) + " \t\r\n"
+        (ws.inputs / "notes.md").write_bytes(path_text.encode("utf-16-be"))
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_paths=workspace.oracle_path_checks([path]))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def large_executable(self):
+        # A real local interpreter with inert appended bytes; no installer or network.
+        executable = self.root / ("engine.exe" if os.name == "nt" else "engine")
+        shutil.copyfile(sys.executable, executable)
+        executable.chmod(0o755)
+        with executable.open("ab") as handle:
+            handle.truncate((64 << 20) + 4096)
+        return executable
+
+    def test_large_executable_scanned_frozen_and_changed_digest_refused(self):
+        executable = self.large_executable()
+        ws = self.build()
+        files = workspace.check_variant_channels(ws, argv=[str(executable)])
+        digest = case_mod.file_sha256(executable)
+        self.assertEqual(files[str(executable)], digest)
+        # PATH resolution avoids the plan's absolute-argument digest check: this
+        # specifically exercises the scanner's frozen executable dependency.
+        (self.root / "plan.toml").write_text(
+            '[[case]]\npath="cases/derived-index"\n[[variant]]\nname="engine"\ncommand=["'
+            + executable.name + '", "--version"]\n', encoding="utf-8")
+        env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""))
+        out = self.root / "prereg.json"
+        with mock.patch.dict(os.environ, env):
+            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        frozen = plan.load_frozen(out)
+        self.assertEqual(frozen.data["variants"][0]["channel_files"]["derived-index"][str(executable)], digest)
+        runs = make_tmp_dir(self) / "runs"
+        if os.name != "nt":
+            # Relocated Windows python.exe may need sibling DLLs; native tests
+            # below cover scanning/freezing without assuming that runtime layout.
+            run = runner.run_eval(frozen, runs, env=env, timeout_seconds=60)
+            self.assertEqual(read_result(run, "engine")["exit_code"], 0)
+        with executable.open("r+b") as handle:
+            handle.seek(-1, os.SEEK_END)
+            handle.write(b"X")
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(frozen, runs, env=env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_PREREG_MISMATCH")
+
+    def test_large_verified_npm_runtime_is_scanned_and_frozen(self):
+        prefix = make_tmp_dir(self)
+        shim = npm_layout(prefix, "@test/cli", {"claude": "cli.js"}, command="claude",
+                          script_rel="cli.js", local_node=True)
+        node = prefix / "node.exe"
+        node.unlink()
+        self.large_executable().rename(node)
+        resolved = proc.classify(shim, "claude", platform="win32", search_path=str(prefix))
+        ws = self.build()
+        with mock.patch.object(commands, "resolve_command", return_value=resolved):
+            argv = commands.resolve_argv(["claude"], dict(os.environ), "variant", cwd=ws.repo)
+        raw = oracle_path(self.root).read_bytes()
+        files = workspace.check_variant_channels(ws, argv=argv, oracle_hashes=workspace.content_hashes(raw),
+                                                 oracle_blocks=workspace.oracle_block_checks(raw))
+        self.assertEqual(files[str(node)], case_mod.file_sha256(node))
+        script = prefix / "node_modules" / "@test" / "cli" / "cli.js"
+        self.assertEqual(files[str(script)], case_mod.file_sha256(script))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows large executable scanning")
+    def test_windows_large_executable_scan_freeze_and_leak_refusal(self):
+        self.test_large_executable_scanned_frozen_and_changed_digest_refused()
+        self.test_large_executable_embedded_oracle_refused()
+
+    def test_large_executable_embedded_oracle_refused(self):
+        executable = self.large_executable()
+        raw = oracle_path(self.root).read_bytes()
+        text = raw.decode("utf-8").rstrip()
+        ws = self.build()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                # Cross a stream boundary well beyond the former refusal threshold.
+                offset = (64 << 20) - 128
+                with executable.open("r+b") as handle:
+                    handle.seek(offset)
+                    handle.write(("# Notes\n" + text).encode(encoding))
+                with self.assertRaises(EvalError) as caught:
+                    workspace.check_variant_channels(ws, argv=[str(executable)],
+                        oracle_hashes=workspace.content_hashes(raw), oracle_blocks=workspace.oracle_block_checks(raw))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                self.assertNotIn(text, str(caught.exception))
+                with executable.open("r+b") as handle:
+                    handle.seek(offset)
+                    handle.write(b"\0" * (len(text) * 2 + 100))
+
+    def test_binary_regions_keep_oracle_checks_despite_invalid_surrounding_bytes(self):
+        ws = self.build()
+        raw = oracle_path(self.root).read_bytes()
+        text = raw.decode("utf-8").rstrip()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                invalid = b"\xff\xff\x00\xd8\xd8\x00"
+                content = "# Notes\r\n" + text.replace("\n", " " * 600 + "\r\n")
+                (ws.inputs / "binary.dat").write_bytes(invalid + content.encode(encoding) + invalid)
+                with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                                         oracle_blocks=workspace.oracle_block_checks(raw))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_utf16_regions_in_odd_length_binary_channels_are_checked(self):
+        ws = self.build()
+        raw = oracle_path(self.root).read_bytes()
+        text = raw.decode("utf-8").rstrip()
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                data = b"\xff\xff\x00\xd8\xd8\x00" + text.encode(encoding) + b"X"
+                self.assertEqual(len(data) % 2, 1)
+                (ws.inputs / "binary.dat").write_bytes(data)
+                with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                                         oracle_blocks=workspace.oracle_block_checks(raw))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_reused_content_pass_checks_current_bytes_and_oracle_context(self):
+        ws = self.build()
+        raw = oracle_path(self.root).read_bytes()
+        path = ws.inputs / "notes.md"
+        payload = b"# Notes\n" + raw.rstrip()
+        path.write_bytes(payload.ljust(2048, b" "))
+        # A pass without oracle checks cannot authorize the same bytes with an oracle.
+        workspace.check_variant_channels(ws)
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                             oracle_blocks=workspace.oracle_block_checks(raw))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        path.write_bytes(b"ordinary notes".ljust(2048, b" "))
+        workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                         oracle_blocks=workspace.oracle_block_checks(raw))
+        before = path.stat()
+        path.write_bytes(payload.ljust(2048, b" "))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        # Same name, size and timestamps still require the current content digest.
+        with self.assertRaises(EvalError) as caught:
+            workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                             oracle_blocks=workspace.oracle_block_checks(raw))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+
+    def test_legacy_normalization_preregistration_refused(self):
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        data = plan.load_frozen(out).data
+        data.pop("oracle_normalization", None)
+        raw = json.dumps(data).encode("utf-8")
+        out.write_bytes(raw)
+        out.with_suffix(".json.sha256").write_text(hashlib.sha256(raw).hexdigest(), encoding="utf-8")
+        env = Env(self)
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(out), env.runs, env=env.env, timeout_seconds=60)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+        self.assertIn("preregister again", str(caught.exception))
+        self.assertFalse(env.runs.exists())
+
+    def test_large_executable_leak_refused_at_preregistration_and_run(self):
+        executable = self.large_executable()
+        (self.root / "plan.toml").write_text(
+            '[[case]]\npath="cases/derived-index"\n[[variant]]\nname="engine"\ncommand=['
+            + json.dumps(str(executable)) + ', "--version"]\n', encoding="utf-8")
+        out = self.root / "prereg.json"
+        plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], out)
+        text = oracle_path(self.root).read_text(encoding="utf-8").rstrip()
+        with executable.open("r+b") as handle:
+            handle.seek((64 << 20) - 128)
+            handle.write(("# Notes\n" + text).encode("utf-16-be"))
+        env = Env(self)
+        with self.assertRaises(EvalError) as caught:
+            runner.run_eval(plan.load_frozen(out), env.runs, env=env.env, timeout_seconds=60)
+        # Absolute command files are checked for changed digests even before scanning.
+        self.assertIn(caught.exception.code, ("OAH_EVAL_ISOLATION", "OAH_EVAL_PREREG_MISMATCH"))
+        self.assertFalse(env.runs.exists())
+        rejected = self.root / "rejected.json"
+        with self.assertRaises(EvalError) as caught:
+            plan.preregister(plan.load_plan(self.root / "plan.toml"), [oracle_path(self.root)], rejected)
+        self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+        self.assertFalse(rejected.exists())
+        self.assertFalse(rejected.with_suffix(".json.sha256").exists())
+
+    def test_streamed_working_files_and_retained_blobs_share_canonical_checks(self):
+        raw = oracle_path(self.root).read_bytes()
+        text = raw.decode("utf-8").rstrip()
+        source = self.source()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            for channel in ("working-file", "git-blob"):
+                with self.subTest(encoding=encoding, channel=channel):
+                    ws = self.build(source)
+                    data = ("\r\n# Notes\r\n" + text.replace("\n", " \t\r\n")).encode(encoding)
+                    if channel == "working-file":
+                        (ws.inputs / "notes.md").write_bytes(data)
+                    else:
+                        subprocess.run(["git", "-C", str(ws.repo), "hash-object", "-w", "--stdin"],
+                                       input=data, capture_output=True, check=True)
+                    with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+                        with self.assertRaises(EvalError) as caught:
+                            workspace.scan_workspace(ws, source, oracle_hashes=workspace.content_hashes(raw),
+                                                     oracle_blocks=workspace.oracle_block_checks(raw))
+                    self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                    self.assertIn(channel, str(caught.exception))
+
+    def test_streamed_short_oracle_requires_whole_channel_equality(self):
+        raw = b'case="derived-index"\n[[defect]]\nid="D"\nkeywords=["x"]'
+        ws = self.build()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                path = ws.inputs / "notes.md"
+                path.write_bytes(("\r\n" * 200 + raw.decode("utf-8") + " \t\r\n" * 200).encode(encoding))
+                with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                                         oracle_blocks=workspace.oracle_block_checks(raw))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
+                path.write_bytes(("Heading\n" + raw.decode("utf-8") + "\nOther text").encode(encoding))
+                with mock.patch.object(workspace, "NORMALIZE_LIMIT", 16):
+                    workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                                     oracle_blocks=workspace.oracle_block_checks(raw))
+
+    def test_streamed_malformed_marked_utf16_is_still_unchecked(self):
+        ws = self.build()
+        # Valid UTF-8 bytes are not a substitute for validating marked UTF-16.
+        data = b"\xff\xfe" + "ordinary notes\n".encode("utf-16-le") * 100 + b"\x00"
+        (ws.inputs / "notes.md").write_bytes(data)
+        with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+            with self.assertRaises(EvalError) as caught:
+                workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(
+                    oracle_path(self.root).read_bytes()))
+        self.assertEqual(caught.exception.code, "OAH_EVAL_CHANNEL_UNCHECKED")
+
+    def test_stream_normalization_across_long_whitespace_and_decoder_boundaries(self):
+        raw = oracle_path(self.root).read_bytes()
+        text = raw.decode("utf-8").rstrip()
+        ws = self.build()
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                content = "\r\n\t\r# Notes\r" + text.replace("\n", " " * 300 + "\t\r\n")
+                (ws.inputs / "notes.md").write_bytes(content.encode(encoding))
+                with mock.patch.object(workspace, "NORMALIZE_LIMIT", 256):
+                    with self.assertRaises(EvalError) as caught:
+                        workspace.check_variant_channels(ws, oracle_hashes=workspace.content_hashes(raw),
+                                                         oracle_blocks=workspace.oracle_block_checks(raw))
+                self.assertEqual(caught.exception.code, "OAH_EVAL_ISOLATION")
 
 
 class FixtureTest(unittest.TestCase):

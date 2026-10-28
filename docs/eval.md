@@ -160,7 +160,8 @@ the agents cannot change; `oah eval run --expect-sha256 HASH` checks against it.
 preregistration. Every result records the preregistration hash.
 Preregistration also builds and scans every workspace, without launching a variant. Known leaks are
 refused before either preregistration file is written. Older preregistrations without grader-folder checks
-must be recreated. Preregistrations without oracle-block fingerprints must also be recreated.
+must be recreated. Preregistrations without oracle-block fingerprints or the current
+canonical-normalization version must also be recreated; older fingerprints cannot safely enforce the current containment rule.
 
 ## Isolation
 
@@ -175,7 +176,8 @@ scans each one. It refuses with `OAH_EVAL_ISOLATION`, naming what it found, when
   and unreferenced blobs;
 - a copy of any preregistered oracle, including a complete oracle block pasted within other text,
   in checked-out files **or any raw Git blob retained in the repository**, including unreferenced blobs.
-  Text comparison normalizes LF/CRLF, strips trailing whitespace per line and accepts UTF-8/UTF-16
+  One canonical text form unifies CRLF/CR/LF to LF, strips trailing whitespace per line and drops
+  leading/trailing blank lines (including the final newline). It accepts UTF-8/UTF-16
   with or without BOM (strict BOM-less UTF-16 LE/BE decoding as below). Blocks of at least 64
   normalized UTF-8 bytes match anywhere in a channel; shorter oracles require whole-channel equality.
   Raw-byte hashes remain checked too;
@@ -221,14 +223,20 @@ start with `./`, `../`, `~` or a drive letter, or resolve to an existing path. D
 version strings and ordinary words remain plain text; content and literal grader-path checks still apply.
 Only literal references and TOML/JSON configs can be checked. Dynamic paths, response files, inline
 code/module launch switches (including `--eval`, `--command`, `-c`, `-e` and their `=` forms), attached
-short options, unsupported config formats, missing/unreadable files, directory inputs and channels
-larger than 64 MiB refuse with `OAH_EVAL_CHANNEL_UNCHECKED`. Malformed BOM-marked UTF-16 also refuses
-as unchecked.
+short options, unsupported config formats, missing/unreadable files and directory inputs refuse with
+`OAH_EVAL_CHANNEL_UNCHECKED`. Malformed BOM-marked UTF-16 also refuses as unchecked. Size alone never
+refuses a channel: files above the 64 MiB in-memory threshold,
+including engine executables and npm runtimes, are scanned in bounded chunks. Canonical chunks
+overlap by at least the longest oracle form, so copies crossing chunk boundaries remain checked.
+Executable dependencies receive the same content/path scan; their SHA-256 is frozen at preregistration
+and compared again before launch. Large binaries add pre-launch scanning time, without dropping checks.
 
-For every even-length BOM-less channel within the 64 MiB limit, both strict UTF-16 LE and BE decodings
+For every even-length BOM-less channel, both strict UTF-16 LE and BE decodings
 are attempted alongside UTF-8, regardless of NUL density or language. Every valid decoding receives
 the same normalized content and literal grader-path checks. Invalid candidate decodings are skipped;
-raw byte checks still apply to binary files.
+raw byte checks still apply to binary files. Valid text regions in binaries receive the same canonical
+block and literal-path checks even when another region cannot be decoded; malformed sequences form
+hard boundaries, so matches cannot bridge invalid bytes. Short oracles still require whole-channel equality.
 
 Explicit `--output`, `--output-dir`, `--marker` and `--record-dir` destinations may be missing. Existing
 empty directories inside the workspace are allowed; an existing external destination is refused. A

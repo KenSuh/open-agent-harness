@@ -19,8 +19,9 @@ from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import RUN_FILE, normalize_finding
 from oah.eval.plan import Source
-from oah.eval.workspace import (RUNTIME_ENV, Workspace, build_workspace, check_grader_separation,
-                                open_snapshot, remove_tree, scan_workspace, variant_environment)
+from oah.eval.workspace import (ORACLE_NORMALIZATION, RUNTIME_ENV, Workspace, build_workspace,
+                                check_grader_separation, open_snapshot, remove_tree, scan_workspace,
+                                variant_environment)
 
 DEFAULTS = {"timeout_seconds": 1800.0, "test_timeout_seconds": 300.0}
 RESULT_FILE = "result.json"
@@ -166,6 +167,9 @@ def run_eval(source: Source, runs_root: pathlib.Path, *, env: Mapping[str, str],
                         "preregister again before running")
     if source.sha256 is not None and any("oracle_block_checks" not in entry for entry in source.data["cases"]):
         raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration has no oracle block checks; "
+                        "preregister again before running")
+    if source.sha256 is not None and source.data.get("oracle_normalization") != ORACLE_NORMALIZATION:
+        raise EvalError("OAH_EVAL_CHANNEL_UNCHECKED", "this preregistration uses an older oracle normalization; "
                         "preregister again before running")
     run_id = run_id or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(3)
     run_dir = pathlib.Path(runs_root) / run_id

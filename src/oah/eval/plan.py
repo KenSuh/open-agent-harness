@@ -16,9 +16,9 @@ from oah.eval.case import case_digest, file_sha256, is_inside, load_case, read_t
 from oah.eval.commands import resolve_argv, substitute
 from oah.eval.errors import EXIT_ENVIRONMENT, EvalError
 from oah.eval.grade import load_oracle
-from oah.eval.workspace import (build_workspace, check_grader_separation, content_hashes, open_snapshot,
-                                oracle_block_checks, oracle_path_checks, remove_tree, scan_workspace,
-                                variant_environment)
+from oah.eval.workspace import (ORACLE_NORMALIZATION, build_workspace, check_grader_separation, content_hashes,
+                                open_snapshot, oracle_block_checks, oracle_path_checks, remove_tree,
+                                scan_workspace, variant_environment)
 
 FORMAT = "oah-eval-prereg/1"
 METRICS = ("matched", "missed", "unmatched", "human_verdicts", "tests_fixed", "exit_code", "timed_out",
@@ -226,6 +226,7 @@ def preregister(plan: Plan, oracle_paths: Iterable[pathlib.Path], out: pathlib.P
         remove_tree(scratch)
     data = _source_data(plan, oracles)
     data["oracle_path_checks"] = path_checks
+    data["oracle_normalization"] = ORACLE_NORMALIZATION
     for variant in data["variants"]:
         variant["channel_files"] = channel_files[variant["name"]]
     data["created_at"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

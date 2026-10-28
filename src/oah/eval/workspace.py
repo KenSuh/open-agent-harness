@@ -1,7 +1,9 @@
 # 평가 작업 공간 — 시작 스냅샷의 트리만으로 커밋 하나짜리 새 저장소를 만들고, 변형 실행 전에 정답·원래 이력·금지 파일을 검사한다.
 from __future__ import annotations
 
+import codecs
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -15,6 +17,7 @@ import tomllib
 import unicodedata
 import zipfile
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Iterable, Mapping, Sequence
@@ -34,6 +37,9 @@ IDENTITY = {"GIT_AUTHOR_NAME": "oah eval", "GIT_AUTHOR_EMAIL": "eval@oah.invalid
             "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"}
 NORMALIZE_LIMIT = 64 << 20
 ORACLE_BLOCK_MIN = 64
+ORACLE_NORMALIZATION = "utf-lf-rstrip-trim-blank/1"
+# Bounded, process-local evidence only: never channel bytes or oracle locations.
+_CHANNEL_PASSES: dict[tuple, None] = {}
 _ROLL_BASE, _ROLL_MOD = 257, 1 << 64
 _HEX = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 VARIANT_CHANNELS = ("git-blob", "working-file", "prompt", "argument", "environment", "reference", "config")
@@ -274,40 +280,107 @@ def build_workspace(snapshot: Snapshot, root: pathlib.Path, *, config_text: str 
     return Workspace(root=root, repo=repo, inputs=inputs, requirement=requirement, output=output, commit=commit)
 
 
+def _text_encodings(header: bytes, size: int) -> tuple[str, ...]:
+    if header.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return ("utf-8-sig", "utf-16")
+    return ("utf-8-sig", "utf-16-le", "utf-16-be") if size % 2 == 0 else ("utf-8-sig",)
+
+
 def _decoded_texts(data: bytes) -> Iterable[str]:
-    """The shared set of valid UTF-8 and UTF-16 channel decodings."""
-    try:
-        yield data.decode("utf-8-sig")
-    except UnicodeError:
-        pass
-    encodings = ()
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        encodings = ("utf-16",)
-    elif len(data) % 2 == 0 and len(data) <= NORMALIZE_LIMIT:
-        encodings = ("utf-16-le", "utf-16-be")
-    for encoding in encodings:
+    """The shared set of strict UTF-8 and UTF-16 channel decodings."""
+    for encoding in _text_encodings(data[:4], len(data)):
         try:
             yield data.decode(encoding)
         except UnicodeError:
-            # A candidate can be binary or valid only in the other byte order.
-            # The channel checker still refuses malformed BOM-marked text separately.
+            # Invalid unmarked candidates can be binary; marked UTF-16 refuses
+            # separately at the channel boundary.
             continue
 
 
+def _binary_boundary(error: UnicodeDecodeError) -> tuple[str, int]:
+    # A NUL separates maximal strictly decodable runs. Literal NULs cannot occur
+    # in TOML or filesystem paths, so a match can never cross a malformed region.
+    return "\0", error.end
+
+
+codecs.register_error("oah_eval_binary_boundary", _binary_boundary)
+
+
+def _canonical_chunks(open_text) -> Iterable[bytes]:
+    """One canonical form, with bounded reads even for unbounded lines/whitespace.
+
+    A lookahead reader measures each line; a replay reader emits its trimmed
+    prefix. Neither stores a whole line or a run of trailing whitespace. Readers
+    translate CRLF and CR to LF before this function sees them.
+    """
+    chunk_size = min(NORMALIZE_LIMIT, 1 << 20)
+    with open_text() as lookahead, open_text() as replay:
+        started = False
+        blank_lines = 0
+        length = trimmed = 0
+
+        def consume(count: int, emit: bool = False) -> Iterable[bytes]:
+            while count:
+                part = replay.read(min(count, chunk_size))
+                if not part:
+                    raise OSError("incomplete channel")
+                count -= len(part)
+                if emit:
+                    yield part.encode("utf-8")
+
+        def line(newline: bool) -> Iterable[bytes]:
+            nonlocal started, blank_lines, length, trimmed
+            if trimmed:
+                if started:
+                    count = blank_lines + 1
+                    while count:
+                        size = min(count, chunk_size)
+                        yield b"\n" * size
+                        count -= size
+                yield from consume(trimmed, True)
+                yield from consume(length - trimmed)
+                started, blank_lines = True, 0
+            else:
+                yield from consume(length)
+                if started:
+                    blank_lines += 1
+            if newline:
+                yield from consume(1)
+            length = trimmed = 0
+
+        for chunk in iter(lambda: lookahead.read(chunk_size), ""):
+            parts = chunk.split("\n")
+            for index, part in enumerate(parts):
+                stripped = part.rstrip()
+                if stripped:
+                    trimmed = length + len(stripped)
+                length += len(part)
+                if index < len(parts) - 1:
+                    yield from line(True)
+        yield from line(False)
+
+
+def _scan_chunks(parts: Iterable[bytes]) -> Iterable[bytes]:
+    """Batch canonical lines so each scan advances by a bounded byte chunk."""
+    size = min(NORMALIZE_LIMIT, 1 << 20)
+    buffer = bytearray()
+    for part in parts:
+        buffer.extend(part)
+        while len(buffer) >= size:
+            yield bytes(buffer[:size])
+            del buffer[:size]
+    if buffer:
+        yield bytes(buffer)
+
+
 def _normalized_text(text: str) -> bytes:
-    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n")).encode("utf-8")
+    return b"".join(_canonical_chunks(lambda: io.StringIO(text, newline=None)))
 
 
 def content_hashes(data: bytes) -> frozenset[str]:
-    """SHA-256 of raw bytes and UTF-8/UTF-16 text, including LF/per-line whitespace normalization."""
-    plain = data.removeprefix(b"\xef\xbb\xbf")
-    hashes = {hashlib.sha256(value).hexdigest() for value in
-              (data, data.replace(b"\r\n", b"\n"), plain, plain.replace(b"\r\n", b"\n"))}
-    for text in _decoded_texts(data):
-        plain = text.encode("utf-8")
-        hashes.update(hashlib.sha256(value).hexdigest() for value in
-                      (plain, plain.replace(b"\r\n", b"\n"), _normalized_text(text)))
-    return frozenset(hashes)
+    """Raw-byte identity plus the single canonical form of every valid decoding."""
+    return frozenset({hashlib.sha256(data).hexdigest(),
+                      *(hashlib.sha256(_normalized_text(text)).hexdigest() for text in _decoded_texts(data))})
 
 
 def _rolling_hash(data: bytes) -> int:
@@ -320,6 +393,10 @@ def _rolling_hash(data: bytes) -> int:
 def oracle_block_checks(data: bytes) -> list[dict]:
     """Freeze only normalized block fingerprints, never expected-answer text or its location."""
     blocks = {_normalized_text(text) for text in _decoded_texts(data)}
+    # An alternate byte-order interpretation must not promote a short oracle
+    # into embedded matching merely by expanding its UTF-8 representation.
+    if any(len(block) < ORACLE_BLOCK_MIN for block in blocks):
+        return []
     return [{"length": len(block), "rolling": _rolling_hash(block),
              "sha256": hashlib.sha256(block).hexdigest()} for block in sorted(blocks)
             if len(block) >= ORACLE_BLOCK_MIN]
@@ -331,6 +408,10 @@ def _contains_block(data: bytes, block: Mapping) -> bool:
     if size < ORACLE_BLOCK_MIN or size > len(data):
         return False
     value = _rolling_hash(data[:size])
+    # Uniform binary padding has only one distinct window; avoid a Python loop
+    # over hundreds of megabytes when it cannot match the rolling fingerprint.
+    if value != block["rolling"] and data.count(data[:1]) == len(data):
+        return False
     power = pow(_ROLL_BASE, size - 1, _ROLL_MOD)
     verified = 0
     for start in range(len(data) - size + 1):
@@ -403,7 +484,7 @@ def _history_header(header: bytes) -> bool:
 
 
 def _path_bytes(value: str) -> bytes:
-    value = value.replace("\\", "/")
+    value = _normalized_text(value).decode("utf-8").replace("\\", "/")
     return (value.casefold() if os.name == "nt" else value).encode("utf-8")
 
 
@@ -450,6 +531,10 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
     is outside this contents scan, which is not a sandbox.
     """
     hashes = frozenset(oracle_hashes)
+    scan_context = hashlib.sha256(json.dumps(
+        [sorted(hashes), [dict(item) for item in oracle_blocks], [dict(item) for item in oracle_paths],
+         os.name, NORMALIZE_LIMIT],
+        sort_keys=True).encode("utf-8")).digest()
     check_grader_separation((ws.root,), oracle_paths)
     dependencies: dict[str, str] = {}
     visited: set[tuple[pathlib.Path, bool]] = set()
@@ -464,7 +549,7 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
         raise EvalError(code, f"variant channel {channel} {reason}; remove the reference or supply readable "
                         "literal files and TOML/JSON configs, then preregister and run again. No variant was started") from None
 
-    def fingerprints(channel: str, raw: bytes) -> None:
+    def fingerprint_match(raw: bytes) -> bool:
         # Keep locations out of preregistration and errors, including resolved aliases.
         normal = raw.replace(b"\\", b"/")
         if os.name == "nt":
@@ -478,7 +563,12 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                           if separator <= match.start() <= len(normal) - size + separator)
             if any(hashlib.sha256(normal[start:start + size]).hexdigest() == fingerprint["sha256"]
                    for start in starts):
-                refuse(channel)
+                return True
+        return False
+
+    def fingerprints(channel: str, raw: bytes) -> None:
+        if fingerprint_match(raw):
+            refuse(channel)
 
     def literal(channel: str, token: str, base: pathlib.Path) -> None:
         # NAME=VALUE can be a filename or an assignment. Check both interpretations.
@@ -506,29 +596,113 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
                     and resolved not in executable_files):
                 refuse(channel)
 
-    def check(channel: str, raw: bytes) -> None:
-        if len(raw) > NORMALIZE_LIMIT:
-            refuse(channel, unchecked=True)
-        if content_hashes(raw) & hashes:
-            refuse(channel)
-        fingerprints(channel, raw)
-        # Use the same valid decodings as content checks, including BOM-less UTF-16.
-        texts = tuple(_decoded_texts(raw))
-        if raw.startswith((b"\xff\xfe", b"\xfe\xff")) and not texts:
-            refuse(channel, unchecked=True)
-        for text in texts:
-            normal = _normalized_text(text)
-            if any(_contains_block(normal, block) for block in oracle_blocks):
-                refuse(channel)
-            fingerprints(channel, _path_bytes(text))
+    # Fourfold overlap also covers UTF-8 byte-length changes from Windows case
+    # folding. It always retains at least the longest canonical oracle form.
+    overlap = 4 * max((item["length"] for item in (*oracle_blocks, *oracle_paths)), default=1)
 
-    def read(path: pathlib.Path, channel: str) -> bytes:
+    min_block = min((item["length"] for item in oracle_blocks), default=float("inf"))
+    min_path = min((item["length"] for item in oracle_paths), default=float("inf"))
+    # Windows Unicode case folding can expand UTF-8 bytes; test the folded
+    # length in fingerprint_match rather than discarding a possible short input.
+    min_region = min(min_block, min_path / 3 if os.name == "nt" else min_path)
+
+    def text_match(normal: bytes) -> bool:
+        if len(normal) < min_region:
+            return False
+        return (any(_contains_block(normal, block) for block in oracle_blocks)
+                or fingerprint_match(normal))
+
+    def stream(open_binary, channel: str) -> str:
+        """Scan without a size refusal; retain only fixed chunks and fingerprint overlap."""
+        digest = hashlib.sha256()
+        header, size = b"", 0
+        with open_binary() as handle:
+            for raw in iter(lambda: handle.read(min(NORMALIZE_LIMIT, 1 << 20)), b""):
+                if not header:
+                    header = raw[:4]
+                size += len(raw)
+                digest.update(raw)
+        raw_digest = digest.hexdigest()
+        if raw_digest in hashes:
+            refuse(channel)
+        # Always reread/hash the actual bytes. Reuse a pass only for identical
+        # bytes and the complete identical oracle/path comparison context.
+        cache_key = (raw_digest, scan_context)
+        if cache_key in _CHANNEL_PASSES:
+            return raw_digest
+        encodings = _text_encodings(header, size)
+        invalid = set()
+        if size % 2 and (hashes or oracle_blocks or oracle_paths):
+            # An odd binary can still contain even-length UTF-16 text regions.
+            invalid.update(("utf-16-le", "utf-16-be"))
+        for encoding in encodings if hashes or oracle_blocks or oracle_paths or "utf-16" in encodings else ():
+            digest = hashlib.sha256()
+            tail = b""
+            matched = False
+
+            @contextmanager
+            def open_text():
+                with open_binary() as binary:
+                    with io.TextIOWrapper(binary, encoding=encoding, newline=None) as text:
+                        yield text
+
+            try:
+                for normal in _scan_chunks(_canonical_chunks(open_text)):
+                    digest.update(normal)
+                    window = tail + normal
+                    matched = text_match(window) or matched
+                    tail = window[-overlap:]
+            except UnicodeError:
+                if encoding == "utf-16":
+                    refuse(channel, unchecked=True)
+                invalid.add(encoding)
+                continue
+            if matched or digest.hexdigest() in hashes:
+                refuse(channel)
+        # Do not drop an executable's valid text regions just because other
+        # bytes are binary. Strictly decoded runs use the same canonicalizer;
+        # malformed sequences are hard boundaries, never replacement text.
+        for encoding in invalid:
+            @contextmanager
+            def open_regions():
+                with open_binary() as binary:
+                    with io.TextIOWrapper(binary, encoding=encoding, newline=None,
+                                          errors="oah_eval_binary_boundary") as text:
+                        yield text
+
+            tail = b""
+            for normal in _scan_chunks(_canonical_chunks(open_regions)):
+                window = tail + normal
+                if any(text_match(region) for region in window.strip(b"\0").split(b"\0")
+                       if region and len(region) >= min_region):
+                    refuse(channel)
+                tail = window[-overlap:]
+        tail = b""
+        with open_binary() as handle:
+            for raw in iter(lambda: handle.read(min(NORMALIZE_LIMIT, 1 << 20)), b""):
+                window = tail + raw
+                fingerprints(channel, window)
+                tail = window[-overlap:]
+        if len(_CHANNEL_PASSES) >= 128:
+            _CHANNEL_PASSES.pop(next(iter(_CHANNEL_PASSES)), None)
+        _CHANNEL_PASSES[cache_key] = None
+        return raw_digest
+
+    def check(channel: str, raw: bytes) -> None:
+        stream(lambda: io.BytesIO(raw), channel)
+
+    def read(path: pathlib.Path, channel: str, *, config: bool = False) -> tuple[bytes | None, str]:
         try:
-            if not path.is_file() or path.stat().st_size > NORMALIZE_LIMIT:
+            if not path.is_file():
                 refuse(channel, unchecked=True)
+            if path.stat().st_size > NORMALIZE_LIMIT:
+                digest = stream(lambda: path.open("rb"), channel)
+                # Config parsing still needs the literal document after its scan;
+                # the size threshold is never a reason to refuse a channel.
+                return (path.read_bytes() if config else None), digest
             raw = path.read_bytes()
             check(channel, raw)
-            return raw
+            return raw, hashlib.sha256(raw).hexdigest()
         except (OSError, ValueError, RuntimeError):
             refuse(channel, unchecked=True)
 
@@ -568,10 +742,10 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             if identity in visited:
                 return
             visited.add(identity)
-            raw = read(path, channel)
+            raw, digest = read(path, channel, config=parse_config)
             name = ("{workspace}/" + path.relative_to(ws.root).as_posix()
                     if path.is_relative_to(ws.root) else str(path.absolute()))
-            dependencies[name] = hashlib.sha256(raw).hexdigest()
+            dependencies[name] = digest
             if parse_config:
                 config_values(raw, path.parent)
         except (OSError, ValueError, RuntimeError):
@@ -646,17 +820,41 @@ def check_variant_channels(ws: Workspace, *, oracle_hashes: Iterable[str] = (),
             oid, kind, size = line.split()
             if kind != "blob":
                 continue
-            if int(size) > NORMALIZE_LIMIT:
-                refuse("git-blob", unchecked=True)
-            # run_command decodes output; raw blobs must bypass text decoding and filters.
+            # Raw Git blobs use a pipe, never subprocess capture_output, so
+            # retained/unreferenced large blobs have the same bounded scan.
             git_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-            result = subprocess.run([*git_argv(), "-C", str(ws.repo), "cat-file", "blob", oid],
-                                    capture_output=True, env=git_env, timeout=GIT_TIMEOUT)
-            if result.returncode or len(result.stdout) != int(size):
-                refuse("git-blob", unchecked=True)
-            if _history_header(result.stdout[:128]):
-                refuse("git-blob", history=True)
-            check("git-blob", result.stdout)
+
+            @contextmanager
+            def blob_reader():
+                process = subprocess.Popen([*git_argv(), "-C", str(ws.repo), "cat-file", "blob", oid],
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_env)
+                try:
+                    yield process.stdout
+                    if process.wait(timeout=GIT_TIMEOUT):
+                        refuse("git-blob", unchecked=True)
+                finally:
+                    process.stdout.close()
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=GIT_TIMEOUT)
+
+            with blob_reader() as handle:
+                header = handle.read(128)
+                if _history_header(header):
+                    refuse("git-blob", history=True)
+                if int(size) <= NORMALIZE_LIMIT:
+                    raw = header + handle.read(int(size) + 1)
+                    if len(raw) != int(size):
+                        refuse("git-blob", unchecked=True)
+                    check("git-blob", raw)
+                    continue
+                # Drain before wait: a child must never block on a full pipe.
+                count = len(header)
+                for part in iter(lambda: handle.read(1 << 20), b""):
+                    count += len(part)
+                if count != int(size):
+                    refuse("git-blob", unchecked=True)
+            stream(blob_reader, "git-blob")
         for base in (ws.repo, ws.inputs, ws.requirement, ws.output):
             for path in _files(base):
                 check("working-file", _path_bytes(str(path)))
