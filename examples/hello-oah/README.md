@@ -67,11 +67,12 @@ so landing refuses with `OAH_LAND_CI_PENDING`. Use the GitHub route for landing.
 oah init
 ```
 
-`oah init` prints its whole plan first, then asks a few questions: tier agents, hooks, unlazy, the knowledge
+`oah init` first asks you to select options: tier agents, hooks, unlazy, the knowledge
 graph, the CI starter, the companion apps Orca and Aside, the TypeSafe Jev re-ranker and skill updates. For
 this example, say yes to unlazy. For GitHub landing in step 9, also say yes to the CI starter and confirm
 its Python test command; for local practice through step 8, say no to CI. Say no to the other options.
-You can add them later. It installs nothing you did not confirm, and it checks your Claude Code and Codex
+You can add them later. Then inspect and confirm the complete plan before changes are applied.
+It installs nothing you did not confirm, and it checks your Claude Code and Codex
 sign-ins with their own status commands.
 
 It writes `.oah/config.toml`, the rules block in `AGENTS.md` (which `CLAUDE.md` imports), the wiki in
