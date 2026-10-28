@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from tests.fixtures.gates.support import StubNode, make_unlazy_dir, met_ledger, run_cli, stub_pin
 from tests.helpers import git_env, make_tmp_dir
+from oah import unlazy
 from oah.gates.inputs import collect
 from oah.gates.ledger import parse_text
 
@@ -168,7 +169,8 @@ class WalkthroughTest(unittest.TestCase):
         shutil.copytree(EXAMPLE, self.work, ignore=shutil.ignore_patterns("README*.md", "__pycache__"))
         self.remote = self.tmp / "hello-remote.git"
         self.state = self.tmp / "state"
-        self.state.mkdir(mode=0o700)
+        # oah init refuses a state directory that is not owner-only; on Windows mkdir's mode is not a private DACL.
+        unlazy._private_makedirs(self.state)
         home, codex_home, bin_dir = self.tmp / "home", self.tmp / "codex-home", self.tmp / "bin"
         for folder in (home, codex_home, bin_dir):
             folder.mkdir()
