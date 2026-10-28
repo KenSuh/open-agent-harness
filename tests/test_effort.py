@@ -6,6 +6,7 @@ import json
 import unittest
 from importlib import resources
 
+from oah.engines import codex
 from oah.engines.effort import (PROVEN_LABELS, UNVERIFIED, EngineError, HeaderCheck, compare_labels, highest,
                                 load_rules, normalize, parse_rules, resolve, verify_inference)
 
@@ -69,9 +70,9 @@ class HeaderTest(unittest.TestCase):
         self.assertEqual(compare_labels("ultra", "ultra"), ("match", None))
 
 
-def header(effort: str | None, launch: str) -> HeaderCheck:
+def header(effort: str | None, launch: str, model: str | None = "gpt-test-a") -> HeaderCheck:
     status, code = compare_labels(effort, launch)
-    return HeaderCheck(header_effort=effort or UNVERIFIED, status=status, code=code, header_model=None)
+    return HeaderCheck(header_effort=effort or UNVERIFIED, status=status, code=code, header_model=model)
 
 
 class NormalizationTest(unittest.TestCase):
@@ -79,7 +80,7 @@ class NormalizationTest(unittest.TestCase):
         for model in ("gpt-test-a", "gpt-6.1-sol", "unmeasured-model"):
             for label in ("low", "medium", "high", "xhigh", "max"):
                 with self.subTest(model=model, label=label):
-                    check = verify_inference("codex", "0.163.0", model, label, header(label, label), load_rules())
+                    check = verify_inference("codex", "0.163.0", model, label, header(label, label, model), load_rules())
                     self.assertFalse(check.effort_verified)
                     self.assertEqual(check.resolved_inference_effort, UNVERIFIED)
 
@@ -139,7 +140,7 @@ class ShippedRuleTest(unittest.TestCase):
     """The shipped rule: exact Codex 0.164.0, exact models, proven labels only, honest basis."""
 
     def check(self, version, model, launch, effort):
-        return verify_inference("codex", version, model, launch, header(effort, launch), load_rules())
+        return verify_inference("codex", version, model, launch, header(effort, launch, model), load_rules())
 
     def test_proven_labels_verify_for_exact_version_and_models(self):
         for model in ("gpt-6.1-sol", "gpt-6.1-terra"):
@@ -149,6 +150,24 @@ class ShippedRuleTest(unittest.TestCase):
                     self.assertEqual((check.resolved_inference_effort, check.normalization_basis, check.code,
                                       check.effort_verified), (label, SHIPPED_BASIS, None, True))
                     self.assertIn("not observed served effort", check.normalization_basis)
+
+    def test_header_model_must_match_selected_model(self):
+        for reported_model in ("gpt-6.1-sol", None, "unmeasured-model", "gpt-6.1-terra"):
+            with self.subTest(reported_model=reported_model):
+                stderr = "reasoning effort: high\n"
+                if reported_model is not None:
+                    stderr = f"model: {reported_model}\n{stderr}"
+                parsed = codex.check_header(stderr, "high")
+                self.assertEqual((parsed.header_model, parsed.status), (reported_model, "match"))
+                check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", parsed, load_rules())
+                if reported_model == "gpt-6.1-sol":
+                    self.assertEqual((check.resolved_inference_effort, check.effort_verified), ("high", True))
+                else:
+                    self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+                    reason = "no model" if reported_model is None else f"header model {reported_model!r}"
+                    self.assertIn(reason, check.normalization_basis)
+                    if reported_model is not None:
+                        self.assertIn("differs from selected model 'gpt-6.1-sol'", check.normalization_basis)
 
     def test_other_versions_stay_unverified(self):
         for version in ("0.164.1", "0.164.01", "0.164.0-dev", "0.164", "0.164.", "0.164.00", " 0.164.0", "",
@@ -173,11 +192,11 @@ class ShippedRuleTest(unittest.TestCase):
         check = self.check("0.164.0", "gpt-6.1-sol", "high", "medium")
         self.assertEqual((check.resolved_inference_effort, check.code, check.effort_verified),
                          ("medium", "OAH_EFFORT_DOWNGRADED", False))
-        mismatched = header("ultra", "high")
+        mismatched = header("ultra", "high", "gpt-6.1-sol")
         self.assertEqual((mismatched.status, mismatched.code), ("mismatch", "OAH_EFFORT_MISMATCH"))
         check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", mismatched, load_rules())
         self.assertFalse(check.effort_verified)
-        mismatched = header("max", "high")  # higher configuration: a mismatch, never verified
+        mismatched = header("max", "high", "gpt-6.1-sol")  # higher configuration: a mismatch, never verified
         check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", mismatched, load_rules())
         self.assertEqual((mismatched.code, check.effort_verified), ("OAH_EFFORT_MISMATCH", False))
         check = self.check("0.164.0", "gpt-6.1-sol", "high", None)
@@ -186,7 +205,10 @@ class ShippedRuleTest(unittest.TestCase):
     def test_exact_match_ignores_prefix_and_glob(self):
         exact = {"id": "x", "engine": "codex", "match": "exact", "cli_versions": ["0.164.", "*"],
                  "models": ["gpt-*", "*"], "map": {"high": "high"}}
-        self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [exact]), (None, None))
+        model_glob = dict(exact, cli_versions=["0.164.0"])
+        self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [model_glob]), (None, None))
+        version_prefix = dict(exact, models=["gpt-6.1-sol"])
+        self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [version_prefix]), (None, None))
         self.assertEqual(normalize("codex", "*", "*", "high", [exact]), ("high", "x"))  # literal equality only
         for policy in ("prefix", "glob", "Exact", "", None, 1):
             with self.subTest(policy=policy):
@@ -196,6 +218,11 @@ class ShippedRuleTest(unittest.TestCase):
     def test_legacy_rule_without_evidence_keeps_id_basis(self):
         check = verify_inference("codex", "1.2.7", "gpt-test-a", "high", header("high", "high"), RULES)
         self.assertEqual(check.normalization_basis, "test-codex-1.2")
+
+    def test_legacy_rule_with_evidence_keeps_id_basis(self):
+        legacy = dict(RULES[0], evidence={"commit": COMMIT})
+        check = verify_inference("codex", "1.2.7", "gpt-test-a", "high", header("high", "high"), [legacy])
+        self.assertEqual((check.normalization_basis, check.effort_verified), ("test-codex-1.2", True))
 
 
 def shipped_document() -> dict:

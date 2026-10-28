@@ -239,7 +239,7 @@ def _match(engine: str, cli_version: str | None, model: str | None, label: str |
 
 def _basis(rule: Mapping) -> str:
     evidence = rule.get("evidence")
-    if isinstance(evidence, Mapping) and evidence.get("commit"):
+    if rule.get("match") == EXACT and isinstance(evidence, Mapping) and evidence.get("commit"):
         return (f"{rule.get('id')}: expected mapping from CLI source at {evidence['commit']}; "
                 "not observed served effort")
     return rule.get("id") or UNVERIFIED
@@ -257,6 +257,11 @@ def verify_inference(engine: str, cli_version: str | None, model: str | None, la
     """The header-derived inference effort and whether the run counts as effort-verified."""
     if header.status == "unverified":
         return InferenceCheck(UNVERIFIED, "unverified: the header reported no reasoning effort", None, False)
+    if not header.header_model:
+        return InferenceCheck(UNVERIFIED, "unverified: the header reported no model", None, False)
+    if header.header_model != model:
+        return InferenceCheck(UNVERIFIED, f"unverified: header model {header.header_model!r} differs from selected "
+                              f"model {model!r}", None, False)
     launch_value, _ = _match(engine, cli_version, model, launch, rules)
     header_value, rule = _match(engine, cli_version, model, header.header_effort, rules)
     if header_value is None:
