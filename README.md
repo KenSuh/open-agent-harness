@@ -11,6 +11,42 @@
 
 # open-agent-harness (`oah`)
 
+## Purpose: a harness that keeps adapting
+
+`oah` is not meant to be the one perfect harness that everyone adopts as is. It is a worked reference and a
+guideline for building a development environment that fits you and keeps changing as AI changes.
+
+A harness is set up once and then usually left alone, while the models and skills under it keep improving. Rules
+and skills that helped an older model can hold a newer one back from its full ability, and outdated skills can make
+results worse. A good harness flows like water: it keeps up with each new model, drops skills that are no longer
+needed, adds the ones that are, and changes its rules to match.
+
+- **Adapt the parts you need.** If you already use other AI tools or another harness, read how `oah` handles
+  leases, engine stages, evidence gates, the impact map, the wiki and the review loop, and carry over only the
+  ideas that fit your tools. The rules are written down in [`docs/PLAN.md`](docs/PLAN.md) so they can be copied
+  as ideas, not only as code.
+- **Or follow it and make it yours.** If you start from `oah` as it is, treat it as a starting point: change the
+  config, the stages and the rules to match your own goals, and grow your own project wiki and impact map as your
+  code grows. The harness you end up with should be yours, not a copy of ours.
+- **Keep updating it.** Review your models, skills and rules as the tools change. Remove what no longer helps and
+  add what does. `oah` keeps updating too, so that its users can adapt to a changing AI environment together.
+
+So `oah` prefers defaults you can understand and change over checks you cannot turn off. When a rule gets in
+the way of your work or of a newer model, the project treats that as a design problem to fix.
+
+### Why Claude implements and Codex reviews
+
+This split is the author's own setup, based on personal experience rather than a measurement. In my use, Claude
+is good at implementing a task while filling in what a beginner tends to miss, and Codex is good at checking and
+correcting work inside a fixed scope. So I let Claude write the first version, and Codex review, correct and
+re-review it.
+
+### Use it with any AI setup
+
+The `oah` command drives Claude Code and Codex CLI today, but the harness itself is not tied to them. Its parts
+(leases, packets, gates, the review loop, the impact map and the wiki) work with a single AI or with several
+different AIs. Fit them to your own environment, and give each stage to whichever AI works best for you.
+
 `oah` is a small command-line tool that makes **Claude Code** and **Codex CLI** work as one disciplined
 team on your own repository, with **TypeSafe Jev** as an optional judge. It is written for developers and
 small teams who already use git and pull requests and want production-grade review discipline from AI
@@ -56,29 +92,6 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 - [Security](#security)
 - [License and third-party notices](#license-and-third-party-notices)
 - [한국어 소개](#한국어-소개)
-
-## Purpose: a harness that keeps adapting
-
-`oah` is not meant to be the one perfect harness that everyone adopts as is. It is a worked reference and a
-guideline for building a development environment that fits you and keeps changing as AI changes.
-
-A harness is set up once and then usually left alone, while the models and skills under it keep improving. Rules
-and skills that helped an older model can hold a newer one back from its full ability, and outdated skills can make
-results worse. A good harness flows like water: it keeps up with each new model, drops skills that are no longer
-needed, adds the ones that are, and changes its rules to match.
-
-- **Adapt the parts you need.** If you already use other AI tools or another harness, read how `oah` handles
-  leases, engine stages, evidence gates, the impact map, the wiki and the review loop, and carry over only the
-  ideas that fit your tools. The rules are written down in [`docs/PLAN.md`](docs/PLAN.md) so they can be copied
-  as ideas, not only as code.
-- **Or follow it and make it yours.** If you start from `oah` as it is, treat it as a starting point: change the
-  config, the stages and the rules to match your own goals, and grow your own project wiki and impact map as your
-  code grows. The harness you end up with should be yours, not a copy of ours.
-- **Keep updating it.** Review your models, skills and rules as the tools change. Remove what no longer helps and
-  add what does. `oah` keeps updating too, so that its users can adapt to a changing AI environment together.
-
-So `oah` prefers defaults you can understand and change over checks you cannot turn off. When a rule gets in
-the way of your work or of a newer model, the project treats that as a design problem to fix.
 
 ## Next update
 
@@ -308,6 +321,41 @@ graphify, Claude Code and Codex CLI, are listed with their licenses in
 
 ## 한국어 소개
 
+### 이 프로젝트의 목적
+
+`oah`는 모두가 그대로 써야 하는 완벽한 하네스를 내놓는 것이 목적이 아니다. 각자에게 맞고, AI가 바뀌는 만큼
+함께 바뀌는 개발 환경을 만들도록 돕는 참고 구현이자 가이드라인이다.
+
+하네스는 보통 한 번 세팅해 두면 그대로 쓰인다. 그 사이 AI 모델과 스킬은 계속 업데이트된다. 예전 모델에서 잘
+쓰던 규칙과 스킬이 업그레이드된 모델의 최대 성능을 막는 제약이 되기도 하고, 시대에 뒤떨어진 스킬이 오히려
+더 나쁜 결과를 내기도 한다. 좋은 하네스는 흐르는 물처럼 새 모델에 맞춰 계속 바뀐다. 필요 없어진 스킬은
+지우고, 필요한 스킬은 더하고, 규칙도 그에 맞게 고친다.
+
+- **필요한 부분만 가져가 적용한다.** 이미 다른 AI 도구나 다른 하네스를 쓰고 있다면 `oah`가 리스, 단계별
+  엔진, 증거 게이트, 영향 지도, 위키, 리뷰 루프를 어떻게 다루는지 참고해서 자기 도구에 맞는 부분만 옮겨
+  하네스를 업그레이드하면 된다. 규칙은 [`docs/PLAN.md`](docs/PLAN.md)에 글로 적어 두었으니 코드가 아니라
+  생각으로도 가져갈 수 있다.
+- **그대로 따라 하더라도 자기 것으로 키운다.** `oah`를 그대로 시작점으로 삼는다면 설정과 단계, 규칙을 자기
+  개발 목적에 맞게 바꾸고, 코드가 자라는 만큼 자기 프로젝트 위키와 영향 지도를 만들어 가면 된다. 결국 남는
+  하네스는 우리 것을 복사한 것이 아니라 사용자 자신의 것이어야 한다.
+- **계속 업데이트한다.** 도구가 바뀌면 모델과 스킬, 규칙을 다시 살핀다. 더는 도움이 안 되는 것은 지우고
+  도움이 되는 것은 더한다. `oah`도 계속 업데이트하면서 사용자들이 변하는 AI 환경에 함께 적응하도록 돕는다.
+
+그래서 `oah`는 끌 수 없는 검사보다 이해하고 바꿀 수 있는 기본값을 고른다. 규칙이 사용자의 작업이나 새 모델을
+가로막으면 이 프로젝트는 그것을 고쳐야 할 설계 문제로 다룬다.
+
+#### Claude가 구현하고 Codex가 검토하는 이유
+
+이 역할 분담은 만든 사람의 개인적인 경험에서 나온 방식이고, 측정한 결과는 아니다. 내가 써 보니 Claude는 초보자
+입장에서 놓치기 쉬운 부분까지 채워 넣으며 구현하는 데 강했고, Codex는 정해진 범위 안에서 검사하고 고치는 데
+강했다. 그래서 첫 버전은 Claude에게 맡기고 검토와 수정, 재검토는 Codex에게 맡긴다.
+
+#### 어떤 AI 구성에도 맞춰 쓴다
+
+지금 `oah` 명령은 Claude Code와 Codex CLI를 움직이지만, 하네스 자체가 이 둘에 묶여 있지는 않다. 리스, 패킷,
+게이트, 리뷰 루프, 영향 지도, 위키 같은 구성 부분은 AI 하나만 써도, 여러 다른 AI를 함께 써도 그대로 쓸 수
+있다. 자기 환경에 맞추고, 단계마다 자기에게 가장 잘 맞는 AI를 고르면 된다.
+
 ### oah는 무엇인가
 
 `oah`는 **Claude Code**와 **Codex CLI**가 내 저장소에서 규율 있게 한 팀으로 일하도록 돕는 작은 명령줄 도구다.
@@ -338,29 +386,6 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 > [!NOTE]
 > **v0.1.0은 첫 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
 > 지원한다. Linux는 아직 지원하지 않는다.
-
-### 이 프로젝트의 목적
-
-`oah`는 모두가 그대로 써야 하는 완벽한 하네스를 내놓는 것이 목적이 아니다. 각자에게 맞고, AI가 바뀌는 만큼
-함께 바뀌는 개발 환경을 만들도록 돕는 참고 구현이자 가이드라인이다.
-
-하네스는 보통 한 번 세팅해 두면 그대로 쓰인다. 그 사이 AI 모델과 스킬은 계속 업데이트된다. 예전 모델에서 잘
-쓰던 규칙과 스킬이 업그레이드된 모델의 최대 성능을 막는 제약이 되기도 하고, 시대에 뒤떨어진 스킬이 오히려
-더 나쁜 결과를 내기도 한다. 좋은 하네스는 흐르는 물처럼 새 모델에 맞춰 계속 바뀐다. 필요 없어진 스킬은
-지우고, 필요한 스킬은 더하고, 규칙도 그에 맞게 고친다.
-
-- **필요한 부분만 가져가 적용한다.** 이미 다른 AI 도구나 다른 하네스를 쓰고 있다면 `oah`가 리스, 단계별
-  엔진, 증거 게이트, 영향 지도, 위키, 리뷰 루프를 어떻게 다루는지 참고해서 자기 도구에 맞는 부분만 옮겨
-  하네스를 업그레이드하면 된다. 규칙은 [`docs/PLAN.md`](docs/PLAN.md)에 글로 적어 두었으니 코드가 아니라
-  생각으로도 가져갈 수 있다.
-- **그대로 따라 하더라도 자기 것으로 키운다.** `oah`를 그대로 시작점으로 삼는다면 설정과 단계, 규칙을 자기
-  개발 목적에 맞게 바꾸고, 코드가 자라는 만큼 자기 프로젝트 위키와 영향 지도를 만들어 가면 된다. 결국 남는
-  하네스는 우리 것을 복사한 것이 아니라 사용자 자신의 것이어야 한다.
-- **계속 업데이트한다.** 도구가 바뀌면 모델과 스킬, 규칙을 다시 살핀다. 더는 도움이 안 되는 것은 지우고
-  도움이 되는 것은 더한다. `oah`도 계속 업데이트하면서 사용자들이 변하는 AI 환경에 함께 적응하도록 돕는다.
-
-그래서 `oah`는 끌 수 없는 검사보다 이해하고 바꿀 수 있는 기본값을 고른다. 규칙이 사용자의 작업이나 새 모델을
-가로막으면 이 프로젝트는 그것을 고쳐야 할 설계 문제로 다룬다.
 
 ### 다음 업데이트
 
