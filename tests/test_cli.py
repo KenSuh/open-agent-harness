@@ -49,7 +49,7 @@ class CliTest(unittest.TestCase):
     def test_python_m_oah_version(self):
         result = run_oah("--version")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.decode("utf-8").strip(), "oah 0.1.0.dev0")
+        self.assertEqual(result.stdout.decode("utf-8").strip(), "oah 0.1.0")
 
     def test_cli_under_cp949_io_encoding(self):
         work = make_tmp_dir(self)

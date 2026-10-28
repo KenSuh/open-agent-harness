@@ -33,7 +33,7 @@ TMPDIR="$PWD/.tmp/test-tmp" python3.11 -m unittest discover -s tests -t .
 ```
 
 If you have a newer Python as well, run the suite with it too. CI runs the tests on macOS and Windows for every
-pull request to `main`.
+pull request to `main`. Documentation-only pull requests skip the tests; the secret scan still runs.
 
 Before every push, run the privacy scan with gitleaks required. It must print `PRIVACY_SCAN_CLEAN`:
 
