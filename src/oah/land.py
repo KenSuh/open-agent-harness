@@ -4,8 +4,13 @@
 `assess(root, task, env=...)` runs the landing checks in one fixed order, immediately before landing.
 Preconditions are a caller that is not a dispatched worker, a commit at HEAD, clean tracked files, and no untracked
 file that gate evidence hashes as an input (it would not land). Every check then reports `passed`, `failed`,
-`unverified` (CI only) or `skipped` (a check it needs failed). The run is ready only when every check passed or is
-unverified, and the first failure is the headline.
+`unverified` (CI only) or `skipped` (a check it needs failed). The run is ready only when every check passed; the
+first failure is the headline, and unverified CI blocks as `OAH_LAND_CI_UNVERIFIED` (user decision 2026-10-27).
+Unverified CI is never passed. Only a CI exception bound to the exact head lets an unverified-only ci check land:
+`accept_unverified_ci=<reason>` (`oah land --accept-unverified-ci`) or the `[land] ci_unverified = "exception"`
+policy (reason `config policy`). The ci state stays `unverified`, the result is
+`OAH_LAND_READY_WITH_CI_EXCEPTION` (`OAH_LAND_LANDED_WITH_CI_EXCEPTION` after a push), and the exception never
+applies to failed or pending CI.
 
 1. lease: no lease, active or stale, is recorded for this worktree (`OAH_LAND_LEASE_OPEN`).
 2. intent: the task's latest lease binding is `current`, and its packet is committed at HEAD as bound
@@ -29,13 +34,26 @@ unverified, and the first failure is the headline.
    `OAH_LAND_IMPACT_STALE`; one already at HEAD is `OAH_LAND_NOTHING_TO_LAND`.
 8. scan: gitleaks reports nothing in `F..HEAD`. Without gitleaks the check refuses with `OAH_LAND_SCAN_REQUIRED`;
    findings or a scanner error refuse with `OAH_LAND_SCAN_FAILED`. Its output, which names authors, is never shown.
-9. ci: through `gh`, every check run for HEAD completed as success, neutral or skipped (`OAH_LAND_CI_FAILED`,
-   `OAH_LAND_CI_PENDING`). Only absent `gh` or zero check runs is `unverified`; read errors refuse landing.
+9. ci: through `gh`, the check runs and the combined commit statuses of exactly HEAD. For repeated names the
+   latest (highest id) decides. Every result must have completed as success, neutral or skipped (a status as
+   `success`); `failure`/`error` statuses and other conclusions are `OAH_LAND_CI_FAILED`, unfinished ones and read
+   errors `OAH_LAND_CI_PENDING`. Absent `gh`, zero results, or a required check with no result is `unverified`
+   (`OAH_LAND_CI_UNVERIFIED`), which names the missing items.
+
+Configuration (`[land]` in the fetched landing target's committed `.oah/config.toml`, `DEFAULTS`):
+- `ci_unverified = "block"` (default) refuses unverified CI; `"exception"` lands it under a recorded exception with
+  reason `config policy` on every landing. Other values are `OAH_CONFIG_INVALID`.
+- `required_checks = []` lists check-run names or status contexts that must each succeed at HEAD. Empty means the
+  discovered results decide, and zero results is unverified.
+HEAD's policy differences are reported; enabling exception mode or removing a target-required check refuses
+with `OAH_LAND_POLICY_LOOSENED` until the policy change lands separately.
 
 The changed paths are `F..HEAD` when HEAD contains F (exactly what lands). Otherwise they are the review range,
 from the merge-base with the local default ref to HEAD.
 
-`push(root, assessment, env=...)` revalidates local authorization under the state lock, then runs
+`push(root, assessment, env=...)` rechecks CI, then revalidates local authorization under the state lock. A CI
+exception must be durably recorded before pushing; failure refuses with `OAH_LAND_CI_EXCEPTION_RECORD_FAILED`.
+It then runs
 `git push --porcelain --no-follow-tags --no-recurse-submodules --force-with-lease=refs/heads/<branch>:<F> <verified-remote-name>
 <HEAD>:refs/heads/<branch>`. The remote updates the branch only while it still equals F, as one atomic step.
 After a successful push, a fresh fetch must show the default branch at exactly HEAD before reporting landed.
@@ -45,7 +63,11 @@ the outcome explicitly uncertain.
 A17: oah never reads a credential. `gh` and git use their own helpers. Remote URLs, `gh` and `git push` output
 and gitleaks findings are never echoed or stored. `gh` uses an explicit destination selector with its
 `{owner}/{repo}` placeholders. `record` appends SHAs, digests, check names, states and codes to
-`<state>/land/<task>/records.jsonl`, and never messages or paths.
+`<state>/land/<task>/records.jsonl`, and never messages or paths. CI names reported by GitHub are never shown or
+stored; only configured required names are. When a CI exception applies, `record` also appends
+`<state>/land/<task>/ci-exceptions.jsonl`: reason, source, the remote URL without credentials, the full head, the
+unverified items, a CI summary, `git config user.name` (or `unknown`), the code and the UTC time. An exception
+push first appends this authorization with the ready code under the state lock; `record` appends its outcome.
 """
 from __future__ import annotations
 
@@ -69,9 +91,17 @@ from oah.review import summary as evidence
 CHECKS = ("lease", "intent", "review", "gates", "impact", "required-checks", "fast-forward", "scan", "ci")
 PASSED, FAILED, UNVERIFIED, SKIPPED = "passed", "failed", "unverified", "skipped"
 READY = "OAH_LAND_READY"
+READY_WITH_CI_EXCEPTION = "OAH_LAND_READY_WITH_CI_EXCEPTION"
+LANDED_WITH_CI_EXCEPTION = "OAH_LAND_LANDED_WITH_CI_EXCEPTION"
+CI_UNVERIFIED = "OAH_LAND_CI_UNVERIFIED"
+DEFAULTS = {"ci_unverified": "block", "required_checks": []}
+CI_POLICIES = ("block", "exception")
 CI_PASSING = ("success", "neutral", "skipped")
 CI_STATUSES = ("queued", "in_progress", "completed", "waiting", "requested", "pending")
 CI_CONCLUSIONS = (*CI_PASSING, "failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")
+CI_STATUS_OUTCOMES = {"success": PASSED, "failure": FAILED, "error": FAILED, "pending": "pending"}
+CI_KINDS = {"check-runs": ("check_runs", "check-run", "check runs"),
+            "status": ("statuses", "commit-status", "commit statuses")}
 GH_TIMEOUT = 60.0
 GH_PER_PAGE = 100
 GH_PAGES = 10
@@ -265,24 +295,39 @@ class Assessment:
     required: list[dict] = dataclasses.field(default_factory=list)
     checks: list[Check] = dataclasses.field(default_factory=list)
     warnings: list[str] = dataclasses.field(default_factory=list)
+    # reason, source ("flag" or "config"), head, repository, user, unverified, ci; set only for unverified CI
+    ci_exception: dict | None = None
+    land_policy: dict | None = dataclasses.field(default=None, init=False)
 
     _destination: tuple[str, str] | None = dataclasses.field(default=None, init=False, repr=False)
+    _ci_required: tuple[str, ...] = dataclasses.field(default=(), init=False, repr=False)
     _authorization: str | None = dataclasses.field(default=None, init=False, repr=False)
     _git: _GitContext | None = dataclasses.field(default=None, init=False, repr=False)
+    _push_refusal: Check | None = dataclasses.field(default=None, init=False, repr=False)
+
+    def excepted(self, check: Check) -> bool:
+        """Unverified CI that a CI exception for exactly this head lets land; never failed or pending CI."""
+        return (check.name == "ci" and check.state == UNVERIFIED and self.ci_exception is not None
+                and self.ci_exception.get("head") == self.head)
 
     @property
     def ready(self) -> bool:
-        return (tuple(check.name for check in self.checks) == CHECKS
-                and all(check.state in (PASSED, UNVERIFIED) for check in self.checks))
+        return (self._push_refusal is None and tuple(check.name for check in self.checks) == CHECKS
+                and all(check.state == PASSED or self.excepted(check) for check in self.checks))
 
     @property
     def failure(self) -> Check | None:
-        return next((check for check in self.checks if check.state == FAILED), None)
+        """A push refusal, else the first failed check or unexcepted unverified CI."""
+        return (self._push_refusal or next((check for check in self.checks if check.state == FAILED), None)
+                or next((check for check in self.checks
+                         if check.state == UNVERIFIED and not self.excepted(check)), None))
 
     @property
     def code(self) -> str:
         failure = self.failure
-        return failure.code if failure else READY
+        if failure:
+            return failure.code
+        return READY_WITH_CI_EXCEPTION if any(self.excepted(check) for check in self.checks) else READY
 
     def check(self, name: str) -> Check:
         return next(check for check in self.checks if check.name == name)
@@ -295,7 +340,10 @@ class Assessment:
                 "commits": self.commits, "impact": dict(self.impact) if self.impact else None,
                 "git_context": self._git.transport if self._git else None,
                 "required_checks": _required_json(self.required),
+                "land_policy": dict(self.land_policy) if self.land_policy else None,
                 "checks": [check.to_json() for check in self.checks], "ready": self.ready, "code": self.code,
+                "ci_exception": ({"source": self.ci_exception["source"], "head": self.ci_exception["head"]}
+                                 if self.ci_exception else None),
                 "warnings": ["OAH_LAND_IMPACT_WARNING: impact reported a warning; inspect the impact configuration"
                              for _warning in self.warnings]}
 
@@ -866,9 +914,32 @@ def _scan_check(root: pathlib.Path, head: str, reassessed: _Reassessment, env: M
                                                    f"{retry}")
 
 
+def _ci_item(kind: str, item, head: str) -> dict | None:
+    """One validated check run or commit status of head as name and outcome; None when invalid."""
+    if not isinstance(item, dict):
+        return None
+    if kind == "status":
+        name, state = item.get("context"), item.get("state")
+        if not isinstance(name, str) or not name or not isinstance(state, str) or state not in CI_STATUS_OUTCOMES:
+            return None
+        return {"name": name, "outcome": CI_STATUS_OUTCOMES[state], "state": state}
+    if item.get("head_sha") != head:
+        return None
+    status, conclusion, name = item.get("status"), item.get("conclusion"), item.get("name")
+    if (status not in CI_STATUSES or (conclusion is not None and conclusion not in CI_CONCLUSIONS)
+            or (status == "completed" and conclusion is None)
+            or (status != "completed" and conclusion is not None)
+            or (name is not None and not isinstance(name, str))):
+        return None
+    outcome = "pending" if status != "completed" else PASSED if conclusion in CI_PASSING else FAILED
+    return {"name": name, "outcome": outcome, "status": status, "conclusion": conclusion}
+
+
 def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
-                env: Mapping[str, str], destination: str) -> tuple[list[dict], str | None]:
-    """Validated enums and positions for head; read errors retain prior runs and never export gh's strings."""
+                env: Mapping[str, str], destination: str, kind: str = "check-runs") -> tuple[list[dict], str | None]:
+    """Validated outcomes and positions of head's check runs (or commit statuses); read errors retain prior
+    results and never export gh's strings. Names stay internal: they decide reruns and required checks only."""
+    key, singular, plural = CI_KINDS[kind]
     runs: list[dict] = []
     identities: set[int] = set()
     seen = 0
@@ -878,7 +949,7 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
     except ValueError:
         return [], "destination could not be verified"
     for page in range(1, GH_PAGES + 1):
-        endpoint = f"repos/{{owner}}/{{repo}}/commits/{head}/check-runs?per_page={GH_PER_PAGE}&page={page}"
+        endpoint = f"repos/{{owner}}/{{repo}}/commits/{head}/{kind}?per_page={GH_PER_PAGE}&page={page}"
         try:
             result = run_command([*gh, "api", "--hostname", host, "--method", "GET", "-H",
                                   "Accept: application/vnd.github+json", endpoint], timeout=GH_TIMEOUT, cwd=str(root),
@@ -891,96 +962,196 @@ def _check_runs(gh: Sequence[str], root: pathlib.Path, head: str,
             return runs, f"gh exited {result.returncode}"
         try:
             data = json.loads(result.stdout)
-            items = data["check_runs"]
+            items = data[key]
             total = data.get("total_count")
             if not isinstance(items, list):
                 raise TypeError
         except (ValueError, KeyError, TypeError):
-            return runs, "gh did not return valid check-run JSON"
+            return runs, f"gh did not return valid {singular} JSON"
+        if kind == "status" and data.get("sha") != head:
+            return runs, f"gh returned {plural} for another commit"
         invalid = False
         for position, item in enumerate(items, start=seen + 1):
-            if not isinstance(item, dict) or item.get("head_sha") != head:
+            parsed = _ci_item(kind, item, head)
+            if parsed is None:
                 invalid = True
                 continue
-            status, conclusion = item.get("status"), item.get("conclusion")
-            if (status not in CI_STATUSES or (conclusion is not None and conclusion not in CI_CONCLUSIONS)
-                    or (status == "completed" and conclusion is None)
-                    or (status != "completed" and conclusion is not None)):
-                invalid = True
-                continue
-            runs.append({"position": position, "status": status, "conclusion": conclusion})
             identifier = item.get("id")
-            if type(identifier) is not int or identifier <= 0 or identifier in identities:
-                invalid = True
-            else:
+            valid_id = type(identifier) is int and identifier > 0 and identifier not in identities
+            runs.append({"position": position, "kind": kind, "id": identifier if valid_id else None, **parsed})
+            if valid_id:
                 identities.add(identifier)
+            else:
+                invalid = True
         if invalid:
-            return runs, "gh returned invalid check runs"
+            return runs, f"gh returned invalid {plural}"
         # Validate each run before the envelope so bad metadata cannot erase a known failure.
         if type(total) is not int or total < 0 or len(items) > GH_PER_PAGE:
-            return runs, "gh did not return valid check-run JSON"
+            return runs, f"gh did not return valid {singular} JSON"
         if expected_total is None:
             expected_total = total
         if total != expected_total or len(items) != min(GH_PER_PAGE, total - seen):
-            return runs, "check-run pagination was incomplete"
+            return runs, f"{singular} pagination was incomplete"
         seen = len(identities)
         if seen == total:
             return runs, None
-    return runs, "check-run pagination exceeded the supported limit; inspect all runs before landing"
+    return runs, f"{singular} pagination exceeded the supported limit; inspect all {plural} before landing"
 
 
-def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None = None) -> Check:
+def _latest(results: Sequence[dict]) -> list[dict]:
+    """The latest result (highest id) per kind and name; unnamed check runs each count on their own."""
+    latest: dict[tuple[str, str], dict] = {}
+    unnamed = []
+    for item in results:
+        if item["name"] is None:
+            unnamed.append(item)
+            continue
+        key = (item["kind"], item["name"])
+        if key not in latest or (item["id"] or 0) > (latest[key]["id"] or 0):
+            latest[key] = item
+    return sorted([*unnamed, *latest.values()], key=lambda item: item["position"])
+
+
+def _ci_counts(results: Sequence[dict], outcome: str, head: str, verb: str) -> list[str]:
+    parts = []
+    for kind, noun in (("check-runs", "CI check run(s)"), ("status", "commit status(es)")):
+        positions = [str(item["position"]) for item in results if item["kind"] == kind and item["outcome"] == outcome]
+        if positions:
+            parts.append(f"{len(positions)} {noun} {verb} for HEAD {head[:12]} at positions {', '.join(positions)}")
+    return parts
+
+
+def _ci_digest(results: Sequence[dict]) -> str:
+    """Bind latest identities and exact states without exporting discovered names or API order."""
+    identities = sorted(json.dumps({key: value for key, value in item.items() if key != "position"},
+                                   sort_keys=True) for item in _latest(results))
+    return hashlib.sha256(json.dumps(identities).encode("utf-8")).hexdigest()
+
+
+def _unverified_ci(head: str, items: list[dict], detail: dict, retry: str) -> Check:
+    found, steps = [], []
+    for item in items:
+        if item["kind"] == "gh-missing":
+            found.append("gh is not installed, so CI was not checked")
+            steps.append("install gh (oah doctor prints the command), sign in with gh auth login")
+        elif item["kind"] == "no-results":
+            found.append(f"no CI check runs or commit statuses are reported for HEAD {head[:12]}")
+        else:
+            found.append(f"required check {item['name']} has no result for HEAD {head[:12]}")
+    steps.append("push the task branch and let CI run")
+    return Check("ci", UNVERIFIED, CI_UNVERIFIED,
+                 f"CI is unverified, not passed: {'; '.join(found)}. To land, {', '.join(dict.fromkeys(steps))}, "
+                 f"{retry}; or accept unverified CI for this exact HEAD with oah land --accept-unverified-ci "
+                 '"<reason>", which is recorded and never shown as passed', detail)
+
+
+def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None = None,
+              required: Sequence[str] = ()) -> Check:
     from oah.engines.proc import UnsupportedBatchShim
 
     retry = "then run oah land --check again"
+    required = list(required)
+
+    def detail(runs=(), statuses=(), unverified=()):
+        return {"runs": len(runs), "statuses": len(statuses), "required": list(required),
+                "unverified": list(unverified), "results_digest": _ci_digest([*runs, *statuses])}
+
     try:
         gh = find_gh(env)
     except UnsupportedBatchShim:
-        return _failed("ci", "OAH_LAND_CI_PENDING", f"gh needs a supported executable; fix its installation, {retry}")
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"gh needs a supported executable; fix its installation, {retry}",
+                       detail())
     if gh is None:
-        return Check("ci", UNVERIFIED, None, "gh is not installed, so CI was not checked (unverified, not passed); "
-                                             "install it (oah doctor prints the command), sign in with gh auth login, "
-                                             f"push the task branch, {retry}")
+        items = [{"kind": "gh-missing"}]
+        return _unverified_ci(head, items, detail(unverified=items), retry)
     if destination is None:
-        return _failed("ci", "OAH_LAND_CI_PENDING", f"the destination was not assessed; fix the impact check, {retry}")
-    runs, problem = _check_runs(gh, root, head, env, destination)
-    failed = [run for run in runs if run["status"] == "completed" and run["conclusion"] not in CI_PASSING]
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"the destination was not assessed; fix the impact check, {retry}",
+                       detail())
+    runs, run_problem = _check_runs(gh, root, head, env, destination)
+    statuses, status_problem = _check_runs(gh, root, head, env, destination, "status")
+    problem = "; ".join(text for text in (run_problem, status_problem) if text) or None
+    latest = _latest(runs) + _latest(statuses)
+    failed = _ci_counts(latest, FAILED, head, "failed")
     if failed:
-        positions = ", ".join(str(run["position"]) for run in failed)
-        incomplete = "; check-run reading is also incomplete" if problem is not None else ""
+        named = [name for name in required
+                 if any(item["name"] == name and item["outcome"] == FAILED for item in latest)]
+        required_text = f"; required check(s) failed: {', '.join(named)}" if named else ""
+        incomplete = "; CI reading is also incomplete" if problem is not None else ""
         return _failed("ci", "OAH_LAND_CI_FAILED",
-                       f"{len(failed)} CI check run(s) failed for HEAD {head[:12]} at positions {positions}"
-                       f"{incomplete}; inspect the runs, fix them, push, wait for CI, {retry}")
+                       f"{'; '.join(failed)}{required_text}{incomplete}; inspect the runs, fix them, push, wait for "
+                       f"CI, {retry}", detail(runs, statuses))
     if problem is not None:
-        return _failed("ci", "OAH_LAND_CI_PENDING", f"CI check-run reading is incomplete ({problem}); inspect all "
-                       f"check runs and check gh auth status and that the task branch is pushed, {retry}")
-    if not runs:
-        return Check("ci", UNVERIFIED, None, f"no CI check runs are reported for HEAD {head[:12]}, so CI is "
-                                             f"unverified, not passed; push the task branch and let CI run, {retry}")
-    pending = [run for run in runs if run["status"] != "completed"]
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"CI reading is incomplete ({problem}); inspect all check runs "
+                       f"and commit statuses and check gh auth status and that the task branch is pushed, {retry}",
+                       detail(runs, statuses))
+    pending = _ci_counts(latest, "pending", head, "are pending")
     if pending:
-        positions = ", ".join(str(run["position"]) for run in pending)
-        return _failed("ci", "OAH_LAND_CI_PENDING",
-                       f"{len(pending)} CI check run(s) are pending for HEAD {head[:12]} at positions {positions}; "
-                       f"wait for them to finish, {retry}")
-    return _passed("ci", f"{len(runs)} CI check run{'s' if len(runs) != 1 else ''} passed for HEAD {head[:12]}",
-                   {"runs": len(runs)})
+        return _failed("ci", "OAH_LAND_CI_PENDING", f"{'; '.join(pending)}; wait for them to finish, {retry}",
+                       detail(runs, statuses))
+    names = {item["name"] for item in latest}
+    items = ([{"kind": "required-missing", "name": name} for name in required if name not in names]
+             or ([] if latest else [{"kind": "no-results"}]))
+    if items:
+        return _unverified_ci(head, items, detail(runs, statuses, items), retry)
+    shown = [f"{count} {noun}{'s' if count != 1 else ''}" if noun == "CI check run"
+             else f"{count} {noun}{'es' if count != 1 else ''}"
+             for count, noun in ((len(_latest(runs)), "CI check run"), (len(_latest(statuses)), "commit status"))
+             if count]
+    present = f"; required checks present: {', '.join(required)}" if required else ""
+    return _passed("ci", f"{' and '.join(shown)} passed for HEAD {head[:12]}{present}", detail(runs, statuses))
+
+
+def land_settings(config) -> dict:
+    """The `[land]` section over `DEFAULTS`, with the policy and required names validated."""
+    from oah.config import ConfigError
+
+    settings = config.section("land", DEFAULTS)
+    if settings["ci_unverified"] not in CI_POLICIES:
+        raise ConfigError("OAH_CONFIG_INVALID", f'{config._where()}: land.ci_unverified must be "block" or '
+                                                '"exception"; set one of them, or remove it to block unverified CI')
+    names = settings["required_checks"]
+    if not all(isinstance(name, str) and name.strip() for name in names):
+        raise ConfigError("OAH_CONFIG_INVALID", f"{config._where()}: land.required_checks must list check names as "
+                                                "non-empty strings; fix the list, or remove it to use the discovered "
+                                                "CI results")
+    settings["required_checks"] = list(dict.fromkeys(name.strip() for name in names))
+    return settings
+
+
+def _credential_free(url: str) -> str:
+    """The remote URL without userinfo, query or fragment; a local path is kept as given."""
+    if "://" in url:
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+    scp = re.fullmatch(r"[^/@:\\]+@([^/:\\]+:.*)", url, re.DOTALL)
+    return scp[1] if scp else url
+
+
+def _git_user(root: pathlib.Path, env: Mapping[str, str]) -> str:
+    result = run_command([*git_argv(), "-C", str(root), "config", "user.name"], timeout=GH_TIMEOUT, env=dict(env))
+    name = result.stdout.strip() if result.returncode == 0 and not result.timed_out else ""
+    return name or "unknown"
 
 
 # The assessment -------------------------------------------------------------------------------------------
 
 
 def assess(root: pathlib.Path, task: str, *, env: Mapping[str, str], offline: bool = False,
-           home: pathlib.Path | None = None) -> Assessment:
-    """Every landing check for the exact HEAD of root's worktree; preconditions raise LandError."""
+           home: pathlib.Path | None = None, accept_unverified_ci: str | None = None) -> Assessment:
+    """Every landing check for the exact HEAD of root's worktree; preconditions raise LandError.
+
+    `accept_unverified_ci` is the user's reason for landing unverified-only CI at this exact HEAD."""
+    if accept_unverified_ci is not None and not accept_unverified_ci.strip():
+        raise LandError("OAH_USAGE", "--accept-unverified-ci needs a non-empty reason; run oah land again with one")
     with _git_environment_scope(_git_environment(env)):
         git_context = _GitContext(repo_info(pathlib.Path(root)).root, env)
     with _git_environment_scope(git_context.original):
-        return _assess(root, task, env=git_context.original, offline=offline, home=home, git_context=git_context)
+        return _assess(root, task, env=git_context.original, offline=offline, home=home, git_context=git_context,
+                       accept_unverified_ci=accept_unverified_ci)
 
 
-def _assess(root, task, *, env, offline, home, git_context):
-    from oah.config import load_config
+def _assess(root, task, *, env, offline, home, git_context, accept_unverified_ci=None):
+    from oah.config import load_config, parse_config
     from oah.gates.context import DEFAULTS as GATE_DEFAULTS
     from oah.review import context
 
@@ -1018,7 +1189,10 @@ def _assess(root, task, *, env, offline, home, git_context):
     result.checks.append(intent_check)
     result.checks.append(_review_check(root, state, task, head, binding) if binding is not None
                          else _skipped("review", "it needs a current intent binding"))
-    gate_settings = load_config(root).section("gates", GATE_DEFAULTS)
+    config = load_config(root)
+    gate_settings = config.section("gates", GATE_DEFAULTS)
+    proposed_settings = land_settings(config)
+    settings = dict(DEFAULTS)  # No fetched target means impact refuses; HEAD never supplies land policy.
     tools, tools_error = _gate_tools(root, env, home)
     result.checks.append(_gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env))
     with _git_environment_scope(git_context.env):
@@ -1029,10 +1203,22 @@ def _assess(root, task, *, env, offline, home, git_context):
         result.fetched, result.base, result.changed = reassessed.fetched, reassessed.base, reassessed.changed
         result.commits = reassessed.commits
         result.impact = {"worktree": head, "default_branch": reassessed.fetched, "result": reassessed.result}
+        with _git_environment_scope(git_context.env):
+            target_config = parse_config(evidence.committed_bytes(root, reassessed.fetched, ".oah/config.toml")
+                                         or b"", label="landing target configuration")
+        settings = land_settings(target_config)
+        loosened = ((settings["ci_unverified"] == "block" and proposed_settings["ci_unverified"] == "exception")
+                    or not set(settings["required_checks"]).issubset(proposed_settings["required_checks"]))
+        result.land_policy = {"target": reassessed.fetched, "changed": proposed_settings != settings,
+                              "loosened": loosened}
         result.checks.append(_passed("impact", f"{_destination_text(reassessed.remote, reassessed.branch)} fetched at "
                                                f"{reassessed.fetched[:12]}; {len(reassessed.changed)} changed path(s) "
                                                f"reassessed against it and HEAD {head[:12]}; result "
                                                f"{reassessed.result[:12]}", dict(result.impact)))
+        if loosened:
+            result.checks[-1] = _failed("impact", "OAH_LAND_POLICY_LOOSENED",
+                "HEAD loosens the landing target's CI policy; land the policy change separately on the default "
+                "branch, then run oah land again", dict(result.impact))
         seen, unread = (_evidence_by_definition(root, state, task, lease, gate_settings, tools, tools_error, env)
                         if reassessed.newly else ({}, ""))
         result.checks.append(_required_check(result, reassessed, seen, unread))
@@ -1045,8 +1231,20 @@ def _assess(root, task, *, env, offline, home, git_context):
         result.checks.append(_failed("impact", "OAH_LAND_IMPACT_STALE", reassessed.message))
         why = "impact was not reassessed against a freshly fetched default branch"
         result.checks += [_skipped("required-checks", why), _skipped("fast-forward", why), _skipped("scan", why)]
-    result.checks.append(_ci_check(root, head, env, destination=(result._destination[1]
-                                                              if result._destination else None)))
+    result._ci_required = tuple(settings["required_checks"])
+    ci = _ci_check(root, head, env, destination=result._destination[1] if result._destination else None,
+                   required=result._ci_required)
+    result.checks.append(ci)
+    if ci.state == UNVERIFIED and (accept_unverified_ci is not None or settings["ci_unverified"] == "exception"):
+        source, reason = (("flag", accept_unverified_ci.strip()) if accept_unverified_ci is not None
+                          else ("config", "config policy"))
+        gh = "missing" if {"kind": "gh-missing"} in ci.detail["unverified"] else "found"
+        result.ci_exception = {
+            "reason": reason, "source": source, "head": head,
+            "repository": _credential_free(result._destination[0]) if result._destination else None,
+            "user": _git_user(root, env), "unverified": list(ci.detail["unverified"]),
+            "ci": {"gh": gh, "runs": ci.detail["runs"], "statuses": ci.detail["statuses"],
+                   "required": list(ci.detail["required"])}}
     return result
 
 
@@ -1137,6 +1335,25 @@ def _revalidate_local(root: pathlib.Path, assessment: Assessment, env: Mapping[s
     return None
 
 
+def _revalidate_ci(root: pathlib.Path, assessment: Assessment, env: Mapping[str, str]) -> Check | None:
+    """Read CI again after confirmation; any change from the assessed result refuses."""
+    before = assessment.check("ci")
+    now = _ci_check(root, assessment.head, env, required=assessment._ci_required,
+                    destination=assessment._destination[1] if assessment._destination else None)
+    assessment.checks = [now if check.name == "ci" else check for check in assessment.checks]
+    changed = (now.state, now.code, now.detail) != (before.state, before.code, before.detail)
+    excepted = assessment.excepted(now)
+    if changed:
+        assessment.ci_exception = None
+    if now.state == FAILED or (now.state == UNVERIFIED and not excepted):
+        return now
+    if changed:
+        return _failed("ci", "OAH_LAND_AUTHORIZATION_CHANGED",
+                       "CI results for HEAD changed while awaiting confirmation; read the fresh checks with oah land "
+                       "--merge and confirm again")
+    return None
+
+
 def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
     """Revalidate after confirmation and serialize local authorization through the conditional push."""
     if not (assessment.ready and assessment.remote and assessment.branch and assessment.fetched):
@@ -1157,15 +1374,34 @@ def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) 
                         or not git_context.unchanged(env)):
                     return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
                                   "the destination or git transport changed; run oah land --merge and confirm again")
-                refusal = _revalidate_local(root, assessment, git_context.original)
+                refusal = (_revalidate_ci(root, assessment, git_context.original)
+                           or _revalidate_local(root, assessment, git_context.original))
                 if refusal is not None:
+                    assessment._push_refusal = refusal
                     return Pushed(False, refusal.code, refusal.message)
                 if (assessment._destination is None or not git_context.unchanged(env)
                         or _destination(root, assessment.remote, git_context.env) != assessment._destination):
                     return Pushed(False, "OAH_LAND_DESTINATION_CHANGED",
                                   "the destination changed after assessment; run oah land --merge and confirm again")
+                if assessment.code == READY_WITH_CI_EXCEPTION:
+                    from oah.atomic import StateCorrupt
+
+                    try:
+                        _record_ci_exception(state, assessment, "merge", assessment.code,
+                                             dt.datetime.now(dt.timezone.utc))
+                    except (LandError, StateCorrupt, OSError):
+                        refusal = _failed("ci", "OAH_LAND_CI_EXCEPTION_RECORD_FAILED",
+                            "the CI exception could not be durably recorded; nothing was pushed. Repair the "
+                            "exception log and check state permissions and free space, then run oah land --merge again")
+                        assessment._push_refusal = refusal
+                        return Pushed(False, refusal.code, refusal.message)
                 with _git_environment_scope(git_context.env):
-                    return _push_verified(root, assessment, env=git_context.env)
+                    pushed = _push_verified(root, assessment, env=git_context.env)
+                if pushed.landed and assessment.code == READY_WITH_CI_EXCEPTION:
+                    return dataclasses.replace(pushed, code=LANDED_WITH_CI_EXCEPTION, message=(
+                        f"{pushed.message}. CI was unverified, not passed: it landed under the recorded CI "
+                        "exception"))
+                return pushed
     except LandError as exc:
         if exc.code != "OAH_LAND_HISTORY_UNSUPPORTED":
             raise
@@ -1229,7 +1465,9 @@ def _push_verified(root: pathlib.Path, assessment: Assessment, *, env: Mapping[s
 
 def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushed | None,
            *, now: dt.datetime | None = None) -> None:
-    """Append one landing record: SHAs, digests, check names, states and codes; never messages or paths."""
+    """Append one landing record: SHAs, digests, check names, states and codes; never messages or paths.
+
+    A landing that a CI exception made ready also appends its exception record beside it."""
     from oah.atomic import append_jsonl
     from oah.lockfile import StateLock
     from oah.runs import RunError, _contained_path
@@ -1242,6 +1480,7 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
             "git_context": assessment._git.transport if assessment._git else None,
             "impact_result": assessment.impact["result"] if assessment.impact else None,
             "required_checks": _required_json(assessment.required),
+            "land_policy": dict(assessment.land_policy) if assessment.land_policy else None,
             "checks": [{"name": check.name, "state": check.state, "code": check.code} for check in assessment.checks],
             "ready": assessment.ready, "code": pushed.code if pushed else assessment.code,
             "landed": pushed.landed if pushed else False, "remote_sha": pushed.remote_sha if pushed else None}
@@ -1249,6 +1488,21 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
         path = _contained_path(state, "land", assessment.task, "records.jsonl")
         with StateLock(_contained_path(state, ".lock")):
             append_jsonl(path, line)
+            if assessment.ready and assessment.code == READY_WITH_CI_EXCEPTION:
+                _record_ci_exception(state, assessment, mode, line["code"], moment)
     except RunError:
         raise LandError("OAH_RUN_PATH_UNSAFE", "the landing record path is unsafe; remove linked state paths and "
                         "run oah land again") from None
+
+
+def _record_ci_exception(state: pathlib.Path, assessment: Assessment, mode: str, code: str,
+                         moment: dt.datetime) -> None:
+    """Append and fsync under the caller's state lock, before pushing or when recording its outcome."""
+    from oah.atomic import append_jsonl
+
+    exception = assessment.ci_exception
+    noted = {"schema": RECORD_SCHEMA, "at": moment.isoformat().replace("+00:00", "Z"), "mode": mode, "code": code,
+             "reason": exception["reason"], "source": exception["source"],
+             "repository": exception["repository"], "head": exception["head"],
+             "unverified": exception["unverified"], "ci": exception["ci"], "user": exception["user"]}
+    append_jsonl(_state_path(state, "land", assessment.task, "ci-exceptions.jsonl"), noted)
