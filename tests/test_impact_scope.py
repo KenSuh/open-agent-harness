@@ -79,6 +79,65 @@ class GraphStatusTest(unittest.TestCase):
                 self.assertEqual(query.read_graph(repo, settings, commit)[:2],
                                  ({"files": {}, "edges": []}, "analysed"))
 
+    def test_graph_schema_table(self):
+        repo = make_git_repo(self)
+        settings = effective(None)
+        commit = "a" * 40
+        nodes = [{"id": "n1", "source_file": "a.py"}, {"id": "n2", "file": "b.py"}]
+        edge = {"source": "n1", "target": "n2"}
+        for edge_key in ("links", "edges"):
+            cases = [("valid", {"nodes": nodes, edge_key: [edge]}, True)]
+            for bad in (None, {}, "", 1):
+                cases += [("nodes collection", {"nodes": bad, edge_key: []}, False),
+                          ("edge collection", {"nodes": nodes, edge_key: bad}, False)]
+            for bad_node in (None, [], {}, {"id": None}, {"id": 1}, {"id": {}}, {"id": []}):
+                cases.append(("node record", {"nodes": nodes + [bad_node], edge_key: [edge]}, False))
+            for key in ("source_file", "file", "path"):
+                for bad in (None, 1, False, {}, []):
+                    # Even an unused path alias must be well formed: reject the whole document.
+                    bad_node = dict(nodes[0], **{key: bad})
+                    cases.append((key, {"nodes": [bad_node, nodes[1]], edge_key: [edge]}, False))
+            for key in ("source", "target"):
+                for bad in ({"id": "n1"}, None, "undeclared", 1, False, []):
+                    bad_edge = dict(edge, **{key: bad})
+                    cases.append((key, {"nodes": nodes, edge_key: [edge, bad_edge]}, False))
+            for label, body, valid in cases:
+                with self.subTest(edge_key=edge_key, case=label, body=body):
+                    write_graph(repo, dict(body, commit=commit))
+                    graph, status, reason = query.read_graph(repo, settings, commit)
+                    self.assertEqual(status, "analysed" if valid else "unavailable")
+                    self.assertEqual(graph is None, not valid)
+                    self.assertEqual(query.load_graph(repo, settings) is None, not valid)
+                    if valid:
+                        self.assertEqual(graph, {"files": {"n1": "a.py", "n2": "b.py"},
+                                                 "edges": [["n1", "n2", ""]]})
+                    else:
+                        self.assertTrue(reason.startswith("OAH_IMPACT_GRAPH_UNAVAILABLE:"), reason)
+                        self.assertIn("oah graph update", reason)
+
+    def test_graph_loader_preserves_commit_free_and_pathless_nodes(self):
+        repo = make_git_repo(self)
+        settings = effective(None)
+        nodes = [{"id": "n1", "source_file": "pkg\\a.py"}, {"id": "n2", "file": "b.py"},
+                 {"id": "n3", "path": "c.py"}, {"id": "n4"}]
+        links = [{"source": "n1", "target": node["id"]} for node in nodes[1:]]
+        for edge_key in ("links", "edges"):
+            for recorded in (None, "a" * 40):
+                with self.subTest(edge_key=edge_key, commit=recorded):
+                    body = {"nodes": nodes, edge_key: links}
+                    if recorded is not None:
+                        body["commit"] = recorded
+                    write_graph(repo, body)
+                    graph = query.load_graph(repo, settings)
+                    self.assertIsNotNone(graph)
+                    self.assertEqual(graph["files"], {"n1": "pkg/a.py", "n2": "b.py", "n3": "c.py"})
+                    rows = query.query(data_with({path: "code" for path in graph["files"].values()}),
+                                       ["pkg/a.py"], graph=graph, settings=settings)
+                    self.assertEqual(sorted((row.layer, row.source) for row in rows),
+                                     [("graph", "b.py"), ("graph", "c.py")])
+                    self.assertEqual(query.read_graph(repo, settings, "a" * 40)[1],
+                                     "stale-unknown" if recorded is None else "analysed")
+
     def test_ambiguous_report_matches_lexical_skip(self):
         files = {f"pkg{i}/util.py": "code" for i in range(4)}
         files["docs/a.md"] = "doc"
@@ -418,6 +477,33 @@ class ScopeCliTest(unittest.TestCase):
                     self.assertIn("oah graph update", gaps[0]["detail"])
                     self.assertEqual([item["check"] for item in report["fallback"]], ["python -m unittest"])
                     self.assertIn("re-run (fallback): python -m unittest", text)
+
+    def test_invalid_graph_endpoints_keep_fallback_without_partial_rows(self):
+        repo = self.repo({"db/migrations/001_init.sql": b"-- no SQL statements\n",
+                          ".oah/config.toml": b'[impact]\nfallback_checks = ["python -m unittest"]\n'})
+        commit = head(repo)
+        nodes = [{"id": "n1", "source_file": "tools/check.py"}, {"id": "n2", "file": "src/app.py"}]
+        edge = {"source": "n1", "target": "n2"}
+        for edge_key in ("links", "edges"):
+            for key in ("source", "target"):
+                for bad in ({"id": "n1"}, None, "undeclared"):
+                    with self.subTest(edge_key=edge_key, endpoint=key, value=bad):
+                        write_graph(repo, {"nodes": nodes, edge_key: [edge, dict(edge, **{key: bad})],
+                                           "commit": commit})
+                        report, text = self.impact(repo, "tools/check.py")
+                        block = self.assert_shape(report, text)
+                        self.assertTrue(all(layer["status"] == "analysed"
+                                            for name, layer in block["layers"].items() if name != "graph"))
+                        self.assertFalse(block["complete"])
+                        self.assertEqual(block["layers"]["graph"]["status"], "unavailable")
+                        gaps = [item for item in block["unanalysed"] if item.get("layer") == "graph"]
+                        self.assertEqual(len(gaps), 1)
+                        self.assertEqual(gaps[0]["detail"], "graph: " + block["layers"]["graph"]["reason"])
+                        self.assertTrue(block["layers"]["graph"]["reason"].startswith("OAH_IMPACT_GRAPH_UNAVAILABLE:"))
+                        self.assertIn("oah graph update", gaps[0]["detail"])
+                        self.assertFalse(any(row["layer"] == "graph" for row in report["rows"]))
+                        self.assertEqual([item["check"] for item in report["fallback"]], ["python -m unittest"])
+                        self.assertIn("re-run (fallback): python -m unittest", text)
 
     def test_ambiguous_skip_with_count(self):
         repo = self.repo({f"pkg{i}/shared.py": f"N = {i}\n" for i in range(4)})

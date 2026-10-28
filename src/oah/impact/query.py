@@ -169,19 +169,26 @@ def read_graph(root: pathlib.Path, settings: Mapping, commit: str | None = None)
     name = settings["graph_file"]
     try:
         raw = json.loads((pathlib.Path(root) / name).read_bytes().decode("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid graph document")
         nodes = raw.get("nodes")
         links = raw.get("links", raw.get("edges"))
         if (not isinstance(nodes, list) or not isinstance(links, list)
-                or any(not isinstance(node, dict) or "id" not in node for node in nodes)
-                or any(not isinstance(edge, dict) or "source" not in edge or "target" not in edge
-                       for edge in links)):
+                or any(not isinstance(node, dict) or not isinstance(node.get("id"), str)
+                       or any(key in node and not isinstance(node[key], str)
+                              for key in ("source_file", "file", "path")) for node in nodes)):
             raise ValueError("invalid graph collections")
+        declared = {node["id"] for node in nodes}
+        if any(not isinstance(edge, dict)
+               or any(not isinstance(edge.get(key), str) or edge[key] not in declared
+                      for key in ("source", "target")) for edge in links):
+            raise ValueError("invalid graph endpoints")
         files = {}
         for node in nodes:
             file = node.get("source_file") or node.get("file") or node.get("path")
             if isinstance(file, str):
-                files[str(node["id"])] = file.replace("\\", "/")
-        edges = [[str(e["source"]), str(e["target"]), str(e.get("relation") or e.get("label") or "")]
+                files[node["id"]] = file.replace("\\", "/")
+        edges = [[e["source"], e["target"], str(e.get("relation") or e.get("label") or "")]
                  for e in links]
         meta = raw.get("graph")
         recorded = raw.get("commit") or (meta.get("commit") if isinstance(meta, dict) else None)
