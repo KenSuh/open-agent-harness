@@ -1,10 +1,14 @@
 # effort 규칙 검사 — 지원 목록에서 effort 를 고르고(highest 는 ultra 를 건너뜀), 헤더 비교와 버전별 정규화가 낮춤·불일치·미확인을 정직하게 남기는지 본다.
 from __future__ import annotations
 
+import copy
+import json
 import unittest
+from importlib import resources
 
-from oah.engines.effort import (UNVERIFIED, EngineError, HeaderCheck, compare_labels, highest, load_rules, normalize,
-                                resolve, verify_inference)
+from oah.engines import codex
+from oah.engines.effort import (PROVEN_LABELS, UNVERIFIED, EngineError, HeaderCheck, compare_labels, highest,
+                                load_rules, normalize, parse_rules, resolve, verify_inference)
 
 RULES = [
     {"id": "test-codex-1.2", "engine": "codex", "cli_versions": ["1.2."], "models": ["gpt-test*"],
@@ -66,9 +70,9 @@ class HeaderTest(unittest.TestCase):
         self.assertEqual(compare_labels("ultra", "ultra"), ("match", None))
 
 
-def header(effort: str | None, launch: str) -> HeaderCheck:
+def header(effort: str | None, launch: str, model: str | None = "gpt-test-a") -> HeaderCheck:
     status, code = compare_labels(effort, launch)
-    return HeaderCheck(header_effort=effort or UNVERIFIED, status=status, code=code, header_model=None)
+    return HeaderCheck(header_effort=effort or UNVERIFIED, status=status, code=code, header_model=model)
 
 
 class NormalizationTest(unittest.TestCase):
@@ -76,7 +80,7 @@ class NormalizationTest(unittest.TestCase):
         for model in ("gpt-test-a", "gpt-6.1-sol", "unmeasured-model"):
             for label in ("low", "medium", "high", "xhigh", "max"):
                 with self.subTest(model=model, label=label):
-                    check = verify_inference("codex", "0.163.0", model, label, header(label, label), load_rules())
+                    check = verify_inference("codex", "0.163.0", model, label, header(label, label, model), load_rules())
                     self.assertFalse(check.effort_verified)
                     self.assertEqual(check.resolved_inference_effort, UNVERIFIED)
 
@@ -118,10 +122,197 @@ class NormalizationTest(unittest.TestCase):
 
     def test_shipped_rules_load_and_leave_ultra_unknown(self):
         rules = load_rules()
-        self.assertEqual(rules, [])  # no version/model mapping has recorded evidence yet
+        self.assertTrue(rules)  # every shipped rule is exact and evidence-backed (intent nrm)
         for rule in rules:
-            self.assertEqual(set(rule) - {"id", "engine", "cli_versions", "models", "map", "note"}, set())
+            self.assertEqual(set(rule) - {"id", "engine", "match", "cli_versions", "models", "map", "evidence",
+                                          "assumptions", "note"}, set())
+            self.assertEqual(rule["match"], "exact")
+            self.assertEqual(rule["evidence"]["kind"], "public-source")
             self.assertNotIn("ultra", rule["map"])
+
+
+COMMIT = "6aaac694803004a63c6f393d153c96d22521a6b9"
+SHIPPED_ID = "codex-0.164.0-gpt-6.1"
+SHIPPED_BASIS = f"{SHIPPED_ID}: expected mapping from CLI source at {COMMIT}; not observed served effort"
+
+
+class ShippedRuleTest(unittest.TestCase):
+    """The shipped rule: exact Codex 0.164.0, exact models, proven labels only, honest basis."""
+
+    def check(self, version, model, launch, effort):
+        return verify_inference("codex", version, model, launch, header(effort, launch, model), load_rules())
+
+    def test_proven_labels_verify_for_exact_version_and_models(self):
+        for model in ("gpt-6.1-sol", "gpt-6.1-terra"):
+            for label in ("low", "medium", "high", "xhigh", "max"):
+                with self.subTest(model=model, label=label):
+                    check = self.check("0.164.0", model, label, label)
+                    self.assertEqual((check.resolved_inference_effort, check.normalization_basis, check.code,
+                                      check.effort_verified), (label, SHIPPED_BASIS, None, True))
+                    self.assertIn("not observed served effort", check.normalization_basis)
+
+    def test_header_model_must_match_selected_model(self):
+        for reported_model in ("gpt-6.1-sol", None, "unmeasured-model", "gpt-6.1-terra"):
+            with self.subTest(reported_model=reported_model):
+                stderr = "reasoning effort: high\n"
+                if reported_model is not None:
+                    stderr = f"model: {reported_model}\n{stderr}"
+                parsed = codex.check_header(stderr, "high")
+                self.assertEqual((parsed.header_model, parsed.status), (reported_model, "match"))
+                check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", parsed, load_rules())
+                if reported_model == "gpt-6.1-sol":
+                    self.assertEqual((check.resolved_inference_effort, check.effort_verified), ("high", True))
+                else:
+                    self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+                    reason = "no model" if reported_model is None else f"header model {reported_model!r}"
+                    self.assertIn(reason, check.normalization_basis)
+                    if reported_model is not None:
+                        self.assertIn("differs from selected model 'gpt-6.1-sol'", check.normalization_basis)
+
+    def test_other_versions_stay_unverified(self):
+        for version in ("0.164.1", "0.164.01", "0.164.0-dev", "0.164", "0.164.", "0.164.00", " 0.164.0", "",
+                        None, "0.163.0", "1.0.164.0"):
+            with self.subTest(version=version):
+                check = self.check(version, "gpt-6.1-sol", "medium", "medium")
+                self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+                self.assertTrue(check.normalization_basis.startswith("unverified:"))
+                self.assertEqual(normalize("codex", version, "gpt-6.1-sol", "medium", load_rules()), (None, None))
+
+    def test_other_models_and_unproven_labels_stay_unverified(self):
+        for model, label in (("gpt-6.1-sol-mini", "medium"), ("gpt-6.1", "medium"), ("GPT-6.1-SOL", "medium"),
+                             ("gpt-6.1-luna", "high"), ("gpt-6-sol", "high"), ("gpt-6.1-sol", "ultra"),
+                             ("gpt-6.1-sol", "persistent"), ("gpt-6.1-terra", "none"),
+                             ("gpt-6.1-terra", "minimal"), ("gpt-6.1-sol", "turbo")):
+            with self.subTest(model=model, label=label):
+                check = self.check("0.164.0", model, label, label)
+                self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+        self.assertEqual(normalize("claude", "0.164.0", "gpt-6.1-sol", "high", load_rules()), (None, None))
+
+    def test_downgraded_and_mismatched_headers_still_fail(self):
+        check = self.check("0.164.0", "gpt-6.1-sol", "high", "medium")
+        self.assertEqual((check.resolved_inference_effort, check.code, check.effort_verified),
+                         ("medium", "OAH_EFFORT_DOWNGRADED", False))
+        mismatched = header("ultra", "high", "gpt-6.1-sol")
+        self.assertEqual((mismatched.status, mismatched.code), ("mismatch", "OAH_EFFORT_MISMATCH"))
+        check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", mismatched, load_rules())
+        self.assertFalse(check.effort_verified)
+        mismatched = header("max", "high", "gpt-6.1-sol")  # higher configuration: a mismatch, never verified
+        check = verify_inference("codex", "0.164.0", "gpt-6.1-sol", "high", mismatched, load_rules())
+        self.assertEqual((mismatched.code, check.effort_verified), ("OAH_EFFORT_MISMATCH", False))
+        check = self.check("0.164.0", "gpt-6.1-sol", "high", None)
+        self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+
+    def test_exact_match_ignores_prefix_and_glob(self):
+        exact = {"id": "x", "engine": "codex", "match": "exact", "cli_versions": ["0.164.", "*"],
+                 "models": ["gpt-*", "*"], "map": {"high": "high"}}
+        model_glob = dict(exact, cli_versions=["0.164.0"])
+        self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [model_glob]), (None, None))
+        version_prefix = dict(exact, models=["gpt-6.1-sol"])
+        self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [version_prefix]), (None, None))
+        self.assertEqual(normalize("codex", "*", "*", "high", [exact]), ("high", "x"))  # literal equality only
+        for policy in ("prefix", "glob", "Exact", "", None, 1):
+            with self.subTest(policy=policy):
+                rule = dict(exact, match=policy, cli_versions=["0.164.0"], models=["gpt-6.1-sol"])
+                self.assertEqual(normalize("codex", "0.164.0", "gpt-6.1-sol", "high", [rule]), (None, None))
+
+    def test_legacy_rule_without_evidence_keeps_id_basis(self):
+        check = verify_inference("codex", "1.2.7", "gpt-test-a", "high", header("high", "high"), RULES)
+        self.assertEqual(check.normalization_basis, "test-codex-1.2")
+
+    def test_legacy_rule_with_evidence_keeps_id_basis(self):
+        legacy = dict(RULES[0], evidence={"commit": COMMIT})
+        check = verify_inference("codex", "1.2.7", "gpt-test-a", "high", header("high", "high"), [legacy])
+        self.assertEqual((check.normalization_basis, check.effort_verified), ("test-codex-1.2", True))
+
+
+def shipped_document() -> dict:
+    text = resources.files("oah").joinpath("templates/engines/normalization.json").read_text(encoding="utf-8")
+    return json.loads(text)
+
+
+class ParseRulesTest(unittest.TestCase):
+    """`load_rules` refuses any shipped rule that is not exact, evidence-backed and proven."""
+
+    def refused(self, document, needle: str) -> None:
+        with self.assertRaises(EngineError) as ctx:
+            parse_rules(json.dumps(document))
+        self.assertEqual(ctx.exception.code, "OAH_NORMALIZATION_RULE_INVALID")
+        self.assertIn(needle, str(ctx.exception))
+        self.assertIn("reinstall oah", str(ctx.exception))
+
+    def mutated(self, change) -> dict:
+        document = copy.deepcopy(shipped_document())
+        change(document["rules"][0])
+        return document
+
+    def test_shipped_file_parses_and_matches_load_rules(self):
+        document = shipped_document()
+        self.assertEqual(parse_rules(json.dumps(document)), load_rules())
+        self.assertEqual(document["version"], 2)
+        (rule,) = load_rules()
+        self.assertEqual((rule["id"], rule["cli_versions"], rule["models"]),
+                         (SHIPPED_ID, ["0.164.0"], ["gpt-6.1-sol", "gpt-6.1-terra"]))
+        self.assertEqual(rule["map"], {label: label for label in PROVEN_LABELS})
+        self.assertEqual(PROVEN_LABELS, ("low", "medium", "high", "xhigh", "max"))
+        evidence = rule["evidence"]
+        self.assertEqual((evidence["kind"], evidence["repository"], evidence["commit"]),
+                         ("public-source", "openai/codex", COMMIT))
+        for reference in ("codex-rs/core/src/config/mod.rs:1039-1041", "codex-rs/core/src/client.rs:957-976",
+                          "codex-rs/exec/src/event_processor_with_human_output.rs:461-469"):
+            self.assertIn(reference, evidence["references"])
+        self.assertEqual(set(rule["assumptions"]), {"explicit-supported-effort", "fresh-codex-exec-session",
+                                                    "no-prior-runtime-effort-pin"})
+
+    def test_evidence_less_rule_refuses(self):
+        self.refused(self.mutated(lambda rule: rule.pop("evidence")), "evidence")
+        for field in ("kind", "repository", "commit", "references"):
+            with self.subTest(field=field):
+                self.refused(self.mutated(lambda rule: rule["evidence"].pop(field)), "evidence")
+        for field, value in (("kind", "observed"), ("repository", ""), ("commit", COMMIT[:12]),
+                             ("commit", COMMIT.upper()), ("commit", "g" * 40), ("references", []),
+                             ("references", ["codex-rs/core/src/client.rs"]), ("references", ["client.rs:x"])):
+            with self.subTest(field=field, value=value):
+                self.refused(self.mutated(lambda rule: rule["evidence"].__setitem__(field, value)), "evidence")
+        self.refused(self.mutated(lambda rule: rule.pop("assumptions")), "assumptions")
+        self.refused(self.mutated(lambda rule: rule.__setitem__("assumptions", ["fresh-codex-exec-session"])),
+                     "assumptions")
+
+    def test_wildcard_or_prefix_version_refuses(self):
+        for versions in (["*"], ["0.164."], ["0.164"], ["0.164.*"], ["0.164.01"], ["0.164.0-dev"], [""], [],
+                         "0.164.0", [0.164]):
+            with self.subTest(versions=versions):
+                self.refused(self.mutated(lambda rule: rule.__setitem__("cli_versions", versions)), "cli_versions")
+        for match in (None, "prefix", "Exact"):
+            with self.subTest(match=match):
+                self.refused(self.mutated(lambda rule: rule.__setitem__("match", match)), "match")
+        self.refused(self.mutated(lambda rule: rule.pop("match")), "match")
+
+    def test_wildcard_model_refuses(self):
+        for models in (["gpt-6.1-*"], ["*"], ["gpt-6.1-so?"], ["gpt-6.1-[st]*"], [""], [], "gpt-6.1-sol"):
+            with self.subTest(models=models):
+                self.refused(self.mutated(lambda rule: rule.__setitem__("models", models)), "models")
+
+    def test_unproven_or_non_identity_label_refuses(self):
+        for label, value in (("ultra", "xhigh"), ("persistent", "none"), ("none", "none"), ("minimal", "minimal"),
+                             ("turbo", "turbo"), ("high", "xhigh")):
+            with self.subTest(label=label):
+                self.refused(self.mutated(lambda rule: rule["map"].__setitem__(label, value)), "map")
+        self.refused(self.mutated(lambda rule: rule.__setitem__("map", {})), "map")
+
+    def test_malformed_document_refuses(self):
+        self.refused({"version": 1, "rules": []}, "version")
+        self.refused({"rules": []}, "version")
+        self.refused({"version": 2}, "rules")
+        self.refused({"version": 2, "rules": {}}, "rules")
+        self.refused(self.mutated(lambda rule: rule.__setitem__("extra", 1)), "extra")
+        self.refused(self.mutated(lambda rule: rule.__setitem__("engine", "claude")), "engine")
+        self.refused(self.mutated(lambda rule: rule.__setitem__("id", "")), "id")
+        document = shipped_document()
+        document["rules"].append(copy.deepcopy(document["rules"][0]))
+        self.refused(document, "duplicate")
+        with self.assertRaises(EngineError) as ctx:
+            parse_rules("{not json")
+        self.assertEqual(ctx.exception.code, "OAH_NORMALIZATION_RULE_INVALID")
 
 
 if __name__ == "__main__":
