@@ -23,7 +23,108 @@ def prepare(project, stage="correction", **fields):
                         keychain=NoKeychain())
 
 
+def advance_budget_base(project):
+    """Move the default merge-base from unlimited A to limited B; HEAD omits the limit."""
+    config = project.repo / ".oah/config.toml"
+    original = config.read_bytes()
+    base = project.commit({".oah/config.toml": original + b"[review]\nmax_rounds = 1\n"})
+    project.commit({".oah/config.toml": original})
+    git(project.repo, "update-ref", "refs/remotes/origin/main", base)
+    return base
+
+
 class BudgetGateTest(unittest.TestCase):
+    def test_changed_default_base_limit_reaches_every_paid_path(self):
+        for mode in ("initial", "correction", "review-call", "background", "fix", "review", "explicit-review"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                project.changes_requested()
+                advance_budget_base(project)
+                if mode in ("fix", "review", "explicit-review"):
+                    action = project.fix if mode == "fix" else lambda: project.review(
+                        **({"base": project.base} if mode == "explicit-review" else {}))
+                    with self.assertRaises(ReviewError) as caught:
+                        action()
+                    self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                else:
+                    stage = "review" if mode == "review-call" else "correction" if mode == "background" else mode
+                    args = ["call", "codex", "--stage", stage, "--task", "t1", "--tier", "low"]
+                    if stage == "initial":
+                        args.append("--override-stage")
+                    if mode == "background":
+                        args.append("--background")
+                    done = oah(project, *args)
+                    self.assertEqual(done.returncode, 1, done.stderr)
+                    self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
+                self.assertIn(1, [line.get("max_rounds") for line in receipts.read_round_log(project.state, "t1")])
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+
+    def test_changed_default_base_limit_is_rechecked_at_launch(self):
+        for mode in ("foreground", "background", "background-handoff"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                project.review()
+                pending = prepare(project, tier="low")
+                checked = call.check_prepared
+
+                def change_after_check(prepared):
+                    checked(prepared)
+                    advance_budget_base(project)
+
+                if mode != "background-handoff":
+                    advance_budget_base(project)
+                with mock.patch.object(call, "check_prepared", side_effect=change_after_check
+                                       if mode == "background-handoff" else checked):
+                    with self.assertRaises(Exception) as caught:
+                        launch = call.execute if mode == "foreground" else call.start_background
+                        launch(pending, base_env=project.env)
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                self.assertIn(1, [line.get("max_rounds") for line in receipts.read_round_log(project.state, "t1")])
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+
+    def test_changed_default_base_limit_is_rechecked_between_paid_steps(self):
+        for mode in ("call", "fix", "review"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                if mode == "fix":
+                    project.changes_requested()
+                else:
+                    project.review()
+                    project.commit({"src/next.py": "pass\n"})
+                original = call._brief_skills
+
+                def change_base(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    advance_budget_base(project)
+                    return result
+
+                action = project.fix if mode == "fix" else project.review if mode == "review" else lambda: prepare(project)
+                with mock.patch.object(call, "_brief_skills", side_effect=change_base):
+                    with self.assertRaises(Exception) as caught:
+                        action()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+
+    def test_changed_default_base_allows_exactly_one_extra_round(self):
+        project = FixProject(self)
+        project.review()
+        advance_budget_base(project)
+        with self.assertRaises(Exception) as caught:
+            prepare(project, tier="low")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        self.assertEqual(project.review(extra_round=True).code, "OAH_REVIEW_CONVERGED")
+        self.assertIs(project.receipt(2)["extra_round"], True)
+        # The same approval remains free, but the recorded override authorizes no later call.
+        self.assertIn("already approved", project.review().message)
+        with self.assertRaises(Exception) as caught:
+            prepare(project, tier="low")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        project.commit({"src/next.py": "pass\n"})
+        with self.assertRaises(ReviewError) as caught:
+            project.review()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        self.assertEqual((len(project.calls()), len(project.fix_calls())), (2, 0))
+
     def test_fix_limit_append_does_not_replace_changed_captured_bytes(self):
         project = FixProject(self)
         project.changes_requested()

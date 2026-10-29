@@ -252,8 +252,8 @@ class TaskBudget:
 
 def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state=None) -> TaskBudget:
     """Resolve all task budget sources and persist newly seen limits under the caller's task/state locks."""
-    from oah.config import load_config
-    from oah.review import receipts, runner
+    from oah.config import ConfigError, load_config
+    from oah.review import context, receipts, runner
     from oah.review.settings import budget_limit
 
     limits = {line["max_rounds"] for line in s.log if line.get("max_rounds") is not None}
@@ -261,23 +261,35 @@ def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state
     if settings.max_rounds is not None:
         limits.add(settings.max_rounds)
     if root is not None:
-        config = load_config(root)
-        current = budget_limit(config)
-        if current is not None:
-            limits.add(current)
-        base = s.base
-        if not base:
-            from oah.review import context
-
+        try:
+            config = load_config(root)
+            current = budget_limit(config)
+            if current is not None:
+                limits.add(current)
+            bases = {s.base} if s.base else set()
+            bases.update(entry.record["base"] for entry in s.task_receipts)
+            bases.update(line["base"] for line in s.log if line.get("base"))
+            # The default merge-base is an independent source, even when this dispatch uses
+            # an explicit or historical review base. No earlier observation substitutes for it.
             remote, branch = runner._base_settings(config)
             ref = context._default_ref(root, remote, branch)
             if ref is not None:
                 code, common = context._git(root, "merge-base", "HEAD", ref, ok=(0, 1))
-                base = common.strip() if code == 0 else None
-        if base:
-            based = budget_limit(runner.config_at(root, base))
-            if based is not None:
-                limits.add(based)
+                if code != 0 or not common.strip():
+                    raise ReviewError("OAH_REVIEW_BASE_INVALID", "restore a common default-branch ancestor, "
+                                      "then retry")
+                bases.add(common.strip())
+            for base in sorted(bases):
+                # A missing historical commit is not evidence of an unlimited config.
+                if context._commit(root, base) is None:
+                    raise ReviewError("OAH_REVIEW_BASE_INVALID", "restore the task's review-base commits, "
+                                      "then retry")
+                based = budget_limit(runner.config_at(root, base))
+                if based is not None:
+                    limits.add(based)
+        except (ConfigError, ReviewError) as exc:
+            raise ReviewError(exc.code, "task budget sources could not be read; restore the task's Git history "
+                              "and correct .oah/config.toml, then retry") from None
     if state is not None:
         for limit in sorted(limits - seen):
             receipts._log_round_unlocked(state, s.task, {"event": "limit", "max_rounds": limit})

@@ -11,7 +11,8 @@ a reviewer CLI that does not match
 native program it starts).
 
 Reviewer policy (`[stages]`, `[engines]`, `[models]` and `[review]`) comes from `.oah/config.toml` at the base
-(`config_at`). The task's max_rounds budget uses the strictest saved, live or base limit. A config change is
+(`config_at`). The task's max_rounds budget uses the strictest saved, live, current default merge-base or
+recorded review-base limit. A config change is
 a critical path and a warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs

@@ -20,7 +20,8 @@ from oah.impact.errors import ImpactError
 from oah.lease import Store
 from oah.lockfile import StateLock
 from oah.paths import repo_info
-from oah.review import ReviewError, receipts, runner
+from oah.review import ReviewError, receipts, rounds, runner
+from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
@@ -159,6 +160,63 @@ class Project:
         head = self.commit({"src/app.py": f"print('v{number + 1}')\n"}, "fix", CODEX_TRAILER)
         return self.attempt(number, finding_ids or [f"R{number}-F1"], class_ids or [f"R{number}-C1"],
                             after_head=head)
+
+
+class TaskBudgetTest(unittest.TestCase):
+    def test_every_base_config_is_resolved_and_new_limits_are_saved_once(self):
+        for event in ("start", "finish"):
+            with self.subTest(event=event):
+                project = Project(self)
+                project.review()
+                original = (project.repo / ".oah/config.toml").read_bytes()
+
+                def limit_commit(limit):
+                    return project.commit({".oah/config.toml": original +
+                                           f"[review]\nmax_rounds = {limit}\n".encode()})
+
+                receipt_base, logged_base, default_base = (limit_commit(limit) for limit in (4, 2, 6))
+                limit_commit(3)
+                git(project.repo, "update-ref", "refs/heads/main", default_base)
+                # Legacy history can name bases without having saved their limits. The latest
+                # receipt and explicit series still select unlimited A, hiding both older bases.
+                old = project.receipt(1)
+                receipts.publish(project.state, "t1", "R2.json", {**old, "round": 2, "base": receipt_base})
+                receipts.publish(project.state, "t1", "R3.json", {**old, "round": 3})
+                fields = {"attempt": 1} if event == "start" else {"counted": False, "code": "OAH_REVIEW_ENGINE_FAILED"}
+                receipts.log_round(project.state, "t1", {"event": event, "base": logged_base,
+                                                         "round": 4, "series_round": 1, **fields})
+                receipts.log_round(project.state, "t1", {"event": "limit", "max_rounds": 5})
+                with StateLock(receipts.task_lock_path(project.state, "t1")), StateLock(project.state / ".lock"):
+                    s = rounds.series(receipts.load(project.state, "t1"), project.round_log(), project.base,
+                                      head=project.head, is_ancestor=lambda a, b: True)
+                    budget = rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()),
+                                                        root=project.repo, state=project.state)
+                    self.assertEqual(budget.limit, 2)
+                    lines = project.round_log()
+                    self.assertEqual(sorted(line["max_rounds"] for line in lines if line["event"] == "limit"),
+                                     [2, 3, 4, 5, 6])
+                    s = dataclasses.replace(s, log=tuple(lines))
+                    rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()),
+                                               root=project.repo, state=project.state)
+                    self.assertEqual(project.round_log(), lines)
+
+    def test_unreadable_historical_budget_refuses_without_echoing_saved_values(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                project = Project(self)
+                marker = "private-fixture-marker"
+                base = "f" * 40 if missing else project.commit({".oah/config.toml": f"[{marker}\n"})
+                # Keep the malformed config solely at an older recorded base.
+                if not missing:
+                    project.commit({".oah/config.toml": git(project.repo, "show", f"{project.base}:.oah/config.toml") + "\n"})
+                receipts.log_round(project.state, "t1", {"event": "finish", "base": base, "round": 1,
+                                                         "series_round": 1, "counted": False,
+                                                         "code": "OAH_REVIEW_ENGINE_FAILED", "message": marker})
+                before = (project.folder() / "rounds.jsonl").read_bytes()
+                error = project.refused("OAH_REVIEW_BASE_INVALID" if missing else "OAH_CONFIG_INVALID")
+                self.assertNotIn(marker, str(error))
+                self.assertNotIn(base, str(error))
+                self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
 
 
 class SeriesTest(unittest.TestCase):
