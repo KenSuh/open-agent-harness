@@ -426,8 +426,13 @@ def _intent_check(root: pathlib.Path, task: str, head: str,
 
 def _review_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
                   binding: oah_intent.Binding) -> Check:
-    found = evidence.convergence(root, state, task, head, binding)
-    if not found.converged:
+    from oah.review import ReviewError
+
+    try:
+        found = evidence.convergence(root, state, task, head, binding)
+    except ReviewError:
+        found = None  # Unverifiable review state refuses landing without exposing saved values.
+    if found is None or not found.converged:
         return _failed("review", "OAH_LAND_REVIEW_REQUIRED",
                        f"no converged latest review approves HEAD {head[:12]} for the current intent binding; "
                        "inspect the review history, resolve any decision and run oah review --task <task> again")
