@@ -2647,11 +2647,15 @@ class SecretTest(unittest.TestCase):
         with mock.patch.object(pathlib.Path, "read_bytes", read), \
                 mock.patch.object(call, "_plan_prepare", side_effect=planned):
             self.assertEqual(project.fix().outcome, "no-change")
-        self.assertEqual(at_plan, [dict.fromkeys(watched, 1)], "preparation must consume one captured input snapshot")
+        planned_reads = dict.fromkeys(watched, 1)
+        log_path = project.state / "reviews/t1/rounds.jsonl"
+        planned_reads[log_path] = 3  # Capture plus checks before skill ranking and model judgment.
+        self.assertEqual(at_plan, [planned_reads], "capture inputs once; revalidate the live task budget before paid steps")
         expected = dict.fromkeys(watched, 3)  # Capture, start comparison and terminal comparison.
         expected[project.state / "transaction.json"] = 1  # Pending journal checks use existence after capture.
         for name in ("models/catalog.json", "models/resolved.json", "models/changes.jsonl"):
             expected[project.state / name] = 2  # Only the start publication depends on model inputs.
+        expected[log_path] = 6  # Also revalidate the live task budget immediately before the engine starts.
         self.assertEqual(reads, expected)
 
     def test_invalid_model_pins_leave_the_complete_state_tree_unchanged(self):

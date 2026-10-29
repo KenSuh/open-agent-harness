@@ -1189,14 +1189,25 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
         from oah.atomic import write_json_atomic
         write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=False))
         child = types.SimpleNamespace(pid=12345, returncode=None)
+        real_popen = subprocess.Popen
+        launcher = call._boot_argv("background_main", prepared.run_dir)
+
+        def spawn(argv, **kwargs):
+            if list(argv) != launcher:
+                return real_popen(argv, **kwargs)
+            if kwargs["creationflags"] & 0x01000000:
+                raise PermissionError("breakaway denied")
+            return child
+
         with mock.patch.object(call, "_windows", return_value=True), \
-                mock.patch.object(call.subprocess, "Popen", side_effect=[PermissionError("breakaway denied"), child]) as popen, \
+                mock.patch.object(call.subprocess, "Popen", side_effect=spawn) as popen, \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
             code = call.launch_main(prepared.run_dir)
         self.assertEqual(code, 0)
-        self.assertEqual(popen.call_count, 2)
-        self.assertTrue(popen.call_args_list[0].kwargs["creationflags"] & 0x01000000)
-        self.assertFalse(popen.call_args_list[1].kwargs["creationflags"] & 0x01000000)
+        launches = [item for item in popen.call_args_list if list(item.args[0]) == launcher]
+        self.assertEqual(len(launches), 2)
+        self.assertTrue(launches[0].kwargs["creationflags"] & 0x01000000)
+        self.assertFalse(launches[1].kwargs["creationflags"] & 0x01000000)
         data = prepared.run.read()
         self.assertEqual(data["detached"], "unverified")
         self.assertIn("closing this terminal may stop the run", data["warnings"][-1])
@@ -1207,12 +1218,20 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
         prepared = project.prepare(tier="low")
         from oah.atomic import write_json_atomic
         write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=True))
+        real_popen = subprocess.Popen
+        launcher = call._boot_argv("background_main", prepared.run_dir)
+
+        def spawn(argv, **kwargs):
+            if list(argv) == launcher:
+                raise PermissionError("breakaway denied")
+            return real_popen(argv, **kwargs)
+
         with mock.patch.object(call, "_windows", return_value=True), \
-                mock.patch.object(call.subprocess, "Popen", side_effect=PermissionError("breakaway denied")) as popen, \
+                mock.patch.object(call.subprocess, "Popen", side_effect=spawn) as popen, \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             code = call.launch_main(prepared.run_dir)
         self.assertEqual(code, call_cli.EXIT_ENVIRONMENT)
-        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(sum(list(item.args[0]) == launcher for item in popen.call_args_list), 1)
         self.assertEqual(prepared.run.read()["detached"], "unverified")
         self.assertIn("OAH_RUN_DETACH_FAILED", err.getvalue())
         self.assertIn("without --require-detach", err.getvalue())
@@ -1222,8 +1241,16 @@ class TimeoutAndBackgroundTest(unittest.TestCase):
         prepared = project.prepare(tier="low")
         from oah.atomic import write_json_atomic
         write_json_atomic(prepared.run.launch_path, dict(prepared.to_json(), require_detach=True))
+        real_popen = subprocess.Popen
+        launcher = call._boot_argv("background_main", prepared.run_dir)
+
+        def spawn(argv, **kwargs):
+            if list(argv) == launcher:
+                return types.SimpleNamespace(pid=12345)
+            return real_popen(argv, **kwargs)
+
         with mock.patch.object(call, "_windows", return_value=True), \
-                mock.patch.object(call.subprocess, "Popen", return_value=types.SimpleNamespace(pid=12345)), \
+                mock.patch.object(call.subprocess, "Popen", side_effect=spawn), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(call.launch_main(prepared.run_dir), 0)
         self.assertEqual(prepared.run.read()["detached"], "verified")

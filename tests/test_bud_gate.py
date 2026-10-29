@@ -10,7 +10,7 @@ from oah.lockfile import StateLock
 from oah.review import ReviewError, receipts, rounds
 from oah.secrets import NoKeychain
 from tests.test_call import Project as CallProject
-from tests.test_fix import FixProject
+from tests.test_fix import FixProject, state_snapshot
 from tests.test_review_cli import oah
 from tests.test_review_rounds import bug, git
 
@@ -24,6 +24,219 @@ def prepare(project, stage="correction", **fields):
 
 
 class BudgetGateTest(unittest.TestCase):
+    def test_fix_limit_append_does_not_replace_changed_captured_bytes(self):
+        project = FixProject(self)
+        project.changes_requested()
+        config = project.repo / ".oah/config.toml"
+        project.commit({".oah/config.toml": config.read_bytes() + b"[review]\nmax_rounds = 2\n"})
+        resolve = rounds.resolve_task_budget
+        changed = []
+
+        def change(*args, **kwargs):
+            path = project.folder() / "rounds.jsonl"
+            lines = [json.loads(line) for line in path.read_bytes().splitlines()]
+            lines[-1]["message"] = "s" + "k-private-fixture-value-never-exported"
+            path.write_bytes(b"".join(json.dumps(line).encode() + b"\n" for line in lines))
+            changed.append(state_snapshot(project.state))
+            return resolve(*args, **kwargs)
+
+        with mock.patch.object(rounds, "resolve_task_budget", side_effect=change):
+            with self.assertRaises(ReviewError) as caught:
+                project.fix()
+        self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
+        self.assertNotIn("private-fixture", str(caught.exception))
+        self.assertEqual(state_snapshot(project.state), changed[0])
+        self.assertEqual(project.fix_calls(), [])
+
+    def test_fix_scans_stop_text_before_persisting_a_new_limit(self):
+        project = FixProject(self)
+        project.changes_requested()
+        config = project.repo / ".oah/config.toml"
+        project.commit({".oah/config.toml": config.read_bytes() + b"[review]\nmax_rounds = 2\n"})
+        path = project.folder() / "rounds.jsonl"
+        lines = [json.loads(line) for line in path.read_bytes().splitlines()]
+        marker = "s" + "k-private-fixture-value-never-exported"
+        lines[-1]["message"] = marker
+        path.write_bytes(b"".join(json.dumps(line).encode() + b"\n" for line in lines))
+        before = state_snapshot(project.state)
+        with self.assertRaises(ReviewError) as caught:
+            project.fix()
+        self.assertEqual(caught.exception.code, "OAH_FIX_SENSITIVE_INPUT")
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertEqual(state_snapshot(project.state), before)
+        self.assertEqual(project.fix_calls(), [])
+
+    def test_corrupt_log_at_fix_spawn_keeps_the_state_invalid_code(self):
+        project = FixProject(self)
+        project.changes_requested()
+        execute = call.execute
+        damaged = []
+
+        def corrupt(*args, **kwargs):
+            path = project.folder() / "rounds.jsonl"
+            raw = path.read_bytes() + b'{"event":"unknown","message":{"private-fixture-marker":1}}\n'
+            path.write_bytes(raw)
+            damaged.append(raw)
+            return execute(*args, **kwargs)
+
+        with mock.patch.object(call, "execute", side_effect=corrupt):
+            with self.assertRaises(ReviewError) as caught:
+                project.fix()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_STATE_INVALID")
+        self.assertNotIn("private-fixture-marker", str(caught.exception))
+        self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), damaged[0])
+        self.assertEqual(project.fix_calls(), [])
+
+    def test_base_budget_applies_to_calls_before_any_structured_review(self):
+        project = FixProject(self, config="[review]\nmax_rounds = 1\n")
+        config = project.repo / ".oah/config.toml"
+        project.commit({".oah/config.toml": config.read_bytes().replace(b"max_rounds = 1", b"")})
+        call.execute(prepare(project, stage="review", tier="low"), base_env=project.env)
+        with self.assertRaises(Exception) as caught:
+            prepare(project, tier="low")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+
+    def test_new_limits_are_rechecked_between_paid_preparation_steps(self):
+        for mode in ("call", "fix", "review"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                if mode == "fix":
+                    project.changes_requested()
+                else:
+                    project.review()
+                    project.commit({"src/next.py": "pass\n"})
+                original = call._brief_skills
+
+                def lower(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    config = project.repo / ".oah/config.toml"
+                    project.commit({".oah/config.toml": config.read_bytes() + b"[review]\nmax_rounds = 1\n"})
+                    return result
+
+                action = project.fix if mode == "fix" else project.review if mode == "review" else lambda: prepare(project)
+                with mock.patch.object(call, "_brief_skills", side_effect=lower):
+                    with self.assertRaises(Exception) as caught:
+                        action()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+
+    def test_corruption_between_paid_steps_blocks_every_managed_path(self):
+        for mode in ("call", "fix", "review"):
+            with self.subTest(mode=mode):
+                project = FixProject(self)
+                if mode == "fix":
+                    project.changes_requested()
+                original = call._brief_skills
+                damaged = []
+
+                def corrupt(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    path = project.folder() / "rounds.jsonl"
+                    raw = path.read_bytes() + b'{"event":"unknown","message":{"private-fixture-marker":1}}\n'
+                    path.write_bytes(raw)
+                    damaged.append(raw)
+                    return result
+
+                action = project.fix if mode == "fix" else project.review if mode == "review" else lambda: prepare(project)
+                with mock.patch.object(call, "_brief_skills", side_effect=corrupt):
+                    with self.assertRaises(Exception) as caught:
+                        action()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_STATE_INVALID")
+                self.assertNotIn("private-fixture-marker", str(caught.exception))
+                self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), damaged[0])
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1 if mode == "fix" else 0, 0))
+
+    def test_valid_stop_text_is_not_interpolated_into_diagnostics(self):
+        project = FixProject(self)
+        project.review()
+        path = project.folder() / "rounds.jsonl"
+        lines = [json.loads(line) for line in path.read_bytes().splitlines()]
+        lines[-1].update(counted=False, code="OAH_REVIEW_NEEDS_DECISION", message="private-fixture-marker")
+        path.write_bytes(b"".join(json.dumps(line).encode() + b"\n" for line in lines))
+        done = oah(project, "review", "--task", "t1")
+        self.assertIn("OAH_REVIEW_NEEDS_DECISION", done.stderr)
+        self.assertNotIn("private-fixture-marker", done.stdout + done.stderr)
+
+    def test_review_honours_a_limit_added_after_unlimited_reviews(self):
+        project = FixProject(self)
+        project.review()
+        config = project.repo / ".oah/config.toml"
+        project.commit({".oah/config.toml": config.read_bytes() + b"[review]\nmax_rounds = 1\n"})
+        with self.assertRaises(ReviewError) as caught:
+            project.review()
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        self.assertEqual(len(project.calls()), 1)
+
+    def test_finish_stop_fields_are_validated_before_decision_override(self):
+        project = FixProject(self)
+        project.review()
+        path = project.folder() / "rounds.jsonl"
+        original = [json.loads(line) for line in path.read_bytes().splitlines()]
+        for field in ("message", "receipt"):
+            with self.subTest(field=field):
+                lines = [dict(line) for line in original]
+                lines[-1].update(code="OAH_REVIEW_NEEDS_DECISION", counted=False)
+                lines[-1][field] = {"private-fixture-marker": "must never be echoed"}
+                invalid = b"".join(json.dumps(line).encode() + b"\n" for line in lines)
+                path.write_bytes(invalid)
+                with self.assertRaises(ReviewError) as caught:
+                    receipts.read_round_log(project.state, "t1")
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_STATE_INVALID")
+                done = oah(project, "review", "--task", "t1", "--decision", "continue")
+                self.assertIn("OAH_REVIEW_STATE_INVALID", done.stderr)
+                self.assertNotIn("private-fixture-marker", done.stdout + done.stderr)
+                self.assertEqual(path.read_bytes(), invalid)
+
+    def test_new_limit_is_shared_and_persisted_even_when_dispatch_refuses(self):
+        project = FixProject(self)
+        project.changes_requested()
+        config = project.repo / ".oah/config.toml"
+        original = config.read_bytes()
+        project.commit({".oah/config.toml": original + b"[review]\nmax_rounds = 1\n"})
+        for args in (("review", "--task", "t1"), ("fix", "--task", "t1"),
+                     ("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low")):
+            done = oah(project, *args)
+            self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
+        self.assertTrue(any(line.get("max_rounds") == 1
+                            for line in receipts.read_round_log(project.state, "t1")))
+        project.commit({".oah/config.toml": original})
+        with self.assertRaises(ReviewError) as caught:
+            project.review(decision="continue without corrections")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        self.assertEqual(project.review(extra_round=True, decision="continue without corrections").code,
+                         "OAH_REVIEW_CONVERGED")
+        for args in (("fix", "--task", "t1"),
+                     ("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low")):
+            done = oah(project, *args)
+            self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
+        self.assertEqual((len(project.calls()), len(project.fix_calls())), (2, 0))
+
+    def test_round_log_schema_rejects_all_malformed_consumed_fields(self):
+        project = FixProject(self)
+        project.review()
+        path = project.folder() / "rounds.jsonl"
+        original = [json.loads(line) for line in path.read_bytes().splitlines()]
+        mutations = [(field, value) for field in ("message", "receipt")
+                     for value in ({"private-fixture-marker": "hidden"}, ["private-fixture-marker"], None, 17)]
+        mutations += [("event", "private-fixture-marker"), ("task", "private-fixture-marker"),
+                      ("head", []), ("outcome", {}), ("at", None), ("attempt", 0),
+                      ("extra_attempt", 1), ("decision_for", []), ("unknown", "private-fixture-marker")]
+        for field, value in mutations:
+            with self.subTest(field=field, value=value):
+                lines = [dict(line) for line in original]
+                lines[-1].update(code="OAH_REVIEW_NEEDS_DECISION", counted=False)
+                lines[-1][field] = value
+                invalid = b"".join(json.dumps(line).encode() + b"\n" for line in lines)
+                path.write_bytes(invalid)
+                for args in (("review", "--task", "t1", "--decision", "continue", "--extra-round"),
+                             ("fix", "--task", "t1"),
+                             ("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")):
+                    done = oah(project, *args)
+                    self.assertIn("OAH_REVIEW_STATE_INVALID", done.stderr)
+                    self.assertNotIn("private-fixture-marker", done.stdout + done.stderr)
+                    self.assertEqual(path.read_bytes(), invalid)
+        self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+
     def test_structured_review_reservations_survive_failure_and_interruption(self):
         for interrupted in (False, "execute", "prepare"):
             with self.subTest(interrupted=interrupted):
@@ -260,8 +473,8 @@ class BudgetGateTest(unittest.TestCase):
         project.run(task="t2", tier="low")
         self.assertEqual(len(project.runs()), 1)
         log = receipts.read_round_log(project.state, "t2")
-        self.assertEqual([line["event"] for line in log], ["reservation", "dispatch"])
-        self.assertEqual(len({line["run_id"] for line in log}), 1)
+        self.assertEqual([line["event"] for line in log], ["limit", "reservation", "dispatch"])
+        self.assertEqual(len({line["run_id"] for line in log if "run_id" in line}), 1)
 
     def test_recorded_limit_survives_config_without_limit(self):
         project = FixProject(self, config="[review]\nmax_rounds = 1\n")

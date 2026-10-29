@@ -385,7 +385,7 @@ class DecisionTest(unittest.TestCase):
         project.review(base=project.base)
         project.review(base=later_base)
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=project.base)
-        self.assertIn("R2.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
         result = project.review(base=project.base, decision="keep the approved design")
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual(project.receipt(3)["decision"]["text"], "keep the approved design")
@@ -402,7 +402,7 @@ class DecisionTest(unittest.TestCase):
         project.review(base=project.base, decision="settle the R2 decision")
         project.review(base=other_base, decision="check the design again")
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=project.base)
-        self.assertIn("R3.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
 
     def test_previously_defined_alias_of_attempted_class_stops(self):
         from tests.test_review import receipt_record
@@ -582,7 +582,7 @@ class DecisionTest(unittest.TestCase):
         project.queue({"findings": [bug(fix_kind="design")]}, {})
         self.assertEqual(project.review().code, "OAH_REVIEW_NEEDS_DECISION")
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=first)
-        self.assertIn("R1.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
         result = project.review(base=first, decision="review only the second commit")
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual((project.receipt(2)["base"], project.receipt(2)["series_round"]), (first, 1))
@@ -1167,7 +1167,7 @@ class ConfigTest(unittest.TestCase):
     def test_reviewer_config_comes_from_the_base(self):
         project = Project(self)
         hostile = re.sub(r"command = \[.*\]", 'command = ["no-such-reviewer"]', self.config_text(project))
-        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 0\ncritical_paths = []\n'
+        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 2\ncritical_paths = []\n'
         project.commit({".oah/config.toml": hostile}, "reconfigure the reviewer")
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)

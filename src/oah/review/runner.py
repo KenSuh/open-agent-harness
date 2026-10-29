@@ -10,9 +10,9 @@ a reviewer CLI that does not match
 `[review] codex_sha256` (the resolved CLI entry file: for an npm install that is the JavaScript launcher, not the
 native program it starts).
 
-The reviewed change never configures its own review: `[stages]`, `[engines]`, `[models]` and `[review]` come
-from `.oah/config.toml` as committed at the base (`config_at`). A change to that file is a critical path and a
-warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
+Reviewer policy (`[stages]`, `[engines]`, `[models]` and `[review]`) comes from `.oah/config.toml` at the base
+(`config_at`). The task's max_rounds budget uses the strictest saved, live or base limit. A config change is
+a critical path and a warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs
 the reviewer in the snapshot: stage `review` (read-only), `--output-schema`, `--ephemeral`, the user's Codex
@@ -299,7 +299,7 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
             raise ReviewError("OAH_REVIEW_SERIES_BUSY", f"another oah review of task {request.task} is running "
                               "against another base; wait for it to finish, then run oah review again") from None
         try:
-            with rounds._managed_dispatch(request.task):
+            with rounds._managed_dispatch(request.task, root=root, base=span.base):
                 return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
                               call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
                               rules=rules, ensure_impact=ensure_impact)
@@ -347,12 +347,15 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                               read_source=oah_intent.read_source)
     call.check_dispatch_binding(call.dispatch_binding(state, task), packet, task)
     impact_info, data = _impact(root, env, ensure_impact, span.head)
-    records = receipts.load(state, task)
-    s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
-                      is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
-    conf = dataclasses.replace(conf, max_rounds=rounds.task_limit(s, conf))
+    with StateLock(state / ".lock"):
+        records = receipts.load(state, task)
+        s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
+                          is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
+        budget = rounds.resolve_task_budget(s, conf, root=root, state=state)
+    conf = dataclasses.replace(conf, max_rounds=budget.limit)
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
-                   settings=conf, extra_attempt=request.extra_attempt, binding=binding) == rounds.CONVERGED:
+                   settings=conf, extra_attempt=request.extra_attempt, binding=binding,
+                   budget=budget) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
                       f"{span.head}; nothing was launched",

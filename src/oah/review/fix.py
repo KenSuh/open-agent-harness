@@ -69,7 +69,7 @@ from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock, _try_lock
 from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
-from oah.review import ReviewError, authors, receipts, rounds, runner, settings as review_settings
+from oah.review import ReviewError, authors, receipts, rounds, runner
 from oah.review.schema import BLOCKING
 from oah.scope import outside
 from oah.toolkit.checks import CONTENT_RULES, UTF16_BOMS
@@ -1164,9 +1164,28 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         h = _history(t, capture=True)
         _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, LAUNCHED)
-        round_log = receipts.read_round_log(t.state, t.name)
-        gated = rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=round_log)
-        limit = rounds.task_limit(gated, review_settings.from_config(config))
+        _safe_inputs(config.raw, redact)
+        with _ExistingLock(t.state / ".lock"):
+            round_log = receipts.read_round_log(t.state, t.name)
+            _safe_inputs(round_log, redact)
+            _, budget = rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records,
+                                            log=round_log, return_budget=True)
+        limit = budget.limit
+
+        def check_budget():
+            held = call._CORRECTION_STATE_LOCK.get() == t.state
+            with contextlib.nullcontext() if held else _ExistingLock(t.state / ".lock"):
+                # Publication has just compared the captured bytes. Between publications, validate
+                # the live stop log before each paid preparation or engine step.
+                token = runs._CORRECTION_CAPTURE.set(None) if not held else None
+                try:
+                    lines = receipts.read_round_log(t.state, t.name)
+                finally:
+                    if token is not None:
+                        runs._CORRECTION_CAPTURE.reset(token)
+                _safe_inputs(lines, redact)
+                rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=lines)
+
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)
@@ -1202,7 +1221,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             final = scratch / "last-message.md"
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
-                                         metadata_json=json.dumps(metadata), max_rounds=limit) as inputs:
+                                         metadata_json=json.dumps(metadata), max_rounds=limit,
+                                         budget_check=check_budget) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,
@@ -1327,6 +1347,9 @@ class _Attempt:
             return result
         except BaseException as exc:
             if not self.published or self.ended or isinstance(exc, _PublicationConflict):
+                raise
+            if getattr(exc, "code", None) == "OAH_REVIEW_STATE_INVALID":
+                # Preserve the corrupt bytes and the refusal. Repair the log before settling the start.
                 raise
             interrupted = isinstance(exc, KeyboardInterrupt)
             with _held_signals():

@@ -572,12 +572,13 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
 
 
 @contextmanager
-def _paid_dispatch(prepared):
+def _paid_dispatch(prepared, *, record=True):
     """Serialize ordinary paid starts with reviews; managed review/fix already owns this lock."""
     from oah.lockfile import LockTimeout, StateLock
     from oah.review import receipts, rounds
 
-    if _CORRECTION_PUBLICATION.get() is not None or rounds._MANAGED_DISPATCH.get() == prepared.task:
+    managed = rounds._MANAGED_DISPATCH.get()
+    if _CORRECTION_PUBLICATION.get() is not None or managed is not None and managed["task"] == prepared.task:
         yield
         return
     lock = StateLock(receipts.task_lock_path(prepared.run.path.parents[2], prepared.task), timeout=0)
@@ -588,7 +589,7 @@ def _paid_dispatch(prepared):
                             "finish, then retry oah call")
         prepared.run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
         raise error from None
-    token = rounds._PAID_SPAWN.set(True)
+    token = rounds._PAID_SPAWN.set(record)
     try:
         yield
     finally:
@@ -599,10 +600,13 @@ def _paid_dispatch(prepared):
 def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None, reserve=False):
     from oah.review import ReviewError, rounds
 
-    if rounds._MANAGED_DISPATCH.get() == task:
-        return
+    managed = rounds._MANAGED_DISPATCH.get()
+    base = None
+    if managed is not None and managed["task"] == task:
+        root, base = managed["root"] or root, managed["base"]
+        record = reserve = False  # The structured start already reserved this run.
     try:
-        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id, reserve=reserve)
+        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id, reserve=reserve, base=base)
     except ReviewError as exc:
         raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
 
@@ -616,6 +620,7 @@ def dispatch_guard(prepared: Prepared):
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
         # Fix authorized this immutable lease at start publication and owns the task review lock.
+        publication.budget_check()
         yield
         return
     try:
@@ -644,7 +649,7 @@ def dispatch_guard(prepared: Prepared):
 
 def check_prepared(prepared: Prepared) -> None:
     """Check a queue/launcher handoff; execute checks again at the engine's actual spawn."""
-    with dispatch_guard(prepared):
+    with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
         pass
 
 
@@ -822,6 +827,7 @@ class _CorrectionInputs:
     config: object
     metadata_json: str
     max_rounds: int | None = None
+    budget_check: Callable[[], None] | None = None
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
@@ -848,6 +854,7 @@ class _CorrectionInputs:
         from oah.review import receipts
 
         plan = self.plan
+        self.budget_check()
         receipts._log_round_unlocked(self.state, self.run.task, json.loads(plan.dispatch_record))
         # Only start publication depends on model inputs, including when a later write fails.
         for path in self.catalog.original:
@@ -894,12 +901,13 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None):
+def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None,
+                       budget_check=None):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
-                                   metadata_json, max_rounds=max_rounds)
+                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check)
         snapshot = _CORRECTION_INPUTS.set(inputs)
         try:
             yield inputs
@@ -957,7 +965,9 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     from oah.lockfile import LockTimeout, StateLock
     from oah.review import receipts, rounds
 
-    managed = _CORRECTION_INPUTS.get() is not None or rounds._MANAGED_DISPATCH.get() == request.task
+    managed_review = rounds._MANAGED_DISPATCH.get()
+    managed = (_CORRECTION_INPUTS.get() is not None
+               or managed_review is not None and managed_review["task"] == request.task)
     lock = None if managed else StateLock(receipts.task_lock_path(state_dir, request.task), timeout=0)
     if lock is not None:
         try:
@@ -1000,8 +1010,6 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                           f"oah start --task {request.task} --agent {request.engine} --packet "
                           f".oah/tasks/{request.task}/PACKET.md (use your packet's path); then call again")
     _check_dispatch_lease(holder, root, stage=request.stage)
-    if inputs is None:
-        _task_dispatch_gate(state_dir, request.task, pathlib.Path(holder.worktree), stage=request.stage)
     leased = holder.binding()
     bound = json.loads(inputs.bound_json) if inputs is not None else dispatch_binding(state_dir, request.task)
     default_source = bound["source"] if bound else leased.source
@@ -1032,6 +1040,20 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
             _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
                                 reserve=True, run_id=planned_run[0].id)
     axes = scored.axes if recorded is not None else None
+
+    def check_budget():
+        from oah.lease import LeaseError
+
+        if inputs is not None:
+            inputs.budget_check()
+        else:
+            try:
+                with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
+                    _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
+                                        run_id=planned_run[0].id)
+            except LeaseError as exc:
+                raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
+
     reasons = None
     advisory = "unused(tier-given)"
     if request.tier:
@@ -1049,8 +1071,10 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
+        check_budget()
         advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
     skill_axes = scored.axes
+    check_budget()
     selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
                               state_dir=state_dir, env=env, keychain=keychain,
                               brief_disabled=disabled, now=now)
@@ -1060,6 +1084,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                 checked=checked)
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
+    check_budget()
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
                                      entry=checked[1].entry, root=root, env=env, brief_disabled=disabled,
                                      keychain=keychain)
@@ -1764,7 +1789,7 @@ def _launch_main(run_dir: str) -> int:
     if _windows():
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
-            with dispatch_guard(prepared):
+            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                 child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
         except OSError as exc:
             if require_detach:
@@ -1776,12 +1801,12 @@ def _launch_main(run_dir: str) -> int:
                        "in a terminal whose job permits breakaway")
             run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
             print(warning, file=sys.stderr, flush=True)
-            with dispatch_guard(prepared):
+            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                 child = subprocess.Popen(argv, creationflags=flags, **options)
         else:
             run.result(detached="verified")
     else:
-        with dispatch_guard(prepared):
+        with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
             child = subprocess.Popen(argv, start_new_session=True, **options)
         run.result(detached="verified")
     print(child.pid, flush=True)

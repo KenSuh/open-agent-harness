@@ -546,7 +546,25 @@ def _log_round_unlocked(state, task, entry, *, now=None):
         write_text_atomic(path, contents.decode("utf-8"))
         capture[path] = contents
         return
+    from oah.runs import _CORRECTION_CAPTURE
+
+    capture = _CORRECTION_CAPTURE.get()
+    path = _path(state, task, ROUNDS_NAME)
+    expected = capture.get(path) if capture is not None else None
     read_round_log(state, task)
+    if capture is not None:
+        try:
+            actual = path.read_bytes()
+        except FileNotFoundError:
+            actual = None
+        if actual != expected:
+            capture[path] = expected
+            raise ReviewError("OAH_FIX_STATE_CHANGED", "saved task state changed; inspect it and retry oah fix")
+        contents = (expected or b"") + (json.dumps({"at": _iso(now), **entry, "task": task},
+                                                 sort_keys=True) + "\n").encode("utf-8")
+        write_text_atomic(path, contents.decode("utf-8"))
+        capture[path] = contents
+        return
     review_dir(state, task).mkdir(parents=True, exist_ok=True)
     append_jsonl(_path(state, task, ROUNDS_NAME), {"at": _iso(now), **entry, "task": task})
 
@@ -556,7 +574,17 @@ def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
     from oah.runs import _CORRECTION_CAPTURE
     path = _path(state, task, ROUNDS_NAME)
     try:
-        lines = (_captured_state(path, jsonl=True)[1] if _CORRECTION_CAPTURE.get() is not None else read_jsonl(path))
+        capture = _CORRECTION_CAPTURE.get()
+        publication = _CORRECTION_PUBLICATION.get()
+        if (publication is not None and publication["state"] == state and publication["task"] == task
+                and capture is not None and path in capture):
+            # Publication compared these bytes before its first write. Consume that exact snapshot.
+            raw = capture[path]
+            if raw is not None and (not raw or not raw.endswith(b"\n")):
+                raise ValueError
+            lines = [json.loads(line.decode("utf-8")) for line in raw.split(b"\n")[:-1]] if raw else []
+        else:
+            lines = _captured_state(path, jsonl=True)[1] if capture is not None else read_jsonl(path)
         if not lines and path.exists():
             raise ValueError  # an existing empty log can be a truncation, never a fresh task
         for line in lines:
@@ -571,7 +599,7 @@ def read_round_log(state: pathlib.Path, task: str) -> list[dict]:
 
 
 def _round_shape(line, task):
-    """Accept landed logs without a task field; validate all fields used to authorize spending."""
+    """One closed schema, including the optional fields of landed start/finish events."""
     from oah.runs import RUN_ID_RE
 
     def count(value):
@@ -580,17 +608,40 @@ def _round_shape(line, task):
     if not isinstance(line, dict) or line.get("task", task) != task:
         return False
     event = line.get("event")
-    if event not in ("start", "finish", "dispatch", "reservation"):
+    fields = {
+        "start": {"base", "head", "round", "series_round", "attempt", "run_id", "max_rounds",
+                  "decision", "decision_for", "extra_round", "extra_attempt"},
+        "finish": {"base", "head", "round", "series_round", "attempt", "run_id", "max_rounds",
+                   "counted", "code", "message", "receipt", "outcome", "extra_round", "extra_attempt",
+                   "decision_for"},
+        "dispatch": {"stage", "run_id", "max_rounds"},
+        "reservation": {"stage", "run_id", "max_rounds"},
+        "limit": {"max_rounds"},
+    }
+    if not isinstance(event, str) or event not in fields or set(line) - fields[event] - {"event", "at", "task"}:
         return False
+    if "at" in line:
+        if not isinstance(line["at"], str):
+            return False
+        try:
+            stamp = dt.datetime.fromisoformat(line["at"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                return False
+        except ValueError:
+            return False
     if "max_rounds" in line and line["max_rounds"] is not None and not count(line["max_rounds"]):
         return False
     if "run_id" in line and not (isinstance(line["run_id"], str) and RUN_ID_RE.fullmatch(line["run_id"])):
         return False
+    if event == "limit":
+        return line.get("task") == task and count(line.get("max_rounds"))
     if event in ("dispatch", "reservation"):
         return (line.get("stage") in ("initial", "review", "correction")
                 and isinstance(line.get("run_id"), str) and RUN_ID_RE.fullmatch(line["run_id"]) is not None
                 and "max_rounds" in line and line.get("task") == task)
     if not _sha(line.get("base")) or not all(count(line.get(key)) for key in ("round", "series_round")):
+        return False
+    if "head" in line and not _sha(line["head"]):
         return False
     if "attempt" in line and not count(line["attempt"]):
         return False
@@ -603,6 +654,14 @@ def _round_shape(line, task):
             isinstance(line["decision_for"], str) and DIGEST_RE.fullmatch(line["decision_for"])):
         return False
     if event == "finish" and (type(line.get("counted")) is not bool or not _text(line.get("code"))):
+        return False
+    if "message" in line and not isinstance(line["message"], str):
+        return False
+    if "receipt" in line and not (isinstance(line["receipt"], str) and _RECEIPT_NAME.fullmatch(line["receipt"])):
+        return False
+    if event == "finish" and line["counted"] and "receipt" not in line:
+        return False
+    if "outcome" in line and (not isinstance(line["outcome"], str) or line["outcome"] not in RECEIPT_OUTCOMES):
         return False
     return True
 
