@@ -16,11 +16,12 @@ from unittest import mock
 
 from oah import briefs, call, call_cli, intent
 from oah.engines.effort import EngineError
+from oah.engines.proc import RunResult
 from oah.impact.errors import ImpactError
 from oah.lease import Store
 from oah.lockfile import StateLock
 from oah.paths import repo_info
-from oah.review import ReviewError, receipts, rounds, runner
+from oah.review import ReviewError, context, receipts, rounds, runner
 from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
@@ -163,6 +164,47 @@ class Project:
 
 
 class TaskBudgetTest(unittest.TestCase):
+    def test_git_helper_spawn_error_is_safe(self):
+        with mock.patch.object(context, "run_git", side_effect=OSError("private-fixture-marker")):
+            with self.assertRaises(ReviewError) as caught:
+                context._git(pathlib.Path("."), "rev-parse", "HEAD")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+        self.assertNotIn("private-fixture-marker", str(caught.exception))
+
+    def test_default_ref_inspection_error_is_not_a_missing_ref(self):
+        project = Project(self)
+        inspect = context.run_git
+        marker = "private-fixture-marker"
+
+        def broken(root, *args):
+            if args == ("rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/main^{commit}"):
+                return RunResult(1, "", marker, False)
+            return inspect(root, *args)
+
+        with mock.patch.object(context, "run_git", side_effect=broken):
+            error = project.refused("OAH_REVIEW_GIT_FAILED", base=project.base)
+        self.assertNotIn(marker, str(error))
+
+    def test_config_inspection_failures_are_safe_before_budget_resolution(self):
+        from tests.test_bud_gate import budget_git_fault
+
+        project = Project(self)
+        for fault in ("timeout", "error", "silent", "blob", "os-error"):
+            with self.subTest(fault=fault), budget_git_fault(project.base, fault) as marker:
+                with self.assertRaises(ReviewError) as caught:
+                    runner.config_at(project.repo, project.base)
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+                self.assertIn("retry", str(caught.exception))
+                self.assertNotIn(marker, str(caught.exception))
+
+    def test_confirmed_absent_config_at_existing_commit_is_empty(self):
+        project = Project(self)
+        base = project.commit({".oah/config.toml": None})
+        self.assertEqual(dict(runner.config_at(project.repo, base).raw), {})
+        with self.assertRaises(ReviewError) as caught:
+            runner.config_at(project.repo, "f" * 40)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+
     def test_every_base_config_is_resolved_and_new_limits_are_saved_once(self):
         for event in ("start", "finish"):
             with self.subTest(event=event):
@@ -201,22 +243,20 @@ class TaskBudgetTest(unittest.TestCase):
                     self.assertEqual(project.round_log(), lines)
 
     def test_unreadable_historical_budget_refuses_without_echoing_saved_values(self):
-        for missing in (False, True):
-            with self.subTest(missing=missing):
-                project = Project(self)
-                marker = "private-fixture-marker"
-                base = "f" * 40 if missing else project.commit({".oah/config.toml": f"[{marker}\n"})
-                # Keep the malformed config solely at an older recorded base.
-                if not missing:
-                    project.commit({".oah/config.toml": git(project.repo, "show", f"{project.base}:.oah/config.toml") + "\n"})
-                receipts.log_round(project.state, "t1", {"event": "finish", "base": base, "round": 1,
-                                                         "series_round": 1, "counted": False,
-                                                         "code": "OAH_REVIEW_ENGINE_FAILED", "message": marker})
-                before = (project.folder() / "rounds.jsonl").read_bytes()
-                error = project.refused("OAH_REVIEW_BASE_INVALID" if missing else "OAH_CONFIG_INVALID")
-                self.assertNotIn(marker, str(error))
-                self.assertNotIn(base, str(error))
-                self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
+        project = Project(self)
+        marker = "private-fixture-marker"
+        base = project.commit({".oah/config.toml": f"[{marker}\n"})
+        # Keep the malformed config solely at an older recorded base. Confirmed missing
+        # bases follow C7's separate regressions; malformed configurations still refuse.
+        project.commit({".oah/config.toml": git(project.repo, "show", f"{project.base}:.oah/config.toml") + "\n"})
+        receipts.log_round(project.state, "t1", {"event": "finish", "base": base, "round": 1,
+                                                 "series_round": 1, "counted": False,
+                                                 "code": "OAH_REVIEW_ENGINE_FAILED", "message": marker})
+        before = (project.folder() / "rounds.jsonl").read_bytes()
+        error = project.refused("OAH_CONFIG_INVALID")
+        self.assertNotIn(marker, str(error))
+        self.assertNotIn(base, str(error))
+        self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
 
 
 class SeriesTest(unittest.TestCase):

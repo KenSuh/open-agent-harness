@@ -1,13 +1,16 @@
 # 작업 예산 관문 검사 — 실제 임시 저장소와 가짜 엔진으로 모든 호출 경로의 정지·계수·손상 거부를 확인한다.
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import unittest
 from unittest import mock
 
 from oah import call, call_cli
+from oah.engines.proc import RunResult
 from oah.lockfile import StateLock
-from oah.review import ReviewError, receipts, rounds
+from oah.review import ReviewError, context, receipts, rounds, runner
 from oah.secrets import NoKeychain
 from tests.test_call import Project as CallProject
 from tests.test_fix import FixProject, state_snapshot
@@ -33,7 +36,120 @@ def advance_budget_base(project):
     return base
 
 
+@contextlib.contextmanager
+def budget_git_fault(base, fault):
+    """Fail only the historical budget read, leaving live Git and engine execution real."""
+    marker = "private-fixture-marker"
+    run_git, run_command = runner.run_git, runner.run_command
+
+    def inspect(root, *args):
+        path_probe = (args == ("cat-file", "-e", f"{base}:{runner.CONFIG_PATH}") or
+                      args == ("ls-tree", "-z", base, "--", runner.CONFIG_PATH))
+        object_probe = (args == ("cat-file", "-e", base) or
+                        args == ("cat-file", "-e", f"{base}^{{commit}}") or
+                        args == ("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}"))
+        if path_probe and fault not in ("blob", "object") or object_probe and fault == "object":
+            if fault == "os-error":
+                raise OSError(marker)
+            return RunResult(None if fault == "timeout" else 1 if fault == "silent" else 128,
+                             "" if fault == "silent" else marker,
+                             "" if fault == "silent" else marker, fault == "timeout")
+        return run_git(root, *args)
+
+    def read(argv, **kwargs):
+        if fault == "blob" and list(argv[-3:]) == ["cat-file", "blob", f"{base}:{runner.CONFIG_PATH}"]:
+            return RunResult(128, marker, marker, False)
+        return run_command(argv, **kwargs)
+
+    with mock.patch.object(context, "run_git", side_effect=inspect), \
+            mock.patch.object(runner, "run_git", side_effect=inspect), \
+            mock.patch.object(runner, "run_command", side_effect=read):
+        yield marker
+
+
+def log_old_base(project, base, limit=None):
+    receipts.log_round(project.state, "t1", {"event": "finish", "base": base, "round": 2,
+                                             "series_round": 1, "counted": False,
+                                             "code": "OAH_REVIEW_ENGINE_FAILED", "max_rounds": limit})
+
+
 class BudgetGateTest(unittest.TestCase):
+    def test_git_inspection_errors_stop_every_paid_path(self):
+        for mode in ("foreground", "background", "fix", "review"):
+            for fault in ("timeout", "error", "silent", "blob", "object", "os-error"):
+                with self.subTest(mode=mode, fault=fault):
+                    project = FixProject(self)
+                    if mode == "fix":
+                        project.changes_requested()
+                    original = (project.repo / runner.CONFIG_PATH).read_bytes()
+                    base = project.commit({runner.CONFIG_PATH: original + b"[review]\nmax_rounds = 1\n"})
+                    project.commit({runner.CONFIG_PATH: original})
+                    log_old_base(project, base)
+                    before = (project.folder() / "rounds.jsonl").read_bytes()
+                    terminal = io.StringIO()
+                    with budget_git_fault(base, fault) as marker, contextlib.redirect_stderr(terminal):
+                        with self.assertRaises(Exception) as caught:
+                            if mode == "fix":
+                                project.fix()
+                            elif mode == "review":
+                                project.review()
+                            else:
+                                pending = prepare(project, tier="low")
+                                if mode == "foreground":
+                                    call.execute(pending, base_env=project.env)
+                                else:
+                                    run_id = call.start_background(pending, base_env=project.env)
+                                    call.wait(project.state, run_id, timeout=30)
+                    self.assertEqual(getattr(caught.exception, "code", None), "OAH_REVIEW_GIT_FAILED")
+                    self.assertIn("Git", str(caught.exception))
+                    self.assertIn("retry", str(caught.exception))
+                    self.assertNotIn(marker, str(caught.exception) + terminal.getvalue())
+                    self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
+                    self.assertEqual((len(project.calls()), len(project.fix_calls())),
+                                     (1 if mode == "fix" else 0, 0))
+                    self.assertTrue(all(marker.encode() not in value for value in state_snapshot(project.state).values()
+                                        if isinstance(value, bytes)))
+
+    def test_confirmed_missing_base_keeps_saved_limits_on_every_paid_path(self):
+        for mode in ("foreground", "background", "fix", "review"):
+            for limit in (None, 1):
+                with self.subTest(mode=mode, limit=limit):
+                    project = FixProject(self)
+                    if mode == "fix":
+                        project.changes_requested()
+                    else:
+                        project.review()
+                        project.commit({"src/next.py": "pass\n"})
+                    missing = "f" * 40
+                    log_old_base(project, missing, limit)
+                    terminal = io.StringIO()
+
+                    def action():
+                        if mode == "fix":
+                            return project.fix(terminal=terminal)
+                        if mode == "review":
+                            return project.review()
+                        pending = prepare(project, tier="low")
+                        if mode == "foreground":
+                            return call.execute(pending, base_env=project.env)
+                        run_id = call.start_background(pending, base_env=project.env)
+                        result = call.wait(project.state, run_id, timeout=30)
+                        self.assertEqual(result["status"], "finished", result.get("error"))
+
+                    with contextlib.redirect_stderr(terminal):
+                        if limit is not None:
+                            with self.assertRaises(Exception) as caught:
+                                action()
+                            self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                            self.assertIn(missing[:12], str(caught.exception) + terminal.getvalue())
+                            self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+                        else:
+                            action()
+                            self.assertIn("OAH_REVIEW_BASE_MISSING", terminal.getvalue())
+                            self.assertIn(missing[:12], terminal.getvalue())
+                            self.assertEqual(len(project.calls()) + len(project.fix_calls()), 2)
+                    self.assertNotIn(missing, terminal.getvalue())
+
     def test_changed_default_base_limit_reaches_every_paid_path(self):
         for mode in ("initial", "correction", "review-call", "background", "fix", "review", "explicit-review"):
             with self.subTest(mode=mode):

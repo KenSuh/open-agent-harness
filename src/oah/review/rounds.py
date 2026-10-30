@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import sys
 from contextvars import ContextVar
 from typing import Callable, Sequence
 
@@ -248,6 +249,14 @@ def task_limit(s: Series, settings: ReviewSettings) -> int | None:
 class TaskBudget:
     limit: int | None
     stop: str | None
+    missing_bases: tuple[str, ...] = ()
+
+
+def _missing_base_notice(budget: TaskBudget) -> str:
+    if not budget.missing_bases:
+        return ""
+    return ("OAH_REVIEW_BASE_MISSING: task budget bases " + ", ".join(budget.missing_bases) +
+            " are missing; recorded limits still apply. Restore these commits to inspect their configurations")
 
 
 def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state=None) -> TaskBudget:
@@ -258,6 +267,7 @@ def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state
 
     limits = {line["max_rounds"] for line in s.log if line.get("max_rounds") is not None}
     seen = set(limits)
+    missing = []
     if settings.max_rounds is not None:
         limits.add(settings.max_rounds)
     if root is not None:
@@ -280,20 +290,23 @@ def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state
                                       "then retry")
                 bases.add(common.strip())
             for base in sorted(bases):
-                # A missing historical commit is not evidence of an unlimited config.
-                if context._commit(root, base) is None:
-                    raise ReviewError("OAH_REVIEW_BASE_INVALID", "restore the task's review-base commits, "
+                if not SHA_RE.fullmatch(base):
+                    raise ReviewError("OAH_REVIEW_STATE_INVALID", "restore the task's review-base records, "
                                       "then retry")
+                if not context._budget_commit_exists(root, base):
+                    missing.append(base[:12])
+                    continue
                 based = budget_limit(runner.config_at(root, base))
                 if based is not None:
                     limits.add(based)
-        except (ConfigError, ReviewError) as exc:
-            raise ReviewError(exc.code, "task budget sources could not be read; restore the task's Git history "
+        except (ConfigError, ReviewError, OSError) as exc:
+            code = getattr(exc, "code", "OAH_REVIEW_GIT_FAILED")
+            raise ReviewError(code, "task budget sources could not be read; restore the task's Git history "
                               "and correct .oah/config.toml, then retry") from None
     if state is not None:
         for limit in sorted(limits - seen):
             receipts._log_round_unlocked(state, s.task, {"event": "limit", "max_rounds": limit})
-    return TaskBudget(min(limits) if limits else None, decision_stop(s))
+    return TaskBudget(min(limits) if limits else None, decision_stop(s), tuple(missing))
 
 
 def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = None,
@@ -303,15 +316,25 @@ def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = Non
         raise ReviewError(NEEDS_DECISION, "the task history is invalid; nothing was launched. Restore the original "
                           "review records before retrying; --decision cannot override invalid history")
     budget = budget or resolve_task_budget(s, settings)
+    notice = _missing_base_notice(budget)
+    suffix = " " + notice if notice else ""
     reason = budget.stop
     if reason is not None and decision is None:
+        if notice:
+            print(f"{NEEDS_DECISION}: {notice}", file=sys.stderr)
         raise ReviewError(NEEDS_DECISION, "the task is stopped for a decision; nothing was launched. Inspect its "
-                          f'review history, then run oah review --task {s.task} --decision "<what you decided>"')
+                          f'review history, then run oah review --task {s.task} --decision "<what you decided>"' + suffix)
     limit = budget.limit
     if limit is not None and s.counted_rounds >= limit and not extra_round:
+        if notice:
+            # Fix substitutes a fixed refusal message; retain the notice on stderr too.
+            # Keep the refusal code first so queued launchers preserve it across the handoff.
+            print(f"OAH_REVIEW_ROUNDS_EXHAUSTED: {notice}", file=sys.stderr)
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this task has {s.counted_rounds} counted rounds, reaching "
                           f"its max_rounds limit ({limit}); nothing was launched. Run oah review --task {s.task} "
-                          "--extra-round to authorize and record one additional round")
+                          "--extra-round to authorize and record one additional round" + suffix)
+    if notice:
+        print(notice, file=sys.stderr)
 
 
 def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, records=None, log=None, reserve=False,
@@ -384,6 +407,8 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
             # Receipt numbering is task-wide. Publication supersedes that round's attempts;
             # any higher-numbered call is a later, unfinished round, whatever its base.
             and _approval_current(s, latest)):
+        if budget is not None and (notice := _missing_base_notice(budget)):
+            print(notice, file=sys.stderr)
         return CONVERGED
     task_gate(s, settings=settings, decision=decision, extra_round=extra_round, budget=budget)
     if reason is not None and decision is None:

@@ -122,6 +122,105 @@ class Project:
         return sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
 
 
+class BudgetInspectionTest(unittest.TestCase):
+    def test_git_errors_are_rechecked_before_each_launch(self):
+        from tests.test_bud_gate import budget_git_fault, log_old_base, prepare
+        from tests.test_fix import FixProject, state_snapshot
+        from oah.review import runner
+
+        for mode in ("foreground", "background", "launcher", "runner"):
+            for fault in ("timeout", "error", "blob", "object"):
+                with self.subTest(mode=mode, fault=fault):
+                    project = FixProject(self)
+                    original = (project.repo / runner.CONFIG_PATH).read_bytes()
+                    base = project.commit({runner.CONFIG_PATH: original + b"[review]\nmax_rounds = 1\n"})
+                    project.commit({runner.CONFIG_PATH: original})
+                    pending = prepare(project, tier="low")
+                    log_old_base(project, base)
+                    terminal = io.StringIO()
+                    launch = subprocess.run
+
+                    def launcher(argv, **kwargs):
+                        if argv != call._boot_argv("launch_main", pending.run_dir):
+                            return launch(argv, **kwargs)
+                        out, err = io.StringIO(), io.StringIO()
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            code = call.launch_main(pending.run_dir)
+                        return subprocess.CompletedProcess(argv, code, out.getvalue().encode(), err.getvalue().encode())
+
+                    with budget_git_fault(base, fault) as marker, contextlib.redirect_stderr(terminal):
+                        if mode == "runner":
+                            pending.run.launch_path.write_text(json.dumps(pending.to_json()), encoding="utf-8")
+                            self.assertEqual(call.background_main(pending.run_dir), 1)
+                        else:
+                            with contextlib.ExitStack() as stack:
+                                if mode == "launcher":
+                                    stack.enter_context(mock.patch.object(call, "check_prepared"))
+                                    stack.enter_context(mock.patch.object(call.subprocess, "run", side_effect=launcher))
+                                with self.assertRaises(EngineError) as caught:
+                                    action = call.execute if mode == "foreground" else call.start_background
+                                    action(pending, base_env=project.env)
+                            self.assertEqual(caught.exception.code, "OAH_RUN_LAUNCH_FAILED" if mode == "launcher"
+                                             else "OAH_REVIEW_GIT_FAILED")
+                            self.assertIn("OAH_REVIEW_GIT_FAILED", str(caught.exception))
+                            self.assertNotIn(marker, str(caught.exception))
+                    data = pending.run.read()
+                    self.assertEqual(data["status"], "refused")
+                    self.assertIn("OAH_REVIEW_GIT_FAILED", data["error"])
+                    self.assertNotIn(marker, terminal.getvalue())
+                    self.assertEqual((len(project.calls()), len(project.fix_calls())), (0, 0))
+                    self.assertTrue(all(marker.encode() not in value for value in state_snapshot(project.state).values()
+                                        if isinstance(value, bytes)))
+
+    def test_confirmed_missing_base_is_rechecked_without_losing_saved_limits(self):
+        from tests.test_bud_gate import log_old_base, prepare
+        from tests.test_fix import FixProject
+
+        for mode in ("foreground", "background", "launcher", "runner"):
+            for limit in (None, 1):
+                with self.subTest(mode=mode, limit=limit):
+                    project = FixProject(self)
+                    project.review()
+                    pending = prepare(project, tier="low")
+                    missing = "f" * 40
+                    if mode != "launcher":
+                        log_old_base(project, missing, limit)
+                    terminal = io.StringIO()
+                    checked = call.check_prepared
+
+                    def change_after_check(prepared):
+                        checked(prepared)
+                        log_old_base(project, missing, limit)
+
+                    def action():
+                        if mode == "runner":
+                            pending.run.launch_path.write_text(json.dumps(pending.to_json()), encoding="utf-8")
+                            with mock.patch.dict(os.environ, project.env):
+                                return call.background_main(pending.run_dir)
+                        if mode == "foreground":
+                            return call.execute(pending, base_env=project.env)
+                        with mock.patch.object(call, "check_prepared", side_effect=change_after_check
+                                               if mode == "launcher" else checked):
+                            run_id = call.start_background(pending, base_env=project.env)
+                        return call.wait(project.state, run_id, timeout=30)
+
+                    with contextlib.redirect_stderr(terminal):
+                        if limit is not None and mode != "runner":
+                            with self.assertRaises(EngineError) as caught:
+                                action()
+                            self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                            self.assertIn(missing[:12], str(caught.exception))
+                        else:
+                            result = action()
+                            if mode == "runner":
+                                self.assertEqual(result, 1 if limit is not None else 0)
+                            else:
+                                self.assertEqual(result["status"], "finished", result.get("error"))
+                            self.assertIn(missing[:12], terminal.getvalue())
+                    self.assertNotIn(missing, terminal.getvalue())
+                    self.assertEqual(len(project.calls()) + len(project.fix_calls()), 1 if limit is not None else 2)
+
+
 class RunFolderTest(unittest.TestCase):
     def test_packet_fixture_helpers_keep_exact_line_endings(self):
         project = Project(self)

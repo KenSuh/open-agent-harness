@@ -41,17 +41,41 @@ class DbImpact:
     rows: tuple[str, ...]
 
 
-def _git(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,)) -> tuple[int | None, str]:
-    result = run_git(root, *args)
-    if result.returncode not in ok:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git {args[0]} failed in {root} "
-                          f"({result.stderr.strip() or 'no output'}); check the repository and retry")
+def _git(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,),
+         quiet_failure: bool = False) -> tuple[int | None, str]:
+    try:
+        result = run_git(root, *args)
+    except OSError:
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry") from None
+    if (result.timed_out or result.returncode not in ok
+            or quiet_failure and result.returncode != 0 and (result.stdout or result.stderr)):
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry")
     return result.returncode, result.stdout
 
 
 def _commit(root: pathlib.Path, rev: str) -> str | None:
-    code, out = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}", ok=(0, 1))
+    code, out = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}", ok=(0, 1),
+                     quiet_failure=True)
     return out.strip() if code == 0 and out.strip() else None
+
+
+def _budget_commit_exists(root: pathlib.Path, rev: str) -> bool:
+    """Only a quiet missing-object result confirms absence; peeling errors are not absence."""
+    try:
+        for obj in (rev, f"{rev}^{{commit}}"):
+            result = run_git(root, "cat-file", "-e", obj)
+            # Probe the object before peeling: Git reports a missing full object ID with
+            # status 1 and no output, but an unsuccessful peel produces a fatal error.
+            if (obj == rev and not result.timed_out and result.returncode == 1
+                    and not result.stdout and not result.stderr):
+                return False
+            if result.timed_out or result.returncode != 0 or result.stdout or result.stderr:
+                raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not inspect a task budget base; "
+                                  "restore the repository and retry")
+    except OSError:
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not inspect a task budget base; "
+                          "restore the repository and retry") from None
+    return True
 
 
 def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
@@ -69,7 +93,8 @@ def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
         candidates.append(f"refs/heads/{branch}")
     else:
         if chosen:
-            code, out = _git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD", ok=(0, 1, 128))
+            code, out = _git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD", ok=(0, 1, 128),
+                             quiet_failure=True)
             if code == 0 and out.strip():
                 candidates.append(out.strip())
             candidates += [f"refs/remotes/{chosen}/main", f"refs/remotes/{chosen}/master"]

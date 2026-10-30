@@ -209,13 +209,21 @@ def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Bindi
 def config_at(root: pathlib.Path, rev: str) -> Config:
     """`.oah/config.toml` as committed at `rev`; a commit without the file reads as empty."""
     label = f"{CONFIG_PATH} at the review base {rev[:12]}"
-    if run_git(root, "cat-file", "-e", f"{rev}:{CONFIG_PATH}").returncode != 0:
-        return Config(path=None, raw={}, label=label)
-    result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{CONFIG_PATH}"],
-                         timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
-    if result.timed_out or result.returncode != 0:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git could not read {label} ({result.stderr.strip() or 'no output'}); "
-                          "check the repository and retry")
+    try:
+        listed = run_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
+        if listed.timed_out or listed.returncode != 0 or listed.stderr:
+            raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not inspect the base configuration; "
+                              "restore the repository and retry")
+        if not listed.stdout:
+            return Config(path=None, raw={}, label=label)
+        result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{CONFIG_PATH}"],
+                             timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
+        if result.timed_out or result.returncode != 0 or result.stderr:
+            raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not read the base configuration; "
+                              "restore the repository and retry")
+    except OSError:
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not read the base configuration; "
+                          "restore the repository and retry") from None
     return parse_config(result.stdout.encode("latin-1"), label=label)
 
 
