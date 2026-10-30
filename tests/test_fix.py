@@ -1723,7 +1723,8 @@ class ManualTest(unittest.TestCase):
                           start["class_ids"]), ("human", True, project.receipt(1)["head"], ["R1-F1", "R1-F2"],
                                                 ["R1-C1", "R1-C2"]))
         self.assertEqual((outcome["outcome"], outcome["after_head"], bound["after_head"]), ("applied", None, head))
-        project.queue({"findings": [bug(1, class_id="R1-C1", title="the same defect, worded differently")]})
+        project.queue({"findings": [bug(1, class_id="R1-C1", title="the same defect, worded differently", prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1", "class_id": "R1-C1"}])]})
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
         receipt = project.receipt(2)
@@ -1910,7 +1911,8 @@ class EndToEndTest(unittest.TestCase):
         project = FixProject(self)
         project.run_commands(applied(self, project).commands)
         project.bind()
-        project.queue({"findings": [bug(1, class_id="R1-C1", title="the defect came back")]})
+        project.queue({"findings": [bug(1, class_id="R1-C1", title="the defect came back", prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1", "class_id": "R1-C1"}])]})
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
         self.assertIn("A1 (applied)", project.receipt(2)["decision_stop_reason"])

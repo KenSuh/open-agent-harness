@@ -5,7 +5,7 @@ import os
 import pathlib
 import secrets
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Mapping
 
 from oah.atomic import RETRY_SECONDS, RETRY_SLEEP, StorageError
@@ -69,6 +69,19 @@ class WikiSettings:
     def from_mapping(cls, section: Mapping[str, object]) -> "WikiSettings":
         merged = dict(DEFAULTS, **section)
         return cls(**{name: merged[name] for name in DEFAULTS})
+
+    def for_root(self, root: pathlib.PurePath) -> "WikiSettings":
+        """One repository-relative POSIX directory; native paths also resolve filesystem aliases."""
+        folder = root / self.dir
+        if isinstance(root, pathlib.Path):
+            root, folder = root.resolve(), folder.resolve()
+        try:
+            directory = folder.relative_to(root).as_posix()
+        except ValueError:
+            raise WikiError("OAH_WIKI_MISSING", "[wiki] dir is outside this repository. Set [wiki] dir "
+                            "in .oah/config.toml to a folder inside the repository, then retry.",
+                            EXIT_ENVIRONMENT) from None
+        return replace(self, dir=directory)
 
     def lint_config(self) -> dict[str, object]:
         """The settings that change what lint counts; hygiene resets its baseline when they change."""

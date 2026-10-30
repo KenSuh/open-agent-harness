@@ -47,6 +47,12 @@ class ArchiveNaming:
     def name(self, number: int) -> str:
         return f"{self.prefix}{number:0{self.digits}d}.md"
 
+    @property
+    def output_pattern(self) -> str:
+        """Full-match pattern for positive numbers formatted by name(), with no extra zero padding."""
+        return (re.escape(self.prefix) + rf"(?!0+\.md)(?:[0-9]{{{self.digits}}}"
+                rf"|[1-9][0-9]{{{self.digits},}})\.md")
+
 
 DEFAULT_NAMING = ArchiveNaming()
 

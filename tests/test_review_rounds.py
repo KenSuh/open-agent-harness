@@ -21,7 +21,7 @@ from oah.impact.errors import ImpactError
 from oah.lease import Store
 from oah.lockfile import StateLock
 from oah.paths import repo_info
-from oah.review import ReviewError, context, receipts, rounds, runner
+from oah.review import ReviewError, context, receipts, rounds, runner, schema
 from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
@@ -518,7 +518,9 @@ class DecisionTest(unittest.TestCase):
             {"class_id": "R1-C1", "mechanism": "Cache outlives source.", "rule": "Invalidate on change"},
             {"class_id": "R1-C2", "mechanism": "cache outlives source", "rule": "invalidate on change!"}])
         receipts.publish(project.state, "t1", "R1.json", legacy)
-        project.queue({"findings": [bug(class_id="R1-C2")]})
+        project.queue({"findings": [bug(class_id="R1-C2", prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1",
+            "class_id": "R1-C1"}])]})
         project.correct(1)
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
@@ -527,13 +529,13 @@ class DecisionTest(unittest.TestCase):
 
     def test_attempted_class_reappearing_stops_even_reworded(self):
         project = Project(self)
-        project.queue({"findings": [bug(title="the cache is never invalidated")]},
-                      {"findings": [{"finding_id": "R2-F1", "class_id": "R1-C1", "severity": "P1",
-                                     "title": "stale entries survive a reload", "detail": "worded differently",
-                                     "prior_refs": []}]},
-                      {})
+        project.queue({"findings": [bug(title="the cache is never invalidated")]})
         project.review()
         attempt = project.correct(1)
+        project.queue({"findings": [bug(class_id="R1-C1", title="stale entries survive a reload",
+                                        detail="worded differently", location="src/cache.py:90", prior_refs=[{
+                                            "round": 1, "receipt_digest": project.receipt_digest(1),
+                                            "finding_id": "R1-F1", "class_id": "R1-C1"}])]}, {})
         result = project.review()
         self.assertEqual((result.code, result.exit_code), ("OAH_REVIEW_NEEDS_DECISION", 1), result.message)
         receipt = project.receipt(2)
@@ -569,14 +571,80 @@ class DecisionTest(unittest.TestCase):
     def test_reminted_class_definition_of_attempted_class_stops(self):
         project = Project(self)
         project.queue({"findings": [bug()], "classes": [{"class_id": "R1-C1", "mechanism": "Cache entries outlive "
-                                                         "their source.", "rule": "Invalidate on change"}]},
-                      {"findings": [bug()], "classes": [{"class_id": "R2-C1", "mechanism": "cache entries outlive their "
-                                                         "source", "rule": "invalidate on change!"}]})
+                                                         "their source.", "rule": "Invalidate on change"}]})
         project.review()
         project.correct(1)
+        project.queue({"findings": [bug(prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1", "class_id": "R1-C1"}])],
+            "classes": [{"class_id": "R2-C1", "mechanism": "cache entries outlive their source",
+                         "rule": "invalidate on change!"}]})
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
         self.assertIn("R1-C1", project.receipt(2)["decision_stop_reason"])
+
+    def test_new_instance_of_attempted_class_continues(self):
+        for reminted in (False, True):
+            for location in ("src/app.py:10", "src/app.py:14"):
+                with self.subTest(reminted=reminted, location=location):
+                    project = Project(self)
+                    definition = {"mechanism": "Unvalidated request value.", "rule": "Validate before use"}
+                    project.queue({"findings": [bug(location="src/app.py:10", detail="unchecked query value")],
+                                   "classes": [{"class_id": "R1-C1", **definition}]})
+                    project.review()
+                    project.correct(1)
+                    project.queue({"findings": [bug(class_id="R2-C1" if reminted else "R1-C1",
+                                                    location=location, detail="unchecked body value", prior_refs=[])],
+                                   "classes": [{"class_id": "R2-C1", "mechanism": "unvalidated request value",
+                                                "rule": "validate before use!"}] if reminted else []})
+                    result = project.review()
+                    self.assertEqual(result.code, "OAH_REVIEW_CHANGES_REQUESTED", result.message)
+                    receipt = project.receipt(2)
+                    self.assertIsNone(receipt["decision_stop_reason"])
+                    mark = "R2-F1: new instance of attempted class R1-C1"
+                    self.assertEqual(receipt["new_instances"], [mark])
+                    self.assertIn(mark, result.message)
+
+    def test_reclassed_reference_to_corrected_finding_stops(self):
+        project = Project(self)
+        project.queue({"findings": [bug()]})
+        project.review()
+        project.correct(1)
+        # A changed class definition must not hide an explicit occurrence tie.
+        project.queue({"findings": [bug(title="renamed problem", detail="a different explanation", prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1", "class_id": "R1-C1"}])]})
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
+        self.assertIn("A1", project.receipt(2)["decision_stop_reason"])
+        self.assertEqual(project.receipt(2)["new_instances"], [])
+
+    def test_reference_to_untargeted_finding_is_not_a_recurrence(self):
+        project = Project(self)
+        project.queue({"findings": [bug(), bug(2, class_id="R1-C1", severity="P2")]})
+        project.review()
+        project.correct(1)
+        project.queue({"findings": [bug(class_id="R1-C1", prior_refs=[{
+            "round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F2", "class_id": "R1-C1"}])]})
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CHANGES_REQUESTED", result.message)
+        self.assertIn("new instance of attempted class R1-C1", result.message)
+
+    def test_decide_ignores_invalid_prior_refs_as_recurrence_evidence(self):
+        project = Project(self)
+        project.queue({"findings": [bug()]})
+        first = project.review()
+        output = schema.parse((pathlib.Path(first.run_dir) / "last-message.md").read_bytes(), number=1)
+        project.correct(1)
+        history = rounds.series(receipts.load(project.state, "t1"), project.round_log(), project.base,
+                                head=project.head, is_ancestor=lambda before, after: True)
+        valid = {"round": 1, "receipt_digest": project.receipt_digest(1), "finding_id": "R1-F1", "class_id": "R1-C1"}
+        for changes in ({"round": 99}, {"round": 2}, {"receipt_digest": "sha256:" + "0" * 64},
+                        {"finding_id": "R1-F9"}, {"class_id": "R1-C9"}):
+            with self.subTest(changes=changes):
+                finding = dataclasses.replace(output.findings[0], finding_id="R2-F1",
+                                              prior_refs=(schema.PriorRef(**{**valid, **changes}),))
+                judged = rounds.decide(dataclasses.replace(output, findings=(finding,), classes=()), history)
+                self.assertEqual(judged.outcome, "changes-requested")
+                self.assertIsNone(judged.stop_reason)
 
     def test_prior_finding_without_attempt_is_not_a_recurrence(self):
         project = Project(self)
@@ -614,7 +682,6 @@ class DecisionTest(unittest.TestCase):
             "wrong digest": lambda p: [bug(prior_refs=[ref(p, receipt_digest="sha256:" + "0" * 64)])],
             "unknown finding": lambda p: [bug(prior_refs=[ref(p, finding_id="R1-F9")])],
             "class of the earlier finding": lambda p: [bug(class_id="R1-C1", prior_refs=[ref(p, class_id="R1-C2")])],
-            "finding class differs": lambda p: [bug(prior_refs=[ref(p)])],
             "unknown earlier class": lambda p: [bug(class_id="R1-C7")],
         }
         for label, findings in cases.items():
@@ -707,7 +774,7 @@ class DecisionTest(unittest.TestCase):
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual(project.receipt(2)["decision"]["text"], "the rewritten commit preserves the fix")
 
-    def test_attempted_class_from_an_earlier_series_still_stops(self):
+    def test_attempted_class_from_an_earlier_series_without_a_tie_continues(self):
         project = Project(self)
         project.queue({"findings": [bug()]},
                       {"findings": [{"finding_id": "R2-F1", "class_id": "R1-C1", "severity": "P1"}]})
@@ -721,10 +788,11 @@ class DecisionTest(unittest.TestCase):
         project.head = git(project.repo, "rev-parse", "HEAD")
         project.refused("OAH_REVIEW_NEEDS_DECISION")
         result = project.review(decision="the rebase preserves the corrections")
-        self.assertEqual(result.code, "OAH_REVIEW_NEEDS_DECISION", result.message)
+        self.assertEqual(result.code, "OAH_REVIEW_CHANGES_REQUESTED", result.message)
         receipt = project.receipt(2)
         self.assertEqual(receipt["series_round"], 1)
-        self.assertIn("R1-C1", receipt["decision_stop_reason"])
+        self.assertIsNone(receipt["decision_stop_reason"])
+        self.assertIn("new instance of attempted class R1-C1", result.message)
         self.assertIn("R1-C1 (mechanism: mechanism of R1-C1", project.calls()[1]["prompt"])
 
     def test_another_review_of_the_task_is_running(self):
@@ -1186,6 +1254,8 @@ class PromptRoundTest(unittest.TestCase):
         self.assertIn(receipt["history_digest"], prompt)
         self.assertIn("R1-C1 (mechanism: mechanism of R1-C1; rule: rule of R1-C1): correction attempt A1 (applied)",
                       prompt)
+        self.assertIn("same problem as an earlier finding, whatever its wording or class_id", prompt)
+        self.assertIn("A shared class or location alone does not establish recurrence", prompt)
 
     def test_db_change_carries_query_and_graph_identity(self):
         project = Project(self, files={"db/migrations/001_init.sql": "CREATE TABLE widgets (id int);\n"})

@@ -38,6 +38,23 @@ def make_wiki(test: unittest.TestCase, repo: pathlib.Path, **settings) -> Wiki:
     return Wiki(repo, WikiSettings(**settings), state)
 
 
+class WikiDirectoryTest(unittest.TestCase):
+    def test_windows_directory_normalizes_to_one_relative_posix_path(self):
+        root = pathlib.PureWindowsPath(r"C:\work\repo")
+        for directory in (r"C:\work\repo\notes", "c:/work/repo/notes", "notes", r"notes\team"):
+            with self.subTest(directory=directory):
+                settings = WikiSettings(dir=directory).for_root(root)
+                self.assertEqual(settings.dir, "notes/team" if directory == r"notes\team" else "notes")
+
+    def test_windows_directory_outside_repository_refuses(self):
+        root = pathlib.PureWindowsPath(r"C:\work\repo")
+        for directory in (r"C:\work\other\notes", r"D:\work\repo\notes"):
+            with self.subTest(directory=directory):
+                with self.assertRaises(WikiError) as caught:
+                    WikiSettings(dir=directory).for_root(root)
+                self.assertEqual(caught.exception.code, "OAH_WIKI_MISSING")
+
+
 class MarkdownTest(unittest.TestCase):
     def test_fences_after_checkboxes_and_inline_links_hide_code(self):
         for eol in ("\n", "\r\n"):
@@ -689,6 +706,69 @@ class MaintainTaskTest(unittest.TestCase):
     def task_entries(self, task: str) -> int:
         marker = f"<!-- oah-task: {task} -->".encode()
         return sum(path.read_bytes().count(marker) for path in self.wiki_dir.glob("log*.md"))
+
+    def test_configured_directory_maintenance_verifies(self):
+        self.wiki_dir.rename(self.repo / "notes")
+        settings = WikiSettings(dir="notes")
+        self.assertEqual(self.maintain(settings=settings).errors, [])
+        for check in (Wiki(self.repo, settings, self.state).verify_task("t1"), self.verify(settings=settings)):
+            self.assertTrue(check.ok, check.problems)
+            self.assertEqual([path for path, _ in check.outputs], ["notes/index.md", "notes/log.md"])
+
+    def test_absolute_directory_maintenance_records_relative_outputs(self):
+        folder = self.repo / "notes"
+        self.wiki_dir.rename(folder)
+        settings = WikiSettings(dir=str(folder))
+        self.assertEqual(self.maintain(settings=settings).errors, [])
+        expected = {f"notes/{name}": hashlib.sha256((folder / name).read_bytes()).hexdigest()
+                    for name in ("index.md", "log.md")}
+        self.assertEqual(self.records_for("t1")[-1]["outputs"], expected)
+        for check in (Wiki(self.repo, settings, self.state).verify_task("t1"), self.verify(settings=settings)):
+            self.assertTrue(check.ok, check.problems)
+            self.assertEqual(check.outputs, sorted(expected.items()))
+        # Absolute and relative settings refer to the same maintenance evidence.
+        self.assertTrue(self.verify(settings=WikiSettings(dir="notes")).ok)
+
+    def test_directory_outside_repository_refuses_before_maintenance(self):
+        folder = make_tmp_dir(self) / "notes"
+        self.wiki_dir.rename(folder)
+        before = {p.relative_to(folder): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+        for directory in (str(folder), os.path.relpath(folder, self.repo)):
+            with self.subTest(directory=directory):
+                settings = WikiSettings(dir=directory)
+                result = self.maintain(settings=settings)
+                self.assertFalse(result.ok)
+                self.assertTrue(all(p.startswith("OAH_WIKI_MISSING") for p in result.errors), result.errors)
+                check = self.verify(settings=settings)
+                self.assertFalse(check.ok)
+                self.assertTrue(all(p.startswith("OAH_WIKI_MISSING") for p in check.problems), check.problems)
+        self.assertFalse(self.records.exists())
+        self.assertEqual({p.relative_to(folder): p.read_bytes() for p in folder.rglob("*") if p.is_file()}, before)
+
+    def test_task_entry_page_is_recorded_without_archive_output_filter(self):
+        # Existing archive parsing accepts extra padding; this task page is not a new rollover name.
+        self.assertEqual(self.maintain().errors, [])
+        archive = self.wiki_dir / "log_archive_001.md"
+        archive.write_bytes((self.wiki_dir / "log.md").read_bytes())
+        (self.wiki_dir / "log.md").write_bytes(b"# Log\n\n<!-- OAH:LOG_INSERT_BELOW -->\n")
+        self.assertEqual(self.maintain().errors, [])
+        rel = "docs/wiki/log_archive_001.md"
+        self.assertIn(rel, self.records_for("t1")[-1]["outputs"])
+        check = self.verify()
+        self.assertTrue(check.ok, check.problems)
+        self.assertIn((rel, hashlib.sha256(archive.read_bytes()).hexdigest()), check.outputs)
+
+    def test_record_from_other_wiki_directory_refuses_until_maintained_again(self):
+        self.assertEqual(self.maintain().errors, [])
+        self.wiki_dir.rename(self.repo / "notes")
+        settings = WikiSettings(dir="notes")
+        check = self.verify(settings=settings)
+        self.assertFalse(check.ok)
+        self.assertIsNone(check.outputs)
+        self.assertTrue(any(p.startswith("OAH_WIKI_MAINTENANCE_STALE") and "malformed outputs" in p
+                            for p in check.problems), check.problems)
+        self.assertEqual(self.maintain(settings=settings).errors, [])
+        self.assertTrue(self.verify(settings=settings).ok)
 
     def test_nested_marker_examples_do_not_replace_actual_maintenance(self):
         example = (b"## 2026-10-22 Example\n\n- item\n  ~~~\n"

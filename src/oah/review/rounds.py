@@ -29,10 +29,10 @@ Check, after the run
     and prior reference against the series: an earlier round, its receipt digest, its finding and matching
     class ids. Broken references stop for a decision (`OAH_REVIEW_NEEDS_DECISION`); none of these rounds count.
 Decide
-    No P0/P1 finding ends the series (`converged`, P2/P3 become follow-ups). A P0/P1 finding in a class a
-    finished correction attempt tried (by id, or by any class whose normalized mechanism and rule equal
-    that class's), one that needs a design or stored-format change, or one outside the task scope stops
-    the series (`needs-decision`). Otherwise the series continues (`changes-requested`).
+    No P0/P1 finding ends the series (`converged`, P2/P3 become follow-ups). A P0/P1 finding with a valid
+    prior reference to a finding targeted by a finished correction, one that needs a design or stored-format
+    change, or one outside the task scope stops the series (`needs-decision`). Otherwise the series continues
+    (`changes-requested`), marking new instances of attempted classes (by id or normalized definition).
 """
 from __future__ import annotations
 
@@ -131,6 +131,7 @@ class Decision:
     outcome: str  # converged | changes-requested | needs-decision
     stop_reason: str | None
     follow_ups: tuple[str, ...]
+    new_instances: tuple[str, ...] = ()
 
 
 def series(records: Records, log: Sequence[dict], base: str, *, head: str,
@@ -405,9 +406,6 @@ def _reference_problems(output: Output, s: Series, number: int) -> list[str]:
             elif earlier[ref.finding_id].get("class_id") != ref.class_id:
                 problems.append(f"{where} as class {ref.class_id}, but that finding's class is "
                                 f"{earlier[ref.finding_id].get('class_id')}")
-            elif finding.class_id != ref.class_id:
-                problems.append(f"{where} of class {ref.class_id}, but {finding.finding_id} has class "
-                                f"{finding.class_id}; a repeated finding keeps its class")
     return problems
 
 
@@ -447,21 +445,38 @@ def decide(output: Output, s: Series) -> Decision:
     classes = s.classes()
     twins = {definition_key(classes[c]["mechanism"], classes[c]["rule"]): c for c in attempted if c in classes}
     resolved = {**classes, **{item.class_id: item.to_json() for item in output.classes}}
+    prior = {(entry.record["round"], entry.digest, item["finding_id"], item["class_id"])
+             for entry in s.receipts if entry.record["round"] < s.next_number
+             for item in entry.record.get("findings", [])}
+    corrected: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for attempt in s.task_attempts:
+        if attempt.terminal and not attempt.problems:
+            for finding_id in attempt.finding_ids:
+                corrected.setdefault((attempt.source_receipt_digest, finding_id), []).append(
+                    (attempt.attempt_id, attempt.outcome))
     reasons: list[str] = []
+    new_instances: list[str] = []
     for finding in blocking:
-        if finding.class_id in attempted:
-            reasons.append(f"{finding.finding_id} repeats class {finding.class_id}, which "
-                           f"{_tries(attempted[finding.class_id])} already tried to fix")
-        elif finding.class_id in resolved:
-            definition = resolved[finding.class_id]
-            twin = twins.get(definition_key(definition["mechanism"], definition["rule"]))
+        recurring = False
+        for ref in finding.prior_refs:
+            if (ref.round, ref.receipt_digest, ref.finding_id, ref.class_id) not in prior:
+                continue
+            tried = corrected.get((ref.receipt_digest, ref.finding_id))
+            if tried:
+                recurring = True
+                reasons.append(f"{finding.finding_id} repeats {ref.finding_id} of class {ref.class_id}, which "
+                               f"{_tries(tried)} already tried to fix")
+        if not recurring:
+            twin = finding.class_id if finding.class_id in attempted else None
+            if twin is None and finding.class_id in resolved:
+                definition = resolved[finding.class_id]
+                twin = twins.get(definition_key(definition["mechanism"], definition["rule"]))
             if twin is not None:
-                reasons.append(f"{finding.finding_id} uses {finding.class_id} with the mechanism and rule of class "
-                               f"{twin}, which {_tries(attempted[twin])} already tried to fix")
+                new_instances.append(f"{finding.finding_id}: new instance of attempted class {twin}")
         if finding.fix_kind != "local":
             reasons.append(f"{finding.finding_id} needs a {finding.fix_kind} change")
         if not finding.in_scope:
             reasons.append(f"{finding.finding_id}'s fix lies outside the task scope")
     if reasons:
-        return Decision("needs-decision", "; ".join(reasons), ())
-    return Decision("changes-requested", None, ())
+        return Decision("needs-decision", "; ".join(reasons), (), tuple(new_instances))
+    return Decision("changes-requested", None, (), tuple(new_instances))

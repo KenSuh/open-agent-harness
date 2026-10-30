@@ -6,7 +6,7 @@ macOS 13 이상과 터미널 창만 있으면 된다. 명령 하나가 나머지
 
 방법은 두 가지다. 어느 쪽이든 같은 설치 프로그램이 같은 질문을 한다.
 
-**클론에서 설치한다.** 저장소가 비공개인 지금은 이 방법을 쓴다. 먼저 `git`이 있어야 한다.
+**클론에서 설치한다.** 먼저 `git`이 있어야 한다.
 `git --version`이 실패하면 `xcode-select --install`을 실행하고 열리는 창에서 설치를 끝낸다. 그다음 아래
 명령을 실행한다.
 
@@ -16,31 +16,36 @@ cd open-agent-harness
 bash install/install.sh
 ```
 
-**명령 한 줄로 설치한다.** 릴리스가 공개된 뒤에 쓸 수 있고 클론도 `git`도 필요 없다.
+**v0.1.0 릴리스에서 설치한다.** 저장소의 릴리스 페이지에서 해당 태그의 소스 압축 파일과 `SHA256SUMS`를
+받는다. `SHA256SUMS`에 적힌 정확한 파일을 쓰고 다른 압축 형식으로 바꾸지 않는다. 클론은 필요 없지만 git은
+여전히 oah의 필수 도구다.
+
+압축을 풀기 전에 SHA-256을 계산한다. `<downloaded-archive>`는 받은 파일 이름으로 바꾼다.
 
 ```bash
-curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash
+shasum -a 256 "./<downloaded-archive>"
 ```
 
-`<version>` 자리에는 릴리스 페이지(https://github.com/KenSuh/open-agent-harness/releases)에 있는 버전을
-넣는다.
-
-이 방법은 고정된 릴리스 압축 파일을 내려받는다. 그리고 릴리스와 함께 공개된 SHA-256 지문과 맞춰 본다.
-지문이 다르면 아무것도 풀지 않고 멈춘다(`OAH_INSTALL_DIGEST_MISMATCH`). 압축을 푼 파일은 임시 폴더에만
-두고 끝날 때 지운다. 릴리스가 아직 없으면 `OAH_INSTALL_NOT_PUBLISHED`를 보여 주고 멈춘다. 그때는 클론
-방법을 쓴다. 이 방법으로 옵션을 주려면 `bash -s --` 뒤에 적는다. 예를 들면 다음과 같다.
+전체 지문을 릴리스의 `SHA256SUMS`에서 해당 파일의 값과 비교한다. 16진수 문자의 대소문자는 무관하다.
+**일치할 때만 압축을 풀고 설치 프로그램을 실행한다.** 지문이 다르거나 항목이 없으면 멈추고 릴리스 페이지에서
+서로 맞는 압축 파일과 지문 파일을 다시 받거나 클론 방법을 쓴다. 검증한 뒤 압축을 풀고 소스 폴더에서 터미널을
+열어 안에 있는 설치 프로그램을 실행한다.
 
 ```bash
-curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash -s -- --dry-run
+bash install/install.sh
 ```
+
+설치 프로그램 소스에 적힌 릴리스 링크 형식은
+`https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh`이다.
+실제 공개된 파일은 저장소의 릴리스 페이지에서 찾는다. 체크아웃 사본에는 아직 릴리스 핀 자리표시자가 있으므로
+위의 검증된 소스 압축 파일 방법은 별도 설치 파일이 공개되었다고 가정하지 않는다.
 
 ## 2. 설치 프로그램이 하는 일
 
 아무것도 바꾸지 않고 단계만 먼저 보려면 `--dry-run`을 붙인다. 설치 프로그램은 순서가 있는 계획을 만들고
 출력만 한다. 도구나 버전 검사, 안내식 설정을 실행하거나 프로필을 읽지 않는다. 설치된 도구는 실제 실행에서만
-확인하므로 계획에는 조건별 명령이 함께 나온다. 공개 설치 방식은 릴리스 다운로드, SHA-256 검사, 압축 해제와
-정리 계획도 보여 준다. 임시 폴더를 만들거나 압축 파일을 내려받거나 검증하지 않는다. 동의하면서 계획을
-실행하려면 `--dry-run` 없이 다시 실행한다. 실제 릴리스 다운로드와 모든 리디렉션은 HTTPS만 허용한다.
+확인하므로 계획에는 조건별 명령이 함께 나온다. 직접 받은 압축 파일의 지문을 검증해 주지는
+않으므로 위의 지문 확인을 먼저 마친다. 동의하면서 계획을 실행하려면 `--dry-run` 없이 다시 실행한다. 실제 릴리스 다운로드와 모든 리디렉션은 HTTPS만 허용한다.
 
 설치는 다섯 단계로 진행된다.
 
@@ -96,7 +101,7 @@ Claude Code를 쓰려면 Pro, Max, Team, Enterprise 또는 Console 계정이 있
 | Codex CLI | 필수 | `brew install --cask codex` 또는 `npm install -g @openai/codex` |
 | uv | 권장 | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js | 권장, 게이트를 쓰는 프로젝트에서는 필수 | `brew install node` |
-| unlazy | 권장 (게이트) | P5가 반영된 뒤 `oah init --with-unlazy`로 P5 계약 검사를 통과한 고정 커밋 설치 |
+| unlazy | 권장 (게이트) | `oah init --with-unlazy`로 `oah` 게이트를 검증한 고정 커밋 설치 |
 | graphify | 권장 | `uv tool install graphifyy` |
 | gh | 권장 | `brew install gh` |
 | gitleaks | 권장 | `brew install gitleaks` |
@@ -107,8 +112,8 @@ Claude Code를 쓰려면 Pro, Max, Team, Enterprise 또는 Console 계정이 있
 그 도구의 다운로드 페이지를 대신 보여 준다. `brew install node`는 현재 Node.js 릴리스를 설치하고 PATH에
 올린다. unlazy는 Node 16 이상에서 돌아간다.
 
-이번 단계의 도구 설치 안내는 unlazy를 설치하지 않는다. P5가 반영된 뒤 `oah init --with-unlazy`를 쓴다.
-게이트 명령을 실행하기 전에 계약 검사를 통과한 고정 커밋과 스크립트 지문을 검증한다.
+설치 프로그램은 unlazy를 설치하지 않는다. 프로젝트 안에서 `oah init --with-unlazy`가 설치한다. `oah` 게이트를
+검증한 커밋을 설치하고, 게이트 명령을 실행하기 전에 그 커밋과 스크립트 지문을 검증한다.
 
 프로젝트가 게이트를 쓰기 시작하면 `oah doctor`는 Node를 필수로 센다. `.oah/tasks/*/GATES.md` 파일이
 있거나 `.oah/config.toml`에 `[gates]` 섹션이 있으면 게이트를 쓰는 것으로 본다. 단 그 섹션에
