@@ -418,6 +418,8 @@ class LandCliTest(unittest.TestCase):
                 self.assertEqual(project.remote_main(), project.base)
                 if change == "review":
                     self.assertIn("OAH_LAND_REVIEW_REQUIRED", done.stderr)
+                    self.assertIn("inspect the review history", done.stderr)
+                    self.assertEqual(records(project)[-1]["code"], "OAH_LAND_REVIEW_REQUIRED")
 
     def test_confirmation_rejects_new_index_flags_without_changing_index(self):
         for flag in ("--assume-unchanged", "--skip-worktree"):

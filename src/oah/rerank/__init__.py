@@ -18,6 +18,13 @@ not sent and keep their place after the re-ordered ones. `advise_difficulty` rec
 tier next to the rule tier and never changes it: `Advice.tier` is the rule tier.
 For `oah call`, `advise_difficulty(axes, task, root=root)` accepts `routing.Axes` and loads the launch
 target's re-ranker config; a disabled re-ranker reports `unused(not-configured)` at this seam.
+
+`judge_model(request, candidates, config=...)` asks the provider for one (model, effort) pair from a
+closed candidate list (amendment 6). The provider receives only the stage, the tier, the four axes and
+the candidate pairs. After the same gate it reports `unused(no-candidates)`, `unused(one-candidate)` or
+`unused(too-many-candidates)` (more than `max_candidates`) without a request. The answer must be a
+tuple of two strings, else `unused(error:bad-response)`; whether it is one of the candidates is
+`oah.models`' rule, which the caller applies.
 """
 from __future__ import annotations
 
@@ -32,8 +39,8 @@ from oah.rerank.base import (TIERS, Candidate, Provider, ProviderError, _INTERRU
                              _classify_failure, _raise_if_interrupted)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, TypeSafeProvider
 
-__all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "Provider", "ProviderError",
-           "RerankResult", "advise_difficulty", "rerank"]
+__all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "Advice", "Candidate", "ModelJudgement", "Provider", "ProviderError",
+           "RerankResult", "advise_difficulty", "judge_model", "rerank"]
 
 DEFAULTS = {
     "enabled": False,
@@ -89,6 +96,16 @@ class Advice:
         return {"tier": self.rule_tier, "tier_source": "rules", "advice": self.status,
                 "provider": self.provider, "advisory_tier": self.advisory_tier,
                 "advisory_confidence": self.confidence}
+
+
+@dataclass(frozen=True)
+class ModelJudgement:
+    status: str
+    proposal: tuple[str, str] | None = None
+    provider: str | None = None
+
+
+AXES = ("kind", "intensity", "reasoning", "risk")
 
 
 def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | None,
@@ -177,6 +194,15 @@ def _valid_advice(answer: object) -> tuple[str, float | None]:
     return tier, confidence
 
 
+def _valid_pair(answer: object) -> tuple[str, str]:
+    try:
+        if type(answer) is not tuple or len(answer) != 2 or any(type(item) is not str for item in answer):
+            raise ProviderError("bad-response")
+        return answer
+    finally:
+        del answer
+
+
 def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query: str = "",
            brief_disabled: bool = False, env: Mapping[str, str] | None = None,
            keychain: secrets.Keychain | None = None,
@@ -254,6 +280,46 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, task: str, *, conf
         failure = _classify_failure(exc)
     finally:
         del axes, task, config, root, brief_disabled, env, keychain, providers, provider, key, answer, confidence
+    if type(failure) is str:
+        raise ProviderError(failure) from None
+    raise BaseException.with_traceback(failure, None) from None
+
+
+def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, config: Mapping,
+                brief_disabled: bool = False, env: Mapping[str, str] | None = None,
+                keychain: secrets.Keychain | None = None,
+                providers: Mapping[str, Provider] | None = None) -> ModelJudgement:
+    """One (model, effort) proposal from the provider, for the caller to validate against its rules."""
+    provider = key = answer = failure = None
+    try:
+        axes = request.get("axes") if isinstance(request.get("axes"), Mapping) else {}
+        sent = {"stage": str(request.get("stage", "")), "tier": str(request.get("tier", "")),
+                "axes": {name: str(axes[name]) for name in AXES if name in axes}}
+        pairs = tuple((str(model), str(effort)) for model, effort in candidates)
+        provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
+                                      providers=providers)
+        env = keychain = providers = None
+        if provider is None:
+            return ModelJudgement(status)
+        provider_name, status = _call(lambda: _valid_text(provider.name))
+        if status != USED:
+            return ModelJudgement(status)
+        limit = config.get("max_candidates")
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(pairs)
+        if not pairs:
+            return ModelJudgement(unused("no-candidates"), None, provider_name)
+        if len(pairs) == 1:
+            return ModelJudgement(unused("one-candidate"), None, provider_name)
+        if len(pairs) > limit:
+            return ModelJudgement(unused("too-many-candidates"), None, provider_name)
+        answer, status = _call(lambda: _valid_pair(provider.choose_model(sent, pairs, key=key, config=config)))
+        if status != USED:
+            return ModelJudgement(status, None, provider_name)
+        return ModelJudgement(USED, answer, provider_name)
+    except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
+        failure = _classify_failure(exc)
+    finally:
+        del request, candidates, config, brief_disabled, env, keychain, providers, provider, key, answer
     if type(failure) is str:
         raise ProviderError(failure) from None
     raise BaseException.with_traceback(failure, None) from None

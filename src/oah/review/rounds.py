@@ -11,6 +11,9 @@ Series
     task's latest receipt no longer descends from that receipt's head or is not in the reviewed history
     (an amend, squash or rebase), the user decides.
 Gate, before any paid call
+    `task_gate` shares decision stops and the task-wide limit across all dispatch paths. `dispatch_gate`
+    loads that state for ordinary calls; review-stage calls reserve a counted round before preparation.
+    Structured starts retain spent reservations; successful receipts reconcile them once, across bases.
     `gate(...)` raises `OAH_REVIEW_NEEDS_DECISION` for history problems or while the task waits
     for a decision (`waiting`: the task's latest receipt stopped for one, or requested changes whose P0/P1
     findings have no finished correction attempt; an ambiguity; or an uncounted call that stopped for a
@@ -33,7 +36,9 @@ Decide
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+from contextvars import ContextVar
 from typing import Callable, Sequence
 
 from oah import intent as oah_intent
@@ -44,6 +49,18 @@ from oah.review.settings import ReviewSettings
 
 NEEDS_DECISION = "OAH_REVIEW_NEEDS_DECISION"
 CONVERGED = "converged"
+_MANAGED_DISPATCH = ContextVar("oah_review_managed_dispatch", default=None)
+_PAID_SPAWN = ContextVar("oah_paid_spawn", default=False)
+
+
+@contextlib.contextmanager
+def _managed_dispatch(task: str, *, root=None, base=None):
+    """Keep the live budget root/base for a reviewer running inside a stripped snapshot."""
+    token = _MANAGED_DISPATCH.set({"task": task, "root": root, "base": base})
+    try:
+        yield
+    finally:
+        _MANAGED_DISPATCH.reset(token)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +88,14 @@ class Series:
     @property
     def task_latest(self) -> Entry | None:
         return self.task_receipts[-1] if self.task_receipts else None
+
+    @property
+    def counted_rounds(self) -> int:
+        published = {entry.record.get("reviewer", {}).get("run_id") for entry in self.task_receipts}
+        reserved = {line.get("run_id", ("start", index)) for index, line in enumerate(self.log)
+                    if (line.get("event") == "start" or
+                        line.get("event") in ("reservation", "dispatch") and line.get("stage") == "review")}
+        return len(self.task_receipts) + len(reserved - published)
 
     def history_items(self) -> list[dict]:
         return [{"kind": entry.kind, "name": entry.name, "digest": entry.digest} for entry in self.history]
@@ -190,7 +215,7 @@ def _waiting(s: Series, *, settled: bool, include_uncorrected: bool) -> str | No
 def _logged_decision_stop(s: Series, reason: str | None, *, settled: bool) -> str | None:
     """Share the landed ordering and settlement rules with correction selection."""
     pending = None
-    for line in s.log:
+    for position, line in enumerate(s.log, 1):
         # A recorded decision settles earlier logged stops across bases. Its target is checked
         # separately below before it can settle the latest receipt's wait.
         if line.get("event") == "start" and line.get("decision"):
@@ -198,11 +223,9 @@ def _logged_decision_stop(s: Series, reason: str | None, *, settled: bool) -> st
         if line.get("event") == "start" and line.get("decision") and settled and _decision_current(line, s):
             reason = None
         elif line.get("event") == "finish" and line.get("code") == NEEDS_DECISION:
-            if line.get("counted"):
-                pending = f"{line.get('receipt')} stopped the task for a decision"
-            else:
-                pending = (f"a reviewer call of round {line.get('series_round')} against base {line.get('base')} "
-                           f"did not count and stopped for a decision: {line.get('message', '')}")
+            from oah.review.receipts import canonical, digest
+
+            pending = f"OAH_REVIEW_NEEDS_DECISION at saved event {position} ({digest(canonical(line))})"
     return pending or reason
 
 
@@ -217,8 +240,115 @@ def round_decision(s: Series) -> str | None:
     return decision
 
 
+def task_limit(s: Series, settings: ReviewSettings) -> int | None:
+    """A saved limit survives a different base or a worktree config with no limit."""
+    return resolve_task_budget(s, settings).limit
+
+
+@dataclasses.dataclass(frozen=True)
+class TaskBudget:
+    limit: int | None
+    stop: str | None
+
+
+def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state=None) -> TaskBudget:
+    """The strictest of the worktree config's limit and every limit in the task log (owner decision b').
+
+    No other branch's config is read: a limit only there has no effect until it is in the checked-out
+    `.oah/config.toml`. With `root`, that file is the worktree source; without it, `settings.max_rounds`
+    is. Newly seen limits are recorded under the caller's task/state locks, so they stay."""
+    from oah.config import ConfigError, load_config
+    from oah.review import receipts
+    from oah.review.settings import budget_limit
+
+    limits = {line["max_rounds"] for line in s.log if line.get("max_rounds") is not None}
+    seen = set(limits)
+    current = settings.max_rounds
+    if root is not None:
+        try:
+            current = budget_limit(load_config(root))
+        except (ConfigError, OSError) as exc:
+            raise ReviewError(getattr(exc, "code", "OAH_CONFIG_INVALID"), "the task budget could not be read; "
+                              "correct .oah/config.toml in the worktree, then retry") from None
+    if current is not None:
+        limits.add(current)
+    if state is not None:
+        for limit in sorted(limits - seen):
+            receipts._log_round_unlocked(state, s.task, {"event": "limit", "max_rounds": limit})
+    return TaskBudget(min(limits) if limits else None, decision_stop(s))
+
+
+def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = None,
+              extra_round: bool = False, budget: TaskBudget | None = None) -> None:
+    """The shared stop and task budget gate; corrections may resolve missing-correction waits."""
+    if s.problems:
+        raise ReviewError(NEEDS_DECISION, "the task history is invalid; nothing was launched. Restore the original "
+                          "review records before retrying; --decision cannot override invalid history")
+    budget = budget or resolve_task_budget(s, settings)
+    reason = budget.stop
+    if reason is not None and decision is None:
+        raise ReviewError(NEEDS_DECISION, "the task is stopped for a decision; nothing was launched. Inspect its "
+                          f'review history, then run oah review --task {s.task} --decision "<what you decided>"')
+    limit = budget.limit
+    if limit is not None and s.counted_rounds >= limit and not extra_round:
+        raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this task has {s.counted_rounds} counted rounds, reaching "
+                          f"its max_rounds limit ({limit}); nothing was launched. Run oah review --task {s.task} "
+                          "--extra-round to authorize and record one additional round")
+
+
+def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, records=None, log=None, reserve=False,
+                  base=None, return_budget=False):
+    """Authorize preparation or launch under task/state locks; a run spends its reservation once."""
+    from oah.review import context, receipts, settings
+
+    conf = settings.load(root) if base is None else settings.ReviewSettings(None, 2, None, ())
+    history = receipts.load(state, task) if records is None else records
+    lines = receipts.read_round_log(state, task) if log is None else log
+    latest = history.receipts()[-1] if history.receipts() else None
+    # Only correction ancestry needs live Git. Empty history still has a task budget, and an
+    # ordinary dispatch without corrections does not need an extra ancestry check.
+    head = (context._commit(root, "HEAD") if any(entry.kind != "receipt" for entry in history.entries)
+            else latest.record["head"] if latest else "")
+    based = base or (latest.record["base"] if latest else
+                    next((line["base"] for line in reversed(lines) if line.get("event") == "start"), head))
+    s = series(history, lines, based, head=head,
+               is_ancestor=lambda a, b: context._git(root, "merge-base", "--is-ancestor", a, b, ok=(0, 1))[0] == 0)
+    budget = resolve_task_budget(s, conf, root=root, state=state)
+    effective = budget.limit
+    # The run may spend the slot it already reserved, but it still observes every later stop and limit.
+    own = [line for line in lines if line.get("event") in ("reservation", "start")
+           and line.get("run_id") == run_id and line.get("stage", "review") == stage]
+    authorized = dataclasses.replace(s, log=tuple(line for line in s.log if line not in own))
+    # A structured --extra-round belongs only to its recorded run, including its preparation and rechecks.
+    extra = any(line.get("event") == "start" and line.get("extra_round") for line in own)
+    task_gate(authorized, settings=conf, budget=budget, extra_round=bool(extra))
+    if record:
+        if any(line.get("event") == "dispatch" and line.get("run_id") == run_id for line in lines):
+            raise ReviewError("OAH_RUN_LAUNCH_INVALID", "this run already dispatched; prepare a new oah call instead "
+                              "of replaying its saved launch")
+        receipts._log_round_unlocked(state, task, {"event": "dispatch", "stage": stage, "run_id": run_id,
+                                                   "max_rounds": effective})
+    elif reserve and not own:
+        receipts._log_round_unlocked(state, task, {"event": "reservation", "stage": stage, "run_id": run_id,
+                                                   "max_rounds": effective})
+    return (s, budget) if return_budget else s
+
+
+def _approval_current(s: Series, latest: Entry) -> bool:
+    """The matching start/finish brackets publication under the task lock, including legacy dispatches."""
+    run_id = latest.record.get("reviewer", {}).get("run_id")
+    boundary = max((index for index, line in enumerate(s.log)
+                    if (line.get("event") == "start" and run_id is not None and line.get("run_id") == run_id)
+                    or (line.get("event") == "finish" and line.get("counted") is True
+                        and line.get("receipt") == latest.name)), default=-1)
+    return all(index <= boundary if line.get("event") in ("reservation", "dispatch") else
+               line.get("round", s.next_number) <= latest.record["round"]
+               for index, line in enumerate(s.log) if line.get("event") != "limit")
+
+
 def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, settings: ReviewSettings,
-         extra_attempt: bool = False, binding: oah_intent.Binding | None = None) -> str | None:
+         extra_attempt: bool = False, binding: oah_intent.Binding | None = None,
+         budget: TaskBudget | None = None) -> str | None:
     """Refuse before any paid call; `"converged"` means this head is already approved."""
     if s.problems:
         raise ReviewError(NEEDS_DECISION, "the review history of this series is incomplete or was changed, so "
@@ -226,7 +356,7 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
                           "\nRestore or complete the records first (a --decision does not override this), then run "
                           f"oah review --task {s.task} again")
     reason = waiting(s)
-    if reason is not None and decision is None:
+    if reason is not None and decision is None and decision_stop(s) is not None:
         raise ReviewError(NEEDS_DECISION, f"{reason}. Nothing was launched. Run oah review --task {s.task} "
                           '--decision "<what you decided>" to continue; the decision is recorded')
     latest = s.task_latest
@@ -235,13 +365,12 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
             and latest.record.get("intent") == binding.to_json()
             # Receipt numbering is task-wide. Publication supersedes that round's attempts;
             # any higher-numbered call is a later, unfinished round, whatever its base.
-            and all(line.get("round", s.next_number) <= latest.record["round"] for line in s.log)):
+            and _approval_current(s, latest)):
         return CONVERGED
-    if settings.max_rounds is not None and len(s.receipts) >= settings.max_rounds and not extra_round:
-        raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this series has {len(s.receipts)} counted rounds, the "
-                          f"[review] max_rounds limit, so nothing was launched. Run oah review --task {s.task} "
-                          "--extra-round to continue (it is recorded), or raise or remove max_rounds in "
-                          ".oah/config.toml")
+    task_gate(s, settings=settings, decision=decision, extra_round=extra_round, budget=budget)
+    if reason is not None and decision is None:
+        raise ReviewError(NEEDS_DECISION, f"{reason}. Nothing was launched. Run oah review --task {s.task} "
+                          '--decision "<what you decided>" to continue; the decision is recorded')
     used = sum(1 for line in s.round_lines() if line.get("event") == "start")
     if used >= settings.round_attempts and not extra_attempt:
         raise ReviewError("OAH_REVIEW_ATTEMPTS_EXHAUSTED", f"round {s.series_round} of this series already used "

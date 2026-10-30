@@ -679,6 +679,32 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
         self.assertIn("current intent binding", result.failure.message)
 
+    def test_pending_and_invalid_review_logs_refuse_without_exposing_values(self):
+        from oah.review import ReviewError
+
+        project = LandProject(self)
+        private = "account-" + secrets.token_hex(16)
+        path = project.state / "reviews" / "t1" / receipts.ROUNDS_NAME
+        for run_id in ("r20261030T000000Z-12345678", private):
+            with self.subTest(pending=run_id != private):
+                raw = (json.dumps({"event": "start", "task": "t1", "base": project.base,
+                                   "head": project.head, "round": 2, "series_round": 2,
+                                   "attempt": 1, "run_id": run_id}) + "\n").encode("utf-8")
+                path.write_bytes(raw)
+                if run_id == private:
+                    with self.assertRaises(ReviewError) as caught:
+                        receipts.read_round_log(project.state, "t1")
+                    self.assertEqual(caught.exception.code, "OAH_REVIEW_STATE_INVALID")
+                else:
+                    self.assertEqual(len(receipts.read_round_log(project.state, "t1")), 1)
+                result = project.assess()
+                self.assertFalse(result.ready, describe(result))
+                self.assertEqual(result.failure.code, "OAH_LAND_REVIEW_REQUIRED", describe(result))
+                self.assertIn("inspect the review history", result.failure.message)
+                self.assertNotIn(private, describe(result) + json.dumps(result.to_json()))
+                self.assertEqual(path.read_bytes(), raw)
+                self.assertEqual(project.remote_main(), project.base)
+
     def test_exact_head_failures_have_named_codes(self):
         older = LandProject(self, receipt=False)
         publish_receipt(older, 1, head=git(older.repo, "rev-parse", "HEAD~1"), base=older.base)

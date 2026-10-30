@@ -16,11 +16,13 @@ from unittest import mock
 
 from oah import briefs, call, call_cli, intent
 from oah.engines.effort import EngineError
+from oah.engines.proc import RunResult
 from oah.impact.errors import ImpactError
 from oah.lease import Store
 from oah.lockfile import StateLock
 from oah.paths import repo_info
-from oah.review import ReviewError, receipts, rounds, runner, schema
+from oah.review import ReviewError, context, receipts, rounds, runner, schema
+from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
@@ -159,6 +161,107 @@ class Project:
         head = self.commit({"src/app.py": f"print('v{number + 1}')\n"}, "fix", CODEX_TRAILER)
         return self.attempt(number, finding_ids or [f"R{number}-F1"], class_ids or [f"R{number}-C1"],
                             after_head=head)
+
+
+class TaskBudgetTest(unittest.TestCase):
+    def test_git_helper_spawn_error_is_safe(self):
+        with mock.patch.object(context, "run_git", side_effect=OSError("private-fixture-marker")):
+            with self.assertRaises(ReviewError) as caught:
+                context._git(pathlib.Path("."), "rev-parse", "HEAD")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+        self.assertNotIn("private-fixture-marker", str(caught.exception))
+
+    def test_default_ref_inspection_error_is_not_a_missing_ref(self):
+        project = Project(self)
+        inspect = context.run_git
+        marker = "private-fixture-marker"
+
+        def broken(root, *args):
+            if args == ("rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/main^{commit}"):
+                return RunResult(1, "", marker, False)
+            return inspect(root, *args)
+
+        with mock.patch.object(context, "run_git", side_effect=broken):
+            error = project.refused("OAH_REVIEW_GIT_FAILED")
+        self.assertNotIn(marker, str(error))
+
+    def test_config_inspection_failures_are_safe(self):
+        from tests.test_bud_gate import config_git_fault
+
+        project = Project(self)
+        for fault in ("timeout", "error", "silent", "blob", "os-error"):
+            with self.subTest(fault=fault), config_git_fault(project.base, fault) as marker:
+                with self.assertRaises(ReviewError) as caught:
+                    runner.config_at(project.repo, project.base)
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+                self.assertIn("retry", str(caught.exception))
+                self.assertNotIn(marker, str(caught.exception))
+
+    def test_confirmed_absent_config_at_existing_commit_is_empty(self):
+        project = Project(self)
+        base = project.commit({".oah/config.toml": None})
+        self.assertEqual(dict(runner.config_at(project.repo, base).raw), {})
+        with self.assertRaises(ReviewError) as caught:
+            runner.config_at(project.repo, "f" * 40)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+
+    def test_only_worktree_and_logged_limits_count_and_new_ones_are_saved_once(self):
+        for event in ("start", "finish"):
+            with self.subTest(event=event):
+                project = Project(self)
+                project.review()
+                original = (project.repo / ".oah/config.toml").read_bytes()
+
+                def limit_commit(limit):
+                    return project.commit({".oah/config.toml": original +
+                                           f"[review]\nmax_rounds = {limit}\n".encode()})
+
+                receipt_base, logged_base, default_base = (limit_commit(limit) for limit in (4, 2, 1))
+                limit_commit(3)
+                git(project.repo, "update-ref", "refs/heads/main", default_base)
+                # Receipt, logged and default-branch bases carry stricter limits, but only the
+                # checked-out config (3) and the task log (5) are budget sources.
+                old = project.receipt(1)
+                receipts.publish(project.state, "t1", "R2.json", {**old, "round": 2, "base": receipt_base})
+                receipts.publish(project.state, "t1", "R3.json", {**old, "round": 3})
+                fields = {"attempt": 1} if event == "start" else {"counted": False, "code": "OAH_REVIEW_ENGINE_FAILED"}
+                receipts.log_round(project.state, "t1", {"event": event, "base": logged_base,
+                                                         "round": 4, "series_round": 1, **fields})
+                receipts.log_round(project.state, "t1", {"event": "limit", "max_rounds": 5})
+                with StateLock(receipts.task_lock_path(project.state, "t1")), StateLock(project.state / ".lock"):
+                    s = rounds.series(receipts.load(project.state, "t1"), project.round_log(), project.base,
+                                      head=project.head, is_ancestor=lambda a, b: True)
+                    with mock.patch.object(context, "run_git", side_effect=AssertionError("budget read Git")), \
+                            mock.patch.object(runner, "run_git", side_effect=AssertionError("budget read Git")), \
+                            mock.patch.object(context, "run_command", side_effect=AssertionError("budget read Git")):
+                        budget = rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()),
+                                                            root=project.repo, state=project.state)
+                        self.assertEqual(budget.limit, 3)
+                        lines = project.round_log()
+                        self.assertEqual(sorted(line["max_rounds"] for line in lines if line["event"] == "limit"),
+                                         [3, 5])
+                        s = dataclasses.replace(s, log=tuple(lines))
+                        rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()),
+                                                   root=project.repo, state=project.state)
+                    self.assertEqual(project.round_log(), lines)
+
+    def test_no_limit_anywhere_is_unlimited(self):
+        project = Project(self)
+        s = rounds.series(receipts.Records("t1"), (), project.base, head=project.head, is_ancestor=lambda a, b: True)
+        self.assertIsNone(rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()), root=project.repo).limit)
+
+    def test_a_recorded_base_config_is_not_read_for_the_budget(self):
+        project = Project(self)
+        marker = "private-fixture-marker"
+        base = project.commit({".oah/config.toml": f"[{marker}\n"})
+        # The malformed config exists only at an older recorded base, never in the worktree.
+        project.commit({".oah/config.toml": git(project.repo, "show", f"{project.base}:.oah/config.toml") + "\n"})
+        receipts.log_round(project.state, "t1", {"event": "finish", "base": base, "round": 1,
+                                                 "series_round": 1, "counted": False,
+                                                 "code": "OAH_REVIEW_ENGINE_FAILED", "message": marker})
+        result = project.review(base=project.base)
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        self.assertNotIn(marker, result.message)
 
 
 class SeriesTest(unittest.TestCase):
@@ -385,7 +488,7 @@ class DecisionTest(unittest.TestCase):
         project.review(base=project.base)
         project.review(base=later_base)
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=project.base)
-        self.assertIn("R2.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
         result = project.review(base=project.base, decision="keep the approved design")
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual(project.receipt(3)["decision"]["text"], "keep the approved design")
@@ -402,7 +505,7 @@ class DecisionTest(unittest.TestCase):
         project.review(base=project.base, decision="settle the R2 decision")
         project.review(base=other_base, decision="check the design again")
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=project.base)
-        self.assertIn("R3.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
 
     def test_previously_defined_alias_of_attempted_class_stops(self):
         from tests.test_review import receipt_record
@@ -649,7 +752,7 @@ class DecisionTest(unittest.TestCase):
         project.queue({"findings": [bug(fix_kind="design")]}, {})
         self.assertEqual(project.review().code, "OAH_REVIEW_NEEDS_DECISION")
         error = project.refused("OAH_REVIEW_NEEDS_DECISION", base=first)
-        self.assertIn("R1.json", str(error))
+        self.assertIn(receipts.digest(receipts.canonical(project.round_log()[-1])), str(error))
         result = project.review(base=first, decision="review only the second commit")
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual((project.receipt(2)["base"], project.receipt(2)["series_round"]), (first, 1))
@@ -1237,7 +1340,7 @@ class ConfigTest(unittest.TestCase):
     def test_reviewer_config_comes_from_the_base(self):
         project = Project(self)
         hostile = re.sub(r"command = \[.*\]", 'command = ["no-such-reviewer"]', self.config_text(project))
-        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 0\ncritical_paths = []\n'
+        hostile += '[stages]\nreview = "claude"\n[review]\nmax_rounds = 2\ncritical_paths = []\n'
         project.commit({".oah/config.toml": hostile}, "reconfigure the reviewer")
         result = project.review()
         self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)

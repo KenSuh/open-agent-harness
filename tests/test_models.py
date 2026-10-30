@@ -14,7 +14,9 @@ from unittest import mock
 
 from oah import models_cli
 from oah.engines.effort import EngineError
-from oah.models import Catalog, Entry, ModelInfo, map_tier, resolve_base
+from oah.engines import codex
+from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
+                        resolve_base)
 from tests.helpers import make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -238,6 +240,68 @@ class ModelsCliTest(unittest.TestCase):
         self.assertEqual(data["engines"]["claude"]["tiers"]["high"]["model"], "opus")
         self.assertIn("gpt-a", [m["name"] for m in data["engines"]["codex"]["models"]])
 
+    def test_shows_candidates_and_caps(self):
+        repo = project_with_fakes(self, 'quality_order = ["m-strong", "m-mid"]\nallowed_models = ["m-strong", "m-mid"]\n'
+                                        '[engines.codex.effort_caps]\n"m-strong" = "high"\n')
+        state, home = make_tmp_dir(self), make_tmp_dir(self)
+        write_cache(home, ("m-strong", ["low", "medium", "high", "xhigh", "max"], True),
+                    ("m-mid", ["low", "medium", "high"], False))
+        with inside(repo, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
+            code, out, err = run_models("--json")
+            text_code, text, _ = run_models()
+        self.assertEqual((code, text_code), (0, 0), err)
+        codex_report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(codex_report["allowed_models"], ["m-strong", "m-mid"])
+        self.assertEqual(codex_report["effort_caps"], {"m-strong": "high"})
+        high = codex_report["tiers"]["high"]
+        self.assertEqual((high["model"], high["effort"]), ("m-strong", "high"))
+        self.assertEqual(high["floor"], {"tier": "high", "model": "m-strong", "effort": "high"})
+        self.assertEqual(high["candidates"], [["m-strong", "high"]])
+        low = codex_report["tiers"]["low"]
+        self.assertEqual((low["model"], low["effort"]), ("m-mid", "low"))
+        self.assertIn(["m-strong", "low"], low["candidates"])
+        self.assertNotIn(["m-strong", "max"], low["candidates"])
+        self.assertIn("allowed m-strong, m-mid", text)
+        self.assertIn("caps m-strong=high", text)
+        self.assertIn("candidates at floor low: m-strong (low, medium, high) · m-mid (low, medium, high)", text)
+
+    def test_shows_tier_pools_and_why_model_choice_is_off(self):
+        state, home = make_tmp_dir(self), make_tmp_dir(self)
+        write_cache(home, ("m-strong", ["low", "medium", "high"], True), ("m-mid", ["low", "medium"], False),
+                    ("m-light", ["low"], False), ("m-new", ["low", "medium", "high"], False))
+        pooled = project_with_fakes(self, 'allowed_models = ["m-strong", "m-mid", "m-light", "m-new"]\n'
+                                          '[engines.codex.tier_pools]\nlow = ["m-mid", "m-light"]\n'
+                                          'medium = ["m-mid"]\nhigh = ["m-strong"]\nmax = ["m-strong"]\n')
+        with inside(pooled, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
+            code, out, err = run_models("--json")
+            _, text, _ = run_models()
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(report["tier_pools"], {"low": ["m-mid", "m-light"], "medium": ["m-mid"], "high": ["m-strong"],
+                                                "max": ["m-strong"]})
+        tiers = report["tiers"]
+        self.assertEqual([tiers[tier]["mode"] for tier in tiers], ["pools"] * 4)
+        self.assertEqual(tiers["low"]["candidates"], [["m-mid", "low"], ["m-mid", "medium"], ["m-light", "low"]])
+        self.assertEqual(tiers["medium"]["candidates"], [["m-mid", "medium"]])
+        self.assertEqual(tiers["high"]["candidates"], [["m-strong", "high"]])
+        for tier, row in tiers.items():
+            with self.subTest(tier=tier):
+                # Allowed but in no pool: its quality for any tier is unknown, so it is never a candidate.
+                self.assertEqual(row["excluded"]["m-new"], "not-in-tier-pool")
+                self.assertNotIn("m-new", {model for model, _ in row["candidates"]})
+        self.assertIn("pools low: m-mid, m-light; medium: m-mid; high: m-strong; max: m-strong", text)
+        self.assertIn("candidates at floor low: m-mid (low, medium) · m-light (low)", text)
+        self.assertIn("m-new (not-in-tier-pool)", text)
+        off = project_with_fakes(self, 'allowed_models = ["m-mid", "m-light"]\n')
+        with inside(off, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
+            code, out, err = run_models("--json")
+            _, text, _ = run_models()
+        self.assertEqual(code, 0, err)
+        low = json.loads(out)["engines"]["codex"]["tiers"]["low"]
+        self.assertEqual((low["mode"], low["note"]), ("deterministic", "model choice off: no ranking and no tier pools"))
+        self.assertIn("model choice off: no ranking and no tier pools", text)
+        self.assertIn("· pools none", text)
+
     def test_models_cli_reports_unresolved_tier(self):
         repo = project_with_fakes(self)
         state, home = make_tmp_dir(self), make_tmp_dir(self)
@@ -246,6 +310,276 @@ class ModelsCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("OAH_MODEL_UNRESOLVED", out)
         self.assertIn("OAH_MODELS_REFRESH_FAILED", err)
+
+    def test_cap_conflicts_report_the_same_uncapped_floor_as_calls(self):
+        from tests import test_call as calls
+
+        for engine in ("codex", "claude"):
+            with self.subTest(engine=engine):
+                model = "m-default" if engine == "codex" else "opus"
+                project = calls.Project(self, f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n')
+                write_cache(project.home, ("m-default", ["low", "medium", "high", "max"], True))
+                with inside(project.repo, project.env):
+                    code, out, err = run_models("--json")
+                    _, text, _ = run_models()
+                    with self.assertRaises(EngineError) as caught:
+                        project.prepare(engine=engine, stage="review" if engine == "codex" else "initial",
+                                        axes={"kind": "security"})
+                self.assertEqual(code, 0, err)
+                rows = json.loads(out)["engines"][engine]["tiers"]
+                self.assertEqual(rows["high"], {"error": str(caught.exception)})
+                self.assertIn("OAH_CONFIG_INVALID", rows["max"]["error"])
+                self.assertIn("floor effort high", text)
+                self.assertIn(".oah/config.toml", rows["high"]["error"])
+                self.assertEqual(rows["medium"]["floor"]["effort"], "medium")
+                self.assertFalse(project.record.exists())
+
+
+ALL = ("low", "medium", "high", "xhigh", "max", "ultra")
+JUDGE_ENTRY = Entry("codex", "0.163.0", "2026-10-23T12:00:00Z", (
+    ModelInfo("m-strong", ALL, True),
+    ModelInfo("m-mid", ("low", "medium", "high")),
+    ModelInfo("m-light", ("low", "medium")),
+    ModelInfo("m-hidden", ALL, listed=False),
+    ModelInfo("m-extra", ("medium", "high")),
+), "fixture")
+RANKING = ["m-strong", "m-mid", "m-light"]
+
+
+def candidates(*, ranking=RANKING, floor=("m-mid", "medium"), deterministic=("m-strong", "high"),
+               allowed=(), caps=None, floor_tier="medium", tier="high", pools=None):
+    return build_candidates("codex", entry=JUDGE_ENTRY, deterministic=Pair(*deterministic), tier=tier,
+                            floor_tier=floor_tier, floor=Pair(*floor), quality_order=list(ranking),
+                            allowed_models=list(allowed), effort_caps=dict(caps or {}), tier_pools=dict(pools or {}))
+
+
+def pairs(candidate_set) -> list[tuple[str, str]]:
+    return [(pair.model, pair.effort) for pair in candidate_set.pairs]
+
+
+class CandidateTableTest(unittest.TestCase):
+    def test_hidden_models_are_parsed_and_kept_out_of_candidates(self):
+        parsed = codex.parse_models_cache(json.dumps({"models": [
+            {"slug": "m-a", "visibility": "list", "supported_reasoning_levels": ["low"]},
+            {"slug": "m-b", "visibility": "hide", "supported_reasoning_levels": ["low"]},
+            {"slug": "m-c", "hidden": True, "supported_reasoning_levels": ["low"]},
+            {"slug": "m-d", "supported_reasoning_levels": ["low"]},
+        ]}))
+        self.assertEqual({slug: model.listed for slug, model in parsed.items()},
+                         {"m-a": True, "m-b": False, "m-c": False, "m-d": True})
+        self.assertNotIn("m-hidden", {pair.model for pair in candidates(ranking=[]).pairs})
+        self.assertNotIn("m-hidden", {pair.model for pair in candidates(ranking=["m-hidden", *RANKING]).pairs})
+
+    def test_catalog_round_trips_listed(self):
+        fixture = Fixture(self)
+        write_cache(fixture.home, ("m-a", ["low"], True))
+        cache = json.loads((fixture.home / "models_cache.json").read_text(encoding="utf-8"))
+        cache["models"].append({"slug": "m-b", "visibility": "hide", "supported_reasoning_levels": ["low"]})
+        (fixture.home / "models_cache.json").write_text(json.dumps(cache), encoding="utf-8")
+        fixture.fresh("codex")
+        entry = fixture.catalog.load("codex")
+        self.assertEqual([(model.name, model.listed) for model in entry.models], [("m-a", True), ("m-b", False)])
+        old = Entry.from_json("codex", {"models": [{"name": "m-a", "efforts": ["low"]}]})
+        self.assertIsNone(old)
+        for listed in (None, "false", 0, 1):
+            with self.subTest(listed=listed):
+                self.assertIsNone(Entry.from_json("codex", {
+                    "models": [{"name": "m-a", "efforts": ["low"], "listed": listed}]}))
+
+    def test_unexpired_legacy_catalog_never_qualifies_hidden_models(self):
+        for readable_cache in (True, False):
+            for mixed_visibility in (False, True):
+                with self.subTest(readable_cache=readable_cache, mixed_visibility=mixed_visibility):
+                    fixture = Fixture(self)
+                    visible = {"name": "m-visible", "efforts": ["high"], "default": True}
+                    if mixed_visibility:
+                        visible["listed"] = True
+                    legacy = {"codex": {"cli_version": "0.163.0", "checked_at": NOW.isoformat(),
+                                        "source": "fixture", "models": [visible,
+                                            {"name": "m-hidden", "efforts": ["high"]}]}}
+                    fixture.catalog.dir.mkdir(parents=True)
+                    fixture.catalog.catalog_path.write_bytes(json.dumps(legacy).encode("utf-8"))
+                    if readable_cache:
+                        fixture.home.mkdir()
+                        (fixture.home / "models_cache.json").write_bytes(json.dumps({"models": [
+                            {"slug": "m-visible", "supported_reasoning_levels": ["high"], "is_default": True},
+                            {"slug": "m-hidden", "supported_reasoning_levels": ["high"], "visibility": "hide"},
+                        ]}).encode("utf-8"))
+                    freshness = fixture.fresh("codex", now=NOW + dt.timedelta(hours=1))
+                    for ranking, pools in ((["m-hidden", "m-visible"], {}),
+                                           ([], {"high": ["m-hidden", "m-visible"]})):
+                        built = build_candidates("codex", entry=freshness.entry, tier="high", floor_tier="high",
+                                                 deterministic=Pair("m-visible", "high"),
+                                                 floor=Pair("m-visible", "high"), quality_order=ranking,
+                                                 allowed_models=[], effort_caps={}, tier_pools=pools)
+                        self.assertEqual(pairs(built), [("m-visible", "high")] if readable_cache else [])
+                        self.assertEqual(built.reject_reason("m-hidden", "high"), "outside-candidates")
+                    self.assertEqual(freshness.entry.cli_version, "0.163.0")
+                    if readable_cache:
+                        self.assertIsNotNone(freshness.refreshed)
+                        self.assertFalse(fixture.catalog.load("codex").model("m-hidden").listed)
+                        self.assertIsNone(fixture.fresh("codex", now=NOW + dt.timedelta(hours=2)).refreshed)
+                    else:
+                        self.assertTrue(any(w.startswith("OAH_MODELS_REFRESH_FAILED") for w in freshness.warnings))
+                        self.assertIsNone(fixture.catalog.load("codex"))
+
+    def test_candidate_table(self):
+        rows = [
+            ("ranked, floor medium", {}, [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"),
+                                          ("m-strong", "max"), ("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked with a cap", {"caps": {"m-strong": "high"}},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked with an allow list", {"allowed": ["m-mid", "m-hidden"]}, [("m-mid", "medium"), ("m-mid", "high")]),
+            ("ranked, floor low", {"floor": ("m-light", "low"), "floor_tier": "low"},
+             [("m-strong", e) for e in ("low", "medium", "high", "xhigh", "max")]
+             + [("m-mid", e) for e in ("low", "medium", "high")] + [("m-light", e) for e in ("low", "medium")]),
+            ("no ranking: the model stays deterministic", {"ranking": [], "floor": ("m-strong", "medium")},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"), ("m-strong", "max")]),
+            ("ranking names no listed model", {"ranking": ["m-hidden", "m-gone"], "floor": ("m-strong", "medium")},
+             [("m-strong", "medium"), ("m-strong", "high"), ("m-strong", "xhigh"), ("m-strong", "max")]),
+            ("floor model unranked: effort only", {"floor": ("m-extra", "medium"), "deterministic": ("m-mid", "high")},
+             [("m-mid", "medium"), ("m-mid", "high")]),
+            ("cap below the floor leaves nothing for that model",
+             {"ranking": [], "floor": ("m-strong", "high"), "caps": {"m-strong": "medium"}}, []),
+            # Revision 3: without a ranking, only models the user put in the floor tier's pool and the call tier's
+            # pool are candidates (peers, no order inferred); allowed_models alone qualifies nothing.
+            ("pools: floor and call tier pools both hold",
+             {"ranking": [], "floor": ("m-strong", "medium"),
+              "pools": {"medium": ["m-mid", "m-light", "m-strong"], "high": ["m-strong", "m-mid"]}},
+             [("m-strong", e) for e in ("medium", "high", "xhigh", "max")] + [("m-mid", "medium"), ("m-mid", "high")]),
+            ("a cap bounds a pool model",
+             {"ranking": [], "floor": ("m-strong", "medium"), "tier": "medium",
+              "pools": {"medium": ["m-mid", "m-extra"]}, "caps": {"m-extra": "medium"}},
+             [("m-mid", "medium"), ("m-mid", "high"), ("m-extra", "medium")]),
+            ("allowed_models filters a pool",
+             {"ranking": [], "floor": ("m-strong", "medium"), "tier": "medium", "allowed": ["m-mid"],
+              "pools": {"medium": ["m-mid", "m-light"]}}, [("m-mid", "medium"), ("m-mid", "high")]),
+            ("hidden and unknown pool models are never candidates",
+             {"ranking": [], "floor": ("m-strong", "medium"), "tier": "medium",
+              "pools": {"medium": ["m-hidden", "m-typo", "m-light"]}}, [("m-light", "medium")]),
+            ("a pool model below the floor effort is not a candidate",
+             {"ranking": [], "floor": ("m-strong", "high"), "floor_tier": "high",
+              "pools": {"high": ["m-mid", "m-light"]}}, [("m-mid", "high")]),
+            ("no pool for the call tier: no judged candidates",
+             {"ranking": [], "floor": ("m-strong", "medium"), "deterministic": ("m-strong", "medium"),
+              "tier": "medium", "pools": {"low": ["m-light"], "high": ["m-mid"]}},
+             []),
+            ("allowed_models alone qualifies nothing",
+             {"ranking": [], "floor": ("m-strong", "medium"), "deterministic": ("m-strong", "medium"),
+              "tier": "medium", "allowed": ["m-mid", "m-light"]}, []),
+        ]
+        for name, options, expected in rows:
+            with self.subTest(name):
+                built = candidates(**options)
+                self.assertEqual(pairs(built), expected)
+                for pair in built.pairs:
+                    self.assertIsNone(built.reject_reason(pair.model, pair.effort))
+
+    def test_missing_or_empty_applicable_pool_has_no_candidates(self):
+        for ranking in ([], RANKING):
+            for absent in ("high", "max"):
+                for empty in (False, True):
+                    with self.subTest(ranking=ranking, absent=absent, empty=empty):
+                        pools = {"high": ["m-mid"], "max": ["m-mid"]}
+                        pools.pop(absent)
+                        if empty:
+                            pools[absent] = []
+                        built = candidates(ranking=ranking, floor=("m-strong", "high"), floor_tier="high",
+                                           tier="max", pools=pools)
+                        self.assertEqual(pairs(built), [])
+                        self.assertEqual(built.reject_reason("m-strong", "high"), "not-in-tier-pool")
+                        self.assertEqual(built.reject_reason("m-mid", "high"), "not-in-tier-pool")
+
+    def test_reject_reasons_table(self):
+        ranked, unranked = candidates(caps={"m-strong": "high"}), candidates(ranking=[], floor=("m-strong", "medium"))
+        allow = candidates(allowed=["m-strong"])
+        pools = candidates(ranking=[], floor=("m-strong", "medium"), caps={"m-extra": "medium"},
+                           pools={"medium": ["m-strong", "m-mid", "m-extra"], "high": ["m-strong", "m-extra"]})
+        pinned_pool = candidates(ranking=[], floor=("m-strong", "medium"), allowed=["m-strong"],
+                                 pools={"medium": ["m-strong", "m-extra"], "high": ["m-strong", "m-extra"]})
+        rows = [
+            (ranked, ("m-hidden", "high"), "outside-candidates"),
+            (ranked, ("m-unknown", "high"), "outside-candidates"),
+            (allow, ("m-mid", "high"), "not-allowed"),
+            (ranked, ("m-light", "high"), "unsupported-effort"),
+            (ranked, ("m-strong", "ultra"), "unsupported-effort"),
+            (ranked, ("m-strong", "turbo"), "unsupported-effort"),
+            (ranked, ("m-extra", "high"), "unranked-model"),
+            (ranked, ("m-light", "medium"), "below-floor"),
+            (ranked, ("m-strong", "low"), "below-floor"),
+            (ranked, ("m-strong", "max"), "above-cap"),
+            (unranked, ("m-mid", "high"), "outside-candidates"),
+            (unranked, ("m-strong", "low"), "below-floor"),
+            (ranked, ("m-mid", "high"), None),
+            (pools, ("m-mid", "high"), "not-in-tier-pool"),
+            (pools, ("m-light", "medium"), "not-in-tier-pool"),
+            (pools, ("m-strong", "low"), "below-floor"),
+            (pools, ("m-extra", "high"), "above-cap"),
+            (pools, ("m-hidden", "high"), "outside-candidates"),
+            (pools, ("m-strong", "ultra"), "unsupported-effort"),
+            (pools, ("m-strong", "xhigh"), None),
+            (pools, ("m-extra", "medium"), None),
+            (pinned_pool, ("m-extra", "medium"), "not-allowed"),
+        ]
+        for built, (model, effort), rule in rows:
+            with self.subTest(model=model, effort=effort):
+                self.assertEqual(built.reject_reason(model, effort), rule)
+
+    def test_candidate_set_json_names_its_inputs(self):
+        data = candidates(caps={"m-strong": "high"}, allowed=["m-strong", "m-mid"]).to_json()
+        self.assertEqual(data["deterministic"], {"model": "m-strong", "effort": "high"})
+        self.assertEqual(data["floor"], {"tier": "medium", "model": "m-mid", "effort": "medium"})
+        self.assertTrue(data["ranked"])
+        self.assertEqual(data["mode"], "ranked")
+        self.assertIsNone(data["note"])
+        self.assertEqual(data["caps"], {"m-strong": "high"})
+        self.assertEqual(data["allowed_models"], ["m-strong", "m-mid"])
+        self.assertIn(["m-mid", "high"], data["candidates"])
+
+    def test_pools_and_off_record_why(self):
+        off = candidates(ranking=[], floor=("m-strong", "medium"))
+        self.assertEqual((off.mode, off.note), ("deterministic", "model choice off: no ranking and no tier pools"))
+        self.assertEqual(off.to_json()["note"], off.note)
+        skipped = candidates(floor=("m-extra", "medium"), deterministic=("m-mid", "high"))
+        self.assertEqual(skipped.note, "model choice off: quality_order does not rank m-extra and no tier pools")
+        missing = candidates(ranking=[], floor=("m-strong", "medium"), pools={"medium": ["m-mid"]})
+        self.assertEqual((missing.mode, missing.note), ("deterministic", "model choice off: no ranking and no tier pool for high"))
+        pools = candidates(ranking=[], floor=("m-strong", "high"), floor_tier="high", caps={"m-extra": "medium"},
+                           allowed=["m-strong", "m-mid", "m-light", "m-extra", "m-hidden"],
+                           pools={"high": ["m-mid", "m-light", "m-extra", "m-hidden"]})
+        self.assertEqual((pools.mode, pools.note), ("pools", None))
+        self.assertEqual(pools.excluded, (("m-light", "below-floor"), ("m-extra", "above-cap"),
+                                          ("m-hidden", "outside-candidates"), ("m-strong", "not-in-tier-pool")))
+        data = pools.to_json()
+        self.assertEqual((data["mode"], data["ranked"]), ("pools", False))
+        self.assertEqual(data["tier_pools"], {"high": ["m-mid", "m-light", "m-extra", "m-hidden"]})
+        self.assertEqual(data["excluded"], {"m-light": "below-floor", "m-extra": "above-cap",
+                                            "m-hidden": "outside-candidates", "m-strong": "not-in-tier-pool"})
+        self.assertEqual(data["candidates"], [["m-mid", "high"]])
+
+    def test_check_caps_fresh_and_stale(self):
+        self.assertEqual(check_caps("codex", {}, [], JUDGE_ENTRY, fresh=True), [])
+        with self.assertRaises(EngineError) as ctx:
+            check_caps("codex", {"m-typo": "high"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(ctx.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("m-typo", str(ctx.exception))
+        self.assertIn("oah models", str(ctx.exception))
+        warned = check_caps("codex", {"m-strong": "high", "m-typo": "low"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(len(warned), 1)
+        self.assertTrue(warned[0].startswith("OAH_MODEL_CAP_UNKNOWN: "), warned)
+        self.assertIn("m-typo", warned[0])
+        stale = check_caps("codex", {"m-typo": "high"}, [], JUDGE_ENTRY, fresh=False)
+        self.assertTrue(stale[0].startswith("OAH_MODEL_CAP_UNKNOWN: "), stale)
+        hidden = check_caps("codex", {"m-hidden": "high", "m-mid": "high"}, [], JUDGE_ENTRY, fresh=True)
+        self.assertIn("m-hidden", hidden[0])
+        allowed = check_caps("codex", {}, ["m-mid", "m-typo"], JUDGE_ENTRY, fresh=True)
+        self.assertEqual(len(allowed), 1)
+        self.assertTrue(allowed[0].startswith("OAH_MODEL_ALLOWED_UNKNOWN: "), allowed)
+        pooled = check_caps("codex", {}, [], JUDGE_ENTRY, fresh=True, pools={"high": ["m-mid", "m-typo"], "low": []})
+        self.assertEqual(len(pooled), 1)
+        self.assertTrue(pooled[0].startswith("OAH_MODEL_POOL_UNKNOWN: "), pooled)
+        self.assertIn("tier_pools.high", pooled[0])
+        self.assertIn("m-typo", pooled[0])
 
 
 if __name__ == "__main__":

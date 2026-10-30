@@ -10,9 +10,10 @@ a reviewer CLI that does not match
 `[review] codex_sha256` (the resolved CLI entry file: for an npm install that is the JavaScript launcher, not the
 native program it starts).
 
-The reviewed change never configures its own review: `[stages]`, `[engines]`, `[models]` and `[review]` come
-from `.oah/config.toml` as committed at the base (`config_at`). A change to that file is a critical path and a
-warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
+Reviewer policy (`[stages]`, `[engines]`, `[models]` and `[review]`) comes from `.oah/config.toml` at the base
+(`config_at`). The task's max_rounds budget is the strictest of the worktree config's limit and the limits in
+the task log; no other branch's or base's config is read for it. A config change is
+a critical path and a warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs
 the reviewer in the snapshot: stage `review` (read-only), `--output-schema`, `--ephemeral`, the user's Codex
@@ -20,8 +21,8 @@ config and rules ignored, and an allowlisted environment plus the worker variabl
 variables never pass through (in any letter case); sign in through `codex login`, including
 `codex login --with-api-key`. Structured output is redacted once, after JSON decoding and before retention
 or validation. The snapshot is removed as soon as the reviewer exits. A validated round publishes
-`R<n>.json` and its index line; every other call
-is an uncounted attempt in `rounds.jsonl`.
+`R<n>.json` and its index line; every other call has no validated receipt in `rounds.jsonl`.
+The start reservation is durable before preparation; failed and interrupted calls retain that spend.
 """
 from __future__ import annotations
 
@@ -37,10 +38,9 @@ from oah import call, call_cli, models, preflight, runs
 from oah import intent as oah_intent
 from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
-from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
-from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
+from oah.paths import repo_info, run_git, state_dir
 from oah.review import ReviewError, authors, canary, context, prompt, receipts, rounds, schema, snapshot
 from oah.review import settings as review_settings
 
@@ -208,14 +208,11 @@ def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Bindi
 def config_at(root: pathlib.Path, rev: str) -> Config:
     """`.oah/config.toml` as committed at `rev`; a commit without the file reads as empty."""
     label = f"{CONFIG_PATH} at the review base {rev[:12]}"
-    if run_git(root, "cat-file", "-e", f"{rev}:{CONFIG_PATH}").returncode != 0:
+    status, _out = context._review_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
+    if status == context.ABSENT:
         return Config(path=None, raw={}, label=label)
-    result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{CONFIG_PATH}"],
-                         timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
-    if result.timed_out or result.returncode != 0:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git could not read {label} ({result.stderr.strip() or 'no output'}); "
-                          "check the repository and retry")
-    return parse_config(result.stdout.encode("latin-1"), label=label)
+    _status, raw = context._review_git(root, "cat-file", "blob", f"{rev}:{CONFIG_PATH}")
+    return parse_config(raw.encode("latin-1"), label=label)
 
 
 def _call_settings(config: Config) -> call.Settings:
@@ -299,9 +296,10 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
             raise ReviewError("OAH_REVIEW_SERIES_BUSY", f"another oah review of task {request.task} is running "
                               "against another base; wait for it to finish, then run oah review again") from None
         try:
-            return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
-                          call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
-                          rules=rules, ensure_impact=ensure_impact)
+            with rounds._managed_dispatch(request.task, root=root, base=span.base):
+                return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
+                              call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
+                              rules=rules, ensure_impact=ensure_impact)
         finally:
             task_lock.__exit__(None, None, None)
     finally:
@@ -346,17 +344,21 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                               read_source=oah_intent.read_source)
     call.check_dispatch_binding(call.dispatch_binding(state, task), packet, task)
     impact_info, data = _impact(root, env, ensure_impact, span.head)
-    records = receipts.load(state, task)
-    s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
-                      is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
+    with StateLock(state / ".lock"):
+        records = receipts.load(state, task)
+        s = rounds.series(records, receipts.read_round_log(state, task), span.base, head=span.head,
+                          is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
+        budget = rounds.resolve_task_budget(s, conf, root=root, state=state)
+    conf = dataclasses.replace(conf, max_rounds=budget.limit)
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
-                   settings=conf, extra_attempt=request.extra_attempt, binding=binding) == rounds.CONVERGED:
+                   settings=conf, extra_attempt=request.extra_attempt, binding=binding,
+                   budget=budget) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
                       f"{span.head}; nothing was launched",
                       lines=_lines(latest.record, latest.digest, latest.name, conf, task), receipt=latest.record,
                       receipt_path=receipts.review_dir(state, task) / latest.name)
-    extra = bool(request.extra_round and conf.max_rounds is not None and len(s.receipts) >= conf.max_rounds)
+    extra = bool(request.extra_round and conf.max_rounds is not None and s.counted_rounds >= conf.max_rounds)
     extra_attempt = request.extra_attempt
     warnings: list[str] = []
     stopped = rounds.waiting(s, settled=False)
@@ -364,7 +366,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         warnings.append("OAH_REVIEW_DECISION_UNUSED: no decision was pending for this round; your note is recorded "
                         "with it anyway")
     if request.extra_round and not extra:
-        warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this series is below [review] max_rounds, so --extra-round "
+        warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this task is below [review] max_rounds, so --extra-round "
                         "changed nothing")
     decision = request.decision or rounds.round_decision(s)
     command = models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"])
@@ -411,20 +413,12 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                             for class_id, tried in s.attempted().items()),
             decision=decision, stopped=stopped if decision else None, extra_round=extra,
             impact=impact, impact_rows=impact_rows)
-        prepared = call.prepare(
-            call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
-                             round_instructions=redact(prompt.round_instructions(context_)), output_schema=str(schema_path),
-                             ephemeral=True, isolated=True, timeout_s=request.timeout_s,
-                             output_last_message=str(final_path)),
-            call_settings, root=snap.tree, state_dir=state,
-            env=launch_env,
-            footer=tools.footer, has_footer=tools.has_footer,
-            parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
-        warnings.extend(prepared.warnings)
+        planned_run = runs._plan_run(state, task, ENGINE, "review")
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
-                 "run_id": prepared.run_id}
+                 "run_id": planned_run[0].id}
         receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
                                          "extra_attempt": extra_attempt, "decision": request.decision,
+                                         "max_rounds": conf.max_rounds,
                                          "decision_for": s.task_latest.digest if s.task_latest else None})
         for note in ([f"review R{number}: the user's decision before this round: {request.decision}"]
                      if request.decision else []) + ([f"review R{number} runs beyond [review] max_rounds = "
@@ -434,6 +428,19 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             Store(state).log(task=task, agent=lease.agent,
                              message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
         try:
+            token = call._PREPARATION_RUN.set(planned_run)
+            try:
+                prepared = call.prepare(
+                    call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
+                                     round_instructions=redact(prompt.round_instructions(context_)),
+                                     output_schema=str(schema_path), ephemeral=True, isolated=True,
+                                     timeout_s=request.timeout_s, output_last_message=str(final_path)),
+                    call_settings, root=snap.tree, state_dir=state, env=launch_env,
+                    footer=tools.footer, has_footer=tools.has_footer,
+                    parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
+            finally:
+                call._PREPARATION_RUN.reset(token)
+            warnings.extend(prepared.warnings)
             run = call.execute(prepared, base_env=launch_env, rules=rules, redact=redact)
         except BaseException as exc:
             receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
@@ -475,10 +482,13 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})
         left = conf.round_attempts - attempt
-        budget = (f" This was attempt {attempt} of {conf.round_attempts} for round {s.series_round} of this series; "
-                  + (f"run oah review --task {task} again to retry." if left > 0 else
-                     f"the budget is spent; fix the cause, then run oah review --task {task} --base {span.base} "
-                     "--extra-attempt to permit one more call (recorded)."))
+        retry = f"oah review --task {task} --base {span.base}"
+        if conf.max_rounds is not None and s.counted_rounds + 1 >= conf.max_rounds:
+            retry += " --extra-round"
+        if left <= 0:
+            retry += " --extra-attempt"
+        budget = (f" Its reserved round remains spent. This was attempt {attempt} of {conf.round_attempts} for "
+                  f"round {s.series_round} of this series; fix the cause, then run {retry} to retry (recorded).")
         return Result(code, 1, message + budget, lines=[f"run folder: {prepared.run_dir}"], warnings=warnings,
                       run_dir=prepared.run_dir)
     judged = rounds.decide(output, s)
@@ -560,7 +570,7 @@ def _lines(receipt: dict, digest: str, name: str, conf: review_settings.ReviewSe
     lines += [f"{item['finding_id']} {item['severity']} {item['axis']} {item['location']} — {item['title']}"
               for item in receipt["findings"]]
     if (receipt["outcome"] == "changes-requested" and conf.max_rounds is not None
-            and receipt["series_round"] >= conf.max_rounds):
-        lines.append(f"OAH_REVIEW_ROUNDS_EXHAUSTED: this series reached [review] max_rounds = {conf.max_rounds}; the "
+            and receipt["round"] >= conf.max_rounds):
+        lines.append(f"OAH_REVIEW_ROUNDS_EXHAUSTED: this task reached [review] max_rounds = {conf.max_rounds}; the "
                      f"next round needs oah review --task {task} --extra-round")
     return lines

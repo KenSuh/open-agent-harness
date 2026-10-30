@@ -11,8 +11,9 @@
 - `critical_paths`: globs whose changes the prompt (and `oah review summary`) call out. The defaults include
   `.oah/config.toml`, because it configures the review itself.
 
-`oah review` reads these from the configuration committed at the review base, so the reviewed change cannot
-configure its own review (`from_config`); `load(root)` reads a worktree's file.
+Reviewer policy comes from the configuration committed at the review base (`from_config`). The task's
+max_rounds budget also observes the current worktree and saved limits; `budget_limit` reads that field
+independently of reviewer policy. `load(root)` reads a worktree's reviewer settings.
 """
 from __future__ import annotations
 
@@ -44,6 +45,19 @@ class ReviewSettings:
 
 def _count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def budget_limit(config: Config) -> int | None:
+    """Read only the task budget; reviewer policy remains pinned to the review base."""
+    section = config.raw.get("review", {})
+    if not isinstance(section, Mapping):
+        raise ConfigError("OAH_CONFIG_INVALID", "review must be a table; use [review] in .oah/config.toml "
+                          "and retry")
+    value = section.get("max_rounds")
+    if value is not None and not _count(value):
+        raise ConfigError("OAH_CONFIG_INVALID", "review.max_rounds must be a whole number of at least 1; "
+                          "fix it in .oah/config.toml or remove it for no ceiling")
+    return value
 
 
 def from_section(section: Mapping[str, object], where: str = ".oah/config.toml") -> ReviewSettings:

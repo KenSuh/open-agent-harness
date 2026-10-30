@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import subprocess
 from typing import Iterable, Mapping, Sequence
 
+from oah.engines.proc import run_command
 from oah.impact.kinds import glob_match
-from oah.paths import run_git
+from oah.paths import GIT_TIMEOUT, GitMissing, git_argv, run_git
 from oah.review import ReviewError
 
 NOT_TOUCHED = "db-impact: not touched (no DB entity changes in base..head)"
 STAT_LINES = 300
 ROW_LINES = 80
+PRESENT = "PRESENT"
+ABSENT = "ABSENT"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,25 +45,69 @@ class DbImpact:
     rows: tuple[str, ...]
 
 
-def _git(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,)) -> tuple[int | None, str]:
-    result = run_git(root, *args)
-    if result.returncode not in ok:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", f"git {args[0]} failed in {root} "
-                          f"({result.stderr.strip() or 'no output'}); check the repository and retry")
+def _git(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,),
+         quiet_failure: bool = False) -> tuple[int | None, str]:
+    try:
+        result = run_git(root, *args)
+    except OSError:
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry") from None
+    if (result.timed_out or result.returncode not in ok
+            or quiet_failure and result.returncode != 0 and (result.stdout or result.stderr)):
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry")
     return result.returncode, result.stdout
 
 
+def _review_git(root: pathlib.Path, *args: str) -> tuple[str, str]:
+    """A review read is PRESENT, proven ABSENT, or a refusal; Git output is never diagnostic.
+
+    Review uses it to resolve its base and read the base's reviewer policy; the task budget
+    reads no Git. Git documents quiet rev-parse status 1 for an unresolved ref. Quiet
+    symbolic-ref status 1 proves only non-symbolic: verify the ref before declaring it
+    absent, and retain a direct commit ref as PRESENT. A successful ls-tree with no entry
+    proves a path absent in the inspected tree. No other failure is absence, including
+    status 128 with no output.
+    """
+    try:
+        if args[:2] == ("cat-file", "blob"):
+            result = run_command([*git_argv(), "-C", str(root), *args], timeout=GIT_TIMEOUT,
+                                 encoding="latin-1")  # preserve config bytes
+        else:
+            result = run_git(root, *args)
+    except (OSError, subprocess.SubprocessError, GitMissing):
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry") from None
+    quiet = not result.stdout and not result.stderr
+    optional = (len(args) == 5 and args[:4] == ("rev-parse", "--verify", "--quiet", "--end-of-options")
+                or len(args) == 3 and args[:2] == ("symbolic-ref", "--quiet"))
+    if not result.timed_out and result.returncode == 1 and quiet and optional:
+        if args[0] == "symbolic-ref":
+            status, _out = _review_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                                      f"{args[2]}^{{commit}}")
+            return (PRESENT, args[2]) if status == PRESENT else (ABSENT, "")
+        return ABSENT, ""
+    if (result.timed_out or result.returncode != 0 or result.stderr
+            or args[0] in ("rev-parse", "symbolic-ref") and not result.stdout.strip()):
+        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry")
+    if args[0] == "ls-tree" and not result.stdout:
+        return ABSENT, ""
+    return PRESENT, result.stdout
+
+
 def _commit(root: pathlib.Path, rev: str) -> str | None:
-    code, out = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}", ok=(0, 1))
-    return out.strip() if code == 0 and out.strip() else None
+    status, out = _review_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+    return out.strip() if status == PRESENT else None
 
 
 def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
-    if branch and (branch.startswith("-") or branch == "@" or "@{" in branch
-                   or _git(root, "check-ref-format", "--branch", branch, ok=(0, 1, 128))[0]):
-        raise ReviewError("OAH_CONFIG_INVALID", f"[preflight] default_branch {branch!r} is not a branch name; set it "
+    # Diagnose invalid names without interpreting a failed Git process as validation.
+    if branch and (branch.startswith("-") or branch == "@" or "@{" in branch or ".." in branch
+                   or branch.endswith(".")
+                   or any(not part or part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))
+                   or any(ord(char) <= 32 or ord(char) == 127 or char in "~^:?*[\\" for char in branch)):
+        raise ReviewError("OAH_CONFIG_INVALID", "[preflight] default_branch is not a branch name; set it "
                           "to the name of the default branch (such as main) in .oah/config.toml")
-    remotes = _git(root, "remote")[1].split()
+    if branch:
+        _review_git(root, "check-ref-format", "--branch", branch)
+    remotes = _review_git(root, "remote")[1].split()
     chosen = remote if remote in remotes else "origin" if "origin" in remotes else (
         remotes[0] if len(remotes) == 1 else None)
     candidates = []
@@ -69,8 +117,8 @@ def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
         candidates.append(f"refs/heads/{branch}")
     else:
         if chosen:
-            code, out = _git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD", ok=(0, 1, 128))
-            if code == 0 and out.strip():
+            status, out = _review_git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD")
+            if status == PRESENT:
                 candidates.append(out.strip())
             candidates += [f"refs/remotes/{chosen}/main", f"refs/remotes/{chosen}/master"]
         candidates += ["refs/heads/main", "refs/heads/master"]

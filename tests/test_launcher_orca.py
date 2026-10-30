@@ -904,6 +904,56 @@ raise SystemExit(code)
         self.assertEqual(len(list(rendezvous.glob("engine-*.json"))), 1)
         self.assertEqual(prepared.run.read()["status"], "finished")
 
+    def test_refused_worker_never_rewrites_a_run_another_worker_claimed(self):
+        from oah.lockfile import StateLock
+        from oah.review import receipts
+
+        for refusal, expected in (("busy", "OAH_REVIEW_SERIES_BUSY"), ("lease", "OAH_LEASE_CHANGED")):
+            with self.subTest(refusal=refusal):
+                project = OrcaProject(self)
+                prepared = project.queued("claude", "initial")
+                lock = StateLock(receipts.task_lock_path(project.state, "t1"), timeout=0)
+                original, before = orca.worker_prepared, []
+
+                def claimed_by_twin(run, *args, **kwargs):
+                    rebuilt = original(run, *args, **kwargs)
+                    # The twin wins the claim between this worker's queued read and its dispatch check.
+                    (run.path / "worker.claim").touch()
+                    prepared.run.result(status="running", pid=os.getpid() + 1)
+                    if refusal == "busy":
+                        lock.__enter__()
+                        self.addCleanup(lock.__exit__, None, None, None)
+                    else:
+                        Store(project.state).release(task="t1", agent="codex", reason="twin race", force=False)
+                    before.append(prepared.run.result_path.read_bytes())
+                    return rebuilt
+
+                with mock.patch.object(orca, "worker_prepared", side_effect=claimed_by_twin):
+                    code, out, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+                self.assertEqual(code, 1, out + err)
+                self.assertIn(expected, err)
+                self.assertEqual(prepared.run.result_path.read_bytes(), before[0])
+                self.assertFalse(project.record.exists())
+
+    def test_worker_losing_the_task_lock_leaves_the_queued_run_to_its_claimer(self):
+        from oah.lockfile import StateLock
+        from oah.review import receipts
+
+        project = OrcaProject(self)
+        prepared = project.queued("claude", "initial")
+        before = prepared.run.result_path.read_bytes()
+        # The holder may be the worker that claims this run next, so the loser records nothing.
+        with StateLock(receipts.task_lock_path(project.state, "t1"), timeout=0):
+            code, out, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("OAH_REVIEW_SERIES_BUSY", err)
+        self.assertEqual(prepared.run.result_path.read_bytes(), before)
+        self.assertFalse((prepared.run.path / "worker.claim").exists())
+        code, out, err = project.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(prepared.run.read()["status"], "finished")
+        self.assertTrue(project.record.exists())
+
     def test_mutating_run_reuses_the_leased_tree_and_delivers_the_exact_brief(self):
         project = OrcaProject(self)
         project.start_host()
