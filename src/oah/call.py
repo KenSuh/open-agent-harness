@@ -587,7 +587,7 @@ def _paid_dispatch(prepared, *, record=True):
     except LockTimeout:
         error = EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid start owns this task; wait for it to "
                             "finish, then retry oah call")
-        prepared.run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
+        _record_refusal(prepared, error)
         raise error from None
     token = rounds._PAID_SPAWN.set(record)
     try:
@@ -643,8 +643,23 @@ def dispatch_guard(prepared: Prepared):
             yield
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
-        run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
+        _record_refusal(prepared, error)
         raise error from None
+
+
+def _record_refusal(prepared: Prepared, error: EngineError) -> None:
+    """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
+    run = prepared.run
+    if isinstance(run, runs.WorkerRun):
+        data = run.read()
+        if data.get("status") != "running" or data.get("pid") != os.getpid():
+            if error.code == "OAH_REVIEW_SERIES_BUSY":
+                return  # the lock holder may be the worker that claims this run next
+            try:
+                os.close(run._open_file("worker.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+            except FileExistsError:
+                return  # another worker claimed this run; its record is not ours to change
+    run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
 
 
 def check_prepared(prepared: Prepared) -> None:
