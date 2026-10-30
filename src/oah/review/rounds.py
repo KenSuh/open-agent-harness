@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import sys
 from contextvars import ContextVar
 from typing import Callable, Sequence
 
@@ -249,61 +248,33 @@ def task_limit(s: Series, settings: ReviewSettings) -> int | None:
 class TaskBudget:
     limit: int | None
     stop: str | None
-    missing_bases: tuple[str, ...] = ()
-
-
-def _missing_base_notice(budget: TaskBudget) -> str:
-    if not budget.missing_bases:
-        return ""
-    return ("OAH_REVIEW_BASE_MISSING: task budget bases " + ", ".join(budget.missing_bases) +
-            " are missing; recorded limits still apply. Restore these commits to inspect their configurations")
 
 
 def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state=None) -> TaskBudget:
-    """Resolve all task budget sources and persist newly seen limits under the caller's task/state locks."""
+    """The strictest of the worktree config's limit and every limit in the task log (owner decision b').
+
+    No other branch's config is read: a limit only there has no effect until it is in the checked-out
+    `.oah/config.toml`. With `root`, that file is the worktree source; without it, `settings.max_rounds`
+    is. Newly seen limits are recorded under the caller's task/state locks, so they stay."""
     from oah.config import ConfigError, load_config
-    from oah.review import context, receipts, runner
+    from oah.review import receipts
     from oah.review.settings import budget_limit
 
     limits = {line["max_rounds"] for line in s.log if line.get("max_rounds") is not None}
     seen = set(limits)
-    missing = []
-    if settings.max_rounds is not None:
-        limits.add(settings.max_rounds)
+    current = settings.max_rounds
     if root is not None:
         try:
-            config = load_config(root)
-            current = budget_limit(config)
-            if current is not None:
-                limits.add(current)
-            bases = {s.base} if s.base else set()
-            bases.update(entry.record["base"] for entry in s.task_receipts)
-            bases.update(line["base"] for line in s.log if line.get("base"))
-            # The default merge-base is an independent source, even when this dispatch uses
-            # an explicit or historical review base. No earlier observation substitutes for it.
-            remote, branch = runner._base_settings(config)
-            ref = context._default_ref(root, remote, branch)
-            if ref is not None:
-                _status, common = context._budget_git(root, "merge-base", "HEAD", ref)
-                bases.add(common.strip())
-            for base in sorted(bases):
-                if not SHA_RE.fullmatch(base):
-                    raise ReviewError("OAH_REVIEW_STATE_INVALID", "restore the task's review-base records, "
-                                      "then retry")
-                if not context._budget_commit_exists(root, base):
-                    missing.append(base[:12])
-                    continue
-                based = budget_limit(runner.config_at(root, base))
-                if based is not None:
-                    limits.add(based)
-        except (ConfigError, ReviewError, OSError) as exc:
-            code = getattr(exc, "code", "OAH_REVIEW_GIT_FAILED")
-            raise ReviewError(code, "task budget sources could not be read; restore the task's Git history "
-                              "and correct .oah/config.toml, then retry") from None
+            current = budget_limit(load_config(root))
+        except (ConfigError, OSError) as exc:
+            raise ReviewError(getattr(exc, "code", "OAH_CONFIG_INVALID"), "the task budget could not be read; "
+                              "correct .oah/config.toml in the worktree, then retry") from None
+    if current is not None:
+        limits.add(current)
     if state is not None:
         for limit in sorted(limits - seen):
             receipts._log_round_unlocked(state, s.task, {"event": "limit", "max_rounds": limit})
-    return TaskBudget(min(limits) if limits else None, decision_stop(s), tuple(missing))
+    return TaskBudget(min(limits) if limits else None, decision_stop(s))
 
 
 def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = None,
@@ -313,25 +284,15 @@ def task_gate(s: Series, *, settings: ReviewSettings, decision: str | None = Non
         raise ReviewError(NEEDS_DECISION, "the task history is invalid; nothing was launched. Restore the original "
                           "review records before retrying; --decision cannot override invalid history")
     budget = budget or resolve_task_budget(s, settings)
-    notice = _missing_base_notice(budget)
-    suffix = " " + notice if notice else ""
     reason = budget.stop
     if reason is not None and decision is None:
-        if notice:
-            print(f"{NEEDS_DECISION}: {notice}", file=sys.stderr)
         raise ReviewError(NEEDS_DECISION, "the task is stopped for a decision; nothing was launched. Inspect its "
-                          f'review history, then run oah review --task {s.task} --decision "<what you decided>"' + suffix)
+                          f'review history, then run oah review --task {s.task} --decision "<what you decided>"')
     limit = budget.limit
     if limit is not None and s.counted_rounds >= limit and not extra_round:
-        if notice:
-            # Fix substitutes a fixed refusal message; retain the notice on stderr too.
-            # Keep the refusal code first so queued launchers preserve it across the handoff.
-            print(f"OAH_REVIEW_ROUNDS_EXHAUSTED: {notice}", file=sys.stderr)
         raise ReviewError("OAH_REVIEW_ROUNDS_EXHAUSTED", f"this task has {s.counted_rounds} counted rounds, reaching "
                           f"its max_rounds limit ({limit}); nothing was launched. Run oah review --task {s.task} "
-                          "--extra-round to authorize and record one additional round" + suffix)
-    if notice:
-        print(notice, file=sys.stderr)
+                          "--extra-round to authorize and record one additional round")
 
 
 def dispatch_gate(state, task, root, *, stage, record=False, run_id=None, records=None, log=None, reserve=False,
@@ -404,8 +365,6 @@ def gate(s: Series, *, head: str, decision: str | None, extra_round: bool, setti
             # Receipt numbering is task-wide. Publication supersedes that round's attempts;
             # any higher-numbered call is a later, unfinished round, whatever its base.
             and _approval_current(s, latest)):
-        if budget is not None and (notice := _missing_base_notice(budget)):
-            print(notice, file=sys.stderr)
         return CONVERGED
     task_gate(s, settings=settings, decision=decision, extra_round=extra_round, budget=budget)
     if reason is not None and decision is None:

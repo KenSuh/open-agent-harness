@@ -11,8 +11,8 @@ a reviewer CLI that does not match
 native program it starts).
 
 Reviewer policy (`[stages]`, `[engines]`, `[models]` and `[review]`) comes from `.oah/config.toml` at the base
-(`config_at`). The task's max_rounds budget uses the strictest saved, live, current default merge-base or
-recorded review-base limit. A config change is
+(`config_at`). The task's max_rounds budget is the strictest of the worktree config's limit and the limits in
+the task log; no other branch's or base's config is read for it. A config change is
 a critical path and a warning. `[impact]` stays the worktree's, because the persisted impact map binds it.
 
 Then the snapshot is built in a temporary folder, the canary is planted, and `oah.call` prepares and runs
@@ -208,10 +208,10 @@ def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Bindi
 def config_at(root: pathlib.Path, rev: str) -> Config:
     """`.oah/config.toml` as committed at `rev`; a commit without the file reads as empty."""
     label = f"{CONFIG_PATH} at the review base {rev[:12]}"
-    status, _out = context._budget_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
+    status, _out = context._review_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
     if status == context.ABSENT:
         return Config(path=None, raw={}, label=label)
-    _status, raw = context._budget_git(root, "cat-file", "blob", f"{rev}:{CONFIG_PATH}")
+    _status, raw = context._review_git(root, "cat-file", "blob", f"{rev}:{CONFIG_PATH}")
     return parse_config(raw.encode("latin-1"), label=label)
 
 

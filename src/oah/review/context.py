@@ -22,7 +22,6 @@ from oah.engines.proc import run_command
 from oah.impact.kinds import glob_match
 from oah.paths import GIT_TIMEOUT, GitMissing, git_argv, run_git
 from oah.review import ReviewError
-from oah.review.receipts import SHA_RE
 
 NOT_TOUCHED = "db-impact: not touched (no DB entity changes in base..head)"
 STAT_LINES = 300
@@ -58,15 +57,15 @@ def _git(root: pathlib.Path, *args: str, ok: tuple[int, ...] = (0,),
     return result.returncode, result.stdout
 
 
-def _budget_git(root: pathlib.Path, *args: str) -> tuple[str, str]:
-    """A budget read is PRESENT, proven ABSENT, or a refusal; Git output is never diagnostic.
+def _review_git(root: pathlib.Path, *args: str) -> tuple[str, str]:
+    """A review read is PRESENT, proven ABSENT, or a refusal; Git output is never diagnostic.
 
-    Git documents quiet rev-parse status 1 for an unresolved ref. Quiet symbolic-ref
-    status 1 proves only non-symbolic: verify the ref before declaring it absent, and
-    retain a direct commit ref as PRESENT. A raw full-ID cat-file existence probe reports a
-    missing object with quiet status 1 (probe before peeling, per C7). A successful
-    ls-tree with no entry proves a path absent in the inspected tree. No other failure
-    is absence, including status 128 with no output.
+    Review uses it to resolve its base and read the base's reviewer policy; the task budget
+    reads no Git. Git documents quiet rev-parse status 1 for an unresolved ref. Quiet
+    symbolic-ref status 1 proves only non-symbolic: verify the ref before declaring it
+    absent, and retain a direct commit ref as PRESENT. A successful ls-tree with no entry
+    proves a path absent in the inspected tree. No other failure is absence, including
+    status 128 with no output.
     """
     try:
         if args[:2] == ("cat-file", "blob"):
@@ -78,17 +77,15 @@ def _budget_git(root: pathlib.Path, *args: str) -> tuple[str, str]:
         raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry") from None
     quiet = not result.stdout and not result.stderr
     optional = (len(args) == 5 and args[:4] == ("rev-parse", "--verify", "--quiet", "--end-of-options")
-                or len(args) == 3 and args[:2] == ("symbolic-ref", "--quiet")
-                or len(args) == 3 and args[:2] == ("cat-file", "-e") and SHA_RE.fullmatch(args[2]))
+                or len(args) == 3 and args[:2] == ("symbolic-ref", "--quiet"))
     if not result.timed_out and result.returncode == 1 and quiet and optional:
         if args[0] == "symbolic-ref":
-            status, _out = _budget_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options",
+            status, _out = _review_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options",
                                       f"{args[2]}^{{commit}}")
             return (PRESENT, args[2]) if status == PRESENT else (ABSENT, "")
         return ABSENT, ""
     if (result.timed_out or result.returncode != 0 or result.stderr
-            or args[0] in ("rev-parse", "symbolic-ref", "merge-base") and not result.stdout.strip()
-            or args[:2] == ("cat-file", "-e") and result.stdout):
+            or args[0] in ("rev-parse", "symbolic-ref") and not result.stdout.strip()):
         raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git inspection failed; restore the repository and retry")
     if args[0] == "ls-tree" and not result.stdout:
         return ABSENT, ""
@@ -96,16 +93,8 @@ def _budget_git(root: pathlib.Path, *args: str) -> tuple[str, str]:
 
 
 def _commit(root: pathlib.Path, rev: str) -> str | None:
-    status, out = _budget_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
+    status, out = _review_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}")
     return out.strip() if status == PRESENT else None
-
-
-def _budget_commit_exists(root: pathlib.Path, rev: str) -> bool:
-    """Only a quiet missing-object result confirms absence; peeling errors are not absence."""
-    if _budget_git(root, "cat-file", "-e", rev)[0] == ABSENT:
-        return False
-    _budget_git(root, "cat-file", "-e", f"{rev}^{{commit}}")
-    return True
 
 
 def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
@@ -117,8 +106,8 @@ def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
         raise ReviewError("OAH_CONFIG_INVALID", "[preflight] default_branch is not a branch name; set it "
                           "to the name of the default branch (such as main) in .oah/config.toml")
     if branch:
-        _budget_git(root, "check-ref-format", "--branch", branch)
-    remotes = _budget_git(root, "remote")[1].split()
+        _review_git(root, "check-ref-format", "--branch", branch)
+    remotes = _review_git(root, "remote")[1].split()
     chosen = remote if remote in remotes else "origin" if "origin" in remotes else (
         remotes[0] if len(remotes) == 1 else None)
     candidates = []
@@ -128,7 +117,7 @@ def _default_ref(root: pathlib.Path, remote: str, branch: str) -> str | None:
         candidates.append(f"refs/heads/{branch}")
     else:
         if chosen:
-            status, out = _budget_git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD")
+            status, out = _review_git(root, "symbolic-ref", "--quiet", f"refs/remotes/{chosen}/HEAD")
             if status == PRESENT:
                 candidates.append(out.strip())
             candidates += [f"refs/remotes/{chosen}/main", f"refs/remotes/{chosen}/master"]

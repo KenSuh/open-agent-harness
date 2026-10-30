@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import subprocess
 import unittest
 from unittest import mock
 
@@ -19,115 +18,6 @@ from tests.test_review_cli import oah
 from tests.test_review_rounds import bug, git
 
 
-@contextlib.contextmanager
-def budget_git_trace(*, replay=None, fail_at=None, fault=None):
-    """Enumerate process calls, or replay them with exactly one injected Git failure."""
-    marker = "private-fixture-marker"
-    trace, hit = [], []
-    run_git = context.run_git
-
-    def inspect(args, execute):
-        position = len(trace)
-        if replay is not None:
-            if position >= len(replay) or args != replay[position][0]:
-                raise AssertionError("budget Git invocation sequence changed")
-            result = replay[position][1]
-        else:
-            result = execute()
-        trace.append((args, result))
-        if position == fail_at:
-            hit.append(position)
-            if fault == "spawn":
-                raise OSError(marker)
-            if fault == "timeout":
-                raise subprocess.TimeoutExpired("git", 1, output=marker, stderr=marker)
-            if fault == "timeout-result":
-                return RunResult(None, marker, marker, True)
-            return RunResult(128 if fault == "silent-128" else 2,
-                             "" if fault == "silent-128" else marker,
-                             "" if fault == "silent-128" else marker, False)
-        return result
-
-    def git_read(root, *args):
-        return inspect(args, lambda: run_git(root, *args))
-
-    def blob_read(argv, **kwargs):
-        args = tuple(argv[list(argv).index("-C") + 2:])
-        return inspect(args, lambda: run_command(argv, **kwargs))
-
-    with mock.patch.object(context, "run_git", side_effect=git_read), \
-            mock.patch.object(runner, "run_git", side_effect=git_read), \
-            mock.patch.object(context, "run_command", side_effect=blob_read):
-        yield trace, hit
-
-
-def budget_discovery(project, discovery):
-    """An unrecorded limit on trunk/master, plus empty-config and missing-base sources."""
-    original = (project.repo / runner.CONFIG_PATH).read_bytes()
-    limited = project.commit({runner.CONFIG_PATH: original + b"[review]\nmax_rounds = 1\n"})
-    empty = project.commit({runner.CONFIG_PATH: None})
-    configured = b'[preflight]\ndefault_branch = "trunk"\n' if discovery == "configured" else b""
-    project.commit({runner.CONFIG_PATH: original + configured})
-    if discovery == "direct":
-        git(project.repo, "update-ref", "--no-deref", "refs/remotes/origin/HEAD", limited)
-    elif discovery in ("symbolic", "configured"):
-        git(project.repo, "update-ref", "refs/remotes/origin/trunk", limited)
-        git(project.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
-    else:
-        if discovery == "fallback":
-            git(project.repo, "update-ref", "-d", "refs/remotes/origin/main")
-        git(project.repo, "branch", "-m", "main", "master")
-        git(project.repo, "update-ref", "refs/heads/master", limited)
-    return empty
-
-
-def check_budget_git_faults(test, project, action, *, pending=None, launcher=False):
-    """Fail every enumerated Git call singly through the real paid entry point."""
-    from oah.review.settings import ReviewSettings
-
-    before = (project.folder() / "rounds.jsonl").read_bytes()
-    s = rounds.series(receipts.load(project.state, "t1"), receipts.read_round_log(project.state, "t1"),
-                      project.base, head=project.head, is_ancestor=lambda a, b: True)
-    with budget_git_trace() as (trace, _):
-        budget = rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()), root=project.repo)
-    test.assertEqual(budget.limit, 1)
-    test.assertIsNotNone(budget.stop)
-    resolve = rounds.resolve_task_budget
-    counts = len(project.calls()), len(project.fix_calls())
-    for position, (args, _) in enumerate(trace):
-        for fault in ("silent-128", "other-nonzero", "timeout", "timeout-result", "spawn"):
-            with test.subTest(position=position, operation=args[0], fault=fault):
-                hits = []
-
-                def faulted(*values, **fields):
-                    with budget_git_trace(replay=trace, fail_at=position, fault=fault) as (_, hit):
-                        try:
-                            return resolve(*values, **fields)
-                        finally:
-                            hits.extend(hit)
-
-                terminal = io.StringIO()
-                with mock.patch.object(rounds, "resolve_task_budget", side_effect=faulted), \
-                        contextlib.redirect_stderr(terminal):
-                    if pending is not None:
-                        test.assertEqual(action(), 1)
-                        message = pending.run.read()["error"]
-                    else:
-                        with test.assertRaises(Exception) as caught:
-                            action()
-                        test.assertEqual(caught.exception.code,
-                                         "OAH_RUN_LAUNCH_FAILED" if launcher else "OAH_REVIEW_GIT_FAILED")
-                        message = str(caught.exception)
-                test.assertEqual(hits, [position])
-                test.assertIn("OAH_REVIEW_GIT_FAILED", message)
-                test.assertIn("retry", message)
-                test.assertNotIn("private-fixture-marker", message + terminal.getvalue())
-                test.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
-                test.assertEqual((len(project.calls()), len(project.fix_calls())), counts)
-                test.assertTrue(all(b"private-fixture-marker" not in value
-                                    for value in state_snapshot(project.state).values() if isinstance(value, bytes)))
-
-
 def prepare(project, stage="correction", **fields):
     tools = call_cli.intent_tools()
     return call.prepare(call.CallRequest(engine="codex", stage=stage, task="t1", **fields),
@@ -136,29 +26,46 @@ def prepare(project, stage="correction", **fields):
                         keychain=NoKeychain())
 
 
+LIMIT = b"[review]\nmax_rounds = 1\n"
+
+
 def advance_budget_base(project):
     """Move the default merge-base from unlimited A to limited B; HEAD omits the limit."""
     config = project.repo / ".oah/config.toml"
     original = config.read_bytes()
-    base = project.commit({".oah/config.toml": original + b"[review]\nmax_rounds = 1\n"})
+    base = project.commit({".oah/config.toml": original + LIMIT})
     project.commit({".oah/config.toml": original})
     git(project.repo, "update-ref", "refs/remotes/origin/main", base)
     return base
 
 
+def limit_on_another_branch(project, where):
+    """A max_rounds limit on main (merge-base or unmerged tip) or at a recorded base, absent from HEAD."""
+    original = (project.repo / runner.CONFIG_PATH).read_bytes()
+    if where == "default-base":
+        return advance_budget_base(project)
+    if where == "recorded-base":
+        base = project.commit({runner.CONFIG_PATH: original + LIMIT})
+        project.commit({runner.CONFIG_PATH: original})
+        log_old_base(project, base)
+        return base
+    head = project.head
+    git(project.repo, "checkout", "-q", "main")
+    tip = project.commit({runner.CONFIG_PATH: original + LIMIT})
+    git(project.repo, "update-ref", "refs/remotes/origin/main", tip)
+    git(project.repo, "checkout", "-q", "feat")
+    project.head = head
+    return tip
+
+
 @contextlib.contextmanager
-def budget_git_fault(base, fault):
-    """Fail only the historical budget read, leaving live Git and engine execution real."""
+def config_git_fault(base, fault):
+    """Fail only the config read at `base`, leaving live Git and engine execution real."""
     marker = "private-fixture-marker"
     run_git = context.run_git
 
     def inspect(root, *args):
-        path_probe = (args == ("cat-file", "-e", f"{base}:{runner.CONFIG_PATH}") or
-                      args == ("ls-tree", "-z", base, "--", runner.CONFIG_PATH))
-        object_probe = (args == ("cat-file", "-e", base) or
-                        args == ("cat-file", "-e", f"{base}^{{commit}}") or
-                        args == ("rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}"))
-        if path_probe and fault not in ("blob", "object") or object_probe and fault == "object":
+        if args == ("ls-tree", "-z", base, "--", runner.CONFIG_PATH) and fault != "blob":
             if fault == "os-error":
                 raise OSError(marker)
             return RunResult(None if fault == "timeout" else 1 if fault == "silent" else 128,
@@ -183,184 +90,99 @@ def log_old_base(project, base, limit=None):
                                              "code": "OAH_REVIEW_ENGINE_FAILED", "max_rounds": limit})
 
 
+def logged_limits(project):
+    return [line.get("max_rounds") for line in receipts.read_round_log(project.state, "t1")]
+
+
 class BudgetGateTest(unittest.TestCase):
-    def test_every_budget_git_error_stops_paid_preparation(self):
-        for discovery in ("symbolic", "direct", "fallback", "configured"):
-            for mode in ("foreground", "background", "fix", "review"):
-                with self.subTest(discovery=discovery, mode=mode):
-                    project = FixProject(self)
-                    project.changes_requested()
-                    empty = budget_discovery(project, discovery)
-                    log_old_base(project, empty, 1)
-                    log_old_base(project, "f" * 40)
-                    receipts.log_round(project.state, "t1", {"event": "finish", "base": project.base,
-                                                             "round": 2, "series_round": 1, "counted": False,
-                                                             "code": rounds.NEEDS_DECISION})
+    def test_a_limit_only_on_another_branch_does_not_apply_until_it_is_in_the_worktree_config(self):
+        for where in ("default-base", "recorded-base", "unmerged"):
+            with self.subTest(where=where):
+                project = FixProject(self)
+                project.review()
+                original = (project.repo / runner.CONFIG_PATH).read_bytes()
+                limit_on_another_branch(project, where)
+                # Ignored while absent from the checked-out config: a call and a structured review both run.
+                run = call.execute(prepare(project, tier="low"), base_env=project.env)
+                self.assertEqual(run["status"], "finished", run.get("error"))
+                project.commit({"src/next.py": "pass\n"})
+                self.assertEqual(project.review().code, "OAH_REVIEW_CONVERGED")
+                self.assertNotIn(1, logged_limits(project))
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (2, 1))
+                # A rebase or merge brings it into the worktree config: enforced, recorded, and it stays.
+                project.commit({runner.CONFIG_PATH: original + LIMIT})
+                with self.assertRaises(Exception) as caught:
+                    prepare(project, tier="low")
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                self.assertIn(1, logged_limits(project))
+                project.commit({runner.CONFIG_PATH: original})
+                with self.assertRaises(ReviewError) as caught:
+                    project.review()
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                with self.assertRaises(Exception) as caught:
+                    prepare(project, tier="low")
+                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                self.assertEqual((len(project.calls()), len(project.fix_calls())), (2, 1))
 
-                    def action():
-                        if mode == "fix":
-                            return project.fix()
-                        if mode == "review":
-                            return project.review(base=project.base)
-                        pending = prepare(project, tier="low")
-                        if mode == "foreground":
-                            return call.execute(pending, base_env=project.env)
-                        run_id = call.start_background(pending, base_env=project.env)
-                        return call.wait(project.state, run_id, timeout=30)
-
-                    check_budget_git_faults(self, project, action)
-
-    def test_git_inspection_errors_stop_every_paid_path(self):
-        for mode in ("foreground", "background", "fix", "review"):
-            for fault in ("timeout", "error", "silent", "blob", "object", "os-error"):
-                with self.subTest(mode=mode, fault=fault):
-                    project = FixProject(self)
-                    if mode == "fix":
-                        project.changes_requested()
-                    original = (project.repo / runner.CONFIG_PATH).read_bytes()
-                    base = project.commit({runner.CONFIG_PATH: original + b"[review]\nmax_rounds = 1\n"})
-                    project.commit({runner.CONFIG_PATH: original})
-                    log_old_base(project, base)
-                    before = (project.folder() / "rounds.jsonl").read_bytes()
-                    terminal = io.StringIO()
-                    with budget_git_fault(base, fault) as marker, contextlib.redirect_stderr(terminal):
-                        with self.assertRaises(Exception) as caught:
-                            if mode == "fix":
-                                project.fix()
-                            elif mode == "review":
-                                project.review()
-                            else:
-                                pending = prepare(project, tier="low")
-                                if mode == "foreground":
-                                    call.execute(pending, base_env=project.env)
-                                else:
-                                    run_id = call.start_background(pending, base_env=project.env)
-                                    call.wait(project.state, run_id, timeout=30)
-                    self.assertEqual(getattr(caught.exception, "code", None), "OAH_REVIEW_GIT_FAILED")
-                    self.assertIn("Git", str(caught.exception))
-                    self.assertIn("retry", str(caught.exception))
-                    self.assertNotIn(marker, str(caught.exception) + terminal.getvalue())
-                    self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
-                    self.assertEqual((len(project.calls()), len(project.fix_calls())),
-                                     (1 if mode == "fix" else 0, 0))
-                    self.assertTrue(all(marker.encode() not in value for value in state_snapshot(project.state).values()
-                                        if isinstance(value, bytes)))
-
-    def test_confirmed_missing_base_keeps_saved_limits_on_every_paid_path(self):
-        for mode in ("foreground", "background", "fix", "review"):
-            for limit in (None, 1):
-                with self.subTest(mode=mode, limit=limit):
+    def test_a_worktree_or_task_log_limit_is_enforced_on_every_paid_path(self):
+        for source in ("worktree", "log"):
+            for mode in ("foreground", "background", "launch-recheck", "runner", "fix", "review"):
+                with self.subTest(source=source, mode=mode):
                     project = FixProject(self)
                     if mode == "fix":
                         project.changes_requested()
                     else:
                         project.review()
                         project.commit({"src/next.py": "pass\n"})
-                    missing = "f" * 40
-                    log_old_base(project, missing, limit)
+                    pending = None if mode in ("fix", "review") else prepare(project, tier="low")
+                    original = (project.repo / runner.CONFIG_PATH).read_bytes()
+
+                    def add_limit():
+                        project.commit({runner.CONFIG_PATH: original + LIMIT})
+                        if source == "log":
+                            # Recorded earlier, then dropped from the checked-out config.
+                            receipts.log_round(project.state, "t1", {"event": "limit", "max_rounds": 1})
+                            project.commit({runner.CONFIG_PATH: original})
+
+                    checked = call.check_prepared
+
+                    def add_after_check(prepared):
+                        checked(prepared)
+                        add_limit()
+
+                    if mode != "launch-recheck":
+                        add_limit()
                     terminal = io.StringIO()
-
-                    def action():
-                        if mode == "fix":
-                            return project.fix(terminal=terminal)
-                        if mode == "review":
-                            return project.review()
-                        pending = prepare(project, tier="low")
-                        if mode == "foreground":
-                            return call.execute(pending, base_env=project.env)
-                        run_id = call.start_background(pending, base_env=project.env)
-                        result = call.wait(project.state, run_id, timeout=30)
-                        self.assertEqual(result["status"], "finished", result.get("error"))
-
                     with contextlib.redirect_stderr(terminal):
-                        if limit is not None:
-                            with self.assertRaises(Exception) as caught:
-                                action()
-                            self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
-                            self.assertIn(missing[:12], str(caught.exception) + terminal.getvalue())
-                            self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
+                        if mode == "runner":
+                            pending.run.launch_path.write_text(json.dumps(pending.to_json()), encoding="utf-8")
+                            self.assertEqual(call.background_main(pending.run_dir), 1)
+                            message = pending.run.read()["error"]
                         else:
-                            action()
-                            self.assertIn("OAH_REVIEW_BASE_MISSING", terminal.getvalue())
-                            self.assertIn(missing[:12], terminal.getvalue())
-                            self.assertEqual(len(project.calls()) + len(project.fix_calls()), 2)
-                    self.assertNotIn(missing, terminal.getvalue())
+                            with mock.patch.object(call, "check_prepared", side_effect=add_after_check
+                                                   if mode == "launch-recheck" else checked):
+                                with self.assertRaises(Exception) as caught:
+                                    if mode == "fix":
+                                        project.fix()
+                                    elif mode == "review":
+                                        project.review()
+                                    elif mode == "foreground":
+                                        call.execute(pending, base_env=project.env)
+                                    else:
+                                        call.start_background(pending, base_env=project.env)
+                            self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+                            message = str(caught.exception)
+                    self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", message)
+                    self.assertIn("--extra-round", message)
+                    if pending is not None:
+                        self.assertEqual(pending.run.read()["status"], "refused")
+                    self.assertIn(1, logged_limits(project))
+                    self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
 
-    def test_changed_default_base_limit_reaches_every_paid_path(self):
-        for mode in ("initial", "correction", "review-call", "background", "fix", "review", "explicit-review"):
-            with self.subTest(mode=mode):
-                project = FixProject(self)
-                project.changes_requested()
-                advance_budget_base(project)
-                if mode in ("fix", "review", "explicit-review"):
-                    action = project.fix if mode == "fix" else lambda: project.review(
-                        **({"base": project.base} if mode == "explicit-review" else {}))
-                    with self.assertRaises(ReviewError) as caught:
-                        action()
-                    self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
-                else:
-                    stage = "review" if mode == "review-call" else "correction" if mode == "background" else mode
-                    args = ["call", "codex", "--stage", stage, "--task", "t1", "--tier", "low"]
-                    if stage == "initial":
-                        args.append("--override-stage")
-                    if mode == "background":
-                        args.append("--background")
-                    done = oah(project, *args)
-                    self.assertEqual(done.returncode, 1, done.stderr)
-                    self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
-                self.assertIn(1, [line.get("max_rounds") for line in receipts.read_round_log(project.state, "t1")])
-                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
-
-    def test_changed_default_base_limit_is_rechecked_at_launch(self):
-        for mode in ("foreground", "background", "background-handoff"):
-            with self.subTest(mode=mode):
-                project = FixProject(self)
-                project.review()
-                pending = prepare(project, tier="low")
-                checked = call.check_prepared
-
-                def change_after_check(prepared):
-                    checked(prepared)
-                    advance_budget_base(project)
-
-                if mode != "background-handoff":
-                    advance_budget_base(project)
-                with mock.patch.object(call, "check_prepared", side_effect=change_after_check
-                                       if mode == "background-handoff" else checked):
-                    with self.assertRaises(Exception) as caught:
-                        launch = call.execute if mode == "foreground" else call.start_background
-                        launch(pending, base_env=project.env)
-                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
-                self.assertIn(1, [line.get("max_rounds") for line in receipts.read_round_log(project.state, "t1")])
-                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
-
-    def test_changed_default_base_limit_is_rechecked_between_paid_steps(self):
-        for mode in ("call", "fix", "review"):
-            with self.subTest(mode=mode):
-                project = FixProject(self)
-                if mode == "fix":
-                    project.changes_requested()
-                else:
-                    project.review()
-                    project.commit({"src/next.py": "pass\n"})
-                original = call._brief_skills
-
-                def change_base(*args, **kwargs):
-                    result = original(*args, **kwargs)
-                    advance_budget_base(project)
-                    return result
-
-                action = project.fix if mode == "fix" else project.review if mode == "review" else lambda: prepare(project)
-                with mock.patch.object(call, "_brief_skills", side_effect=change_base):
-                    with self.assertRaises(Exception) as caught:
-                        action()
-                self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
-                self.assertEqual((len(project.calls()), len(project.fix_calls())), (1, 0))
-
-    def test_changed_default_base_allows_exactly_one_extra_round(self):
+    def test_a_worktree_limit_allows_exactly_one_extra_round(self):
         project = FixProject(self)
         project.review()
-        advance_budget_base(project)
+        project.commit({".oah/config.toml": (project.repo / ".oah/config.toml").read_bytes() + LIMIT})
         with self.assertRaises(Exception) as caught:
             prepare(project, tier="low")
         self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
@@ -439,15 +261,6 @@ class BudgetGateTest(unittest.TestCase):
         self.assertNotIn("private-fixture-marker", str(caught.exception))
         self.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), damaged[0])
         self.assertEqual(project.fix_calls(), [])
-
-    def test_base_budget_applies_to_calls_before_any_structured_review(self):
-        project = FixProject(self, config="[review]\nmax_rounds = 1\n")
-        config = project.repo / ".oah/config.toml"
-        project.commit({".oah/config.toml": config.read_bytes().replace(b"max_rounds = 1", b"")})
-        call.execute(prepare(project, stage="review", tier="low"), base_env=project.env)
-        with self.assertRaises(Exception) as caught:
-            prepare(project, tier="low")
-        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
 
     def test_new_limits_are_rechecked_between_paid_preparation_steps(self):
         for mode in ("call", "fix", "review"):
