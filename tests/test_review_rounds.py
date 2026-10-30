@@ -164,6 +164,40 @@ class Project:
 
 
 class TaskBudgetTest(unittest.TestCase):
+    def test_every_budget_git_invocation_fails_closed(self):
+        from tests.test_bud_gate import budget_discovery, budget_git_trace
+
+        operations = set()
+        for discovery in ("symbolic", "direct", "fallback", "configured", "local"):
+            with self.subTest(discovery=discovery):
+                project = Project(self, remote=discovery != "local")
+                empty = budget_discovery(project, discovery)
+                log = ({"event": "limit", "max_rounds": 3},
+                       {"event": "finish", "base": empty, "code": rounds.NEEDS_DECISION},
+                       {"event": "finish", "base": "f" * 40})
+                s = rounds.series(receipts.Records("t1"), log, project.base, head=project.head,
+                                  is_ancestor=lambda a, b: True)
+                conf = ReviewSettings(None, 2, None, ())
+                with budget_git_trace() as (trace, _):
+                    budget = rounds.resolve_task_budget(s, conf, root=project.repo)
+                self.assertEqual(budget.limit, 1)
+                self.assertIsNotNone(budget.stop)
+                operations.update(args[0] for args, _ in trace)
+                for position, (args, _) in enumerate(trace):
+                    for fault in ("silent-128", "other-nonzero", "timeout", "timeout-result", "spawn"):
+                        with self.subTest(position=position, operation=args[0], fault=fault):
+                            with budget_git_trace(replay=trace, fail_at=position, fault=fault) as (_, hit):
+                                with self.assertRaises(ReviewError) as caught:
+                                    rounds.resolve_task_budget(s, conf, root=project.repo)
+                            self.assertEqual(hit, [position])
+                            self.assertEqual(caught.exception.code, "OAH_REVIEW_GIT_FAILED")
+                            self.assertIn("retry", str(caught.exception))
+                            self.assertNotIn("private-fixture-marker", str(caught.exception))
+                            self.assertFalse((project.folder() / "rounds.jsonl").exists())
+                            self.assertEqual(s.log, log)
+        self.assertEqual(operations, {"check-ref-format", "remote", "symbolic-ref", "rev-parse",
+                                      "merge-base", "cat-file", "ls-tree"})
+
     def test_git_helper_spawn_error_is_safe(self):
         with mock.patch.object(context, "run_git", side_effect=OSError("private-fixture-marker")):
             with self.assertRaises(ReviewError) as caught:

@@ -123,6 +123,48 @@ class Project:
 
 
 class BudgetInspectionTest(unittest.TestCase):
+    def test_every_budget_git_error_is_rechecked_before_launch(self):
+        from tests.test_bud_gate import budget_discovery, check_budget_git_faults, log_old_base, prepare
+        from tests.test_fix import FixProject
+        from oah.review import receipts, rounds
+
+        for discovery in ("symbolic", "direct", "fallback", "configured"):
+            for mode in ("foreground", "background", "launcher", "runner"):
+                with self.subTest(discovery=discovery, mode=mode):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    pending = prepare(project, tier="low")
+                    empty = budget_discovery(project, discovery)
+                    log_old_base(project, empty, 1)
+                    log_old_base(project, "f" * 40)
+                    receipts.log_round(project.state, "t1", {"event": "finish", "base": project.base,
+                                                             "round": 2, "series_round": 1, "counted": False,
+                                                             "code": rounds.NEEDS_DECISION})
+                    launch = subprocess.run
+
+                    def launcher(argv, **kwargs):
+                        if argv != call._boot_argv("launch_main", pending.run_dir):
+                            return launch(argv, **kwargs)
+                        out, err = io.StringIO(), io.StringIO()
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            code = call.launch_main(pending.run_dir)
+                        return subprocess.CompletedProcess(argv, code, out.getvalue().encode(), err.getvalue().encode())
+
+                    def action():
+                        if mode == "runner":
+                            pending.run.launch_path.write_text(json.dumps(pending.to_json()), encoding="utf-8")
+                            return call.background_main(pending.run_dir)
+                        with contextlib.ExitStack() as stack:
+                            if mode == "launcher":
+                                stack.enter_context(mock.patch.object(call, "check_prepared"))
+                                stack.enter_context(mock.patch.object(call.subprocess, "run", side_effect=launcher))
+                            start = call.execute if mode == "foreground" else call.start_background
+                            return start(pending, base_env=project.env)
+
+                    check_budget_git_faults(self, project, action, pending=pending if mode == "runner" else None,
+                                           launcher=mode == "launcher")
+                    self.assertEqual(pending.run.read()["status"], "refused")
+
     def test_git_errors_are_rechecked_before_each_launch(self):
         from tests.test_bud_gate import budget_git_fault, log_old_base, prepare
         from tests.test_fix import FixProject, state_snapshot

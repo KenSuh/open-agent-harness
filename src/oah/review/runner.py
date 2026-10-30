@@ -38,10 +38,9 @@ from oah import call, call_cli, models, preflight, runs
 from oah import intent as oah_intent
 from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
-from oah.engines.proc import run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
-from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git, state_dir
+from oah.paths import repo_info, run_git, state_dir
 from oah.review import ReviewError, authors, canary, context, prompt, receipts, rounds, schema, snapshot
 from oah.review import settings as review_settings
 
@@ -209,22 +208,11 @@ def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Bindi
 def config_at(root: pathlib.Path, rev: str) -> Config:
     """`.oah/config.toml` as committed at `rev`; a commit without the file reads as empty."""
     label = f"{CONFIG_PATH} at the review base {rev[:12]}"
-    try:
-        listed = run_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
-        if listed.timed_out or listed.returncode != 0 or listed.stderr:
-            raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not inspect the base configuration; "
-                              "restore the repository and retry")
-        if not listed.stdout:
-            return Config(path=None, raw={}, label=label)
-        result = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{rev}:{CONFIG_PATH}"],
-                             timeout=GIT_TIMEOUT, encoding="latin-1")  # latin-1 keeps every byte
-        if result.timed_out or result.returncode != 0 or result.stderr:
-            raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not read the base configuration; "
-                              "restore the repository and retry")
-    except OSError:
-        raise ReviewError("OAH_REVIEW_GIT_FAILED", "Git could not read the base configuration; "
-                          "restore the repository and retry") from None
-    return parse_config(result.stdout.encode("latin-1"), label=label)
+    status, _out = context._budget_git(root, "ls-tree", "-z", rev, "--", CONFIG_PATH)
+    if status == context.ABSENT:
+        return Config(path=None, raw={}, label=label)
+    _status, raw = context._budget_git(root, "cat-file", "blob", f"{rev}:{CONFIG_PATH}")
+    return parse_config(raw.encode("latin-1"), label=label)
 
 
 def _call_settings(config: Config) -> call.Settings:

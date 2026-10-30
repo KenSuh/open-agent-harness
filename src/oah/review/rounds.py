@@ -284,10 +284,7 @@ def resolve_task_budget(s: Series, settings: ReviewSettings, *, root=None, state
             remote, branch = runner._base_settings(config)
             ref = context._default_ref(root, remote, branch)
             if ref is not None:
-                code, common = context._git(root, "merge-base", "HEAD", ref, ok=(0, 1))
-                if code != 0 or not common.strip():
-                    raise ReviewError("OAH_REVIEW_BASE_INVALID", "restore a common default-branch ancestor, "
-                                      "then retry")
+                _status, common = context._budget_git(root, "merge-base", "HEAD", ref)
                 bases.add(common.strip())
             for base in sorted(bases):
                 if not SHA_RE.fullmatch(base):

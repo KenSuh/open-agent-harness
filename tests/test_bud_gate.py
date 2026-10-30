@@ -4,11 +4,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 import unittest
 from unittest import mock
 
 from oah import call, call_cli
-from oah.engines.proc import RunResult
+from oah.engines.proc import RunResult, run_command
 from oah.lockfile import StateLock
 from oah.review import ReviewError, context, receipts, rounds, runner
 from oah.secrets import NoKeychain
@@ -16,6 +17,115 @@ from tests.test_call import Project as CallProject
 from tests.test_fix import FixProject, state_snapshot
 from tests.test_review_cli import oah
 from tests.test_review_rounds import bug, git
+
+
+@contextlib.contextmanager
+def budget_git_trace(*, replay=None, fail_at=None, fault=None):
+    """Enumerate process calls, or replay them with exactly one injected Git failure."""
+    marker = "private-fixture-marker"
+    trace, hit = [], []
+    run_git = context.run_git
+
+    def inspect(args, execute):
+        position = len(trace)
+        if replay is not None:
+            if position >= len(replay) or args != replay[position][0]:
+                raise AssertionError("budget Git invocation sequence changed")
+            result = replay[position][1]
+        else:
+            result = execute()
+        trace.append((args, result))
+        if position == fail_at:
+            hit.append(position)
+            if fault == "spawn":
+                raise OSError(marker)
+            if fault == "timeout":
+                raise subprocess.TimeoutExpired("git", 1, output=marker, stderr=marker)
+            if fault == "timeout-result":
+                return RunResult(None, marker, marker, True)
+            return RunResult(128 if fault == "silent-128" else 2,
+                             "" if fault == "silent-128" else marker,
+                             "" if fault == "silent-128" else marker, False)
+        return result
+
+    def git_read(root, *args):
+        return inspect(args, lambda: run_git(root, *args))
+
+    def blob_read(argv, **kwargs):
+        args = tuple(argv[list(argv).index("-C") + 2:])
+        return inspect(args, lambda: run_command(argv, **kwargs))
+
+    with mock.patch.object(context, "run_git", side_effect=git_read), \
+            mock.patch.object(runner, "run_git", side_effect=git_read), \
+            mock.patch.object(context, "run_command", side_effect=blob_read):
+        yield trace, hit
+
+
+def budget_discovery(project, discovery):
+    """An unrecorded limit on trunk/master, plus empty-config and missing-base sources."""
+    original = (project.repo / runner.CONFIG_PATH).read_bytes()
+    limited = project.commit({runner.CONFIG_PATH: original + b"[review]\nmax_rounds = 1\n"})
+    empty = project.commit({runner.CONFIG_PATH: None})
+    configured = b'[preflight]\ndefault_branch = "trunk"\n' if discovery == "configured" else b""
+    project.commit({runner.CONFIG_PATH: original + configured})
+    if discovery == "direct":
+        git(project.repo, "update-ref", "--no-deref", "refs/remotes/origin/HEAD", limited)
+    elif discovery in ("symbolic", "configured"):
+        git(project.repo, "update-ref", "refs/remotes/origin/trunk", limited)
+        git(project.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    else:
+        if discovery == "fallback":
+            git(project.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        git(project.repo, "branch", "-m", "main", "master")
+        git(project.repo, "update-ref", "refs/heads/master", limited)
+    return empty
+
+
+def check_budget_git_faults(test, project, action, *, pending=None, launcher=False):
+    """Fail every enumerated Git call singly through the real paid entry point."""
+    from oah.review.settings import ReviewSettings
+
+    before = (project.folder() / "rounds.jsonl").read_bytes()
+    s = rounds.series(receipts.load(project.state, "t1"), receipts.read_round_log(project.state, "t1"),
+                      project.base, head=project.head, is_ancestor=lambda a, b: True)
+    with budget_git_trace() as (trace, _):
+        budget = rounds.resolve_task_budget(s, ReviewSettings(None, 2, None, ()), root=project.repo)
+    test.assertEqual(budget.limit, 1)
+    test.assertIsNotNone(budget.stop)
+    resolve = rounds.resolve_task_budget
+    counts = len(project.calls()), len(project.fix_calls())
+    for position, (args, _) in enumerate(trace):
+        for fault in ("silent-128", "other-nonzero", "timeout", "timeout-result", "spawn"):
+            with test.subTest(position=position, operation=args[0], fault=fault):
+                hits = []
+
+                def faulted(*values, **fields):
+                    with budget_git_trace(replay=trace, fail_at=position, fault=fault) as (_, hit):
+                        try:
+                            return resolve(*values, **fields)
+                        finally:
+                            hits.extend(hit)
+
+                terminal = io.StringIO()
+                with mock.patch.object(rounds, "resolve_task_budget", side_effect=faulted), \
+                        contextlib.redirect_stderr(terminal):
+                    if pending is not None:
+                        test.assertEqual(action(), 1)
+                        message = pending.run.read()["error"]
+                    else:
+                        with test.assertRaises(Exception) as caught:
+                            action()
+                        test.assertEqual(caught.exception.code,
+                                         "OAH_RUN_LAUNCH_FAILED" if launcher else "OAH_REVIEW_GIT_FAILED")
+                        message = str(caught.exception)
+                test.assertEqual(hits, [position])
+                test.assertIn("OAH_REVIEW_GIT_FAILED", message)
+                test.assertIn("retry", message)
+                test.assertNotIn("private-fixture-marker", message + terminal.getvalue())
+                test.assertEqual((project.folder() / "rounds.jsonl").read_bytes(), before)
+                test.assertEqual((len(project.calls()), len(project.fix_calls())), counts)
+                test.assertTrue(all(b"private-fixture-marker" not in value
+                                    for value in state_snapshot(project.state).values() if isinstance(value, bytes)))
 
 
 def prepare(project, stage="correction", **fields):
@@ -40,7 +150,7 @@ def advance_budget_base(project):
 def budget_git_fault(base, fault):
     """Fail only the historical budget read, leaving live Git and engine execution real."""
     marker = "private-fixture-marker"
-    run_git, run_command = runner.run_git, runner.run_command
+    run_git = context.run_git
 
     def inspect(root, *args):
         path_probe = (args == ("cat-file", "-e", f"{base}:{runner.CONFIG_PATH}") or
@@ -63,7 +173,7 @@ def budget_git_fault(base, fault):
 
     with mock.patch.object(context, "run_git", side_effect=inspect), \
             mock.patch.object(runner, "run_git", side_effect=inspect), \
-            mock.patch.object(runner, "run_command", side_effect=read):
+            mock.patch.object(context, "run_command", side_effect=read):
         yield marker
 
 
@@ -74,6 +184,32 @@ def log_old_base(project, base, limit=None):
 
 
 class BudgetGateTest(unittest.TestCase):
+    def test_every_budget_git_error_stops_paid_preparation(self):
+        for discovery in ("symbolic", "direct", "fallback", "configured"):
+            for mode in ("foreground", "background", "fix", "review"):
+                with self.subTest(discovery=discovery, mode=mode):
+                    project = FixProject(self)
+                    project.changes_requested()
+                    empty = budget_discovery(project, discovery)
+                    log_old_base(project, empty, 1)
+                    log_old_base(project, "f" * 40)
+                    receipts.log_round(project.state, "t1", {"event": "finish", "base": project.base,
+                                                             "round": 2, "series_round": 1, "counted": False,
+                                                             "code": rounds.NEEDS_DECISION})
+
+                    def action():
+                        if mode == "fix":
+                            return project.fix()
+                        if mode == "review":
+                            return project.review(base=project.base)
+                        pending = prepare(project, tier="low")
+                        if mode == "foreground":
+                            return call.execute(pending, base_env=project.env)
+                        run_id = call.start_background(pending, base_env=project.env)
+                        return call.wait(project.state, run_id, timeout=30)
+
+                    check_budget_git_faults(self, project, action)
+
     def test_git_inspection_errors_stop_every_paid_path(self):
         for mode in ("foreground", "background", "fix", "review"):
             for fault in ("timeout", "error", "silent", "blob", "object", "os-error"):
