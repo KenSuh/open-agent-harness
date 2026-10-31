@@ -19,6 +19,7 @@ DEFAULTS: dict[str, object] = {
     "sql_dialect": "standard",  # MySQL rules require explicit sql_dialect = "mysql"
     "ledger_globs": [".oah/tasks/*/GATES.md"],  # gate ledgers bind the map's identity, ignored or not
     "rerank": False,              # a re-ranker runs only when enabled here explicitly and its key is present
+    "fallback_checks": [],        # extra weak checks listed whenever an impact result is incomplete
     "refresh_default_branch": True,  # fetch the remote's default branch before a query and map it too (A23)
     "git_timeout": 300.0,
     "lock_timeout": 120.0,
@@ -51,7 +52,7 @@ def _check(settings: Mapping[str, object]) -> None:
     for key in ("git_timeout", "lock_timeout"):
         if not isinstance(settings[key], (int, float)) or isinstance(settings[key], bool) or settings[key] <= 0:
             fail(key, "a positive number of seconds")
-    for key in ("wiki_dirs", "db_globs", "ledger_globs"):
+    for key in ("wiki_dirs", "db_globs", "ledger_globs", "fallback_checks"):
         if not isinstance(settings[key], (list, tuple)) or not all(isinstance(v, str) for v in settings[key]):
             fail(key, "an array of strings")
     if not isinstance(settings["graph_file"], str):
