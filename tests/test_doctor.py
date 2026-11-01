@@ -15,6 +15,8 @@ from unittest import mock
 from oah.console import make_safe
 from oah.doctor import check_tools, exit_code, gates_in_use, project_root, python_status, render_json, render_text
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
+from oah.models import Catalog, Entry, ModelInfo
+from oah.paths import repo_info
 from oah.setup import catalog, display
 from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy
 
@@ -432,6 +434,174 @@ class McpNoticeDoctorTest(unittest.TestCase):
                 self.assertEqual(code, 0, out)
                 self.assertIn("4.4.4 -> 4.5.0", out)
                 self.assertNotIn("9.9.9", out)
+
+
+class ModelNoticeDoctorTest(unittest.TestCase):
+    """oah doctor shows the logged unpooled-model notices that still hold, from local state only."""
+
+    CONFIG = ('[engines.codex]\ncommand = ["/no/such/codex"]\n'
+              '[engines.codex.tier_pools]\nhigh = ["m-old"]\n')
+
+    def setUp(self):
+        from tests.fixtures.toolkit.registry import forbid_network
+
+        forbid_network(self)
+        self.repo = make_git_repo(self)
+        self.state = make_tmp_dir(self) / "state"
+        self.catalog = Catalog(self.state)
+        self.config = self.repo / ".oah" / "config.toml"
+        self.config.parent.mkdir()
+        self.config.write_text(self.CONFIG, encoding="utf-8")
+        self.store(ModelInfo("m-old", ("high",)), ModelInfo("m-new", ("high",)))
+        self.write_log(self.notice())
+
+    def store(self, *models):
+        self.catalog._save(Entry("codex", "1.0.0", "2026-10-27T09:00:00Z", models, "fixture"))
+
+    def write_log(self, *records):
+        self.catalog.unpooled_path.write_text("".join(json.dumps(record) + "\n" for record in records),
+                                              encoding="utf-8")
+
+    def notice(self, engine="codex", model="m-new", ts="2026-10-27T09:00:00Z"):
+        return {"ts": ts, "engine": engine, "model": model}
+
+    def doctor(self, *, json_output=False):
+        import oah.doctor as doctor
+
+        out = io.StringIO()
+        with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
+                mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                mock.patch.dict(os.environ, {"OAH_STATE_DIR": str(self.state)}), \
+                contextlib.redirect_stdout(out):
+            code = doctor.doctor_main(json_output=json_output)
+        return code, out.getvalue()
+
+    def shown(self):
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        return json.loads(out)["model_notices"]
+
+    def test_shows_the_notice_in_text_and_json_with_the_date(self):
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn("OAH_MODEL_NEW_UNPOOLED", out)
+        self.assertIn("m-new", out)
+        self.assertIn("2026-10-27", out)
+        self.assertIn("not only new ones", out)
+        self.assertIn("[engines.codex.tier_pools]", out)
+        self.assertIn(".oah/config.toml", out)
+        _, raw = self.doctor(json_output=True)
+        data = json.loads(raw)
+        self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices"])
+        notice = data["model_notices"][0]
+        self.assertEqual((notice["code"], notice["engine"], notice["model"], notice["date"]),
+                         ("OAH_MODEL_NEW_UNPOOLED", "codex", "m-new", "2026-10-27"))
+        self.assertIn(".oah/config.toml", notice["message"])
+
+    def test_shows_it_with_no_cli_on_path_and_nothing_spawned(self):
+        import oah.doctor as doctor
+
+        info = repo_info(self.repo)
+        forbidden = AssertionError("a notice must not start a process")
+        with mock.patch("oah.paths.repo_info", return_value=info), \
+                mock.patch("subprocess.Popen", side_effect=forbidden), \
+                mock.patch("subprocess.run", side_effect=forbidden), \
+                mock.patch("os.system", side_effect=forbidden), \
+                mock.patch.dict(os.environ, {"PATH": ""}):
+            found = doctor.model_notices(self.repo, {"OAH_STATE_DIR": str(self.state), "PATH": ""})
+        self.assertEqual([(item["engine"], item["model"]) for item in found], [("codex", "m-new")])
+
+    def test_the_last_record_per_engine_and_model_wins(self):
+        self.write_log(self.notice(ts="2026-10-20T09:00:00Z"), self.notice(ts="2026-10-27T09:00:00Z"))
+        self.assertEqual([item["date"] for item in self.shown()], ["2026-10-27"])
+
+    def test_a_missing_log_or_no_project_shows_nothing(self):
+        import oah.doctor as doctor
+
+        self.catalog.unpooled_path.unlink()
+        self.assertEqual(self.shown(), [])
+        _, text = self.doctor()
+        self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", text)
+        self.assertEqual(doctor.model_notices(None, {}), [])
+
+    def test_a_corrupt_log_shows_nothing(self):
+        for raw in (b"{not json\n", b"\xff\n", b'{"engine": "codex", "model": "m-new"}', b"[" * 200000 + b"\n"):
+            with self.subTest(raw=raw[:30]):
+                self.catalog.unpooled_path.write_bytes(raw)
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", out)
+                self.assertEqual(self.shown(), [])
+
+    def test_a_tampered_record_is_dropped_and_never_echoed(self):
+        table = [self.notice(engine="evil-engine \x1b[2J"), self.notice(engine="gemini"), self.notice(engine=[]),
+                 self.notice(engine="claude"), self.notice(model="m-evil \x1b[2J"),
+                 self.notice(model="m-new\nINJECTED"), self.notice(model=["m-new"]), self.notice(model={})]
+        for record in table:
+            with self.subTest(record=record):
+                self.write_log(record)
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                for text in ("evil", "gemini", "INJECTED", "\x1b", "OAH_MODEL_NEW_UNPOOLED"):
+                    self.assertNotIn(text, out)
+                self.assertEqual(self.shown(), [])
+
+    def test_a_name_that_is_not_plain_stays_out_even_when_the_catalog_lists_it(self):
+        name = "m-evil\x1b[2J"
+        self.store(ModelInfo("m-old", ("high",)), ModelInfo(name, ("high",)))
+        self.write_log(self.notice(model=name))
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("m-evil", out)
+        self.assertEqual(self.shown(), [])
+
+    def test_a_tampered_date_keeps_the_notice_and_drops_the_text(self):
+        for ts in ("<date \x1b[2J>", 7, None, "2026-10-27"):
+            with self.subTest(ts=ts):
+                self.write_log(self.notice(ts=ts))
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("\x1b", out)
+                self.assertNotIn("<date", out)
+                self.assertEqual([item["date"] for item in self.shown()], [""])
+
+    def test_a_model_since_pooled_gone_or_hidden_shows_nothing(self):
+        self.config.write_text(self.CONFIG.replace('["m-old"]', '["m-old", "m-new"]'), encoding="utf-8")
+        self.assertEqual(self.shown(), [])
+        self.config.write_text(self.CONFIG, encoding="utf-8")
+        self.assertEqual(len(self.shown()), 1)
+        self.store(ModelInfo("m-old", ("high",)))
+        self.assertEqual(self.shown(), [])
+        self.store(ModelInfo("m-old", ("high",)), ModelInfo("m-new", ("high",), listed=False))
+        self.assertEqual(self.shown(), [])
+
+    def test_pools_removed_shows_nothing(self):
+        self.config.write_text('[engines.codex]\ncommand = ["/no/such/codex"]\n', encoding="utf-8")
+        self.assertEqual(self.shown(), [])
+
+    def test_a_bad_catalog_or_config_shows_nothing(self):
+        bad = {"not json": "{not json", "bad efforts": json.dumps(
+            {"codex": {"models": [{"name": "m-new", "listed": True, "efforts": 5}]}})}
+        for name, body in bad.items():
+            with self.subTest(name=name):
+                self.catalog.catalog_path.write_text(body, encoding="utf-8")
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", out)
+        self.catalog.catalog_path.unlink()
+        self.store(ModelInfo("m-old", ("high",)), ModelInfo("m-new", ("high",)))
+        for body in ('[engines.codex.tier_pools]\nhuge = ["m-old"]\n', "not toml ["):
+            with self.subTest(body=body):
+                self.config.write_text(body, encoding="utf-8")
+                code, out = self.doctor()
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", out)
+
+    def test_doctor_leaves_the_config_and_the_log_alone(self):
+        before = self.config.read_bytes(), self.catalog.unpooled_path.read_bytes()
+        self.doctor()
+        self.doctor(json_output=True)
+        self.assertEqual((self.config.read_bytes(), self.catalog.unpooled_path.read_bytes()), before)
 
 
 if __name__ == "__main__":

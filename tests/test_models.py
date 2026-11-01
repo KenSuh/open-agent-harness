@@ -15,8 +15,9 @@ from unittest import mock
 from oah import models_cli
 from oah.engines.effort import EngineError
 from oah.engines import codex
+from oah.lockfile import LockTimeout
 from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
-                        resolve_base)
+                        resolve_base, unpooled_models, unpooled_warning)
 from tests.helpers import make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -580,6 +581,179 @@ class CandidateTableTest(unittest.TestCase):
         self.assertTrue(pooled[0].startswith("OAH_MODEL_POOL_UNKNOWN: "), pooled)
         self.assertIn("tier_pools.high", pooled[0])
         self.assertIn("m-typo", pooled[0])
+
+
+CODE = "OAH_MODEL_NEW_UNPOOLED"
+POOLS = "[engines.codex.tier_pools]\n" + "".join(f'{tier} = ["m-old"]\n' for tier in TIERS)
+LEVELS = ["low", "medium", "high"]
+
+
+def log_records(state: pathlib.Path) -> list[dict]:
+    path = Catalog(state).unpooled_path
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def notices(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(CODE)]
+
+
+class UnpooledRuleTest(unittest.TestCase):
+    def test_unpooled_models_table(self):
+        table = [({}, []), (None, []), ({"low": [], "high": []}, []),
+                 ({"high": ["m-strong"], "low": ["m-mid"]}, ["m-extra", "m-light"]),
+                 ({"high": ["m-strong", "m-mid", "m-light", "m-extra"]}, []),
+                 ({"high": ["m-hidden", "m-strong", "m-mid", "m-light"]}, ["m-extra"])]
+        for pools, expected in table:
+            with self.subTest(pools=pools):
+                self.assertEqual(unpooled_models(JUDGE_ENTRY, pools), expected)
+        self.assertEqual(unpooled_models(None, {"high": ["m-strong"]}), [])
+
+    def test_the_warning_names_the_model_and_the_one_step(self):
+        warning = unpooled_warning("codex", "m-extra")
+        self.assertTrue(warning.startswith(f"{CODE}: "), warning)
+        for text in ("m-extra", "[engines.codex.tier_pools]", ".oah/config.toml", "judge will not pick"):
+            self.assertIn(text, warning)
+
+    def test_check_caps_leaves_the_notice_to_check_catalog(self):
+        for fresh in (True, False):
+            with self.subTest(fresh=fresh):
+                warned = check_caps("codex", {}, [], JUDGE_ENTRY, fresh=fresh, pools={"high": ["m-strong"]})
+                self.assertEqual(warned, [])
+
+    def test_build_candidates_never_offers_an_unpooled_model(self):
+        pools = {"medium": ["m-mid"], "high": ["m-strong", "m-mid"]}
+        table = [("ranked", dict(ranking=["m-extra", *RANKING])), ("pools", dict(ranking=[])),
+                 ("deterministic", dict(ranking=[], deterministic=("m-extra", "high"), pools={"low": ["m-mid"]})),
+                 ("pools", dict(ranking=[], allowed=["m-extra", "m-mid"]))]
+        for mode, fields in table:
+            with self.subTest(mode=mode, fields=fields):
+                built = candidates(**{"pools": pools, **fields})
+                self.assertEqual(built.mode, mode)
+                self.assertNotIn("m-extra", {pair.model for pair in built.pairs})
+                self.assertIsNotNone(built.reject_reason("m-extra", "high"))
+
+
+class UnpooledNoticeTest(unittest.TestCase):
+    def setUp(self):
+        self.state, self.home = make_tmp_dir(self), make_tmp_dir(self)
+        self.env = {"OAH_STATE_DIR": str(self.state), "CODEX_HOME": str(self.home)}
+        write_cache(self.home, ("m-old", LEVELS, True), ("m-new", LEVELS, False))
+
+    def cli(self, repo: pathlib.Path, *argv: str) -> tuple[int, str, str]:
+        with inside(repo, self.env):
+            return run_models(*argv)
+
+    def test_new_model_in_text_and_json(self):
+        repo = project_with_fakes(self, POOLS)
+        code, out, err = self.cli(repo, "--json")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(report["unpooled"], ["m-new"])
+        self.assertEqual(list(report), ["cli_version", "checked_at", "source", "refreshed", "warnings", "models",
+                                        "allowed_models", "effort_caps", "tier_pools", "tiers", "unpooled"])
+        self.assertEqual(len(notices("\n".join(report["warnings"]))), 1)
+        self.assertIn("[engines.codex.tier_pools]", notices("\n".join(report["warnings"]))[0])
+        self.assertEqual(len(notices(err)), 1)
+        code, out, err = self.cli(repo)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out + err).count(CODE), 1, out + err)
+        self.assertIn(".oah/config.toml", notices(err)[0])
+
+    def test_no_notice_without_pools_for_hidden_or_pooled(self):
+        cache = self.home / "models_cache.json"
+        listed = cache.read_text(encoding="utf-8")
+        data = json.loads(listed)
+        data["models"][1]["visibility"] = "hide"
+        both = '[engines.codex.tier_pools]\nhigh = ["m-old", "m-new"]\n'
+        for extra, body in (("", listed), (POOLS, json.dumps(data)), (both, listed)):
+            with self.subTest(extra=extra, body=body):
+                cache.write_text(body, encoding="utf-8")
+                code, out, err = self.cli(project_with_fakes(self, extra), "--json", "--refresh")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], [])
+                self.assertNotIn(CODE, out + err)
+                self.assertEqual(log_records(self.state), [])
+
+    def test_notice_survives_every_tier_failing_to_resolve(self):
+        write_cache(self.home, ("m-a", LEVELS, False), ("m-b", LEVELS, False))
+        repo = project_with_fakes(self, '[engines.codex.tier_pools]\nhigh = ["m-a"]\n')
+        with mock.patch("oah.call._effective", return_value=None):
+            code, out, err = self.cli(repo, "--json")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertEqual({row.get("error", "").split(":")[0] for row in report["tiers"].values()},
+                         {"OAH_MODEL_UNRESOLVED"})
+        self.assertEqual(report["unpooled"], ["m-b"])
+        self.assertEqual(len(notices(err)), 1)
+
+    def test_resolved_models_do_not_change_and_config_is_untouched(self):
+        repo = project_with_fakes(self, POOLS)
+        config = repo / ".oah" / "config.toml"
+        before = config.read_bytes()
+        write_cache(self.home, ("m-old", LEVELS, True))
+        _, out, _ = self.cli(repo, "--json", "--refresh")
+        without = json.loads(out)["engines"]["codex"]["tiers"]
+        write_cache(self.home, ("m-old", LEVELS, True), ("m-new", LEVELS, False))
+        _, out, _ = self.cli(repo, "--json", "--refresh")
+        self.assertEqual(json.loads(out)["engines"]["codex"]["tiers"], without)
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_one_record_per_engine_and_model(self):
+        repo = project_with_fakes(self, POOLS)
+        config = repo / ".oah" / "config.toml"
+        before = config.read_bytes()
+        for argv in (("--refresh",), ("--refresh", "--json"), (), ("--json",), ()):
+            code, _, err = self.cli(repo, *argv)
+            self.assertEqual(code, 0, err)
+        self.assertEqual([(r["engine"], r["model"]) for r in log_records(self.state)], [("codex", "m-new")])
+        write_cache(self.home, ("m-old", LEVELS, True), ("m-new", LEVELS, False), ("m-next", LEVELS, False))
+        self.cli(repo, "--refresh")
+        self.cli(repo, "--refresh")
+        self.assertEqual([r["model"] for r in log_records(self.state)], ["m-new", "m-next"])
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_only_a_rebuild_logs(self):
+        self.cli(project_with_fakes(self), "--refresh")
+        repo = project_with_fakes(self, POOLS)
+        code, _, err = self.cli(repo)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(notices(err)), 1)
+        self.assertEqual(log_records(self.state), [])
+        self.cli(repo, "--refresh")
+        self.assertEqual(len(log_records(self.state)), 1)
+
+    def test_a_bad_log_never_stops_a_refresh_and_is_kept(self):
+        repo = project_with_fakes(self, POOLS)
+        log = Catalog(self.state).unpooled_path
+        log.parent.mkdir(parents=True)
+        for raw in (b"{not json\n", b"\xff\n", b'{"engine": "codex", "model": "m-new"}', b"[" * 200000 + b"\n"):
+            with self.subTest(raw=raw[:30]):
+                log.write_bytes(raw)
+                code, _, err = self.cli(repo, "--refresh")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(notices(err)), 1)
+                self.assertEqual(log.read_bytes(), raw)
+
+    def test_a_tampered_record_never_stops_a_refresh(self):
+        repo = project_with_fakes(self, POOLS)
+        log = Catalog(self.state).unpooled_path
+        log.parent.mkdir(parents=True)
+        log.write_text('{"engine": [], "model": {}}\n{"engine": "codex", "model": []}\n', encoding="utf-8")
+        code, _, err = self.cli(repo, "--refresh")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(log_records(self.state)[-1]["model"], "m-new")
+
+    def test_a_busy_lock_or_failed_write_skips_the_record(self):
+        catalog = Catalog(self.state)
+        with mock.patch("oah.models.StateLock", side_effect=LockTimeout("busy")):
+            self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW), [])
+        with mock.patch("oah.models.append_jsonl", side_effect=OSError("disk full")):
+            self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW), [])
+        self.assertEqual(log_records(self.state), [])
+        self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW),
+                         [{"ts": "2026-10-23T12:00:00Z", "engine": "codex", "model": "m-new"}])
 
 
 if __name__ == "__main__":

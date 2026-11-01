@@ -17,7 +17,7 @@ import types
 import unittest
 from unittest import mock
 
-from oah import call, call_cli, intent, rerank
+from oah import call, call_cli, intent, models_cli, rerank
 from oah.briefs import VERIFY_FOOTER, VERIFY_MARKER, BriefError, raw_section
 from oah.engines.effort import EngineError
 from oah.lease import Store
@@ -1488,6 +1488,96 @@ class CallCliTest(unittest.TestCase):
             os.chdir(previous)
         self.assertEqual(code, 1)
         self.assertTrue(err.getvalue().startswith("OAH_FOOTER_NOT_APPENDED"))
+
+
+class UnpooledNoticeTest(unittest.TestCase):
+    """Only a launch that rebuilt the catalog names a listed model in no pool; `oah models` always does."""
+
+    POOLS = "[engines.codex.tier_pools]\n" + "".join(f'{tier} = ["gpt-test-a"]\n'
+                                                     for tier in ("low", "medium", "high", "max"))
+
+    def project(self) -> Project:
+        project = Project(self, self.POOLS)
+        cache = project.home / "models_cache.json"
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        data["models"].append({"slug": "gpt-test-new", "supported_reasoning_levels": [{"effort": "low"}]})
+        cache.write_text(json.dumps(data), encoding="utf-8")
+        return project
+
+    def run_models(self, project: Project, *argv: str) -> tuple[int, str, str]:
+        parser = argparse.ArgumentParser()
+        models_cli.register(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(["models", *argv])
+        out, err = io.StringIO(), io.StringIO()
+        previous = os.getcwd()
+        os.chdir(project.repo)
+        try:
+            with mock.patch.dict(os.environ, project.env, clear=True), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = models_cli.run(args)
+        finally:
+            os.chdir(previous)
+        return code, out.getvalue(), err.getvalue()
+
+    def records(self, project: Project) -> list[dict]:
+        path = project.state / "models" / "unpooled.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_launch_warns_logs_once_and_keeps_the_resolved_model(self):
+        project = self.project()
+        config = project.repo / ".oah" / "config.toml"
+        before = config.read_bytes()
+        prepared = project.prepare(tier="low")
+        found = [warning for warning in prepared.warnings if warning.startswith("OAH_MODEL_NEW_UNPOOLED: ")]
+        self.assertEqual(len(found), 1, prepared.warnings)
+        self.assertIn("gpt-test-new", found[0])
+        self.assertIn("[engines.codex.tier_pools]", found[0])
+        self.assertEqual(prepared.model, "gpt-test-a")
+        for env, rebuilt in (({}, False), ({}, False), ({"FAKE_CODEX_VERSION": "0.164.0"}, True),
+                             ({"FAKE_CODEX_VERSION": "0.164.0"}, False)):
+            with self.subTest(env=env, rebuilt=rebuilt):
+                prepared = project.prepare(tier="low", env=env)
+                self.assertEqual(prepared.model, "gpt-test-a")
+                self.assertEqual(any(w.startswith("OAH_MODEL_NEW_UNPOOLED: ") for w in prepared.warnings), rebuilt)
+        self.assertEqual([(item["engine"], item["model"]) for item in self.records(project)],
+                         [("codex", "gpt-test-new")])
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_an_unrefreshed_launch_is_quiet_and_oah_models_still_reports(self):
+        project = self.project()
+        argv = ("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low", "--message", "hello")
+        code, out, err = run_cli(project, *argv)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out + err).count("OAH_MODEL_NEW_UNPOOLED"), 1, out + err)
+        code, out, err = run_cli(project, *argv)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", out + err)
+        for extra, unpooled in (((), None), (("--json",), ["gpt-test-new"])):
+            with self.subTest(extra=extra):
+                code, out, err = self.run_models(project, *extra)
+                self.assertEqual(code, 0, err)
+                self.assertEqual((out + err).count("OAH_MODEL_NEW_UNPOOLED:"), 1 + (unpooled is not None), out + err)
+                if unpooled is not None:
+                    self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], unpooled)
+
+    def test_a_corrupt_log_never_blocks_a_launch(self):
+        project = self.project()
+        log = project.state / "models" / "unpooled.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_bytes(b"{not json\n")
+        prepared = project.prepare(tier="low")
+        self.assertEqual(prepared.model, "gpt-test-a")
+        self.assertTrue(any(warning.startswith("OAH_MODEL_NEW_UNPOOLED: ") for warning in prepared.warnings))
+        self.assertEqual(log.read_bytes(), b"{not json\n")
+
+    def test_a_correction_plan_writes_no_notice(self):
+        project = self.project()
+        token = call._CORRECTION_INPUT_CHECK.set(lambda value: None)
+        try:
+            self.assertEqual(call._CorrectionCatalog(project.state).record_unpooled("codex", ["gpt-test-new"]), [])
+        finally:
+            call._CORRECTION_INPUT_CHECK.reset(token)
+        self.assertEqual(self.records(project), [])
 
 
 if __name__ == "__main__":
