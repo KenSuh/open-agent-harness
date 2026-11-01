@@ -352,7 +352,17 @@ flowchart TD
   `independent: yes` only when every commit in the range was written by another engine than the reviewer;
   unknown authorship gives `unknown`, and a Codex review of a Codex correction says `no`. That is an honest
   label for this engine order, not an error.
-- `oah review summary --task T` prints a block for the pull request: rounds, verdicts, gates and follow-ups.
+- `oah review summary --task T` prints a block for the pull request: rounds, verdicts, gates and follow-ups. When
+  the task is not converged at HEAD, the block adds a handoff: the last reviewed head, the P0/P1 findings in the
+  latest receipt, the gates not met in the task's local ledgers, and one suggested next command. It asks the review
+  gates for flags but does not check the command against the intent, packet or base state. A refusal names the
+  next step. JSON carries the same qualification. Review commands retain the selected `--base`. Without an active
+  bound lease, it prints no suggested command and instead names the prerequisite: accept the packet, then start
+  or bind the lease with
+  `oah start --task T --agent "<you>" --packet ".oah/tasks/T/PACKET.md"`, using the lease holder and the accepted
+  packet's path. Run the summary again after binding. Handoff finding ids, axes, locations and titles are quoted.
+  The gate list shows ids and states only. It is a structural reading: nothing is re-run and evidence freshness
+  is not checked, so a met box can still be stale.
 
 ## Landing
 
