@@ -98,12 +98,17 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 
 ## Next update
 
-These four features are in review for the next update and are **not available in v0.1.0**.
+None of these features is **available in v0.1.0** yet.
+
+Merged to `main`, waiting for the next release:
 
 - Jev chooses the model and effort for each call within the tier pools you allow.
+- A review budget covers the whole task, with ways to stop, resume and increase it.
+
+Still in review:
+
 - Impact reports say which scope was analysed and which was not, with conservative fallback checks.
 - Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
-- A review budget covers the whole task, with ways to stop, resume and increase it.
 
 ## How it fits together
 
@@ -173,6 +178,8 @@ are optional. Each part is explained in [Concepts](docs/concepts.md).
 - **An impact map** lists the gates and commands that pin or run a changed file, so you re-run exactly those.
 - **A project wiki** records decisions next to the code, and `oah finish` checks that it was maintained.
 - **Evidence gates.** A task is done when its gates pass with recorded evidence, not when an agent says so.
+  Gates watch repository files and the run environment only. They do not notice changes to external services or
+  `.gitignore`d files, so check those separately.
 - **Intent that travels** from the packet into the lease and the brief of every call.
 - **Leases and preflight** keep parallel sessions off each other's files and off a stale base.
 - **Reviews that converge.** Codex reviews a read-only snapshot, corrections are bound to their findings, and a
@@ -491,12 +498,17 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 
 ### 다음 업데이트
 
-다음 네 기능은 다음 업데이트를 위해 리뷰 중이며 **v0.1.0에서는 아직 쓸 수 없다**.
+아래 기능은 모두 **v0.1.0에서는 아직 쓸 수 없다**.
+
+다음 두 기능은 `main`에 병합되어 다음 릴리스를 기다리고 있다.
 
 - 호출마다 사용자가 허용한 tier별 후보 안에서 Jev가 모델과 추론 강도를 고른다.
+- 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
+
+다음 두 기능은 아직 리뷰 중이다.
+
 - 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
 - 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
-- 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
 
 ### 한눈에 보는 구조
 
@@ -565,6 +577,8 @@ flowchart LR
 - **영향 지도**는 바뀐 파일을 고정하거나 실행하는 게이트와 명령을 알려 줘서, 정확히 그것만 다시 돌리게 한다.
 - **프로젝트 위키**가 결정을 코드 옆에 남기고, `oah finish`가 위키 정리 여부를 확인한다.
 - **증거 게이트.** 에이전트가 끝났다고 말할 때가 아니라, 게이트가 증거와 함께 통과할 때 작업이 끝난다.
+  게이트는 저장소 파일과 실행 환경만 확인한다. 외부 서비스와 `.gitignore`된 파일의 변경은 감지하지 못하므로
+  따로 확인해야 한다.
 - **따라다니는 의도.** 패킷의 의도가 리스와 모든 호출의 브리프로 이어진다.
 - **리스와 사전 점검**이 병렬 세션이 서로의 파일이나 낡은 기준점에서 작업하지 않게 막는다.
 - **수렴하는 리뷰.** Codex가 읽기 전용 스냅샷을 리뷰하고, 수정은 해당 지적에 묶이며, 같은 종류가 반복되거나
