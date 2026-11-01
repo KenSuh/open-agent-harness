@@ -1519,11 +1519,7 @@ class UnpooledNoticeTest(unittest.TestCase):
             os.chdir(previous)
         return code, out.getvalue(), err.getvalue()
 
-    def records(self, project: Project) -> list[dict]:
-        path = project.state / "models" / "unpooled.jsonl"
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
-
-    def test_launch_warns_logs_once_and_keeps_the_resolved_model(self):
+    def test_launch_warns_only_on_rebuild_and_keeps_the_resolved_model(self):
         project = self.project()
         config = project.repo / ".oah" / "config.toml"
         before = config.read_bytes()
@@ -1539,8 +1535,8 @@ class UnpooledNoticeTest(unittest.TestCase):
                 prepared = project.prepare(tier="low", env=env)
                 self.assertEqual(prepared.model, "gpt-test-a")
                 self.assertEqual(any(w.startswith("OAH_MODEL_NEW_UNPOOLED: ") for w in prepared.warnings), rebuilt)
-        self.assertEqual([(item["engine"], item["model"]) for item in self.records(project)],
-                         [("codex", "gpt-test-new")])
+        self.assertEqual({path.name for path in (project.state / "models").iterdir()},
+                         {"catalog.json", "resolved.json", "changes.jsonl"})
         self.assertEqual(config.read_bytes(), before)
 
     def test_an_unrefreshed_launch_is_quiet_and_oah_models_still_reports(self):
@@ -1560,24 +1556,34 @@ class UnpooledNoticeTest(unittest.TestCase):
                 if unpooled is not None:
                     self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], unpooled)
 
-    def test_a_corrupt_log_never_blocks_a_launch(self):
+    def test_empty_configured_pool_warns_on_rebuild(self):
         project = self.project()
-        log = project.state / "models" / "unpooled.jsonl"
-        log.parent.mkdir(parents=True)
-        log.write_bytes(b"{not json\n")
+        config = project.repo / ".oah" / "config.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace('["gpt-test-a"]', '[]'), encoding="utf-8")
         prepared = project.prepare(tier="low")
         self.assertEqual(prepared.model, "gpt-test-a")
-        self.assertTrue(any(warning.startswith("OAH_MODEL_NEW_UNPOOLED: ") for warning in prepared.warnings))
-        self.assertEqual(log.read_bytes(), b"{not json\n")
+        found = [warning for warning in prepared.warnings if warning.startswith("OAH_MODEL_NEW_UNPOOLED: ")]
+        self.assertTrue(any("gpt-test-new" in warning for warning in found), prepared.warnings)
+        self.assertTrue(any("gpt-test-a" in warning for warning in found), prepared.warnings)
 
-    def test_a_correction_plan_writes_no_notice(self):
+    def test_correction_refresh_keeps_catalog_writes_sealed(self):
         project = self.project()
+        project.prepare(tier="low")
+        before = {path: path.read_bytes() for path in (project.state / "models").iterdir()}
         token = call._CORRECTION_INPUT_CHECK.set(lambda value: None)
         try:
-            self.assertEqual(call._CorrectionCatalog(project.state).record_unpooled("codex", ["gpt-test-new"]), [])
+            catalog = call._CorrectionCatalog(project.state)
+            inputs_token = call._CORRECTION_INPUTS.set(mock.Mock(catalog=catalog))
+            try:
+                _, freshness = call.check_catalog("codex", project.settings(), state_dir=project.state,
+                                                  env=project.env, refresh=True)
+            finally:
+                call._CORRECTION_INPUTS.reset(inputs_token)
         finally:
             call._CORRECTION_INPUT_CHECK.reset(token)
-        self.assertEqual(self.records(project), [])
+        self.assertTrue(any(w.startswith("OAH_MODEL_NEW_UNPOOLED: ") for w in freshness.warnings))
+        self.assertEqual(set(catalog.writes), {catalog.catalog_path})
+        self.assertEqual({path: path.read_bytes() for path in (project.state / "models").iterdir()}, before)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ from unittest import mock
 from oah import models_cli
 from oah.engines.effort import EngineError
 from oah.engines import codex
-from oah.lockfile import LockTimeout
 from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
                         resolve_base, unpooled_models, unpooled_warning)
 from tests.helpers import make_git_repo, make_tmp_dir
@@ -588,20 +587,13 @@ POOLS = "[engines.codex.tier_pools]\n" + "".join(f'{tier} = ["m-old"]\n' for tie
 LEVELS = ["low", "medium", "high"]
 
 
-def log_records(state: pathlib.Path) -> list[dict]:
-    path = Catalog(state).unpooled_path
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
 def notices(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith(CODE)]
 
 
 class UnpooledRuleTest(unittest.TestCase):
     def test_unpooled_models_table(self):
-        table = [({}, []), (None, []), ({"low": [], "high": []}, []),
+        table = [({}, []), (None, []), ({"low": [], "high": []}, ["m-extra", "m-light", "m-mid", "m-strong"]),
                  ({"high": ["m-strong"], "low": ["m-mid"]}, ["m-extra", "m-light"]),
                  ({"high": ["m-strong", "m-mid", "m-light", "m-extra"]}, []),
                  ({"high": ["m-hidden", "m-strong", "m-mid", "m-light"]}, ["m-extra"])]
@@ -609,6 +601,11 @@ class UnpooledRuleTest(unittest.TestCase):
             with self.subTest(pools=pools):
                 self.assertEqual(unpooled_models(JUDGE_ENTRY, pools), expected)
         self.assertEqual(unpooled_models(None, {"high": ["m-strong"]}), [])
+
+    def test_only_plain_catalog_names_are_reported(self):
+        entry = Entry("codex", "1", None, tuple(ModelInfo(name, ()) for name in
+                      ("m-valid_1.2", "m-evil\x1b[2J", "m-new\nINJECTED", "x" * 129, "../model")), "test")
+        self.assertEqual(unpooled_models(entry, {"high": []}), ["m-valid_1.2"])
 
     def test_the_warning_names_the_model_and_the_one_step(self):
         warning = unpooled_warning("codex", "m-extra")
@@ -674,7 +671,6 @@ class UnpooledNoticeTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], [])
                 self.assertNotIn(CODE, out + err)
-                self.assertEqual(log_records(self.state), [])
 
     def test_notice_survives_every_tier_failing_to_resolve(self):
         write_cache(self.home, ("m-a", LEVELS, False), ("m-b", LEVELS, False))
@@ -700,60 +696,32 @@ class UnpooledNoticeTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["engines"]["codex"]["tiers"], without)
         self.assertEqual(config.read_bytes(), before)
 
-    def test_one_record_per_engine_and_model(self):
+    def test_reports_every_time_without_extra_state(self):
         repo = project_with_fakes(self, POOLS)
         config = repo / ".oah" / "config.toml"
         before = config.read_bytes()
         for argv in (("--refresh",), ("--refresh", "--json"), (), ("--json",), ()):
             code, _, err = self.cli(repo, *argv)
             self.assertEqual(code, 0, err)
-        self.assertEqual([(r["engine"], r["model"]) for r in log_records(self.state)], [("codex", "m-new")])
-        write_cache(self.home, ("m-old", LEVELS, True), ("m-new", LEVELS, False), ("m-next", LEVELS, False))
-        self.cli(repo, "--refresh")
-        self.cli(repo, "--refresh")
-        self.assertEqual([r["model"] for r in log_records(self.state)], ["m-new", "m-next"])
+            self.assertEqual(len(notices(err)), 1)
+        self.assertEqual({path.name for path in (self.state / "models").iterdir()},
+                         {"catalog.json", "resolved.json", "changes.jsonl"})
         self.assertEqual(config.read_bytes(), before)
 
-    def test_only_a_rebuild_logs(self):
+    def test_current_pools_apply_without_a_rebuild(self):
         self.cli(project_with_fakes(self), "--refresh")
         repo = project_with_fakes(self, POOLS)
-        code, _, err = self.cli(repo)
+        code, out, err = self.cli(repo, "--json")
         self.assertEqual(code, 0, err)
         self.assertEqual(len(notices(err)), 1)
-        self.assertEqual(log_records(self.state), [])
-        self.cli(repo, "--refresh")
-        self.assertEqual(len(log_records(self.state)), 1)
+        self.assertIsNone(json.loads(out)["engines"]["codex"]["refreshed"])
 
-    def test_a_bad_log_never_stops_a_refresh_and_is_kept(self):
-        repo = project_with_fakes(self, POOLS)
-        log = Catalog(self.state).unpooled_path
-        log.parent.mkdir(parents=True)
-        for raw in (b"{not json\n", b"\xff\n", b'{"engine": "codex", "model": "m-new"}', b"[" * 200000 + b"\n"):
-            with self.subTest(raw=raw[:30]):
-                log.write_bytes(raw)
-                code, _, err = self.cli(repo, "--refresh")
-                self.assertEqual(code, 0, err)
-                self.assertEqual(len(notices(err)), 1)
-                self.assertEqual(log.read_bytes(), raw)
-
-    def test_a_tampered_record_never_stops_a_refresh(self):
-        repo = project_with_fakes(self, POOLS)
-        log = Catalog(self.state).unpooled_path
-        log.parent.mkdir(parents=True)
-        log.write_text('{"engine": [], "model": {}}\n{"engine": "codex", "model": []}\n', encoding="utf-8")
-        code, _, err = self.cli(repo, "--refresh")
+    def test_empty_configured_pool_reports_every_listed_model(self):
+        repo = project_with_fakes(self, '[engines.codex.tier_pools]\nhigh = []\n')
+        code, out, err = self.cli(repo, "--json")
         self.assertEqual(code, 0, err)
-        self.assertEqual(log_records(self.state)[-1]["model"], "m-new")
-
-    def test_a_busy_lock_or_failed_write_skips_the_record(self):
-        catalog = Catalog(self.state)
-        with mock.patch("oah.models.StateLock", side_effect=LockTimeout("busy")):
-            self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW), [])
-        with mock.patch("oah.models.append_jsonl", side_effect=OSError("disk full")):
-            self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW), [])
-        self.assertEqual(log_records(self.state), [])
-        self.assertEqual(catalog.record_unpooled("codex", ["m-new"], now=NOW),
-                         [{"ts": "2026-10-23T12:00:00Z", "engine": "codex", "model": "m-new"}])
+        self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], ["m-new", "m-old"])
+        self.assertEqual(len(notices(err)), 2)
 
 
 if __name__ == "__main__":

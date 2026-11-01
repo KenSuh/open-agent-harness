@@ -215,9 +215,6 @@ class _CorrectionCatalog(models.Catalog):
             self._plan_write(self.resolved_path, data)
         return changes
 
-    def record_unpooled(self, engine, names, *, now=None):
-        return []  # Only the sealed plan writes here; the next ordinary rebuild logs the notice.
-
 
 def _catalog(state_dir):
     inputs = _CORRECTION_INPUTS.get()
@@ -228,7 +225,7 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
                   refresh: bool = False, now: dt.datetime | None = None) -> tuple[list[str], models.Freshness]:
     """The engine's argv prefix and its catalog entry, after the freshness check that runs before every launch.
 
-    A rebuild logs the listed models in no pool and warns about them; this is the one place that decides when a
+    A rebuild warns about the listed models in no pool; this is the one place that decides when a
     launch hears of them, so a launch that rebuilt nothing stays quiet."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
     catalog = _catalog(state_dir)
@@ -236,7 +233,6 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
                                      refresh=refresh, now=now)
     if freshness.refreshed:
         unpooled = models.unpooled_models(freshness.entry, settings.engines[engine]["tier_pools"])
-        catalog.record_unpooled(engine, unpooled, now=now)
         notices = [models.unpooled_warning(engine, name) for name in unpooled]
         freshness = dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices))
     return base, freshness

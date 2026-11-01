@@ -178,7 +178,7 @@ def mcp_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]
 
 
 def model_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]:
-    """The last recorded unpooled-model notice per engine and model, from local state and config; no network, no CLI."""
+    """Unpooled-model notices from the stored catalog and current config; no network or engine CLI calls."""
     if root is None:
         return []
     from oah.call_cli import load_settings
@@ -191,7 +191,7 @@ def model_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
         settings = load_settings(root)
         return Catalog(state_dir(repo_info(root), env)).unpooled_notices(
             {engine: settings.engines[engine]["tier_pools"] for engine in ENGINES})
-    except (ConfigError, EngineError, NotARepo, GitMissing, OSError):
+    except (ConfigError, EngineError, NotARepo, GitMissing, OSError, TypeError, ValueError, RecursionError):
         return []
 
 
@@ -210,11 +210,11 @@ def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
 def _model_lines(notices: Sequence[Mapping]) -> list[str]:
     if not notices:
         return []
-    lines = ["", "Listed models in no tier pool (logged by catalog rebuilds; no network used):"]
+    lines = ["", "Listed models in no tier pool (from the stored catalog and current config; no network used):"]
     for notice in notices:
-        logged = f" (logged {notice['date']})" if notice.get("date") else ""
-        lines.append(f"  {notice['message']}{logged}")
-    lines.append("      the first rebuild with pools configured logs every unpooled model, not only new ones")
+        checked = f" (checked {notice['date']})" if notice.get("date") else ""
+        lines.append(f"  {notice['message']}{checked}")
+    lines.append("      this includes every currently unpooled model, not only new ones")
     return lines
 
 
