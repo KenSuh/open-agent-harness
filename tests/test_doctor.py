@@ -575,6 +575,36 @@ class ModelNoticeDoctorTest(unittest.TestCase):
         self.config.unlink()
         self.assertEqual(self.shown(), [])
 
+    def assert_notice_lookup_failure(self, *, json_output, error):
+        code, out = self.doctor(json_output=json_output)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("OAH_MODEL_NEW_UNPOOLED", out)
+        if json_output:
+            data = json.loads(out)
+            self.assertEqual(data["model_notices"], [])
+            self.assertEqual(data["model_notices_error"], error)
+        else:
+            self.assertEqual(out.splitlines()[-1], "DOCTOR_OK")
+            self.assertIn(f"Model notices could not be read ({error}); run oah models to see why.\n", out)
+        return out
+
+    def test_overflowing_model_ttl_does_not_abort_doctor(self):
+        self.catalog.catalog_path.unlink()
+        self.config.write_text("[models]\nttl_hours = " + "9" * 400 + "\n", encoding="utf-8")
+        for json_output in (False, True):
+            with self.subTest(json_output=json_output):
+                out = self.assert_notice_lookup_failure(json_output=json_output, error="OverflowError")
+                self.assertNotIn("9" * 400, out)
+                self.assertNotIn("int too large", out)
+
+    def test_unexpected_model_notice_lookup_error_does_not_abort_doctor(self):
+        with mock.patch("oah.doctor.model_notices", side_effect=RuntimeError("PRIVATE\n\x1b[2J")):
+            for json_output in (False, True):
+                with self.subTest(json_output=json_output):
+                    out = self.assert_notice_lookup_failure(json_output=json_output, error="RuntimeError")
+                    self.assertNotIn("PRIVATE", out)
+                    self.assertNotIn("\x1b", out)
+
     def test_a_bad_catalog_or_config_shows_nothing(self):
         bad = {"not json": "{not json", "bad efforts": json.dumps(
             {"codex": {"models": [{"name": "m-new", "listed": True, "efforts": 5}]}})}
