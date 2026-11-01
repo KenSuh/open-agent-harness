@@ -149,11 +149,15 @@ each engine.
 - **Effort is verified, never lowered silently.** When Codex's header reports a lower effort than requested,
   the run fails with `OAH_EFFORT_DOWNGRADED`. An effort that cannot be observed, such as Claude Code's, is
   recorded as `unverified`.
-- **Tier pools are optional.** `[engines.<engine>.tier_pools]` in `.oah/config.toml` lists the models you accept
-  for each tier, for example `high = ["model-a", "model-b"]`. A model is a candidate when it is in the pool of
+- **Tier pools are optional.** `[engines.<engine>.tier_pools]` in `.oah/config.toml` lists the models the judge
+  may pick for each tier, for example `high = ["model-a", "model-b"]`. A judged model must be in the pool of
   the call's tier and of its floor tier. When `quality_order` does not rank the models, TypeSafe Jev may pick a
-  model and effort among those candidates. When Jev is unused, the rule-based choice runs. A model a CLI lists in
-  no pool gets `OAH_MODEL_NEW_UNPOOLED` from `oah models`, `oah doctor` and a launch that rebuilt the catalog.
+  model and effort among those candidates. Pools do not limit the rule-based choice, which runs when Jev is
+  unused or its answer is rejected. With no tier model pin and an empty `quality_order`, that choice can follow
+  a new Codex CLI default outside every pool. To prevent this, set
+  `[engines.<engine>.tiers] <tier> = { model = "<model>" }` in `.oah/config.toml`.
+  With pools configured, a listed model in no pool gets `OAH_MODEL_NEW_UNPOOLED` from `oah models`, `oah doctor`
+  and a launch that rebuilt the catalog. `oah doctor` uses the stored catalog without rereading the CLI.
   `oah` never edits your pools.
 - Every run record keeps the axes, the tier and where it came from (`rules`, `packet` or `flag`), and the
   requested and effective model and effort.
