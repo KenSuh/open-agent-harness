@@ -306,9 +306,9 @@ command and the output it must produce:
   (`--approve`). Passing gates are ticked with evidence and bound to their inputs, so a later change to an input
   makes the gate run again.
 - A gate's inputs are your tracked files, untracked files that are not ignored, and the run environment. A change
-  to an external service or a `.gitignore`d file does not make a gate run again, so check those separately. An
-  indented `OAH-INPUTS: a, b/c` line under a gate narrows its files to those paths, and a change outside them no
-  longer makes that gate run again.
+  to an external service or an ignored untracked file does not make a gate run again, so check those separately.
+  An indented `OAH-INPUTS: a, b/c` line under a gate narrows the repository-relative file prefixes used for
+  freshness checks. Another affected runnable gate can still trigger a ledger-wide rerun of this gate.
 - `GATES.summary.md`, written by `gates check`, is the committed, path-free record. The ledger itself stays out
   of git.
 - `oah finish` refuses unmet gates (`OAH_GATES_UNMET`). A gate that is truly impossible is written as

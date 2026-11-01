@@ -179,7 +179,7 @@ are optional. Each part is explained in [Concepts](docs/concepts.md).
 - **A project wiki** records decisions next to the code, and `oah finish` checks that it was maintained.
 - **Evidence gates.** A task is done when its gates pass with recorded evidence, not when an agent says so.
   Gates watch repository files and the run environment only. They do not notice changes to external services or
-  `.gitignore`d files, so check those separately.
+  ignored untracked files, so check those separately.
 - **Intent that travels** from the packet into the lease and the brief of every call.
 - **Leases and preflight** keep parallel sessions off each other's files and off a stale base.
 - **Reviews that converge.** Codex reviews a read-only snapshot, corrections are bound to their findings, and a
@@ -577,7 +577,7 @@ flowchart LR
 - **영향 지도**는 바뀐 파일을 고정하거나 실행하는 게이트와 명령을 알려 줘서, 정확히 그것만 다시 돌리게 한다.
 - **프로젝트 위키**가 결정을 코드 옆에 남기고, `oah finish`가 위키 정리 여부를 확인한다.
 - **증거 게이트.** 에이전트가 끝났다고 말할 때가 아니라, 게이트가 증거와 함께 통과할 때 작업이 끝난다.
-  게이트는 저장소 파일과 실행 환경만 확인한다. 외부 서비스와 `.gitignore`된 파일의 변경은 감지하지 못하므로
+  게이트는 저장소 파일과 실행 환경만 확인한다. 외부 서비스와 무시된 미추적 파일의 변경은 감지하지 못하므로
   따로 확인해야 한다.
 - **따라다니는 의도.** 패킷의 의도가 리스와 모든 호출의 브리프로 이어진다.
 - **리스와 사전 점검**이 병렬 세션이 서로의 파일이나 낡은 기준점에서 작업하지 않게 막는다.
