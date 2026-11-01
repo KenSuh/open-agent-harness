@@ -81,7 +81,7 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 ## Contents
 
 - [Purpose: a harness that keeps adapting](#purpose-a-harness-that-keeps-adapting)
-- [Next update](#next-update)
+- [Roadmap](#roadmap)
 - [How it fits together](#how-it-fits-together)
 - [Strengths](#strengths)
 - [Beginner mistakes oah guards against](#beginner-mistakes-oah-guards-against)
@@ -96,19 +96,37 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 - [License and third-party notices](#license-and-third-party-notices)
 - [한국어 소개](#한국어-소개)
 
-## Next update
+## Roadmap
 
-None of these features is **available in v0.1.0** yet.
+Nothing below is **available in v0.1.0** yet. Plans can change as the tools change.
 
-Merged to `main`, waiting for the next release:
+### v0.2.0: reviews and evidence you can hand off
+
+On `main`, waiting for the release:
 
 - Jev chooses the model and effort for each call within the tier pools you allow.
 - A review budget covers the whole task, with ways to stop, resume and increase it.
+- A not-converged review summary shows what is left: the last reviewed head, P0 and P1 findings, gates not met and
+  a suggested next command.
 
-Still in review:
+In review:
 
 - Impact reports say which scope was analysed and which was not, with conservative fallback checks.
 - Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
+
+### v0.3.0: model choices you can check
+
+Planned, after v0.2.0:
+
+- When Jev has low confidence, the rule-based choice runs. A call is never blocked.
+- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later.
+  Counts alone do not prove Jev helped.
+- Benchmark data, opt-in and with its source and date, supports model choice. A new model shows its evidence and joins
+  your tier pools only when you confirm it.
+- AI task classification and three profiles (performance, balanced, efficient) arrive in record-only mode: they record
+  what they would choose and do not change the model that runs. Applying them comes after that data has been reviewed.
+
+Your pinned models, tier pools, effort caps and task floors stay in force throughout.
 
 ## How it fits together
 
@@ -496,19 +514,37 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 > **v0.1.0은 첫 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
 > 지원한다. Linux는 아직 지원하지 않는다.
 
-### 다음 업데이트
+### 로드맵
 
-아래 기능은 모두 **v0.1.0에서는 아직 쓸 수 없다**.
+아래 내용은 모두 **v0.1.0에서는 아직 쓸 수 없다**. 도구가 바뀌면 계획도 바뀔 수 있다.
 
-다음 두 기능은 `main`에 병합되어 다음 릴리스를 기다리고 있다.
+#### v0.2.0: 넘겨받을 수 있는 리뷰와 증거
+
+다음 세 기능은 `main`에 병합되어 릴리스를 기다리고 있다.
 
 - 호출마다 사용자가 허용한 tier별 후보 안에서 Jev가 모델과 추론 강도를 고른다.
 - 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
+- 수렴하지 않은 리뷰 요약이 남은 일을 보여 준다. 마지막으로 리뷰한 head, P0/P1 지적, 충족하지 못한 게이트, 다음
+  명령 제안이 들어간다.
 
 다음 두 기능은 아직 리뷰 중이다.
 
 - 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
 - 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
+
+#### v0.3.0: 확인할 수 있는 모델 선택
+
+다음 내용은 v0.2.0 다음으로 계획하고 있다.
+
+- Jev의 확신도가 낮으면 규칙이 고른 선택으로 실행한다. 호출을 막지는 않는다.
+- `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가
+  증명되지는 않는다.
+- 사용자가 켜면 출처와 날짜가 붙은 벤치마크 자료를 모델 선택의 근거로 쓴다. 새 모델은 근거를 보여 주고, 사용자가
+  확인해야 tier 후보에 들어간다.
+- AI 작업 분류와 세 프로필(performance, balanced, efficient)은 기록 전용으로 먼저 들어간다. 무엇을 골랐을지 기록할
+  뿐 실행 모델은 바꾸지 않으며, 그 자료를 검토한 뒤 적용한다.
+
+고정한 모델, tier 후보, 추론 강도 상한, 작업별 최저 기준은 그대로 유지된다.
 
 ### 한눈에 보는 구조
 
