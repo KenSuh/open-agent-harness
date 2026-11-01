@@ -1,16 +1,20 @@
 # oah review summary 검사 — 가짜 리뷰어 세 라운드와 직접 쓴 영수증으로 라운드·판정·digest·독립성·노력 검증·게이트·후속 과제·중요 경로 블록과 JSON 을 본다.
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import unittest
 
+from oah.cli import build_parser
 from oah.gates import summary as gate_summary
 from oah.lease import Store
-from oah.review import receipts
+from oah.review import ReviewError, receipts, rounds, runner
+from oah.review import settings as review_settings
 from oah.review import summary as review_summary
 from tests.fixtures.gates.support import run_cli
 from tests.helpers import git_env, make_tmp_dir
@@ -18,6 +22,9 @@ from tests.test_review_cli import oah
 from tests.test_review_rounds import Project, bug, git
 
 SHA_A = "a" * 64
+DECIDE = '--decision "<what you decided>"'
+LIMIT = "[review]\nmax_rounds = 1\n"
+LEDGER = ".oah/tasks/t1/GATES.md"
 
 
 def finding(number: int, k: int = 1, *, severity: str = "P2", title: str = "a follow-up",
@@ -273,6 +280,396 @@ class SummaryTest(unittest.TestCase):
                          (False, "finished", project.binding, (".oah/tasks/t1/GATES.md",)))
         self.assertEqual(pathlib.Path(found.worktree).resolve(), project.repo.resolve())
         self.assertIsNone(review_summary.task_lease(project.state, "other"))
+
+
+def shown(project) -> dict:
+    done = summary_cli(project, "--json")
+    assert done.returncode == 0, done.stdout + done.stderr
+    return json.loads(done.stdout)
+
+
+def handoff_text(data: dict) -> str:
+    start = data["markdown"].index("**Handoff")
+    return data["markdown"][start:data["markdown"].index("| Round |")]
+
+
+def spent_start(project, *, series_round: int = 2, base: str | None = None, attempt: int = 1) -> None:
+    """Log one reviewer call of a round that did not count, as `oah review` logs it."""
+    receipts.log_round(project.state, "t1", {
+        "event": "start", "base": base or project.base, "head": project.head, "round": series_round,
+        "series_round": series_round, "attempt": attempt,
+        "run_id": f"r20261024T000000Z-{series_round:04x}{attempt:04x}",
+        "extra_round": False, "extra_attempt": False, "decision": None, "max_rounds": None, "decision_for": None})
+
+
+def gate_view(project, base: str):
+    """The series, settings and budget `oah review` hands to the gate, built from the same calls."""
+    records = receipts.load(project.state, "t1")
+    log = receipts.read_round_log(project.state, "t1")
+    series = rounds.series(records, log, base, head=project.head,
+                           is_ancestor=lambda commit, tip: review_summary._is_ancestor(project.repo, commit, tip))
+    conf = review_settings.from_config(runner.config_at(project.repo, base))
+    budget = rounds.resolve_task_budget(series, conf, root=project.repo, state=project.state)
+    return series, dataclasses.replace(conf, max_rounds=budget.limit), budget
+
+
+def real_gate(project, *, base: str | None = None, decision: str | None = None, extra_round: bool = False,
+              extra_attempt: bool = False):
+    series, conf, budget = gate_view(project, base or project.base)
+    return rounds.gate(series, head=project.head, decision=decision, extra_round=extra_round,
+                       extra_attempt=extra_attempt, settings=conf, binding=project.binding, budget=budget)
+
+
+def run_printed_review(project, command: str):
+    """Parse the printed command with the real CLI parser, then hand exactly those flags to the real gate."""
+    args = build_parser().parse_args(shlex.split(command)[1:])
+    if args.command != "review" or args.task != "t1":
+        raise AssertionError(command)
+    return real_gate(project, base=args.base, decision=args.decision, extra_round=args.extra_round,
+                     extra_attempt=args.extra_attempt)
+
+
+class HandoffConvergedTest(unittest.TestCase):
+    def test_converged_markdown_and_json_carry_no_handoff(self):
+        project = Project(self)
+        publish_receipt(project, 1, findings=(finding(1, title="a note"),))
+        entry = receipts.load(project.state, "t1").receipts()[-1]
+        row = (f"| R1 | `{project.base[:12]}..{project.head[:12]}` | approve | converged | independent | "
+               f"effort verified | `codex codex-cli 0.163.0` sha256 `{'c' * 12}` | `{entry.digest}` |")
+        expected = (
+            "<!-- oah review summary v1 -->\n## Review summary\n\n"
+            f"- **Task:** `t1`\n- **Intent:** `{project.binding.line()}`\n- **Head:** `{project.head}`\n"
+            f"- **Status:** converged at head `{project.head[:12]}` (R1.json, `{entry.digest}`)\n\n"
+            "| Round | Range | Verdict | Outcome | Independence | Effort | Reviewer | Receipt |\n"
+            f"|---|---|---|---|---|---|---|---|\n{row}\n\n"
+            "**Gates:** no `.oah/tasks/t1/GATES.summary.md` committed at HEAD; run oah gates check t1, then commit "
+            "it\n\n**Follow-ups (P2/P3):**\n- R1-F1 P2 tests `src/app.py:1` — `a note`\n\n"
+            "**Critical paths touched:**\n- none\n")
+        done = summary_cli(project)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, expected)
+        data = shown(project)
+        self.assertEqual(list(data), ["task", "head", "intent", "status", "rounds", "follow_ups", "critical_paths",
+                                      "gates", "problems", "markdown"])
+        self.assertEqual(data["markdown"], expected)
+        self.assertNotIn("handoff", json.dumps(data).lower())
+
+
+class HandoffResumeTest(unittest.TestCase):
+    def test_waiting_on_a_decision(self):
+        project = Project(self)
+        publish_receipt(project, 1, outcome="needs-decision", findings=(finding(1, severity="P1"),))
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project)
+        self.assertEqual(caught.exception.code, rounds.NEEDS_DECISION)
+        resume = shown(project)["handoff"]["resume"]
+        self.assertEqual(resume["command"], f"oah review --task t1 {DECIDE}")
+        self.assertIsNone(run_printed_review(project, resume["command"]))
+
+    def test_requested_changes_prints_fix_and_fix_passes_its_gate(self):
+        project = Project(self)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project)
+        self.assertEqual(caught.exception.code, rounds.NEEDS_DECISION)
+        resume = shown(project)["handoff"]["resume"]
+        self.assertEqual(resume["command"], "oah fix --task t1")
+        self.assertIsNone(resume["note"])
+        self.assertEqual(build_parser().parse_args(shlex.split(resume["command"])[1:]).command, "fix")
+        rounds.dispatch_gate(project.state, "t1", project.repo, stage="correction")
+
+    def test_round_limit_prints_extra_round(self):
+        project = Project(self, config=LIMIT)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_a_limit_saved_only_in_the_task_log_still_counts(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        receipts.log_round(project.state, "t1", {"event": "limit", "max_rounds": 1})
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_requested_changes_at_the_limit_prints_a_command_that_passes(self):
+        project = Project(self, config=LIMIT)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        with self.assertRaises(ReviewError) as caught:
+            rounds.dispatch_gate(project.state, "t1", project.repo, stage="correction")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")  # oah fix is refused at the limit
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project, extra_round=True)
+        self.assertEqual(caught.exception.code, rounds.NEEDS_DECISION)  # and --extra-round alone is not enough
+        resume = shown(project)["handoff"]["resume"]
+        self.assertEqual(resume["command"], f"oah review --task t1 --extra-round {DECIDE}")
+        self.assertIn("oah fix is refused at the round limit", resume["note"])
+        self.assertIn("oah fix --manual --engine claude|human --task t1", resume["note"])
+        self.assertIsNone(run_printed_review(project, resume["command"]))
+
+    def test_a_recorded_correction_at_the_limit_needs_only_the_extra_round(self):
+        project = Project(self, config=LIMIT)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        project.correct(1)
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_decision_stop_at_the_limit_prints_both_flags(self):
+        project = Project(self, config=LIMIT)
+        publish_receipt(project, 1, outcome="needs-decision", findings=(finding(1, severity="P1"),))
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project, decision="go on")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --extra-round {DECIDE}")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_out_of_attempts_prints_extra_attempt_with_the_base(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        spent_start(project)
+        spent_start(project, attempt=2)
+        with self.assertRaises(ReviewError) as caught:
+            real_gate(project)
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ATTEMPTS_EXHAUSTED")
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-attempt")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_attempts_use_the_setting_pinned_to_the_base(self):
+        project = Project(self, config="[review]\nround_attempts = 1\n")
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        spent_start(project)
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-attempt")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_attempts_spent_on_a_newer_base_are_seen(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        newer = project.head
+        project.commit({"src/app.py": "print('v2')\n"})
+        spent_start(project, series_round=1, base=newer)
+        spent_start(project, series_round=1, base=newer, attempt=2)
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --base {newer} --extra-attempt")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_only_a_review_of_head_is_needed(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, "oah review --task t1")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_broken_history_prints_no_command(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        publish_receipt(project, 2, outcome="changes-requested", findings=(finding(2, severity="P1"),))
+        target = project.state / "reviews" / "t1" / "R1.json"
+        target.write_bytes(target.read_bytes().replace(b'"fixture"', b'"edited"'))
+        with self.assertRaises(ReviewError):
+            real_gate(project, decision="go on")  # a decision does not override invalid history
+        data = shown(project)
+        self.assertIsNone(data["handoff"]["resume"]["command"])
+        self.assertIn("**Resume:** no command", handoff_text(data))
+
+    def test_a_task_without_an_active_lease_is_told_to_start_first(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        done = run_cli(["release", "--task", "t1", "--agent", "claude", "--reason", "stopped"], cwd=project.repo,
+                       env=project.env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        resume = shown(project)["handoff"]["resume"]
+        self.assertEqual(resume["command"], "oah review --task t1")
+        self.assertIn("oah start", resume["note"])
+
+    def test_summary_records_nothing(self):
+        project = Project(self, config=LIMIT)
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        log = project.folder() / receipts.ROUNDS_NAME
+        self.assertFalse(log.exists())
+        self.assertEqual(shown(project)["handoff"]["resume"]["command"], "oah review --task t1 --extra-round")
+        self.assertFalse(log.exists())  # a newly seen limit is recorded only by the gates that dispatch
+
+
+class HandoffHeadTest(unittest.TestCase):
+    def test_head_past_the_latest_receipt_is_named(self):
+        project = Project(self)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        reviewed = project.head
+        project.commit({"src/app.py": "print('v2')\n"})
+        data = shown(project)
+        self.assertEqual(data["handoff"]["reviewed"], {"receipt": "R1.json", "round": 1, "head": reviewed,
+                                                       "verdict": "request_changes"})
+        self.assertEqual(data["handoff"]["head"], project.head)
+        self.assertTrue(data["handoff"]["head_moved"])
+        block = handoff_text(data)
+        self.assertIn(f"**Last reviewed head:** `{reviewed}` (R1, verdict request_changes)", block)
+        self.assertIn(f"HEAD is `{project.head}`, a different commit", block)
+        self.assertNotRegex(block.lower(), "verified|approved")
+
+    def test_head_at_the_latest_receipt_is_not_called_moved(self):
+        project = Project(self)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        data = shown(project)
+        self.assertFalse(data["handoff"]["head_moved"])
+        self.assertNotIn("different commit", handoff_text(data))
+
+    def test_no_valid_receipt_says_so(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        target = project.state / "reviews" / "t1" / "R1.json"
+        target.write_bytes(target.read_bytes().replace(b'"fixture"', b'"edited"'))
+        data = shown(project)
+        self.assertIsNone(data["handoff"]["reviewed"])
+        self.assertEqual(data["handoff"]["findings"], [])
+        self.assertIn("**Last reviewed head:** none", handoff_text(data))
+
+
+class HandoffFindingsTest(unittest.TestCase):
+    def test_blocking_findings_are_quoted_and_lower_ones_left_out(self):
+        project = Project(self)
+        title = "ping @someone about `x` | and\nmore"
+        publish_receipt(project, 1, outcome="changes-requested", findings=(
+            finding(1, 1, severity="P0", title=title, location="src/a|b.py:2 @x", axis="security"),
+            finding(1, 2, severity="P1", title="second"),
+            finding(1, 3, severity="P2", title="minor-marker"),
+            finding(1, 4, severity="P3", title="trivial-marker")))
+        data = shown(project)
+        self.assertEqual([(item["finding_id"], item["severity"]) for item in data["handoff"]["findings"]],
+                         [("R1-F1", "P0"), ("R1-F2", "P1")])
+        block = handoff_text(data)
+        self.assertIn("- R1-F1 P0 security `src/a|b.py:2 @x` — ``ping @someone about `x` | and more``", block)
+        self.assertIn("- R1-F2 P1 tests `src/app.py:1` — `second`", block)
+        self.assertIn("latest receipt (R1.json)", block)
+        self.assertNotRegex(block.lower(), r"\bopen\b")
+        self.assertNotIn("minor-marker", block)
+        self.assertNotIn("trivial-marker", block)
+
+    def test_no_blocking_finding_says_none(self):
+        project = Project(self)
+        publish_receipt(project, 1, findings=(finding(1, title="minor-marker"),))
+        project.commit({"src/app.py": "print('v2')\n"})
+        data = shown(project)
+        self.assertEqual(data["handoff"]["findings"], [])
+        section = handoff_text(data).split("**P0/P1 findings", 1)[1].split("**Gates not met", 1)[0]
+        self.assertIn("  - none\n", section)
+
+
+class HandoffGatesTest(unittest.TestCase):
+    MARKED = ("OWNS: src/owns-marker\n# Gates: heading-marker\n\n"
+              "- [ ] G1: title-marker\n  CHECK: echo check-marker\n  EXPECT: expect-marker\n  EVIDENCE: pending\n"
+              "- [x] G2: title-marker\n  CHECK: echo check-marker\n  EXPECT: expect-marker\n"
+              "  EVIDENCE: evidence-marker\n"
+              "- [x] G3: title-marker\n  EVIDENCE: evidence-marker\n"
+              "- [x] G4: title-marker\n  EVIDENCE: pending\n"
+              "- [ ] G5: title-marker\n\nABANDON: G5 reason-marker\n")
+
+    def stopped(self, *declared: str) -> Project:
+        project = Project(self)
+        publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
+        if declared:
+            Store(project.state).renew(task="t1", agent="claude", ttl_hours=1, gates=list(declared))
+        return project
+
+    def write(self, project: Project, relative: str, text: str) -> None:
+        target = project.repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def assert_private(self, project: Project, *secrets: str) -> None:
+        text = summary_cli(project)
+        as_json = summary_cli(project, "--json")
+        self.assertEqual((text.returncode, as_json.returncode), (0, 0), text.stderr + as_json.stderr)
+        for secret in ("-marker", str(project.repo), "GATES.md", *secrets):
+            self.assertNotIn(secret, text.stdout)
+            self.assertNotIn(secret, as_json.stdout)
+
+    def test_states_are_listed_without_any_ledger_text(self):
+        project = self.stopped()
+        self.write(project, LEDGER, self.MARKED)
+        data = shown(project)
+        self.assertEqual(data["handoff"]["gates"], {"reading": "structural", "rerun": False,
+                                                    "freshness_checked": False, "ledgers": [{
+            "position": 1, "state": "read", "gates": [
+                {"id": "G1", "state": "unmet"}, {"id": "G2", "state": "stale-unmet"},
+                {"id": "G4", "state": "unmet-no-evidence"}, {"id": "G5", "state": "abandoned"}]}]})
+        block = handoff_text(data)
+        self.assertIn("  - `G1` unmet, `G2` stale-unmet, `G4` unmet-no-evidence, `G5` abandoned\n", block)
+        self.assertNotIn("`G3`", block)
+        self.assert_private(project)
+
+    def test_the_reading_says_nothing_was_run_even_with_none_left(self):
+        project = self.stopped()
+        self.write(project, LEDGER, "# Gates: t1\n\n- [x] G1: done\n  EVIDENCE: a person looked\n")
+        data = shown(project)
+        self.assertEqual(data["handoff"]["gates"]["ledgers"][0]["gates"], [])
+        block = handoff_text(data)
+        self.assertIn("  - none in this reading\n", block)
+        self.assertIn("structural reading", block)
+        self.assertIn("Nothing was re-run", block)
+        self.assertIn("evidence freshness was not checked", block)
+        self.assertIn("a met box can still be stale", block)
+
+    def test_a_missing_ledger_says_so(self):
+        project = self.stopped()
+        data = shown(project)
+        self.assertEqual(data["handoff"]["gates"]["ledgers"], [{"position": 1, "state": "missing", "gates": []}])
+        self.assertIn("  - the ledger is missing\n", handoff_text(data))
+        self.assert_private(project)
+
+    def test_an_unreadable_ledger_says_so_without_its_path(self):
+        project = self.stopped()
+        (project.repo / LEDGER).mkdir(parents=True)  # reading a folder fails with an error that names the path
+        data = shown(project)
+        self.assertEqual(data["handoff"]["gates"]["ledgers"], [{"position": 1, "state": "unreadable", "gates": []}])
+        self.assertIn("  - the ledger could not be read\n", handoff_text(data))
+        self.assert_private(project)
+
+    def test_an_invalid_ledger_could_not_be_read_either(self):
+        project = self.stopped()
+        self.write(project, LEDGER, "- [ ] no id title-marker\n  CHECK: echo check-marker\n")
+        data = shown(project)
+        self.assertEqual(data["handoff"]["gates"]["ledgers"], [{"position": 1, "state": "unreadable", "gates": []}])
+        self.assert_private(project)
+
+    def test_two_ledgers_are_told_apart_by_position(self):
+        second = "notes/path-marker/second.md"
+        project = self.stopped(LEDGER, second, "gone/absent-marker.md")
+        self.write(project, LEDGER, self.MARKED)
+        self.write(project, second, "- [ ] G1: title-marker\n")
+        data = shown(project)
+        self.assertEqual([item["position"] for item in data["handoff"]["gates"]["ledgers"]], [1, 2, 3])
+        self.assertEqual(data["handoff"]["gates"]["ledgers"][1]["gates"], [{"id": "G1", "state": "unmet"}])
+        block = handoff_text(data)
+        self.assertIn("  - ledger 1: `G1` unmet, ", block)
+        self.assertIn("  - ledger 2: `G1` unmet\n", block)
+        self.assertIn("  - ledger 3 is missing\n", block)
+        self.assert_private(project, "second.md", "notes/")
+
+    def test_the_task_worktree_holds_the_ledger(self):
+        project = self.stopped()
+        self.write(project, LEDGER, "- [ ] G1: title-marker\n")
+        other = project.repo.parent / "other-checkout"
+        git(project.repo, "worktree", "add", "-q", "--detach", str(other))
+        self.addCleanup(git, project.repo, "worktree", "remove", "--force", str(other))
+        done = run_cli(["review", "summary", "--task", "t1", "--json"], cwd=other, env=project.env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["handoff"]["gates"]["ledgers"][0]["gates"],
+                         [{"id": "G1", "state": "unmet"}])
 
 
 class SummaryCliTest(unittest.TestCase):

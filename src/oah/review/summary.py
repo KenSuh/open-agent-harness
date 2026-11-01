@@ -16,6 +16,11 @@ Summary
     base, like the review reads them), and every history problem. `Summary.render()` fills
     `templates/review/summary.md`. Untrusted text (finding titles, locations, problems) is quoted in code spans, so
     a PR body cannot mention anyone or break the table.
+Handoff
+    Only when HEAD is not converged, `_handoff` adds what the next person needs: the latest receipt's head, its
+    P0/P1 findings, the gates not met in the task's local ledgers (ids and states only, read structurally) and
+    one resume command. `_resume` asks the real gates which flags they need, so it keeps no copy of their rules,
+    and it records nothing. A converged summary has no handoff text and no `handoff` key.
 """
 from __future__ import annotations
 
@@ -32,17 +37,21 @@ from oah import intent as oah_intent
 from oah.atomic import StateCorrupt, read_jsonl
 from oah.config import ConfigError
 from oah.engines.proc import run_command
-from oah.gates.context import LEDGER_NAME, SUMMARY_NAME
+from oah.gates.context import LEDGER_NAME, SUMMARY_NAME, default_ledger
 from oah.lease import TASK_RE, Store
 from oah.paths import GIT_TIMEOUT, git_argv, repo_info, run_git
 from oah.review import ReviewError, receipts, rounds
 from oah.review import settings as review_settings
+from oah.review.schema import BLOCKING
 
 CONFIG_PATH = ".oah/config.toml"
 SEVERITIES = ("P0", "P1", "P2", "P3")
 _CLOSING = {"lease_finished": "finished", "lease_released": "released", "lease_expired": "expired"}
 _SETTINGS = review_settings.from_section(review_settings.DEFAULTS)
 _DEFAULT_STATUS_ORDER = ("met", "abandoned")
+_DECISION = "<what you decided>"
+_GATE_FLAGS = {rounds.NEEDS_DECISION: "decision", "OAH_REVIEW_ROUNDS_EXHAUSTED": "extra_round",
+               "OAH_REVIEW_ATTEMPTS_EXHAUSTED": "extra_attempt"}
 
 
 class SummaryError(Exception):
@@ -353,6 +362,7 @@ class Summary:
     critical: tuple[str, ...]
     gates: GateSummary
     problems: tuple[str, ...]
+    handoff: dict | None = None  # present only when HEAD is not converged
 
     def status(self) -> str:
         if self.convergence.converged:
@@ -375,13 +385,12 @@ class Summary:
     def render(self) -> str:
         template = string.Template(resources.files("oah").joinpath("templates/review/summary.md")
                                    .read_text(encoding="utf-8"))
-        follow_ups = [f"- {item['finding_id']} {item['severity']} {item['axis']} {code_span(item['location'])} — "
-                      f"{code_span(item['title'])}" for item in self.follow_ups]
+        follow_ups = [f"- {_finding_line(item)}" for item in self.follow_ups]
         problems = ("\n**History problems** (`oah land` refuses until they are resolved):\n" +
                     "\n".join(f"- {code_span(problem, 400)}" for problem in self.problems)) if self.problems else ""
         text = template.substitute(
             task=f"`{self.task}`", intent=f"`{self.intent}`" if self.intent else "no intent binding recorded",
-            head=f"`{self.head}`", status=self.status(),
+            head=f"`{self.head}`", status=self.status(), handoff=_handoff_text(self.handoff),
             rounds="\n".join(item.row() for item in self.rounds) or "| (none) | | | | | | | |",
             gates=self.gate_text(), follow_ups="\n".join(follow_ups) or "- none",
             critical="\n".join(f"- {code_span(path)}" for path in self.critical) or "- none", problems=problems)
@@ -389,25 +398,34 @@ class Summary:
 
     def to_json(self) -> dict:
         receipt = self.convergence.receipt
-        return {"task": self.task, "head": self.head, "intent": self.intent,
+        data = {"task": self.task, "head": self.head, "intent": self.intent,
                 "status": {"converged": self.convergence.converged, "receipt": receipt.name if receipt else None,
                            "reason": self.convergence.reason},
                 "rounds": [item.to_json() for item in self.rounds],
                 "follow_ups": [dict(item) for item in self.follow_ups],
-                "critical_paths": list(self.critical), "gates": self.gates.to_json(), "problems": list(self.problems),
-                "markdown": self.render()}
+                "critical_paths": list(self.critical), "gates": self.gates.to_json(), "problems": list(self.problems)}
+        if self.handoff is not None:
+            data["handoff"] = self.handoff
+        data["markdown"] = self.render()
+        return data
+
+
+def _finding(latest: receipts.Entry, finding_id: object, item: Mapping) -> dict:
+    return {"receipt": latest.name, "finding_id": finding_id, "severity": item.get("severity"),
+            "axis": item.get("axis"), "location": item.get("location"), "title": item.get("title")}
+
+
+def _finding_line(item: Mapping) -> str:
+    return (f"{item['finding_id']} {item['severity']} {item['axis']} {code_span(item['location'])} — "
+            f"{code_span(item['title'])}")
 
 
 def _follow_ups(latest: receipts.Entry | None) -> tuple[dict, ...]:
     if latest is None or latest.record.get("outcome") != "converged":
         return ()
     findings = {item.get("finding_id"): item for item in latest.record["findings"]}
-    chosen = []
-    for finding_id in latest.record.get("follow_ups") or []:
-        item = findings.get(finding_id, {})
-        chosen.append({"receipt": latest.name, "finding_id": finding_id, "severity": item.get("severity"),
-                       "axis": item.get("axis"), "location": item.get("location"), "title": item.get("title")})
-    return tuple(chosen)
+    return tuple(_finding(latest, finding_id, findings.get(finding_id, {}))
+                 for finding_id in latest.record.get("follow_ups") or [])
 
 
 def _critical(root: pathlib.Path, base: str, head: str) -> tuple[str, ...]:
@@ -420,6 +438,135 @@ def _critical(root: pathlib.Path, base: str, head: str) -> tuple[str, ...]:
     if CONFIG_PATH in changed and CONFIG_PATH not in found:
         found.append(CONFIG_PATH)
     return tuple(sorted(found))
+
+
+def _local_ledgers(worktree: pathlib.Path, task: str, declared: Sequence[str]) -> list[dict]:
+    """Gate ids and states not met, by ledger position. Ledger text, paths and read errors never leave here."""
+    from oah.gates import parse_ledger, structural_status
+
+    paths = [worktree / pathlib.PurePosixPath(entry) for entry in declared] or [default_ledger(worktree, task)]
+    found = []
+    for position, path in enumerate(paths, 1):
+        condition, gates = "read", []
+        try:
+            if not path.exists():
+                condition = "missing"
+            else:
+                status = structural_status(parse_ledger(path))
+                condition = "unreadable" if status.verdict == "invalid" else condition
+                gates = [{"id": gate, "state": state} for gate, state in status.states if state != "met"]
+        except (OSError, ValueError):
+            condition = "unreadable"
+        found.append({"position": position, "state": condition, "gates": gates})
+    return found
+
+
+def _resume(root: pathlib.Path, worktree: pathlib.Path, state: pathlib.Path, task: str, head: str,
+            latest: receipts.Entry | None, binding: oah_intent.Binding | None, records: receipts.Records) -> dict:
+    """The command the gates let through now, found by asking them; `state` stays out, so nothing is recorded."""
+    from oah.review.runner import config_at
+
+    stuck = {"command": None, "note": "repair what the status and history problems name, or the review settings, "
+                                      "first"}
+    if latest is None:
+        return stuck
+    flags: dict = {"decision": None, "extra_round": False, "extra_attempt": False}
+    note = None
+    try:
+        log = receipts.read_round_log(state, task)
+        # The last call's base, as the round-attempt count is kept per base; a task's receipts may trail it.
+        base = next((line["base"] for line in reversed(log) if line.get("event") == "start"), latest.record["base"])
+        s = rounds.series(records, log, base, head=head,
+                          is_ancestor=lambda commit, tip: _is_ancestor(root, commit, tip))
+        conf = review_settings.from_config(config_at(root, base))
+        budget = rounds.resolve_task_budget(s, conf, root=worktree)
+        conf = dataclasses.replace(conf, max_rounds=budget.limit)  # as oah review does; `convergence` cannot see it
+        if rounds.waiting(s) is not None and budget.stop is None:
+            try:
+                rounds.task_gate(s, settings=conf, budget=budget)  # what `oah fix` passes before it dispatches
+                return {"command": f"oah fix --task {task}", "note": None}
+            except ReviewError as exc:
+                if exc.code == "OAH_REVIEW_ROUNDS_EXHAUSTED":
+                    note = (f"oah fix is refused at the round limit. If a correction is already committed, record it "
+                            f"with oah fix --manual --engine claude|human --task {task}; then --decision is not "
+                            "needed")
+        while True:
+            try:
+                rounds.gate(s, head=head, settings=conf, binding=binding, budget=budget, **flags)
+                break
+            except ReviewError as exc:
+                flag = _GATE_FLAGS.get(exc.code)
+                if flag is None or flags[flag]:
+                    return stuck
+                flags[flag] = _DECISION if flag == "decision" else True
+    except (ReviewError, ConfigError, StateCorrupt, OSError):
+        return stuck
+    command = [f"oah review --task {task}"]
+    command += [f"--base {base}"] if flags["extra_attempt"] else []  # the gate's own wording: the count is per base
+    command += ["--extra-round"] if flags["extra_round"] else []
+    command += ["--extra-attempt"] if flags["extra_attempt"] else []
+    command += [f'--decision "{_DECISION}"'] if flags["decision"] else []
+    return {"command": " ".join(command), "note": note}
+
+
+def _handoff(root: pathlib.Path, state: pathlib.Path, task: str, head: str, latest: receipts.Entry | None,
+             lease: TaskLease | None, records: receipts.Records) -> dict:
+    """What the next person needs when HEAD is not converged. It only reads."""
+    worktree = pathlib.Path(root)
+    if lease is not None and lease.worktree and pathlib.Path(lease.worktree).is_dir():
+        worktree = pathlib.Path(lease.worktree)
+    binding = lease.binding if lease else None
+    resume = _resume(root, worktree, state, task, head, latest, binding, records)
+    active = any(held.task == task and not stale and _binding(held.intent) is not None
+                 for held, stale in Store(state).snapshot())
+    if not active:
+        first = f"this task has no active bound lease, so bind one with oah start --task {task} first"
+        resume["note"] = f"{first}. {resume['note']}" if resume["note"] else first
+    record = latest.record if latest else None
+    return {"reviewed": {"receipt": latest.name, "round": record["round"], "head": record["head"],
+                         "verdict": record["verdict"]} if latest else None,
+            "head": head, "head_moved": bool(latest) and record["head"] != head,
+            "findings": [_finding(latest, item["finding_id"], item) for item in record["findings"]
+                         if item.get("severity") in BLOCKING] if latest else [],
+            "gates": {"reading": "structural", "rerun": False, "freshness_checked": False,
+                      "ledgers": _local_ledgers(worktree, task, lease.gates if lease else ())},
+            "resume": resume}
+
+
+def _ledger_line(item: Mapping, many: bool) -> str:
+    label = f"ledger {item['position']}" if many else "the ledger"
+    if item["state"] == "missing":
+        return f"{label} is missing"
+    if item["state"] == "unreadable":
+        return f"{label} could not be read"
+    listed = ", ".join(f"{code_span(gate['id'])} {gate['state']}" for gate in item["gates"]) or "none in this reading"
+    return f"{label}: {listed}" if many else listed
+
+
+def _handoff_text(block: Mapping | None) -> str:
+    """The markdown of the handoff; empty without one, so a converged summary keeps its exact bytes."""
+    if block is None:
+        return ""
+    reviewed = block["reviewed"]
+    last = "none (no valid receipt)"
+    if reviewed:
+        last = f"`{reviewed['head']}` (R{reviewed['round']}, verdict {reviewed['verdict']})"
+    if block["head_moved"]:
+        last += f". HEAD is `{block['head']}`, a different commit"
+    source = f"the latest receipt ({reviewed['receipt']})" if reviewed else "the latest receipt"
+    findings = [f"  - {_finding_line(item)}" for item in block["findings"]] or ["  - none"]
+    ledgers = block["gates"]["ledgers"]
+    gates = [f"  - {_ledger_line(item, len(ledgers) > 1)}" for item in ledgers]
+    resume = block["resume"]
+    command = f"`{resume['command']}`" if resume["command"] else "no command"
+    if resume["note"]:
+        command += f". Note: {resume['note']}"
+    return "\n".join(["", "", "**Handoff** (not converged at HEAD)", "", f"- **Last reviewed head:** {last}",
+                      f"- **P0/P1 findings in {source}:** a correction may already be applied",
+                      *findings,
+                      "- **Gates not met:** a structural reading of the local ledgers. Nothing was re-run and "
+                      "evidence freshness was not checked, so a met box can still be stale",
+                      *gates, f"- **Resume:** {command}"])
 
 
 def build(root: pathlib.Path, state: pathlib.Path, task: str, *, env: Mapping[str, str]) -> Summary:
@@ -453,4 +600,5 @@ def build(root: pathlib.Path, state: pathlib.Path, task: str, *, env: Mapping[st
                                    ledgers=lease.gates if lease else ())
     return Summary(task=task, head=head, intent=binding.line() if binding else None, convergence=status,
                    rounds=tuple(Round.from_entry(entry) for entry in entries), follow_ups=_follow_ups(latest),
-                   critical=critical, gates=gates, problems=tuple(problems))
+                   critical=critical, gates=gates, problems=tuple(problems),
+                   handoff=None if status.converged else _handoff(root, state, task, head, latest, lease, records))
