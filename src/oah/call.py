@@ -7,8 +7,14 @@
   rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given). The re-ranker's
   advisory judgement is recorded next to it and never changes the tier;
 - the model through the catalog (`models.map_tier`) and the launch effort through the adapter;
+- the judged model and effort (`judge_engine`, amendment 6): unless a tier model is explicitly pinned,
+  an enabled re-ranker with a key picks one pair from
+  `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
+  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
+  (with the candidate `mode`, the pool or allowed models left out and why, and why the model is not judged);
 - the brief (`briefs.build`) and the argv; a review is always read-only.
-`execute` holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
+`execute` refuses a Codex header model other than the launched one (`OAH_MODEL_MISMATCH`), like the
+effort check, and holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
 (prompt on stdin, the process tree killed on timeout), recording the exit code, logs, header check and
 inference normalization. It waits in `POLL_SECONDS` slices, so Ctrl-C is handled while the worker runs on
 every OS; an interruption stops the worker's process tree and records the run as failed
@@ -51,7 +57,8 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import briefs, launchers, models, routing, runs, skillsel
 from oah.engines import claude, codex
-from oah.engines.effort import EngineError, HeaderCheck, compare_labels, load_rules, verify_inference
+from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, highest, load_rules, rank,
+                                verify_inference)
 from oah.engines.proc import run_command
 
 WORKER_ENV = ("OAH_WORKER", "OAH_RUN_ID", "OAH_TASK")
@@ -61,15 +68,20 @@ POLL_SECONDS = 0.5  # Windows delivers Ctrl-C to Python only between waits, so a
 _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
 _CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
+_PREPARATION_RUN = ContextVar("oah_preparation_run", default=None)
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
+MODEL_MISMATCH = "OAH_MODEL_MISMATCH"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
 ENGINE_DEFAULTS = {
     "claude": {
         "command": ["claude"],
         "quality_order": ["opus", "sonnet", "haiku"],
+        "allowed_models": [],
+        "effort_caps": {},
+        "tier_pools": {},
         "permission_mode": claude.DEFAULT_PERMISSION_MODE,
         "tools": list(claude.DEFAULT_TOOLS),
         "tiers": {tier: {"model": "", "effort": tier, "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
@@ -77,6 +89,9 @@ ENGINE_DEFAULTS = {
     "codex": {
         "command": ["codex"],
         "quality_order": [],
+        "allowed_models": [],
+        "effort_caps": {},
+        "tier_pools": {},
         "tiers": {tier: {"model": "", "effort": "highest" if tier == "max" else tier,
                          "timeout_min": TIMEOUTS[tier]} for tier in routing.TIERS},
     },
@@ -108,6 +123,20 @@ class Settings:
         for engine, section in engines.items():
             if not all(isinstance(item, str) for item in section["quality_order"]):
                 raise invalid(f"engines.{engine}.quality_order must list model names as strings")
+            if not all(isinstance(item, str) and item for item in section["allowed_models"]):
+                raise invalid(f"engines.{engine}.allowed_models must list model names as strings, or be empty "
+                              "to allow every model the CLI lists")
+            for tier, names in section["tier_pools"].items():
+                if tier not in routing.TIERS:
+                    raise invalid(f"engines.{engine}.tier_pools.{tier} is not a tier; use one of: "
+                                  f"{', '.join(routing.TIERS)}")
+                if not isinstance(names, list) or not all(isinstance(item, str) and item for item in names):
+                    raise invalid(f"engines.{engine}.tier_pools.{tier} must list model names as strings, such as "
+                                  f'{tier} = ["<model>"], or be empty')
+            for model, cap in section["effort_caps"].items():
+                if cap not in ORDINARY:
+                    raise invalid(f"engines.{engine}.effort_caps.{model} = {cap!r} is not an effort level; use one "
+                                  f"of: {', '.join(ORDINARY)}, or remove the entry")
             for tier, values in section["tiers"].items():
                 if values["timeout_min"] <= 0:
                     raise invalid(f"engines.{engine}.tiers.{tier}.timeout_min must be a positive number of minutes")
@@ -201,19 +230,15 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     return base, freshness
 
 
-def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
-                   env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
-                   checked: tuple[list[str], models.Freshness] | None = None) -> Resolution:
-    """Model and effort for one engine and tier; the change log records anything that differs from last time."""
+def _effective(engine: str, root: pathlib.Path, env: Mapping[str, str]) -> str | None:
+    return codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
+
+
+def _deterministic(engine: str, tier: str, settings: Settings, entry: models.Entry | None,
+                   effective: str | None):
+    """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
     section = settings.engines[engine]
     tier_settings = section["tiers"][tier]
-    base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
-    catalog = _catalog(state_dir)
-    entry = freshness.entry
-    effective = codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
-    check = _CORRECTION_INPUT_CHECK.get()
-    if check is not None:
-        check((dataclasses.asdict(freshness), effective))
     model, source = models.map_tier(engine, tier, pin=tier_settings["model"], quality_order=section["quality_order"],
                                     entry=entry, effective=effective)
     info = entry.model(model) if entry else None
@@ -223,6 +248,43 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
         effort = codex.resolve_effort(model, tier_settings["effort"], cache=cache)
     else:
         effort = claude.resolve_effort(tier_settings["effort"], efforts=levels, model=model)
+    return model, source, effort
+
+
+def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+                   env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
+                   checked: tuple[list[str], models.Freshness] | None = None) -> Resolution:
+    """Model and effort for one engine and tier; the change log records anything that differs from last time."""
+    section = settings.engines[engine]
+    tier_settings = section["tiers"][tier]
+    base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
+    catalog = _catalog(state_dir)
+    entry = freshness.entry
+    effective = _effective(engine, root, env)
+    check = _CORRECTION_INPUT_CHECK.get()
+    if check is not None:
+        check((dataclasses.asdict(freshness), effective))
+    fresh = bool(entry.models) and entry.checked_at is not None and not any(
+        warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
+    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh,
+                                     pools=section["tier_pools"])
+    model, source, effort = _deterministic(engine, tier, settings, entry, effective)
+    cap = section["effort_caps"].get(model)
+    if cap is not None:
+        if rank(effort.launch) is None:
+            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot bound effort "
+                              f"{effort.launch} for {model}; set an ordinary tier effort or remove the cap in "
+                              ".oah/config.toml")
+        if rank(effort.launch) > rank(cap):
+            launch = highest([level for level in effort.levels or (cap,)
+                              if rank(level) is not None and rank(level) <= rank(cap)])
+            if launch is None:
+                raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] leaves no supported "
+                                  f"effort for {model}; raise or remove its cap in .oah/config.toml")
+            cap_warnings.append(f"OAH_EFFORT_CAPPED: {model} effort {effort.launch} is capped to {launch}; "
+                                f"raise or remove its [engines.{engine}.effort_caps] entry in .oah/config.toml "
+                                "to permit a higher effort")
+            effort = dataclasses.replace(effort, launch=launch)
     why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
@@ -231,8 +293,96 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
     return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.launch_version,
                       requested_model=tier_settings["model"], model=model, model_source=source,
                       requested_effort=effort.requested, launch_effort=effort.launch,
-                      timeout_s=float(tier_settings["timeout_min"]) * 60, warnings=freshness.warnings,
-                      changes=tuple(changes))
+                      timeout_s=float(tier_settings["timeout_min"]) * 60,
+                      warnings=(*freshness.warnings, *cap_warnings), changes=tuple(changes))
+
+
+def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: str, entry: models.Entry | None,
+                   root: pathlib.Path, env: Mapping[str, str]) -> models.Pair:
+    """Resolve the uncapped floor and check the launch cap against it, for calls and model reports."""
+    engine = resolution.engine
+    cap = settings.engines[engine]["effort_caps"].get(resolution.model)
+    try:
+        model, _, effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
+    except EngineError:
+        if cap is not None:
+            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
+                              f"the {floor_tier} floor; set a resolvable floor model and effort in .oah/config.toml") from None
+        raise
+    if cap is not None and (rank(effort.launch) is None or rank(cap) < rank(effort.launch)
+                            or rank(resolution.launch_effort) < rank(effort.launch)):
+        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] for {resolution.model} cannot "
+                          f"meet the {floor_tier} floor effort {effort.launch}; raise or remove its cap "
+                          "in .oah/config.toml before calling again")
+    return models.Pair(model, effort.launch)
+
+
+def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
+                 entry: models.Entry | None, root: pathlib.Path, env: Mapping[str, str], brief_disabled: bool = False,
+                 keychain=None) -> tuple[Resolution, dict]:
+    """The call's model and effort after the re-ranker's judgement, and the `model_judge`/`model_choice` record.
+
+    The deterministic resolution is kept unless the judged pair passes `CandidateSet.reject_reason`.
+    A plugin failure never blocks a launch: it is recorded as `unused(error: <type>)`."""
+    engine, tier = resolution.engine, resolution.tier
+    deterministic = models.Pair(resolution.model, resolution.launch_effort)
+    choice = {"deterministic": dict(deterministic.to_json(), source=resolution.model_source), "floor": None,
+              "mode": None, "note": None, "candidates": [], "excluded": {}, "proposal": None, "provider": None,
+              "requested": deterministic.to_json()}
+
+    def record(status: str, chosen: Resolution = resolution) -> tuple[Resolution, dict]:
+        choice["requested"] = {"model": chosen.model, "effort": chosen.launch_effort}
+        check = _CORRECTION_INPUT_CHECK.get()
+        if check is not None:
+            check(choice)
+        return chosen, {"model_judge": status, "model_choice": choice}
+
+    section = settings.engines[engine]
+    cap = section["effort_caps"].get(resolution.model)
+    if pinned and cap is None:
+        return record("unused(pinned)")
+    floor_tier = routing.floor_tier(axes.kind)
+    try:
+        floor = _resolve_floor(resolution, settings, floor_tier=floor_tier, entry=entry, root=root, env=env)
+    except EngineError:
+        if cap is not None:
+            raise
+        return record("unused(floor-unresolved)")
+    if pinned:
+        return record("unused(pinned)")
+    candidates = models.build_candidates(
+        engine, entry=entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
+        floor=floor, quality_order=section["quality_order"],
+        allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
+        tier_pools=section["tier_pools"])
+    choice["floor"] = {"tier": floor_tier, **floor.to_json()}
+    choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
+    choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))
+    if section["tier_pools"] and any(not section["tier_pools"].get(t) for t in (floor_tier, tier)):
+        return record("unused(no-pool-for-tier)")
+    try:
+        rerank = importlib.import_module("oah.rerank")
+        inputs = _CORRECTION_INPUTS.get()
+        source = inputs.config if inputs is not None else None
+        if source is None:
+            from oah.config import load_config
+
+            source = load_config(root)
+        judged = rerank.judge_model({"stage": stage, "tier": tier, "axes": axes.to_json()},
+                                    [(pair.model, pair.effort) for pair in candidates.pairs],
+                                    config=source.section("rerank", rerank.DEFAULTS), brief_disabled=brief_disabled,
+                                    env=env, keychain=keychain)
+    except Exception as exc:  # a plugin failure must never block a launch
+        return record(f"unused(error: {type(exc).__name__})")
+    choice["provider"] = judged.provider
+    if judged.status != "used" or judged.proposal is None:
+        return record(judged.status)
+    model, effort = judged.proposal
+    choice["proposal"] = {"model": model, "effort": effort}
+    rule = candidates.reject_reason(model, effort)
+    if rule is not None:
+        return record(f"rejected({rule})")
+    return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -422,6 +572,46 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
 
 
 @contextmanager
+def _paid_dispatch(prepared, *, record=True):
+    """Serialize ordinary paid starts with reviews; managed review/fix already owns this lock."""
+    from oah.lockfile import LockTimeout, StateLock
+    from oah.review import receipts, rounds
+
+    managed = rounds._MANAGED_DISPATCH.get()
+    if _CORRECTION_PUBLICATION.get() is not None or managed is not None and managed["task"] == prepared.task:
+        yield
+        return
+    lock = StateLock(receipts.task_lock_path(prepared.run.path.parents[2], prepared.task), timeout=0)
+    try:
+        lock.__enter__()
+    except LockTimeout:
+        error = EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid start owns this task; wait for it to "
+                            "finish, then retry oah call")
+        _record_refusal(prepared, error)
+        raise error from None
+    token = rounds._PAID_SPAWN.set(record)
+    try:
+        yield
+    finally:
+        rounds._PAID_SPAWN.reset(token)
+        lock.__exit__(None, None, None)
+
+
+def _task_dispatch_gate(state, task, root, *, stage, record=False, run_id=None, reserve=False):
+    from oah.review import ReviewError, rounds
+
+    managed = rounds._MANAGED_DISPATCH.get()
+    base = None
+    if managed is not None and managed["task"] == task:
+        root, base = managed["root"] or root, managed["base"]
+        record = reserve = False  # The structured start already reserved this run.
+    try:
+        rounds.dispatch_gate(state, task, root, stage=stage, record=record, run_id=run_id, reserve=reserve, base=base)
+    except ReviewError as exc:
+        raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
+
+
+@contextmanager
 def dispatch_guard(prepared: Prepared):
     """Revalidate the prepared lease and source under the state lock, through a short launch only."""
     from oah.lease import LeaseError, Store
@@ -430,6 +620,7 @@ def dispatch_guard(prepared: Prepared):
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
         # Fix authorized this immutable lease at start publication and owns the task review lock.
+        publication.budget_check()
         yield
         return
     try:
@@ -446,16 +637,34 @@ def dispatch_guard(prepared: Prepared):
         with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
                                                generation=saved["generation"]) as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+            from oah.review import rounds
+            _task_dispatch_gate(run.path.parents[2], prepared.task, pathlib.Path(live.worktree), stage=prepared.stage,
+                                record=rounds._PAID_SPAWN.get(), run_id=prepared.run_id)
             yield
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
-        run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
+        _record_refusal(prepared, error)
         raise error from None
+
+
+def _record_refusal(prepared: Prepared, error: EngineError) -> None:
+    """Mark only the caller's own run refused; a queued Orca run belongs to the worker that claims it."""
+    run = prepared.run
+    if isinstance(run, runs.WorkerRun):
+        data = run.read()
+        if data.get("status") != "running" or data.get("pid") != os.getpid():
+            if error.code == "OAH_REVIEW_SERIES_BUSY":
+                return  # the lock holder may be the worker that claims this run next
+            try:
+                os.close(run._open_file("worker.claim", os.O_WRONLY | os.O_CREAT | os.O_EXCL))
+            except FileExistsError:
+                return  # another worker claimed this run; its record is not ours to change
+    run.result(status="refused", error=_recorded_error(error, prepared.retain_worker_text))
 
 
 def check_prepared(prepared: Prepared) -> None:
     """Check a queue/launcher handoff; execute checks again at the engine's actual spawn."""
-    with dispatch_guard(prepared):
+    with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
         pass
 
 
@@ -586,6 +795,7 @@ class _CallPlan:
     model_writes: tuple[tuple[pathlib.Path, str], ...] = ()
     binding_record: str | None = None
     lease_record: str | None = None
+    dispatch_record: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -631,6 +841,8 @@ class _CorrectionInputs:
     catalog: _CorrectionCatalog
     config: object
     metadata_json: str
+    max_rounds: int | None = None
+    budget_check: Callable[[], None] | None = None
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
@@ -654,8 +866,11 @@ class _CorrectionInputs:
     def publish_run(self):
         """Consume only the scanned plan, after the attempt start is durable."""
         from oah.atomic import write_json_atomic, write_text_atomic
+        from oah.review import receipts
 
         plan = self.plan
+        self.budget_check()
+        receipts._log_round_unlocked(self.state, self.run.task, json.loads(plan.dispatch_record))
         # Only start publication depends on model inputs, including when a later write fails.
         for path in self.catalog.original:
             runs._CORRECTION_CAPTURE.get().pop(path, None)
@@ -701,12 +916,13 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 
 @contextmanager
-def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json):
+def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None,
+                       budget_check=None):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
-                                   metadata_json)
+                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check)
         snapshot = _CORRECTION_INPUTS.set(inputs)
         try:
             yield inputs
@@ -760,6 +976,34 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             parse_intent: Callable[[str], object] | None = None,
             read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None,
             keychain=None) -> Prepared:
+    """Serialize task authorization and all optional paid preparation, before handing off a reserved run."""
+    from oah.lockfile import LockTimeout, StateLock
+    from oah.review import receipts, rounds
+
+    managed_review = rounds._MANAGED_DISPATCH.get()
+    managed = (_CORRECTION_INPUTS.get() is not None
+               or managed_review is not None and managed_review["task"] == request.task)
+    lock = None if managed else StateLock(receipts.task_lock_path(state_dir, request.task), timeout=0)
+    if lock is not None:
+        try:
+            lock.__enter__()
+        except LockTimeout:
+            raise EngineError("OAH_REVIEW_SERIES_BUSY", "another review or paid preparation owns this task; wait "
+                              "for it to finish, then retry oah call") from None
+    try:
+        return _prepare(request, settings, root=root, state_dir=state_dir, env=env, footer=footer,
+                        has_footer=has_footer, parse_intent=parse_intent, read_source=read_source, now=now,
+                        keychain=keychain)
+    finally:
+        if lock is not None:
+            lock.__exit__(None, None, None)
+
+
+def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+             env: Mapping[str, str], footer: str, has_footer: Callable[[str], bool],
+             parse_intent: Callable[[str], object] | None = None,
+             read_source: Callable[[pathlib.Path], str] | None = None, now: dt.datetime | None = None,
+             keychain=None) -> Prepared:
     """Decide engine, tier, model and effort; write the run folder and brief. Raises before any launch.
 
     `keychain` is passed to the re-ranker's key lookup (`oah.secrets`); None means the OS keychain."""
@@ -800,7 +1044,31 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
     given = recorded.to_json() if recorded is not None else {}
     given.update({axis: value for axis, value in request.axes.items() if value is not None})
     scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+    planned_run = None
+    if inputs is None:
+        from oah.lease import Store
+
+        planned_run = _PREPARATION_RUN.get() or runs._plan_run(
+            state_dir, request.task, request.engine, request.stage, now=now)
+        with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
+            _check_dispatch_lease(live, root, stage=request.stage)
+            _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
+                                reserve=True, run_id=planned_run[0].id)
     axes = scored.axes if recorded is not None else None
+
+    def check_budget():
+        from oah.lease import LeaseError
+
+        if inputs is not None:
+            inputs.budget_check()
+        else:
+            try:
+                with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
+                    _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
+                                        run_id=planned_run[0].id)
+            except LeaseError as exc:
+                raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
+
     reasons = None
     advisory = "unused(tier-given)"
     if request.tier:
@@ -818,17 +1086,27 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
+        check_budget()
         advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
     skill_axes = scored.axes
+    check_budget()
     selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
                               state_dir=state_dir, env=env, keychain=keychain,
                               brief_disabled=disabled, now=now)
-    resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env,
-                                refresh=request.refresh_models, now=now)
+    checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
+                            now=now)
+    resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env, now=now,
+                                checked=checked)
     warnings.extend(resolution.warnings)
+    pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
+    check_budget()
+    resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
+                                     entry=checked[1].entry, root=root, env=env, brief_disabled=disabled,
+                                     keychain=keychain)
     fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
                   has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
-                  reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder)
+                  reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder,
+                  judge=judge)
     plan = None
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
@@ -849,7 +1127,9 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
             model_writes=tuple(inputs.catalog.writes.items()), binding_record=binding_record,
             lease_record=json.dumps(runs._correction_record(
                 {"id": holder.id, "generation": holder.generation, "intent": holder.intent},
-                ("id", "generation", "intent"))) + "\n")
+                ("id", "generation", "intent"))) + "\n",
+            dispatch_record=json.dumps({"event": "dispatch", "stage": request.stage, "run_id": run.id,
+                                        "max_rounds": inputs.max_rounds}))
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
                     "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
@@ -868,7 +1148,7 @@ def prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, sta
         inputs.run = _CorrectionRun(id=run.id, task=run.task, path=run.path, record=dict(plan.initial_record))
         return plan.prepared
     else:
-        run = runs.new_run(state_dir, request.task, request.engine, request.stage, now=now)
+        run = runs._create_run(*planned_run)
     try:
         return _finish_prepare(request, settings, run, plan=plan, **fields)
     except (EngineError, briefs.BriefError) as exc:
@@ -880,7 +1160,8 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                     state_dir: pathlib.Path, packet: Packet | None, scope: Sequence[str], stored: str | None,
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
-                    warnings: list[str], selection: tuple | None = None, checked_lease=None) -> _CallPlan:
+                    warnings: list[str], selection: tuple | None = None, checked_lease=None,
+                    judge: dict | None = None) -> _CallPlan:
     chosen, skills_rerank = selection if selection is not None else (None, None)
     text = _brief_text(request, run.id, packet, scope, stored, footer, has_footer, warnings, selection, checked_lease)
     read_only = request.stage == "review"
@@ -909,7 +1190,7 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
                model_source=resolution.model_source, requested_effort=resolution.requested_effort,
                launch_effort=resolution.launch_effort,
                axes=axes.to_json() if axes else None, tier=tier, tier_source=tier_source, tier_reasons=reasons,
-               advisory=advisory, override_stage=request.override_stage, warnings=warnings)
+               advisory=advisory, override_stage=request.override_stage, warnings=warnings, **(judge or {}))
     if _CORRECTION_INPUT_CHECK.get() is not None:
         result_fields = runs._correction_record(result_fields, runs.RESULT_FIELDS)
     skills_record = {"rerank": skills_rerank, **chosen.to_record()} if chosen is not None else None
@@ -931,7 +1212,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
                     footer: str, has_footer: Callable[[str], bool], resolution: Resolution, tier: str,
                     tier_source: str, axes: routing.Axes | None, reasons: list | None, advisory: str,
                     warnings: list[str], selection: tuple | None = None, checked_lease=None,
-                    plan: _CallPlan | None = None) -> Prepared:
+                    plan: _CallPlan | None = None, judge: dict | None = None) -> Prepared:
     if any(warning.startswith("OAH_STAGE_OVERRIDDEN") for warning in warnings):
         from oah.lease import Store
 
@@ -942,7 +1223,7 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         plan = _plan_prepare(request, settings, run, root=root, state_dir=state_dir, packet=packet, scope=scope,
                              stored=stored, footer=footer, has_footer=has_footer, resolution=resolution, tier=tier,
                              tier_source=tier_source, axes=axes, reasons=reasons, advisory=advisory,
-                             warnings=warnings, selection=selection, checked_lease=checked_lease)
+                             warnings=warnings, selection=selection, checked_lease=checked_lease, judge=judge)
     run.write_prompt(plan.prompt)
     if plan.skills_record is not None:
         from oah.atomic import write_json_atomic
@@ -964,12 +1245,18 @@ def _effort_fields(prepared: Prepared, stdout: str, stderr: str, rules: Sequence
         inference = verify_inference("codex", prepared.cli_version, prepared.model, prepared.launch_effort, header,
                                      rules)
         code = inference.code or header.code
-        return {"header_effort": header.header_effort, "header_check": header.status, "header_code": code,
+        if header.header_model is not None and header.header_model != prepared.model:
+            code = MODEL_MISMATCH  # the effective model is checked first, like the effort (amendment 6)
+        return {"header_model": header.header_model or runs.UNVERIFIED,
+                "header_effort": header.header_effort, "header_check": header.status, "header_code": code,
                 "resolved_inference_effort": inference.resolved_inference_effort,
                 "normalization_basis": inference.normalization_basis, "effort_verified": inference.effort_verified,
                 "effort_observable": header.status != "unverified"}
     observed = claude.observe(stdout)
-    fields = {"observed_models": list(observed.models), "effort_observable": observed.effort_observable}
+    # Claude Code takes aliases that it resolves itself, so a requested alias cannot be compared with the
+    # full names in modelUsage; the effective model stays unverified (observed_models keeps them).
+    fields = {"observed_models": list(observed.models), "effort_observable": observed.effort_observable,
+              "header_model": runs.UNVERIFIED}
     if not observed.effort_observable:
         return dict(fields, header_effort=runs.UNVERIFIED, header_check=runs.UNVERIFIED, header_code=None,
                     resolved_inference_effort=runs.UNVERIFIED,
@@ -1032,6 +1319,8 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if fields.get("header_effort") not in (*ORDINARY, *BEHAVIOUR_CHANGING, prepared.launch_effort):
             fields["header_effort"] = runs.UNVERIFIED
             fields["normalization_basis"] = "unverified: the header effort is unknown"
+        if fields.get("header_model") != prepared.model:
+            fields["header_model"] = runs.UNVERIFIED  # the mismatch stays in header_code
         fields["worker_output"] = result.worker_output
     fields = {name: clean(value) if isinstance(value, str) else value for name, value in fields.items()}
     if result.timed_out:
@@ -1043,6 +1332,10 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if not prepared.retain_worker_text:
             error = (f"OAH_ENGINE_FAILED: {prepared.engine} exited with {result.returncode}; inspect the live "
                      "terminal output and retry the correction")
+    elif fields.get("header_code") == MODEL_MISMATCH:
+        status, error = "failed", (f"{MODEL_MISMATCH}: the engine reported model {fields['header_model']} for the "
+                                   f"requested model {prepared.model}; this run does not count. Check the Codex "
+                                   "configuration (a profile or model override) and call again")
     elif fields.get("header_code"):
         status, error = "failed", (f"{fields['header_code']}: the engine reported effort {fields['header_effort']} "
                                    f"(normalized {fields['resolved_inference_effort']}) for launch effort "
@@ -1362,7 +1655,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
     child = None
     communicator = None
     try:
-        with dispatch_guard(prepared):
+        with _paid_dispatch(prepared), dispatch_guard(prepared):
             with _deferred_creation_signals():
                 try:
                     child = subprocess.Popen(list(prepared.argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1463,7 +1756,9 @@ def start_background(prepared: Prepared, *, base_env: Mapping[str, str] | None =
     text = launched.stdout.decode("utf-8", errors="replace").strip()
     detail = launched.stderr.decode("utf-8", errors="replace").strip()
     if launched.returncode != 0 or not text.isdigit():
-        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ")):
+        if detail.startswith(("OAH_LEASE_CHANGED: ", "OAH_INTENT_NOT_CURRENT: ", "OAH_RUN_LAUNCH_INVALID: ",
+                              "OAH_REVIEW_NEEDS_DECISION: ", "OAH_REVIEW_ROUNDS_EXHAUSTED: ",
+                              "OAH_REVIEW_STATE_INVALID: ", "OAH_REVIEW_SERIES_BUSY: ")):
             code, message = detail.split(": ", 1)
             raise EngineError(code, message)
         if detail.startswith("OAH_RUN_DETACH_FAILED:"):
@@ -1509,7 +1804,7 @@ def _launch_main(run_dir: str) -> int:
     if _windows():
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         try:
-            with dispatch_guard(prepared):
+            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                 child = subprocess.Popen(argv, creationflags=flags | 0x01000000, **options)  # CREATE_BREAKAWAY_FROM_JOB
         except OSError as exc:
             if require_detach:
@@ -1521,12 +1816,12 @@ def _launch_main(run_dir: str) -> int:
                        "in a terminal whose job permits breakaway")
             run.result(detached=runs.UNVERIFIED, warnings=[*run.read().get("warnings", []), warning])
             print(warning, file=sys.stderr, flush=True)
-            with dispatch_guard(prepared):
+            with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
                 child = subprocess.Popen(argv, creationflags=flags, **options)
         else:
             run.result(detached="verified")
     else:
-        with dispatch_guard(prepared):
+        with _paid_dispatch(prepared, record=False), dispatch_guard(prepared):
             child = subprocess.Popen(argv, start_new_session=True, **options)
         run.result(detached="verified")
     print(child.pid, flush=True)

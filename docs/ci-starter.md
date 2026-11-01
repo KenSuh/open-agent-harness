@@ -120,6 +120,20 @@ If **secret scan** fails, a key may have been committed. Deleting it in a new co
 because it stays in the history. Revoke or rotate that key with the service that issued it first, then
 clean it up. Keep keys in environment variables or your OS keychain, never in a project file.
 
+## Landing with CI
+
+`oah land --check --task T` reads check runs and commit statuses for the exact HEAD through `gh`.
+Missing `gh`, no CI results (including when you did not install a workflow), or a required check missing
+blocks landing by default with `OAH_LAND_CI_UNVERIFIED`. Install and sign in to `gh`, commit and push
+the workflow and task branch, and wait for results. Failed or pending/unreadable CI also blocks landing.
+
+To explicitly accept unverified CI, pass `--accept-unverified-ci "<reason>"` to both `oah land --check`
+and `oah land --merge`. This records the exception and reason for that exact head; CI remains
+`unverified` and never counts as a pass. A new head needs its own exception. Failed or pending CI
+cannot use this exception. The target branch can also set a recorded exception policy; see
+[Landing](concepts.md#landing) for that policy and oah’s `required_checks` setting. GitHub branch rules
+are separate and still apply.
+
 ## Make the checks required
 
 By default GitHub shows the results but still lets anyone merge a pull request whose checks failed. To

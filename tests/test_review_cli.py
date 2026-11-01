@@ -33,6 +33,27 @@ def oah(project: Project, *args: str, env_extra: dict | None = None) -> subproce
 
 
 class CliTest(unittest.TestCase):
+    def test_cli_marks_new_instances_in_text_and_json(self):
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                project = Project(self)
+                project.queue({"findings": [bug(location="src/app.py:10")]},
+                              {"findings": [bug(class_id="R1-C1", location="src/app.py:14", prior_refs=[])]})
+                project.review()
+                project.correct(1)
+                args = ["review", "--task", "t1", "--tier", "high"] + (["--json"] if as_json else [])
+                done = oah(project, *args)
+                self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                mark = "R2-F1: new instance of attempted class R1-C1"
+                if as_json:
+                    result = json.loads(done.stdout)
+                    self.assertEqual(result["code"], "OAH_REVIEW_CHANGES_REQUESTED")
+                    self.assertEqual(result["receipt"]["new_instances"], [mark])
+                    self.assertIn(mark, result["message"])
+                else:
+                    self.assertTrue(done.stdout.startswith("OAH_REVIEW_CHANGES_REQUESTED:"), done.stdout)
+                    self.assertIn(mark, done.stdout.splitlines()[0])
+
     def test_cli_unknown_normalization_counts_and_caches_convergence(self):
         project = Project(self, remote=True)
         done = oah(project, "review", "--task", "t1", "--json")

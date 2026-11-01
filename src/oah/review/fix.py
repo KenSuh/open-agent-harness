@@ -145,6 +145,11 @@ _ERROR_DIAGNOSTICS = {
     "OAH_REVIEW_GIT_FAILED": "review Git inspection failed; check Git access and the worktree, then retry.",
     "OAH_REVIEW_RECORD_EXISTS": "a review record already exists; inspect the task history before retrying.",
     "OAH_REVIEW_NEEDS_DECISION": "review needs a decision; inspect the task history and use oah review --decision.",
+    "OAH_REVIEW_ROUNDS_EXHAUSTED": "the task reached its max_rounds limit; use oah review --extra-round to "
+                                     "authorize and record one additional round.",
+    "OAH_REVIEW_STATE_INVALID": "saved task stop, limit or count state is invalid; restore the original "
+                                 "rounds.jsonl against the task receipts, preserving spent rounds and pending "
+                                 "stops, then retry.",
     "OAH_WORKTREE_UNRESOLVED": "the leased worktree cannot be resolved; restore that worktree, then retry.",
     "OAH_WORKTREE_LEASE_MISMATCH": "the worktree does not match the lease; retry in the leased worktree.",
     "OAH_LEASE_CHANGED": "the dispatch lease changed; check oah status and bind the accepted packet before retrying.",
@@ -1159,7 +1164,28 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
         h = _history(t, capture=True)
         _safe_inputs((dataclasses.asdict(h.records), h.index_bytes.decode("utf-8"), h.index_lines), redact)
         _check_history(t, h, LAUNCHED)
-        round_log = receipts.read_round_log(t.state, t.name)
+        _safe_inputs(config.raw, redact)
+        with _ExistingLock(t.state / ".lock"):
+            round_log = receipts.read_round_log(t.state, t.name)
+            _safe_inputs(round_log, redact)
+            _, budget = rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records,
+                                            log=round_log, return_budget=True)
+        limit = budget.limit
+
+        def check_budget():
+            held = call._CORRECTION_STATE_LOCK.get() == t.state
+            with contextlib.nullcontext() if held else _ExistingLock(t.state / ".lock"):
+                # Publication has just compared the captured bytes. Between publications, validate
+                # the live stop log before each paid preparation or engine step.
+                token = runs._CORRECTION_CAPTURE.set(None) if not held else None
+                try:
+                    lines = receipts.read_round_log(t.state, t.name)
+                finally:
+                    if token is not None:
+                        runs._CORRECTION_CAPTURE.reset(token)
+                _safe_inputs(lines, redact)
+                rounds.dispatch_gate(t.state, t.name, t.root, stage=STAGE, records=h.records, log=lines)
+
         receipt = _source(t, h, LAUNCHED, round_log=round_log)
         before = _head(t.root)
         _check_tree(t, receipt, before, LAUNCHED, redact)
@@ -1195,7 +1221,8 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             final = scratch / "last-message.md"
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
-                                         metadata_json=json.dumps(metadata)) as inputs:
+                                         metadata_json=json.dumps(metadata), max_rounds=limit,
+                                         budget_check=check_budget) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,
@@ -1320,6 +1347,9 @@ class _Attempt:
             return result
         except BaseException as exc:
             if not self.published or self.ended or isinstance(exc, _PublicationConflict):
+                raise
+            if getattr(exc, "code", None) == "OAH_REVIEW_STATE_INVALID":
+                # Preserve the corrupt bytes and the refusal. Repair the log before settling the start.
                 raise
             interrupted = isinstance(exc, KeyboardInterrupt)
             with _held_signals():

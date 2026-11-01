@@ -1,5 +1,6 @@
-# 가짜 gh — oah land 시험에서 받은 인자를 기록하고, 시나리오 파일의 커밋별 체크 실행을 GitHub API 모양으로 쪽 단위로 돌려주며, 버려야 할 미끼 필드도 함께 싣는다.
-"""A stand-in for `gh api --method GET -H <header> repos/{owner}/{repo}/commits/<sha>/check-runs?per_page=N&page=M`.
+# 가짜 gh — oah land 시험에서 받은 인자를 기록하고, 시나리오 파일의 커밋별 체크 실행과 커밋 상태를 GitHub API 모양으로 쪽 단위로 돌려주며, 버려야 할 미끼 필드도 함께 싣는다.
+"""A stand-in for `gh api --method GET -H <header> repos/{owner}/{repo}/commits/<sha>/check-runs?per_page=N&page=M`
+and `.../commits/<sha>/status?per_page=N&page=M` (combined commit statuses).
 
 Environment:
 - FAKE_GH_LOG: a JSONL file; each call appends its argv.
@@ -11,6 +12,13 @@ Environment:
   "pages" overrides fields for a numbered page; "sleep" delays that response and "total_count" overrides its total.
 Every run carries the decoys a real response has (`html_url`, `app.owner.login`, `id`), so a test can prove
 oah keeps only validated statuses, conclusions and positions.
+
+Commit statuses come from "statuses": {"<sha>": [{"context", "state", "id"?}, ...]}. The top-level overrides
+above apply to check runs only; "status_script" holds the same overrides ("exit", "stderr", "raw", "sleep",
+"total_count", "pages") for the status endpoint, plus "sha" to report another commit in the envelope. Every
+status carries the decoys `id`, `target_url`, `description` and `creator.login`.
+The status overrides `move_head` (a SHA) and `write_tracked` mutate the real checkout before responding,
+so push-time local validation can be tested across processes on every platform.
 """
 from __future__ import annotations
 
@@ -18,11 +26,12 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
 
-ENDPOINT = re.compile(r"repos/\{owner\}/\{repo\}/commits/([0-9a-f]{40}|[0-9a-f]{64})/check-runs(?:\?(.*))?")
+ENDPOINT = re.compile(r"repos/\{owner\}/\{repo\}/commits/([0-9a-f]{40}|[0-9a-f]{64})/(check-runs|status)(?:\?(.*))?")
 
 
 def main(argv: list[str]) -> int:
@@ -39,8 +48,10 @@ def main(argv: list[str]) -> int:
     if match is None:
         sys.stderr.write("fake gh: unsupported endpoint\n")
         return 2
-    sha, query = match.group(1), urllib.parse.parse_qs(match.group(2) or "")
+    sha, kind, query = match.group(1), match.group(2), urllib.parse.parse_qs(match.group(3) or "")
     per_page, page = int(query.get("per_page", ["30"])[0]), int(query.get("page", ["1"])[0])
+    if kind == "status":
+        return statuses(script, sha, per_page, page)
     script = {**script, **script.get("pages", {}).get(str(page), {})}
     if script.get("sleep"):
         time.sleep(script["sleep"])
@@ -58,6 +69,32 @@ def main(argv: list[str]) -> int:
         dict(run, head_sha=run.get("head_sha", sha), id=run.get("id", 4000 + index),
              html_url=f"https://example.invalid/checks/{4000 + index}", app={"owner": {"login": "decoy-owner-login"}})
         for index, run in enumerate(chunk, start=(page - 1) * per_page)]}
+    sys.stdout.write(json.dumps(body))
+    return 0
+
+
+def statuses(script: dict, sha: str, per_page: int, page: int) -> int:
+    overrides = script.get("status_script", {})
+    overrides = {**overrides, **overrides.get("pages", {}).get(str(page), {})}
+    if overrides.get("move_head"):
+        subprocess.run(["git", "update-ref", "HEAD", overrides["move_head"]], check=True)
+    if overrides.get("write_tracked"):
+        pathlib.Path("README.md").write_bytes(b"changed during CI\n")
+    if overrides.get("sleep"):
+        time.sleep(overrides["sleep"])
+    if overrides.get("exit"):
+        sys.stderr.write(overrides.get("stderr", ""))
+        return int(overrides["exit"])
+    if overrides.get("raw") is not None:
+        sys.stdout.write(overrides["raw"])
+        return 0
+    items = script.get("statuses", {}).get(sha, [])
+    chunk = items[(page - 1) * per_page: page * per_page]
+    body = {"state": "pending", "sha": overrides.get("sha", sha),
+            "total_count": overrides.get("total_count", len(items)),
+            "statuses": [dict(item, id=item.get("id", 8000 + index), target_url=f"https://example.invalid/s/{index}",
+                              description="decoy description", creator={"login": "decoy-owner-login"})
+                         for index, item in enumerate(chunk, start=(page - 1) * per_page)]}
     sys.stdout.write(json.dumps(body))
     return 0
 

@@ -9,7 +9,7 @@ import unittest
 
 from oah import recommend_cli
 from oah.routing import (INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, Axes, RoutingError,
-                         check_stage, recommend, same_engine_warning, score_axes)
+                         check_stage, floor_tier, recommend, same_engine_warning, score_axes)
 
 STAGES = {"initial": "claude", "review": "codex", "correction": "codex"}
 
@@ -197,6 +197,17 @@ class RecommendCliTest(unittest.TestCase):
             parser.parse_args(["recommend", "--kind", "nope", "--intensity", "low", "--reasoning", "low",
                                "--risk", "low"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+class FloorTierTest(unittest.TestCase):
+    def test_floor_tier_by_kind(self):
+        for kind in KIND_SCORES:
+            with self.subTest(kind=kind):
+                expected = recommend(Axes(kind, "low", "low", "low")).tier
+                self.assertEqual(floor_tier(kind), expected)
+        self.assertEqual(floor_tier("migration"), "high")
+        self.assertEqual(floor_tier("review"), "medium")
+        self.assertEqual(floor_tier("quick"), "low")
 
 
 if __name__ == "__main__":

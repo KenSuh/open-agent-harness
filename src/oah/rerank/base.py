@@ -137,3 +137,6 @@ class Provider(Protocol):
 
     def advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
                config: Mapping) -> tuple[str, float | None]: ...
+
+    def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
+                     config: Mapping) -> tuple[str, str]: ...
