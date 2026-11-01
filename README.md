@@ -106,11 +106,11 @@ On `main`, waiting for the release:
 
 - Jev chooses the model and effort for each call within the tier pools you allow.
 - A review budget covers the whole task, with ways to stop, resume and increase it.
+- A not-converged review summary shows what is left: the last reviewed head, P0 and P1 findings, gates not met and
+  a suggested next command.
 
 In review:
 
-- A not-converged review summary shows what is left: the last reviewed head, P0 and P1 findings, gates not met and
-  a suggested next command.
 - Impact reports say which scope was analysed and which was not, with conservative fallback checks.
 - Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
 
@@ -520,15 +520,15 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 
 #### v0.2.0: 넘겨받을 수 있는 리뷰와 증거
 
-다음 두 기능은 `main`에 병합되어 릴리스를 기다리고 있다.
+다음 세 기능은 `main`에 병합되어 릴리스를 기다리고 있다.
 
 - 호출마다 사용자가 허용한 tier별 후보 안에서 Jev가 모델과 추론 강도를 고른다.
 - 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
-
-다음 세 기능은 아직 리뷰 중이다.
-
 - 수렴하지 않은 리뷰 요약이 남은 일을 보여 준다. 마지막으로 리뷰한 head, P0/P1 지적, 충족하지 못한 게이트, 다음
   명령 제안이 들어간다.
+
+다음 두 기능은 아직 리뷰 중이다.
+
 - 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
 - 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
 
