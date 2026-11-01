@@ -225,6 +225,57 @@ class ShippedRuleTest(unittest.TestCase):
         self.assertEqual((check.normalization_basis, check.effort_verified), ("test-codex-1.2", True))
 
 
+LATER_COMMIT = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856"
+LATER_ID = "codex-0.166.0-gpt-6.1"
+LATER_BASIS = f"{LATER_ID}: expected mapping from CLI source at {LATER_COMMIT}; not observed served effort"
+
+
+class LaterShippedRuleTest(unittest.TestCase):
+    """The rule for Codex 0.166.0 is as exact as the 0.164.0 one and leaves that rule alone (intent n66)."""
+
+    def check(self, version, model, launch, effort):
+        return verify_inference("codex", version, model, launch, header(effort, launch, model), load_rules())
+
+    def test_proven_labels_verify_for_exact_version_and_models(self):
+        for model in ("gpt-6.1-sol", "gpt-6.1-terra"):
+            for label in ("low", "medium", "high", "xhigh", "max"):
+                with self.subTest(model=model, label=label):
+                    check = self.check("0.166.0", model, label, label)
+                    self.assertEqual((check.resolved_inference_effort, check.normalization_basis, check.code,
+                                      check.effort_verified), (label, LATER_BASIS, None, True))
+
+    def test_each_version_keeps_its_own_rule(self):
+        self.assertEqual(self.check("0.164.0", "gpt-6.1-sol", "high", "high").normalization_basis, SHIPPED_BASIS)
+        self.assertEqual(self.check("0.166.0", "gpt-6.1-sol", "high", "high").normalization_basis, LATER_BASIS)
+
+    def test_near_versions_stay_unverified(self):
+        for version in ("0.165.0", "0.165.9", "0.166.1", "0.166.01", "0.166.0-dev", "0.166", "0.166.", "0.166.00",
+                        " 0.166.0", "0.167.0", "1.0.166.0"):
+            with self.subTest(version=version):
+                check = self.check(version, "gpt-6.1-sol", "medium", "medium")
+                self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+                self.assertTrue(check.normalization_basis.startswith("unverified:"))
+                self.assertEqual(normalize("codex", version, "gpt-6.1-sol", "medium", load_rules()), (None, None))
+
+    def test_other_models_and_unproven_labels_stay_unverified(self):
+        for model, label in (("gpt-6.1-sol-mini", "medium"), ("gpt-6.1-luna", "high"), ("gpt-6-sol", "high"),
+                             ("gpt-6.1-sol", "ultra"), ("gpt-6.1-sol", "persistent"), ("gpt-6.1-terra", "none"),
+                             ("gpt-6.1-terra", "minimal"), ("gpt-6.1-sol", "turbo")):
+            with self.subTest(model=model, label=label):
+                check = self.check("0.166.0", model, label, label)
+                self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+
+    def test_downgraded_and_mismatched_headers_still_fail(self):
+        check = self.check("0.166.0", "gpt-6.1-sol", "high", "medium")
+        self.assertEqual((check.resolved_inference_effort, check.code, check.effort_verified),
+                         ("medium", "OAH_EFFORT_DOWNGRADED", False))
+        mismatched = header("max", "high", "gpt-6.1-sol")
+        check = verify_inference("codex", "0.166.0", "gpt-6.1-sol", "high", mismatched, load_rules())
+        self.assertEqual((mismatched.code, check.effort_verified), ("OAH_EFFORT_MISMATCH", False))
+        check = self.check("0.166.0", "gpt-6.1-sol", "high", None)
+        self.assertEqual((check.resolved_inference_effort, check.effort_verified), (UNVERIFIED, False))
+
+
 def shipped_document() -> dict:
     text = resources.files("oah").joinpath("templates/engines/normalization.json").read_text(encoding="utf-8")
     return json.loads(text)
@@ -249,9 +300,17 @@ class ParseRulesTest(unittest.TestCase):
         document = shipped_document()
         self.assertEqual(parse_rules(json.dumps(document)), load_rules())
         self.assertEqual(document["version"], 2)
-        (rule,) = load_rules()
+        rule, later = load_rules()
         self.assertEqual((rule["id"], rule["cli_versions"], rule["models"]),
                          (SHIPPED_ID, ["0.164.0"], ["gpt-6.1-sol", "gpt-6.1-terra"]))
+        self.assertEqual((later["id"], later["cli_versions"], later["models"], later["map"]),
+                         (LATER_ID, ["0.166.0"], rule["models"], rule["map"]))
+        self.assertEqual((later["evidence"]["tag"], later["evidence"]["commit"]), ("rust-v0.166.0", LATER_COMMIT))
+        self.assertEqual((later["assumptions"], len(later["evidence"]["references"])),
+                         (rule["assumptions"], len(rule["evidence"]["references"])))
+        for reference in ("codex-rs/core/src/config/mod.rs:1050-1052", "codex-rs/core/src/client.rs:998-1018",
+                          "codex-rs/exec/src/event_processor_with_human_output.rs:461-469"):
+            self.assertIn(reference, later["evidence"]["references"])
         self.assertEqual(rule["map"], {label: label for label in PROVEN_LABELS})
         self.assertEqual(PROVEN_LABELS, ("low", "medium", "high", "xhigh", "max"))
         evidence = rule["evidence"]
