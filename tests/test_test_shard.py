@@ -1,6 +1,7 @@
 # CI 테스트 분할 검사 — 탐색한 테스트가 정확히 한 조각에 들어가고 고르게 나뉘는지 확인한다.
 from __future__ import annotations
 
+import collections
 import contextlib
 import importlib.util
 import io
@@ -587,7 +588,7 @@ def name_of(letter):
 CANCELLED_LOG = "\n".join([
     "test (windows-latest, 1/5)\tUNKNOWN STEP\t﻿2026-11-01T10:00:01.0000000Z Current runner version",
     log_line("00:09.0000000", f"{name_of('early')} ... ok"),
-    log_line("00:10.0000000", "shard 1/5: 9 tests"),
+    log_line("00:10.0000000", "shard 1/5: 10 tests"),
     log_line("00:12.5000000", f"{name_of('a')} ... ok"),
     log_line("00:13.0000000", f"{name_of('b')} ... warning: in the working copy of 'a.md', LF will be replaced"),
     log_line("00:14.0000000", "warning: in the working copy of 'b.md', LF will be replaced"),
@@ -599,10 +600,12 @@ CANCELLED_LOG = "\n".join([
     log_line("00:22.0000000", "A docstring line ... FAIL"),
     log_line("00:22.0000000", f"{name_of('same')} ... ok"),
     log_line("00:23.0000000", "setUpClass (tests.test_m.Other) ... ERROR"),
+    log_line("00:24.0000000", f"{name_of('next')} ... ok"),
     log_line("00:30.0000000", f"{name_of('last')} ... Traceback (most recent call last):"),
     log_line("00:30.5000000", "KeyboardInterrupt"),
     log_line("00:31.0000000", "##[error]The operation was canceled."),
     log_line("00:32.0000000", "ok"),
+    log_line("00:33.0000000", f"{name_of('after')} ... ok"),
     "",
 ])
 
@@ -625,16 +628,12 @@ class GeneratorTest(unittest.TestCase):
         self.generator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.generator)
 
-    def test_each_result_shape_ends_its_test(self):
+    def test_only_complete_entries_count_in_a_cancelled_log(self):
         times, counts = self.generator.parse_log(CANCELLED_LOG)
-        self.assertEqual(times, {result_id("a"): 2500, result_id("b"): 2500, result_id("c"): 1000,
-                                 result_id("same"): 1})
-        self.assertEqual(counts["unfinished"], 2)
-        self.assertEqual(counts["unconfirmed start"], 1)
-        self.assertEqual(counts["never reached"], 2)
-        self.assertEqual(counts["subtest lines"], 1)
+        self.assertEqual(times, {result_id("a"): 2500, result_id("next"): 2000})
+        self.assertEqual(counts, collections.Counter({"complete": 4, "no usable line": 6, "unconfirmed start": 2}))
 
-    def subtest_log(self, *, following_test=True, cancel=False):
+    def unittest_log(self, *, subtest=False, docstring=False, output=False, following_test=True, cancel=False):
         """Timestamp real verbose unittest output without sleeping for the simulated work."""
         seconds = 0
         lines = [log_line("00:00.0000000", f"shard 1/5: {3 if following_test else 1} tests")]
@@ -662,13 +661,15 @@ class GeneratorTest(unittest.TestCase):
             def test_a(self):
                 nonlocal seconds
                 seconds += 2
-                with self.subTest(x=1):
-                    self.skipTest("no")
-                with self.subTest(x=2):
-                    if cancel:
-                        seconds += 30
-                        raise KeyboardInterrupt
-                    seconds += 60
+                if output:
+                    stream.write("output while running\n")
+                if subtest:
+                    with self.subTest(x=1):
+                        self.skipTest("no")
+                if cancel:
+                    seconds += 30
+                    raise KeyboardInterrupt
+                seconds += 60
                 self.addCleanup(cleanup)
 
             def test_b(self):
@@ -679,6 +680,8 @@ class GeneratorTest(unittest.TestCase):
                 nonlocal seconds
                 seconds += 7
 
+        if docstring:
+            Case.test_a.__doc__ = "A docstring line"
         suite = unittest.TestSuite([Case("test_a")] + ([Case("test_b"), Case("test_c")] if following_test else []))
         try:
             unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
@@ -687,42 +690,87 @@ class GeneratorTest(unittest.TestCase):
                                   "##[error]The operation was canceled."))
         return "\n".join(lines)
 
-    def test_subtest_only_parent_and_quiet_successor_get_no_value(self):
+    def test_separate_name_and_result_and_successor_get_no_value(self):
+        text = self.unittest_log(output=True)
+        self.assertIn(f"{name_of('a')} ... output while running", text)
+        self.assertIn(log_line("01:05.0000000", "ok"), text)
+        times, counts = self.generator.parse_log(text)
+        self.assertEqual(times, {result_id("c"): 7000})
+        self.assertEqual(counts, collections.Counter({"complete": 2, "no usable line": 1, "unconfirmed start": 1}))
+
+    def test_docstring_result_gives_no_value_to_test_or_successor(self):
+        text = self.unittest_log(docstring=True)
+        self.assertIn(log_line("00:00.0000000", name_of("a")), text)
+        self.assertIn(log_line("01:05.0000000", "A docstring line ... ok"), text)
+        times, counts = self.generator.parse_log(text)
+        self.assertEqual(times, {result_id("c"): 7000})
+        self.assertEqual(counts, collections.Counter({"complete": 2, "no usable line": 1, "unconfirmed start": 1}))
+
+    def test_docstring_subtest_and_successor_get_no_value(self):
         for following_test in (True, False):
             with self.subTest(following_test=following_test):
-                text = self.subtest_log(following_test=following_test)
-                self.assertIn(f"  {name_of('a')} (x=1) ... skipped 'no'", text)
+                text = self.unittest_log(subtest=True, docstring=True, following_test=following_test)
+                self.assertIn(log_line("00:02.0000000", f"  {name_of('a')} (x=1)"), text)
+                self.assertIn(log_line("00:02.0000000", "A docstring line ... skipped 'no'"), text)
                 self.assertNotIn(f"{name_of('a')} ... ok", text)
                 times, counts = self.generator.parse_log(text)
-                self.assertNotIn(result_id("a"), times)
-                self.assertNotIn(result_id("b"), times)
-                self.assertEqual(counts["unfinished"], 1)
-                self.assertEqual(counts["unconfirmed start"], int(following_test))
-                self.assertEqual(counts["subtest lines"], 1)
+                self.assertEqual(times, {result_id("c"): 7000} if following_test else {})
+                self.assertEqual(counts, collections.Counter({"complete": 2 if following_test else 0,
+                                                              "no usable line": 1,
+                                                              "unconfirmed start": int(following_test)}))
 
     def test_top_level_result_reanchors_after_an_unconfirmed_start(self):
-        text = self.subtest_log()
+        text = self.unittest_log(subtest=True, docstring=True)
         self.assertIn(log_line("01:09.0000000", f"{name_of('b')} ... ok"), text)
         times, counts = self.generator.parse_log(text)
         self.assertEqual(times, {result_id("c"): 7000})
         self.assertEqual(counts["unconfirmed start"], 1)
 
-    def test_cancelled_or_truncated_parent_after_skipped_subtest_is_unfinished(self):
-        text = self.subtest_log(cancel=True)
+    def test_cancelled_or_truncated_docstring_subtest_has_no_value(self):
+        text = self.unittest_log(subtest=True, docstring=True, cancel=True)
         for log in (text, text.rsplit("\n", 1)[0]):
             with self.subTest(cancel_marker="##[error]" in log):
                 times, counts = self.generator.parse_log(log)
                 self.assertEqual(times, {})
-                self.assertEqual(counts["unfinished"], 1)
-                self.assertEqual(counts["unconfirmed start"], 0)
-                self.assertEqual(counts["never reached"], 2)
-                self.assertEqual(counts["subtest lines"], 1)
+                self.assertEqual(counts, collections.Counter({"complete": 0, "no usable line": 3}))
+
+    def test_cancelled_log_ending_inside_a_test_has_no_value_for_it(self):
+        text = self.unittest_log(output=True, cancel=True)
+        times, counts = self.generator.parse_log(text)
+        self.assertEqual(times, {})
+        self.assertEqual(counts, collections.Counter({"complete": 0, "no usable line": 3}))
+
+    def test_late_lone_result_does_not_move_a_confirmed_endpoint(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                lines = [log_line("00:00.0000000", "shard 1/5: 2 tests"),
+                         log_line("00:01.0000000", f"{name_of('a')} ... ok"),
+                         log_line("00:09.0000000", "ok"),
+                         log_line("00:10.0000000", "##[error]The operation was canceled." if cancel
+                                  else f"{name_of('b')} ... ok")]
+                times, counts = self.generator.parse_log("\n".join(lines))
+                self.assertEqual(times, {result_id("a"): 1000} if cancel
+                                 else {result_id("a"): 1000, result_id("b"): 9000})
+                self.assertEqual(counts, collections.Counter({"complete": 1 if cancel else 2,
+                                                              "no usable line": int(cancel)}))
+
+    def test_complete_result_shapes_and_non_test_lines(self):
+        results = ("ok", "FAIL", "ERROR", "expected failure", "unexpected success", "skipped 'no'")
+        lines = [log_line("00:00.0000000", f"shard 1/5: {len(results)} tests")]
+        for second, result in enumerate(results, 1):
+            lines.extend([
+                log_line(f"00:{second:02}.0000000", "setUpClass (tests.test_m.Other) ... ERROR"),
+                log_line(f"00:{second:02}.0000000", f"  {name_of('ignored')} ... ok"),
+                log_line(f"00:{second:02}.0000000", "test_wrong (tests.test_m.Case.test_other) ... ok"),
+                log_line(f"00:{second:02}.0000000", f"{name_of(str(second))} ... {result}")])
+        times, counts = self.generator.parse_log("\n".join(lines))
+        self.assertEqual(times, {result_id(str(second)): 1000 for second in range(1, len(results) + 1)})
+        self.assertEqual(counts, collections.Counter({"complete": len(results), "no usable line": 0}))
 
     def test_the_end_of_the_run_stops_the_log(self):
         times, counts = self.generator.parse_log(FINISHED_LOG)
-        self.assertEqual(times, {result_id("a"): 4000, result_id("b"): 1500})
-        self.assertEqual(counts["unfinished"], 0)
-        self.assertEqual(counts["never reached"], 0)
+        self.assertEqual(times, {result_id("a"): 4000})
+        self.assertEqual(counts, collections.Counter({"complete": 1, "no usable line": 1}))
 
     def test_a_log_without_a_shard_line_is_refused(self):
         with self.assertRaises(ValueError):
@@ -757,21 +805,18 @@ class GeneratorTest(unittest.TestCase):
             written = out.read_bytes()
             self.assertNotIn(b"\r", written)
             data = json.loads(written)
-            self.assertEqual(data["times_ms"], {
-                result_id("a"): 2500, result_id("b"): 2000, result_id("c"): 1000, result_id("same"): 1})
-            self.assertEqual(data["default_ms"], 5501 // 4)
+            self.assertEqual(data["times_ms"], {result_id("a"): 2500, result_id("next"): 2000})
+            self.assertEqual(data["default_ms"], 2250)
             self.assertEqual(written.decode("utf-8"),
                              json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
             self.assertIn("run1", data["source"])
             self.assertIn("run2", data["source"])
             self.assertNotIn("-w1", data["source"])
             self.assertNotIn(folder.name, data["source"])
-            self.assertIn("4 ids from 3 logs", result.stdout)
-            self.assertIn("log entries measured: 7", result.stdout)
-            self.assertIn("2 unfinished", result.stdout)
-            self.assertIn("1 dropped (unconfirmed start)", result.stdout)
-            self.assertIn("2 never reached", result.stdout)
-            self.assertIn("1 subtest lines", result.stdout)
+            self.assertIn("2 ids from 3 logs", result.stdout)
+            self.assertIn("log entries complete: 6", result.stdout)
+            self.assertIn("7 with no usable line", result.stdout)
+            self.assertIn("2 dropped (unconfirmed start)", result.stdout)
 
             weights = tool.load_times(out)
             totals = [sum(weights[1].get(name, weights[0]) for name in ids)

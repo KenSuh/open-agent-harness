@@ -3,17 +3,21 @@
 """Regenerate the shard weights from saved job logs: `python tools/shard_times.py OUT.json LOG [LOG ...]`.
 
 Each log is one job of `gh run view --log`: `job<TAB>step<TAB>TIMESTAMP text` lines from a run of
-`tools/test_shard.py ... -v`. A test takes a value only when top-level results confirm both its start and its end:
-the previous test's own final result (or the `shard N/M: K tests` line for the first test), and its own final result.
-Subtest results, the next test's name and the run summary do not confirm an end. A test without a confirmed end
-and its successor get no value from that log; timing re-anchors at the successor's top-level result.
+`tools/test_shard.py ... -v`. Only a complete top-level one-line entry, `name (id) ... result`, with id ending in
+`.name`, confirms a test's end. Its start is the previous complete entry's timestamp, or the `shard N/M: K tests`
+line for the first test. An incomplete top-level test name clears that start; the next complete entry only
+re-anchors it. Description lines, indented subtests and lone results change nothing. The run summary or cancellation
+ends parsing. Tests without a usable one-line entry, for example those that write output while running or have a
+skipped subtest, fall back to `default_ms`, so the data covers less than the whole suite.
 
 A test's value is the median across the logs that have it, as integer milliseconds, at least 1. `default_ms` is the
 mean of those values rounded down. `source` names the runs from the log file names, without the `-w<N>` job suffix.
 The output holds test ids and those numbers only, so nothing else from a log reaches the repository.
 
-The script then prints what it skipped and the minutes per shard that the file it wrote predicts for COUNT=5, which
-discovers the tests in tests/ without running them. Standard library only.
+Printed counts separate complete entries (including those dropped for no confirmed start), planned tests with no
+usable line (including tests never reached), and complete entries dropped for no confirmed start. The script then
+prints the minutes per shard that the file predicts for COUNT=5, discovering tests/ without running it. Standard
+library only.
 """
 from __future__ import annotations
 
@@ -28,8 +32,8 @@ PREDICTED_COUNT = 5
 _STAMPED = re.compile(r"\ufeff?(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)(?: (.*))?")
 _SHARD = re.compile(r"shard \d+/\d+: (\d+) tests\Z")
 _RAN = re.compile(r"Ran \d+ tests? in ")
-_NAME = re.compile(r"(\s*)(\S+) \(([^\s()]+)\)")
-_RESULT = re.compile(r"(?:\A|\.\.\. )(?:ok|FAIL|ERROR|expected failure|unexpected success|skipped ['\"].*)\Z")
+_NAME = re.compile(r"(\S+) \(([^\s()]+)\)")
+_RESULT = re.compile(r" \.\.\. (?:ok|FAIL|ERROR|expected failure|unexpected success|skipped ['\"].*)\Z")
 _JOB_SUFFIX = re.compile(r"-w\d+\Z")
 _MILLISECOND = datetime.timedelta(milliseconds=1)
 
@@ -53,35 +57,25 @@ def parse_log(text: str) -> tuple[dict[str, int], collections.Counter]:
     if not planned:
         raise ValueError("no `shard N/M: K tests` line")
     counts: collections.Counter = collections.Counter()
-    ends: dict[str, datetime.datetime | None] = {}
-    current = None
+    times = {}
     for stamp, body in lines:
         if _RAN.match(body):
             break
         if body.startswith("##[error]"):
             break
         name = _NAME.match(body)
-        if name and not name[3].endswith(f".{name[2]}"):
+        if not name or not name[2].endswith(f".{name[1]}"):
             continue  # `setUpClass (tests.module.Class) ... ERROR` names no test, so it ends none.
-        if name and name[1]:
-            counts["subtest lines"] += 1
+        if not _RESULT.fullmatch(body[name.end():]):
+            previous = None
             continue
-        if name:
-            counts["repeated"] += name[3] != current and name[3] in ends
-            current = name[3]
-            ends.setdefault(current, None)
-        if current is not None and _RESULT.search(body):
-            ends[current] = stamp
-    times = {}
-    for test, end in ends.items():
-        if end is None:
-            counts["unfinished"] += 1
-        elif previous is None:
+        counts["complete"] += 1
+        if previous is None:
             counts["unconfirmed start"] += 1
         else:
-            times[test] = max(1, (end - previous) // _MILLISECOND)
-        previous = end
-    counts["never reached"] = max(0, int(planned[1]) - len(ends))
+            times[name[2]] = max(1, (stamp - previous) // _MILLISECOND)
+        previous = stamp
+    counts["no usable line"] = max(0, int(planned[1]) - counts["complete"])
     return times, counts
 
 
@@ -106,7 +100,6 @@ def build(logs: list[pathlib.Path]) -> tuple[dict[str, object], collections.Coun
         except (OSError, ValueError) as error:
             raise SystemExit(f"shard_times: {log}: {error}") from None
         counts += found
-        counts["measured"] += len(times)
         for test, value in times.items():
             measured[test].append(value)
     if not measured:
@@ -135,12 +128,9 @@ def main(argv: list[str]) -> int:
     text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     out.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {out}: {len(data['times_ms'])} ids from {len(logs)} logs, default_ms {data['default_ms']}")
-    print(f"log entries measured: {counts['measured']}")
-    print(f"log entries skipped: {counts['unfinished']} unfinished, "
-          f"{counts['unconfirmed start']} dropped (unconfirmed start), "
-          f"{counts['repeated']} repeated in one log, "
-          f"{counts['never reached']} never reached")
-    print(f"result lines folded into their test: {counts['subtest lines']} subtest lines")
+    print(f"log entries complete: {counts['complete']}")
+    print(f"log entries skipped: {counts['no usable line']} with no usable line, "
+          f"{counts['unconfirmed start']} dropped (unconfirmed start)")
     minutes = predicted_minutes(out)
     print(f"predicted minutes for COUNT={PREDICTED_COUNT}: {' '.join(f'{m:.1f}' for m in minutes)}; "
           f"total {sum(minutes):.1f}")
