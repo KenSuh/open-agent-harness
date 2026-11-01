@@ -19,8 +19,9 @@ Summary
 Handoff
     Only when HEAD is not converged, `_handoff` adds what the next person needs: the latest receipt's head, its
     P0/P1 findings, the gates not met in the task's local ledgers (ids and states only, read structurally) and
-    one resume command. `_resume` asks the real gates which flags they need, so it keeps no copy of their rules,
-    and it records nothing. A converged summary has no handoff text and no `handoff` key.
+    one suggested next command. `_resume` asks the real gates which flags they need, so it keeps no copy of their
+    rules, but does not check the intent, packet or base state. It records nothing. A converged summary has no
+    handoff text and no `handoff` key.
 """
 from __future__ import annotations
 
@@ -368,7 +369,7 @@ class Summary:
         if self.convergence.converged:
             receipt = self.convergence.receipt
             return f"converged at head `{self.head[:12]}` ({receipt.name}, `{receipt.digest}`)"
-        return "not converged: " + self.convergence.reason
+        return "not converged: " + code_span(self.convergence.reason, 800)
 
     def gate_text(self) -> str:
         gates = self.gates
@@ -463,7 +464,7 @@ def _local_ledgers(worktree: pathlib.Path, task: str, declared: Sequence[str]) -
 
 def _resume(root: pathlib.Path, worktree: pathlib.Path, state: pathlib.Path, task: str, head: str,
             latest: receipts.Entry | None, binding: oah_intent.Binding | None, records: receipts.Records) -> dict:
-    """The command the gates let through now, found by asking them; `state` stays out, so nothing is recorded."""
+    """A suggested command with flags from the gates; no intent, packet or base check, and nothing is recorded."""
     from oah.review.runner import _lease, config_at
 
     stuck = {"command": None, "note": "repair what the status and history problems name, or the review settings, "
@@ -525,6 +526,8 @@ def _handoff(root: pathlib.Path, state: pathlib.Path, task: str, head: str, late
         worktree = pathlib.Path(lease.worktree)
     binding = lease.binding if lease else None
     resume = _resume(root, worktree, state, task, head, latest, binding, records)
+    resume["guidance"] = ("This is a suggestion, not checked against the intent, packet or base state. "
+                          "A refusal names the next step.")
     record = latest.record if latest else None
     return {"reviewed": {"receipt": latest.name, "round": record["round"], "head": record["head"],
                          "verdict": record["verdict"]} if latest else None,
@@ -570,7 +573,7 @@ def _handoff_text(block: Mapping | None) -> str:
                       *findings,
                       "- **Gates not met:** a structural reading of the local ledgers. Nothing was re-run and "
                       "evidence freshness was not checked, so a met box can still be stale",
-                      *gates, f"- **Resume:** {command}"])
+                      *gates, f"- **Suggested next command:** {command}. {resume['guidance']}"])
 
 
 def build(root: pathlib.Path, state: pathlib.Path, task: str, *, env: Mapping[str, str]) -> Summary:

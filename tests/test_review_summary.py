@@ -261,6 +261,20 @@ class SummaryTest(unittest.TestCase):
         data = json.loads(summary_cli(project, "--json").stdout)
         self.assertIn(f"R2.json approved head {old[:12]}, not HEAD {project.head[:12]}", data["status"]["reason"])
 
+    def test_not_converged_status_quotes_and_bounds_the_reason(self):
+        project = Project(self)
+        publish_receipt(project, 1, outcome="needs-decision")
+        summary = review_summary.build(project.repo, project.state, "t1", env=project.env)
+        reason = "R1.json stopped for a decision: @someone `reason`\n\n## injected"
+        for value in (reason, reason + "x" * 900):
+            with self.subTest(long=len(value) > 800):
+                status = dataclasses.replace(summary.convergence, reason=value)
+                changed = dataclasses.replace(summary, convergence=status)
+                flat = " ".join(value.split())
+                expected = flat if len(flat) <= 800 else flat[:799] + "…"
+                self.assertEqual(changed.status(), f"not converged: ``{expected}``")
+                self.assertIn(f"**Status:** not converged: ``{expected}``\n", changed.render())
+
     def test_task_lease_rebuilds_finished_lease_from_events(self):
         project = Project(self)
         store = Store(project.state)
@@ -358,6 +372,23 @@ class HandoffConvergedTest(unittest.TestCase):
 
 
 class HandoffResumeTest(unittest.TestCase):
+    def test_commands_are_suggestions_even_with_a_missing_packet(self):
+        guidance = ("This is a suggestion, not checked against the intent, packet or base state. "
+                    "A refusal names the next step.")
+        for outcome in ("needs-decision", "changes-requested"):
+            with self.subTest(outcome=outcome):
+                project = Project(self)
+                publish_receipt(project, 1, outcome=outcome, findings=(finding(1, severity="P1"),))
+                (project.repo / project.binding.source).unlink()
+                data = shown(project)
+                resume = data["handoff"]["resume"]
+                expected = (f"oah review --task t1 --base {project.base} {DECIDE}"
+                            if outcome == "needs-decision" else "oah fix --task t1")
+                self.assertEqual(resume["command"], expected)
+                self.assertEqual(resume["guidance"], guidance)
+                self.assertIn(f"**Suggested next command:** `{expected}`. {guidance}", handoff_text(data))
+                self.assertNotIn("**Resume:**", data["markdown"])
+
     def test_waiting_on_a_decision(self):
         project = Project(self)
         publish_receipt(project, 1, outcome="needs-decision", findings=(finding(1, severity="P1"),))
@@ -510,7 +541,7 @@ class HandoffResumeTest(unittest.TestCase):
             real_gate(project, decision="go on")  # a decision does not override invalid history
         data = shown(project)
         self.assertIsNone(data["handoff"]["resume"]["command"])
-        self.assertIn("**Resume:** no command", handoff_text(data))
+        self.assertIn("**Suggested next command:** no command", handoff_text(data))
 
     def test_missing_lease_prerequisites_print_no_resume_and_complete_binding_guidance(self):
         for lease_state in ("released", "expired", "unbound"):
@@ -543,7 +574,7 @@ class HandoffResumeTest(unittest.TestCase):
                     data = shown(project)
                     resume = data["handoff"]["resume"]
                     self.assertIsNone(resume["command"])
-                    self.assertIn("**Resume:** no command", handoff_text(data))
+                    self.assertIn("**Suggested next command:** no command", handoff_text(data))
                     self.assertIn("Prerequisite:", resume["note"])
                     guidance = resume["note"].split("`", 2)[1]
                     argv = shlex.split(guidance)[1:]
@@ -626,7 +657,7 @@ class HandoffFindingsTest(unittest.TestCase):
         self.assertNotIn("minor-marker", block)
         self.assertNotIn("trivial-marker", block)
 
-    def test_hostile_finding_ids_and_axes_cannot_escape_the_handoff_line(self):
+    def test_hostile_finding_ids_and_axes_cannot_escape_the_markdown(self):
         project = Project(self)
         hostile_id = "@someone [link](https://example.invalid) `id`\n\n## injected-id"
         hostile_axis = "@team [link](https://example.invalid) ``axis``\n\n## injected-axis"
@@ -640,10 +671,12 @@ class HandoffFindingsTest(unittest.TestCase):
         quoted_id = "``@someone [link](https://example.invalid) `id` ## injected-id``"
         quoted_axis = "```@team [link](https://example.invalid) ``axis`` ## injected-axis```"
         self.assertIn(f"  - {quoted_id} P1 {quoted_axis} `src/app.py:1` — `a follow-up`\n", block)
-        remainder = block.replace(quoted_id, "").replace(quoted_axis, "")
-        self.assertNotIn("@", remainder)
+        quoted_reason = "``" + " ".join(data["status"]["reason"].split()) + "``"
+        self.assertIn(f"**Status:** not converged: {quoted_reason}\n", data["markdown"])
+        remainder = data["markdown"].replace(quoted_reason, "").replace(quoted_id, "").replace(quoted_axis, "")
+        self.assertNotRegex(remainder, r"@(someone|team)\b")
         self.assertNotIn("[link]", remainder)
-        self.assertNotIn("\n## injected", block)
+        self.assertNotIn("\n## injected", data["markdown"])
 
     def test_no_blocking_finding_says_none(self):
         project = Project(self)
