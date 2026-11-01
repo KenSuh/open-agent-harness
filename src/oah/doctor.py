@@ -177,6 +177,20 @@ def mcp_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]
         return []
 
 
+def model_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]:
+    """Unpooled-model notices from the stored catalog and current config; no network or engine CLI calls."""
+    if root is None:
+        return []
+    from oah.call_cli import load_settings
+    from oah.models import Catalog
+    from oah.paths import repo_info, state_dir
+    from oah.routing import ENGINES
+
+    settings = load_settings(root)
+    return Catalog(state_dir(repo_info(root), env)).unpooled_notices(
+        {engine: settings.engines[engine]["tier_pools"] for engine in ENGINES})
+
+
 def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
     if not notices:
         return []
@@ -189,7 +203,19 @@ def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
     return lines
 
 
-def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = ()) -> str:
+def _model_lines(notices: Sequence[Mapping]) -> list[str]:
+    if not notices:
+        return []
+    lines = ["", "Listed models in no tier pool (from the stored catalog and current config; no network used):"]
+    for notice in notices:
+        checked = f" (checked {notice['date']})" if notice.get("date") else ""
+        lines.append(f"  {notice['message']}{checked}")
+    lines.append("      this includes every currently unpooled model, not only new ones")
+    return lines
+
+
+def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
+                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -207,18 +233,25 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
             lines.append(f"  {status.name}{optional}: {commands[0] if commands else 'see'}{alternatives}")
             lines.append(f"      {url}")
     lines += _mcp_lines(mcp_notices)
+    lines += _model_lines(model_notices)
+    if model_notices_error is not None:
+        lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
     lines += ["", "DOCTOR_OK" if missing_required == 0 else f"DOCTOR_MISSING required={missing_required}"]
     return "\n".join(lines)
 
 
-def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = ()) -> str:
+def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
+                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None) -> str:
     rows = []
     for status in statuses:
         commands, url = _install_texts(status.name, platform)
         rows.append(dict(dataclasses.asdict(status), install=commands, url=url))
     payload = {"ok": exit_code(statuses) == 0, "platform": platform, "tools": rows,
-               "mcp_notices": [dict(notice) for notice in mcp_notices]}
+               "mcp_notices": [dict(notice) for notice in mcp_notices],
+               "model_notices": [dict(notice) for notice in model_notices]}
+    if model_notices_error is not None:
+        payload["model_notices_error"] = model_notices_error
     return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
@@ -255,6 +288,13 @@ def doctor_main(*, json_output: bool) -> int:
     root = project_root(None)
     statuses = check_tools(search_path=None, env=os.environ, home=pathlib.Path.home(),
                            repo_root=root, platform=sys.platform)
-    notices = mcp_notices(root, os.environ)
-    print(render_json(statuses, sys.platform, notices) if json_output else render_text(statuses, sys.platform, notices))
+    mcp = mcp_notices(root, os.environ)
+    model_error = None
+    try:
+        models = model_notices(root, os.environ)
+    except Exception as exc:
+        models = []
+        model_error = type(exc).__name__
+    render = render_json if json_output else render_text
+    print(render(statuses, sys.platform, mcp, models, model_error))
     return exit_code(statuses)

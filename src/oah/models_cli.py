@@ -32,10 +32,12 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
         return {"error": str(exc)}
     entry = checked[1].entry
     section = settings.engines[engine]
+    unpooled = models.unpooled_models(entry, section["tier_pools"])
     report = {"cli_version": entry.cli_version, "checked_at": entry.checked_at, "source": entry.source,
               "refreshed": checked[1].refreshed, "warnings": list(checked[1].warnings),
               "models": [model.to_json() for model in entry.models], "allowed_models": list(section["allowed_models"]),
-              "effort_caps": dict(section["effort_caps"]), "tier_pools": dict(section["tier_pools"]), "tiers": {}}
+              "effort_caps": dict(section["effort_caps"]), "tier_pools": dict(section["tier_pools"]), "tiers": {},
+              "unpooled": unpooled}
     for tier in routing.TIERS:
         try:
             resolution = call.resolve_engine(engine, tier, settings, root=root, state_dir=state, env=os.environ,
@@ -58,6 +60,9 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
                                  "note": candidates.note,
                                  "candidates": [[item.model, item.effort] for item in candidates.pairs],
                                  "excluded": dict(candidates.excluded)}
+    # This report always names them: a launch does so only after a rebuild (call.check_catalog).
+    notices = [models.unpooled_warning(engine, name) for name in unpooled]
+    report["warnings"] += [notice for notice in notices if notice not in report["warnings"]]
     return report
 
 

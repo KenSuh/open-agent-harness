@@ -223,10 +223,18 @@ def _catalog(state_dir):
 
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
                   refresh: bool = False, now: dt.datetime | None = None) -> tuple[list[str], models.Freshness]:
-    """The engine's argv prefix and its catalog entry, after the freshness check that runs before every launch."""
+    """The engine's argv prefix and its catalog entry, after the freshness check that runs before every launch.
+
+    A rebuild warns about the listed models in no pool; this is the one place that decides when a
+    launch hears of them, so a launch that rebuilt nothing stays quiet."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
-    freshness = _catalog(state_dir).ensure_fresh(engine, base=base, env=env,
-                                                       ttl_hours=settings.models["ttl_hours"], refresh=refresh, now=now)
+    catalog = _catalog(state_dir)
+    freshness = catalog.ensure_fresh(engine, base=base, env=env, ttl_hours=settings.models["ttl_hours"],
+                                     refresh=refresh, now=now)
+    if freshness.refreshed:
+        unpooled = models.unpooled_models(freshness.entry, settings.engines[engine]["tier_pools"])
+        notices = [models.unpooled_warning(engine, name) for name in unpooled]
+        freshness = dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices))
     return base, freshness
 
 
