@@ -1,0 +1,16 @@
+# A control-flow-only comparison of two fake variants on the synthetic derived-index case.
+[[case]]
+path = "cases/derived-index"
+used_for_development = false
+
+[[variant]]
+name = "baseline"
+command = ["{python}", "fake_variant.py", "miss"]
+fake = true
+timeout_seconds = 120
+
+[[variant]]
+name = "improved"
+command = ["{python}", "fake_variant.py", "catch"]
+fake = true
+timeout_seconds = 120
