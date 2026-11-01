@@ -1,0 +1,15 @@
+# Expected answers for the derived-index case. Kept outside the case folder; only `oah eval prereg`
+# (to hash it) and `oah eval grade` read it.
+case = "derived-index"
+
+[[defect]]
+id = "D1"
+summary = "index.txt was not regenerated after words.txt changed"
+files = ["index.txt"]
+keywords = ["stale"]
+
+[[test]]
+id = "T1"
+summary = "the generated index matches the word list"
+command = ["{python}", "check_index.py"]
+timeout_seconds = 60

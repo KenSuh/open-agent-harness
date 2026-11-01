@@ -35,6 +35,15 @@ Candidates (amendment 6)
     `check_caps` warns about capped, allowed or pooled models the catalog does not list, and refuses
     when a fresh catalog lists none of the capped models.
 
+Unpooled notices
+    `unpooled_models` names the listed models in no `tier_pools` entry. `check_catalog` in `oah.call` is
+    the one place that decides when a launch hears of them: a rebuild adds
+    `OAH_MODEL_NEW_UNPOOLED` warnings, and any other launch stays quiet. `oah models` reports them every
+    time, and `oah doctor` computes them from the stored catalog and current pools. The rule compares
+    the catalog with the pools, not with an earlier catalog, so the first rebuild with pools configured
+    reports every unpooled model, not only new ones.
+    A notice is advice: oah never edits `tier_pools`, and the judge never picks such a model.
+
 Changes
     `Catalog.record_resolution` stores the last resolved model and effort per engine and tier in
     `resolved.json` and appends `{ts, engine, tier, field, old, new, why}` to `changes.jsonl` for each
@@ -44,10 +53,11 @@ from __future__ import annotations
 
 import datetime as dt
 import pathlib
+import re
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
-from oah.atomic import append_jsonl, read_json, write_json_atomic
+from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
 from oah.engines import claude, codex
 from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, rank
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
@@ -56,6 +66,10 @@ from oah.lockfile import StateLock
 DEFAULTS = {"ttl_hours": 24.0}
 PROBE_TIMEOUT = 30.0
 UNRESOLVED = "OAH_MODEL_UNRESOLVED"
+NEW_UNPOOLED = "OAH_MODEL_NEW_UNPOOLED"
+PLAIN_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+# A damaged catalog must not stop advisory notice lookup.
+_NOTICE_FAILURES = (StateCorrupt, OSError, TypeError, ValueError, RecursionError)
 
 
 @dataclass(frozen=True)
@@ -115,6 +129,17 @@ def utc_now() -> dt.datetime:
 
 def _iso(moment: dt.datetime) -> str:
     return moment.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _utc_date(text: object) -> str:
+    """The UTC date of a checked time, or empty when it is not a timestamp; the text itself is never shown."""
+    if not isinstance(text, str):
+        return ""
+    try:
+        moment = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return moment.astimezone(dt.timezone.utc).date().isoformat() if moment.utcoffset() is not None else ""
+    except (ValueError, OverflowError):
+        return ""
 
 
 def resolve_base(engine: str, command: Sequence[str], search_path: str | None = None) -> list[str]:
@@ -233,9 +258,23 @@ class Catalog:
         return changes
 
     def changes(self) -> list[dict]:
-        from oah.atomic import read_jsonl
-
         return read_jsonl(self.changes_path)
+
+    def unpooled_notices(self, pools: Mapping[str, Mapping[str, Sequence[str]]]) -> list[dict]:
+        """Notices from the stored catalog and current pools, dated by each entry's checked time."""
+        try:
+            notices = []
+            for engine, pool in sorted(pools.items()):
+                if engine not in ("claude", "codex"):
+                    continue
+                entry = self.load(engine)
+                for model in unpooled_models(entry, pool):
+                    notices.append({"code": NEW_UNPOOLED, "engine": engine, "model": model,
+                                    "date": _utc_date(entry.checked_at),
+                                    "message": unpooled_warning(engine, model)})
+            return notices
+        except _NOTICE_FAILURES:
+            return []
 
 
 def _by_tier(names: Sequence[str], tier: str) -> str:
@@ -397,11 +436,31 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
     return replace(rule, pairs=tuple(found), excluded=tuple(excluded))
 
 
+def _listed(entry: Entry | None) -> set[str]:
+    return {model.name for model in entry.models if model.listed} if entry else set()
+
+
+def unpooled_models(entry: Entry | None, pools: Mapping[str, Sequence[str]] | None) -> list[str]:
+    """The plain listed model names in no pool, sorted; nothing when no pools are configured.
+
+    Listed long ago or just now, both count: this compares with the pools, not with an earlier catalog."""
+    if not pools:
+        return []
+    pooled = {name for names in pools.values() for name in names}
+    return sorted(name for name in _listed(entry) - pooled if PLAIN_MODEL.fullmatch(name))
+
+
+def unpooled_warning(engine: str, model: str) -> str:
+    return (f"{NEW_UNPOOLED}: the {engine} CLI lists {model}, which is in no [engines.{engine}.tier_pools] entry, so "
+            f"the judge will not pick it. To qualify it, add the name to [engines.{engine}.tier_pools] in "
+            ".oah/config.toml; oah will not add it for you")
+
+
 def check_caps(engine: str, caps: Mapping[str, str], allowed: Sequence[str], entry: Entry | None, *,
                fresh: bool, pools: Mapping[str, Sequence[str]] | None = None) -> list[str]:
     """Warnings for capped, allowed or pooled models the catalog does not list; refuse when a fresh catalog lists
     none of the capped models."""
-    listed = {model.name for model in entry.models if model.listed} if entry else set()
+    listed = _listed(entry)
     warnings: list[str] = []
     unknown = sorted(name for name in caps if name not in listed)
     if unknown and fresh and len(unknown) == len(caps):
