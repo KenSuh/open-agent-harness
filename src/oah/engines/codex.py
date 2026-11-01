@@ -5,7 +5,8 @@ Lane P6 uses `build_command`, `resolve_effort` and `check_header` for review rou
 
 - `parse_models_cache(text)` reads `$CODEX_HOME/models_cache.json`: a `models` list whose entries carry
   `slug` and `supported_reasoning_levels` (objects with `effort`, or plain strings). An entry marked
-  `is_default` or `default` true is the CLI-reported default (A14).
+  `is_default` or `default` true is the CLI-reported default (A14). An entry whose `visibility` is
+  `hide` or `hidden`, or that has `hidden` true, is not listed: it is never a judged candidate.
 - `effective_model(launch_dir, codex_home)` resolves an empty tier model from Codex's configuration:
   `$CODEX_HOME/config.toml`, then `<launch_dir>/.codex/config.toml` (later wins), then the selected
   `profile`'s `[profiles.<name>]` model. `None` means nothing is configured.
@@ -39,6 +40,7 @@ class CachedModel:
     slug: str
     levels: tuple[str, ...]
     default: bool
+    listed: bool = True
 
 
 def codex_home(env: Mapping[str, str]) -> pathlib.Path:
@@ -73,7 +75,9 @@ def parse_models_cache(text: str) -> dict[str, CachedModel]:
         if not isinstance(slug, str) or not slug or slug in models:
             continue
         default = entry.get("is_default") is True or entry.get("default") is True
-        models[slug] = CachedModel(slug=slug, levels=_levels(entry.get("supported_reasoning_levels")), default=default)
+        listed = entry.get("visibility") not in ("hide", "hidden") and entry.get("hidden") is not True
+        models[slug] = CachedModel(slug=slug, levels=_levels(entry.get("supported_reasoning_levels")), default=default,
+                                   listed=listed)
     return models
 
 

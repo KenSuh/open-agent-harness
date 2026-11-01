@@ -5,21 +5,23 @@
 
 - **번들 스킬**은 `skills/<name>/` 에 들어 있다. 고정한 업스트림 커밋의 파일을 한 바이트도 바꾸지 않고 담으며,
   업스트림 라이선스 파일과 출처 기록 `UPSTREAM.json` 을 함께 둔다. 재배포를 허락하는 라이선스의 스킬만 번들한다.
-  **선택 사용** 항목은 `--all` 로 설치되지 않으며, 지정한 작업에만 고른다(예: 한국어 글에만 쓰는 `humanize-korean`).
+  **선택 사용** 항목은 `--all` 로 설치되지 않으며, 지정한 작업에만 고른다. **지역별** 항목은 한 언어를 위한
+  스킬이다(예: 한국어 글을 위한 `humanize-korean`, 표기 `regional: Korean`). 지역별 항목도 선택 사용이다.
 - **연결 항목**은 공식 설치 명령과 출처만 싣는다. 라이선스가 재배포를 허락하지 않거나, 고치지 않은 파일이
   이 저장소의 개인정보 검사를 통과하지 못하는 경우다.
 - **MCP 템플릿**(`mcp/`)은 Claude Code 나 Codex 에서 서버를 띄운다. 값은 절대 넣지 않고 `${NAME}` 자리표시자(Claude)나
   `env_vars` 이름(Codex)만 둔다. 키를 어디에 두는지는 `mcp/README.md` 에 있다.
+  템플릿마다 npm 버전을 고정하고, 갱신 검사는 더 새 버전이 있으면 알려 준다.
 
 ## 명령
 
 | 명령 | 하는 일 |
 |---|---|
-| `oah skills list` | 번들·캐시·연결·설치된 스킬을 버전이나 커밋, 출처, 라이선스, 위치와 함께 보여 준다. 읽기만 한다. |
+| `oah skills list` | 번들·캐시·연결·설치된 스킬을 버전이나 커밋, 출처, 라이선스, 위치, MCP 템플릿 핀과 함께 보여 준다. 읽기만 한다. |
 | `oah skills install <name>` | 번들 스킬을 이 프로젝트의 `.claude/skills/`, `.agents/skills/` 에 복사한다(`--target claude\|codex\|both`). 짧은 자체 리스 아래에서 하며 계획을 먼저 보여 준다. |
 | `oah skills install <name> --global` | 사용자 폴더 `~/.claude/skills/`, `~/.agents/skills/` 에 복사한다. 전역 파일이라 먼저 묻는다(`--yes` 로 동의). |
 | `oah skills install <연결 항목>` | 물어본 뒤 공식 설치 명령을 실행하거나, Claude Code 에 직접 입력할 단계를 알려 준다. |
-| `oah skills update` | 키트 캐시를 지금 갱신한다. `--check` 는 보고만 한다. |
+| `oah skills update` | 키트 캐시를 지금 갱신하고 MCP 템플릿 핀의 새 버전을 알려 준다. `--check` 는 보고만 한다. |
 | `oah skills update --project` | 이 프로젝트가 추적하는 스킬 사본을 자체 리스 작업으로 갱신한다. |
 | `oah skills update --global` | 확인을 받은 뒤 사용자 수준 사본을 갱신한다. |
 | `oah skills schedule install\|remove\|status` | 자동 검사를 위한 매일 실행 항목(macOS launchd, Windows 작업 스케줄러)을 동의를 받아 추가하거나 지운다. |
@@ -63,6 +65,14 @@
   Windows 장치 이름과 이식 가능한 경로의 충돌은 파일을 쓰기 전에 거부한다.
 - **실패하거나 수상한 갱신은 마지막 정상 사본을 지키고** 이유와 함께 보고한다. 교체가 실패하면 이전 사본을 되돌린다.
   모든 결과는 이전·새 커밋, 시각, 이유와 함께 oah 상태 폴더의 `toolkit/updates.jsonl` 에 남는다.
+- **MCP 템플릿 핀은 그대로 두고 알림만 보낸다.** `oah skills update`, `--check`, `--vendored`와 자동 검사는
+  카탈로그 MCP 항목마다 npm 레지스트리(`registry.npmjs.org`, 추가로 허용하는 네트워크 주소 하나)에 최신 버전을
+  묻는다. 스킬을 가져올 때와 같은 프록시 허용 규칙과 제한 시간을 쓴다. 새 버전이 있으면
+  `OAH_MCP_UPDATE_AVAILABLE <name> <pinned> -> <latest>`와 두 가지 할 일을 보여 준다. 사용자는 원할 때 자기 MCP
+  설정의 버전을 바꾸고, 키트 관리자는 템플릿과 카탈로그를 갱신한다. oah는 `mcp/`, 카탈로그, 사용자 MCP 설정을
+  고치지 않는다. 알림은 상태 폴더의 `toolkit/updates.jsonl`에 `notice` 상태와 이전·새 버전으로 기록한다.
+  `oah doctor`는 네트워크에 접속하지 않고 서버별 마지막 알림을 보여 준다. 일반 semver 버전만 출력하며 다른
+  응답은 `unused(registry error)`, 연결 실패는 `unused(offline)`으로 표시한다. 둘 다 명령을 실패시키지 않는다.
 - **키트 관리자는** 실제 키트 저장소의 로컬 설치에서 `oah skills update --vendored --yes` 를 실행한다.
   `skills/` 와 카탈로그에 자체 리스를 잡으므로 충돌하는 작업을 먼저 끝낸다.
 
@@ -78,7 +88,7 @@
 | `mattpocock-skills` | <https://github.com/mattpocock/skills> `skills` | `49dd158d1076` | MIT | vendor | `oah skills install mattpocock-skills` |
 | `codex-plugin-cc` | <https://github.com/openai/codex-plugin-cc> `plugins/codex` | `db52e28f4d9d` | Apache-2.0 | vendor | `oah skills install codex-plugin-cc` |
 | `ponytail` | <https://github.com/DietrichGebert/ponytail> `skills` | `2ed6c52c9d7e` | MIT | vendor | `oah skills install ponytail` |
-| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, 선택 사용 (다음 작업에만 고름: korean-prose) | `oah skills install humanize-korean` |
+| `humanize-korean` | <https://github.com/epoko77-ai/im-not-ai> `skills`, `scripts`, `agents`, `.claude-plugin` | `b37e0206d31f` | MIT | vendor, 선택 사용, regional: Korean (다음 작업에만 고름: korean-prose) | `oah skills install humanize-korean` |
 
 ## 연결 스킬·플러그인
 
@@ -96,10 +106,14 @@
 
 ## MCP 서버
 
+context7은 코딩 에이전트가 요청할 때 최신 라이브러리·프레임워크 문서를 제공한다. 문서는 context7 서비스에서
+오므로 최신 내용을 받는다. 템플릿이 고정하는 것은 서비스와 통신하는 작은 클라이언트 패키지뿐이며,
+`CONTEXT7_API_KEY`는 선택 사항이다. npm에 새 클라이언트가 나오면 `oah skills update`가
+`OAH_MCP_UPDATE_AVAILABLE`과 MCP 설정에서 바꿀 버전을 알려 준다. oah가 핀을 대신 고치지는 않는다.
+
 | 이름 | 출처 | 버전 | 라이선스 | 판정 | 설치 |
 |---|---|---|---|---|---|
 | `context7` | <https://github.com/upstash/context7> | `@upstash/context7-mcp@4.4.4` | MIT | template | `mcp/claude/context7.json`, `mcp/codex/context7.toml` |
-| `korean-law` | <https://github.com/chrisryugj/korean-law-mcp> | `korean-law-mcp@4.15.9` | MIT | template | `mcp/claude/korean-law.json`, `mcp/codex/korean-law.toml` |
 | `mcp-openai` | <https://github.com/mzxrai/mcp-openai> | `@mzxrai/mcp-openai@0.1.1` | MIT | template | `mcp/claude/mcp-openai.json`, `mcp/codex/mcp-openai.toml` |
 | `aside` | <https://aside.com/> | CLI 1.26.1010.1739 | LicenseRef-Proprietary | link | <https://aside.com/download> 에서 받은 뒤 `aside mcp` 로 등록한다 |
 | `openaiDeveloperDocs` | <https://developers.openai.com/mcp> | 호스팅 서비스 | NOASSERTION | link | `codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp` |

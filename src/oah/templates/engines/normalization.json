@@ -1,4 +1,38 @@
 {
-  "version": 1,
-  "rules": []
+  "version": 2,
+  "rules": [
+    {
+      "id": "codex-0.164.0-gpt-6.1",
+      "engine": "codex",
+      "match": "exact",
+      "cli_versions": ["0.164.0"],
+      "models": ["gpt-6.1-sol", "gpt-6.1-terra"],
+      "map": {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"},
+      "evidence": {
+        "kind": "public-source",
+        "repository": "openai/codex",
+        "tag": "rust-v0.164.0",
+        "commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
+        "references": [
+          "codex-rs/core/src/config/mod.rs:1039-1041",
+          "codex-rs/core/src/config/mod.rs:4596",
+          "codex-rs/core/src/session/mod.rs:895-901",
+          "codex-rs/exec/src/lib.rs:916-918",
+          "codex-rs/exec/src/lib.rs:1252-1259",
+          "codex-rs/core/src/session/reasoning_effort.rs:94-156",
+          "codex-rs/core/src/client.rs:957-976",
+          "codex-rs/protocol/src/openai_models/reasoning_effort.rs:9-39",
+          "codex-rs/protocol/src/openai_models.rs:77-93",
+          "codex-rs/protocol/src/openai_models.rs:124-131",
+          "codex-rs/codex-api/src/common.rs:157-183",
+          "codex-rs/codex-api/src/common.rs:278-291",
+          "codex-rs/exec/src/event_processor_with_human_output.rs:461-469",
+          "codex-rs/exec/src/event_processor_with_human_output.rs:220-226"
+        ],
+        "claim": "The configured model_reasoning_effort reaches the request through session settings and is serialized as reasoning.effort; low, medium, high, xhigh and max are sent as exactly those strings. The exec header line 'reasoning effort:' prints the configured label, not the wire value."
+      },
+      "assumptions": ["explicit-supported-effort", "fresh-codex-exec-session", "no-prior-runtime-effort-pin"],
+      "note": "Expected mapping from client source only; it says nothing about what the backend accepts or computes. ultra resolves to another effort and persistent becomes disabled, so both stay unmapped, as do none, minimal and custom labels. A same-model runtime effort pin, no explicit selection, a model change replacing an unsupported selection, or another step or context fall outside these assumptions."
+    }
+  ]
 }

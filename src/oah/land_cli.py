@@ -81,6 +81,10 @@ def register(commands: argparse._SubParsersAction) -> None:
     parser.add_argument("--offline", action="store_true",
                         help="do not fetch the default branch; landing then refuses with OAH_LAND_IMPACT_STALE, but "
                              "every other check still runs")
+    parser.add_argument("--accept-unverified-ci", metavar="REASON",
+                        help="land although CI is unverified (no gh, no CI results, or a required check missing) for "
+                             "this exact HEAD; the reason is recorded, CI is never shown as passed, and failed or "
+                             "pending CI still refuses")
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
 
 
@@ -104,6 +108,9 @@ def _check_lines(assessment: land.Assessment) -> list[str]:
         lines.append(f"{check.name}: {check.state}{code} — {check.message}")
         if check.name == "required-checks":
             lines += [f"  - {text}" for text in land._required_text(assessment.required)]
+    if assessment.land_policy and assessment.land_policy["changed"]:
+        lines.append("OAH_LAND_POLICY_CHANGED: HEAD's land policy differs from the fetched landing target; "
+                     "the target policy governs. Land policy changes separately, then run oah land again")
     return lines
 
 
@@ -112,8 +119,10 @@ def _where(assessment: land.Assessment) -> str:
 
 
 def _ci_note(assessment: land.Assessment) -> str:
-    ci = assessment.check("ci")
-    return " CI is unverified, not passed: read the ci line above." if ci.state == land.UNVERIFIED else ""
+    if assessment.code != land.READY_WITH_CI_EXCEPTION:
+        return ""
+    return (" CI is unverified, not passed: it lands under a recorded CI exception for this exact HEAD (read the ci "
+            "line above).")
 
 
 def _ready_message(assessment: land.Assessment) -> str:
@@ -176,13 +185,18 @@ def run(args: argparse.Namespace) -> int:
 
     if args.confirm is not None and not args.merge:
         return _done("OAH_USAGE", USAGE_MESSAGE, EXIT_USAGE, args.json)
+    if args.accept_unverified_ci is not None and not args.accept_unverified_ci.strip():
+        return _done("OAH_USAGE", "--accept-unverified-ci needs a non-empty reason, such as --accept-unverified-ci "
+                                  '"CI is not set up yet"; nothing was checked or pushed. Run oah land again with a '
+                                  "reason", EXIT_USAGE, args.json)
     env = dict(os.environ)
     mode = "merge" if args.merge else "check"
     try:
         with land._git_environment_scope(land._git_environment(env)):
             info = repo_info(pathlib.Path.cwd())
             state = state_dir(info, env)
-            assessment = land.assess(info.root, args.task, env=env, offline=args.offline)
+            assessment = land.assess(info.root, args.task, env=env, offline=args.offline,
+                                     accept_unverified_ci=args.accept_unverified_ci)
         if not args.json:
             print("\n".join(_check_lines(assessment)))
         if not assessment.ready:
@@ -192,7 +206,7 @@ def run(args: argparse.Namespace) -> int:
             return _done(failure.code, message, EXIT_REFUSED, args.json, assessment)
         if args.check:
             _record(state, assessment, mode, None)
-            return _done(land.READY, _ready_message(assessment), EXIT_OK, args.json, assessment)
+            return _done(assessment.code, _ready_message(assessment), EXIT_OK, args.json, assessment)
         refusal = _confirmation(args, assessment)
         if refusal is not None:
             pushed = land.Pushed(False, *refusal)

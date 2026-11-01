@@ -4,7 +4,7 @@
 - **Task:** $task
 - **Intent:** $intent
 - **Head:** $head
-- **Status:** $status
+- **Status:** $status$handoff
 
 | Round | Range | Verdict | Outcome | Independence | Effort | Reviewer | Receipt |
 |---|---|---|---|---|---|---|---|

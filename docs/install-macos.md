@@ -7,7 +7,7 @@ installs anything.
 
 There are two ways. Both run the same installer and ask the same questions.
 
-**From a clone (works now, while the repository is private).** You need `git` first. If
+**From a clone.** You need `git` first. If
 `git --version` fails, run `xcode-select --install` and finish the window that opens. Then:
 
 ```bash
@@ -16,30 +16,38 @@ cd open-agent-harness
 bash install/install.sh
 ```
 
-**With one command (once a release is published).** No clone and no `git` needed:
+**From the v0.1.0 release.** Open the repository’s release page and download the source archive of
+that tag and its `SHA256SUMS` file. Use the exact archive named in `SHA256SUMS`; do not substitute a
+different archive format. No clone is needed, but git is still one of oah’s required tools.
+
+Before unpacking, compute the archive’s SHA-256 (replace `<downloaded-archive>` with its filename).
 
 ```bash
-curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash
+shasum -a 256 "./<downloaded-archive>"
 ```
 
-Replace `<version>` with the release you want, as listed on the releases page
-(https://github.com/KenSuh/open-agent-harness/releases).
+Compare the full digest with that file’s entry in the release’s `SHA256SUMS` (hexadecimal letter case
+does not matter). **Refuse to unpack or run the installer unless they match.** If the digest differs
+or the entry is missing, stop and download the matching archive and checksum file again from the
+release page, or use a clone. After verification, unpack it, open a terminal in the extracted source
+folder and run the included installer.
 
-This form downloads the pinned release archive, checks its SHA-256 fingerprint against the one
-published with the release, and stops before unpacking anything if they differ
-(`OAH_INSTALL_DIGEST_MISMATCH`). Everything it unpacks goes to a temporary folder that is removed at
-the end. Until a release is published it stops with `OAH_INSTALL_NOT_PUBLISHED`; use the clone then.
-To pass options this way, write them after `bash -s --`, for example
-`curl -fsSL https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh | bash -s -- --dry-run`.
+```bash
+bash install/install.sh
+```
+
+The installer source documents this release link pattern:
+`https://github.com/KenSuh/open-agent-harness/releases/download/<version>/install.sh`.
+Find actual published files on the repository’s release page. Checkout copies still contain release-pin
+placeholders; the verified source-archive method above does not assume a standalone installer is published.
 
 ## 2. What the installer does
 
 To see every step first without changing anything, add `--dry-run`. The installer builds an ordered
 plan and only prints it: it does not start tools, probe versions, run guided setup or load profiles.
 The plan includes conditional commands because installed tools are checked only during a real run.
-A public dry run also prints the release download, SHA-256 check, extraction and cleanup; it creates
-no temporary folder and does not download or verify the archive. Run without `--dry-run` to execute
-the plan with consent. Actual release downloads and all redirects must use HTTPS.
+A dry run does not verify your manually downloaded archive; complete the checksum step above first.
+Run without `--dry-run` to execute the plan with consent. Actual release downloads and all redirects must use HTTPS.
 
 The installer goes through five steps.
 
@@ -96,7 +104,7 @@ an API key.
 | Codex CLI | required | `brew install --cask codex` or `npm install -g @openai/codex` |
 | uv | recommended | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | Node.js | recommended; required in a project that uses gates | `brew install node` |
-| unlazy | recommended (gates) | After lane P5 lands: `oah init --with-unlazy` at P5's contract-tested pin |
+| unlazy | recommended (gates) | `oah init --with-unlazy`, at the commit `oah`'s gates are tested with |
 | graphify | recommended | `uv tool install graphifyy` |
 | gh | recommended | `brew install gh` |
 | gitleaks | recommended | `brew install gitleaks` |
@@ -107,8 +115,9 @@ Commands that start with `brew` need [Homebrew](https://brew.sh). Without it, th
 tool's download page instead. `brew install node` installs the current Node.js release and puts it
 on your PATH; unlazy needs Node 16 or newer.
 
-Guided setup does not install unlazy in this lane. After P5 lands, use `oah init --with-unlazy`;
-it will verify the contract-tested commit and scripts digest before running gate commands.
+The installer does not install unlazy. `oah init --with-unlazy` does, inside your project: it installs
+the commit `oah`'s gates are tested with, and verifies that commit and its scripts digest before any gate
+command runs.
 
 `oah doctor` counts Node as required once your project uses gates: when it has
 `.oah/tasks/*/GATES.md` files, or a `[gates]` section in `.oah/config.toml` that does not say

@@ -3,6 +3,7 @@
 
 FAKE_CODEX_VERSION        version printed by --version (default 0.163.0)
 FAKE_CODEX_HEADER_EFFORT  effort printed in the header; "-" omits the line; unset echoes -c
+FAKE_CODEX_HEADER_MODEL   model printed in the header; "-" omits the line; unset echoes -m
 """
 from __future__ import annotations
 
@@ -41,8 +42,11 @@ def main(argv: list[str]) -> int:
         if match:
             effort = match.group(1)
     header = os.environ.get("FAKE_CODEX_HEADER_EFFORT", effort)
-    lines = ["OpenAI Codex v0.163.0 (fake)", "--------", f"workdir: {options.get('-C', '')}",
-             f"model: {options.get('-m', '')}", f"sandbox: {options.get('-s', '')}"]
+    model = os.environ.get("FAKE_CODEX_HEADER_MODEL", options.get("-m", ""))
+    lines = ["OpenAI Codex v0.163.0 (fake)", "--------", f"workdir: {options.get('-C', '')}"]
+    if model != "-":
+        lines.append(f"model: {model}")
+    lines.append(f"sandbox: {options.get('-s', '')}")
     if header != "-":
         lines.append(f"reasoning effort: {header}")
     lines.append("--------")
