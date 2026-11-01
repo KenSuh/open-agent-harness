@@ -3,10 +3,10 @@
 """Regenerate the shard weights from saved job logs: `python tools/shard_times.py OUT.json LOG [LOG ...]`.
 
 Each log is one job of `gh run view --log`: `job<TAB>step<TAB>TIMESTAMP text` lines from a run of
-`tools/test_shard.py ... -v`. A test's time runs from the previous test's end, or the `shard N/M: K tests` line, to
-its own result line, whether that result shares the name line or lands later because the test wrote output in
-between. Subtest results alone do not finish their parent: if it prints no final result, its end is confirmed at
-the next top-level test's name line or the normal run summary. An unconfirmed test has no value in that log.
+`tools/test_shard.py ... -v`. A test takes a value only when top-level results confirm both its start and its end:
+the previous test's own final result (or the `shard N/M: K tests` line for the first test), and its own final result.
+Subtest results, the next test's name and the run summary do not confirm an end. A test without a confirmed end
+and its successor get no value from that log; timing re-anchors at the successor's top-level result.
 
 A test's value is the median across the logs that have it, as integer milliseconds, at least 1. `default_ms` is the
 mean of those values rounded down. `source` names the runs from the log file names, without the `-w<N>` job suffix.
@@ -55,11 +55,8 @@ def parse_log(text: str) -> tuple[dict[str, int], collections.Counter]:
     counts: collections.Counter = collections.Counter()
     ends: dict[str, datetime.datetime | None] = {}
     current = None
-    subtest_result = False
     for stamp, body in lines:
         if _RAN.match(body):
-            if subtest_result:
-                ends[current] = stamp
             break
         if body.startswith("##[error]"):
             break
@@ -68,25 +65,21 @@ def parse_log(text: str) -> tuple[dict[str, int], collections.Counter]:
             continue  # `setUpClass (tests.module.Class) ... ERROR` names no test, so it ends none.
         if name and name[1]:
             counts["subtest lines"] += 1
-            if name[3] == current and _RESULT.search(body):
-                subtest_result = True
             continue
         if name:
-            if subtest_result:
-                ends[current] = stamp
-            subtest_result = False
             counts["repeated"] += name[3] != current and name[3] in ends
             current = name[3]
             ends.setdefault(current, None)
         if current is not None and _RESULT.search(body):
             ends[current] = stamp
-            subtest_result = False
     times = {}
     for test, end in ends.items():
         if end is None:
             counts["unfinished"] += 1
-            continue
-        times[test] = max(1, (end - previous) // _MILLISECOND)
+        elif previous is None:
+            counts["unconfirmed start"] += 1
+        else:
+            times[test] = max(1, (end - previous) // _MILLISECOND)
         previous = end
     counts["never reached"] = max(0, int(planned[1]) - len(ends))
     return times, counts
@@ -143,7 +136,9 @@ def main(argv: list[str]) -> int:
     out.write_text(text, encoding="utf-8", newline="\n")
     print(f"wrote {out}: {len(data['times_ms'])} ids from {len(logs)} logs, default_ms {data['default_ms']}")
     print(f"log entries measured: {counts['measured']}")
-    print(f"log entries skipped: {counts['unfinished']} unfinished, {counts['repeated']} repeated in one log, "
+    print(f"log entries skipped: {counts['unfinished']} unfinished, "
+          f"{counts['unconfirmed start']} dropped (unconfirmed start), "
+          f"{counts['repeated']} repeated in one log, "
           f"{counts['never reached']} never reached")
     print(f"result lines folded into their test: {counts['subtest lines']} subtest lines")
     minutes = predicted_minutes(out)

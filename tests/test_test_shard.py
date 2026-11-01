@@ -628,15 +628,16 @@ class GeneratorTest(unittest.TestCase):
     def test_each_result_shape_ends_its_test(self):
         times, counts = self.generator.parse_log(CANCELLED_LOG)
         self.assertEqual(times, {result_id("a"): 2500, result_id("b"): 2500, result_id("c"): 1000,
-                                 result_id("d"): 5000, result_id("e"): 1000, result_id("same"): 1})
-        self.assertEqual(counts["unfinished"], 1)
+                                 result_id("same"): 1})
+        self.assertEqual(counts["unfinished"], 2)
+        self.assertEqual(counts["unconfirmed start"], 1)
         self.assertEqual(counts["never reached"], 2)
         self.assertEqual(counts["subtest lines"], 1)
 
     def subtest_log(self, *, following_test=True, cancel=False):
         """Timestamp real verbose unittest output without sleeping for the simulated work."""
         seconds = 0
-        lines = [log_line("00:00.0000000", f"shard 1/5: {2 if following_test else 1} tests")]
+        lines = [log_line("00:00.0000000", f"shard 1/5: {3 if following_test else 1} tests")]
 
         class LogStream(io.StringIO):
             pending = ""
@@ -672,10 +673,13 @@ class GeneratorTest(unittest.TestCase):
 
             def test_b(self):
                 nonlocal seconds
-                print("starting next test", file=stream)
                 seconds += 4
 
-        suite = unittest.TestSuite([Case("test_a")] + ([Case("test_b")] if following_test else []))
+            def test_c(self):
+                nonlocal seconds
+                seconds += 7
+
+        suite = unittest.TestSuite([Case("test_a")] + ([Case("test_b"), Case("test_c")] if following_test else []))
         try:
             unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
         except KeyboardInterrupt:
@@ -683,19 +687,25 @@ class GeneratorTest(unittest.TestCase):
                                   "##[error]The operation was canceled."))
         return "\n".join(lines)
 
-    def test_skipped_subtest_waits_for_parent_completion(self):
+    def test_subtest_only_parent_and_quiet_successor_get_no_value(self):
         for following_test in (True, False):
             with self.subTest(following_test=following_test):
                 text = self.subtest_log(following_test=following_test)
                 self.assertIn(f"  {name_of('a')} (x=1) ... skipped 'no'", text)
                 self.assertNotIn(f"{name_of('a')} ... ok", text)
-                expected = {result_id("a"): 65000}
-                if following_test:
-                    expected[result_id("b")] = 4000
                 times, counts = self.generator.parse_log(text)
-                self.assertEqual(times, expected)
-                self.assertEqual(counts["unfinished"], 0)
+                self.assertNotIn(result_id("a"), times)
+                self.assertNotIn(result_id("b"), times)
+                self.assertEqual(counts["unfinished"], 1)
+                self.assertEqual(counts["unconfirmed start"], int(following_test))
                 self.assertEqual(counts["subtest lines"], 1)
+
+    def test_top_level_result_reanchors_after_an_unconfirmed_start(self):
+        text = self.subtest_log()
+        self.assertIn(log_line("01:09.0000000", f"{name_of('b')} ... ok"), text)
+        times, counts = self.generator.parse_log(text)
+        self.assertEqual(times, {result_id("c"): 7000})
+        self.assertEqual(counts["unconfirmed start"], 1)
 
     def test_cancelled_or_truncated_parent_after_skipped_subtest_is_unfinished(self):
         text = self.subtest_log(cancel=True)
@@ -704,7 +714,8 @@ class GeneratorTest(unittest.TestCase):
                 times, counts = self.generator.parse_log(log)
                 self.assertEqual(times, {})
                 self.assertEqual(counts["unfinished"], 1)
-                self.assertEqual(counts["never reached"], 1)
+                self.assertEqual(counts["unconfirmed start"], 0)
+                self.assertEqual(counts["never reached"], 2)
                 self.assertEqual(counts["subtest lines"], 1)
 
     def test_the_end_of_the_run_stops_the_log(self):
@@ -747,17 +758,18 @@ class GeneratorTest(unittest.TestCase):
             self.assertNotIn(b"\r", written)
             data = json.loads(written)
             self.assertEqual(data["times_ms"], {
-                result_id("a"): 2500, result_id("b"): 2000, result_id("c"): 1000, result_id("d"): 5000,
-                result_id("e"): 1000, result_id("same"): 1})
-            self.assertEqual(data["default_ms"], 11501 // 6)
+                result_id("a"): 2500, result_id("b"): 2000, result_id("c"): 1000, result_id("same"): 1})
+            self.assertEqual(data["default_ms"], 5501 // 4)
             self.assertEqual(written.decode("utf-8"),
                              json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
             self.assertIn("run1", data["source"])
             self.assertIn("run2", data["source"])
             self.assertNotIn("-w1", data["source"])
             self.assertNotIn(folder.name, data["source"])
-            self.assertIn("6 ids from 3 logs", result.stdout)
-            self.assertIn("1 unfinished", result.stdout)
+            self.assertIn("4 ids from 3 logs", result.stdout)
+            self.assertIn("log entries measured: 7", result.stdout)
+            self.assertIn("2 unfinished", result.stdout)
+            self.assertIn("1 dropped (unconfirmed start)", result.stdout)
             self.assertIn("2 never reached", result.stdout)
             self.assertIn("1 subtest lines", result.stdout)
 
