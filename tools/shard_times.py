@@ -4,9 +4,9 @@
 
 Each log is one job of `gh run view --log`: `job<TAB>step<TAB>TIMESTAMP text` lines from a run of
 `tools/test_shard.py ... -v`. A test's time runs from the previous test's end, or the `shard N/M: K tests` line, to
-its own last result line, whether that result shares the name line or lands later because the test wrote output in
-between. Subtests print their own result lines, and a test with a skipped subtest prints no other. A test with no
-result before the run ends has no value in that log.
+its own result line, whether that result shares the name line or lands later because the test wrote output in
+between. Subtest results alone do not finish their parent: if it prints no final result, its end is confirmed at
+the next top-level test's name line or the normal run summary. An unconfirmed test has no value in that log.
 
 A test's value is the median across the logs that have it, as integer milliseconds, at least 1. `default_ms` is the
 mean of those values rounded down. `source` names the runs from the log file names, without the `-w<N>` job suffix.
@@ -55,19 +55,32 @@ def parse_log(text: str) -> tuple[dict[str, int], collections.Counter]:
     counts: collections.Counter = collections.Counter()
     ends: dict[str, datetime.datetime | None] = {}
     current = None
+    subtest_result = False
     for stamp, body in lines:
-        if _RAN.match(body) or body.startswith("##[error]"):
+        if _RAN.match(body):
+            if subtest_result:
+                ends[current] = stamp
+            break
+        if body.startswith("##[error]"):
             break
         name = _NAME.match(body)
         if name and not name[3].endswith(f".{name[2]}"):
             continue  # `setUpClass (tests.module.Class) ... ERROR` names no test, so it ends none.
+        if name and name[1]:
+            counts["subtest lines"] += 1
+            if name[3] == current and _RESULT.search(body):
+                subtest_result = True
+            continue
         if name:
-            counts["subtest lines"] += bool(name[1])
+            if subtest_result:
+                ends[current] = stamp
+            subtest_result = False
             counts["repeated"] += name[3] != current and name[3] in ends
             current = name[3]
             ends.setdefault(current, None)
         if current is not None and _RESULT.search(body):
             ends[current] = stamp
+            subtest_result = False
     times = {}
     for test, end in ends.items():
         if end is None:

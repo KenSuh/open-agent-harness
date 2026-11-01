@@ -595,7 +595,6 @@ CANCELLED_LOG = "\n".join([
     log_line("00:16.0000000", f"{name_of('c')} ... skipped 'node is missing'"),
     log_line("00:17.0000000", f"{name_of('d')} ... "),
     log_line("00:18.0000000", f"  {name_of('d')} [first] ... skipped 'not here'"),
-    log_line("00:20.0000000", f"{name_of('d')} ... ok"),
     log_line("00:21.0000000", name_of("e")),
     log_line("00:22.0000000", "A docstring line ... FAIL"),
     log_line("00:22.0000000", f"{name_of('same')} ... ok"),
@@ -629,10 +628,84 @@ class GeneratorTest(unittest.TestCase):
     def test_each_result_shape_ends_its_test(self):
         times, counts = self.generator.parse_log(CANCELLED_LOG)
         self.assertEqual(times, {result_id("a"): 2500, result_id("b"): 2500, result_id("c"): 1000,
-                                 result_id("d"): 4000, result_id("e"): 2000, result_id("same"): 1})
+                                 result_id("d"): 5000, result_id("e"): 1000, result_id("same"): 1})
         self.assertEqual(counts["unfinished"], 1)
         self.assertEqual(counts["never reached"], 2)
         self.assertEqual(counts["subtest lines"], 1)
+
+    def subtest_log(self, *, following_test=True, cancel=False):
+        """Timestamp real verbose unittest output without sleeping for the simulated work."""
+        seconds = 0
+        lines = [log_line("00:00.0000000", f"shard 1/5: {2 if following_test else 1} tests")]
+
+        class LogStream(io.StringIO):
+            pending = ""
+
+            def write(self, text):
+                self.pending += text
+                while "\n" in self.pending:
+                    line, self.pending = self.pending.split("\n", 1)
+                    lines.append(log_line(f"{seconds // 60:02}:{seconds % 60:02}.0000000", line))
+                return len(text)
+
+        stream = LogStream()
+
+        def cleanup():
+            nonlocal seconds
+            seconds += 3
+
+        class Case(unittest.TestCase):
+            def __str__(self):
+                return name_of(self._testMethodName.removeprefix("test_"))
+
+            def test_a(self):
+                nonlocal seconds
+                seconds += 2
+                with self.subTest(x=1):
+                    self.skipTest("no")
+                with self.subTest(x=2):
+                    if cancel:
+                        seconds += 30
+                        raise KeyboardInterrupt
+                    seconds += 60
+                self.addCleanup(cleanup)
+
+            def test_b(self):
+                nonlocal seconds
+                print("starting next test", file=stream)
+                seconds += 4
+
+        suite = unittest.TestSuite([Case("test_a")] + ([Case("test_b")] if following_test else []))
+        try:
+            unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+        except KeyboardInterrupt:
+            lines.append(log_line(f"{seconds // 60:02}:{seconds % 60:02}.0000000",
+                                  "##[error]The operation was canceled."))
+        return "\n".join(lines)
+
+    def test_skipped_subtest_waits_for_parent_completion(self):
+        for following_test in (True, False):
+            with self.subTest(following_test=following_test):
+                text = self.subtest_log(following_test=following_test)
+                self.assertIn(f"  {name_of('a')} (x=1) ... skipped 'no'", text)
+                self.assertNotIn(f"{name_of('a')} ... ok", text)
+                expected = {result_id("a"): 65000}
+                if following_test:
+                    expected[result_id("b")] = 4000
+                times, counts = self.generator.parse_log(text)
+                self.assertEqual(times, expected)
+                self.assertEqual(counts["unfinished"], 0)
+                self.assertEqual(counts["subtest lines"], 1)
+
+    def test_cancelled_or_truncated_parent_after_skipped_subtest_is_unfinished(self):
+        text = self.subtest_log(cancel=True)
+        for log in (text, text.rsplit("\n", 1)[0]):
+            with self.subTest(cancel_marker="##[error]" in log):
+                times, counts = self.generator.parse_log(log)
+                self.assertEqual(times, {})
+                self.assertEqual(counts["unfinished"], 1)
+                self.assertEqual(counts["never reached"], 1)
+                self.assertEqual(counts["subtest lines"], 1)
 
     def test_the_end_of_the_run_stops_the_log(self):
         times, counts = self.generator.parse_log(FINISHED_LOG)
@@ -674,8 +747,8 @@ class GeneratorTest(unittest.TestCase):
             self.assertNotIn(b"\r", written)
             data = json.loads(written)
             self.assertEqual(data["times_ms"], {
-                result_id("a"): 2500, result_id("b"): 2000, result_id("c"): 1000, result_id("d"): 4000,
-                result_id("e"): 2000, result_id("same"): 1})
+                result_id("a"): 2500, result_id("b"): 2000, result_id("c"): 1000, result_id("d"): 5000,
+                result_id("e"): 1000, result_id("same"): 1})
             self.assertEqual(data["default_ms"], 11501 // 6)
             self.assertEqual(written.decode("utf-8"),
                              json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
