@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 `-ExecutionPolicy Bypass`는 이번 실행에만 적용되고 시스템 설정은 바뀌지 않는다. 원하면
 `Unblock-File .\install\install.ps1`을 한 번 실행한 뒤 평소 정책으로 실행해도 된다.
 
-**v0.1.0 릴리스에서 설치한다.** 저장소의 릴리스 페이지에서 해당 태그의 소스 압축 파일과 `SHA256SUMS`를
+**v0.2.0 릴리스에서 설치한다.** 저장소의 릴리스 페이지에서 해당 태그의 소스 압축 파일과 `SHA256SUMS`를
 받는다. `SHA256SUMS`에 적힌 정확한 파일을 쓰고 다른 압축 형식으로 바꾸지 않는다. 클론은 필요 없지만 git은
 여전히 oah의 필수 도구다.
 

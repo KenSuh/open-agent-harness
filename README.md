@@ -75,7 +75,7 @@ says, and a review has no rule for when it is finished. `oah` gives both engines
 not replace Claude Code or Codex: it drives them and keeps the records that make their work trustworthy.
 
 > [!NOTE]
-> **v0.1.0 is the first release.** It is for developers fluent with git and pull requests, on macOS and
+> **v0.2.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
 > native Windows. Linux is not yet supported.
 
 ## Contents
@@ -98,21 +98,7 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 
 ## Roadmap
 
-Nothing below is **available in v0.1.0** yet. Plans can change as the tools change.
-
-### v0.2.0: reviews and evidence you can hand off
-
-On `main`, waiting for the release:
-
-- Jev chooses the model and effort for each call within the tier pools you allow.
-- A review budget covers the whole task, with ways to stop, resume and increase it.
-- A not-converged review summary shows what is left: the last reviewed head, P0 and P1 findings, gates not met and
-  a suggested next command.
-
-In review:
-
-- Impact reports say which scope was analysed and which was not, with conservative fallback checks.
-- Reproducible evaluations of real cases use hidden expected answers (`oah eval`).
+Nothing below is **available in v0.2.0** yet. Plans can change as the tools change.
 
 ### v0.3.0: model choices you can check
 
@@ -226,7 +212,7 @@ are optional. Each part is explained in [Concepts](docs/concepts.md).
 
 One command per OS installs `oah`. It asks before it installs any missing tool, shows the official command
 for each one, and never sees your passwords or keys. To install from a clone, run the commands below.
-For v0.1.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
+For v0.2.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
 page. Refuse to unpack it unless its SHA-256 matches that archive’s digest in `SHA256SUMS`; then run the
 included installer. The OS guides below show how to check it.
 
@@ -254,7 +240,7 @@ Then open a new terminal and check:
 
 ```console
 $ oah --version
-oah 0.1.0
+oah 0.2.0
 ```
 
 ## First run
@@ -349,6 +335,7 @@ refusal.
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |
 | `oah impact` | Lists what to re-check when files or database objects change. |
+| `oah eval` | Replays real cases with hidden expected answers and reports each variant, with its limits. |
 | `oah graph` | Uses the graphify knowledge graph when graphify is installed. |
 | `oah review` | Runs one Codex review round and records its receipt; `review summary` prints a block for the pull request. |
 | `oah fix` | Has Codex correct the latest review's findings, then binds the committed correction. |
@@ -511,26 +498,12 @@ AI 코딩 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 �
 Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을 수 있게 하는 기록을 남긴다.
 
 > [!NOTE]
-> **v0.1.0은 첫 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
+> **v0.2.0은 현재 릴리스다.** git과 pull request에 익숙한 개발자를 위한 버전이며 macOS와 네이티브 Windows를
 > 지원한다. Linux는 아직 지원하지 않는다.
 
 ### 로드맵
 
-아래 내용은 모두 **v0.1.0에서는 아직 쓸 수 없다**. 도구가 바뀌면 계획도 바뀔 수 있다.
-
-#### v0.2.0: 넘겨받을 수 있는 리뷰와 증거
-
-다음 세 기능은 `main`에 병합되어 릴리스를 기다리고 있다.
-
-- 호출마다 사용자가 허용한 tier별 후보 안에서 Jev가 모델과 추론 강도를 고른다.
-- 작업 전체의 리뷰 예산을 두고 멈추기, 이어 하기, 늘리기를 제공한다.
-- 수렴하지 않은 리뷰 요약이 남은 일을 보여 준다. 마지막으로 리뷰한 head, P0/P1 지적, 충족하지 못한 게이트, 다음
-  명령 제안이 들어간다.
-
-다음 두 기능은 아직 리뷰 중이다.
-
-- 영향 보고서가 분석한 범위와 분석하지 못한 범위를 밝히고 보수적인 대체 검사를 제시한다.
-- 정답을 숨긴 실제 사례 평가를 재현할 수 있게 한다(`oah eval`).
+아래 내용은 모두 **v0.2.0에서는 아직 쓸 수 없다**. 도구가 바뀌면 계획도 바뀔 수 있다.
 
 #### v0.3.0: 확인할 수 있는 모델 선택
 
@@ -642,7 +615,7 @@ flowchart LR
 ### 설치
 
 OS마다 명령 하나로 `oah`를 설치한다. 빠진 도구는 설치하기 전에 묻고 도구마다 공식 명령을 보여 주며, 사용자의
-비밀번호나 키는 보지 않는다. 클론에서 설치하려면 아래 명령을 실행한다. v0.1.0은 저장소의 릴리스 페이지에서
+비밀번호나 키는 보지 않는다. 클론에서 설치하려면 아래 명령을 실행한다. v0.2.0은 저장소의 릴리스 페이지에서
 태그의 소스 압축 파일과 `SHA256SUMS`를 받는 방법도 있다. 압축 파일의 SHA-256이 `SHA256SUMS`의 해당 파일
 지문과 일치할 때만 풀고 안의 설치 프로그램을 실행한다. 확인 방법은 아래 OS별 안내에 있다.
 
@@ -671,7 +644,7 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 
 ```console
 $ oah --version
-oah 0.1.0
+oah 0.2.0
 ```
 
 ### 처음 실행하기
@@ -738,6 +711,7 @@ CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스
 | `oah check` | 게이트 CHECK 줄에 쓰는 운영체제 공통 검사. |
 | `oah wiki` | 프로젝트 위키의 링크와 출처, 정리 상태를 관리한다. |
 | `oah impact` | 파일이나 데이터베이스 객체가 바뀔 때 다시 확인할 것을 알려 준다. |
+| `oah eval` | 정답을 숨긴 실제 사례를 재현하고 변형별 결과를 한계와 함께 보여 준다. |
 | `oah graph` | graphify가 있으면 그 지식 그래프를 쓴다. |
 | `oah review` | Codex 리뷰 라운드를 하나 돌리고 영수증을 남긴다. `review summary`는 pull request에 붙일 블록을 출력한다. |
 | `oah fix` | 최근 리뷰의 지적을 Codex가 고치게 하고, 커밋한 수정을 기록에 묶는다. |

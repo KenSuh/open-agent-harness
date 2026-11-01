@@ -142,6 +142,12 @@ stateDiagram-v2
   짐작하지 않고 `OAH_EFFORT_METADATA_MISSING`으로 거절한다.
 - **강도는 검증하고 몰래 낮추지 않는다.** Codex 헤더가 요청보다 낮은 강도를 보고하면 실행은
   `OAH_EFFORT_DOWNGRADED`로 실패한다. Claude Code처럼 관측할 수 없는 강도는 `unverified`로 기록한다.
+- **tier 후보는 선택 사항이다.** `.oah/config.toml`의 `[engines.<engine>.tier_pools]`에 tier마다 허용할 모델을
+  적는다. 예를 들면 `high = ["model-a", "model-b"]`다. 모델은 호출의 tier와 그 하한 tier 양쪽 후보에 모두 있어야
+  고를 수 있다. `quality_order`가 모델 순위를 정하지 않으면 TypeSafe Jev가 그 안에서 모델과 강도를 고를 수 있다.
+  Jev를 쓰지 않으면 규칙이 고른 선택으로 실행한다. CLI가 보여 주는 모델이 어느 후보에도 없으면 `oah models`,
+  `oah doctor`, 카탈로그를 다시 읽은 실행이 `OAH_MODEL_NEW_UNPOOLED`로 알려 준다. `oah`가 후보를 대신 고치지는
+  않는다.
 - 실행 기록마다 네 축, tier와 그 출처(`rules`, `packet`, `flag`), 요청한 모델과 강도, 실제로 쓴 모델과 강도가 남는다.
 
 선택 기능인 TypeSafe Jev 재정렬기가 tier에 의견을 더할 수 있다. 의견은 규칙 결과 옆에 기록되고 tier를 낮추지는
