@@ -22,12 +22,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
-        # tools/test_shard.py splits the discovered suite by test method, balanced by test count, so the methods of
-        # one class are dealt over all shards and no single class can outgrow a shard.
+        # tools/test_shard.py splits the discovered suite by test method, balanced by the measured times in
+        # tools/test_shard_times.json, so the methods of one class land apart and no single class can outgrow a shard.
         shard: [1, 2, 3, 4, 5]
     runs-on: ${{ matrix.os }}
-    # Shards are balanced by test count, not time. A slow shard is answered by the method-level split above,
-    # not by a higher limit or more shards.
+    # Shards are balanced by measured time; tools/shard_times.py refreshes the data from saved job logs. A slow
+    # shard is answered by that split and fresh data, not by a higher limit or more shards.
     timeout-minutes: 45
     steps:
       # Test the PR head itself; GitHub's temporary merge commit carries an identity we do not control.
