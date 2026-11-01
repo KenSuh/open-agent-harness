@@ -464,10 +464,19 @@ def _local_ledgers(worktree: pathlib.Path, task: str, declared: Sequence[str]) -
 def _resume(root: pathlib.Path, worktree: pathlib.Path, state: pathlib.Path, task: str, head: str,
             latest: receipts.Entry | None, binding: oah_intent.Binding | None, records: receipts.Records) -> dict:
     """The command the gates let through now, found by asking them; `state` stays out, so nothing is recorded."""
-    from oah.review.runner import config_at
+    from oah.review.runner import _lease, config_at
 
     stuck = {"command": None, "note": "repair what the status and history problems name, or the review settings, "
                                       "first"}
+    try:
+        _lease(state, task)
+    except ReviewError:
+        return {"command": None, "note": "Prerequisite: accept the packet, then start or bind an active lease in "
+                f'the task\'s worktree with `oah start --task {task} --agent "<you>" '
+                f'--packet ".oah/tasks/{task}/PACKET.md"` (replace the agent placeholder with the lease holder '
+                "and use your accepted packet's path). Run the summary again after binding"}
+    except (StateCorrupt, OSError, ValueError):
+        return stuck
     if latest is None:
         return stuck
     flags: dict = {"decision": None, "extra_round": False, "extra_attempt": False}
@@ -501,8 +510,7 @@ def _resume(root: pathlib.Path, worktree: pathlib.Path, state: pathlib.Path, tas
                 flags[flag] = _DECISION if flag == "decision" else True
     except (ReviewError, ConfigError, StateCorrupt, OSError):
         return stuck
-    command = [f"oah review --task {task}"]
-    command += [f"--base {base}"] if flags["extra_attempt"] else []  # the gate's own wording: the count is per base
+    command = [f"oah review --task {task} --base {base}"]
     command += ["--extra-round"] if flags["extra_round"] else []
     command += ["--extra-attempt"] if flags["extra_attempt"] else []
     command += [f'--decision "{_DECISION}"'] if flags["decision"] else []
@@ -517,11 +525,6 @@ def _handoff(root: pathlib.Path, state: pathlib.Path, task: str, head: str, late
         worktree = pathlib.Path(lease.worktree)
     binding = lease.binding if lease else None
     resume = _resume(root, worktree, state, task, head, latest, binding, records)
-    active = any(held.task == task and not stale and _binding(held.intent) is not None
-                 for held, stale in Store(state).snapshot())
-    if not active:
-        first = f"this task has no active bound lease, so bind one with oah start --task {task} first"
-        resume["note"] = f"{first}. {resume['note']}" if resume["note"] else first
     record = latest.record if latest else None
     return {"reviewed": {"receipt": latest.name, "round": record["round"], "head": record["head"],
                          "verdict": record["verdict"]} if latest else None,
@@ -554,7 +557,8 @@ def _handoff_text(block: Mapping | None) -> str:
     if block["head_moved"]:
         last += f". HEAD is `{block['head']}`, a different commit"
     source = f"the latest receipt ({reviewed['receipt']})" if reviewed else "the latest receipt"
-    findings = [f"  - {_finding_line(item)}" for item in block["findings"]] or ["  - none"]
+    findings = ["  - " + _finding_line({**item, "finding_id": code_span(item["finding_id"]),
+                                      "axis": code_span(item["axis"])}) for item in block["findings"]] or ["  - none"]
     ledgers = block["gates"]["ledgers"]
     gates = [f"  - {_ledger_line(item, len(ledgers) > 1)}" for item in ledgers]
     resume = block["resume"]

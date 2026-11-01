@@ -13,7 +13,7 @@ import unittest
 from oah.cli import build_parser
 from oah.gates import summary as gate_summary
 from oah.lease import Store
-from oah.review import ReviewError, receipts, rounds, runner
+from oah.review import ReviewError, context, receipts, rounds, runner
 from oah.review import settings as review_settings
 from oah.review import summary as review_summary
 from tests.fixtures.gates.support import run_cli
@@ -321,11 +321,13 @@ def real_gate(project, *, base: str | None = None, decision: str | None = None, 
 
 
 def run_printed_review(project, command: str):
-    """Parse the printed command with the real CLI parser, then hand exactly those flags to the real gate."""
+    """Parse the command and resolve its actual range before handing its flags to the real gate."""
     args = build_parser().parse_args(shlex.split(command)[1:])
     if args.command != "review" or args.task != "t1":
         raise AssertionError(command)
-    return real_gate(project, base=args.base, decision=args.decision, extra_round=args.extra_round,
+    remote, branch = runner._base_settings(runner.load_config(project.repo))
+    span = context.resolve(project.repo, args.base, remote=remote, branch=branch)
+    return real_gate(project, base=span.base, decision=args.decision, extra_round=args.extra_round,
                      extra_attempt=args.extra_attempt)
 
 
@@ -363,7 +365,7 @@ class HandoffResumeTest(unittest.TestCase):
             real_gate(project)
         self.assertEqual(caught.exception.code, rounds.NEEDS_DECISION)
         resume = shown(project)["handoff"]["resume"]
-        self.assertEqual(resume["command"], f"oah review --task t1 {DECIDE}")
+        self.assertEqual(resume["command"], f"oah review --task t1 --base {project.base} {DECIDE}")
         self.assertIsNone(run_printed_review(project, resume["command"]))
 
     def test_requested_changes_prints_fix_and_fix_passes_its_gate(self):
@@ -386,7 +388,7 @@ class HandoffResumeTest(unittest.TestCase):
             real_gate(project)
         self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
         command = shown(project)["handoff"]["resume"]["command"]
-        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-round")
         self.assertIsNone(run_printed_review(project, command))
 
     def test_a_limit_saved_only_in_the_task_log_still_counts(self):
@@ -395,7 +397,7 @@ class HandoffResumeTest(unittest.TestCase):
         project.commit({"src/app.py": "print('v2')\n"})
         receipts.log_round(project.state, "t1", {"event": "limit", "max_rounds": 1})
         command = shown(project)["handoff"]["resume"]["command"]
-        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-round")
         self.assertIsNone(run_printed_review(project, command))
 
     def test_requested_changes_at_the_limit_prints_a_command_that_passes(self):
@@ -408,7 +410,7 @@ class HandoffResumeTest(unittest.TestCase):
             real_gate(project, extra_round=True)
         self.assertEqual(caught.exception.code, rounds.NEEDS_DECISION)  # and --extra-round alone is not enough
         resume = shown(project)["handoff"]["resume"]
-        self.assertEqual(resume["command"], f"oah review --task t1 --extra-round {DECIDE}")
+        self.assertEqual(resume["command"], f"oah review --task t1 --base {project.base} --extra-round {DECIDE}")
         self.assertIn("oah fix is refused at the round limit", resume["note"])
         self.assertIn("oah fix --manual --engine claude|human --task t1", resume["note"])
         self.assertIsNone(run_printed_review(project, resume["command"]))
@@ -418,7 +420,7 @@ class HandoffResumeTest(unittest.TestCase):
         publish_receipt(project, 1, outcome="changes-requested", findings=(finding(1, severity="P1"),))
         project.correct(1)
         command = shown(project)["handoff"]["resume"]["command"]
-        self.assertEqual(command, "oah review --task t1 --extra-round")
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-round")
         self.assertIsNone(run_printed_review(project, command))
 
     def test_decision_stop_at_the_limit_prints_both_flags(self):
@@ -428,7 +430,7 @@ class HandoffResumeTest(unittest.TestCase):
             real_gate(project, decision="go on")
         self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
         command = shown(project)["handoff"]["resume"]["command"]
-        self.assertEqual(command, f"oah review --task t1 --extra-round {DECIDE}")
+        self.assertEqual(command, f"oah review --task t1 --base {project.base} --extra-round {DECIDE}")
         self.assertIsNone(run_printed_review(project, command))
 
     def test_out_of_attempts_prints_extra_attempt_with_the_base(self):
@@ -469,7 +471,33 @@ class HandoffResumeTest(unittest.TestCase):
         publish_receipt(project, 1)
         project.commit({"src/app.py": "print('v2')\n"})
         command = shown(project)["handoff"]["resume"]["command"]
-        self.assertEqual(command, "oah review --task t1")
+        self.assertEqual(command, f"oah review --task t1 --base {project.base}")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_last_explicit_base_is_kept_when_default_attempts_are_exhausted(self):
+        project = Project(self)
+        publish_receipt(project, 1)
+        newer = project.head
+        project.commit({"src/app.py": "print('v2')\n"})
+        spent_start(project)
+        spent_start(project, attempt=2)
+        spent_start(project, base=newer, series_round=1)
+        with self.assertRaises(ReviewError) as caught:
+            run_printed_review(project, "oah review --task t1")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ATTEMPTS_EXHAUSTED")
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --base {newer}")
+        self.assertIsNone(run_printed_review(project, command))
+
+    def test_explicit_base_is_kept_when_default_resolution_is_unavailable(self):
+        project = Project(self, config='[preflight]\ndefault_branch = "unavailable"\n')
+        publish_receipt(project, 1)
+        project.commit({"src/app.py": "print('v2')\n"})
+        with self.assertRaises(ReviewError) as caught:
+            run_printed_review(project, "oah review --task t1")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_BASE_INVALID")
+        command = shown(project)["handoff"]["resume"]["command"]
+        self.assertEqual(command, f"oah review --task t1 --base {project.base}")
         self.assertIsNone(run_printed_review(project, command))
 
     def test_broken_history_prints_no_command(self):
@@ -484,16 +512,54 @@ class HandoffResumeTest(unittest.TestCase):
         self.assertIsNone(data["handoff"]["resume"]["command"])
         self.assertIn("**Resume:** no command", handoff_text(data))
 
-    def test_a_task_without_an_active_lease_is_told_to_start_first(self):
-        project = Project(self)
-        publish_receipt(project, 1)
-        project.commit({"src/app.py": "print('v2')\n"})
-        done = run_cli(["release", "--task", "t1", "--agent", "claude", "--reason", "stopped"], cwd=project.repo,
-                       env=project.env)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        resume = shown(project)["handoff"]["resume"]
-        self.assertEqual(resume["command"], "oah review --task t1")
-        self.assertIn("oah start", resume["note"])
+    def test_missing_lease_prerequisites_print_no_resume_and_complete_binding_guidance(self):
+        for lease_state in ("released", "expired", "unbound"):
+            for outcome in ("converged", "changes-requested"):
+                with self.subTest(lease=lease_state, outcome=outcome):
+                    project = Project(self)
+                    publish_receipt(project, 1, outcome=outcome,
+                                    findings=(finding(1, severity="P1"),) if outcome == "changes-requested" else ())
+                    packet = (project.repo / project.binding.source).read_text(encoding="utf-8")
+                    project.commit({"src/app.py": "print('v2')\n",
+                                    project.binding.source: packet + "\n## Plan\n\n## Acceptance\n\n## Return\n"})
+                    agent = project.lease.agent
+                    if lease_state == "expired":
+                        path = Store(project.state).leases_path
+                        data = json.loads(path.read_text(encoding="utf-8"))
+                        data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
+                        path.write_text(json.dumps(data), encoding="utf-8")
+                    else:
+                        done = run_cli(["release", "--task", "t1", "--agent", agent, "--reason", "stopped"],
+                                       cwd=project.repo, env=project.env)
+                        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                        if lease_state == "unbound":
+                            done = run_cli(["start", "--task", "t1", "--agent", agent, "--scope", "src"],
+                                           cwd=project.repo, env=project.env)
+                            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    for command in ("review", "fix"):
+                        done = run_cli([command, "--task", "t1"], cwd=project.repo, env=project.env)
+                        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+                        self.assertIn("OAH_INTENT_NOT_CURRENT", done.stderr)
+                    data = shown(project)
+                    resume = data["handoff"]["resume"]
+                    self.assertIsNone(resume["command"])
+                    self.assertIn("**Resume:** no command", handoff_text(data))
+                    self.assertIn("Prerequisite:", resume["note"])
+                    guidance = resume["note"].split("`", 2)[1]
+                    argv = shlex.split(guidance)[1:]
+                    args = build_parser().parse_args(argv)
+                    self.assertEqual((args.command, args.task, args.agent, args.packet),
+                                     ("start", "t1", "<you>", ".oah/tasks/t1/PACKET.md"))
+                    argv[argv.index("--agent") + 1] = agent
+                    done = run_cli(argv, cwd=project.repo, env=project.env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    runner._check_intent(project.repo, runner._lease(project.state, "t1"))
+                    resumed = shown(project)["handoff"]["resume"]["command"]
+                    if outcome == "converged":
+                        self.assertIsNone(run_printed_review(project, resumed))
+                    else:
+                        self.assertEqual(resumed, "oah fix --task t1")
+                        rounds.dispatch_gate(project.state, "t1", project.repo, stage="correction")
 
     def test_summary_records_nothing(self):
         project = Project(self, config=LIMIT)
@@ -501,7 +567,8 @@ class HandoffResumeTest(unittest.TestCase):
         project.commit({"src/app.py": "print('v2')\n"})
         log = project.folder() / receipts.ROUNDS_NAME
         self.assertFalse(log.exists())
-        self.assertEqual(shown(project)["handoff"]["resume"]["command"], "oah review --task t1 --extra-round")
+        self.assertEqual(shown(project)["handoff"]["resume"]["command"],
+                         f"oah review --task t1 --base {project.base} --extra-round")
         self.assertFalse(log.exists())  # a newly seen limit is recorded only by the gates that dispatch
 
 
@@ -552,12 +619,31 @@ class HandoffFindingsTest(unittest.TestCase):
         self.assertEqual([(item["finding_id"], item["severity"]) for item in data["handoff"]["findings"]],
                          [("R1-F1", "P0"), ("R1-F2", "P1")])
         block = handoff_text(data)
-        self.assertIn("- R1-F1 P0 security `src/a|b.py:2 @x` — ``ping @someone about `x` | and more``", block)
-        self.assertIn("- R1-F2 P1 tests `src/app.py:1` — `second`", block)
+        self.assertIn("- `R1-F1` P0 `security` `src/a|b.py:2 @x` — ``ping @someone about `x` | and more``", block)
+        self.assertIn("- `R1-F2` P1 `tests` `src/app.py:1` — `second`", block)
         self.assertIn("latest receipt (R1.json)", block)
         self.assertNotRegex(block.lower(), r"\bopen\b")
         self.assertNotIn("minor-marker", block)
         self.assertNotIn("trivial-marker", block)
+
+    def test_hostile_finding_ids_and_axes_cannot_escape_the_handoff_line(self):
+        project = Project(self)
+        hostile_id = "@someone [link](https://example.invalid) `id`\n\n## injected-id"
+        hostile_axis = "@team [link](https://example.invalid) ``axis``\n\n## injected-axis"
+        item = finding(1, severity="P1", axis=hostile_axis)
+        item["finding_id"] = hostile_id
+        publish_receipt(project, 1, outcome="changes-requested", findings=(item,))
+        data = shown(project)
+        self.assertEqual(data["handoff"]["findings"][0]["finding_id"], hostile_id)
+        self.assertEqual(data["handoff"]["findings"][0]["axis"], hostile_axis)
+        block = handoff_text(data)
+        quoted_id = "``@someone [link](https://example.invalid) `id` ## injected-id``"
+        quoted_axis = "```@team [link](https://example.invalid) ``axis`` ## injected-axis```"
+        self.assertIn(f"  - {quoted_id} P1 {quoted_axis} `src/app.py:1` — `a follow-up`\n", block)
+        remainder = block.replace(quoted_id, "").replace(quoted_axis, "")
+        self.assertNotIn("@", remainder)
+        self.assertNotIn("[link]", remainder)
+        self.assertNotIn("\n## injected", block)
 
     def test_no_blocking_finding_says_none(self):
         project = Project(self)
