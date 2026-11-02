@@ -152,9 +152,11 @@ QUESTIONS = (
              "for web tasks through MCP. Installs it from its official source and asks before each setup step.",
              "Set up Aside?", False),
     Question("jev", "TypeSafe Jev re-ranker (recommended)", "Jev re-orders the skills and impact results that oah's "
-             "fixed rules chose; it never adds or drops one. Cost: TypeSafe may charge for each request. Data sent: "
-             "the task kind, the query, and each candidate's name and description (up to 200 characters); for "
-             "difficulty advice, the four difficulty axes and the task summary (up to 500 characters). Your key is "
+             "fixed rules chose; it never adds or drops one. It also judges how hard each task is, and its tier sets "
+             "the call's tier, never below the floor. Cost: TypeSafe may charge for each request. Data sent: the task "
+             "kind, the query, and each candidate's name and description (up to 200 characters); to judge difficulty, "
+             "the four difficulty axes, the task's Intent text (or your request before an Intent exists) and its "
+             "Scope paths, up to 16,000 characters in all, never code or file contents. Your key is "
              "read at run time from ${TYPESAFE_API_KEY} or the OS keychain; oah never asks for it or stores it, and "
              "without it Jev stays off. Your answer is recorded in .oah/config.toml.",
              "Turn on Jev? Yes is recommended. Type y or n:", None, recorded=True),

@@ -2,14 +2,19 @@
 # TypeSafe Jev re-orders the skills and impact results that oah's fixed rules chose; it never adds or
 # drops one. You consented to it in `oah init` on {{DATE}}.
 # Re-ranking sends the task kind, the query, and each candidate's name and description (up to 200
-# characters). Difficulty advice sends the four axes (kind, intensity, reasoning, risk) and the task
-# summary (up to 500 characters). TypeSafe may charge for each request.
+# characters). To judge how hard a task is, oah sends the four axes (kind, intensity, reasoning, risk),
+# the task's Intent text (Problem, Desired outcome, Success conditions, Constraints, Non-goals), or the
+# request you give `oah recommend --request-file` before an Intent exists, and the Scope paths: up to
+# 16,000 characters in all, never code, diffs or file contents. Text that looks like a key is not sent.
+# When Jev's confidence is at least difficulty_min_confidence (0.6 unless set below, from 0 to 1), its
+# tier sets the call's tier, never below the floor. TypeSafe may charge for each request.
 # The key is read at run time from ${TYPESAFE_API_KEY} or the OS keychain. Without it this stays off
 # and reports unused(no key). Never write the key in this file. To stop, set enabled = false here and
 # rerank = false under [impact].
 [rerank]
 enabled = true
 provider = "typesafe"
+# difficulty_min_confidence = 0.6
 
 [impact]
 rerank = true

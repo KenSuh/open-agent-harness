@@ -56,6 +56,22 @@ rule, and `oah models` shows each model's score and why a model was left out.
 | `OAH_SCORES_AA_UNUSED` | A notice: your Artificial Analysis copy has no score for a model the CLI lists, so Epoch AI scores chose for that engine. | Nothing. It clears once Artificial Analysis scores that model. |
 | `OAH_SCORES_FILE_INVALID` | A notice: a stored score file in `oah`'s state folder is damaged or was changed, so it counts as absent. | Delete the file the message names, or run `oah models --refresh` to fetch it again. |
 
+## Jev and difficulty
+
+These appear on `main`, which is not in a release yet. [Jev judges difficulty](concepts.md#jev-judges-difficulty) says what
+Jev receives and when its tier counts.
+
+| Code | What it means | What to do next |
+|---|---|---|
+| `OAH_RERANK_SCOPE_WIDENED` | A notice, shown once per project: Jev now receives the task's Intent text and Scope paths, up to 16,000 characters, to judge its difficulty. | Nothing. To stop every Jev request, set `enabled = false` under `[rerank]` in `.oah/config.toml`. |
+| `OAH_RERANK_SECRET` | A privacy rule flagged the part the message names (the Intent text, the Scope paths or the request text) as holding a key or a private path, so Jev was not asked and the rule tier ran. Nothing was sent. | Remove that text from the packet or the request file, or keep the rule tier. |
+| `OAH_DESIGN_UNJUDGED` | A warning from `oah packet new`: no design judgement is recorded for the task. The packet was still created. | Before writing the design, run the command the message names: `oah recommend --kind design --task <task> --request-file <file>`. |
+| `OAH_RECOMMEND_USAGE` | The `oah recommend` arguments do not fit together: `--request-file` without `--kind design` or `packet`, or without a valid `--task`, `--task` or `--scope` without `--request-file`, or a missing axis. | Run the command the message shows, or `oah recommend --help`. |
+| `OAH_RECOMMEND_REQUEST_TOO_LARGE` | The request file is over 1 MB. Nothing was sent or recorded. | Write the request itself to a smaller file. Jev reads at most 16,000 characters. |
+| `OAH_RECOMMEND_REQUEST_UNREADABLE` | The request file is missing, not a file, unreadable or not UTF-8. Nothing was sent or recorded. | Save the request as a UTF-8 text file and give its path. |
+| `OAH_AGENT_FILE_EDITED` | A notice from `oah doctor`: a `.claude/agents/oah-<tier>.md` file differs from what `oah` generates, so it is left alone and its model is no longer kept current. | Keep it as it is, or delete it and run `oah init --with-agents` to have `oah` write it again. |
+| `OAH_AGENT_FILE_STALE` | A notice from `oah doctor`: a subagent file `oah` generated names a model or effort that is no longer the choice, and no session-start hook will update it. | Install the hook with `oah hooks install session-start`, or delete the file and run `oah init --with-agents`. |
+
 ## Leases
 
 | Code | What it means | What to do next |

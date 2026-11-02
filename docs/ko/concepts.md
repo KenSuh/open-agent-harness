@@ -136,7 +136,8 @@ stateDiagram-v2
 - `oah packet new`는 작업에 점수를 매기고 단계별 경로를 패킷의 `## Plan`에 쓴다. 이 명령에는 `--tier` 옵션이
   없다. 패킷의 tier를 바꾸려면 생성된 계획을 고친다.
 - `oah call`은 패킷에 해당 단계의 tier가 있으면 쓰고, 없으면 규칙을 따른다. 호출 시 `--tier` 옵션으로 그 실행의
-  선택을 바꿀 수 있다. 라우팅과 재정의는 실행 상태에 기록하며 패킷을 다시 쓰지 않는다.
+  선택을 바꿀 수 있다. TypeSafe Jev를 켰다면 Jev의 작업 판정이 최저 기준 안에서 tier를 옮길 수 있다
+  ([Jev가 난이도를 판정한다](#jev가-난이도를-판정한다)). 라우팅과 재정의는 실행 상태에 기록하며 패킷을 다시 쓰지 않는다.
 - **추론 강도는 모델이 지원하는 만큼이고 고정 상한이 없다.** tier의 강도는 엔진이 그 모델에 대해 밝힌 단계
   가운데 하나다. `highest`는 Codex가 해당 모델에 대해 밝힌 가장 높은 추론 단계다. Codex가 단계를 알려 주지 않았으면
   짐작하지 않고 `OAH_EFFORT_METADATA_MISSING`으로 거절한다.
@@ -149,21 +150,22 @@ stateDiagram-v2
   후보 목록이 설정되어 있고 목록에 없는 모델이 보고되면 `oah models`, `oah doctor`, 카탈로그를 다시 읽은 실행이
   `OAH_MODEL_NEW_UNPOOLED`로 알려 준다. `oah doctor`는 CLI를 새로 읽지 않고 저장된 카탈로그를 쓴다.
   `oah`가 후보를 대신 고치지는 않는다.
-- 실행 기록마다 네 축, tier와 그 출처(`rules`, `packet`, `flag`), 요청한 모델과 강도, 실제로 쓴 모델과 강도가 남는다.
+- 실행 기록마다 네 축, tier와 그 출처(`rules`, `packet`, `flag`, `jev`), Jev의 답 옆의 규칙 tier, 요청한 모델과 강도,
+  실제로 쓴 모델과 강도가 남는다.
 
-선택 기능인 TypeSafe Jev 재정렬기가 tier에 의견을 더할 수 있다. 의견은 규칙 결과 옆에 기록되고 tier를 낮추지는
-않는다.
+선택 기능인 TypeSafe Jev 재정렬기는 스킬 순서를 바꾸고, 작업마다 얼마나 어려운지 판정한다. 그 tier는 정해 둔 확신
+이상일 때만 쓰고 최저 기준 아래로는 내려가지 않는다.
 
 ```mermaid
 flowchart TD
     task["작업: 단계, 종류, Scope 경로<br/>직접 준 축이 우선"]
     score["고정 규칙이 네 축에 점수를 매김<br/>종류, 작업량, 추론, 위험"]
     tier["tier: low, medium, high, max<br/>위험 critical은 max, 마이그레이션과 보안은 최소 high"]
-    pick["패킷의 단계별 tier, 또는 oah call --tier<br/>출처 기록: rules, packet, flag"]
+    pick["패킷의 단계별 tier, 또는 oah call --tier<br/>출처 기록: rules, packet, flag, jev"]
     model["CLI가 지원하는 모델과 추론 강도<br/>관찰할 수 없는 강도는 미검증으로 기록<br/>더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED"]
     skills["결정적인 스킬 목록<br/>스킬마다 이유"]
     ask{"--no-rerank가 아니고, 직접 켰고,<br/>제공자 설정과 키가 있는가?"}
-    jev["TypeSafe Jev 제공자<br/>순서만 바꾸고 더하거나 빼지 않음"]
+    jev["TypeSafe Jev 제공자<br/>순서만 바꾸고 더하거나 빼지 않음<br/>Intent와 Scope 경로로 난이도 판정"]
     used["rerank=used"]
     unused["rerank=unused(이유)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:CODE"]
     brief["패킷 계획, 브리프, 실행 기록"]
@@ -178,7 +180,7 @@ flowchart TD
     jev -->|"오류, 기존 순서 유지"| unused
     used --> brief
     unused --> brief
-    tier -.->|"참고용 tier, 기록만 하고 적용하지 않음"| jev
+    jev -.->|"difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음"| pick
 
     classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
     classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
@@ -187,6 +189,51 @@ flowchart TD
     class jev,used ai
     class unused note
 ```
+
+### Jev가 난이도를 판정한다
+
+규칙은 Scope만 보고 축에 점수를 매기므로, 한 줄짜리 동시성 수정은 낮게, 파일 20개의 이름 바꾸기는 높게 나올 수 있다.
+TypeSafe Jev를 켰다면(`[rerank] enabled = true`와 키) `oah`가 Jev에게 작업이 실제로 얼마나 어려운지 묻는다. 이 내용은
+`main` 기준이고 아직 릴리스하지 않았다.
+
+- **Jev가 받는 것.** 네 축과 작업 글이다. 작업 글은 승인된 Intent의 다섯 부분(Problem, Desired outcome, Success
+  conditions, Constraints, Non-goals, 제목 포함) 다음에 Scope 경로를 한 줄에 하나씩 붙인 것이다. Intent가 생기기 전에는
+  `oah recommend --request-file`이 Intent 대신 사용자가 쓴 요청을 보낸다. 글은 끝에서부터 잘라 16,000자(약 4,000토큰)를
+  넘지 않게 하므로 Scope 경로가 먼저 잘리고, 잘리면 실행 기록에 `jev_truncated`가 남는다. 코드, diff, 파일 내용, 저장된
+  값, 브리프, 키는 보내지 않고, 경로는 경로로만 보내며 그 내용은 보내지 않는다.
+- **비밀 검사.** 보내기 전에 개인정보 검사기의 내용 규칙으로 글을 읽는다. 키나 개인 홈 경로처럼 규칙에 걸린 부분이
+  있으면 아무것도 보내지 않고 상태는 `unused(secret)`가 되며, `OAH_RERANK_SECRET`이 걸린 부분(Intent 글, Scope 경로,
+  요청 글)을 알려 준다. 걸린 내용 자체는 보여 주지 않는다.
+- **Jev의 tier를 쓰는 때.** tier가 규칙에서 왔거나 직접 고치지 않은 패킷 계획 tier에서 온 호출은 예산 확인 뒤, 모델을
+  고르기 전에 Jev에게 묻는다. 그래서 모델, 추론 강도, 입장 검사가 최종 tier를 따른다. Jev의 확신이
+  `[rerank] difficulty_min_confidence`(따로 정하지 않으면 0.6, 0부터 1 사이의 수이고 다른 값은 아무것도 보내기 전에
+  `OAH_CONFIG_INVALID`로 거절한다) 이상이면 Jev의 tier로 실행하되 최저 기준보다 낮으면 최저 기준으로 올리고,
+  `tier_source`는 `jev`가 된다. 그렇지 않으면 규칙 tier로 실행하고 `jev_status`가 `unused(<이유>)`나
+  `below-threshold <확신>`으로 이유를 남긴다. 리뷰의 최저 기준은 여전히 Scope만으로 매기므로 Jev는 리뷰 tier를 올릴 수
+  있고 내릴 때는 그 기준까지만 내린다. `--tier`나, `oah packet new`가 옆에 적어 둔 규칙 tier와 다르게 고친 계획 tier는
+  Jev를 쓰지 않고 `unused(tier-given)`로 남긴다. Jev가 실패해도 호출을 막지 않고, `oah fix`의 수정은 한 번만 묻고 그 답을
+  유지한다.
+- **기록.** 실행 기록과 리뷰 영수증에 `rule_tier`, `jev_tier`, `jev_confidence`, `jev_status`, `tier`, `tier_source`가
+  남는다.
+- **알림.** 프로젝트에서 처음 요청을 보낼 때 `OAH_RERANK_SCOPE_WIDENED`를 한 번 알린다. 새 질문도, 켜야 하는 설정도
+  없다. `[rerank]`에 `enabled = false`를 두면 모든 요청이 멈춘다.
+- **설계와 패킷.** 설계와 패킷 작업은 Intent보다 먼저 오므로 `oah call`이 판정할 수 없다. 리드 세션은 사용자 요청으로
+  `oah recommend --kind design --task <task> --request-file <file>`을 실행하고(이미 아는 경로는 `--scope <path>`),
+  출력된 tier의 `oah-<tier>` 하위 에이전트에게 작업을 맡긴다. 잘못된 설계는 그 뒤의 모든 단계에 비용을 물리므로 설계는
+  `high` 아래로 내려가지 않고, 쓰인 판정이 없으면(키 없음, Jev 꺼짐, 비밀, 실패, 낮은 확신) `max`로 실행한다. 모르는
+  난이도를 쉬운 것으로 치지 않는다. `--kind packet`은 판정이 없으면 규칙 tier를 지킨다. Jev가 꺼진 경우까지 결과는 상태
+  폴더에 작업 이름으로 기록하되 요청 글, Scope 경로, 키는 남기지 않으며, 기록된 설계 판정이 없으면 `oah packet new`가
+  `OAH_DESIGN_UNJUDGED`로 경고한다. 경고할 뿐 막지 않는다. `oah recommend`가 보내는 요청은 이것뿐이고
+  `--request-file`을 줄 때만 보낸다.
+- **하위 에이전트 파일.** `oah init`은 지금의 선택으로 `.claude/agents/oah-<tier>.md`를 쓴다. 저장된 Claude 카탈로그와
+  점수를 읽을 수 있으면 그것을 쓰고, 아니면 `oah`와 함께 배포된 사본을 쓴다. 세션 시작 훅을 설치했다면 세션이 시작할
+  때마다 모델이나 추론 강도가 더 이상 선택과 맞지 않는 파일을 다시 쓰고 한 줄로 알린다. 다만 그 파일이 적힌 값으로
+  `oah`가 만들어 내는 내용과 정확히 같을 때만 다시 쓴다. 직접 고친 파일은 그대로 두고, 없는 파일은 만들지 않는다.
+  `oah doctor`는 고친 파일을(`OAH_AGENT_FILE_EDITED`), 훅이 설치되지 않았다면 낡은 파일도(`OAH_AGENT_FILE_STALE`)
+  고치는 방법과 함께 알려 준다.
+
+Jev 키가 없으면 난이도는 파일과 경로의 개수로만 정해지고, 내용이 빈약한 Intent는 빈약한 판정을 낳는다. TypeSafe는
+요청마다 요금을 물릴 수 있다.
 
 ### 모델을 고르는 방법
 

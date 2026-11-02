@@ -117,6 +117,20 @@ class ConfigTest(unittest.TestCase):
                                   today=TODAY)
         self.assertEqual(sections(text)["preflight"]["default_branch"], 'odd"name\\x')
 
+    def test_jev_disclosures_say_what_difficulty_judgement_sends(self):
+        question = next(item for item in init.QUESTIONS if item.key == "jev").what
+        on = init.render_config(branch="main", how="", jev=True, skill_updates=True, today=TODAY)
+        for name, text in (("question", question), ("rerank on", init._template("rerank-on.toml", DATE="2026-11-02")),
+                           ("rerank off", init._template("rerank-off.toml", DATE="2026-11-02"))):
+            with self.subTest(text=name):
+                flat = " ".join(text.replace("#", " ").split())
+                for part in ("Intent", "Scope paths", "16,000 characters"):
+                    self.assertIn(part, flat)
+                self.assertNotIn("task summary", flat)
+                self.assertNotIn("500 characters", flat)
+        self.assertIn("difficulty_min_confidence", on)
+        self.assertEqual(sections(on)["rerank"]["difficulty_min_confidence"], 0.6)
+
     def test_key_alone_never_enables_jev(self):
         key = "fake-" + token_source.token_hex(16)
         env = {"TYPESAFE_API_KEY": key}
