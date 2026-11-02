@@ -1050,5 +1050,28 @@ class DoctorNoticesTest(FakeToolsCase):
         self.assertEqual(len(self.launched), launched)  # doctor stays offline: it reads the records only
 
 
+class CodesTest(unittest.TestCase):
+    def test_every_update_code_has_a_next_step_and_both_troubleshooting_rows(self):
+        import re
+
+        from oah.review import fix
+
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        sources = [*(repo / "src" / "oah" / "toolupdate").glob("*.py"), repo / "src" / "oah" / "update_cli.py"]
+        codes = set()
+        for path in sources:
+            codes |= set(re.findall(r"\bOAH_UPDATE_[A-Z_]+\b", path.read_text(encoding="utf-8")))
+        self.assertEqual(codes, {"OAH_UPDATE_STARTED", "OAH_UPDATE_SKIPPED", "OAH_UPDATE_BUSY", "OAH_UPDATE_DEFERRED",
+                                 "OAH_UPDATE_STATE_UNAVAILABLE", "OAH_UPDATE_FINISHED", "OAH_UPDATE_OFF",
+                                 "OAH_UPDATE_UNSETTLED"})
+        pages = [(repo / "docs" / page).read_text(encoding="utf-8")
+                 for page in ("troubleshooting.md", "ko/troubleshooting.md")]
+        for code in sorted(codes):
+            with self.subTest(code=code):
+                self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
+                for page in pages:
+                    self.assertIn(f"| `{code}` |", page)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -628,6 +628,41 @@ A harness that stays the same while models and skills improve slowly falls behin
 
 How to run each update is on the [Upgrade](upgrade.md) page.
 
+### Tool updates after the work finishes
+
+Newer models reach you only when Claude Code and Codex themselves are current, so `oah` can keep the tools up to
+date too. This describes `main`, which is not in a release yet. It is on only when `.oah/config.toml` says
+`after_finish = true` under `[updates]`. `oah init` asks once (Yes is recommended), and a config without the key
+counts as off.
+
+- **When.** After an `oah finish` that leaves no active lease and no run that is created, prepared, queued or
+  running in the repository, at most once every `interval_hours` (24 by default). The finish prints one line and
+  starts the pass in the background; it never waits for it and keeps its own exit code. `oah update` runs a pass now
+  (the switch must be on and nothing in flight, but the interval does not apply), and `oah update status` prints the
+  last pass without running anything. One pass runs at a time on a machine; a second says `OAH_UPDATE_BUSY`.
+- **What, in this order.** `claude update`; `codex update`; `claude plugin marketplace update`, then
+  `claude plugin update <plugin> --scope user --json` for each plugin installed at user scope;
+  `codex plugin marketplace upgrade`; and oah's kit skills through the existing automatic check, which keeps
+  `[skills] auto_update` and its own rules. A command runs only when the installed CLI's `--help` lists it. The
+  model lists refresh at the next `oah` call, because a changed CLI version rebuilds the catalog.
+- **What never.** MCP servers and their configuration; npm, Homebrew or `npx` run by `oah`; a shell; a
+  confirmation flag such as `-y` or `--accept-command`; hook approval; and processes, which `oah` never lists,
+  signals or stops. Sessions already running keep the version and plugins they started with until you restart them.
+- **How a result is checked.** The version is read before and after each step. `updated` needs a readable version
+  afterwards that differs from the one before; `current` needs the tool's own "up to date" answer and a readable,
+  unchanged version. Anything else is, whatever the exit code, `unverified`, `needs-confirmation` (a Claude Code
+  plugin whose marketplace-declared command needs you; the line names the command to run yourself),
+  `needs-hook-approval` (a Codex plugin whose files changed and that declares hooks; open Codex and approve its hooks
+  again in `/hooks`), `unsupported` (the installed CLI lacks the command) or `failed`. Codex marketplaces are checked by
+  the revision Codex records in its own `config.toml`, and installed Codex plugins by a digest of their files. A pass
+  is `complete` only when every result is `updated`, `current` or `unsupported`, and `needs-attention` otherwise.
+- **Records.** `~/.oah/updates/state.json` holds the last pass and `runs.jsonl` the newest 200, next to the lock
+  `pass.lock` and the background pass's `pass.log`. Every read is validated: a broken record is reported as
+  `OAH_UPDATE_STATE_UNAVAILABLE`, and every tool is checked again. Records keep versions, statuses and next steps,
+  never environment values or command output.
+- **Off.** `after_finish = false`, or no key at all, turns it off. Then no entry point runs an update command,
+  reaches the network for one or writes a record.
+
 ## The toolkit
 
 The kit bundles the skills, MCP server templates and command-line checks the workflow uses, each with its

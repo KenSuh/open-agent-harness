@@ -169,6 +169,29 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
 - 세션 시작 훅을 설치했다면 `oah init`이 쓴 하위 에이전트 파일이 지금의 모델 선택을 따라가므로, git에
   `.claude/agents/oah-<tier>.md` 변경이 보일 수 있다. 직접 고친 파일은 그대로 두고 `oah doctor`가 알려 준다.
 
+### Claude Code, Codex와 그 플러그인
+
+이제 `oah`가 도구 자체도 최신으로 맞출 수 있어서, 업데이트를 기억하지 않아도 새 모델이 들어온다. 이 내용은 `main`
+기준이고 아직 릴리스하지 않았다.
+
+- 기존 프로젝트는 그대로다. `[updates]`에 `after_finish`가 없는 `.oah/config.toml`은 꺼진 것으로 보고, `oah init`은
+  그 파일을 다시 쓰지 않으며, `oah doctor`가 이 설정을 한 번 알린다. 켜려면 다음을 더한다.
+
+  ```toml
+  [updates]
+  after_finish = true
+  ```
+
+  새로 실행하는 `oah init`은 한 번 묻고(Yes 권장) 답을 거기에 적는다. `false`로 두면 계속 꺼지고 안내도 사라진다.
+- 켜 두면 리스와 진행 중인 run을 남기지 않는 `oah finish`가 백그라운드로 패스를 시작하며, `interval_hours`(기본
+  24)마다 많아야 한 번이다. 지금 돌리려면 `oah update`를 실행한다. `oah update status`는 아무것도 실행하지 않고
+  마지막 패스를 보여 준다.
+- MCP 서버는 바꾸지 않는다. 마켓플레이스가 선언한 명령에 확인이 필요한 Claude Code 플러그인과 `/hooks`에서 훅을 다시
+  승인해야 하는 Codex 플러그인은 직접 처리하도록 알려 준다. 이미 실행 중인 세션은 다시 시작할 때까지 원래 버전을 쓴다.
+
+자세한 내용은 [작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에 있고, 코드는
+[문제 해결](troubleshooting.md#도구-업데이트)에 있다.
+
 ## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
 
 `oah`는 소유자의 하네스가 나아지는 것을 따라간다. [`docs/UPSTREAM_SYNC.md`](../UPSTREAM_SYNC.md)는 그 하네스에서

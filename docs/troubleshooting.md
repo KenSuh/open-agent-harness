@@ -148,6 +148,22 @@ Jev receives and when its tier counts.
 | `OAH_LAND_IMPACT_STALE` | The default branch could not be fetched or reassessed, for example with `--offline` or a remote that is a relative path. | Use a remote with a URL or an absolute path, run `oah impact refresh`, then `oah land --check` again. |
 | `OAH_LAND_CHECKS_REQUIRED` | The latest default branch binds checks to files you changed, and they have no passing evidence for your head. | Add a gate with the same CHECK and EXPECT to your ledger, run `oah gates check <task>`, commit, then check again. |
 
+## Tool updates
+
+These appear on `main`, which is not in a release yet.
+[Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) explains the pass.
+
+| Code | What it means | What to do next |
+|---|---|---|
+| `OAH_UPDATE_STARTED` | `oah finish` started the tool-update pass in the background and did not wait for it. | `oah update status` shows the result once the pass finishes. |
+| `OAH_UPDATE_SKIPPED` | The pass did not run: `after_finish` under `[updates]` is off or unreadable, a pass started less than `interval_hours` ago, the caller is a dispatched worker, or the background start failed. | Read the reason on the line. Set `after_finish = true` under `[updates]` in `.oah/config.toml` to turn it on, or run `oah update` to run a pass now. |
+| `OAH_UPDATE_BUSY` | Another pass on this machine holds `~/.oah/updates/pass.lock`. | Wait, then run `oah update status`. `oah update` exits 1 with this code. |
+| `OAH_UPDATE_DEFERRED` | A lease is active or a run is in flight (or a run record cannot be read), so nothing was updated or recorded. | Finish the work: the next `oah finish` that leaves nothing in flight starts the pass, or run `oah update` then. A run stuck at `running` keeps deferring it; check it with `oah wait <run-id>`. |
+| `OAH_UPDATE_STATE_UNAVAILABLE` | `~/.oah/updates/state.json` is missing, unreadable or wrongly shaped, so `oah` trusts none of it and checks every tool again. | Delete it and run `oah update`; the pass writes a fresh record. |
+| `OAH_UPDATE_FINISHED` | The pass ended. `complete` means every result is updated, current or unsupported; `needs-attention` means at least one is not. | Follow the step on each `oah:` line above it; `oah update status` shows them again. |
+| `OAH_UPDATE_OFF` | `oah doctor`: `.oah/config.toml` has no `after_finish` under `[updates]`, so tool updates are off. | Set `after_finish = true` to turn them on (then `oah update` runs a pass now), or `false` to keep them off and stop the notice. |
+| `OAH_UPDATE_UNSETTLED` | `oah doctor`: the last pass left a result that is not `updated` or `current`. | Follow the next step on that line, then run `oah update`. |
+
 ## Still stuck
 
 - `oah status` shows every lease and whether it is active or stale.

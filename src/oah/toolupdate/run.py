@@ -340,7 +340,8 @@ def doctor_notices(root: pathlib.Path | None) -> list[dict]:
     if not settings.explicit:
         notices.append({"code": "OAH_UPDATE_OFF", "message": "tool updates are off: .oah/config.toml has no "
                         "after_finish under [updates]. Set it to true to keep Claude Code, Codex, their plugins and "
-                        "oah's skills up to date after your work finishes, or run oah update now"})
+                        "oah's skills up to date after your work finishes (oah update then runs a pass now), or to "
+                        "false to keep them off and stop this notice"})
     try:
         record = records.read_state()
     except records.StateUnavailable as exc:

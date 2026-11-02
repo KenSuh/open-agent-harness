@@ -145,6 +145,22 @@
 | `OAH_LAND_IMPACT_STALE` | 기본 브랜치를 가져오거나 다시 평가하지 못했다. `--offline`을 줬거나 원격이 상대 경로인 경우 등이다. | URL이나 절대 경로로 된 원격을 쓰고 `oah impact refresh`를 실행한 뒤 `oah land --check`를 다시 실행한다. |
 | `OAH_LAND_CHECKS_REQUIRED` | 최신 기본 브랜치가 내가 바꾼 파일에 검사를 묶어 두었는데 내 head에서 통과한 증거가 없다. | 같은 CHECK와 EXPECT로 게이트를 원장에 더하고 `oah gates check <task>`를 실행해 커밋한 뒤 다시 확인한다. |
 
+## 도구 업데이트
+
+이 코드들은 `main`에 있고 아직 릴리스하지 않았다. 패스는
+[작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에서 설명한다.
+
+| 코드 | 뜻 | 다음에 할 일 |
+|---|---|---|
+| `OAH_UPDATE_STARTED` | `oah finish`가 도구 업데이트 패스를 백그라운드로 시작했고 기다리지 않았다. | 패스가 끝나면 `oah update status`가 결과를 보여 준다. |
+| `OAH_UPDATE_SKIPPED` | 패스가 돌지 않았다. `[updates]`의 `after_finish`가 꺼져 있거나 읽을 수 없거나, 직전 패스가 `interval_hours` 안에 시작했거나, 호출한 쪽이 발주된 워커이거나, 백그라운드 시작이 실패한 경우다. | 줄에 적힌 이유를 읽는다. 켜려면 `.oah/config.toml`의 `[updates]`에 `after_finish = true`를 두고, 지금 돌리려면 `oah update`를 실행한다. |
+| `OAH_UPDATE_BUSY` | 이 컴퓨터의 다른 패스가 `~/.oah/updates/pass.lock`을 잡고 있다. | 기다렸다가 `oah update status`를 실행한다. `oah update`는 이 코드와 함께 1로 끝난다. |
+| `OAH_UPDATE_DEFERRED` | 리스가 살아 있거나 run이 진행 중이어서(또는 run 기록을 읽을 수 없어서) 아무것도 갱신하거나 기록하지 않았다. | 작업을 마친다. 진행 중인 것을 남기지 않는 다음 `oah finish`가 패스를 시작하고, 그때 `oah update`를 실행해도 된다. `running`에 멈춘 run은 계속 미루게 하므로 `oah wait <run-id>`로 확인한다. |
+| `OAH_UPDATE_STATE_UNAVAILABLE` | `~/.oah/updates/state.json`이 없거나 읽을 수 없거나 모양이 틀려서 `oah`가 그 내용을 믿지 않고 모든 도구를 다시 확인한다. | 그 파일을 지우고 `oah update`를 실행한다. 패스가 새 기록을 쓴다. |
+| `OAH_UPDATE_FINISHED` | 패스가 끝났다. `complete`는 모든 결과가 updated, current, unsupported라는 뜻이고 `needs-attention`은 하나라도 아니라는 뜻이다. | 그 위 `oah:` 줄마다 적힌 다음 단계를 따른다. `oah update status`가 다시 보여 준다. |
+| `OAH_UPDATE_OFF` | `oah doctor` 알림이다. `.oah/config.toml`의 `[updates]`에 `after_finish`가 없어서 도구 업데이트가 꺼져 있다. | 켜려면 `after_finish = true`를 두고(그다음 `oah update`가 지금 패스를 돌린다), 계속 끄고 알림을 없애려면 `false`를 둔다. |
+| `OAH_UPDATE_UNSETTLED` | `oah doctor` 알림이다. 마지막 패스가 `updated`나 `current`가 아닌 결과를 남겼다. | 그 줄의 다음 단계를 따른 뒤 `oah update`를 실행한다. |
+
 ## 그래도 막히면
 
 - `oah status`는 모든 리스와 각 리스가 살아 있는지 만료됐는지 보여 준다.
