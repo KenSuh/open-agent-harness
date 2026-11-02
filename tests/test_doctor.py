@@ -18,7 +18,7 @@ from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.models import Catalog, Entry, ModelInfo
 from oah.setup import catalog, display
-from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy
+from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
 
 OK_VERSIONS = {
     "git": "git version 2.50.1",
@@ -522,6 +522,59 @@ class ModelChoiceDoctorTest(unittest.TestCase):
         self.assertIsNone(row["scores"])
         self.assertEqual(row["tiers"]["high"], {"error": "OAH_MODEL_NO_SCORES: damaged; pin one"})
 
+    def stored(self, name: str, content: object) -> None:
+        path = self.state / "models" / name
+        path.write_bytes(content if isinstance(content, bytes) else json.dumps(content).encode("utf-8"))
+
+    def test_a_stored_copy_shows_its_source_date_fetch_time_and_credit(self):
+        from tests.test_call import write_stored_epoch
+
+        shipped_defaults(self)
+        fetched = __import__("datetime").datetime(2026, 11, 1, 8, 0, tzinfo=__import__("datetime").timezone.utc)
+        write_stored_epoch(self.state, {"gpt-6-luna": 0.1, "gpt-6.1-sol": 1.0, "gpt-6-sol": 0.9}, fetched=fetched)
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        scores = next(item for item in json.loads(out)["model_choices"] if item["engine"] == "codex")["scores"]
+        self.assertEqual(list(scores), ["source", "date", "credit", "models", "fetched_at"], "fetched_at comes last")
+        self.assertEqual((scores["source"], scores["date"], scores["fetched_at"]),
+                         ("Epoch AI", "2026-11-01", "2026-11-01T08:00:00Z"))
+        self.assertTrue(scores["credit"].endswith("Accessed 1 Nov 2026."))
+        _, text = self.doctor()
+        self.assertIn("scores from: Epoch AI, fetched 2026-11-01T08:00:00Z", text)
+        self.assertIn("Accessed 1 Nov 2026.", text)
+
+    def test_the_snapshot_says_it_shipped_with_oah(self):
+        _, text = self.doctor()
+        self.assertIn("scores from: the Epoch AI snapshot shipped with oah (2026-11-02)", text)
+
+    def test_a_corrupt_stored_file_is_reported_and_the_snapshot_scores(self):
+        shipped_defaults(self)
+        self.stored("benchmarks-epoch.json", b"{")
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        row = next(item for item in json.loads(out)["model_choices"] if item["engine"] == "codex")
+        self.assertEqual(row["scores"]["credit"], "Epoch AI, a credit line.")
+        self.assertEqual([notice.split(":")[0] for notice in row["notices"]], ["OAH_SCORES_FILE_INVALID"])
+        _, text = self.doctor()
+        self.assertIn("OAH_SCORES_FILE_INVALID", text)
+        self.assertIn("benchmarks-epoch.json", text)
+
+    def test_artificial_analysis_data_shows_its_credit_and_no_key_is_asked(self):
+        from oah import secrets
+
+        shipped_defaults(self)
+        # Made-up values: no Artificial Analysis data is in a test.
+        self.stored("benchmarks-aa.json", {
+            "schema": 1, "source": "Artificial Analysis", "date": "2026-11-01", "url": "https://artificialanalysis.ai/",
+            "credit": "Artificial Analysis, https://artificialanalysis.ai/", "min_tasks": 1,
+            "scores": {"gpt-6-luna": {"Coding Index": 0.2}, "gpt-6.1-sol": {"Coding Index": 0.7}},
+            "fetched_at": "2026-11-01T08:00:00Z", "source_url": "https://artificialanalysis.ai/api/v2/data/llms/models"})
+        with mock.patch.object(secrets, "get", side_effect=AssertionError("oah doctor looks up no key")):
+            code, text = self.doctor()
+        self.assertEqual(code, 0, text)
+        self.assertIn("scores from: Artificial Analysis with your key, fetched 2026-11-01T08:00:00Z", text)
+        self.assertIn("credit: Artificial Analysis, https://artificialanalysis.ai/", text)
+
     def test_a_name_that_is_not_plain_is_never_echoed(self):
         self.catalog._save(Entry("codex", "1.0.0", "2026-10-27T09:00:00Z", (
             ModelInfo("gpt-6-luna", ("high",)), ModelInfo("gpt-6\x1b[2J", ("high",))), "fixture"))
@@ -732,3 +785,19 @@ class ModelNoticeDoctorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DoctorPinTest(unittest.TestCase):
+    def test_a_pin_its_model_cannot_run_is_the_same_error_in_doctor_and_a_call(self):
+        import oah.doctor as doctor
+        from tests.test_call import Project
+
+        project = Project(self, '[engines.codex.tiers.high]\nmodel = "gpt-test-a"\neffort = "minimal"\n')
+        with self.assertRaises(EngineError) as caught:
+            project.prepare(stage="correction", tier="high")
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        choices = doctor.model_choices(project.repo, project.env)
+        row = next(item for item in choices if item["engine"] == "codex")
+        self.assertEqual(row["tiers"]["high"]["error"].split(":")[0], "OAH_CONFIG_INVALID")
+        self.assertIn("high OAH_CONFIG_INVALID", doctor.render_text([], "darwin", model_choices=choices))
+        self.assertEqual(row["tiers"]["medium"], {"model": "gpt-test-a", "source": "quality_order"}, "only that tier")

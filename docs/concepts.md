@@ -232,8 +232,9 @@ clears, even where `balanced` would take the last one, and it can cost more than
 **The scale.** The scores and the mark of each step come from the data, not from your machine. The scale runs over every
 known family, `luna`, `terra`, `sol` and `astra` for Codex and `haiku`, `sonnet`, `opus` and `fable` for Claude, using each
 family's newest generation in the data. Each score is the mean, over the tasks those models share, of the model's place
-from 0 to 100 between the lowest and highest of them, and at least 3 common tasks are required. So a model your CLI does
-not list, or `allowed_models` leaves out, keeps its place on the scale, and neither can move a score or lower a floor.
+from 0 to 100 between the lowest and highest of them. Epoch AI data needs at least 3 common tasks; Artificial Analysis
+gives one index per model, so one is enough there, on the same 0 to 100 scale. So a model your CLI does not list, or
+`allowed_models` leaves out, keeps its place on the scale, and neither can move a score or lower a floor.
 
 **Which models compete.** A model competes when the CLI lists it and does not hide it, its family is known, it has every
 common task, it is the newest generation of its family with those tasks, and `allowed_models` permits it. A new
@@ -242,12 +243,40 @@ generation also stands in when the CLI does not list the newest one: it is score
 it. A family `oah` does not know is never chosen automatically (`OAH_MODEL_UNKNOWN_FAMILY`). A model you name yourself
 skips these tests, and an older generation you name runs with `OAH_MODEL_SUPERSEDED`.
 
-**What the scores measure.** They come from Epoch AI's published benchmarks, on Epoch's own tasks only, with each model
-at its maximum effort. Those tasks are mostly maths, puzzles and reasoning. They are not coding tasks, there are few of
-them, and they say nothing about your repository. A score compares models on those tasks and does not say one model is
-better in general. List prices stand in for what you pay, and a subscription pays in quota instead. A wrong or stale
-score can send work to a weaker model, so `oah models` shows the source and the date. A new model waits for a published
-score, which can take days or weeks. To decide for yourself, pin a model.
+**Claude aliases.** `claude --help` names a few aliases in an example sentence, so it can leave out one that works, such as
+`haiku`. At a Claude catalog rebuild `oah` asks the CLI about each known alias the help leaves out, with
+`claude --bare -p x --model <alias> --no-session-persistence --tools ""`, stdin closed, in an empty temporary folder, with
+no Anthropic credential or provider switch in its environment and no settings file. With no credential the request
+cannot be billed: Claude Code answers `Not logged in`. A made-up control alias runs first and must print Claude Code's
+unrecognized-model tag. An alias joins the list only when the control printed the tag and the alias did not, and the
+stored catalog then says `claude --help + alias check`. Launches run no check. The tag is undocumented: if it changes,
+`haiku` drops out and `sonnet` serves instead until `oah` is updated.
+
+**Where the scores come from.** Each release ships a snapshot of Epoch AI's data, and `oah` refreshes it when it rebuilds a
+model catalog: after a CLI update, after `[models] ttl_hours` (24 by default), or with `oah models --refresh`. It fetches a
+source only when its stored copy is older than `ttl_hours`, missing or damaged, at most once per command, and `oah doctor`,
+`oah recommend --engine` and `oah fix` never fetch. The request is an HTTPS GET of `https://epoch.ai/data/benchmarks.csv`
+with `oah/<version>` as its user agent, a 10 second timeout and a size limit. It sends nothing about your project, your
+tasks or you. If you stored your own `ARTIFICIAL_ANALYSIS_API_KEY` ([Keys](keys.md)), `oah` also asks Artificial
+Analysis for its model list, with the key only in the request header, and keeps one index per matched model. The copies
+stay on your machine, in `<state>/models/benchmarks-epoch.json` and `benchmarks-aa.json`, and every read checks them: a
+damaged or changed file counts as absent (`OAH_SCORES_FILE_INVALID`). A failed fetch keeps the last good copy and says so
+once (`OAH_SCORES_REFRESH_FAILED`). A launch never fails because of it.
+
+Each engine uses one source per launch: Artificial Analysis when its copy scores the newest listed model of every known
+family of that engine, else the latest Epoch AI fetch, else the snapshot shipped with `oah`. A partial Artificial
+Analysis set never mixes with Epoch data, and a rebuild names the models it lacks (`OAH_SCORES_AA_UNUSED`). `oah` matches
+Artificial Analysis rows by name, as its documentation describes them; this is not yet confirmed against a live
+response. `[models] fetch_scores = false` stops every fetch, and the snapshot shipped with `oah` then chooses.
+
+**What the scores measure.** Epoch AI's scores come from Epoch's own tasks only, with each model at its maximum effort.
+Those tasks are mostly maths, puzzles and reasoning. They are not coding tasks, and there are few of them. Artificial
+Analysis gives one index per model: its coding index, or its intelligence index when a model lacks the first. Either
+way, scores measure general quality on someone else's tests and say nothing about your repository. A score compares
+models on those tests and does not say one model is better in general. List prices stand in for what you pay, and a
+subscription pays in quota instead. A wrong or stale score can send work to a weaker model, so `oah models` shows the
+source and the date. A new model waits for a published score, which can take days or weeks. To decide for yourself, pin
+a model.
 
 **Reviews have a floor.** A review's floor is `medium`, or `high` when a path in its scope is risky or its kind needs it.
 It is scored again from the scope, so no flag, packet axis, profile or judge answer can lower it, and it is a mark on the
@@ -262,15 +291,22 @@ floor of the work, a review stops with `OAH_MODEL_BELOW_FLOOR` and any other cal
 it does not print, so its pins are not checked.
 
 **Seeing the choice.** `oah models` and `oah doctor` show the profile, the scores with their source, date and credit, each
-tier's model, and each listed model left out with its reason. `oah doctor` reads local state only. `oah recommend --engine
-<engine> --stage <stage>` gives the answer for one task, launches nothing and writes nothing. A review receipt records
-the family, floor, profile, source of the model and the scores used. When a catalog rebuild changes a choice,
-`OAH_MODEL_CHANGED` says so once and `changes.jsonl` keeps it.
+tier's model, and each listed model left out with its reason. A `scores from:` line says in plain words where each
+engine's scores came from, and the JSON adds `fetched_at` when they were fetched. `oah doctor` reads local state only,
+looks up no key, reports a damaged stored score file, and shows a pin that cannot run as the error a call would give.
+`oah recommend --engine <engine> --stage <stage>` gives the answer for one task, launches nothing and writes nothing. A
+review receipt records the family, floor, profile, source of the model and the scores used. When a catalog rebuild
+changes a choice, `OAH_MODEL_CHANGED` says so once, with the reason, such as a newer generation or new scores, and
+`changes.jsonl` keeps it.
 
-Scores come from this source:
+The snapshot shipped with `oah` comes from this source, and a fetched copy carries the same credit with the day it was
+read:
 
 Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from
 'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026. Licence: CC BY 4.0.
+
+Artificial Analysis data, used only with your own key, shows its credit wherever its scores are shown:
+Artificial Analysis, https://artificialanalysis.ai/.
 
 ## Skill selection
 
@@ -529,10 +565,11 @@ flowchart LR
 
 A harness that stays the same while models and skills improve slowly falls behind, so `oah` follows updates:
 
-- **Models.** Scores choose among the models each CLI lists. A newer generation of a known family is used from
-  the next catalog rebuild once it has a score, and a superseded or vanished model stops being chosen at that same
-  rebuild. [How a model is chosen](#how-a-model-is-chosen) has the rule. Before every launch `oah` checks that its
-  model catalog is fresh. A model you pin always wins, and every change is logged with old, new, when and why.
+- **Models.** Scores choose among the models each CLI lists, and a catalog rebuild also refreshes the scores. A newer
+  generation of a known family is used from the next catalog rebuild once it has a score, and a superseded or
+  vanished model stops being chosen at that same rebuild. [How a model is chosen](#how-a-model-is-chosen) has the
+  rule. Before every launch `oah` checks that its model catalog is fresh. A model you pin always wins, and every
+  change is logged with old, new, when and why.
 - **Skills.** With `[skills] auto_update = true`, the kit cache in `oah`'s state folder is checked at most once
   a day and never while a lease is active. Updates are checked (license, loading, privacy scan) before they are
   published and roll back on failure. Your project's tracked skill copies stay pinned until you run

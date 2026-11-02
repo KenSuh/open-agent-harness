@@ -29,7 +29,7 @@ from oah.review import receipts
 from oah.routing import RoutingError
 from oah.runs import RESULT_FIELDS, UNVERIFIED, find_run, new_run
 from oah.secrets import NoKeychain
-from tests.helpers import directory_alias, git_commit, make_git_repo, make_tmp_dir
+from tests.helpers import SHIPPED_DEFAULTS, directory_alias, git_commit, make_git_repo, make_tmp_dir, shipped_defaults
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
 FAKE_CODEX = [sys.executable, str(FAKES / "fake_codex.py")]
@@ -154,6 +154,28 @@ def scored_project(test: unittest.TestCase, config: str = "", *, models=SCORED_M
     patcher.start()
     test.addCleanup(patcher.stop)
     return project
+
+
+# A stored Epoch AI copy that ranks the four models apart from SCORES: here sol clears the high step, terra does not.
+STORED_RANKING = {"gpt-6-luna": 0.1, "gpt-6.1-terra": 0.2, "gpt-6.1-sol": 0.95, "gpt-6-astra": 1.0}
+STORED_TASKS = ("Chess Puzzles", "EBR-bench", "Mystery Game Puzzles", "Furniture Assembly")  # allow-listed
+
+
+def write_stored_epoch(state: pathlib.Path, ranking: dict, *, fetched: dt.datetime | None = None) -> pathlib.Path:
+    """A fresh stored copy, as a fetch writes it, so that no rebuild is due to fetch it again."""
+    fetched = fetched or dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    date = fetched.date()
+    data = {"schema": 1, "source": "Epoch AI", "date": date.isoformat(), "license": "CC BY 4.0",
+            "url": "https://epoch.ai/benchmarks/use-this-data",
+            "credit": ("Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from "
+                       "'https://epoch.ai/benchmarks/use-this-data'. Accessed "
+                       f"{date.day} {('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')[date.month - 1]} {date.year}."),
+            "scores": {model: dict.fromkeys(STORED_TASKS, value) for model, value in ranking.items()},
+            "fetched_at": fetched.strftime("%Y-%m-%dT%H:%M:%SZ"), "source_url": "https://epoch.ai/data/benchmarks.csv"}
+    path = state / "models" / "benchmarks-epoch.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
 
 
 class ScoredCallTest(unittest.TestCase):
@@ -298,6 +320,48 @@ class ScoredCallTest(unittest.TestCase):
         project = scored_project(self)
         data = project.run(stage="correction", tier="max", axes={"kind": "quick"})
         self.assertEqual(data["launch_effort"], "max")
+
+    def test_a_launch_scores_with_the_stored_copy_and_names_its_source(self):
+        shipped_defaults(self)
+        project = scored_project(self)
+        write_stored_epoch(project.state, STORED_RANKING)
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual(data["resolved_model"], "gpt-6.1-sol", "the stored copy ranks sol first; the snapshot terra")
+        self.assertEqual(data["admission"]["score_source"], "Epoch AI")
+        self.assertTrue(data["admission"]["score_credit"].startswith("Epoch AI, 'Capabilities & benchmarking'"))
+
+    def test_a_tampered_stored_copy_counts_as_absent_and_the_snapshot_scores(self):
+        shipped_defaults(self)
+        project = scored_project(self)
+        path = write_stored_epoch(project.state, STORED_RANKING)
+        path.write_bytes(path.read_bytes().replace(b'"credit": "Epoch AI', b'"credit": "Someone else'))
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual((data["resolved_model"], data["admission"]["score_credit"]),
+                         ("gpt-6.1-terra", "Epoch AI, a credit line."))
+        self.assertTrue(any(warning.startswith("OAH_SCORES_FILE_INVALID:") for warning in data["warnings"]))
+
+    def test_fetch_scores_false_ignores_the_stored_copy(self):
+        shipped_defaults(self)
+        project = scored_project(self, "[models]\nfetch_scores = false\n")
+        write_stored_epoch(project.state, STORED_RANKING)
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual((data["resolved_model"], data["admission"]["score_credit"]),
+                         ("gpt-6.1-terra", "Epoch AI, a credit line."))
+
+    def test_fetch_scores_is_on_by_default_and_takes_only_true_or_false(self):
+        self.assertIs(SHIPPED_DEFAULTS["fetch_scores"], True, "the tests run with it off unless they ask")
+        shipped_defaults(self)
+        self.assertIs(Project(self).settings().models["fetch_scores"], True)
+        self.assertIs(Project(self, "[models]\nfetch_scores = false\n").settings().models["fetch_scores"], False)
+        with self.assertRaises(ConfigError) as caught:
+            Project(self, '[models]\nfetch_scores = "no"\n').settings()
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("fetch_scores", str(caught.exception))
+        for value in (1, "true", None):
+            with self.subTest(value=value), self.assertRaises(EngineError) as caught:
+                call.Settings.validated({}, {}, {"ttl_hours": 24.0, "profile": "balanced", "fetch_scores": value})
+            self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+            self.assertIn("models.fetch_scores", str(caught.exception))
 
     def test_an_unknown_profile_is_refused_like_any_bad_setting(self):
         project = Project(self, '[models]\nprofile = "fast"\n')
@@ -949,6 +1013,7 @@ class RunFolderTest(unittest.TestCase):
 
 class RoutingTest(unittest.TestCase):
     def test_settings_defaults(self):
+        shipped_defaults(self)
         repo = make_git_repo(self)
         settings = call_cli.load_settings(repo)
         self.assertEqual(settings.stages, {"initial": "claude", "review": "codex", "correction": "codex"})
@@ -961,7 +1026,7 @@ class RoutingTest(unittest.TestCase):
                           "max": ("", "max", 90)})
         self.assertEqual({tier: row["effort"] for tier, row in codex["tiers"].items()},
                          {"low": "low", "medium": "medium", "high": "high", "max": "highest"})
-        self.assertEqual(settings.models, {"ttl_hours": 24.0, "profile": "balanced"})
+        self.assertEqual(settings.models, {"ttl_hours": 24.0, "profile": "balanced", "fetch_scores": True})
         self.assertEqual(settings, call.Settings.defaults())
 
     def test_settings_from_config_and_bad_values(self):

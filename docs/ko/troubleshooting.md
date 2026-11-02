@@ -49,6 +49,9 @@
 | `OAH_MODEL_UNKNOWN_FAMILY` | 알림이다. CLI가 나열한 모델의 모델군을 `oah`가 몰라서 자동으로 고르지 않는다. | `quality_order`나 tier에 이름을 적거나 `oah`를 업데이트한다. |
 | `OAH_MODEL_CHANGED` | 알림이다. 카탈로그 재구성으로 어떤 단계에서 규칙이 쓰는 모델이 바뀌었다. 한 번 나오고 `changes.jsonl`에 남는다. | 할 일은 없다. 모델을 지키려면 고정한다. |
 | `OAH_MODEL_ORDER_IGNORED` | `oah models`의 알림이다. `quality_order`가 옛 기본값이라 설정하지 않은 것으로 치고 점수가 고른다. | 그 줄을 지우거나 다른 모델을 적어 직접 순서를 정한다. |
+| `OAH_SCORES_REFRESH_FAILED` | 알림이다. 카탈로그를 다시 만들 때 새 점수를 받지 못해서 마지막으로 성공한 사본이나 `oah`와 함께 배포된 사본이 골랐다. 이유는 메시지에 있다. 멈춘 것은 없다. | 잠깐의 네트워크 문제라면 할 일이 없다. `oah`가 다음 재구성 때 다시 받는다. 키가 거절됐다면 `ARTIFICIAL_ANALYSIS_API_KEY`를 다시 저장한다. 요청을 멈추려면 `[models] fetch_scores = false`로 둔다. |
+| `OAH_SCORES_AA_UNUSED` | 알림이다. Artificial Analysis 사본에 CLI가 나열한 모델의 점수가 없어서 그 엔진은 Epoch AI 점수로 골랐다. | 할 일이 없다. Artificial Analysis가 그 모델에 점수를 매기면 사라진다. |
+| `OAH_SCORES_FILE_INVALID` | 알림이다. `oah` 상태 폴더의 점수 사본이 손상되었거나 바뀌어서 없는 것으로 쳤다. | 메시지가 말한 파일을 지우거나 `oah models --refresh`로 다시 받는다. |
 
 ## 리스
 

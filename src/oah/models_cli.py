@@ -8,7 +8,7 @@ import os
 import pathlib
 import sys
 
-from oah import call, models, routing, scoring
+from oah import benchmarks, call, models, routing, scoring
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.lockfile import LockTimeout
@@ -25,9 +25,10 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, state: pathlib.Path,
-                   refresh: bool) -> dict:
+                   refresh: bool, session: benchmarks.Session) -> dict:
     try:
-        checked = call.check_catalog(engine, settings, state_dir=state, env=os.environ, refresh=refresh)
+        checked = call.check_catalog(engine, settings, state_dir=state, env=os.environ, refresh=refresh,
+                                     session=session)
     except EngineError as exc:
         return {"error": str(exc)}
     entry = checked[1].entry
@@ -85,7 +86,7 @@ def _score_lines(report: dict) -> list[str]:
     else:
         rows = ", ".join(f"{row['model']} {row['score']:.1f}" for row in scores["models"])
         lines = [f"profile {report['profile']} · scores {scores['source']} {scores['date']}: {rows}",
-                 f"credit: {scores['credit']}"]
+                 f"scores from: {benchmarks.describe(scores)}", f"credit: {scores['credit']}"]
     if report["left_out"]:
         lines.append("left out: " + " · ".join(f"{name} ({why})" for name, why in report["left_out"].items()))
     return lines
@@ -106,7 +107,8 @@ def run(args: argparse.Namespace) -> int:
         info = repo_info(pathlib.Path.cwd())
         state = state_dir(info, os.environ)
         settings = load_settings(info.root)
-        reports = {engine: _engine_report(engine, settings, info.root, state, args.refresh)
+        session = benchmarks.Session()  # both engines: each stored score file read, and each source fetched, once
+        reports = {engine: _engine_report(engine, settings, info.root, state, args.refresh, session)
                    for engine in routing.ENGINES}
     except (EngineError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt, StorageError) as exc:
         print(exc, file=sys.stderr)

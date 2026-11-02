@@ -4,7 +4,8 @@
 Catalog
     `Catalog(state_dir)` keeps `<state>/models/catalog.json`: per engine the CLI version, when it was
     checked, and the models the CLI reports (Codex: `models_cache.json` with each model's
-    `supported_reasoning_levels`; Claude: the aliases and effort levels in `claude --help`).
+    `supported_reasoning_levels`; Claude: the aliases and effort levels in `claude --help`, plus each known alias
+    the help omits that the free alias check confirms, `oah.engines.claude_alias`).
     `ensure_fresh` runs before every launch: it probes `<cli> --version` and rebuilds the entry when
     the version changed, the TTL passed or a refresh was asked for. Entries missing explicit visibility
     metadata are invalidated first. A rebuild that reads no models keeps the last valid entry and warns
@@ -69,13 +70,14 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal, Mapping, Sequence
 
 from oah import scoring
-from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
-from oah.engines import claude, codex
+from oah.atomic import (RETRY_SECONDS, StateCorrupt, StorageError, _retry_permission, append_jsonl, read_json,
+                        read_jsonl, write_json_atomic)
+from oah.engines import claude, claude_alias, codex
 from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, highest, rank, resolve
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
 
-DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE}
+DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE, "fetch_scores": True}
 PROBE_TIMEOUT = 30.0
 UNRESOLVED = scoring.UNRESOLVED
 CATALOG_UNAVAILABLE = "OAH_MODEL_CATALOG_UNAVAILABLE"
@@ -223,8 +225,12 @@ def probe_version(engine: str, base: Sequence[str], env: Mapping[str, str]) -> s
     return (codex.parse_version if engine == "codex" else claude.parse_version)(result.stdout)
 
 
-def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str]) -> tuple[tuple[ModelInfo, ...], str]:
-    """The models the CLI reports now, and where they were read; an empty tuple means none were readable."""
+def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str],
+                 aliases: Sequence[str] = ()) -> tuple[tuple[ModelInfo, ...], str]:
+    """The models the CLI reports now, and where they were read; an empty tuple means none were readable.
+
+    For Claude, a known alias in `aliases` that the help omits is listed when the free alias check confirms it. A
+    help text that names no alias stops here, so the last good entry stays in use."""
     if engine == "codex":
         home = codex.codex_home(env)
         cache = codex.read_models_cache(home) or {}
@@ -232,7 +238,19 @@ def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str]) -> tu
                 f"{codex.CACHE_NAME} in CODEX_HOME")
     result = run_command([*base, "--help"], timeout=PROBE_TIMEOUT, env=env)
     info = claude.parse_help(result.stdout if result.returncode == 0 else "")
-    return tuple(ModelInfo(alias, info.efforts) for alias in info.aliases), "claude --help"
+    if not info.aliases:
+        return (), "claude --help"
+    confirmed = claude_alias.confirm(base, [alias for alias in aliases if alias not in info.aliases], env)
+    return (tuple(ModelInfo(alias, info.efforts) for alias in (*info.aliases, *confirmed)),
+            "claude --help + alias check" if confirmed else "claude --help")
+
+
+def _score_bytes(path: pathlib.Path) -> bytes:
+    from oah.benchmarks import FILES, LIMITS
+
+    limit = next(LIMITS[source] for source, filename in FILES.items() if filename == path.name)
+    with path.open("rb") as stream:
+        return stream.read(limit + 1)
 
 
 class Catalog:
@@ -243,6 +261,30 @@ class Catalog:
         self.resolved_path = self.dir / "resolved.json"
         self.changes_path = self.dir / "changes.jsonl"
         self.lock_path = self.state_dir / ".lock"
+
+    def score_bytes(self, name: str) -> bytes | None:
+        """The raw bytes of one stored score file, or None when there is none; `oah.benchmarks` checks them."""
+        path = self.dir / name
+        try:
+            return _retry_permission(lambda: _score_bytes(path), RETRY_SECONDS)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
+
+    def save_scores(self, name: str, data: Mapping) -> None:
+        """Store one fetched score file whole: a reader sees the old file or the new one, never part of one."""
+        write_json_atomic(self.dir / name, data)
+
+    def drop_scores(self, name: str) -> None:
+        """Remove one stored score file; there being none is fine."""
+        path = self.dir / name
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
 
     def load(self, engine: str) -> Entry | None:
         data = read_json(self.catalog_path, {})
@@ -256,8 +298,10 @@ class Catalog:
             write_json_atomic(self.catalog_path, data)
 
     def ensure_fresh(self, engine: str, *, base: Sequence[str], env: Mapping[str, str], ttl_hours: float,
-                     refresh: bool = False, now: dt.datetime | None = None, persist: bool = True) -> Freshness:
-        """The catalog entry to use for this launch, rebuilt first when it is due; `persist=False` stores nothing."""
+                     refresh: bool = False, now: dt.datetime | None = None, persist: bool = True,
+                     aliases: Sequence[str] = ()) -> Freshness:
+        """The catalog entry to use for this launch, rebuilt first when it is due; `persist=False` stores nothing.
+        `aliases` are the known Claude aliases a rebuild may confirm when the help omits them."""
         now = now or utc_now()
         stored = self.load(engine)
         version = probe_version(engine, base, env)
@@ -277,7 +321,7 @@ class Catalog:
             reason = f"catalog older than {ttl_hours:g} h"
         if reason is None:
             return Freshness(stored, None, tuple(warnings), version)
-        models, source = probe_models(engine, base, env)
+        models, source = probe_models(engine, base, env, aliases)
         if not models:
             kept = f"keeping the catalog checked at {stored.checked_at}" if stored else "no earlier catalog exists"
             warnings.append(f"OAH_MODELS_REFRESH_FAILED: {engine} reported no models ({source}); {kept}. Run the "
@@ -418,9 +462,15 @@ def model_changes(before: scoring.ScoreSet, after: scoring.ScoreSet, profile: st
         if old != new:
             why = (f"{old} is no longer listed" if old not in listed else
                    "newer generation" if after.left_out.get(old) == "superseded" or new not in known else
+                   "the scores changed" if _data_of(before) != _data_of(after) else
                    "the eligible models changed")
             rows.append({"step": step, "old": old, "new": new, "why": why})
     return rows
+
+
+def _data_of(scores: scoring.ScoreSet) -> tuple[str, str, str, str]:
+    """Which data a score set came from: its source, date, fetch time and credit."""
+    return scores.source, scores.date, scores.fetched_at, scores.credit
 
 
 def changed_warning(engine: str, change: Mapping) -> str:
@@ -458,9 +508,11 @@ def score_report(scores: scoring.ScoreSet, profile: str, *, left_out: Mapping[st
     """The profile, the scores with their credit, and each listed model left out with its reason."""
     rows = [{"model": item.model, "family": item.family, "score": round(item.score, 1), "cost": item.cost}
             for item in scores.models]
+    block = {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
+    if scores.fetched_at:
+        block["fetched_at"] = scores.fetched_at  # last, so every earlier key keeps its place
     return {"profile": profile,
-            "scores": {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
-            if rows else None,
+            "scores": block if rows else None,
             "left_out": {name: reason for name, reason in sorted({**scores.left_out, **(left_out or {})}.items())
                          if PLAIN_MODEL.fullmatch(name)}}
 

@@ -52,6 +52,9 @@ rule, and `oah models` shows each model's score and why a model was left out.
 | `OAH_MODEL_UNKNOWN_FAMILY` | A notice: the CLI lists a model of a family `oah` does not know, so it is never chosen automatically. | Name it in `quality_order` or a tier, or update `oah`. |
 | `OAH_MODEL_CHANGED` | A notice: a catalog rebuild changed the model the rule uses at a step. It appears once and stays in `changes.jsonl`. | Nothing. To keep a model, pin it. |
 | `OAH_MODEL_ORDER_IGNORED` | A notice from `oah models`: `quality_order` is the old default, so it counts as unset and scores choose. | Remove the line, or list other models to rank them yourself. |
+| `OAH_SCORES_REFRESH_FAILED` | A notice: a catalog rebuild could not fetch fresh scores, so the last good copy, or the snapshot shipped with `oah`, chose. The message says why. Nothing was stopped. | Nothing, for a passing network problem: `oah` tries again at the next rebuild. For a refused key, store `ARTIFICIAL_ANALYSIS_API_KEY` again. To stop these requests, set `[models] fetch_scores = false`. |
+| `OAH_SCORES_AA_UNUSED` | A notice: your Artificial Analysis copy has no score for a model the CLI lists, so Epoch AI scores chose for that engine. | Nothing. It clears once Artificial Analysis scores that model. |
+| `OAH_SCORES_FILE_INVALID` | A notice: a stored score file in `oah`'s state folder is damaged or was changed, so it counts as absent. | Delete the file the message names, or run `oah models --refresh` to fetch it again. |
 
 ## Leases
 

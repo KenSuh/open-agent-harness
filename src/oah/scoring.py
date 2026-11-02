@@ -10,10 +10,10 @@ Data
 Score set
     `score_set` turns one catalog entry into the `ScoreSet` of one call. The scale comes from the data alone,
     so what one machine lists or allows moves no score, required score or floor. It runs over every known
-    family: each family's newest generation in the data, and a generation that would leave fewer than 3 common
-    tasks gives way to the one before it, weakest coverage first, and on a tie the older generation. The tasks those
-    models share are the common tasks. Each task is scaled from 0 to 100 between the lowest and highest of them,
-    and a score is the mean.
+    family: each family's newest generation in the data, and a generation that would leave fewer common tasks than
+    the data's `min_tasks` (3 when absent; a source with one index sets 1) gives way to the one before it, weakest
+    coverage first, and on a tie the older generation. The tasks those models share are the common tasks. Each task
+    is scaled from 0 to 100 between the lowest and highest of them, and a score is the mean.
 
     Listing and `allowed` then only decide what may be picked. A listed model that has every common task gets its
     score on that scale, and each family keeps its newest such generation, so a family never goes empty because a
@@ -93,6 +93,7 @@ class ScoreSet:
     failure: str = ""  # why no scores could be read, kept until a choice needs them
     stays: Mapping[str, str] = field(default_factory=dict)  # an unscored model -> the one its family keeps using
     scale: tuple[float, float] | None = None  # lowest and highest of the fixed scale; a hand-built set uses `models`
+    fetched_at: str = ""  # when a fetched copy was read from its source; empty for the snapshot shipped with oah
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,8 @@ def bundled() -> Mapping:
             raise _unusable(name, f"has no {key}")
     if not (isinstance(data.get("date"), str) and _DATE.fullmatch(data["date"])):
         raise _unusable(name, "has no date")
+    if "min_tasks" in data and not (type(data["min_tasks"]) is int and data["min_tasks"] == MIN_COMMON_TASKS):
+        raise _unusable(name, f"has a min_tasks other than {MIN_COMMON_TASKS}")
     scores = data.get("scores")
     if not isinstance(scores, dict) or not scores:
         raise _unusable(name, "has no scores")
@@ -226,10 +229,10 @@ def _candidate(engine: str, spec: Mapping, name: str, scores: Mapping) -> _Candi
     return _Candidate(name, match["family"], generation, sum(price), scores.get(name, {}))
 
 
-def _competing(candidates: Sequence[_Candidate]) -> list[_Candidate]:
-    """Drop candidates, weakest coverage first, until at least 3 tasks are common to all that remain."""
+def _competing(candidates: Sequence[_Candidate], need: int) -> list[_Candidate]:
+    """Drop candidates, weakest coverage first, until at least `need` tasks are common to all that remain."""
     kept = list(candidates)
-    while kept and len(set.intersection(*(set(item.tasks) for item in kept))) < MIN_COMMON_TASKS:
+    while kept and len(set.intersection(*(set(item.tasks) for item in kept))) < need:
         kept.remove(min(kept, key=lambda item: (len(item.tasks), item.generation, item.model)))
     return kept
 
@@ -240,14 +243,14 @@ def _in_data(engine: str, spec: Mapping, scores: Mapping) -> list[_Candidate]:
     return [item for item in found if item is not None and item.tasks]
 
 
-def _leaders(pool: Sequence[_Candidate]) -> list[_Candidate]:
+def _leaders(pool: Sequence[_Candidate], need: int) -> list[_Candidate]:
     """The models of the scale: each family's newest generation, and one too thin gives way to the one before it."""
     queues: dict[str, list[_Candidate]] = {}
     for item in sorted(pool, key=lambda item: (item.generation, item.model), reverse=True):
         queues.setdefault(item.family, []).append(item)
     while True:
         front = [queue[0] for queue in queues.values() if queue]
-        kept = _competing(front)
+        kept = _competing(front, need)
         if len(kept) == len(front):
             return kept
         for item in front:
@@ -261,8 +264,12 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     known = families() if known is None else known
     data = bundled() if data is None else data
     spec = known["engines"][engine]
+    need = data.get("min_tasks", MIN_COMMON_TASKS)
+    if type(need) is not int or need < 1:
+        raise EngineError(NO_SCORES, f"the score data has an invalid min_tasks, so scores cannot choose a model; run "
+                          f"`oah doctor`, or {_PIN.format(engine=engine)}")
     in_data = _in_data(engine, spec, data["scores"])
-    leaders = _leaders(in_data)
+    leaders = _leaders(in_data, need)
     none_listed = (f"no model the {engine} CLI lists has a usable score, so scores cannot choose one; run `oah models` "
                    f"to see why each was left out, or {_PIN.format(engine=engine)}")
     if not leaders:
@@ -321,7 +328,8 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     nothing_allowed = (f"no model in [engines.{engine}] allowed_models has a usable score, so scores cannot choose one; "
                        f"run `oah models` to see why each was left out, or {_PIN.format(engine=engine)}")
     return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(picks), left_out, tuple(retired.values()),
-                    "" if picks else nothing_allowed if ranked else none_listed, stays, (min(values), max(values)))
+                    "" if picks else nothing_allowed if ranked else none_listed, stays, (min(values), max(values)),
+                    data.get("fetched_at", ""))
 
 
 def failed(engine: str, error: EngineError) -> ScoreSet:

@@ -1,13 +1,19 @@
-# 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout)를 만든다.
+# 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout), 점수 받기용 가짜 연결과 네트워크 차단을 만든다.
 from __future__ import annotations
 
+import io
 import json
 import os
 import pathlib
 import shutil
+import socket
 import stat
 import tempfile
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from unittest import mock
 
 
 def make_tmp_dir(test: unittest.TestCase) -> pathlib.Path:
@@ -115,3 +121,91 @@ def git_commit(repo: pathlib.Path, files: dict, message: str = "change") -> str:
                    check=True, env=git_env())
     return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
                           text=True).stdout.strip()
+
+
+class FakeResponse(io.BytesIO):
+    """What a fake opener answers: a body, an HTTP status and headers."""
+
+    def __init__(self, body: bytes = b"", status: int = 200, headers: dict | None = None) -> None:
+        super().__init__(body)
+        self.status = status
+        self.headers = dict(headers or {})
+
+
+class FakeOpener:
+    """Stands in for the opener of `oah.benchmarks`: it records each request and answers from `answers`, which maps a
+    URL to a response, an exception to raise, or a function of the request. Anything else is refused as offline."""
+
+    def __init__(self, answers: dict | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.requests: list[dict] = []
+
+    def open(self, request, timeout=None):
+        self.requests.append({"url": request.full_url, "method": request.get_method(),
+                              "headers": dict(request.header_items()), "data": request.data, "timeout": timeout})
+        answer = self.answers.get(request.full_url, urllib.error.URLError("tests never reach the network"))
+        if callable(answer) and not isinstance(answer, BaseException):
+            answer = answer(request)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def urls(self) -> list[str]:
+        return [request["url"] for request in self.requests]
+
+
+def use_opener(test: unittest.TestCase, opener: FakeOpener | None = None) -> FakeOpener:
+    """Give every score fetch of this test `opener` (a refusing one by default) and return it as a spy."""
+    from oah import benchmarks
+
+    opener = opener if opener is not None else FakeOpener()
+    patcher = mock.patch.object(benchmarks, "_opener", lambda: opener)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return opener
+
+
+class RealNetworkRequest(BaseException):
+    """A test reached for the real network. A BaseException, so that no `except Exception` in oah swallows it."""
+
+
+REAL_OPENER = None  # the production opener factory of `oah.benchmarks`, kept for the guard test
+SHIPPED_DEFAULTS: dict = {}  # `oah.models.DEFAULTS` as oah ships them, before `block_network`
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+def block_network() -> None:
+    """Keep every test offline (AC6).
+
+    Tests that do not test fetching run with `[models] fetch_scores` off by default, so a first catalog build in a test
+    neither asks for data nor warns that it could not; a test of fetching calls `shipped_defaults`. A fetch gets a
+    refusing fake opener unless a test installs its own, and a request to any host but this machine raises
+    RealNetworkRequest instead of leaving it."""
+    global REAL_OPENER
+    from oah import benchmarks, models
+
+    if REAL_OPENER is not None:
+        return
+    SHIPPED_DEFAULTS.update(models.DEFAULTS)
+    models.DEFAULTS["fetch_scores"] = False
+    REAL_OPENER = benchmarks._opener
+    benchmarks._opener = FakeOpener
+    real_open = urllib.request.OpenerDirector.open
+
+    def open_loopback_only(self, fullurl, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT):
+        url = fullurl.full_url if isinstance(fullurl, urllib.request.Request) else fullurl
+        host = urllib.parse.urlsplit(url).hostname
+        if host not in LOOPBACK:
+            raise RealNetworkRequest(f"a test tried to reach {host}; install a fake opener (tests.helpers.use_opener)")
+        return real_open(self, fullurl, data, timeout)
+
+    urllib.request.OpenerDirector.open = open_loopback_only
+
+
+def shipped_defaults(test: unittest.TestCase) -> None:
+    """Run this test with the model defaults oah ships, so a catalog rebuild fetches scores (through a fake opener)."""
+    from oah import models
+
+    patcher = mock.patch.dict(models.DEFAULTS, SHIPPED_DEFAULTS)
+    patcher.start()
+    test.addCleanup(patcher.stop)

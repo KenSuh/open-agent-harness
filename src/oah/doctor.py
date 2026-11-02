@@ -201,13 +201,17 @@ def model_choices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
     from oah.paths import repo_info, state_dir
     from oah.routing import ENGINES
 
+    from oah.benchmarks import Session
+
     settings = load_settings(root)
     catalog = Catalog(state_dir(repo_info(root), env))
     try:
         entries = {engine: catalog.load(engine) for engine in ENGINES}
     except _NOTICE_FAILURES:  # a damaged catalog must not stop an advisory report
         return []
-    return [call.stored_choices(engine, entry, settings) for engine, entry in entries.items() if entry is not None]
+    session = Session()  # one view of the stored score files for both engines
+    return [call.stored_choices(engine, entry, settings, catalog=catalog, session=session)
+            for engine, entry in entries.items() if entry is not None]
 
 
 def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
@@ -236,7 +240,10 @@ def _model_lines(notices: Sequence[Mapping]) -> list[str]:
 def _choice_lines(choices: Sequence[Mapping]) -> list[str]:
     if not choices:
         return []
-    lines = ["", "Model choice (from the stored catalog, packaged scores and current config; no network used):"]
+    from oah.benchmarks import describe
+
+    lines = ["", "Model choice (from the stored catalog, the stored or packaged scores and current config; "
+             "no network used):"]
     for row in choices:
         scores = row["scores"]
         where = f"scores {scores['source']} {scores['date']}" if scores else "no usable scores"
@@ -246,7 +253,9 @@ def _choice_lines(choices: Sequence[Mapping]) -> list[str]:
         if row["left_out"]:
             lines.append("      left out: " + " · ".join(f"{name} ({why})" for name, why in row["left_out"].items()))
         if scores:
+            lines.append(f"      scores from: {describe(scores)}")
             lines.append(f"      credit: {scores['credit']}")
+        lines += [f"      {notice}" for notice in row.get("notices", ())]
     return lines
 
 

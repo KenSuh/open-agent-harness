@@ -23,6 +23,7 @@ API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 프�
 | Claude Code 로그인 | Claude Code. `oah`는 `claude auth status`로 확인만 하고 읽지 않는다. | `oah call claude`를 실행할 수 없다 |
 | Codex 로그인 | Codex CLI. `oah`는 `codex login status`로 확인만 하고 읽지 않는다. | `oah review`와 `oah fix`를 실행할 수 없다 |
 | `TYPESAFE_API_KEY` | 선택 기능인 TypeSafe Jev 재정렬기 | `rerank=unused(no key)`. 정해진 규칙만으로 판단한다 |
+| `ARTIFICIAL_ANALYSIS_API_KEY` | 모델을 고를 때 쓰는 선택 기능인 Artificial Analysis 점수. [아래](#artificial-analysis-점수) 참고 | Epoch AI의 공개 점수로 고르고, Artificial Analysis에는 아무것도 보내지 않는다 |
 | `CONTEXT7_API_KEY`, `OPENAI_API_KEY` | 툴킷의 `mcp/` 템플릿으로 띄우는 MCP 서버. 서버를 띄울 때 Claude Code나 Codex가 읽는다 | 그 서버가 뜨지 않거나 선택 키 없이 돈다. [툴킷](toolkit.md) 참고 |
 
 ## Claude Code와 Codex는 각자 로그인한다
@@ -82,7 +83,7 @@ Windows(명령 프롬프트나 PowerShell):
 cmdkey /generic:oah:TYPESAFE_API_KEY /user:oah /pass
 ```
 
-## 키만으로는 기능이 켜지지 않는다
+## 키만으로는 재정렬기가 켜지지 않는다
 
 TypeSafe Jev 재정렬기는 **사용자가 켰고 키도 있을 때만** 돈다. 환경 변수에 키가 있다고 켜지지 않는다. 안내형
 `oah init`이 한 번 묻는다. 무엇을 보내는지, TypeSafe가 요청마다 요금을 받을 수 있다는 점을 밝히고 답을
@@ -104,6 +105,34 @@ provider = "typesafe"
 | `rerank=unused(disabled-by-brief)` | 명령에 `--no-rerank`를 줬거나 패킷에서 껐다. |
 
 다른 변수 이름을 쓰려면 `[rerank.typesafe]`에 `key_name`을 적는다.
+
+## Artificial Analysis 점수
+
+모델 선택은 Epoch AI의 공개 점수를 쓰므로 키가 필요 없다. 자신의 Artificial Analysis 키가 있으면 `oah`는 그 점수를 대신
+쓴다. 키는 `ARTIFICIAL_ANALYSIS_API_KEY`라는 이름으로 위처럼 환경 변수나 OS 키체인에 둔다.
+
+macOS:
+
+```sh
+security add-generic-password -s oah -a ARTIFICIAL_ANALYSIS_API_KEY -w
+```
+
+Windows(명령 프롬프트나 PowerShell):
+
+```powershell
+cmdkey /generic:oah:ARTIFICIAL_ANALYSIS_API_KEY /user:oah /pass
+```
+
+재정렬기와 달리 이 기능은 키만 있으면 켜진다. `[models] fetch_scores`의 기본값이 `true`이기 때문이다. `false`로 두면 Epoch AI를
+포함한 모든 점수 요청이 멈춘다.
+
+- `oah`는 모델 카탈로그를 다시 만들면서 Artificial Analysis에 물어보기 바로 전에만 키를 찾고, 요청의 `x-api-key` 헤더에만
+  싣는다. 키를 저장하거나 출력하거나 기록하지 않는다.
+- 자료는 내 컴퓨터의 `oah` 상태 폴더에 `models/benchmarks-aa.json`으로만 남고 저장소에는 들어가지 않는다. `oah`는 맞춘
+  모델마다 지수 값 하나만 남기고 응답의 나머지는 버린다.
+- Artificial Analysis는 출처 표시를 요구하므로 `oah`는 이 점수를 보여 주는 곳마다
+  `Artificial Analysis, https://artificialanalysis.ai/`를 함께 보여 준다.
+- 키를 지우면 다음 갱신 때 `oah`가 그 자료를 더 쓰지 않고 사본도 지운다.
 
 ## 키가 git에 들어가지 않게 막는 장치
 

@@ -27,7 +27,7 @@ from oah.paths import repo_info
 from oah.review import ReviewError, authors, fix, receipts, runner
 from oah.secrets import NoKeychain
 from tests.fixtures.gates.support import remove_tree
-from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir, shipped_defaults
 from tests.test_review_rounds import CLAUDE_TRAILER, LEVELS, PACKET, RULES, bug, git, toml_list
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -501,7 +501,8 @@ class RefusalTest(unittest.TestCase):
     def test_every_model_code_has_a_fixed_diagnostic_with_a_next_step(self):
         for code in ("OAH_MODEL_NO_SCORES", "OAH_MODEL_CATALOG_UNAVAILABLE", "OAH_MODEL_BELOW_FLOOR",
                      "OAH_MODEL_NOT_LISTED", "OAH_MODEL_SUPERSEDED", "OAH_MODEL_CHANGED", "OAH_MODEL_UNKNOWN_FAMILY",
-                     "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED"):
+                     "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED",
+                     "OAH_SCORES_REFRESH_FAILED", "OAH_SCORES_AA_UNUSED", "OAH_SCORES_FILE_INVALID"):
             with self.subTest(code=code):
                 self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
                 self.assertEqual(runs._correction_record({"warnings": [f"{code}: a model name"]}, ("warnings",))["warnings"],
@@ -2173,6 +2174,63 @@ class SecretTest(unittest.TestCase):
                 project.fix()
         self.assertEqual(caught.exception.code, "OAH_FIX_STATE_CHANGED")
         self.assertEqual(state_snapshot(project.state), expected[0])
+
+    def test_a_score_file_change_after_capture_refuses_without_overwriting_state(self):
+        from tests.test_call import STORED_RANKING, write_stored_epoch
+
+        shipped_defaults(self)  # fetching on, so the stored copies are inputs of the choice
+        for present in (True, False):
+            with self.subTest(present_at_capture=present):
+                project = FixProject(self)
+                project.changes_requested()
+                if present:
+                    write_stored_epoch(project.state, STORED_RANKING)
+                resolve = call.resolve_engine
+                expected = []
+
+                def changed(*args, **kwargs):
+                    result = resolve(*args, **kwargs)
+                    with StateLock(project.state / ".lock", timeout=0):
+                        write_stored_epoch(project.state, {**STORED_RANKING, "gpt-6-luna": 0.5})
+                    expected.append(state_snapshot(project.state))
+                    return result
+
+                with mock.patch.object(call, "resolve_engine", side_effect=changed):
+                    project.refused("OAH_FIX_STATE_CHANGED", project.fix)
+                self.assertEqual(state_snapshot(project.state), expected[0])
+
+    def test_a_score_file_is_no_input_with_fetch_scores_off(self):
+        from tests.test_call import STORED_RANKING, write_stored_epoch
+
+        project = FixProject(self)  # the tests' default: fetching off, so no stored copy is read
+        project.changes_requested()
+        resolve = call.resolve_engine
+
+        def changed(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            write_stored_epoch(project.state, STORED_RANKING)
+            return result
+
+        with mock.patch.object(call, "resolve_engine", side_effect=changed):
+            self.assertEqual(project.fix().outcome, "no-change")
+
+    def test_a_score_refresh_during_the_correction_never_stops_its_result(self):
+        from tests.test_call import STORED_RANKING, write_stored_epoch
+
+        shipped_defaults(self)
+        project = FixProject(self)
+        project.changes_requested()
+        write_stored_epoch(project.state, STORED_RANKING)
+        judge = fix._Attempt._judge
+
+        def refreshed(attempt, *args, **kwargs):
+            result = judge(attempt, *args, **kwargs)
+            with StateLock(project.state / ".lock", timeout=0):  # another command's rebuild stores new scores
+                write_stored_epoch(project.state, {**STORED_RANKING, "gpt-6-luna": 0.5})
+            return result
+
+        with mock.patch.object(fix._Attempt, "_judge", refreshed):
+            self.assertEqual(project.fix().outcome, "no-change", "only the start publication depends on model inputs")
 
     def test_model_change_after_capture_refuses_without_overwriting_state(self):
         project = FixProject(self)

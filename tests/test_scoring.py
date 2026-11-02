@@ -690,6 +690,38 @@ class BandTest(unittest.TestCase):
         self.assertEqual(scoring.band(strong, scoring.choose(strong, "medium", "low", "efficient")), ("m-top", "m-low"))
 
 
+class MinTasksTest(unittest.TestCase):
+    """A source with one index sets `min_tasks` to 1; the packaged snapshot and Epoch copies keep 3."""
+
+    ONE = {"gpt-6-luna": {"Coding Index": 0.2}, "gpt-6.1-sol": {"Coding Index": 0.6}}
+
+    def test_one_common_task_is_enough_only_when_the_data_says_so(self):
+        listed = entry("codex", "gpt-6-luna", "gpt-6.1-sol")
+        one = scoring.score_set("codex", listed, allowed=(), data={**data(self.ONE), "min_tasks": 1}, known=KNOWN)
+        self.assertEqual({item.model: item.score for item in one.models}, {"gpt-6-luna": 0.0, "gpt-6.1-sol": 100.0})
+        with self.assertRaises(EngineError) as caught:
+            scoring.score_set("codex", listed, allowed=(), data=data(self.ONE), known=KNOWN)
+        self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+
+    def test_a_count_it_cannot_use_is_no_scores(self):
+        usable = scoring.score_set("codex", entry("codex", "gpt-6-luna"), allowed=(),
+                                   data={**data(self.ONE), "min_tasks": 1}, known=KNOWN)
+        self.assertEqual([item.model for item in usable.models], ["gpt-6-luna"], "the control: a count of 1 scores")
+        for value in (0, -1, True, "1", 1.5, None):
+            with self.subTest(value=value), self.assertRaises(EngineError) as caught:
+                scoring.score_set("codex", entry("codex", "gpt-6-luna"), allowed=(),
+                                  data={**data(self.ONE), "min_tasks": value}, known=KNOWN)
+            self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+
+    def test_the_packaged_snapshot_keeps_three(self):
+        good = json.loads(scoring._packaged("benchmarks.json").decode("utf-8"))
+        for value in (1, 0, True, "3", 3.0):
+            with self.subTest(value=value):
+                fails_with_no_scores(self, scoring.bundled, json.dumps({**good, "min_tasks": value}).encode())
+        with mock.patch.object(scoring, "_packaged", return_value=json.dumps({**good, "min_tasks": 3}).encode()):
+            self.assertEqual(scoring.bundled()["min_tasks"], 3)
+
+
 class ChangeStepTest(unittest.TestCase):
     def test_each_step_has_one_choice_for_a_profile(self):
         self.assertEqual([scoring.at_step(CODEX, step, "balanced").model for step in range(4)],
