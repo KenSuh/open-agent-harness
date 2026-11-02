@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import math
 import pathlib
@@ -255,7 +256,8 @@ class ScoreSetTest(unittest.TestCase):
         self.assertEqual((scores.engine, scores.source, scores.date, scores.credit),
                          ("codex", "Epoch AI", "2026-11-02", CREDIT))
         best = next(model for model in scores.models if model.model == "gpt-6.1-sol")
-        self.assertEqual((best.family, best.generation, best.score, best.cost), ("sol", (6, 1), 100.0, 12))
+        self.assertEqual((best.family, best.generation, best.cost), ("sol", (6, 1), 12))
+        self.assertAlmostEqual(best.score, (0.9 - 0.1) / (0.95 - 0.1) * 100, msg="astra, unlisted, still tops the scale")
         self.assertEqual(next(m for m in scores.models if m.model == "gpt-6-luna").score, 0.0)
 
     def test_a_score_is_the_mean_of_each_common_task_scaled_between_the_candidates(self):
@@ -348,12 +350,20 @@ class ScoreSetTest(unittest.TestCase):
                     self.assertEqual(scoring.choose(scores, tier, "low", profile).model, "gpt-6-luna")
 
     def test_a_one_model_engine(self):
-        scores = codex_set(("gpt-6.1-sol",), self.ALL)
+        scores = codex_set(("gpt-6.1-sol",), {"gpt-6.1-sol": flat(0.9)})
         for tier in TIERS:
             for floor in TIERS:
                 for profile in PROFILES:
                     self.assertEqual(scoring.choose(scores, tier, floor, profile).model, "gpt-6.1-sol")
         self.assertTrue(scoring.clears(scores, "gpt-6.1-sol", 3))
+
+    def test_a_one_model_catalog_takes_every_tier_it_can_reach(self):
+        scores = codex_set(("gpt-6.1-sol",), self.ALL)
+        for tier in TIERS:
+            for profile in PROFILES:
+                with self.subTest(tier=tier, profile=profile):
+                    self.assertEqual(scoring.choose(scores, tier, "high", profile).model, "gpt-6.1-sol")
+        self.assertFalse(scoring.clears(scores, "gpt-6.1-sol", 3), "the top of the scale is astra, which is not listed")
 
     def test_allowed_filters_last_and_leaves_the_scale_alone(self):
         wide = codex_set(("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol"), self.ALL)
@@ -363,16 +373,28 @@ class ScoreSetTest(unittest.TestCase):
         self.assertEqual({model.model: model.score for model in narrow.models},
                          {model.model: model.score for model in wide.models if model.model != "gpt-6-luna"})
 
-    def test_nothing_allowed_is_a_named_failure(self):
+    def test_nothing_allowed_is_a_named_failure_when_a_choice_needs_it(self):
+        scores = codex_set(("gpt-6-luna",), self.ALL, allowed=("gpt-6.1-sol",))
+        self.assertEqual(scores.models, ())
         with self.assertRaises(EngineError) as caught:
-            codex_set(("gpt-6-luna",), self.ALL, allowed=("gpt-6.1-sol",))
+            scoring.choose(scores, "high", "low", "balanced")
         self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+        self.assertIn("allowed_models", str(caught.exception))
 
-    def test_an_empty_or_absent_entry_is_a_named_failure(self):
+    def test_an_empty_or_absent_entry_is_a_named_failure_when_a_choice_needs_it(self):
         for empty in (None, entry("codex")):
-            with self.subTest(empty=empty), self.assertRaises(EngineError) as caught:
-                scoring.score_set("codex", empty, allowed=(), data=data(self.ALL), known=KNOWN)
-            self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+            with self.subTest(empty=empty):
+                scores = scoring.score_set("codex", empty, allowed=(), data=data(self.ALL), known=KNOWN)
+                with self.assertRaises(EngineError) as caught:
+                    scoring.choose(scores, "high", "low", "balanced")
+                self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+                self.assertIn(".oah/config.toml", str(caught.exception))
+
+    def test_data_with_no_usable_model_is_a_named_failure_at_once(self):
+        with self.assertRaises(EngineError) as caught:
+            scoring.score_set("codex", entry("codex", "gpt-6.1-sol"), allowed=(),
+                              data=data({"gpt-6.1-sol": flat(0.9, TASKS[:2]), "gpt-7-nova": flat(1.0)}), known=KNOWN)
+        self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
 
     def test_a_left_out_model_keeps_a_score_on_the_same_scale_for_floor_checks_only(self):
         scores = codex_set(("gpt-5.6-sol", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"),
@@ -384,6 +406,152 @@ class ScoreSetTest(unittest.TestCase):
         self.assertIsNone(scoring.score_of(scores, "gpt-unknown"))
         for tier in TIERS:
             self.assertNotIn(scoring.choose(scores, tier, "low", "balanced").model, ("gpt-5.6-sol", "gpt-6-luna"))
+
+
+class FixedScaleTest(unittest.TestCase):
+    """The scale comes from the data, so what one machine lists or allows moves no score, required score or floor."""
+
+    # Shaped like real results: haiku leads fable on one task, and without haiku sonnet falls to the bottom of the others.
+    CLAUDE = {"claude-opus-5-5": dict(zip(TASKS, (0.7, 0.9, 0.9, 0.8))),
+              "claude-sonnet-5-5": dict(zip(TASKS, (0.6, 0.8, 0.85, 0.7))),
+              "claude-fable-5-1": dict(zip(TASKS, (0.4, 0.85, 0.88, 0.75))),
+              "claude-haiku-5-5": dict(zip(TASKS, (0.5, 0.4, 0.7, 0.4)))}
+    CODEX = {"gpt-6-luna": flat(0.1), "gpt-6.1-terra": flat(0.8), "gpt-6.1-sol": flat(0.9), "gpt-6-astra": flat(1.0)}
+
+    def requires(self, scores: scoring.ScoreSet) -> list[float]:
+        return [scoring.required(scores, step) for step in range(len(TIERS))]
+
+    def test_removing_haiku_leaves_every_required_score_and_medium_balanced_picks_sonnet(self):
+        full = claude_set(("haiku", "sonnet", "opus", "fable"), self.CLAUDE)
+        listed = claude_set(("sonnet", "opus", "fable"), self.CLAUDE)
+        self.assertEqual(self.requires(listed), self.requires(full))
+        self.assertEqual(scoring.choose(listed, "medium", "low", "balanced").model, "sonnet")
+        self.assertEqual(scoring.choose(listed, "high", "low", "balanced").model, "sonnet")
+        self.assertEqual(scoring.choose(listed, "max", "low", "balanced").model, "opus")
+        self.assertTrue(scoring.clears(listed, "sonnet", 1), "sonnet reaches a medium floor")
+
+    def test_removing_any_model_moves_no_score(self):
+        everything = ("haiku", "sonnet", "opus", "fable")
+        full = claude_set(everything, self.CLAUDE)
+        for size in range(1, len(everything) + 1):
+            for listed in itertools.combinations(everything, size):
+                with self.subTest(listed=listed):
+                    scores = claude_set(listed, self.CLAUDE)
+                    self.assertEqual(self.requires(scores), self.requires(full))
+                    self.assertEqual({name: scoring.score_of(scores, name) for name in everything},
+                                     {name: scoring.score_of(full, name) for name in everything})
+
+    def test_no_allow_list_moves_a_score_or_a_required_score(self):
+        everything = tuple(self.CODEX)
+        full = codex_set(everything, self.CODEX)
+        for size in range(1, len(everything) + 1):
+            for allowed in itertools.combinations(everything, size):
+                with self.subTest(allowed=allowed):
+                    scores = codex_set(everything, self.CODEX, allowed=allowed)
+                    self.assertEqual(self.requires(scores), self.requires(full))
+                    self.assertEqual({name: scoring.score_of(scores, name) for name in everything},
+                                     {name: scoring.score_of(full, name) for name in everything})
+
+    def test_a_narrow_allow_list_cannot_let_a_model_under_a_floor(self):
+        scores = codex_set(tuple(self.CODEX), self.CODEX, allowed=("gpt-6-luna",))
+        self.assertEqual(names_of(scores), {"gpt-6-luna"})
+        self.assertFalse(scoring.clears(scores, "gpt-6-luna", 1))
+
+    def test_a_model_the_data_has_and_the_cli_does_not_list_sets_the_scale_and_is_never_chosen(self):
+        scores = codex_set(("gpt-6-luna", "gpt-6.1-terra"), self.CODEX)
+        self.assertEqual(scoring.score_of(scores, "gpt-6-astra"), 100.0)
+        self.assertEqual(scores.left_out, {}, "a model nobody lists is not reported as left out")
+        for tier in TIERS:
+            for profile in PROFILES:
+                with self.subTest(tier=tier, profile=profile):
+                    self.assertIn(scoring.choose(scores, tier, "low", profile).model, ("gpt-6-luna", "gpt-6.1-terra"))
+
+    def test_a_hidden_model_keeps_its_place_on_the_scale(self):
+        hidden = codex_set(("gpt-6-luna", "gpt-6.1-sol"), self.CODEX, hidden=("gpt-6-astra",))
+        self.assertEqual(self.requires(hidden), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+        self.assertEqual(names_of(hidden), {"gpt-6-luna", "gpt-6.1-sol"})
+
+    def test_an_unknown_family_never_moves_the_scale(self):
+        wide = codex_set(tuple(self.CODEX), {**self.CODEX, "gpt-7-nova": flat(0.0), "codex-auto-review": flat(1.0)})
+        self.assertEqual(self.requires(wide), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+
+    def test_only_the_newest_generation_in_the_data_sets_the_scale(self):
+        older = {**self.CODEX, "gpt-6-sol": flat(0.0), "gpt-5.6-terra": flat(0.05)}
+        self.assertEqual(self.requires(codex_set(tuple(self.CODEX), older)),
+                         self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+
+    def test_a_listed_older_generation_is_scored_when_the_newest_is_not_listed(self):
+        scores = codex_set(("gpt-6-luna", "gpt-6-sol"), {**self.CODEX, "gpt-6-sol": flat(0.55)})
+        self.assertEqual(names_of(scores), {"gpt-6-luna", "gpt-6-sol"})
+        self.assertAlmostEqual(scoring.score_of(scores, "gpt-6-sol"), 50.0)
+        self.assertEqual(scores.left_out, {})
+
+    def test_a_listed_older_generation_does_not_stretch_the_scale(self):
+        newest = {**self.CODEX, "gpt-6-astra": flat(0.95)}
+        odd = dict(zip(TASKS, (1.0, 0.0, 0.5, 0.5)))  # above every newest model on one task, below them on another
+        scores = codex_set(("gpt-6-luna", "gpt-6-sol"), {**newest, "gpt-6-sol": odd})
+        self.assertEqual(self.requires(scores), self.requires(codex_set(("gpt-6-luna",), newest)))
+        self.assertTrue(0.0 <= scoring.score_of(scores, "gpt-6-sol") <= 100.0)
+        self.assertIn("gpt-6-sol", names_of(scores))
+
+    def test_a_listed_older_generation_missing_a_common_task_waits_and_takes_no_task_away(self):
+        thin = codex_set(("gpt-6-luna", "gpt-6.1-terra", "gpt-6-sol"),
+                         {**self.CODEX, "gpt-6-sol": flat(0.55, TASKS[:3])})
+        self.assertEqual(thin.left_out, {"gpt-6-sol": "unscored"})
+        self.assertEqual(self.requires(thin), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+
+    def test_a_thin_newest_generation_gives_way_to_the_one_before_it(self):
+        data_set = {**self.CODEX, "gpt-6.2-sol": flat(0.2, TASKS[:2])}
+        scores = codex_set(("gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"), data_set)
+        self.assertEqual(scores.left_out, {"gpt-6.2-sol": "unscored"})
+        self.assertEqual(scores.stays, {"gpt-6.2-sol": "gpt-6.1-sol"})
+        self.assertEqual(self.requires(scores), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+
+    def test_a_family_with_only_a_thin_record_leaves_the_scale(self):
+        scores = codex_set(("gpt-6-luna", "gpt-6.1-sol"), {**self.CODEX, "gpt-6-luna": flat(0.1, TASKS[:2])})
+        self.assertEqual(scores.left_out, {"gpt-6-luna": "unscored"})
+        self.assertEqual(self.requires(scores)[0], 0.0, "the scale runs over the three families that have the tasks")
+
+    def test_a_pin_is_measured_with_no_catalog_at_all(self):
+        scores = scoring.score_set("codex", None, allowed=(), data=data(self.CODEX), known=KNOWN)
+        self.assertEqual(scores.models, ())
+        self.assertEqual(scoring.score_of(scores, "gpt-6-luna"), 0.0)
+        self.assertFalse(scoring.clears(scores, "gpt-6-luna", 1))
+        self.assertTrue(scoring.clears(scores, "gpt-6-astra", 3))
+
+    def test_a_pin_is_measured_when_the_allow_list_leaves_nothing_to_pick(self):
+        scores = codex_set(("gpt-6-luna",), self.CODEX, allowed=("gpt-7-nova",))
+        self.assertEqual(scores.models, ())
+        self.assertFalse(scoring.clears(scores, "gpt-6-luna", 1))
+
+    def test_nothing_reaching_the_step_takes_the_strongest_that_reaches_the_floor(self):
+        scores = codex_set(tuple(self.CODEX), self.CODEX, allowed=("gpt-6-luna", "gpt-6.1-terra"))
+        for tier, profile in (("max", "balanced"), ("high", "performance"), ("max", "performance")):
+            with self.subTest(tier=tier, profile=profile):
+                self.assertEqual(scoring.choose(scores, tier, "low", profile).model, "gpt-6.1-terra")
+        cheap = hand_built("codex", scored("m-low", "luna", 0.0, 1), scored("m-a", "terra", 50.0, 1),
+                           scored("m-b", "sol", 60.0, 2))
+        capped = scoring.ScoreSet("codex", "Epoch AI", "2026-11-02", CREDIT, cheap.models, {}, scale=(0.0, 100.0))
+        self.assertEqual(scoring.choose(capped, "max", "low", "balanced").model, "m-b", "the strongest, not the cheapest")
+
+    def test_a_floor_no_model_reaches_is_unresolved_and_names_allowed_models(self):
+        scores = codex_set(tuple(self.CODEX), self.CODEX, allowed=("gpt-6-luna",))
+        for profile in PROFILES:
+            with self.subTest(profile=profile), self.assertRaises(scoring.FloorUnmet) as caught:
+                scoring.choose(scores, "high", "medium", profile)
+            self.assertIsInstance(caught.exception, EngineError)
+            self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
+            self.assertIn("allowed_models", str(caught.exception))
+            self.assertIn("medium", str(caught.exception))
+            self.assertIn(".oah/config.toml", str(caught.exception))
+
+    def test_a_floor_of_low_is_no_floor_even_for_a_model_below_the_scale(self):
+        low = hand_built("codex", scored("m-low", "luna", 5.0, 1))
+        below = scoring.ScoreSet("codex", "Epoch AI", "2026-11-02", CREDIT, low.models, {}, scale=(10.0, 90.0))
+        for profile in PROFILES:
+            self.assertEqual(scoring.choose(below, "low", "low", profile).model, "m-low")
+        self.assertTrue(scoring.clears(below, "m-low", 0))
+        self.assertFalse(scoring.clears(below, "m-low", 1))
 
 
 class ClaudeAliasTest(unittest.TestCase):

@@ -284,6 +284,17 @@ class RecommendModelTest(unittest.TestCase):
             project.prepare(stage="review")
         self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
 
+    def test_a_floor_no_allowed_model_reaches_refuses_like_a_call(self):
+        project = self.project('allowed_models = ["gpt-6-luna"]\n')
+        code, out, err = recommend_in(project, *AXES, "--engine", "codex", "--stage", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_MODEL_BELOW_FLOOR", err)
+        self.assertIn("allowed_models", err)
+        code, out, err = recommend_in(project, "--kind", "security", "--intensity", "low", "--reasoning", "low",
+                                      "--risk", "low", "--engine", "codex")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_MODEL_UNRESOLVED", err)
+
     def test_it_writes_nothing_to_a_state_folder_that_does_not_exist(self):
         project = self.project()
         code, out, err = recommend_in(project, *AXES, "--engine", "codex", "--stage", "review")

@@ -16,7 +16,8 @@ Mapping
     model of the tier, and `OAH_MODEL_UNRESOLVED` when a configured tier has none. Then `quality_order`
     (strongest first, over listed models: low takes the last, medium the second or the only one, high and
     max the first), which needs no family and no score, so it is the way out when a family is renamed. If it names
-    no listed model, the score rule in `oah.scoring` decides, and `OAH_MODEL_NO_SCORES` says so when it cannot.
+    no listed model, the score rule in `oah.scoring` decides, and `OAH_MODEL_NO_SCORES` says so when it has no
+    scores, or `OAH_MODEL_UNRESOLVED` when no allowed model reaches the floor.
     `allowed_models` filters pool and `quality_order` picks. The CLI's default flag and Codex's own
     configuration never choose a model. The old Claude template default
     `["opus", "sonnet", "haiku"]` counts as unset (`user_order`), so every existing config gets scores with
@@ -76,7 +77,7 @@ from oah.lockfile import StateLock
 
 DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE}
 PROBE_TIMEOUT = 30.0
-UNRESOLVED = "OAH_MODEL_UNRESOLVED"
+UNRESOLVED = scoring.UNRESOLVED
 CATALOG_UNAVAILABLE = "OAH_MODEL_CATALOG_UNAVAILABLE"
 NEW_UNPOOLED = "OAH_MODEL_NEW_UNPOOLED"
 OLD_CLAUDE_ORDER = ("opus", "sonnet", "haiku")  # the template default before scores: it counts as unset

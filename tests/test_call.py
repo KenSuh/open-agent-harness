@@ -410,6 +410,38 @@ class AdmissionTest(unittest.TestCase):
                                        '[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
         self.refused(project, tier="medium")
 
+    def test_a_narrow_allow_list_cannot_let_a_low_model_pass_a_review(self):
+        project = scored_project(self, 'allowed_models = ["gpt-6-luna"]\n')
+        message = self.refused(project, tier="medium")
+        self.assertIn("allowed_models", message)
+        self.assertIn("medium", message)
+
+    def test_a_pin_stays_measured_when_the_allow_list_leaves_nothing_to_pick(self):
+        project = scored_project(self, 'allowed_models = ["gpt-7-nova"]\n'
+                                       '[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
+        self.assertIn("gpt-6-luna", self.refused(project, tier="medium"))
+
+    def test_a_pin_stays_measured_with_no_catalog(self):
+        project = scored_project(self, '[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
+        (project.home / "models_cache.json").unlink()
+        self.assertIn("gpt-6-luna", self.refused(project, tier="medium"))
+
+    def test_a_floor_no_allowed_model_reaches_is_unresolved_outside_a_review(self):
+        project = scored_project(self, 'allowed_models = ["gpt-6-luna"]\n')
+        message = self.refused(project, "OAH_MODEL_UNRESOLVED", stage="correction", tier="high", axes={"kind": "security"})
+        self.assertIn("allowed_models", message)
+
+    def test_a_narrow_allow_list_still_runs_where_no_floor_stands(self):
+        project = scored_project(self, 'allowed_models = ["gpt-6.1-terra"]\n')
+        data = project.run(stage="correction", tier="max", axes={"kind": "quick"})
+        self.assertEqual((data["status"], data["resolved_model"], data["model_source"]),
+                         ("finished", "gpt-6.1-terra", "scored"))
+
+    def test_a_model_this_machine_does_not_list_still_sets_the_review_floor(self):
+        # Without astra and sol on the list, terra would have topped the scale, and luna reached a medium floor with it.
+        project = scored_project(self, models=("gpt-6-luna",))
+        self.assertIn("allowed_models", self.refused(project, tier="medium"))
+
     def test_floors_only_bind_reviews(self):
         project = scored_project(self, '[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
         data = project.run(stage="correction", tier="medium")

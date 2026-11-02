@@ -8,14 +8,19 @@ Data
     `OAH_MODEL_NO_SCORES`, which names the one-line pin that gets past it.
 
 Score set
-    `score_set` turns one catalog entry into the `ScoreSet` of one call. Listed models that match the
-    family rules are candidates. The tasks every candidate has are the common tasks; a candidate that would
-    leave fewer than 3 is unscored, weakest coverage first, and on a tie the older generation goes first. Each
-    family keeps its newest generation with a score, so a family never goes empty because a new model
-    has no score yet. Steps 2 and 3 then run once more over the models that survive, because the
-    common tasks must be those of the models that compete. Each task is scaled from 0 to 100 between the
-    lowest and highest of them, and the score is the mean. `allowed` filters last, so it never moves the scale.
-    Models left out keep a score on the same scale where they have the tasks: only floors read it.
+    `score_set` turns one catalog entry into the `ScoreSet` of one call. The scale comes from the data alone,
+    so what one machine lists or allows moves no score, required score or floor. It runs over every known
+    family: each family's newest generation in the data, and a generation that would leave fewer than 3 common
+    tasks gives way to the one before it, weakest coverage first, and on a tie the older generation. The tasks those
+    models share are the common tasks. Each task is scaled from 0 to 100 between the lowest and highest of them,
+    and a score is the mean.
+
+    Listing and `allowed` then only decide what may be picked. A listed model that has every common task gets its
+    score on that scale, and each family keeps its newest such generation, so a family never goes empty because a
+    new model has no score yet. An older generation can stand in when the CLI does not list the newest one: it is
+    scored like the rest, a task outside the scale counts as the end it passed, and it does not stretch the scale.
+    A model with no score is unscored. Every other scored model, listed or not, keeps its score in `retired`,
+    which only a floor check reads, so a pin is measured even with no catalog and nothing left to pick.
 
 Rule
     `choose` numbers the tiers low 0 to max 3, adds the profile's offset, keeps the step in 0 to 3 and takes the
@@ -25,7 +30,9 @@ Rule
     test, and `choose` applies it too, so the rule cannot pick a model the admission check would refuse.
 
     Performance and balanced take the cheapest model that clears, then the lower score, then the name, so a
-    choice never flips. Efficient does not step down by itself: its lowest allowed step is one below the tier,
+    choice never flips. When nothing that may be picked reaches the step, for example on a machine that does not list
+    the top of the scale, the strongest model that meets the floor runs. When nothing meets the floor,
+    `FloorUnmet` says so, and a call turns it into `OAH_MODEL_BELOW_FLOOR` for a review. Efficient does not step down by itself: its lowest allowed step is one below the tier,
     and among the models that clear it and pass the effort rules (`usable`) it takes the most score per cost,
     then the lower score, the lower cost and the name. So a stronger model wins when it is the better value.
     The effort rules bind only here. Efforts stay the tier's, and a cap still clamps: `usable` drops a model the
@@ -48,6 +55,7 @@ from oah.engines.effort import EngineError
 from oah.routing import ENGINES, TIERS
 
 NO_SCORES = "OAH_MODEL_NO_SCORES"
+UNRESOLVED = "OAH_MODEL_UNRESOLVED"
 DEFAULT_PROFILE = "balanced"
 PROFILES = {"performance": 1, "balanced": 0, "efficient": 0}  # steps added to the tier; efficient looks one lower too
 MARGIN = 0.02
@@ -83,6 +91,7 @@ class ScoreSet:
     retired: tuple[Scored, ...] = ()  # left-out models on the same scale; only a floor check reads these
     failure: str = ""  # why no scores could be read, kept until a choice needs them
     stays: Mapping[str, str] = field(default_factory=dict)  # an unscored model -> the one its family keeps using
+    scale: tuple[float, float] | None = None  # lowest and highest of the fixed scale; a hand-built set uses `models`
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,10 @@ class _Candidate:
     generation: tuple[int, int]
     cost: float
     tasks: Mapping[str, float]
+
+
+class FloorUnmet(EngineError):
+    """No model that may be picked reaches the floor."""
 
 
 def _unusable(name: str, why: str) -> EngineError:
@@ -217,12 +230,53 @@ def _competing(candidates: Sequence[_Candidate]) -> list[_Candidate]:
     return kept
 
 
+def _in_data(engine: str, spec: Mapping, scores: Mapping) -> list[_Candidate]:
+    """Every known-family model with data, whatever a CLI lists; an alias stands for its newest generation."""
+    found = (_candidate(engine, spec, name, scores) for name in (spec["aliases"] if engine == "claude" else scores))
+    return [item for item in found if item is not None and item.tasks]
+
+
+def _leaders(pool: Sequence[_Candidate]) -> list[_Candidate]:
+    """The models of the scale: each family's newest generation, and one too thin gives way to the one before it."""
+    queues: dict[str, list[_Candidate]] = {}
+    for item in sorted(pool, key=lambda item: (item.generation, item.model), reverse=True):
+        queues.setdefault(item.family, []).append(item)
+    while True:
+        front = [queue[0] for queue in queues.values() if queue]
+        kept = _competing(front)
+        if len(kept) == len(front):
+            return kept
+        for item in front:
+            if item not in kept:
+                queues[item.family].pop(0)
+
+
 def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | None = None,
               known: Mapping | None = None) -> ScoreSet:
-    """The eligible models of one catalog entry; `data` and `known` let one read serve two entries."""
+    """The fixed scale and the models one entry may pick; `data` and `known` let one read serve two entries."""
     known = families() if known is None else known
     data = bundled() if data is None else data
     spec = known["engines"][engine]
+    leaders = _leaders(_in_data(engine, spec, data["scores"]))
+    none_listed = (f"no model the {engine} CLI lists has a usable score, so scores cannot choose one; run `oah models` "
+                   f"to see why each was left out, or {_PIN.format(engine=engine)}")
+    if not leaders:
+        raise EngineError(NO_SCORES, none_listed)
+    common = sorted(set.intersection(*(set(item.tasks) for item in leaders)))
+    bounds = {task: (min(item.tasks[task] for item in leaders), max(item.tasks[task] for item in leaders))
+              for task in common}
+
+    def place(task: str, value: float) -> float:
+        lowest, highest = bounds[task]
+        return (min(max(value, lowest), highest) - lowest) / (highest - lowest) * 100 if highest > lowest else 0.0
+
+    def record(item: _Candidate) -> Scored:
+        score = sum(place(task, item.tasks[task]) for task in common) / len(common)
+        return Scored(item.model, item.family, item.generation, score, item.cost)
+
+    def has_tasks(item: _Candidate) -> bool:
+        return all(task in item.tasks for task in common)
+
     left_out: dict[str, str] = {}
     stays: dict[str, str] = {}
     candidates: list[_Candidate] = []
@@ -234,7 +288,7 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
             else:
                 candidates.append(found)
     newest: dict[str, _Candidate] = {}
-    for item in _competing(candidates):
+    for item in filter(has_tasks, candidates):
         best = newest.get(item.family)
         if best is None or (item.generation, item.model) > (best.generation, best.model):
             newest[item.family] = item
@@ -246,34 +300,16 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
                 stays[item.model] = best.model
         elif item is not best:
             left_out[item.model] = "superseded"
-    competing = list(newest.values())
-    if not competing:
-        raise EngineError(NO_SCORES, f"no model the {engine} CLI lists has a usable score, so scores cannot choose "
-                          f"one; run `oah models` to see why each was left out, or {_PIN.format(engine=engine)}")
-    common = sorted(set.intersection(*(set(item.tasks) for item in competing)))
-    bounds = {task: (min(item.tasks[task] for item in competing), max(item.tasks[task] for item in competing))
-              for task in common}
-
-    def scale(task: str, value: float) -> float:
-        lowest, highest = bounds[task]
-        return (value - lowest) / (highest - lowest) * 100 if highest > lowest else 0.0
-
-    def record(item: _Candidate) -> Scored:
-        score = sum(scale(task, item.tasks[task]) for task in common) / len(common)
-        return Scored(item.model, item.family, item.generation, score, item.cost)
-
-    ranked = sorted(map(record, competing), key=lambda item: (-item.score, item.model))
-    retired = [record(item) for item in candidates if item not in competing and set(common) <= set(item.tasks)]
-    if allowed:
-        left_out.update((item.model, "not-allowed") for item in ranked if item.model not in allowed)
-        retired += [item for item in ranked if item.model not in allowed]
-        ranked = [item for item in ranked if item.model in allowed]
-    if not ranked:
-        raise EngineError(NO_SCORES, f"no model in [engines.{engine}] allowed_models has a usable score, so scores "
-                          f"cannot choose one; run `oah models` to see why each was left out, or "
-                          f"{_PIN.format(engine=engine)}")
-    return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(ranked), left_out, tuple(retired),
-                     stays=stays)
+    ranked = sorted(map(record, newest.values()), key=lambda item: (-item.score, item.model))
+    picks = [item for item in ranked if not allowed or item.model in allowed]
+    left_out.update((item.model, "not-allowed") for item in ranked if item not in picks)
+    names = {item.model for item in picks}
+    retired = {item.model: record(item) for item in (*leaders, *candidates) if item.model not in names and has_tasks(item)}
+    values = [record(item).score for item in leaders]
+    nothing_allowed = (f"no model in [engines.{engine}] allowed_models has a usable score, so scores cannot choose one; "
+                       f"run `oah models` to see why each was left out, or {_PIN.format(engine=engine)}")
+    return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(picks), left_out, tuple(retired.values()),
+                    "" if picks else nothing_allowed if ranked else none_listed, stays, (min(values), max(values)))
 
 
 def failed(engine: str, error: EngineError) -> ScoreSet:
@@ -281,10 +317,16 @@ def failed(engine: str, error: EngineError) -> ScoreSet:
     return ScoreSet(engine, "", "", "", (), {}, failure=str(error).split(": ", 1)[-1])
 
 
+def _no_scores(scores: ScoreSet) -> EngineError:
+    return EngineError(NO_SCORES, scores.failure or f"no scores are available for {scores.engine}; "
+                       f"{_PIN.format(engine=scores.engine)}")
+
+
 def _bounds(scores: ScoreSet) -> tuple[float, float]:
+    if scores.scale is not None:
+        return scores.scale
     if not scores.models:
-        raise EngineError(NO_SCORES, scores.failure or f"no scores are available for {scores.engine}; "
-                          f"{_PIN.format(engine=scores.engine)}")
+        raise _no_scores(scores)
     values = [model.score for model in scores.models]
     return min(values), max(values)
 
@@ -293,6 +335,19 @@ def required(scores: ScoreSet, step: int) -> float:
     """The score a step needs; the ends are exact, so the top scorer always clears the top step."""
     lowest, highest = _bounds(scores)
     return highest if step >= TOP_STEP else lowest + step / TOP_STEP * (highest - lowest)
+
+
+def _reaches(scores: ScoreSet, value: float, step: int, slack: float = 0.0) -> bool:
+    """Whether a score reaches a step. Step 0 asks nothing, even of an old model below the fixed scale."""
+    return step <= 0 or value >= required(scores, step) - slack
+
+
+def _floor_unmet(scores: ScoreSet, floor_step: int) -> FloorUnmet:
+    tier = TIERS[floor_step]
+    return FloorUnmet(UNRESOLVED, f"no model the {scores.engine} CLI lists and allowed_models permits reaches the {tier} "
+                      f"floor, which needs a score of {required(scores, floor_step):.1f}, so nothing was launched or "
+                      f"spent. Widen [engines.{scores.engine}] allowed_models in .oah/config.toml, or update the CLI if "
+                      "it lists no stronger model; `oah models` shows each model's score")
 
 
 def _price(model: Scored) -> tuple[bool, float]:
@@ -308,19 +363,25 @@ def _value(model: Scored) -> float:
 
 def _pick(scores: ScoreSet, step: int, floor_step: int, profile: str,
           usable: Callable[[str], bool] | None = None) -> Choice:
+    if not scores.models:
+        raise _no_scores(scores)
     lowest, highest = _bounds(scores)
     efficient = profile == "efficient"
     base = max(step - 1, floor_step) if efficient else step
-    need = required(scores, base)
     slack = 0.0 if profile == "performance" else MARGIN * (highest - lowest)
-    floor = required(scores, floor_step)
-    fits = [model for model in scores.models if model.score >= need - slack and model.score >= floor]
+    meets_floor = [model for model in scores.models if _reaches(scores, model.score, floor_step)]
+    if not meets_floor:
+        raise _floor_unmet(scores, floor_step)
+    fits = [model for model in meets_floor if _reaches(scores, model.score, base, slack)]
     if efficient:
         fits = [model for model in fits if usable is None or usable(model.model)] or fits
+    if not fits:
+        best = min(meets_floor, key=lambda model: (-model.score, *_price(model), model.model))
+    elif efficient:
         best = min(fits, key=lambda model: (-_value(model), model.score, *_price(model), model.model))
     else:
         best = min(fits, key=lambda model: (*_price(model), model.score, model.model))
-    return Choice(best.model, step, floor_step, need, scores.source, base)
+    return Choice(best.model, step, floor_step, required(scores, base), scores.source, base)
 
 
 def choose(scores: ScoreSet, tier: str, floor_tier: str, profile: str, *,
@@ -349,7 +410,7 @@ def scored(scores: ScoreSet, model: str) -> Scored | None:
 def clears(scores: ScoreSet, model: str, step: int) -> bool:
     """Whether a model reaches a step's required score. A floor has no margin, in any profile."""
     value = score_of(scores, model)
-    return value is not None and bool(scores.models) and value >= required(scores, step)
+    return value is not None and _reaches(scores, value, step)
 
 
 def band(scores: ScoreSet, choice: Choice) -> tuple[str, ...]:

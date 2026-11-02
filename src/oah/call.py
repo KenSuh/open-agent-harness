@@ -372,7 +372,7 @@ def _deterministic(engine: str, tier: str, settings: Settings, freshness: models
 def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pathlib.Path,
                    env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
                    checked: tuple[list[str], models.Freshness] | None = None, floor_tier: str = "low",
-                   record: bool = True) -> Resolution:
+                   record: bool = True, stage: str | None = None) -> Resolution:
     """Model and effort for one engine and tier; the change log records anything that differs from last time."""
     section = settings.engines[engine]
     tier_settings = section["tiers"][tier]
@@ -384,7 +384,12 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pat
         check(dataclasses.asdict(freshness))
     cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry,
                                      fresh=_fresh(freshness), pools=section["tier_pools"])
-    model, source, effort = _deterministic(engine, tier, settings, freshness, floor_tier=floor_tier)
+    try:
+        model, source, effort = _deterministic(engine, tier, settings, freshness, floor_tier=floor_tier)
+    except scoring.FloorUnmet as exc:
+        if stage != "review":
+            raise
+        raise EngineError(BELOW_FLOOR, str(exc).split(": ", 1)[1]) from None
     cap = section["effort_caps"].get(model)
     if cap is not None:
         if rank(effort.launch) is None:
@@ -518,8 +523,8 @@ def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: s
     """Refuse a review below its floor; False when the user's named model leaves nothing to check against."""
     engine, model, effort = resolution.engine, resolution.model, resolution.launch_effort
     scores = freshness.scores
-    next_step = (f"Nothing was launched or spent. Use a tier of {floor_tier} or higher, or change the pin, pool or "
-                 "quality_order in .oah/config.toml; `oah models` shows each model's score")
+    next_step = (f"Nothing was launched or spent. Use a tier of {floor_tier} or higher, or change the pin, pool, "
+                 "quality_order or allowed_models in .oah/config.toml; `oah models` shows each model's score")
     if routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
         raise EngineError(BELOW_FLOOR, f"tier {tier} is below the {floor_tier} floor of this review. {next_step}")
     step = routing.TIERS.index(floor_tier)
@@ -552,7 +557,7 @@ def preview(engine: str, stage: str | None, tier: str, kind: str, settings: Sett
         tier = floor_tier
     checked = check_catalog(engine, settings, state_dir=state_dir, env=env, persist=False)
     resolution = resolve_engine(engine, tier, settings, state_dir=state_dir, env=env, checked=checked,
-                                floor_tier=floor_tier, record=False)
+                                floor_tier=floor_tier, record=False, stage=stage)
     admitted = admit(resolution, settings, stage=stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     return ({"engine": engine, "stage": stage, "tier": tier, "model": _shown(resolution.model),
              "effort": resolution.launch_effort, "source": resolution.model_source, **admitted.to_json()},
@@ -564,8 +569,9 @@ def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier
     """The one check on the final model and effort; it reads nothing, on the entry and scores of this call.
 
     A refusal raises before the call has spent anything. A selection that cannot start at all has
-    already raised its named failure in `models.map_tier` (no catalog, no scores, an empty pool). A floor is
-    checked on the model's own score, so a pin of a superseded or not-allowed model cannot get under it."""
+    already raised its named failure in `models.map_tier` (no catalog, no scores, an empty pool, a floor no
+    allowed model reaches). A floor is checked on the model's own score on the fixed scale, so a pin of a superseded,
+    not-allowed or unlisted model cannot get under it."""
     engine, model = resolution.engine, resolution.model
     scores = freshness.scores
     warnings: list[str] = []
@@ -1301,7 +1307,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, now=now,
-                                checked=checked, floor_tier=floor_tier)
+                                checked=checked, floor_tier=floor_tier, stage=request.stage)
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
     check_budget()

@@ -847,6 +847,16 @@ class AdmissionRoundTest(unittest.TestCase):
         started = [line for line in project.round_log() if line["event"] == "start"]
         self.assertEqual([(line["round"], line["attempt"]) for line in started], [(1, 1)])
 
+    def test_a_floor_no_allowed_model_reaches_spends_no_round_and_no_attempt(self):
+        project = self.scored('allowed_models = ["gpt-6-luna"]\n[review]\nmax_rounds = 1\nround_attempts = 1\n')
+        for _ in range(3):
+            with self.assertRaises(EngineError) as caught:
+                project.review(tier="medium")
+            self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+            self.assertIn("allowed_models", str(caught.exception))
+            self.assertEqual([line["event"] for line in project.round_log() if line["event"] != "limit"], [])
+        self.assertEqual(project.calls(), [])
+
     def test_a_refusal_keeps_the_decision_and_extra_round_unused(self):
         project = self.scored()
         events = project.state / "events.jsonl"

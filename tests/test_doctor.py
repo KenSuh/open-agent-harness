@@ -482,14 +482,14 @@ class ModelChoiceDoctorTest(unittest.TestCase):
         self.assertEqual((row["scores"]["source"], row["scores"]["date"], row["scores"]["credit"]),
                          ("Epoch AI", "2026-11-02", "Epoch AI, a credit line."))
         self.assertEqual(row["left_out"], {"gpt-6-sol": "superseded", "gpt-7-nova": "unknown-family"})
-        self.assertEqual(row["tiers"]["low"], {"model": "gpt-6-luna", "source": "scored"})
+        self.assertEqual(row["tiers"]["low"], {"model": "gpt-6.1-sol", "source": "scored"}, "luna scores 0 here")
         self.assertEqual(row["tiers"]["max"], {"model": "gpt-6.1-sol", "source": "scored"})
 
     def test_text_shows_the_same(self):
         code, out = self.doctor()
         self.assertEqual(code, 0, out)
         for text in ("no network used", "profile efficient", "scores Epoch AI 2026-11-02", "Epoch AI, a credit line.",
-                     "gpt-6-sol (superseded)", "gpt-7-nova (unknown-family)", "low gpt-6-luna"):
+                     "gpt-6-sol (superseded)", "gpt-7-nova (unknown-family)", "low gpt-6.1-sol"):
             self.assertIn(text, out)
 
     def test_the_engine_clis_are_never_run(self):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import datetime as dt
 import io
 import json
@@ -183,6 +184,19 @@ class SelectionTest(unittest.TestCase):
                 map_tier("codex", "high", pin="", quality_order=[], entry=CODEX_LIST, scores=scores)
             self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
             self.assertIn(".oah/config.toml" if scores is None else "the data is damaged", str(caught.exception))
+
+
+    def test_a_floor_out_of_reach_is_unresolved_and_a_step_out_of_reach_is_not(self):
+        rows = (("gpt-6-luna", "low", 0.0, 0.6), ("gpt-6.1-terra", "terra", 89.0, 6))
+        narrow = scoring.ScoreSet("codex", "Epoch AI", "2026-11-02", "credit",
+                                  tuple(scoring.Scored(name, family, (6, 0), score, cost)
+                                        for name, family, score, cost in rows), {}, scale=(0.0, 100.0))
+        self.assertEqual(picked("codex", "max", scores=narrow), ("gpt-6.1-terra", "scored"))
+        one = dataclasses.replace(narrow, models=narrow.models[:1])
+        with self.assertRaises(EngineError) as caught:
+            picked("codex", "high", scores=one, floor_tier="high")
+        self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
+        self.assertIn("allowed_models", str(caught.exception))
 
 
 class ClaudeMappingTest(unittest.TestCase):
