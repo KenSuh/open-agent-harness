@@ -46,6 +46,7 @@ from oah.paths import GitMissing, NotARepo, git_argv, repo_info, run_git, state_
 from oah.setup import companions, guide
 from oah.setup.tools import Tool, catalog, display, os_name_for
 from oah.toolkit import checks
+from oah.toolupdate import records as toolupdate_records
 from oah.wiki import notes
 from oah.wiki.base import DEFAULTS as WIKI_DEFAULTS, WikiError, WikiSettings
 from oah.wiki.log import parse_log
@@ -163,6 +164,12 @@ QUESTIONS = (
     Question("skill_updates", "Skill updates", "Keeps oah's own skill cache current automatically, checked at most "
              "once a day. Your project's skill folders never change on their own.",
              "Turn on automatic skill updates?", True, recorded=True),
+    Question("tool_updates", "Tool updates (recommended)", "Runs each tool's own update command when no task is "
+             "active; MCP servers are never changed. After oah finish leaves no task or run in flight, at most once a "
+             "day: claude update, codex update, their plugin and marketplace updates and oah's kit skills, each "
+             "result checked by reading what is installed. Your answer is recorded in .oah/config.toml.",
+             "Keep Claude Code, Codex, their plugins and oah's skills up to date after your work finishes?", True,
+             recorded=True),
 )
 ASK_ATTEMPTS = 5
 
@@ -223,11 +230,13 @@ def _template(name: str, **values: str) -> str:
     return _PLACEHOLDER.sub(lambda match: values[match.group(1)], notes.packaged("init", name))
 
 
-def render_config(*, branch: str, how: str, jev: bool, skill_updates: bool, today: dt.date) -> str:
-    """`.oah/config.toml` with the owner's defaults (PLAN 5.5), the default branch and the two recorded answers."""
+def render_config(*, branch: str, how: str, jev: bool, skill_updates: bool, today: dt.date,
+                  tool_updates: bool = False) -> str:
+    """`.oah/config.toml` with the owner's defaults (PLAN 5.5), the default branch and the recorded answers."""
     rerank_text = _template("rerank-on.toml" if jev else "rerank-off.toml", DATE=today.isoformat())
     return _template("config.toml", DEFAULT_BRANCH=json.dumps(branch, ensure_ascii=False), BRANCH_HOW=how,
-                     AUTO_UPDATE="true" if skill_updates else "false", RERANK=rerank_text)
+                     AUTO_UPDATE="true" if skill_updates else "false",
+                     AFTER_FINISH="true" if tool_updates else "false", RERANK=rerank_text)
 
 
 def _yaml(value: str) -> str:
@@ -2498,11 +2507,13 @@ def companion_probe(argv, cwd: pathlib.Path) -> int | None:
 
 
 def recorded_answers(config: Config) -> dict[str, bool]:
-    """The Jev and skill-update answers an existing .oah/config.toml records."""
+    """The Jev, skill-update and tool-update answers an existing .oah/config.toml records. A config written before
+    tool updates existed has no [updates] after_finish: init leaves it alone, and that counts as no."""
     chosen = config.section("rerank", rerank.DEFAULTS)
     skills = config.section("skills", skillsel.config_defaults())
+    updates = config.section(toolupdate_records.SECTION, toolupdate_records.DEFAULTS)
     return {"jev": chosen["enabled"] is True and chosen["provider"] == "typesafe",
-            "skill_updates": skills["auto_update"] is True}
+            "skill_updates": skills["auto_update"] is True, "tool_updates": updates["after_finish"] is True}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2559,7 +2570,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     values = {key: answer.value for key, answer in answers.items()}
     branch, how = default_branch(root)
     config = render_config(branch=branch, how=how, jev=values["jev"], skill_updates=values["skill_updates"],
-                           today=machine.today).encode("utf-8")
+                           today=machine.today, tool_updates=values["tool_updates"]).encode("utf-8")
     has_config = existing is not None and existing.path is not None
     effective = existing if has_config and not force else parse_config(config)
     engines = effective.section("engines", call.ENGINE_DEFAULTS)
@@ -2726,6 +2737,9 @@ def render_plan(plan: Plan) -> list[str]:
     lines.append(f"  Jev re-ranker: {'on, with your consent' if jev else 'off'}")
     updates = plan.answers["skill_updates"].value
     lines.append(f"  skill updates: {'on, checked at most once a day' if updates else 'off'}")
+    tools = plan.answers["tool_updates"].value
+    lines.append(f"  tool updates: {'on, after oah finish when no task is active, at most once a day' if tools else 'off'}"
+                 "; MCP servers are never changed")
     state, reason = plan.map
     action = plan.map_action
     lines.append("Impact map:")

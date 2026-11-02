@@ -549,12 +549,15 @@ class QuestionsTest(unittest.TestCase):
 
     def test_interactive_answers_shape_the_environment(self):
         repo = committed_repo(self)
-        # agents, hooks, unlazy, graph, ci, orca, aside, jev, skill updates; then "Apply this plan?"
-        replies = ("n", "n", "n", "y", "", "", "", "n", "", "y")
+        # agents, hooks, unlazy, graph, ci, orca, aside, jev, skill updates, tool updates; then "Apply this plan?"
+        replies = ("n", "n", "n", "y", "", "", "", "n", "", "n", "y")
         machine = make_machine(self, FakeTools(), interactive=True, replies=replies)
         code, out, err = run_init(repo, machine)
         self.assertEqual(code, 0, err)
-        self.assertEqual(len(machine.ask.prompts), 10)
+        self.assertEqual(len(machine.ask.prompts), 11)
+        self.assertIn("Keep Claude Code, Codex, their plugins and oah's skills up to date", machine.ask.prompts[9])
+        self.assertIn("  tool updates: off; MCP servers are never changed", out)
+        self.assertIn("after_finish = false", (repo / ".oah" / "config.toml").read_text(encoding="utf-8"))
         self.assertFalse((repo / ".claude" / "agents").exists())
         self.assertTrue((repo / ".graphifyignore").is_file())
         self.assertIn("enabled = false", (repo / ".oah" / "config.toml").read_text(encoding="utf-8"))

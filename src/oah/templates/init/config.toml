@@ -89,4 +89,12 @@ default_branch = {{DEFAULT_BRANCH}}
 # Your project's skill folders never change on their own: `oah skills update --project` does that.
 auto_update = {{AUTO_UPDATE}}
 update_interval_days = 1
+
+[updates]
+# After oah finish leaves no task or run active, at most once per interval_hours, bring Claude Code, Codex,
+# their plugins and oah's kit skills up to date with each tool's own update command; every result is checked
+# by reading what is installed. MCP servers are never changed. false: nothing runs and nothing is recorded.
+# `oah update` runs a pass now, and `oah update status` shows the last one.
+after_finish = {{AFTER_FINISH}}
+interval_hours = 24
 {{RERANK}}

@@ -27,7 +27,8 @@ TASK = "hello-name"
 SH_BLOCK = re.compile(r"^```sh\n(.*?)^```", re.M | re.S)
 # `oah init` asks questions on a terminal; without one, every question needs its flag.
 INIT_ANSWERS = ("--without-agents", "--without-hooks", "--without-unlazy", "--without-graph", "--without-ci",
-                "--without-orca", "--without-aside", "--without-jev", "--without-skill-updates")
+                "--without-orca", "--without-aside", "--without-jev", "--without-skill-updates",
+                "--without-tool-updates")
 # The packet text the README tells the reader to write.
 INTENT = {
     "<what is wrong or missing today>":
