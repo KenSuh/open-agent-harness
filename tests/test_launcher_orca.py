@@ -1383,10 +1383,18 @@ with StateLock(pathlib.Path(sys.argv[1])):
                         raise orca.OrcaReplyError("timeout", "timeout")
                     return {"terminal": {"tail": ["working"], "nextCursor": "1", "latestCursor": "1"}}
 
+                # `orca.time` is the shared `time` module: only this thread may move or read the stub clock.
+                owner, real_monotonic, real_sleep = threading.get_ident(), time.monotonic, time.sleep
+
+                def monotonic():
+                    return clock.now if threading.get_ident() == owner else real_monotonic()
+
                 def sleep(seconds):
+                    if threading.get_ident() != owner:
+                        return real_sleep(seconds)
                     clock.now += seconds
 
-                with mock.patch.object(orca.time, "monotonic", lambda: clock.now), \
+                with mock.patch.object(orca.time, "monotonic", monotonic), \
                         mock.patch.object(orca.time, "sleep", side_effect=sleep), \
                         mock.patch.object(pathlib.Path, "read_bytes", read_bytes), \
                         mock.patch.object(atomic.os, "replace", side_effect=replace), \
