@@ -100,20 +100,24 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 
 Nothing below is **available in v0.2.0** yet. Plans can change as the tools change.
 
-### v0.3.0: model choices you can check
+### v0.3.0: models chosen from benchmarks
 
 Planned, after v0.2.0:
 
-- When Jev has low confidence, the rule-based choice runs. A call is never blocked.
-- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later.
-  Counts alone do not prove Jev helped.
-- On `main`, not in a release yet: benchmark scores, the task's difficulty and a profile (performance, balanced or
-  efficient) pick each automatic model for Claude and Codex, with no table that maps a difficulty to a model. A newer
-  generation with a score is used from the next catalog rebuild, and an older one stops being chosen. A review cannot
-  run below its floor. `oah models` shows the choice, the scores and their source, and
-  [Concepts](docs/concepts.md#how-a-model-is-chosen) has the rule. The scores come from published benchmarks that are
-  mostly maths and reasoning, so they do not measure your repository.
-- AI task classification is planned.
+- Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs, and oah
+  takes the cheapest model that reaches it. Performance takes the top scorer for the hardest work. No table ties a difficulty to a
+  model, and every current model is a candidate in every profile.
+- Scores come from Epoch AI, with no key and no account. With your own Artificial Analysis key, oah uses those instead. Published
+  scores measure general quality, not your repository.
+- A new model generation joins once it has a score, and superseded or removed models drop out, with no file edited. Each change
+  shows a plain notice and stays in the run record.
+- TypeSafe Jev judges difficulty from the task's Intent and Scope paths. When Jev is off or has low confidence, the rule-based
+  difficulty runs. A call is never blocked.
+- A review never runs below the floor for its risk, whatever a flag, packet, profile or judge says.
+- After the last lease finishes, `oah` can update Claude Code, Codex, plugins, MCP servers and skills, then re-read the model lists.
+  `oah init` asks once, and you can turn it off.
+- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later. Counts alone do
+  not prove Jev helped.
 
 Your pinned models, tier pools, effort caps and task floors stay in force throughout.
 
@@ -508,19 +512,22 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 
 아래 내용은 모두 **v0.2.0에서는 아직 쓸 수 없다**. 도구가 바뀌면 계획도 바뀔 수 있다.
 
-#### v0.3.0: 확인할 수 있는 모델 선택
+#### v0.3.0: 벤치마크로 고르는 모델
 
 다음 내용은 v0.2.0 다음으로 계획하고 있다.
 
-- Jev의 확신도가 낮으면 규칙이 고른 선택으로 실행한다. 호출을 막지는 않는다.
-- `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가
-  증명되지는 않는다.
-- 아직 릴리스하지 않았고 `main`에만 있다. 벤치마크 점수, 작업 난이도, 프로필(performance, balanced, efficient)이
-  Claude와 Codex의 자동 모델을 고른다. 난이도를 모델에 잇는 표는 없다. 점수가 있는 새 세대는 다음 카탈로그 재구성부터
-  쓰고, 옛 세대는 더 고르지 않는다. 리뷰는 최저 기준 아래로 실행할 수 없다. `oah models`가 선택과 점수, 출처를 보여
-  주고, 규칙은 [개념](docs/ko/concepts.md#모델을-고르는-방법)에 있다. 점수는 수학과 추론이 대부분인 공개 벤치마크에서
-  오므로 내 저장소를 측정하지는 않는다.
-- AI 작업 분류를 계획하고 있다.
+- 벤치마크 점수가 모델을 고른다. 난이도와 프로필(performance, balanced, efficient)이 작업에 필요한 점수를 정하면, oah는 그 점수에
+  닿는 가장 싼 모델을 쓴다. performance는 가장 어려운 일에 최고점 모델을 쓴다. 난이도마다 모델을 정해 둔 표는 없고, 현재 모델은 모든
+  프로필에서 후보가 된다.
+- 점수는 키나 계정 없이 Epoch AI에서 가져온다. 자기 Artificial Analysis 키가 있으면 그 점수를 대신 쓴다. 공개 점수는 모델의 일반 성능을
+  재는 것이고, 내 저장소에서의 성능을 재는 것은 아니다.
+- 새 세대 모델은 점수가 나오면 합류하고, 낡거나 사라진 모델은 빠진다. 파일은 고치지 않는다. 바뀔 때마다 쉬운 말로 알리고 실행 기록에 남긴다.
+- TypeSafe Jev가 작업의 Intent와 Scope 경로를 보고 난이도를 판정한다. Jev가 꺼져 있거나 확신도가 낮으면 규칙이 정한 난이도로 실행한다.
+  호출을 막지는 않는다.
+- 리뷰는 플래그, 패킷, 프로필, 판정이 무엇을 말해도 위험도에 맞는 하한 아래로 실행하지 않는다.
+- 마지막 임대가 끝나면 `oah`가 Claude Code, Codex, 플러그인, MCP 서버, 스킬을 갱신하고 모델 목록을 다시 읽을 수 있다. `oah init`에서 한 번
+  묻고, 끌 수 있다.
+- `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가 증명되지는 않는다.
 
 고정한 모델, tier 후보, 추론 강도 상한, 작업별 최저 기준은 그대로 유지된다.
 
