@@ -1046,7 +1046,8 @@ class ScoreReportTest(unittest.TestCase):
                 code, out, err = run_in(project, "--json")
                 self.assertEqual(code, 0, err)
                 report = json.loads(out)["engines"]["codex"]
-                stored = call.stored_choices("codex", Catalog(project.state).load("codex"), project.settings())
+                catalog = Catalog(project.state)
+                stored = call.stored_choices("codex", catalog.load("codex"), project.settings(), catalog=catalog)
                 for row in (report, stored):
                     self.assertEqual(row["tiers"]["high"]["model"], expected)
                     self.assertIn("not-runnable", row["left_out"]["gpt-6.1-terra"])

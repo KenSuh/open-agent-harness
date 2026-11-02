@@ -69,13 +69,14 @@ from dataclasses import dataclass, replace
 from typing import Callable, Literal, Mapping, Sequence
 
 from oah import scoring
-from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
+from oah.atomic import (RETRY_SECONDS, StateCorrupt, StorageError, _retry_permission, append_jsonl, read_json,
+                        read_jsonl, write_json_atomic)
 from oah.engines import claude, codex
 from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, highest, rank, resolve
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
 
-DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE}
+DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE, "fetch_scores": True}
 PROBE_TIMEOUT = 30.0
 UNRESOLVED = scoring.UNRESOLVED
 CATALOG_UNAVAILABLE = "OAH_MODEL_CATALOG_UNAVAILABLE"
@@ -243,6 +244,16 @@ class Catalog:
         self.resolved_path = self.dir / "resolved.json"
         self.changes_path = self.dir / "changes.jsonl"
         self.lock_path = self.state_dir / ".lock"
+
+    def score_bytes(self, name: str) -> bytes | None:
+        """The raw bytes of one stored score file, or None when there is none; `oah.benchmarks` checks them."""
+        path = self.dir / name
+        try:
+            return _retry_permission(path.read_bytes, RETRY_SECONDS)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
 
     def load(self, engine: str) -> Entry | None:
         data = read_json(self.catalog_path, {})

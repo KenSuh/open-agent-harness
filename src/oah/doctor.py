@@ -201,13 +201,17 @@ def model_choices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
     from oah.paths import repo_info, state_dir
     from oah.routing import ENGINES
 
+    from oah.benchmarks import Session
+
     settings = load_settings(root)
     catalog = Catalog(state_dir(repo_info(root), env))
     try:
         entries = {engine: catalog.load(engine) for engine in ENGINES}
     except _NOTICE_FAILURES:  # a damaged catalog must not stop an advisory report
         return []
-    return [call.stored_choices(engine, entry, settings) for engine, entry in entries.items() if entry is not None]
+    session = Session()  # one view of the stored score files for both engines
+    return [call.stored_choices(engine, entry, settings, catalog=catalog, session=session)
+            for engine, entry in entries.items() if entry is not None]
 
 
 def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:

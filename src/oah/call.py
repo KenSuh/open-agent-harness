@@ -60,7 +60,7 @@ from typing import Callable, Mapping, Sequence
 
 import oah.intent as oah_intent
 import oah.packet as oah_packet
-from oah import briefs, launchers, models, routing, runs, scoring, skillsel
+from oah import benchmarks, briefs, launchers, models, routing, runs, scoring, skillsel
 from oah.engines import claude, codex
 from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
                                 verify_inference)
@@ -154,6 +154,8 @@ class Settings:
             raise invalid("models.ttl_hours must be a positive number of hours")
         if models_section["profile"] not in scoring.PROFILES:
             raise invalid(f"models.profile = {models_section['profile']!r}; use one of: {', '.join(scoring.PROFILES)}")
+        if type(models_section["fetch_scores"]) is not bool:
+            raise invalid("models.fetch_scores must be true or false")
         return cls(stages=stages, engines=engines, models=models_section)
 
 
@@ -258,10 +260,15 @@ def _catalog(state_dir):
     return inputs.catalog if inputs is not None else models.Catalog(state_dir)
 
 
+_READ_FAILURES = (EngineError, ValueError, TypeError, OverflowError, RecursionError)
+
+
 def read_scores(engine: str, entry: models.Entry | None, settings: Settings, *,
-                previous: models.Entry | None = None) -> tuple[scoring.ScoreSet, scoring.ScoreSet | None]:
+                previous: models.Entry | None = None, data: Mapping | None = None, known: Mapping | None = None,
+                before: Mapping | None = None) -> tuple[scoring.ScoreSet, scoring.ScoreSet | None]:
     """The score sets of an entry and of the entry it replaced, from one read of the data.
 
+    `data` and `before` are what `benchmarks.data_for` chose for them, and None is the snapshot shipped with oah.
     A failure is kept in the set, not raised: a pin still runs and only a choice fails."""
     allowed = settings.engines[engine]["allowed_models"]
 
@@ -271,37 +278,52 @@ def read_scores(engine: str, entry: models.Entry | None, settings: Settings, *,
         return scoring.failed(engine, error)
 
     try:
-        known, data = scoring.families(), scoring.bundled()
-    except (EngineError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        known = scoring.families() if known is None else known
+        packaged = scoring.bundled() if data is None or (previous is not None and before is None) else None
+    except _READ_FAILURES as exc:
         return failed(exc), None
 
-    def one(item: models.Entry | None) -> scoring.ScoreSet:
+    def one(item: models.Entry | None, chosen: Mapping | None) -> scoring.ScoreSet:
         try:
-            return scoring.score_set(engine, item, allowed=allowed, data=data, known=known)
-        except (EngineError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return scoring.score_set(engine, item, allowed=allowed, data=chosen or packaged, known=known)
+        except _READ_FAILURES as exc:
             return failed(exc)
 
-    return one(entry), one(previous) if previous is not None else None
+    return one(entry, data), one(previous, before) if previous is not None else None
+
+
+def _families() -> Mapping | None:
+    """The packaged family rules, read once per check; None when they cannot be read, which `read_scores` reports."""
+    try:
+        return scoring.families()
+    except _READ_FAILURES:
+        return None
 
 
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
-                  refresh: bool = False, now: dt.datetime | None = None,
-                  persist: bool = True) -> tuple[list[str], models.Freshness]:
+                  refresh: bool = False, now: dt.datetime | None = None, persist: bool = True,
+                  session: benchmarks.Session | None = None) -> tuple[list[str], models.Freshness]:
     """The engine's argv prefix, its catalog entry and that entry's scores: the one read of both for a launch.
 
     A rebuild warns about the listed models in no pool; this is the one place that decides when a
-    launch hears of them, so a launch that rebuilt nothing stays quiet. `persist=False` writes nothing."""
+    launch hears of them, so a launch that rebuilt nothing stays quiet. `persist=False` writes nothing.
+    `session` is the command's view of the stored score files, shared when one command checks both engines."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
     catalog = _catalog(state_dir)
+    known = _families()
     freshness = catalog.ensure_fresh(engine, base=base, env=env, ttl_hours=settings.models["ttl_hours"],
                                      refresh=refresh, now=now, persist=persist)
     rebuilt = bool(freshness.refreshed) and persist
-    scores, before = read_scores(engine, freshness.entry, settings, previous=freshness.previous if rebuilt else None)
-    notices: list[str] = []
+    previous = freshness.previous if rebuilt else None
+    chosen = benchmarks.data_for(engine, freshness.entry, catalog=catalog, settings=settings.models, known=known,
+                                 session=session, previous=previous, rebuilt=rebuilt)
+    scores, before = read_scores(engine, freshness.entry, settings, previous=previous, data=chosen.data, known=known,
+                                 before=chosen.before)
+    notices: list[str] = list(chosen.notices)
     if rebuilt:
         section = settings.engines[engine]
         unpooled = models.unpooled_models(freshness.entry, section["tier_pools"])
-        notices = [models.unpooled_warning(engine, name) for name in unpooled]
+        notices += [models.unpooled_warning(engine, name) for name in unpooled]
         notices += models.score_notices(engine, scores)
         if before is not None and models.rule_decides(engine, section, freshness.entry):
             changes = models.model_changes(before, scores, settings.models["profile"], freshness.entry)
@@ -311,9 +333,13 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     return base, dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices), scores=scores)
 
 
-def stored_choices(engine: str, entry: models.Entry, settings: Settings) -> dict:
-    """What `oah models` shows, from a stored entry alone: no CLI runs and nothing is recorded."""
-    scores = read_scores(engine, entry, settings)[0]
+def stored_choices(engine: str, entry: models.Entry, settings: Settings, *, catalog: models.Catalog,
+                   session: benchmarks.Session | None = None) -> dict:
+    """What `oah models` shows, from a stored entry and the stored score files alone: no CLI runs, nothing is fetched
+    and nothing is recorded."""
+    known = _families()
+    chosen = benchmarks.data_for(engine, entry, catalog=catalog, settings=settings.models, known=known, session=session)
+    scores = read_scores(engine, entry, settings, data=chosen.data, known=known)[0]
     freshness = models.Freshness(entry, None, (), scores=scores)
     tiers: dict[str, dict] = {}
     for tier in routing.TIERS:
@@ -324,7 +350,7 @@ def stored_choices(engine: str, entry: models.Entry, settings: Settings) -> dict
             tiers[tier] = {"error": str(exc)}
     return {"engine": engine, **models.score_report(scores, settings.models["profile"],
                                                     left_out=_effort_left_out(engine, settings, freshness)),
-            "tiers": tiers}
+            "tiers": tiers, "notices": list(chosen.notices)}
 
 
 def _fresh(freshness: models.Freshness) -> bool:
