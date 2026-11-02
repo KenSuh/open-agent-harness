@@ -544,9 +544,9 @@ class WriteFilesTest(unittest.TestCase):
     def test_wiki_opens_the_lock_without_reading_its_bytes(self):
         read = init._current
 
-        def current(root, relative, folder):
+        def current(root, relative, folder, **kwargs):
             self.assertNotEqual(relative, ".lock", "a shared writable lock must be opened directly")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=current):
             # Start with an existing lock so the only open is the shared writable lock open.
@@ -759,7 +759,7 @@ class WriteFilesTest(unittest.TestCase):
         read = init._current
         changed = False
 
-        def swap(root, relative, folder):
+        def swap(root, relative, folder, **kwargs):
             nonlocal changed
             if not changed and root == self.repo and relative == init.CONFIG_PATH:
                 changed = True
@@ -767,7 +767,7 @@ class WriteFilesTest(unittest.TestCase):
                 parent.mkdir()
                 # Matching bytes cannot bless a different parent object.
                 target.write_bytes(b"before\r\n")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=swap):
             written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
@@ -782,7 +782,7 @@ class WriteFilesTest(unittest.TestCase):
         read = init._current
         swapped = []
 
-        def swap(root, relative, folder):
+        def swap(root, relative, folder, **kwargs):
             if not swapped and root == self.repo and relative == "published":
                 staging, = self.repo.glob(".published.*.tmp")
                 swapped.append(staging)
@@ -790,7 +790,7 @@ class WriteFilesTest(unittest.TestCase):
                 staging.mkdir()
                 sentinel = staging / "file.tmp"
                 sentinel.write_bytes(b"unrelated bytes\r\n\x00")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=swap):
             self.assertFalse(init._publish(self.repo, "published", b"planned bytes\r\n"))
