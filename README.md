@@ -107,10 +107,13 @@ Planned, after v0.2.0:
 - When Jev has low confidence, the rule-based choice runs. A call is never blocked.
 - `oah models report` counts how model choices were made, and an export saves them as cases you can compare later.
   Counts alone do not prove Jev helped.
-- Benchmark data, opt-in and with its source and date, supports model choice. A new model shows its evidence and joins
-  your tier pools only when you confirm it.
-- AI task classification and three profiles (performance, balanced, efficient) arrive in record-only mode: they record
-  what they would choose and do not change the model that runs. Applying them comes after that data has been reviewed.
+- On `main`, not in a release yet: benchmark scores, the task's difficulty and a profile (performance, balanced or
+  efficient) pick each automatic model for Claude and Codex, with no table that maps a difficulty to a model. A newer
+  generation with a score is used from the next catalog rebuild, and an older one stops being chosen. A review cannot
+  run below its floor. `oah models` shows the choice, the scores and their source, and
+  [Concepts](docs/concepts.md#how-a-model-is-chosen) has the rule. The scores come from published benchmarks that are
+  mostly maths and reasoning, so they do not measure your repository.
+- AI task classification is planned.
 
 Your pinned models, tier pools, effort caps and task floors stay in force throughout.
 
@@ -512,10 +515,12 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 - Jev의 확신도가 낮으면 규칙이 고른 선택으로 실행한다. 호출을 막지는 않는다.
 - `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가
   증명되지는 않는다.
-- 사용자가 켜면 출처와 날짜가 붙은 벤치마크 자료를 모델 선택의 근거로 쓴다. 새 모델은 근거를 보여 주고, 사용자가
-  확인해야 tier 후보에 들어간다.
-- AI 작업 분류와 세 프로필(performance, balanced, efficient)은 기록 전용으로 먼저 들어간다. 무엇을 골랐을지 기록할
-  뿐 실행 모델은 바꾸지 않으며, 그 자료를 검토한 뒤 적용한다.
+- 아직 릴리스하지 않았고 `main`에만 있다. 벤치마크 점수, 작업 난이도, 프로필(performance, balanced, efficient)이
+  Claude와 Codex의 자동 모델을 고른다. 난이도를 모델에 잇는 표는 없다. 점수가 있는 새 세대는 다음 카탈로그 재구성부터
+  쓰고, 옛 세대는 더 고르지 않는다. 리뷰는 최저 기준 아래로 실행할 수 없다. `oah models`가 선택과 점수, 출처를 보여
+  주고, 규칙은 [개념](docs/ko/concepts.md#모델을-고르는-방법)에 있다. 점수는 수학과 추론이 대부분인 공개 벤치마크에서
+  오므로 내 저장소를 측정하지는 않는다.
+- AI 작업 분류를 계획하고 있다.
 
 고정한 모델, tier 후보, 추론 강도 상한, 작업별 최저 기준은 그대로 유지된다.
 
