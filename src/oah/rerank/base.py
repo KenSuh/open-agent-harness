@@ -135,7 +135,7 @@ class Provider(Protocol):
     def score(self, kind: str, query: str, candidates: Sequence[Candidate], *, key: Secret,
               config: Mapping) -> Sequence[float]: ...
 
-    def advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
+    def advise(self, axes: Mapping[str, str], work: str, *, key: Secret,
                config: Mapping) -> tuple[str, float | None]: ...
 
     def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,

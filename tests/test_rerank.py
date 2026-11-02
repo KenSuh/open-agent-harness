@@ -614,15 +614,16 @@ class TypeSafeHttpTest(unittest.TestCase):
                                                                 "max": 0.65}}}}, 0, {}
         server = FakeServer(self, respond)
         axes = {"kind": "migration", "intensity": "high", "reasoning": "high", "risk": "high", "tier": "high"}
-        advice = rerank.advise_difficulty(axes, "x" * 900, config=typesafe_config(server.url()), env=self.env,
+        advice = rerank.advise_difficulty(axes, "x" * 20_000, config=typesafe_config(server.url()), env=self.env,
                                           keychain=NoKeychain())
-        self.assertEqual((advice.status, advice.advisory_tier, advice.confidence, advice.tier),
-                         ("used", "max", 0.65, "high"))
+        self.assertEqual((advice.status, advice.advisory_tier, advice.confidence, advice.tier, advice.truncated),
+                         ("used", "max", 0.65, "high", True))
         body = server.requests[0]["body"]
-        self.assertEqual(sorted(body["state"]), ["axes", "task"])
+        self.assertEqual(sorted(body["state"]), ["axes", "work"])
         self.assertEqual(body["state"]["axes"], {"kind": "migration", "intensity": "high",
                                                  "reasoning": "high", "risk": "high"})
-        self.assertEqual(len(body["state"]["task"]), typesafe.TASK_LIMIT)
+        self.assertEqual(len(body["state"]["work"]), typesafe.WORK_LIMIT)
+        self.assertIn("`work`", body["questions"]["tier"]["instructions"])
 
 
 
@@ -1802,6 +1803,285 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(rerank.DEFAULTS["typesafe"]["url"], "https://api.typesafe.ai/v1/systemone")
         self.assertIs(rerank.DEFAULTS["enabled"], False)
         self.assertEqual(rerank.DEFAULTS["provider"], "")
+
+
+INTENT = ("<!-- OAH_INTENT:BEGIN -->\n## Intent\nIntent-ID: t1\nRevision: 2\nStatus: accepted\n"
+          "### Problem\nReports miss files.\n### Desired outcome\nEvery file is listed.\n"
+          "### Success conditions\n- AC1: the report lists every file\n### Constraints\nStandard library only.\n"
+          "### Non-goals\nNo new report format.\n### Open questions\nWhich folders count?\n"
+          "<!-- OAH_INTENT:END -->\n")
+
+
+def key_shaped() -> str:
+    """A value the privacy scanner's key rule flags, built at run time; never a real credential."""
+    return "s" + "k-" + token_source.token_hex(16)
+
+
+class WorkTextTest(unittest.TestCase):
+    """What Jev reads to judge difficulty: the Intent's five parts and the Scope paths, nothing else."""
+
+    def test_the_five_intent_parts_then_the_scope_paths(self) -> None:
+        work = rerank.intent_work(INTENT, ("src/report.py", "docs/report.md"))
+        self.assertEqual(work.text, "### Problem\nReports miss files.\n### Desired outcome\nEvery file is listed.\n"
+                                    "### Success conditions\n- AC1: the report lists every file\n### Constraints\n"
+                                    "Standard library only.\n### Non-goals\nNo new report format.\n"
+                                    "### Scope\nsrc/report.py\ndocs/report.md")
+        for left_out in ("Intent-ID", "Revision", "Status", "Open questions", "Which folders count?", "OAH_INTENT"):
+            self.assertNotIn(left_out, work.text)
+        self.assertEqual((work.truncated, work.secret), (False, None))
+
+    def test_a_comment_inside_a_part_keeps_the_lines_after_it(self) -> None:
+        commented = INTENT.replace("### Success conditions\n", "### Success conditions\n<!-- Outcomes only,\n"
+                                                                "one bullet each. -->\n")
+        work = rerank.intent_work(commented, ())
+        self.assertIn("### Success conditions\n<!-- Outcomes only,\none bullet each. -->\n- AC1: the report lists "
+                      "every file\n### Constraints", work.text)
+        self.assertNotIn("OAH_INTENT", work.text)
+
+    def test_crlf_intent_reads_the_same(self) -> None:
+        self.assertEqual(rerank.intent_work(INTENT.replace("\n", "\r\n"), ("a.py",)),
+                         rerank.intent_work(INTENT, ("a.py",)))
+
+    def test_a_long_intent_is_cut_to_the_limit_from_the_end_scope_first(self) -> None:
+        long = INTENT.replace("Reports miss files.", "y" * 40_000)
+        work = rerank.intent_work(long, ("src/never-sent.py",))
+        self.assertEqual(rerank.WORK_LIMIT, 16_000)
+        self.assertEqual(len(work.text), 16_000)
+        self.assertTrue(work.truncated)
+        self.assertTrue(work.text.startswith("### Problem\nyyy"))
+        self.assertNotIn("src/never-sent.py", work.text)
+        self.assertEqual(rerank.intent_work(INTENT, ("a.py",)).truncated, False)
+
+    def test_a_long_scope_is_cut_before_the_intent(self) -> None:
+        paths = [f"src/module_{number:05}.py" for number in range(2_000)]
+        work = rerank.intent_work(INTENT, paths)
+        self.assertEqual(len(work.text), 16_000)
+        self.assertTrue(work.truncated)
+        self.assertIn("### Non-goals\nNo new report format.\n### Scope\nsrc/module_00000.py", work.text)
+
+    def test_the_cut_never_splits_a_multibyte_character(self) -> None:
+        for char in ("가", "\U0001F600", "é"):
+            with self.subTest(char=char):
+                work = rerank.request_work(char * 20_000, ())
+                self.assertEqual(len(work.text), 16_000)
+                payload = json.dumps({"work": work.text}, ensure_ascii=False).encode("utf-8")
+                self.assertEqual(json.loads(payload.decode("utf-8"))["work"], work.text)
+                self.assertTrue(work.text.endswith(char))
+
+    def test_request_text_then_scope_paths(self) -> None:
+        work = rerank.request_work("Add a dark mode to the settings page.\n", ("src/settings.py",))
+        self.assertEqual(work.text, "### Request\nAdd a dark mode to the settings page.\n### Scope\nsrc/settings.py")
+        self.assertEqual(rerank.request_work("Only text.", ()).text, "### Request\nOnly text.")
+
+    def test_a_secret_shaped_value_names_its_part_never_the_match(self) -> None:
+        secret = key_shaped()
+        home = "/" + "Us" + "ers/" + "someone/notes.txt"
+        cases = (
+            (rerank.intent_work(INTENT.replace("Reports miss files.", f"Use the key {secret}."), ("a.py",)),
+             "the Intent text"),
+            (rerank.intent_work(INTENT, ("src/a.py", f"src/{secret}.py")), "the Scope paths"),
+            (rerank.intent_work(INTENT, (home,)), "the Scope paths"),
+            (rerank.request_work(f"Rotate {secret} today.", ()), "the request text"),
+        )
+        for work, part in cases:
+            with self.subTest(part=part):
+                self.assertEqual(work.secret, part)
+                self.assertNotIn(secret, work.secret)
+
+    def test_a_secret_beyond_the_cut_still_counts(self) -> None:
+        secret = key_shaped()
+        work = rerank.intent_work(INTENT.replace("No new report format.", "z" * 20_000 + " " + secret), ())
+        self.assertTrue(work.truncated)
+        self.assertEqual(work.secret, "the Intent text")
+
+    def test_a_commit_sha_is_not_a_secret(self) -> None:
+        sha = token_source.token_hex(20)
+        work = rerank.intent_work(INTENT.replace("Reports miss files.", f"Since {sha} reports miss files."), ())
+        self.assertIsNone(work.secret)
+        self.assertIn(sha, work.text)
+
+
+class DifficultyRequestTest(unittest.TestCase):
+    AXES = {"kind": "implementation", "intensity": "medium", "reasoning": "high", "risk": "normal", "tier": "high"}
+
+    def setUp(self) -> None:
+        self.key = fake_key()
+        self.provider = FakeProvider(advice=("max", 0.9))
+        self.env = {"FAKE_RERANK_KEY": self.key}
+        self.state = make_tmp_dir(self) / "state"
+        self.notices: list[str] = []
+
+    def advise(self, work, cfg: dict | None = None, **kwargs) -> rerank.Advice:
+        kwargs.setdefault("state_dir", self.state)
+        return rerank.advise_difficulty(self.AXES, work, config=enabled() if cfg is None else cfg, env=self.env,
+                                        keychain=NoKeychain(), providers={"fake": self.provider},
+                                        notify=self.notices.append, **kwargs)
+
+    def test_the_provider_receives_the_work_text_and_the_four_axes(self) -> None:
+        work = rerank.intent_work(INTENT, ("src/report.py",))
+        advice = self.advise(work)
+        self.assertEqual((advice.status, advice.advisory_tier, advice.confidence, advice.truncated),
+                         ("used", "max", 0.9, False))
+        (call,) = self.provider.calls
+        self.assertEqual(call[1], self.AXES)
+        self.assertEqual(call[2], work.text)
+
+    def test_a_cut_is_recorded(self) -> None:
+        work = rerank.intent_work(INTENT.replace("Reports miss files.", "y" * 40_000), ())
+        advice = self.advise(work)
+        self.assertTrue(advice.truncated)
+        self.assertEqual(len(self.provider.calls[0][2]), rerank.WORK_LIMIT)
+
+    def test_secret_shaped_text_sends_nothing(self) -> None:
+        secret = key_shaped()
+        for work, part in ((rerank.intent_work(INTENT.replace("Reports miss files.", secret), ()), "the Intent text"),
+                           (rerank.intent_work(INTENT, (f"src/{secret}",)), "the Scope paths")):
+            with self.subTest(part=part):
+                advice = self.advise(work)
+                self.assertEqual((advice.status, advice.note), ("unused(secret)", part))
+                self.assertIsNone(advice.advisory_tier)
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.notices, [])
+        self.assertFalse(self.state.exists(), "nothing was sent, so the notice was not recorded")
+
+    def test_empty_text_sends_nothing(self) -> None:
+        advice = self.advise(rerank.request_work("  \n", ()))
+        self.assertEqual(advice.status, "unused(no-text)")
+        self.assertEqual(self.provider.calls, [])
+
+    def test_off_stops_every_request_before_the_text_is_read(self) -> None:
+        secret = key_shaped()
+        for cfg in (config(enabled=False, provider="fake"), config()):
+            with self.subTest(cfg=cfg):
+                advice = self.advise(rerank.intent_work(INTENT, (f"src/{secret}",)), cfg)
+                self.assertEqual(advice.status, "unused(not-enabled)")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.notices, [])
+
+    def test_the_notice_is_printed_once_per_project(self) -> None:
+        work = rerank.intent_work(INTENT, ("a.py",))
+        self.advise(work)
+        self.advise(work)
+        self.assertEqual(len(self.provider.calls), 2)
+        self.assertEqual(self.notices, [rerank.SCOPE_NOTICE])
+        self.assertTrue(rerank.SCOPE_NOTICE.startswith("OAH_RERANK_SCOPE_WIDENED: Jev now receives this task's "
+                                                       "Intent text and Scope paths (up to 16,000 characters)"))
+        self.assertIn("set enabled = false under [rerank] to stop it", rerank.SCOPE_NOTICE)
+        marker = self.state / rerank.NOTICE_MARKER
+        self.assertTrue(marker.is_file())
+        marker.unlink()
+        self.advise(work)
+        self.assertEqual(self.notices, [rerank.SCOPE_NOTICE] * 2)
+
+    def test_an_unreadable_marker_means_not_yet_shown(self) -> None:
+        work = rerank.intent_work(INTENT, ("a.py",))
+        self.state.mkdir(parents=True)
+        (self.state / rerank.NOTICE_MARKER).mkdir()  # a folder in its place cannot be read as the marker
+        advice = self.advise(work)
+        self.assertEqual(advice.status, "used")
+        self.assertEqual(self.notices, [rerank.SCOPE_NOTICE])
+
+    def test_an_unwritable_state_folder_does_not_block(self) -> None:
+        blocked = make_tmp_dir(self) / "not-a-folder"
+        blocked.write_text("a file where the state folder should be", encoding="utf-8")
+        work = rerank.intent_work(INTENT, ("a.py",))
+        for _ in range(2):
+            advice = self.advise(work, state_dir=blocked)
+            self.assertEqual(advice.status, "used")
+        self.assertEqual(self.notices, [rerank.SCOPE_NOTICE] * 2, "not recorded, so it is shown again")
+
+    def test_a_correction_shows_the_notice_but_writes_nothing(self) -> None:
+        self.advise(rerank.intent_work(INTENT, ("a.py",)), record_notice=False)
+        self.assertEqual(self.notices, [rerank.SCOPE_NOTICE])
+        self.assertFalse(self.state.exists())
+
+    def test_without_a_state_folder_no_notice_is_shown(self) -> None:
+        self.advise(rerank.intent_work(INTENT, ("a.py",)), state_dir=None)
+        self.assertEqual(self.notices, [])
+        self.assertEqual(len(self.provider.calls), 1)
+
+    def test_typesafe_receives_only_the_work_and_the_axes(self) -> None:
+        sha = token_source.token_hex(20)
+        server = FakeServer(self, lambda path, body: (200, {"answers": {"tier": {
+            "type": "choice", "choice": "high", "confidence": 0.7}}}, 0, {}))
+        work = rerank.intent_work(INTENT.replace("Reports miss files.", f"Since {sha}, reports miss files."),
+                                  ("src/report.py",))
+        advice = rerank.advise_difficulty(self.AXES, work, config=typesafe_config(server.url()),
+                                          env={"TYPESAFE_API_KEY": self.key}, keychain=NoKeychain(),
+                                          state_dir=self.state, notify=self.notices.append)
+        self.assertEqual((advice.status, advice.advisory_tier), ("used", "high"))
+        body = server.requests[0]["body"]
+        self.assertEqual(sorted(body["state"]), ["axes", "work"])
+        self.assertEqual(body["state"]["work"], work.text)
+        self.assertIn(sha, body["state"]["work"])
+        self.assertEqual(body["state"]["axes"], {name: self.AXES[name] for name in rerank.AXES})
+
+    def test_typesafe_payload_keeps_whole_characters_at_the_cut(self) -> None:
+        server = FakeServer(self, lambda path, body: (200, {"answers": {"tier": {
+            "type": "choice", "choice": "high", "confidence": 0.7}}}, 0, {}))
+        work = rerank.request_work("\U0001F600" * 20_000, ())
+        advice = rerank.advise_difficulty(self.AXES, work, config=typesafe_config(server.url()),
+                                          env={"TYPESAFE_API_KEY": self.key}, keychain=NoKeychain())
+        self.assertEqual(advice.status, "used")
+        sent = server.requests[0]["body"]["state"]["work"]
+        self.assertEqual(sent, work.text)
+        self.assertEqual(len(sent), rerank.WORK_LIMIT)
+
+
+class DifficultyDecisionTest(unittest.TestCase):
+    def advice(self, tier: str | None, confidence: float | None, status: str = "used") -> rerank.Advice:
+        return rerank.Advice("medium", tier, confidence, status, "fake")
+
+    def test_jev_tier_counts_at_or_above_the_threshold(self) -> None:
+        for jev, expected in (("high", "high"), ("max", "max"), ("medium", "medium"), ("low", "low")):
+            with self.subTest(jev=jev):
+                decision = rerank.decide(self.advice(jev, 0.6), floor_tier="low", threshold=0.6)
+                self.assertEqual((decision.tier, decision.used, decision.status, decision.raised),
+                                 (expected, True, "used", False))
+
+    def test_a_tier_below_the_floor_is_raised_to_it(self) -> None:
+        decision = rerank.decide(self.advice("low", 0.9), floor_tier="medium", threshold=0.6)
+        self.assertEqual((decision.tier, decision.used, decision.raised), ("medium", True, True))
+
+    def test_below_the_threshold_or_no_confidence_keeps_the_rule_tier(self) -> None:
+        for confidence, status in ((0.59, "below-threshold 0.59"), (None, "below-threshold none"),
+                                   (0.0, "below-threshold 0")):
+            with self.subTest(confidence=confidence):
+                decision = rerank.decide(self.advice("max", confidence), floor_tier="low", threshold=0.6)
+                self.assertEqual((decision.tier, decision.used, decision.status), ("medium", False, status))
+
+    def test_an_unused_judgement_keeps_the_rule_tier(self) -> None:
+        for status in ("unused(no key)", "unused(error:timeout)", "unused(secret)"):
+            with self.subTest(status=status):
+                decision = rerank.decide(self.advice(None, None, status), floor_tier="low", threshold=0.6)
+                self.assertEqual((decision.tier, decision.used, decision.status), ("medium", False, status))
+
+    def test_the_threshold_is_a_finite_number_from_0_to_1(self) -> None:
+        self.assertEqual(rerank.DEFAULTS["difficulty_min_confidence"], 0.6)
+        self.assertEqual(rerank.min_confidence(rerank.DEFAULTS), 0.6)
+        for value in (0, 0.0, 0.25, 1, 1.0):
+            with self.subTest(value=value):
+                self.assertEqual(rerank.min_confidence(config(difficulty_min_confidence=value)), float(value))
+        for value in (-0.1, 1.01, float("nan"), float("inf"), 10**400, True, "0.6", None):
+            with self.subTest(value=value), self.assertRaises(ConfigError) as caught:
+                rerank.min_confidence(config(difficulty_min_confidence=value))
+            self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+            self.assertIn("difficulty_min_confidence", str(caught.exception))
+
+    def test_the_threshold_is_read_from_the_config_file(self) -> None:
+        root = make_tmp_dir(self)
+        (root / ".oah").mkdir()
+        for text, expected in (("0.75", 0.75), ("1", 1.0), ("nan", None), ("1.5", None), ('"high"', None)):
+            with self.subTest(text=text):
+                (root / ".oah" / "config.toml").write_text(f"[rerank]\ndifficulty_min_confidence = {text}\n",
+                                                           encoding="utf-8")
+                if expected is None:
+                    with self.assertRaises(ConfigError) as caught:
+                        rerank.min_confidence(load_config(root).section("rerank", rerank.DEFAULTS))
+                    self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+                else:
+                    self.assertEqual(rerank.min_confidence(load_config(root).section("rerank", rerank.DEFAULTS)),
+                                     expected)
 
 
 if __name__ == "__main__":
