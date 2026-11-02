@@ -302,12 +302,14 @@ def _families() -> Mapping | None:
 
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
                   refresh: bool = False, now: dt.datetime | None = None, persist: bool = True,
-                  session: benchmarks.Session | None = None) -> tuple[list[str], models.Freshness]:
+                  session: benchmarks.Session | None = None, keychain=None) -> tuple[list[str], models.Freshness]:
     """The engine's argv prefix, its catalog entry and that entry's scores: the one read of both for a launch.
 
     A rebuild warns about the listed models in no pool; this is the one place that decides when a
     launch hears of them, so a launch that rebuilt nothing stays quiet. `persist=False` writes nothing.
-    `session` is the command's view of the stored score files, shared when one command checks both engines."""
+    A rebuild that may write also refreshes the stored scores (`benchmarks.data_for`); `oah fix` never fetches, so
+    a correction decides on the bytes it captured. `session` is the command's view of the stored score files, shared
+    when one command checks both engines, and `keychain` is where an Artificial Analysis key may be found."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
     catalog = _catalog(state_dir)
     known = _families()
@@ -316,7 +318,8 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     rebuilt = bool(freshness.refreshed) and persist
     previous = freshness.previous if rebuilt else None
     chosen = benchmarks.data_for(engine, freshness.entry, catalog=catalog, settings=settings.models, known=known,
-                                 session=session, previous=previous, rebuilt=rebuilt)
+                                 session=session, previous=previous, rebuilt=rebuilt,
+                                 fetch=rebuilt and _CORRECTION_INPUTS.get() is None, env=env, keychain=keychain, now=now)
     scores, before = read_scores(engine, freshness.entry, settings, previous=previous, data=chosen.data, known=known,
                                  before=chosen.before)
     notices: list[str] = list(chosen.notices)
@@ -1347,7 +1350,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         floor_tier = min(tier, floor_tier, key=routing.TIERS.index)
     # Admit the rule's pair before reserving any spend, then account durably before the paid judge.
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
-                            now=now)
+                            now=now, keychain=keychain)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, now=now,
                                 checked=checked, floor_tier=floor_tier, stage=request.stage)
     warnings.extend(resolution.warnings)

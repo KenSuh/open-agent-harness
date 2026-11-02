@@ -29,7 +29,7 @@ from oah.review import receipts
 from oah.routing import RoutingError
 from oah.runs import RESULT_FIELDS, UNVERIFIED, find_run, new_run
 from oah.secrets import NoKeychain
-from tests.helpers import directory_alias, git_commit, make_git_repo, make_tmp_dir
+from tests.helpers import SHIPPED_DEFAULTS, directory_alias, git_commit, make_git_repo, make_tmp_dir, shipped_defaults
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
 FAKE_CODEX = [sys.executable, str(FAKES / "fake_codex.py")]
@@ -322,6 +322,7 @@ class ScoredCallTest(unittest.TestCase):
         self.assertEqual(data["launch_effort"], "max")
 
     def test_a_launch_scores_with_the_stored_copy_and_names_its_source(self):
+        shipped_defaults(self)
         project = scored_project(self)
         write_stored_epoch(project.state, STORED_RANKING)
         data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
@@ -330,6 +331,7 @@ class ScoredCallTest(unittest.TestCase):
         self.assertTrue(data["admission"]["score_credit"].startswith("Epoch AI, 'Capabilities & benchmarking'"))
 
     def test_a_tampered_stored_copy_counts_as_absent_and_the_snapshot_scores(self):
+        shipped_defaults(self)
         project = scored_project(self)
         path = write_stored_epoch(project.state, STORED_RANKING)
         path.write_bytes(path.read_bytes().replace(b'"credit": "Epoch AI', b'"credit": "Someone else'))
@@ -339,6 +341,7 @@ class ScoredCallTest(unittest.TestCase):
         self.assertTrue(any(warning.startswith("OAH_SCORES_FILE_INVALID:") for warning in data["warnings"]))
 
     def test_fetch_scores_false_ignores_the_stored_copy(self):
+        shipped_defaults(self)
         project = scored_project(self, "[models]\nfetch_scores = false\n")
         write_stored_epoch(project.state, STORED_RANKING)
         data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
@@ -346,6 +349,8 @@ class ScoredCallTest(unittest.TestCase):
                          ("gpt-6.1-terra", "Epoch AI, a credit line."))
 
     def test_fetch_scores_is_on_by_default_and_takes_only_true_or_false(self):
+        self.assertIs(SHIPPED_DEFAULTS["fetch_scores"], True, "the tests run with it off unless they ask")
+        shipped_defaults(self)
         self.assertIs(Project(self).settings().models["fetch_scores"], True)
         self.assertIs(Project(self, "[models]\nfetch_scores = false\n").settings().models["fetch_scores"], False)
         with self.assertRaises(ConfigError) as caught:
@@ -1008,6 +1013,7 @@ class RunFolderTest(unittest.TestCase):
 
 class RoutingTest(unittest.TestCase):
     def test_settings_defaults(self):
+        shipped_defaults(self)
         repo = make_git_repo(self)
         settings = call_cli.load_settings(repo)
         self.assertEqual(settings.stages, {"initial": "claude", "review": "codex", "correction": "codex"})

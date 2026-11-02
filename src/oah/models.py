@@ -255,6 +255,20 @@ class Catalog:
         except OSError as exc:
             raise StorageError(path, exc) from exc
 
+    def save_scores(self, name: str, data: Mapping) -> None:
+        """Store one fetched score file whole: a reader sees the old file or the new one, never part of one."""
+        write_json_atomic(self.dir / name, data)
+
+    def drop_scores(self, name: str) -> None:
+        """Remove one stored score file; there being none is fine."""
+        path = self.dir / name
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise StorageError(path, exc) from exc
+
     def load(self, engine: str) -> Entry | None:
         data = read_json(self.catalog_path, {})
         return Entry.from_json(engine, data.get(engine)) if isinstance(data, dict) else None
@@ -429,9 +443,15 @@ def model_changes(before: scoring.ScoreSet, after: scoring.ScoreSet, profile: st
         if old != new:
             why = (f"{old} is no longer listed" if old not in listed else
                    "newer generation" if after.left_out.get(old) == "superseded" or new not in known else
+                   "the scores changed" if _data_of(before) != _data_of(after) else
                    "the eligible models changed")
             rows.append({"step": step, "old": old, "new": new, "why": why})
     return rows
+
+
+def _data_of(scores: scoring.ScoreSet) -> tuple[str, str, str, str]:
+    """Which data a score set came from: its source, date, fetch time and credit."""
+    return scores.source, scores.date, scores.fetched_at, scores.credit
 
 
 def changed_warning(engine: str, change: Mapping) -> str:
