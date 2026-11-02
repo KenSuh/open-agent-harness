@@ -79,34 +79,6 @@ class ResolveEffortTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "OAH_EFFORT_METADATA_MISSING")
 
 
-class EffectiveModelTest(unittest.TestCase):
-    def test_effective_config_layers_and_profile(self):
-        root = make_tmp_dir(self)
-        home, project = root / "codex-home", root / "project"
-        home.mkdir()
-        (project / ".codex").mkdir(parents=True)
-        self.assertIsNone(codex.effective_model(project, home))
-        (home / "config.toml").write_text('model = "gpt-user"\r\n[profiles.deep]\r\nmodel = "gpt-deep"\r\n',
-                                          encoding="utf-8")
-        self.assertEqual(codex.effective_model(project, home), "gpt-user")
-        (project / ".codex" / "config.toml").write_text('model = "gpt-project"\n', encoding="utf-8")
-        self.assertEqual(codex.effective_model(project, home), "gpt-project")
-        (project / ".codex" / "config.toml").write_text('model = "gpt-project"\nprofile = "deep"\n', encoding="utf-8")
-        self.assertEqual(codex.effective_model(project, home), "gpt-deep")
-
-    def test_selected_profile_without_model_keeps_base(self):
-        root = make_tmp_dir(self)
-        (root / "config.toml").write_text('model = "gpt-user"\nprofile = "fast"\n[profiles.fast]\n', encoding="utf-8")
-        self.assertEqual(codex.effective_model(root / "nowhere", root), "gpt-user")
-
-    def test_invalid_config_refuses(self):
-        root = make_tmp_dir(self)
-        (root / "config.toml").write_text("model = \n", encoding="utf-8")
-        with self.assertRaises(EngineError) as ctx:
-            codex.effective_model(root, root)
-        self.assertEqual(ctx.exception.code, "OAH_CODEX_CONFIG_INVALID")
-
-
 class CommandTest(unittest.TestCase):
     def test_build_command_work(self):
         argv = codex.build_command(["codex"], workdir="/w", read_only=False, model="gpt-test-a", effort="high",

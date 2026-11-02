@@ -1,4 +1,4 @@
-# Codex 어댑터 — models_cache 에서 지원 effort 를 읽고, 유효 설정(프로필 포함)으로 모델을 해석하며, codex exec 명령줄과 헤더 검사를 만든다.
+# Codex 어댑터 — models_cache 에서 지원 effort 를 읽고, codex exec 명령줄과 헤더 검사를 만든다.
 """The Codex CLI adapter (PLAN 5.5). Every function here is pure apart from reading files it names.
 
 Lane P6 uses `build_command`, `resolve_effort` and `check_header` for review rounds.
@@ -7,9 +7,6 @@ Lane P6 uses `build_command`, `resolve_effort` and `check_header` for review rou
   `slug` and `supported_reasoning_levels` (objects with `effort`, or plain strings). An entry marked
   `is_default` or `default` true is the CLI-reported default (A14). An entry whose `visibility` is
   `hide` or `hidden`, or that has `hidden` true, is not listed: it is never a judged candidate.
-- `effective_model(launch_dir, codex_home)` resolves an empty tier model from Codex's configuration:
-  `$CODEX_HOME/config.toml`, then `<launch_dir>/.codex/config.toml` (later wins), then the selected
-  `profile`'s `[profiles.<name>]` model. `None` means nothing is configured.
 - `resolve_effort(model, requested, *, cache)` applies `oah.engines.effort.resolve` to the model's levels.
 - `build_command(...)` is `codex exec -C <dir> -s read-only|workspace-write -m M
   -c model_reasoning_effort="E" [--output-schema F] -o <out> [--ephemeral] -`; the prompt goes on stdin.
@@ -21,7 +18,6 @@ from __future__ import annotations
 import json
 import pathlib
 import re
-import tomllib
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -87,42 +83,6 @@ def read_models_cache(home: pathlib.Path) -> dict[str, CachedModel] | None:
         return parse_models_cache((pathlib.Path(home) / CACHE_NAME).read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, ValueError):
         return None
-
-
-def _read_toml(path: pathlib.Path) -> dict:
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
-        return {}
-    except (OSError, UnicodeDecodeError) as exc:
-        raise EngineError("OAH_CODEX_CONFIG_INVALID", f"{path} cannot be read as UTF-8 ({exc}); fix or remove it, "
-                          "or set the tier's model in .oah/config.toml") from exc
-    try:
-        return tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise EngineError("OAH_CODEX_CONFIG_INVALID", f"{path} is not valid TOML ({exc}); fix it so Codex and oah "
-                          "can read it, or set the tier's model in .oah/config.toml") from exc
-
-
-def effective_model(launch_dir: pathlib.Path, home: pathlib.Path) -> str | None:
-    """The model Codex would use in launch_dir with its configured profile, or None."""
-    layers = [_read_toml(pathlib.Path(home) / "config.toml"),
-              _read_toml(pathlib.Path(launch_dir) / ".codex" / "config.toml")]
-    model = profile = None
-    profiles: dict[str, dict] = {}
-    for layer in layers:
-        if isinstance(layer.get("model"), str) and layer["model"]:
-            model = layer["model"]
-        if isinstance(layer.get("profile"), str) and layer["profile"]:
-            profile = layer["profile"]
-        for name, table in (layer.get("profiles") or {}).items():
-            if isinstance(table, dict):
-                profiles.setdefault(name, {}).update(table)
-    if profile is not None:
-        chosen = profiles.get(profile, {}).get("model")
-        if isinstance(chosen, str) and chosen:
-            model = chosen
-    return model
 
 
 def resolve_effort(model: str, requested: str, *, cache: Mapping[str, CachedModel] | None) -> EffortResolution:
