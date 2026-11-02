@@ -369,6 +369,7 @@ def stored_choices(engine: str, entry: models.Entry, settings: Settings, *, cata
     for tier in routing.TIERS:
         try:
             model, source = _selected(engine, tier, settings, freshness, floor_tier=tier)
+            _tier_effort(engine, tier, model, source, settings, entry, floor_tier=tier, stage=None)
             tiers[tier] = {"model": _shown(model), "source": source}
         except EngineError as exc:
             tiers[tier] = {"error": str(exc)}
@@ -411,6 +412,20 @@ def _effort_left_out(engine: str, settings: Settings, freshness: models.Freshnes
     return left_out
 
 
+def _tier_effort(engine: str, tier: str, model: str, source: str, settings: Settings, entry: models.Entry | None, *,
+                 floor_tier: str, stage: str | None) -> models.Runnable:
+    """The tier's effort on this model, as every call resolves it, or the refusal a call would give."""
+    section = settings.engines[engine]
+    effort = _runnable(engine, tier, floor_tier, model, settings, entry)
+    if effort.reason is not None:
+        code = "OAH_CONFIG_INVALID" if source == "pin" or section["effort_caps"].get(model) is not None else (
+            BELOW_FLOOR if stage == "review" else scoring.UNRESOLVED)
+        raise EngineError(code, f"{_shown(model)} cannot run effort {section['tiers'][tier]['effort']} at the "
+                          f"{floor_tier} floor effort ({effort.reason}); change [engines.{engine}.tiers] effort or "
+                          f"[engines.{engine}.effort_caps] in .oah/config.toml")
+    return effort
+
+
 def _selected(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
               floor_tier: str = "low") -> tuple[str, str]:
     section = settings.engines[engine]
@@ -447,13 +462,7 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pat
         raise EngineError(BELOW_FLOOR, f"tier {tier} effort {tier_settings['effort']}: "
                           + str(exc).split(": ", 1)[1]) from None
     cap = section["effort_caps"].get(model)
-    effort = _runnable(engine, tier, floor_tier, model, settings, entry)
-    if effort.reason is not None:
-        code = "OAH_CONFIG_INVALID" if source == "pin" or cap is not None else (
-            BELOW_FLOOR if stage == "review" else scoring.UNRESOLVED)
-        raise EngineError(code, f"{_shown(model)} cannot run effort {tier_settings['effort']} at the {floor_tier} "
-                          f"floor effort ({effort.reason}); change [engines.{engine}.tiers] effort or "
-                          f"[engines.{engine}.effort_caps] in .oah/config.toml")
+    effort = _tier_effort(engine, tier, model, source, settings, entry, floor_tier=floor_tier, stage=stage)
     info = entry.model(model) or models.ModelInfo(model, ())
     uncapped = models.runnable(info, tier_settings["effort"], section["tiers"][floor_tier]["effort"], None) if cap else effort
     if effort.launch != uncapped.launch:

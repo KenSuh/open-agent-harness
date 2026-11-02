@@ -1144,6 +1144,41 @@ class ScoreReportTest(unittest.TestCase):
         self.assertFalse(warned(json.loads(out)["engines"]["claude"]["warnings"], "OAH_MODEL_ORDER_IGNORED"))
 
 
+class ScoreSourceReportTest(unittest.TestCase):
+    """AC5: `oah models` keeps every key in its order, and says in plain words where each engine's scores came from."""
+
+    KEYS = ["cli_version", "checked_at", "source", "refreshed", "warnings", "models", "allowed_models", "effort_caps",
+            "tier_pools", "tiers", "unpooled", "profile", "scores", "left_out"]
+
+    def test_the_snapshot_is_named_and_the_keys_stay(self):
+        project = scored_project(self)
+        code, out, err = run_in(project, "--json")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(list(report), self.KEYS)
+        self.assertEqual(list(report["scores"]), ["source", "date", "credit", "models"], "no fetch time: not fetched")
+        code, out, err = run_in(project)
+        self.assertIn("scores from: the Epoch AI snapshot shipped with oah (2026-11-02)", out)
+
+    def test_a_fetched_copy_adds_its_fetch_time_last(self):
+        from tests.test_benchmarks import project_with_key
+        from tests.test_call import STORED_RANKING, write_stored_epoch
+
+        project = project_with_key(self, None)
+        fetched = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) - dt.timedelta(hours=1)
+        write_stored_epoch(project.state, STORED_RANKING, fetched=fetched)
+        stamp = fetched.strftime("%Y-%m-%dT%H:%M:%SZ")
+        code, out, err = run_in(project, "--json")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertEqual(list(report), self.KEYS)
+        self.assertEqual(list(report["scores"]), ["source", "date", "credit", "models", "fetched_at"])
+        self.assertEqual(report["scores"]["fetched_at"], stamp)
+        code, out, err = run_in(project)
+        self.assertIn(f"scores from: Epoch AI, fetched {stamp}", out)
+        self.assertIn("credit: Epoch AI, 'Capabilities & benchmarking'", out)
+
+
 class RebuildNoticeTest(unittest.TestCase):
     TWO = ("gpt-6-luna", "gpt-6.1-sol")
     NEWER = "gpt-6.2-sol"

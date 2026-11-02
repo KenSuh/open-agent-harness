@@ -86,7 +86,7 @@ def _score_lines(report: dict) -> list[str]:
     else:
         rows = ", ".join(f"{row['model']} {row['score']:.1f}" for row in scores["models"])
         lines = [f"profile {report['profile']} · scores {scores['source']} {scores['date']}: {rows}",
-                 f"credit: {scores['credit']}"]
+                 f"scores from: {benchmarks.describe(scores)}", f"credit: {scores['credit']}"]
     if report["left_out"]:
         lines.append("left out: " + " · ".join(f"{name} ({why})" for name, why in report["left_out"].items()))
     return lines

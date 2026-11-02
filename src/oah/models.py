@@ -500,9 +500,11 @@ def score_report(scores: scoring.ScoreSet, profile: str, *, left_out: Mapping[st
     """The profile, the scores with their credit, and each listed model left out with its reason."""
     rows = [{"model": item.model, "family": item.family, "score": round(item.score, 1), "cost": item.cost}
             for item in scores.models]
+    block = {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
+    if scores.fetched_at:
+        block["fetched_at"] = scores.fetched_at  # last, so every earlier key keeps its place
     return {"profile": profile,
-            "scores": {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
-            if rows else None,
+            "scores": block if rows else None,
             "left_out": {name: reason for name, reason in sorted({**scores.left_out, **(left_out or {})}.items())
                          if PLAIN_MODEL.fullmatch(name)}}
 

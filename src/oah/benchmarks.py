@@ -344,6 +344,16 @@ def data_for(engine: str, entry, *, catalog, settings: Mapping, known: Mapping |
     return Selection(data, before, tuple(notices))
 
 
+def describe(block: Mapping | None) -> str:
+    """Where a report's scores came from, in plain words; `block` is the `scores` block of `oah models`."""
+    if block is None:
+        return "no usable scores"
+    if not block.get("fetched_at"):
+        return f"the {block['source']} snapshot shipped with oah ({block['date']})"
+    keyed = " with your key" if block["source"] == AA_SOURCE else ""
+    return f"{block['source']}{keyed}, fetched {block['fetched_at']}"
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: it would carry the request, and the key header, to another address."""
 
