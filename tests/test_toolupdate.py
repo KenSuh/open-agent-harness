@@ -473,6 +473,10 @@ class ParserTest(unittest.TestCase):
         self.assertTrue(probes.lists_flag(CLAUDE_HELP["plugin update"], "--scope"))
         self.assertTrue(probes.lists_flag(CLAUDE_HELP["plugin list"], "--json"))
         self.assertFalse(probes.lists_flag(CLAUDE_HELP["plugin list"], "--scope"))
+        wrapped_only = CLAUDE_HELP["plugin list"].replace("  --json                Output as JSON\n", "")
+        self.assertIn("--json)", wrapped_only)  # still mentioned inside the --available description
+        self.assertFalse(probes.lists_flag(wrapped_only, "--json"))
+        self.assertTrue(probes.lists_flag("Options:\n      --json\n          Output upgrade result as JSON\n", "--json"))
 
     def test_every_phrase(self):
         cases = {

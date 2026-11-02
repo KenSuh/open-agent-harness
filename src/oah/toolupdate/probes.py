@@ -124,7 +124,9 @@ def listed_commands(text: str) -> set[str]:
 
 
 def lists_flag(text: str, flag: str) -> bool:
-    return re.search(rf"(?m)^\s+(?:-[A-Za-z], )?{re.escape(flag)}\b", text or "") is not None
+    """True when an option line names `flag`; commander indents those by 2 spaces and clap by 2 or 6, while a
+    wrapped description that merely mentions the flag is indented further."""
+    return re.search(rf"(?m)^ {{2,6}}(?:-[A-Za-z], )?{re.escape(flag)}\b", text or "") is not None
 
 
 class Cli:
