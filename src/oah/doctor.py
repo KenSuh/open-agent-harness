@@ -237,12 +237,11 @@ def agent_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
     if root is None:
         return []
     from oah import call, init, models, routing
+    from oah.hook_session_start import _agent_file
     from oah.paths import repo_info, state_dir
 
     root = pathlib.Path(root)
-    present = [tier for tier in routing.TIERS
-               if (root / init.AGENTS_DIR / f"oah-{tier}.md").is_file()
-               and not (root / init.AGENTS_DIR / f"oah-{tier}.md").is_symlink()]
+    present = [tier for tier in routing.TIERS if _agent_file(root, tier) is not None]
     if not present:
         return []
     config = load_config(root)

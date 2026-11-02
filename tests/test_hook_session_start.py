@@ -226,6 +226,17 @@ class AgentFileHookTest(unittest.TestCase):
         self.assertEqual(self.refresh(), [])
         self.assertFalse(self.agents.exists())
 
+    @unittest.skipIf(os.name == "nt", "creating a symlink needs a privilege on Windows")
+    def test_nothing_is_written_through_a_linked_folder(self):
+        elsewhere = make_tmp_dir(self) / "shared-agents"
+        elsewhere.mkdir()
+        path = elsewhere / "oah-max.md"
+        path.write_bytes(init.agent_text("max", "opus", "max"))
+        self.agents.rmdir()
+        self.agents.symlink_to(elsewhere, target_is_directory=True)
+        self.assertEqual(self.refresh(), [])
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "opus", "max"))
+
     def test_a_write_failure_prints_one_plain_line(self):
         self.write("max", "opus")
         self.write("low", "haiku")

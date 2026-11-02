@@ -84,11 +84,16 @@ def _log(root: pathlib.Path) -> list[str]:
     return [f"Newest wiki log entries ({where}):"] + [f"- {entry.date} {entry.title}" for entry in entries]
 
 
-def _regular(path: pathlib.Path) -> bool:
+def _agent_file(root: pathlib.Path, tier: str) -> pathlib.Path | None:
+    """The tier file when it is a regular file reached through no link or junction, as `oah init` requires."""
+    from oah.init import AGENTS_DIR
+    from oah.runs import RunError, _contained_path
+
     try:
-        return stat.S_ISREG(path.lstat().st_mode)  # never through a link
-    except OSError:
-        return False
+        path = _contained_path(root, *AGENTS_DIR.split("/"), f"oah-{tier}.md")
+        return path if stat.S_ISREG(path.lstat().st_mode) else None
+    except (OSError, RunError):
+        return None
 
 
 def _shown(name: str) -> str:
@@ -105,19 +110,18 @@ def agent_lines(info, env: Mapping[str, str]) -> list[str]:
     """Bring each generated `.claude/agents/oah-<tier>.md` to the current model and effort; one line per change."""
     from oah import call, init, models, routing
 
-    folder = pathlib.Path(info.root) / init.AGENTS_DIR
     out: list[str] = []
     try:
-        present = [tier for tier in routing.TIERS if _regular(folder / f"oah-{tier}.md")]
+        present = {tier: path for tier in routing.TIERS
+                   if (path := _agent_file(pathlib.Path(info.root), tier)) is not None}
         if not present:
             return out
         config = load_config(info.root)
         section = config.section("models", models.DEFAULTS)
         expected = init.tier_agents(config.section("engines", call.ENGINE_DEFAULTS), profile=section["profile"],
                                     models_section=section, state_dir=state_dir(info, env))
-        for tier in present:
+        for tier, path in present.items():
             relative = f"{init.AGENTS_DIR}/oah-{tier}.md"
-            path = folder / f"oah-{tier}.md"
             data = path.read_bytes()
             found, update = init.agent_check(tier, data, expected.files[relative])
             if found != "stale":
