@@ -22,12 +22,18 @@ Rule
     larger of the step and the floor step. The required score sits step/3 of the way from the lowest to the
     highest eligible score. Balanced and efficient also accept a model within 2 percent of that range below it, so
     a gap that small buys nothing. Performance has no such margin. A floor never has one: `clears` is the floor
-    test, and `choose` applies it too, so the rule cannot pick a model the admission check would refuse. The
-    cheapest model that clears wins, then the lower score, then the name, so a choice never flips.
+    test, and `choose` applies it too, so the rule cannot pick a model the admission check would refuse.
+
+    Performance and balanced take the cheapest model that clears, then the lower score, then the name, so a
+    choice never flips. Efficient does not step down by itself: its lowest allowed step is one below the tier,
+    and among the models that clear it and pass the effort rules (`usable`) it takes the most score per cost,
+    then the lower score, the lower cost and the name. So a stronger model wins when it is the better value.
+    The effort rules bind only here. Efforts stay the tier's, and a cap still clamps: `usable` drops a model the
+    launch would refuse, and when it would drop them all the launch keeps that refusal.
 
     No table maps a difficulty to a model: the result follows the scores and moves when they move.
-    `band` is what a judge may pick from: the rule's choice, and the models from this step's required
-    score up to the next step's, so a judge moves at most one step up and never below the rule's step.
+    `band` is what a judge may pick from: the rule's choice, and the models from the lowest allowed step's required
+    score up to the next step's, so a judge moves at most one step up and never below that step.
 """
 from __future__ import annotations
 
@@ -36,14 +42,14 @@ import math
 import re
 from dataclasses import dataclass, field
 from importlib import resources
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from oah.engines.effort import EngineError
 from oah.routing import ENGINES, TIERS
 
 NO_SCORES = "OAH_MODEL_NO_SCORES"
 DEFAULT_PROFILE = "balanced"
-PROFILES = {"performance": 1, "balanced": 0, "efficient": -1}
+PROFILES = {"performance": 1, "balanced": 0, "efficient": 0}  # steps added to the tier; efficient looks one lower too
 MARGIN = 0.02
 MIN_COMMON_TASKS = 3
 TOP_STEP = len(TIERS) - 1
@@ -84,8 +90,9 @@ class Choice:
     model: str
     step: int
     floor_step: int
-    required: float
+    required: float  # the score of `lowest_step`
     source: str
+    lowest_step: int  # the lowest step this choice could come from: `step`, or for efficient one below the tier
 
 
 @dataclass(frozen=True)
@@ -288,21 +295,40 @@ def required(scores: ScoreSet, step: int) -> float:
     return highest if step >= TOP_STEP else lowest + step / TOP_STEP * (highest - lowest)
 
 
-def _pick(scores: ScoreSet, step: int, floor_step: int, profile: str) -> Choice:
+def _price(model: Scored) -> tuple[bool, float]:
+    return model.cost is None, model.cost or 0.0
+
+
+def _value(model: Scored) -> float:
+    """Score per cost: an unknown cost never wins on value, and a free model always does."""
+    if model.cost is None:
+        return -1.0
+    return model.score / model.cost if model.cost > 0 else math.inf
+
+
+def _pick(scores: ScoreSet, step: int, floor_step: int, profile: str,
+          usable: Callable[[str], bool] | None = None) -> Choice:
     lowest, highest = _bounds(scores)
-    need = required(scores, step)
+    efficient = profile == "efficient"
+    base = max(step - 1, floor_step) if efficient else step
+    need = required(scores, base)
     slack = 0.0 if profile == "performance" else MARGIN * (highest - lowest)
     floor = required(scores, floor_step)
     fits = [model for model in scores.models if model.score >= need - slack and model.score >= floor]
-    best = min(fits, key=lambda model: (model.cost is None, model.cost or 0.0, model.score, model.model))
-    return Choice(best.model, step, floor_step, need, scores.source)
+    if efficient:
+        fits = [model for model in fits if usable is None or usable(model.model)] or fits
+        best = min(fits, key=lambda model: (-_value(model), model.score, *_price(model), model.model))
+    else:
+        best = min(fits, key=lambda model: (*_price(model), model.score, model.model))
+    return Choice(best.model, step, floor_step, need, scores.source, base)
 
 
-def choose(scores: ScoreSet, tier: str, floor_tier: str, profile: str) -> Choice:
-    """The automatic model for a tier: the cheapest model that clears the step the tier, floor and profile set."""
+def choose(scores: ScoreSet, tier: str, floor_tier: str, profile: str, *,
+           usable: Callable[[str], bool] | None = None) -> Choice:
+    """The automatic model for a tier: the model the tier, floor and profile lead to; `usable` is the effort rules."""
     step = min(max(TIERS.index(tier) + PROFILES[profile], 0), TOP_STEP)
     floor_step = TIERS.index(floor_tier)
-    return _pick(scores, max(step, floor_step), floor_step, profile)
+    return _pick(scores, max(step, floor_step), floor_step, profile, usable)
 
 
 def at_step(scores: ScoreSet, step: int, profile: str) -> Choice:
@@ -327,8 +353,8 @@ def clears(scores: ScoreSet, model: str, step: int) -> bool:
 
 
 def band(scores: ScoreSet, choice: Choice) -> tuple[str, ...]:
-    """What a judge may pick: the rule's choice, then the models from this step's score up to the next step's."""
-    low = required(scores, choice.step)
-    high = required(scores, choice.step + 1) if choice.step < TOP_STEP else math.inf
+    """What a judge may pick: the rule's choice, then the models from the lowest allowed step's score to the next's."""
+    low = required(scores, choice.lowest_step)
+    high = required(scores, choice.lowest_step + 1) if choice.lowest_step < TOP_STEP else math.inf
     return (choice.model, *(model.model for model in scores.models
                             if low <= model.score <= high and model.model != choice.model))

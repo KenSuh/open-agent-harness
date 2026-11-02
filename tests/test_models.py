@@ -686,10 +686,18 @@ class CandidateTableTest(unittest.TestCase):
         self.assertEqual(built.reject_reason("gpt-6-luna", "high"), "outside-score-bound")
 
     def test_efficient_cannot_become_performance_through_the_band(self):
+        # On these scores the bottom model scores 0, so terra is the rule's choice: the most score per cost.
         built = scored_candidates(tier="medium", floor_tier="low", profile="efficient",
-                                  deterministic=("gpt-6-luna", "medium"), floor=("gpt-6-luna", "low"))
-        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6-luna"})
+                                  deterministic=("gpt-6.1-terra", "medium"), floor=("gpt-6.1-terra", "low"))
+        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6.1-terra", "gpt-6-luna"})
         self.assertEqual(built.reject_reason("gpt-6.1-sol", "high"), "outside-score-bound")
+
+    def test_the_band_keeps_the_model_the_rule_ran_when_the_effort_rules_moved_it(self):
+        # A cap took terra out of the efficient rule, so sol is what runs: the judge must still be offered it.
+        built = scored_candidates(tier="medium", floor_tier="medium", profile="efficient",
+                                  deterministic=("gpt-6.1-sol", "medium"), floor=("gpt-6.1-sol", "medium"),
+                                  caps={"gpt-6.1-terra": "low"})
+        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6.1-sol"})
 
     def test_the_band_keeps_the_existing_effort_rules(self):
         built = scored_candidates(tier="high", floor_tier="medium", deterministic=("gpt-6.1-terra", "high"),

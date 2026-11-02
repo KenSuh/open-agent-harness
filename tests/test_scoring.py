@@ -167,6 +167,85 @@ class ChoiceOrderTest(unittest.TestCase):
         self.assertEqual(scoring.choose(twins, "low", "low", "balanced").model, "m-a")
 
 
+class EfficientValueTest(unittest.TestCase):
+    """Efficient keeps the tier's step, may go one step lower, and takes the most score per cost."""
+
+    VALUE = hand_built("codex", scored("m-a", "luna", 20.0, 8), scored("m-b", "terra", 60.0, 12),
+                       scored("m-c", "sol", 90.0, 14))
+
+    def test_a_stronger_model_beats_a_cheaper_one_on_value(self):
+        self.assertEqual(scoring.choose(self.VALUE, "high", "low", "efficient").model, "m-c")
+
+    def test_it_is_not_a_fixed_step_down(self):
+        # Medium may start at step 0, where every model clears, and m-c still gives the most score per cost.
+        self.assertEqual(scoring.choose(self.VALUE, "medium", "low", "efficient").model, "m-c")
+        self.assertEqual(scoring.choose(self.VALUE, "medium", "low", "balanced").model, "m-b")
+
+    def test_the_lowest_allowed_step_is_one_below_the_tier(self):
+        cheap = hand_built("codex", scored("m-low", "luna", 20.0, 0.1), scored("m-mid", "terra", 60.0, 12),
+                           scored("m-top", "sol", 100.0, 40))
+        self.assertEqual(scoring.choose(cheap, "medium", "low", "efficient").model, "m-low", "step 0 is allowed here")
+        self.assertEqual(scoring.choose(cheap, "high", "low", "efficient").model, "m-mid",
+                         "m-low has the best value but sits below step 1, the lowest step a high tier allows")
+        self.assertEqual(scoring.choose(cheap, "max", "low", "efficient").model, "m-top", "only m-top clears step 2")
+
+    def test_the_step_is_the_tier_and_required_is_the_lowest_allowed_step(self):
+        choice = scoring.choose(self.VALUE, "high", "low", "efficient")
+        self.assertEqual((choice.step, choice.lowest_step), (2, 1))
+        self.assertAlmostEqual(choice.required, 20 + 1 / 3 * 70)
+        self.assertEqual(scoring.choose(self.VALUE, "low", "low", "efficient").lowest_step, 0)
+
+    def test_a_floor_raises_the_lowest_allowed_step(self):
+        choice = scoring.choose(self.VALUE, "high", "high", "efficient")
+        self.assertEqual((choice.step, choice.floor_step, choice.lowest_step, choice.model), (2, 2, 2, "m-c"))
+        lifted = scoring.choose(self.VALUE, "low", "high", "efficient")
+        self.assertEqual((lifted.step, lifted.lowest_step, lifted.model), (2, 2, "m-c"))
+
+    def test_the_margin_applies_at_the_lowest_allowed_step(self):
+        near = hand_built("codex", scored("m-low", "luna", 0.0, 50), scored("m-near", "terra", 32.0, 1),
+                          scored("m-top", "sol", 100.0, 80))
+        self.assertLess(32.0, scoring.required(near, 1), "m-near sits inside the 2 percent below step 1")
+        self.assertEqual(scoring.choose(near, "high", "low", "efficient").model, "m-near")
+
+    def test_the_margin_never_passes_a_floor(self):
+        near = hand_built("codex", scored("m-low", "luna", 0.0, 50), scored("m-near", "terra", 66.0, 1),
+                          scored("m-top", "sol", 100.0, 80))
+        self.assertEqual(scoring.choose(near, "high", "low", "efficient").model, "m-near")
+        self.assertEqual(scoring.choose(near, "high", "high", "efficient").model, "m-top")
+
+    def test_a_tie_on_value_takes_the_lower_score_then_the_lower_cost(self):
+        tie = hand_built("codex", scored("m-a", "luna", 80.0, 4), scored("m-b", "terra", 40.0, 2),
+                         scored("m-c", "sol", 20.0, 1))
+        self.assertEqual(scoring.choose(tie, "low", "low", "efficient").model, "m-c")
+        level = hand_built("codex", scored("m-a", "luna", 0.0, 9), scored("m-b", "terra", 0.0, 3))
+        self.assertEqual(scoring.choose(level, "low", "low", "efficient").model, "m-b")
+
+    def test_an_unknown_cost_never_wins_and_a_free_model_always_does(self):
+        unknown = hand_built("codex", scored("m-a", "luna", 90.0, None), scored("m-b", "terra", 80.0, 40))
+        self.assertEqual(scoring.choose(unknown, "low", "low", "efficient").model, "m-b")
+        free = hand_built("codex", scored("m-a", "luna", 10.0, 0), scored("m-b", "terra", 90.0, 1))
+        self.assertEqual(scoring.choose(free, "low", "low", "efficient").model, "m-a")
+
+    def test_a_model_that_fails_the_effort_rules_is_no_candidate(self):
+        self.assertEqual(scoring.choose(self.VALUE, "high", "low", "efficient",
+                                        usable=lambda name: name != "m-c").model, "m-b")
+
+    def test_with_none_passing_the_effort_rules_the_refusal_stays_with_the_launch(self):
+        self.assertEqual(scoring.choose(self.VALUE, "high", "low", "efficient", usable=lambda _name: False).model, "m-c")
+
+    def test_the_effort_rules_change_no_other_profile(self):
+        for profile in ("performance", "balanced"):
+            with self.subTest(profile=profile):
+                self.assertEqual(scoring.choose(self.VALUE, "high", "low", profile, usable=lambda _name: False).model,
+                                 scoring.choose(self.VALUE, "high", "low", profile).model)
+
+    def test_a_rebuild_compares_each_step_as_the_tier_of_that_number(self):
+        for step, tier in enumerate(TIERS):
+            with self.subTest(tier=tier):
+                self.assertEqual(scoring.at_step(self.VALUE, step, "efficient").model,
+                                 scoring.choose(self.VALUE, tier, "low", "efficient").model)
+
+
 class ScoreSetTest(unittest.TestCase):
     ALL = {"gpt-6-luna": flat(0.1), "gpt-6.1-terra": flat(0.8), "gpt-6-sol": flat(0.85), "gpt-6.1-sol": flat(0.9),
            "gpt-6-astra": flat(0.95)}
@@ -371,15 +450,25 @@ class BandTest(unittest.TestCase):
                           scored("m-top", "astra", 100.0, 9))
         self.assertEqual(scoring.band(near, scoring.choose(near, "max", "low", "balanced")), ("m-near", "m-top"))
 
-    def test_a_judge_can_never_go_below_the_step(self):
+    def test_a_judge_can_never_go_below_the_lowest_allowed_step(self):
         for tier in TIERS:
             for floor in TIERS:
                 for profile in PROFILES:
                     choice = scoring.choose(self.SET, tier, floor, profile)
                     with self.subTest(tier=tier, floor=floor, profile=profile):
                         for name in scoring.band(self.SET, choice):
-                            self.assertTrue(name == choice.model or scoring.clears(self.SET, name, choice.step))
+                            self.assertTrue(name == choice.model or scoring.clears(self.SET, name, choice.lowest_step))
                             self.assertTrue(scoring.clears(self.SET, name, choice.floor_step))
+
+    def test_efficient_is_bound_from_its_lowest_allowed_step_up_to_the_tier(self):
+        self.assertEqual(self.names("high", profile="efficient"), ("m-high", "m-mid", "m-next"),
+                         "step 1 to step 2 and the rule's choice: efficient cannot be judged up into performance")
+        self.assertEqual(scoring.choose(self.SET, "high", "low", "efficient").lowest_step, 1)
+
+    def test_the_rule_choice_of_efficient_stays_offered_above_the_bound(self):
+        strong = hand_built("codex", scored("m-low", "luna", 0.0, 90), scored("m-mid", "terra", 40.0, 90),
+                            scored("m-top", "sol", 100.0, 1))
+        self.assertEqual(scoring.band(strong, scoring.choose(strong, "medium", "low", "efficient")), ("m-top", "m-low"))
 
 
 class ChangeStepTest(unittest.TestCase):
@@ -387,6 +476,8 @@ class ChangeStepTest(unittest.TestCase):
         self.assertEqual([scoring.at_step(CODEX, step, "balanced").model for step in range(4)],
                          ["gpt-luna", "gpt-terra", "gpt-terra", "gpt-sol"])
         self.assertEqual(scoring.at_step(CODEX, 3, "performance").model, "gpt-astra")
+        self.assertEqual([scoring.at_step(CODEX, step, "efficient").model for step in range(4)],
+                         ["gpt-luna", "gpt-luna", "gpt-terra", "gpt-terra"])
 
 
 def fails_with_no_scores(test: unittest.TestCase, reader, content) -> None:

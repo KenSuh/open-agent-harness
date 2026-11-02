@@ -173,6 +173,35 @@ class ScoredCallTest(unittest.TestCase):
                 project = scored_project(self, f'[models]\nprofile = "{profile}"\n')
                 self.assertEqual(project.run(stage="correction", tier="high")["resolved_model"], model)
 
+    def test_efficient_takes_the_most_score_per_cost_with_no_step_down(self):
+        rows = {"low": "gpt-6.1-terra", "medium": "gpt-6.1-terra", "high": "gpt-6.1-terra", "max": "gpt-6.1-terra"}
+        for tier, model in rows.items():
+            with self.subTest(tier=tier):
+                project = scored_project(self, '[models]\nprofile = "efficient"\n')
+                data = project.run(stage="correction", tier=tier, axes={"kind": "quick"})
+                self.assertEqual((data["tier"], data["resolved_model"]), (tier, model))
+
+    def test_efficient_passes_over_a_model_its_cap_keeps_below_the_floor(self):
+        cap = '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "low"\n'
+        project = scored_project(self, '[models]\nprofile = "efficient"\n' + cap)
+        data = project.run(stage="correction", tier="high", axes={"kind": "security"})
+        self.assertEqual((data["status"], data["resolved_model"], data["launch_effort"]),
+                         ("finished", "gpt-6.1-sol", "high"))
+
+    def test_the_other_profiles_still_refuse_that_cap(self):
+        cap = '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "low"\n'
+        project = scored_project(self, cap)
+        with self.assertRaises(EngineError) as caught:
+            project.prepare(stage="correction", tier="high", axes={"kind": "security"})
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("floor effort", str(caught.exception))
+
+    def test_efficient_still_clamps_a_capped_model_that_reaches_the_floor(self):
+        cap = '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "medium"\n'
+        project = scored_project(self, '[models]\nprofile = "efficient"\n' + cap)
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual((data["resolved_model"], data["launch_effort"]), ("gpt-6.1-terra", "medium"))
+
     def test_every_kind_of_call_is_chosen_by_difficulty(self):
         project = scored_project(self)
         easy = project.run(stage="correction", axes={"kind": "docs", "intensity": "low", "reasoning": "low", "risk": "low"})

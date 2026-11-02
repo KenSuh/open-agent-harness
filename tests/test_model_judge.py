@@ -504,7 +504,7 @@ class JudgeCallTest(unittest.TestCase):
         with judge(project, FakeJudge(("gpt-6-astra", "high"))):
             data = project.run(stage="correction", tier="medium", axes={"kind": "quick"})
         self.assertEqual(data["model_judge"], "rejected(outside-score-bound)")
-        self.assertEqual(launched(project), ("gpt-6-luna", "medium"))
+        self.assertEqual(launched(project), ("gpt-6.1-terra", "medium"))
 
     def test_tier_pools_qualify_peers_for_a_high_floor_call(self):
         # AC8 (Revision 3): a security review has floor high; the deterministic choice is the first listed model of

@@ -7,8 +7,9 @@ initial = "claude"
 review = "codex"
 correction = "codex"
 
-# How much score a job needs. Benchmark scores pick the model inside each engine: "performance" asks one
-# step more than the difficulty, "efficient" one step less, and "balanced" exactly what it asks.
+# How benchmark scores pick the model inside each engine. "balanced" takes the cheapest model that reaches what
+# the difficulty asks, "performance" asks one step more, and "efficient" takes the most score per cost, from
+# one step lower up.
 [models]
 profile = "balanced"
 

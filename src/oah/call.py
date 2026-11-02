@@ -336,13 +336,30 @@ def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: 
     return claude.resolve_effort(requested, efforts=levels, model=model)
 
 
+def _passes_effort_rules(engine: str, tier: str, floor_tier: str, model: str, settings: Settings,
+                         entry: models.Entry | None) -> bool:
+    """Whether a launch at this tier would accept the model's effort: the tier and the floor resolve for it, and its
+    cap, which clamps, leaves the floor's effort. The same test `resolve_engine` and `_resolve_floor` make."""
+    try:
+        launch = rank(_tier_effort(engine, tier, model, settings, entry).launch)
+        floor = rank(_tier_effort(engine, floor_tier, model, settings, entry).launch)
+    except EngineError:
+        return False
+    cap = settings.engines[engine]["effort_caps"].get(model)
+    return cap is None or (None not in (launch, floor) and min(launch, rank(cap)) >= floor)
+
+
 def _selected(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
               floor_tier: str = "low") -> tuple[str, str]:
     section = settings.engines[engine]
+
+    def effort_rules(model: str) -> bool:
+        return _passes_effort_rules(engine, tier, floor_tier, model, settings, freshness.entry)
+
     return models.map_tier(engine, tier, pin=section["tiers"][tier]["model"], quality_order=section["quality_order"],
                            entry=freshness.entry, scores=freshness.scores, floor_tier=floor_tier,
                            profile=settings.models["profile"], pools=section["tier_pools"],
-                           allowed=section["allowed_models"])
+                           allowed=section["allowed_models"], effort_rules=effort_rules)
 
 
 def _deterministic(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,

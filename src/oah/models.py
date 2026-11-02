@@ -65,7 +65,7 @@ import datetime as dt
 import pathlib
 import re
 from dataclasses import dataclass, replace
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from oah import scoring
 from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
@@ -323,7 +323,8 @@ def pin_line(engine: str, tier: str) -> str:
 
 def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], entry: Entry | None,
              scores: scoring.ScoreSet | None, floor_tier: str = "low", profile: str = scoring.DEFAULT_PROFILE,
-             pools: Mapping[str, Sequence[str]] | None = None, allowed: Sequence[str] = ()) -> tuple[str, str]:
+             pools: Mapping[str, Sequence[str]] | None = None, allowed: Sequence[str] = (),
+             effort_rules: Callable[[str], bool] | None = None) -> tuple[str, str]:
     """(model, source) for one tier; source is pin, pool, quality_order or scored."""
     if pin:
         return pin, "pin"
@@ -347,7 +348,7 @@ def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], 
     if scores is None:
         raise EngineError(scoring.NO_SCORES, f"no benchmark scores are available for {engine}; run `oah doctor`, or set "
                           f"{pin_line(engine, tier)} in .oah/config.toml")
-    return scoring.choose(scores, tier, floor_tier, profile).model, "scored"
+    return scoring.choose(scores, tier, floor_tier, profile, usable=effort_rules).model, "scored"
 
 
 def rule_decides(engine: str, section: Mapping, entry: Entry | None) -> bool:
@@ -539,7 +540,9 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
     qualified = tuple(name for name in pool.get(tier, ()) if all(name in pool[t] for t in applicable)) \
         if mode == "pools" else ()
     if mode == "scored":
-        qualified = scoring.band(scores, scoring.choose(scores, tier, floor_tier, profile))
+        # The effort rules can move the rule's choice, so the model that would run is the one always offered.
+        qualified = scoring.band(scores, replace(scoring.choose(scores, tier, floor_tier, profile),
+                                                 model=deterministic.model))
     rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
                         tuple(sorted(effort_caps.items())), entry, note=note, tier=tier, pools=pools,
                         qualified=qualified)

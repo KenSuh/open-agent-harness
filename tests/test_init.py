@@ -230,8 +230,9 @@ class AgentFilesTest(unittest.TestCase):
                          {"oah-low": "sonnet", "oah-medium": "sonnet", "oah-high": "opus", "oah-max": "opus"})
 
     def test_the_profile_moves_the_mapping(self):
+        # On these scores haiku is last on every task, so it scores 0 and has no value to weigh against its price.
         self.assertEqual(self.models(call.ENGINE_DEFAULTS, profile="efficient"),
-                         {"oah-low": "haiku", "oah-medium": "haiku", "oah-high": "sonnet", "oah-max": "sonnet"})
+                         {"oah-low": "sonnet", "oah-medium": "sonnet", "oah-high": "sonnet", "oah-max": "sonnet"})
         self.assertEqual(self.models(call.ENGINE_DEFAULTS, profile="unknown"), self.models(call.ENGINE_DEFAULTS))
 
     def test_files_keep_aliases_not_full_names(self):
