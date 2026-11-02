@@ -198,6 +198,30 @@ class RecommendCliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(out.startswith("OAH_RECOMMEND tier=low score=1"))
 
+    def test_design_without_a_request_is_max_and_packet_keeps_its_rule_tier(self):
+        for kind, tier in (("design", "max"), ("packet", "medium")):
+            for flags in ((), ("--json",)):
+                with self.subTest(kind=kind, flags=flags):
+                    forbidden = AssertionError("without a request this path must stay offline")
+                    with mock.patch.object(rerank, "advise_difficulty", side_effect=forbidden) as judge, \
+                            mock.patch("oah.paths.repo_info", side_effect=forbidden) as repo:
+                        code, out, err = run_recommend("--kind", kind, "--intensity", "low", "--reasoning", "low",
+                                                       "--risk", "low", *flags)
+                    self.assertEqual((code, err), (0, ""))
+                    self.assertEqual((judge.call_count, repo.call_count), (0, 0))
+                    if flags:
+                        data = json.loads(out)
+                        self.assertEqual(data["tier"], tier)
+                        if kind == "design":
+                            self.assertEqual(data["reason"], "design unjudged: unused(no-request)")
+                            self.assertEqual(data["jev"]["status"], "unused(no-request)")
+                        else:
+                            self.assertNotIn("jev", data)
+                    else:
+                        self.assertTrue(out.startswith(f"OAH_RECOMMEND tier={tier}"), out)
+                        if kind == "design":
+                            self.assertIn("design unjudged: unused(no-request)", out)
+
     def test_recommend_cli_rejects_bad_values(self):
         parser = argparse.ArgumentParser()
         commands = parser.add_subparsers(dest="command")
@@ -270,12 +294,31 @@ class RecommendModelTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["model"]["engine"], "codex")
 
     def test_a_new_kind_gets_a_model_too(self):
-        for kind, floor in (("design", "high"), ("packet", "medium")):
-            with self.subTest(kind=kind):
-                code, out, err = recommend_in(self.project(), "--kind", kind, "--intensity", "low", "--reasoning", "low",
-                                              "--risk", "low", "--engine", "codex", "--json")
-                self.assertEqual(code, 0, err)
-                self.assertEqual(json.loads(out)["model"]["floor_tier"], floor)
+        project = self.project()
+        for kind, floor, tier in (("design", "high", "max"), ("packet", "medium", "medium")):
+            for preview in (("--engine", "codex"), ("--stage", "review"),
+                            ("--engine", "codex", "--stage", "review")):
+                for flags in ((), ("--json",)):
+                    with self.subTest(kind=kind, preview=preview, flags=flags):
+                        forbidden = AssertionError("a model preview without a request must not ask Jev")
+                        with mock.patch.object(rerank, "advise_difficulty", side_effect=forbidden) as judge:
+                            code, out, err = recommend_in(project, "--kind", kind, "--intensity", "low",
+                                                          "--reasoning", "low", "--risk", "low", *preview, *flags)
+                        self.assertEqual(code, 0, err)
+                        self.assertEqual(judge.call_count, 0)
+                        if flags:
+                            data = json.loads(out)
+                            self.assertEqual((data["tier"], data["model"]["tier"], data["model"]["floor_tier"]),
+                                             (tier, tier, floor))
+                            if kind == "design":
+                                self.assertEqual(data["reason"], "design unjudged: unused(no-request)")
+                        else:
+                            self.assertTrue(out.startswith(f"OAH_RECOMMEND tier={tier}"), out)
+                            model = next(line for line in out.splitlines() if line.startswith("OAH_RECOMMEND_MODEL"))
+                            self.assertIn(f"tier={tier}", model)
+                            self.assertIn(f"floor={floor}", model)
+                            if kind == "design":
+                                self.assertIn("design unjudged: unused(no-request)", out)
 
     def test_it_refuses_exactly_what_a_call_would_refuse(self):
         project = self.project('[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')

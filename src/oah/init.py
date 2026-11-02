@@ -627,7 +627,8 @@ def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, 
             os.close(handle)
 
 
-def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | None:
+def _current(root: pathlib.Path, relative: str, folder: int | None, *,
+             identity: tuple[int, int] | bytes | None = None) -> bytes | None:
     """Read a regular target through its pinned parent; never follow its final component."""
     if _linked(root, relative) is not None:
         raise OSError("linked publication path")
@@ -643,8 +644,13 @@ def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | N
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode) or _is_link(path):
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or _is_link(path):
             raise OSError("non-regular publication target")
+        if identity is not None:
+            actual = _windows_file_identity(handle.fileno()) if os.name == "nt" else (info.st_dev, info.st_ino)
+            if actual != identity:
+                raise OSError("publication target changed")
         return handle.read()
 
 
@@ -1037,14 +1043,15 @@ def _file_restrictions(root: pathlib.Path, relative: str, folder: int | None) ->
 def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: bytes | None = None, *,
              executable: bool = False, source: str | None = None, source_digest: str = "",
              private: bool = False, source_root: pathlib.Path | None = None,
-             source_identity: str = "") -> bool:
+             source_identity: str = "", before_identity: tuple[int, int] | bytes | None = None,
+             create_parents: bool = True) -> bool:
     """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
     if source is not None:
         return False  # No directory may be moved out of or into the worktree (owner M).
     root = pathlib.Path(root).absolute()
     try:
         relative = _relative(relative)
-        with _parents(root, relative, private=private) as folder:
+        with _parents(root, relative, private=private, create_parents=create_parents) as folder:
             path = root / relative
             name = path if folder is None else path.name
             if os.name == "nt":
@@ -1085,7 +1092,7 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                                 if _macos_file_acl(handle.fileno()) != restrictions[1]:
                                     raise OSError("replacement ACL changed")
                         os.fsync(handle.fileno())
-                    current = _current(root, relative, folder)
+                    current = _current(root, relative, folder, identity=before_identity)
                     if ((current is None) != (before is None) or (current is not None and
                             hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
                         return False
@@ -1096,11 +1103,13 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                             return False
                     elif current_restrictions != restrictions:
                         return False
-                    if _current(root, relative, folder) != current:
-                        return False
                     if os.name == "nt":
                         _require_staging(path.parent, parent_identity, private_staging=private)
                         _require_staging(temp.parent, staging_identity, private_staging=private)
+                    if _current(root, relative, folder, identity=before_identity) != current:
+                        return False
+                    # No portable compare-and-replace rename exists: a final read/rename race remains.
+                    # Keep the no-follow byte/identity check immediately before the atomic publication.
                     if before is not None:
                         os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
                     elif os.name == "nt":

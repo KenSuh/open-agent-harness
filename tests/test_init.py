@@ -229,8 +229,9 @@ class AgentFilesTest(unittest.TestCase):
             self.assertEqual(set(self.models(call.ENGINE_DEFAULTS).values()), {"inherit"})
 
     def test_the_mapping_needs_no_catalog_and_runs_no_cli(self):
-        with mock.patch("oah.models.run_command", side_effect=AssertionError("oah init must stay offline")):
+        with mock.patch("oah.models.run_command", side_effect=AssertionError("oah init must stay offline")) as run:
             self.assertEqual(self.models(call.ENGINE_DEFAULTS)["oah-max"], "opus")
+        self.assertEqual(run.call_count, 0)
 
     def test_every_alias_competes_even_those_claude_help_omits(self):
         self.assertIn("haiku", self.models(call.ENGINE_DEFAULTS).values())
@@ -278,10 +279,13 @@ class AgentFilesTest(unittest.TestCase):
         state = self.stored("sonnet", "opus")
         before = {path: path.read_bytes() for path in state.rglob("*") if path.is_file()}
         forbidden = AssertionError("the agent files are chosen from local state only")
-        with mock.patch("subprocess.Popen", side_effect=forbidden), \
-                mock.patch.object(models.Catalog, "ensure_fresh", side_effect=forbidden), \
-                mock.patch("oah.benchmarks._refresh", side_effect=forbidden):
+        with mock.patch("subprocess.Popen", side_effect=forbidden) as popen, \
+                mock.patch.object(models.Catalog, "ensure_fresh", side_effect=forbidden) as fresh, \
+                mock.patch("oah.benchmarks._refresh", side_effect=forbidden) as refresh:
             init.tier_agents(call.ENGINE_DEFAULTS, state_dir=state)
+        self.assertEqual(popen.call_count, 0)
+        self.assertEqual(fresh.call_count, 0)
+        self.assertEqual(refresh.call_count, 0)
         self.assertEqual({path: path.read_bytes() for path in state.rglob("*") if path.is_file()}, before)
 
     def test_the_file_names_the_values_it_was_generated_for(self):

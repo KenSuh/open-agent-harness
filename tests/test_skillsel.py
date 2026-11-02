@@ -420,8 +420,11 @@ class TemplateTest(unittest.TestCase):
         text = resources.files("oah").joinpath("templates/skills/config.toml").read_text(encoding="utf-8")
         disclosure = " ".join(text.split("[rerank]\n", 1)[1].split("enabled =", 1)[0].split())
         for field in ("task kind", "query", "name", "description", "200", "difficulty advice",
-                      "kind", "intensity", "reasoning", "risk", "task summary", "500", "charge"):
+                      "kind", "intensity", "reasoning", "risk", "Intent sections", "request text", "Scope paths",
+                      "16,000 characters", "privacy rules", "Secret-shaped text is not sent", "never code, diffs",
+                      "stored values", "sets the tier", "never below the floor tier", "charge"):
             self.assertIn(field, disclosure)
+        self.assertNotIn("500 characters", disclosure)
 
     def test_template_parses_and_validates(self) -> None:
         text = resources.files("oah").joinpath("templates/skills/config.toml").read_text(encoding="utf-8")

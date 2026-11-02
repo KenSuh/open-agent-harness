@@ -1143,6 +1143,13 @@ class _CorrectionInputs:
     run: _CorrectionRun | None = None
     artifacts: dict = dataclasses.field(default_factory=dict)
     difficulty: object | None = None  # Jev's answer, asked once: the correction decides its tier on it
+    notice_pending: bool = False  # published only after the correction's durable start
+
+    def notice(self, text: str) -> None:
+        from oah.rerank import _print_notice
+
+        self.notice_pending = True
+        _print_notice(text)
 
     def holder(self):
         from oah.lease import Lease
@@ -1167,6 +1174,14 @@ class _CorrectionInputs:
         plan = self.plan
         self.budget_check()
         receipts._log_round_unlocked(self.state, self.run.task, json.loads(plan.dispatch_record))
+        if self.notice_pending:
+            try:
+                from oah.rerank import _record_notice
+
+                _record_notice(self.state)
+            except Exception:
+                pass  # notice persistence must never block a correction
+            self.notice_pending = False
         # Only start publication depends on model inputs, including when a later write fails.
         for path in (*self.catalog.original, *self.catalog.scores):
             runs._CORRECTION_CAPTURE.get().pop(path, None)
@@ -1273,7 +1288,8 @@ def judge_difficulty(axes: routing.Axes, *, section: str | None, request_text: s
                     else rerank.intent_work(section, scope))
             advice = rerank.advise_difficulty(dict(axes.to_json(), tier=rule_tier), work, config=config,
                                               brief_disabled=brief_disabled, env=env, keychain=keychain,
-                                              state_dir=state_dir, record_notice=inputs is None)
+                                              state_dir=state_dir, record_notice=inputs is None,
+                                              notify=inputs.notice if inputs is not None else None)
         except Exception as exc:  # a plugin failure must never block a launch
             return Difficulty(rule_tier, rule_tier, False, f"unused(error: {type(exc).__name__})")
         if inputs is not None:

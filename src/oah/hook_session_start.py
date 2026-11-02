@@ -9,8 +9,9 @@ gets nothing at all and nothing is written. Outside a repository it prints nothi
 Its one write: each existing `.claude/agents/oah-<tier>.md` whose model or effort is no longer oah's choice is
 rewritten in place, and one line says so, but only when the file is exactly what oah generates for the values it
 names (`init.agent_check`, LF or CRLF), so an edited file is left alone and a missing one is never created. The
-choice comes from the stored catalog and scores (`init.tier_agents`): this step runs no subprocess and reaches no
-network. Any failure is one plain line, and the hook always exits 0.
+choice comes from the stored catalog and scores (`init.tier_agents`). Repository lookup still runs git through
+`repo_info`, as before; the refresh step runs no subprocess or engine CLI and reaches no network. Any failure is
+one plain line, and the hook always exits 0.
 """
 from __future__ import annotations
 
@@ -23,7 +24,6 @@ import stat
 import sys
 from typing import Mapping
 
-from oah.atomic import write_text_atomic
 from oah.config import load_config
 from oah.init import _preview_text
 from oah.lease import Store
@@ -102,6 +102,22 @@ def _shown(name: str) -> str:
     return name if PLAIN_MODEL.fullmatch(name) else "a named model"
 
 
+def _agent_snapshot(root: pathlib.Path, relative: str) -> tuple[bytes, tuple[int, int] | bytes]:
+    """Read bytes and identity from one no-follow handle, with every parent pinned."""
+    from oah import init
+
+    path = root / relative
+    with init._parents(root, relative, create_parents=False) as folder:
+        fd = (init._windows_read_fd(path) if os.name == "nt" else
+              os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("non-regular subagent file")
+            identity = init._windows_file_identity(handle.fileno()) if os.name == "nt" else (info.st_dev, info.st_ino)
+            return handle.read(), identity
+
+
 def _label(scores: str) -> str:
     return scores if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", scores) else "unknown"
 
@@ -122,12 +138,16 @@ def agent_lines(info, env: Mapping[str, str]) -> list[str]:
                                     models_section=section, state_dir=state_dir(info, env))
         for tier, path in present.items():
             relative = f"{init.AGENTS_DIR}/oah-{tier}.md"
-            data = path.read_bytes()
+            data, identity = _agent_snapshot(info.root, relative)
             found, update = init.agent_check(tier, data, expected.files[relative])
             if found != "stale":
                 continue  # current, or edited by the user: `oah doctor` names an edited file
             (old_model, old_effort), (model, effort) = init.agent_values(data), init.agent_values(update)
-            write_text_atomic(path, update.decode("utf-8"), retry_seconds=0)
+            if not init._publish(info.root, relative, update, before=data, before_identity=identity,
+                                 create_parents=False):
+                out.append(f"oah: could not update {relative}: file changed, vanished or could not be safely "
+                           "replaced; run `oah doctor` to see the manual step")
+                continue
             what = f"model {_shown(old_model)} -> {_shown(model)}"
             if effort != old_effort:
                 what += f", effort {_shown(old_effort)} -> {_shown(effort)}"

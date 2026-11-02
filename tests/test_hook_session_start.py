@@ -217,6 +217,77 @@ class AgentFileHookTest(unittest.TestCase):
                 self.assertEqual(self.refresh(), [])
                 self.assertEqual(path.read_bytes(), edited)
 
+    def test_a_concurrent_edit_is_left_alone(self):
+        path = self.write("max", "opus")
+        edited = path.read_bytes() + b"- Saved during session start.\n"
+        check = init.agent_check
+
+        def edit(*args):
+            result = check(*args)
+            path.write_bytes(edited)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=edit):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertEqual(path.read_bytes(), edited)
+        self.assertEqual(list(self.agents.iterdir()), [path], "staging files must be cleaned up")
+
+    def test_a_concurrently_deleted_file_is_never_recreated(self):
+        path = self.write("max", "opus")
+        check = init.agent_check
+
+        def delete(*args):
+            result = check(*args)
+            path.unlink()
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=delete):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertFalse(path.exists())
+        self.assertEqual(list(self.agents.iterdir()), [])
+
+    def test_a_concurrent_replacement_with_identical_bytes_is_left_alone(self):
+        path = self.write("max", "opus")
+        before = path.read_bytes()
+        replacement = self.agents / "saved.md"
+        replacement.write_bytes(before)
+        check = init.agent_check
+
+        def replace(*args):
+            result = check(*args)
+            os.replace(replacement, path)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=replace):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertEqual(path.read_bytes(), before)
+
+    @unittest.skipIf(os.name == "nt", "creating a symlink needs a privilege on Windows")
+    def test_a_concurrent_symlink_is_never_followed(self):
+        path = self.write("max", "opus")
+        elsewhere = make_tmp_dir(self) / "saved.md"
+        elsewhere.write_bytes(path.read_bytes())
+        check = init.agent_check
+
+        def link(*args):
+            result = check(*args)
+            path.unlink()
+            path.symlink_to(elsewhere)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=link):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(elsewhere.read_bytes(), init.agent_text("max", "opus", "max"))
+
     def test_a_missing_file_is_never_created(self):
         self.write("max", "opus")
         self.refresh()
@@ -241,7 +312,7 @@ class AgentFileHookTest(unittest.TestCase):
         self.write("max", "opus")
         self.write("low", "haiku")
         failure = StorageError(self.agents / "oah-low.md", PermissionError("read-only"))
-        with mock.patch.object(hook_session_start, "write_text_atomic", side_effect=failure):
+        with mock.patch.object(init, "_publish", side_effect=failure):
             found = self.refresh()
         self.assertEqual(len(found), 1, found)
         self.assertTrue(found[0].startswith("oah: could not update"), found[0])
@@ -259,11 +330,29 @@ class AgentFileHookTest(unittest.TestCase):
         self.assertEqual(len(failures), 1, result.stdout)
         self.assertEqual(path.read_bytes(), before)
 
-    def test_no_subprocess_runs(self):
-        self.write("max", "opus")
+    def test_the_whole_hook_updates_and_only_repository_lookup_runs_subprocesses(self):
+        path = self.write("max", "opus")
         forbidden = AssertionError("the subagent refresh runs no subprocess")
-        with mock.patch("subprocess.Popen", side_effect=forbidden), mock.patch("os.system", side_effect=forbidden):
-            self.assertEqual(len(self.refresh()), 1)
+        refresh = hook_session_start.agent_lines
+
+        def offline_refresh(*args):
+            with mock.patch("subprocess.Popen", side_effect=forbidden) as popen, \
+                    mock.patch("os.system", side_effect=forbidden) as system:
+                result = refresh(*args)
+            self.assertEqual(popen.call_count, 0)
+            self.assertEqual(system.call_count, 0)
+            return result
+
+        with mock.patch.object(hook_session_start, "agent_lines", side_effect=offline_refresh), \
+                mock.patch("subprocess.Popen", wraps=subprocess.Popen) as processes:
+            found = hook_session_start.lines(self.repo, {})
+        self.assertIn(f"oah: updated .claude/agents/oah-max.md: model opus -> sonnet {self.scores}", found)
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "sonnet", "max"))
+        self.assertGreater(processes.call_count, 0, "the hook must exercise its real Git repository lookup")
+        for invocation in processes.call_args_list:
+            argv = invocation.args[0] if invocation.args else invocation.kwargs["args"]
+            self.assertFalse({pathlib.PureWindowsPath(part).stem.lower() for part in argv} & {"claude", "codex"},
+                             argv)
 
     def test_a_dispatched_worker_changes_nothing(self):
         path = self.write("max", "opus")

@@ -185,6 +185,12 @@ def run(args: argparse.Namespace) -> int:
             axes = Axes(args.kind, args.intensity, args.reasoning, args.risk)
             result = recommend(axes)
             tier = result.tier
+            if args.kind == "design":
+                tier = "max"
+                judged = {"rule_tier": result.tier, "tier_source": "rules", "warnings": [],
+                          "reasons": ["design unjudged: unused(no-request)"],
+                          "jev": {"status": "unused(no-request)", "tier": None, "confidence": None,
+                                  "truncated": False}}
         if args.engine or args.stage:
             model, warnings = _model(args, tier)
     except (RoutingError, EngineError, ConfigError, NotARepo, GitMissing, LockTimeout, StateCorrupt,

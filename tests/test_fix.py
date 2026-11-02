@@ -520,7 +520,38 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual((run["tier"], run["tier_source"], run["rule_tier"], run["jev_tier"], run["jev_status"],
                           run["launch_effort"]), ("high", "jev", "medium", "high", "used", "high"))
         self.assertEqual(len(judge.sent), 1)
-        self.assertFalse((project.state / rerank.NOTICE_MARKER).exists(), "a correction writes no state to show it")
+        self.assertTrue((project.state / rerank.NOTICE_MARKER).exists(), "publication records the notice")
+
+    def test_two_successful_corrections_show_the_scope_notice_only_once(self):
+        from oah import rerank
+        from tests.test_call import Judge
+
+        project = FixProject(self, config='[rerank]\nenabled = true\nprovider = "fake"\n')
+        project.changes_requested(bug(1), bug(2))
+        project.queue_fix({"write": FIXED}, {"write": {"src/app.py": "print('fixed twice')\n"}})
+        key = "fake-" + token_source.token_hex(16)
+
+        class Chain:
+            def lookup(self, name):
+                return key if name == "FAKE_RERANK_KEY" else None
+
+        judge = Judge(("high", 0.9), ("high", 0.9))
+        marker = project.state / rerank.NOTICE_MARKER
+        self.assertFalse(marker.exists())
+        output = []
+        with mock.patch.dict(rerank.PROVIDERS, {"fake": judge}):
+            for finding in ("R1-F1", "R1-F2"):
+                terminal = io.StringIO()
+                with contextlib.redirect_stderr(terminal):
+                    result = fix.correct(fix.Request(task="t1", findings=(finding,)), cwd=project.repo,
+                                         env=project.env, keychain=Chain(), rules=RULES, temp_root=project.temp_root)
+                self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+                self.assertTrue(marker.read_text(encoding="utf-8").startswith(rerank.SCOPE_WIDENED))
+                output.append(terminal.getvalue())
+                project.run_commands(result.commands)
+                self.assertEqual(project.bind().code, "OAH_FIX_BOUND")
+        self.assertEqual([text.count(rerank.SCOPE_WIDENED) for text in output], [1, 0])
+        self.assertEqual(len(judge.sent), 2)
 
     def test_one_correction_keeps_its_first_jev_answer(self):
         from oah import rerank, routing
@@ -549,6 +580,8 @@ class RefusalTest(unittest.TestCase):
             call._CORRECTION_INPUTS.reset(token)
         self.assertEqual(tiers, ["high", "high"])
         self.assertEqual(len(judge.sent), 1)
+        self.assertTrue(inputs.notice_pending)
+        self.assertFalse((inputs.state / rerank.NOTICE_MARKER).exists(), "preparation must publish nothing")
 
     def test_correction_records_keep_the_jev_fields_in_their_closed_words(self):
         fields = {"tier": "high", "tier_source": "jev", "rule_tier": "medium", "jev_tier": "high",
