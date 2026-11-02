@@ -602,31 +602,39 @@ flowchart LR
 `oah init`이 한 번 묻고(Yes 권장), 이 키가 없는 설정은 꺼진 것으로 본다.
 
 - **언제.** 저장소에 살아 있는 리스와 created·prepared·queued·running 상태의 run을 남기지 않는 `oah finish` 뒤에,
-  `interval_hours`(기본 24)마다 많아야 한 번 돈다. finish는 한 줄을 출력하고 패스를 백그라운드로 시작하며, 패스를
+  연결되거나 잘못되거나 읽을 수 없는 run 저장소가 있어도 미룬다. `interval_hours`(기본 24)마다 많아야 한 번 돈다. finish는 한 줄을 출력하고 패스를 백그라운드로 시작하며, 패스를
   기다리지 않고 자기 종료 코드도 바꾸지 않는다. `oah update`는 지금 패스를 돌리고(스위치가 켜져 있고 진행 중인 작업이
   없어야 하지만 간격은 따지지 않는다), `oah update status`는 아무것도 실행하지 않고 마지막 패스를 보여 준다. 한
   컴퓨터에서는 한 번에 한 패스만 돌고, 두 번째 패스는 `OAH_UPDATE_BUSY`를 출력한다.
 - **무엇을, 이 순서로.** `claude update`, `codex update`, `claude plugin marketplace update` 다음에 사용자 범위로 설치한
-  플러그인마다 `claude plugin update <plugin> --scope user --json`, `codex plugin marketplace upgrade`, 그리고 기존 자동
-  점검으로 oah 키트 스킬을 갱신한다. 키트 점검은 `[skills] auto_update`와 그 규칙을 따른다. 명령은 설치된 CLI의
+  플러그인마다 `claude plugin update <plugin> --scope user --json`, 그리고 기존 자동 점검으로 oah 키트 스킬을 갱신한다. 키트 점검은 `[skills] auto_update`와 그 규칙을 따른다. 명령은 설치된 CLI의
   `--help`에 있을 때만 쓴다. CLI 버전이 바뀌면 카탈로그를 다시 만들므로 모델 목록은 다음 `oah` 호출에서 새로 읽는다.
 - **하지 않는 것.** MCP 서버와 그 설정, `oah`가 직접 실행하는 npm·Homebrew·`npx`, 셸, `-y`나 `--accept-command` 같은
   확인 플래그, 훅 승인이다. `oah`는 자신이 시작하지 않은 프로세스를 나열하거나 신호를 보내거나 멈추지 않는다.
   공유 실행기는 자신이 시작한 명령이 `timeout_seconds`를 넘으면 멈추고, `failed`와
   «timed out; the tool may be partly updated» 및 직접 실행할 도구 명령을 기록한 뒤 다음 단계로 간다.
+  키트의 네트워크 fetch는 이 제한과 자체 제한 중 작은 값을 쓰고, 나머지 키트 Git 명령는 600초, gitleaks는 300초
+  제한을 유지한다. 키트 시간 초과의 다음 단계는 `oah skills update`다.
   이미 실행 중인 세션은 다시 시작할 때까지 시작할 때의 버전과 플러그인을 쓴다.
 - **결과 확인.** 단계마다 버전을 앞뒤로 읽는다. `updated`는 뒤에 읽은 버전을 읽을 수 있고 앞과 달라야 하고,
   `current`는 도구가 스스로 최신이라고 답했고 버전을 읽을 수 있으며 바뀌지 않아야 한다. 그 밖에는 종료 코드와
   상관없이 `unverified`, `needs-confirmation`(마켓플레이스가 선언한 명령에 사람의 확인이 필요한 Claude Code
-  플러그인이며, 직접 실행할 명령을 줄에 적는다), `needs-hook-approval`(파일이 바뀌었고 훅을 선언한 Codex 플러그인이며,
-  Codex를 열어 `/hooks`에서 훅을 다시 승인한다. 해당 승인 항목이 바뀔 때까지 경고를 유지하고 설정을 읽을 수 없어도
-  미해결로 남긴다), `unsupported`(설치된 CLI에 그 명령이 없다), `failed` 가운데 하나다.
-  Codex 마켓플레이스는 Codex가 자기 `config.toml`에 남긴 리비전으로, 설치된 Codex 플러그인은 파일 지문으로 확인한다.
-  모든 결과가 `updated`, `current`, `unsupported`일 때만 패스는 `complete`이고 아니면 `needs-attention`이다.
+  플러그인이며, 직접 실행할 명령을 줄에 적는다), `unsupported`(설치된 CLI에 그 명령이 없거나 자동 갱신할 대상이
+  없다), `failed` 가운데 하나다. Claude 마켓플레이스 갱신은 별도 구성요소이며, 설치된 Git 리비전과 도구의 최신이라는
+  답으로 확인한다. 근거 없이 종료 코드만 0이면 `unverified`다. 고정 목록은 Claude Code, Codex, Claude 마켓플레이스,
+  Claude 플러그인, 키트 스킬이고, 발견한 Claude 플러그인도 각각 기록한다. 필수 구성요소마다 `updated`, `current`,
+  `unsupported` 결과가 있어야만 `complete`다. 결과가 빠지면 `unverified`로 세어 `needs-attention`이 된다.
+  자체 간격 때문에 건너뛴 키트 점검은 `unverified`이고 `[skills] auto_update = false`는 `unsupported`다.
+- **Codex 플러그인.** 갱신하면 훅 승인이 무효가 되므로 자동 갱신하지 않는다. Codex의 `config.toml`에서 설치 항목만
+  읽는다. 설치된 플러그인이 있거나 설정을 읽을 수 없으면 요약과 `oah update status`에 다음 안내를 출력한다.
+  «Codex plugins are not updated automatically: update them with codex plugin marketplace upgrade, then approve
+  their hooks again in /hooks». 이 안내는 전체 결과에 영향을 주지 않는다. 미해결 훅 상태를 기록하지 않고 Codex 설정도
+  쓰지 않는다.
 - **기록.** `~/.oah/updates/state.json`에 마지막 패스, `runs.jsonl`에 최근 200번이 있고, 같은 폴더에 잠금
   `pass.lock`과 백그라운드 패스의 `pass.log`가 있다. 읽을 때마다 검증하며, 망가진 기록은
   `OAH_UPDATE_STATE_UNAVAILABLE`로 알리고 모든 도구를 다시 확인한다. 기록에는 버전, 상태, 다음 단계만 남기고 환경
-  변수 값이나 명령 출력은 남기지 않는다. 미해결 플러그인의 훅 승인 항목은 값 대신 지문만 남긴다.
+  변수 값, 훅 승인이나 명령 출력은 남기지 않는다. 고정 구성요소가 빠진 완료 기록과 없앤 훅 승인 상태를 담은 옛 기록은
+  잘못된 기록으로 본다. 문자열은 엄격한 UTF-8이어야 한다.
 - **끄기.** `after_finish = false`이거나 키가 아예 없으면 꺼진다. 그러면 어떤 진입점도 업데이트 명령을 실행하거나 그
   때문에 네트워크에 닿거나 기록을 쓰지 않는다.
 

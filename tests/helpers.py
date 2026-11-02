@@ -131,6 +131,48 @@ def guard_subprocesses(test: unittest.TestCase, allowed) -> list[list[str]]:
     return launched
 
 
+class ToolUpdateTestCase(unittest.TestCase):
+    """Install update-test isolation before a subclass creates any repository or other fixture."""
+
+    toolupdate_isolation = True
+
+    def setUp(self):
+        import subprocess
+
+        from oah import paths
+        from oah.toolupdate import records
+        from oah.toolupdate import run as passes
+
+        self.home = make_tmp_dir(self) / "home"
+        self.isolated_env = isolate_git_home(self, self.home)
+        self.git = paths.git_argv()[0]
+        self.launched = guard_subprocesses(self, self.allowed)
+        self._toolupdate_guard = subprocess.Popen
+        self.enterContext(mock.patch.object(passes, "_popen", subprocess.Popen))
+        self.enterContext(mock.patch.object(records, "home", return_value=self.home))
+        self.enterContext(mock.patch.object(pathlib.Path, "home", return_value=self.home))
+        self.enterContext(mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home / ".codex"),
+                                                      "CLAUDE_CONFIG_DIR": str(self.home / ".claude")}))
+        for name in ("OAH_WORKER", "OAH_STATE_DIR", "OAH_KIT_DIR"):
+            os.environ.pop(name, None)
+        self._toolupdate_isolated_home = self.home
+        self.addCleanup(self.assert_update_isolation)
+
+    def allowed(self, argv: list[str]) -> bool:
+        return bool(argv) and argv[0] in ("git", self.git)
+
+    def assert_update_isolation(self):
+        import subprocess
+
+        self.assertTrue(hasattr(self, "_toolupdate_isolated_home"), "setUp did not install tool-update isolation")
+        self.assertEqual(pathlib.Path(os.environ["HOME"]), self._toolupdate_isolated_home)
+        self.assertTrue(self._toolupdate_isolated_home.is_relative_to(pathlib.Path(tempfile.gettempdir()).resolve()))
+        self.assertEqual(os.environ["USERPROFILE"], os.environ["HOME"])
+        self.assertEqual(os.environ["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertTrue(hasattr(self, "launched"), "subprocess guard was not installed")
+        self.assertIs(subprocess.Popen, self._toolupdate_guard, "subprocess guard was replaced")
+
+
 def make_git_repo(test: unittest.TestCase) -> pathlib.Path:
     """A fresh repository on branch main, with no commits."""
     import subprocess

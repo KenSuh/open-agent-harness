@@ -1,4 +1,4 @@
-# 도구 업데이트 판독 — CLI 를 argv 로만 실행해 엄격한 UTF-8 로 읽고, 도움말·버전·문구표·플러그인 목록·Codex 설정과 플러그인 지문으로 결과를 판정한다.
+# 도구 업데이트 판독 — CLI 를 argv 로만 실행해 엄격한 UTF-8 로 읽고, 도움말·버전·문구표·플러그인 목록·Codex 플러그인 설치 여부로 결과를 판정한다.
 """What the pass reads from the tools, and the one rule that turns it into a status.
 
 `Cli.run` goes through `engines.proc.run_command` with the pass's timeout; output that is not strict UTF-8
@@ -13,20 +13,17 @@ and the version is readable and unchanged; otherwise `failed` (a timeout, or a n
 PHRASES is the one table of answers the CLIs print; each entry has a test. Claude Code plugin updates
 answer in JSON (`updateOutcome`, `refreshFailed`, `failureCode`, `shownCommand`) and are read from fields.
 
-Codex: Git marketplaces and installed plugins come from `$CODEX_HOME/config.toml` (`[marketplaces.<name>]`
-with `source_type` and `last_revision`; `[plugins."<name>@<marketplace>"]`), because the CLI's own list
-output reports no revision. Each installed plugin's files under `plugins/cache/<marketplace>/<name>/`
-are digested read-only, without following links; oah never computes or writes Codex's hook approval.
+Codex plugins are only noticed from the installed entries in config.toml, read-only. No Codex plugin
+or marketplace command is run and no hook approval is read or stored. Claude marketplace revisions
+come from the installed clones named by known_marketplaces.json.
 """
 from __future__ import annotations
 
 import dataclasses
 import hashlib
 import json
-import os
 import pathlib
 import re
-import stat
 import tomllib
 from typing import Mapping
 
@@ -37,8 +34,6 @@ from oah.toolupdate import records
 
 REPLACEMENT = "�"
 PLUGIN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}@[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
-NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
-REVISION_RE = re.compile(r"[0-9A-Za-z._-]{1,128}")
 VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,99}")  # anything else is not a readable version
 # Claude Code lists these pseudo-marketplaces for plugins that `claude plugin update` cannot update.
 SPECIAL_MARKETPLACES = frozenset({"inline", "skills-dir", "synced", "builtin"})
@@ -53,10 +48,7 @@ PHRASES = {
     # `codex update` runs the installer it was installed with; Homebrew and npm say so in their own words.
     "codex-current-homebrew": re.compile(r"the latest version is already installed"),
     "codex-current-npm": re.compile(r"^up to date, audited\b", re.M),
-    # `codex plugin marketplace upgrade` (codex-cli 0.166.0).
-    "codex-marketplace-current": re.compile(r"Marketplace `?(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)`? is already up to date"),
-    "codex-marketplaces-current": re.compile(r"All configured Git marketplaces are already up to date|"
-                                             r"marketplaces; all are already up to date"),
+    "claude-marketplaces-current": re.compile(r"^All marketplaces are (?:already )?up to date[.!]?$", re.M),
     # `claude plugin update` without --json, or with a text error: a marketplace-declared command waits.
     "claude-plugin-confirmation": re.compile(r"marketplace-declared command"),
 }
@@ -233,16 +225,37 @@ def plugin_needs_confirmation(result: Mapping | None, text: str) -> bool:
     return said("claude-plugin-confirmation", text)
 
 
-# Codex ---------------------------------------------------------------------------------------------
+# Installed marketplace revisions and the read-only Codex plugin notice ------------------------------
 
-class CodexUnreadable(Exception):
-    pass
-
-
-@dataclasses.dataclass(frozen=True)
-class CodexView:
-    marketplaces: dict[str, str | None]  # Git marketplace -> last_revision, None when none is recorded
-    plugins: dict[str, pathlib.Path]     # installed plugin id -> its cache folder
+def claude_marketplace_version(env: Mapping[str, str]) -> str | None:
+    """Digest the installed Git revisions; missing, unreadable or non-Git sources stay unverified."""
+    config = pathlib.Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else records.home() / ".claude"
+    try:
+        data = json.loads((config / "plugins" / "known_marketplaces.json").read_bytes().decode("utf-8-sig"))
+        if not isinstance(data, dict):
+            return None
+        revisions = []
+        for name, entry in sorted(data.items()):
+            if not isinstance(entry, dict) or not isinstance(entry.get("installLocation"), str):
+                return None
+            git = pathlib.Path(entry["installLocation"]) / ".git"
+            revision = (git / "HEAD").read_text(encoding="utf-8").strip()
+            if revision.startswith("ref: "):
+                ref = pathlib.PurePosixPath(revision[5:])
+                if ref.is_absolute() or ".." in ref.parts or not ref.parts or ref.parts[0] != "refs":
+                    return None
+                try:
+                    revision = git.joinpath(*ref.parts).read_text(encoding="utf-8").strip()
+                except FileNotFoundError:
+                    packed = (git / "packed-refs").read_text(encoding="utf-8").splitlines()
+                    revision = next((line.split()[0] for line in packed
+                                     if len(line.split()) == 2 and line.split()[1] == str(ref)), "")
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision) is None:
+                return None
+            revisions.append(f"{name}={revision}")
+        return "sha256:" + hashlib.sha256("\n".join(revisions).encode("utf-8")).hexdigest()
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return None
 
 
 def codex_home(env: Mapping[str, str]) -> pathlib.Path:
@@ -251,115 +264,15 @@ def codex_home(env: Mapping[str, str]) -> pathlib.Path:
     return pathlib.Path(override) if override else records.home() / ".codex"
 
 
-def read_codex(home: pathlib.Path) -> CodexView:
-    """Git marketplaces and installed plugins from Codex's own config.toml; raises CodexUnreadable."""
+def codex_plugins_installed(env: Mapping[str, str]) -> bool | None:
+    """Installed [plugins."name@marketplace"] entries; unreadable means unknown, which also needs the notice."""
+    path = codex_home(env) / "config.toml"
     try:
-        data = tomllib.loads((home / "config.toml").read_bytes().decode("utf-8-sig"))
-    except FileNotFoundError:
-        data = {}
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        raise CodexUnreadable() from None
-    marketplaces, plugins = data.get("marketplaces", {}), data.get("plugins", {})
-    if not isinstance(marketplaces, dict) or not isinstance(plugins, dict):
-        raise CodexUnreadable()
-    found: dict[str, str | None] = {}
-    for name, entry in marketplaces.items():
-        if not isinstance(entry, dict) or not NAME_RE.fullmatch(name) or entry.get("source_type") != "git":
-            continue
-        revision = entry.get("last_revision")
-        found[name] = revision if isinstance(revision, str) and REVISION_RE.fullmatch(revision) else None
-    installed = {}
-    for ident in plugins:
-        if PLUGIN_ID_RE.fullmatch(ident):
-            name, _, market = ident.rpartition("@")
-            installed[ident] = home / "plugins" / "cache" / market / name
-    return CodexView(found, installed)
-
-
-def hook_approval_digest(home: pathlib.Path, ident: str) -> str | None:
-    """Read only this plugin's hooks.state entry: a digest, 'absent', or None when unreadable."""
-    try:
-        data = tomllib.loads((home / "config.toml").read_bytes().decode("utf-8-sig"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return None
-    hooks = data.get("hooks", {})
-    state = hooks.get("state", {}) if isinstance(hooks, dict) else None
-    if not isinstance(state, dict):
+    plugins = data.get("plugins", {})
+    if not isinstance(plugins, dict) or any(not PLUGIN_ID_RE.fullmatch(name) or not isinstance(entry, dict)
+                                            for name, entry in plugins.items()):
         return None
-    key = f"{ident}:hooks"
-    if key not in state:
-        return "absent"
-    raw = json.dumps(state[key], sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    return "sha256:" + hashlib.sha256(raw).hexdigest()
-
-
-def _is_link(entry: os.DirEntry) -> bool:
-    if entry.is_symlink():
-        return True
-    attributes = getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0)
-    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
-
-
-def plugin_digest(folder: pathlib.Path) -> str | None:
-    """A digest of every name and byte under a plugin's cache folder, links recorded but never followed."""
-    digest = hashlib.sha256()
-    pending = [(folder, "")]
-    try:
-        if not folder.is_dir():
-            return None
-        while pending:
-            current, relative = pending.pop()
-            with os.scandir(current) as scan:
-                entries = sorted(scan, key=lambda item: item.name)
-            for entry in entries:
-                name = f"{relative}/{entry.name}" if relative else entry.name
-                key = name.encode("utf-8", "surrogateescape")
-                if _is_link(entry):
-                    target = os.readlink(entry.path) if entry.is_symlink() else ""
-                    digest.update(b"L\0" + key + b"\0" + target.encode("utf-8", "surrogateescape") + b"\0")
-                elif entry.is_dir(follow_symlinks=False):
-                    digest.update(b"D\0" + key + b"\0")
-                    pending.append((pathlib.Path(entry.path), name))
-                elif entry.is_file(follow_symlinks=False):
-                    content = hashlib.sha256()
-                    with open(entry.path, "rb") as handle:
-                        for chunk in iter(lambda: handle.read(1 << 20), b""):
-                            content.update(chunk)
-                    digest.update(b"F\0" + key + b"\0" + content.digest())
-                else:
-                    digest.update(b"O\0" + key + b"\0")
-    except OSError:
-        return None
-    return "sha256:" + digest.hexdigest()
-
-
-HOOK_FILES = ("hooks/hooks.json", "hooks.json")
-MANIFESTS = (".codex-plugin/plugin.json", ".claude-plugin/plugin.json", "plugin.json")
-
-
-def declares_hooks(folder: pathlib.Path) -> bool:
-    """A hooks file, or a `hooks` entry in a plugin manifest, in any version folder; unreadable counts as yes."""
-    try:
-        versions = sorted(path for path in folder.iterdir() if path.is_dir())
-        for version in versions:
-            if any((version / relative).is_file() for relative in HOOK_FILES):
-                return True
-            for relative in MANIFESTS:
-                manifest = version / relative
-                if not manifest.is_file():
-                    continue
-                try:
-                    data = json.loads(manifest.read_bytes().decode("utf-8-sig"))
-                except (UnicodeDecodeError, ValueError, RecursionError):
-                    return True
-                if not isinstance(data, dict) or data.get("hooks"):
-                    return True
-    except OSError:
-        return True
-    return False
-
-
-def marketplace_said_current(text: str, name: str) -> bool:
-    if said("codex-marketplaces-current", text):
-        return True
-    return any(match.group("name") == name for match in PHRASES["codex-marketplace-current"].finditer(text))
+    return bool(plugins)

@@ -30,10 +30,10 @@ from oah.config import ConfigError
 from oah.journal import PendingTransaction
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
-from oah.runs import RUN_ID_RE, TERMINAL
+from oah.runs import RUN_ID_RE, TERMINAL, RunError, _contained_path, task_directory
 from oah.toolupdate import records, steps
-from oah.toolupdate.probes import Cli
-from oah.toolupdate.steps import RESTART_NOTE, label
+from oah.toolupdate.probes import Cli, codex_plugins_installed
+from oah.toolupdate.steps import CODEX_PLUGINS_NOTE, RESTART_NOTE, label
 
 PASS_LOCK_TIMEOUT = 1.0
 IN_FLIGHT = ("created", "prepared", "queued", "running")
@@ -44,8 +44,7 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _popen = subprocess.Popen  # the one place the background pass is started; tests replace it
 STARTED = "OAH_UPDATE_STARTED: checking for tool updates in the background; see oah update status"
 MODELS_NOTE = "model lists refresh at the next oah call"
-RANK = ("claude", "codex", "claude-marketplaces", "claude-plugins", "claude-plugin", "codex-marketplaces",
-        "codex-marketplace", "codex-plugin", "oah-skills")
+RANK = ("claude", "codex", "claude-marketplaces", "claude-plugins", "claude-plugin", "oah-skills")
 
 Out = Callable[[str], None]
 
@@ -65,23 +64,28 @@ def readiness(state: pathlib.Path) -> str | None:
         return f"the lease records cannot be read ({getattr(exc, 'code', type(exc).__name__)})"
     if holders:
         return f"task {', '.join(holders)} holds a lease"
-    runs = state / "runs"
     try:
-        if not runs.is_dir():
+        runs = _contained_path(state, "runs")
+        try:
+            runs.lstat()
+        except FileNotFoundError:
             return None
         for task in sorted(runs.iterdir()):
-            if not task.is_dir() or task.is_symlink():
-                continue
-            for run in sorted(task.iterdir()):
+            folder = task_directory(state, task.name)
+            for run in sorted(folder.iterdir()):
+                run = _contained_path(state, "runs", task.name, run.name)
+                # Dispatch stores its intent binding beside the run directories.
+                if run.name == "intent-binding.json" and run.is_file():
+                    continue
                 if run.name.endswith(".tmp") and run.name.startswith("."):
                     return f"a run of task {task.name} is being created"
                 if not RUN_ID_RE.fullmatch(run.name):
-                    continue
+                    return f"task {task.name} holds an unrecognized run path"
                 status = _run_status(run)
                 if status not in TERMINAL:
                     shown = status if status in IN_FLIGHT else "unreadable"
                     return f"run {run.name} of task {task.name} is {shown}"
-    except OSError as exc:
+    except (OSError, RunError) as exc:
         return f"the run records cannot be read ({type(exc).__name__})"
     return None
 
@@ -90,8 +94,9 @@ def _run_status(run: pathlib.Path) -> str | None:
     try:
         if run.is_symlink() or not run.is_dir():
             return None
-        data = json.loads((run / "result.json").read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        result = _contained_path(run.parents[2], "runs", run.parent.name, run.name, "result.json")
+        data = json.loads(result.read_bytes().decode("utf-8"))
+    except (OSError, RunError, UnicodeDecodeError, ValueError, RecursionError):
         return None
     status = data.get("status") if isinstance(data, dict) else None
     return status if isinstance(status, str) else None
@@ -159,6 +164,8 @@ def run_pass(root: pathlib.Path, state: pathlib.Path, *, env: Mapping[str, str],
             "in .oah/config.toml to turn them on")
         return "skipped"
     try:
+        # Lock order: pass.lock -> repository state lock (the kit's idle_state needs it).
+        # Never request pass.lock while holding a repository state lock, including from finish.
         lock = StateLock(records.lock_path(), timeout=PASS_LOCK_TIMEOUT)
         lock.__enter__()
     except LockTimeout:
@@ -224,7 +231,7 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     records.write_state({"version": records.FORMAT, "last_started": records.stamp(started), "trigger": trigger,
                          "last_finished": base["last_finished"], "outcome": base["outcome"],
                          "components": base["components"], "models_refresh": base["models_refresh"]})
-    out("oah: checking Claude Code, Codex, their plugins and oah's kit skills; this can take a few minutes")
+    out("oah: checking Claude Code, Codex, Claude Code plugins and oah's kit skills; this can take a few minutes")
     workdir = records.updates_dir()
     context = steps.Context(env=env, checked_at=records.stamp(started),
                             claude=Cli("claude", "Claude Code", env=env, timeout=settings.timeout_seconds, cwd=workdir),
@@ -232,17 +239,17 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     found: dict[str, dict] = {}
     found.update(steps.cli_update(context, context.claude))
     found.update(steps.cli_update(context, context.codex))
+    found.update(steps.claude_marketplaces(context))
     found.update(steps.claude_plugins(context))
-    found.update(steps.codex_plugins(context))
     if kit is not None:
-        found.update(kit(root, state, env, started, context.checked_at))
-    for name, entry in steps.pending_hook_approvals(base["components"], env).items():
-        if found.get(name, {}).get("status") != "needs-hook-approval":
-            found[name] = dict(entry, checked_at=context.checked_at)
+        found.update(kit(root, state, env, started, context.checked_at, settings.timeout_seconds))
     components = {}
     for name, entry in records.redacted(found, redact).items():
         if records.COMPONENT_RE.fullmatch(name):
             components[name] = entry
+    for name in records.COMPONENTS:
+        components.setdefault(name, records.component("unverified", None, None,
+            "this step recorded no result; run oah update to check it again", context.checked_at))
     refresh = [engine for engine in records.ENGINES if components.get(engine, {}).get("status") == "updated"]
     result = records.outcome(components)
     finished = records.stamp(now())
@@ -256,6 +263,8 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
             out(component_line(name, components[name]))
     if refresh:
         out(f"oah: {MODELS_NOTE} ({', '.join(steps.LABELS[engine] for engine in refresh)} changed)")
+    if codex_plugins_installed(env) is not False:
+        out(f"oah: {CODEX_PLUGINS_NOTE}")
     out(summary_line(result, components))
     return result
 
@@ -308,7 +317,8 @@ def start_after_finish(root: pathlib.Path, state: pathlib.Path, env: Mapping[str
 
 def status_lines() -> list[str]:
     """The last pass, from the records only: no subprocess, no network, no write."""
-    lines: list[str] = []
+    lines: list[str] = ([f"oah: {CODEX_PLUGINS_NOTE}"]
+                        if codex_plugins_installed(os.environ) is not False else [])
     try:
         runs = records.read_runs(report=lines.append)
     except records.StateUnavailable as exc:
@@ -332,9 +342,7 @@ def status_lines() -> list[str]:
                      "stopped early (oah update runs a new one)")
     if finished is None:
         return lines
-    components = {name: entry for name, entry in record["components"].items()
-                  if entry["status"] != "needs-hook-approval"}
-    components.update(steps.pending_hook_approvals(record["components"], os.environ))
+    components = record["components"]
     lines.append(f"oah: last pass finished {record['last_finished']} ({record['trigger']}), outcome "
                  f"{records.outcome(components)} ({records.counts(components)})")
     lines += [component_line(name, components[name]) for name in sorted(components, key=_order)]
@@ -357,7 +365,7 @@ def doctor_notices(root: pathlib.Path | None) -> list[dict]:
         return [{"code": exc.code, "message": f"[updates] cannot be read ({exc.code}); fix .oah/config.toml"}]
     if not settings.explicit:
         notices.append({"code": "OAH_UPDATE_OFF", "message": "tool updates are off: .oah/config.toml has no "
-                        "after_finish under [updates]. Set it to true to keep Claude Code, Codex, their plugins and "
+                        "after_finish under [updates]. Set it to true to keep Claude Code, Codex, Claude Code plugins and "
                         "oah's skills up to date after your work finishes (oah update then runs a pass now), or to "
                         "false to keep them off and stop this notice"})
     try:

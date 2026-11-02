@@ -12,7 +12,7 @@ from unittest import mock
 from oah import paths, update_cli
 from oah.cli import build_parser, main
 from oah.toolupdate import records
-from tests.helpers import guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
+from tests.helpers import ToolUpdateTestCase, guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
 from tests.test_toolupdate import FakeToolsCase
 
 
@@ -20,7 +20,6 @@ class UpdateCliTest(FakeToolsCase):
     """`oah update` in a repository; the environment holds only the fake bin folder on PATH."""
 
     def setUp(self):
-        self.git = paths.git_argv()[0]  # resolved before the guard and the cleared environment
         super().setUp()
         self.repo = make_git_repo(self)
         self.switch("[skills]\nauto_update = false\n[updates]\nafter_finish = true\ntimeout_seconds = 30\n")
@@ -99,9 +98,10 @@ class UpdateCliTest(FakeToolsCase):
         self.assertEqual(self.fake_launches(), [])
 
 
-class RepositorySetupIsolationTest(unittest.TestCase):
+class RepositorySetupIsolationTest(ToolUpdateTestCase):
     def test_setup_ignores_a_hostile_global_git_hook_and_guards_setup_commands(self):
         from tests.test_lease_cli import FinishStartsToolUpdatesTest
+        from tests.test_doctor import ToolUpdateDoctorTest
 
         folder = make_tmp_dir(self)
         isolated = isolate_git_home(self, folder / "hostile-home")
@@ -116,7 +116,8 @@ class RepositorySetupIsolationTest(unittest.TestCase):
         hostile = folder / "hostile.gitconfig"
         hostile.write_text(f'[core]\n    hooksPath = "{hooks.as_posix()}"\n', encoding="utf-8")
         for case_type, method in ((UpdateCliTest, "test_status_runs_no_subprocess"),
-                                  (FinishStartsToolUpdatesTest, "test_another_active_lease_starts_nothing")):
+                                  (FinishStartsToolUpdatesTest, "test_another_active_lease_starts_nothing"),
+                                  (ToolUpdateDoctorTest, "test_off_by_absence_is_mentioned_once")):
             with self.subTest(case=case_type.__name__):
                 seen = []
                 real_popen = subprocess.Popen
@@ -145,8 +146,35 @@ class RepositorySetupIsolationTest(unittest.TestCase):
                     finally:
                         case.doCleanups()
 
+    def test_every_update_test_class_installs_isolation_before_fixtures(self):
+        import inspect
+        import re
+        from tests import test_doctor, test_lease_cli, test_toolupdate, test_update_cli
 
-class RegistrationTest(unittest.TestCase):
+        for module in (test_toolupdate, test_update_cli, test_lease_cli, test_doctor):
+            for name, case_type in vars(module).items():
+                if not inspect.isclass(case_type) or not issubclass(case_type, unittest.TestCase):
+                    continue
+                if case_type.__module__ != module.__name__:
+                    continue
+                methods = unittest.defaultTestLoader.getTestCaseNames(case_type)
+                if not methods:
+                    continue
+                if module in (test_lease_cli, test_doctor) and not re.search(
+                        r"toolupdate|update_cli", inspect.getsource(case_type)):
+                    continue
+                with self.subTest(module=module.__name__, case=name):
+                    self.assertTrue(getattr(case_type, "toolupdate_isolation", False),
+                                    f"{name} lacks tool-update isolation")
+                    case = case_type(methods[0])
+                    try:
+                        case.setUp()
+                        case.assert_update_isolation()
+                    finally:
+                        case.doCleanups()
+
+
+class RegistrationTest(ToolUpdateTestCase):
     def test_command_is_registered_and_the_detached_entry_is_hidden(self):
         self.assertEqual(update_cli.COMMANDS, ("update",))
         parser = build_parser()

@@ -18,7 +18,7 @@ from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.models import Catalog, Entry, ModelInfo
 from oah.setup import catalog, display
-from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
+from tests.helpers import ToolUpdateTestCase, make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
 
 
 def setUpModule():
@@ -801,20 +801,17 @@ if __name__ == "__main__":
 
 
 
-class ToolUpdateDoctorTest(unittest.TestCase):
+class ToolUpdateDoctorTest(ToolUpdateTestCase):
     """AC1: doctor names the off-by-absence switch once and the last pass's unsettled results, offline."""
 
     def setUp(self):
         from oah.toolupdate import records
 
+        super().setUp()
         self.records = records
         self.repo = make_git_repo(self)
         self.config = self.repo / ".oah" / "config.toml"
         self.config.parent.mkdir()
-        self.home = make_tmp_dir(self)
-        patcher = mock.patch.object(records, "home", return_value=self.home)
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def doctor(self, *, json_output=False):
         import oah.doctor as doctor
@@ -857,16 +854,14 @@ class ToolUpdateDoctorTest(unittest.TestCase):
                   "outcome": "needs-attention", "models_refresh": [], "components": {
                       "claude": component("current", "2.1.316", "2.1.316", "", stamp),
                       "codex": component("unverified", "0.166.0", "0.166.0", "run codex update yourself", stamp),
-                      "codex-plugin:omo@sisyphuslabs": component("needs-hook-approval", "aaa", "bbb",
-                                                                 "open Codex and approve its hooks again in /hooks",
-                                                                 stamp)}}
+                      "claude-marketplaces": component("current", "abc", "abc", "", stamp),
+                      "claude-plugins": component("current", "abc", "abc", "", stamp),
+                      "oah-skills": component("current", "abc", "abc", "", stamp)}}
         self.records.updates_dir().mkdir(parents=True)
         self.records.state_path().write_text(json.dumps(record), encoding="utf-8")
         code, out = self.doctor()
         self.assertEqual(code, 0, out)
         self.assertIn("  Codex 0.166.0 (unverified); run codex update yourself", out)
-        self.assertIn("  Codex plugin omo@sisyphuslabs bbb (needs-hook-approval); open Codex and approve its hooks "
-                      "again in /hooks", out)
         self.assertNotIn("Claude Code 2.1.316 (current)", out)
 
     def test_unreadable_record_is_named_and_the_report_goes_on(self):

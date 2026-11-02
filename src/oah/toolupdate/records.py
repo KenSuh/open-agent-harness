@@ -26,7 +26,7 @@ SECTION = "updates"
 DEFAULTS = {"after_finish": False, "interval_hours": 24.0, "timeout_seconds": 600.0}
 MAX_TIMEOUT_SECONDS = 86400.0
 FORMAT = 1
-STATUSES = ("updated", "current", "unverified", "needs-confirmation", "needs-hook-approval", "unsupported", "failed")
+STATUSES = ("updated", "current", "unverified", "needs-confirmation", "unsupported", "failed")
 SETTLED = ("updated", "current")
 COMPLETE = ("updated", "current", "unsupported")  # anything else makes a pass "needs-attention"
 TRIGGERS = ("after-finish", "manual")
@@ -35,8 +35,9 @@ ENGINES = ("claude", "codex")
 RUNS_KEPT = 200
 TEXT_LIMIT = 600
 COMPONENT_FIELDS = ("status", "before", "after", "settled_version", "checked_at", "next_step")
-COMPONENT_RE = re.compile(r"(?:claude|codex|oah-skills|claude-plugins|claude-marketplaces|codex-marketplaces)|"
-                          r"(?:claude-plugin|codex-plugin|codex-marketplace):[A-Za-z0-9][A-Za-z0-9._@-]{0,199}")
+COMPONENTS = ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills")
+COMPONENT_RE = re.compile(r"(?:claude|codex|oah-skills|claude-plugins|claude-marketplaces)|"
+                          r"claude-plugin:[A-Za-z0-9][A-Za-z0-9._@-]{0,199}")
 STATE_UNAVAILABLE = "OAH_UPDATE_STATE_UNAVAILABLE"
 
 
@@ -77,8 +78,9 @@ def parse_stamp(text: object) -> dt.datetime | None:
     if not isinstance(text, str):
         return None
     try:
+        text.encode("utf-8", errors="strict")
         moment = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
+    except (UnicodeEncodeError, ValueError):
         return None
     return moment if moment.utcoffset() is not None else None
 
@@ -122,14 +124,20 @@ def due(record: Mapping | None, settings: Settings, now: dt.datetime) -> bool:
 def _text(value: object, *, optional: bool) -> bool:
     if value is None:
         return optional
-    return isinstance(value, str) and len(value) <= TEXT_LIMIT
+    if not isinstance(value, str) or len(value) > TEXT_LIMIT:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def component_problem(name: object, value: object) -> str | None:
     """Why one component entry is wrongly shaped, or None."""
     if not isinstance(name, str) or not COMPONENT_RE.fullmatch(name):
         return "names an unknown component"
-    if not isinstance(value, dict) or set(value) - {"hook_approval_digest"} != set(COMPONENT_FIELDS):
+    if not isinstance(value, dict) or set(value) != set(COMPONENT_FIELDS):
         return f"holds a component {name} with the wrong fields"
     status = value["status"]
     if status not in STATUSES:
@@ -150,12 +158,6 @@ def component_problem(name: object, value: object) -> str | None:
             return f"holds an {status} result for {name} without readable before and after versions"
         if (before != after) != (status == "updated"):
             return f"holds an {status} result for {name} with contradictory versions"
-    if "hook_approval_digest" in value:
-        digest = value["hook_approval_digest"]
-        readable = (digest is None or digest == "absent" or
-                    isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None)
-        if status != "needs-hook-approval" or not name.startswith("codex-plugin:") or not readable:
-            return f"holds invalid hook approval evidence for {name}"
     return None
 
 
@@ -192,6 +194,8 @@ def state_problem(data: object) -> str | None:
     problem = _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
     if problem:
         return problem
+    if finished is not None and not set(COMPONENTS) <= data["components"].keys():
+        return "does not cover every tool-update component"
     if finished is not None and result != outcome(data["components"]):
         return "holds an outcome that contradicts its components"
     return None
@@ -209,6 +213,8 @@ def run_problem(data: object) -> str | None:
     problem = _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
     if problem:
         return problem
+    if not set(COMPONENTS) <= data["components"].keys():
+        return "does not cover every tool-update component"
     if data["outcome"] != outcome(data["components"]):
         return "holds an outcome that contradicts its components"
     return None
@@ -320,8 +326,10 @@ def redacted(value: Any, redact: Callable[[str], str]) -> Any:
 
 
 def outcome(components: Mapping[str, Mapping]) -> str:
-    """complete only when every component is updated, current or unsupported."""
-    return "complete" if all(item["status"] in COMPLETE for item in components.values()) else "needs-attention"
+    """Every fixed component must be present and complete, as must each discovered Claude plugin."""
+    statuses = [components.get(name, {}).get("status", "unverified") for name in COMPONENTS]
+    statuses.extend(item["status"] for item in components.values())
+    return "complete" if all(status in COMPLETE for status in statuses) else "needs-attention"
 
 
 def counts(components: Mapping[str, Mapping], order: Sequence[str] = STATUSES) -> str:

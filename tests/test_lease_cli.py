@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from oah import lease_cli
 from oah.cli import build_parser
-from tests.helpers import directory_alias, git_commit, guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
+from tests.helpers import ToolUpdateTestCase, directory_alias, git_commit, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
@@ -583,19 +583,15 @@ class LeaseCliTest(unittest.TestCase):
         self.assertEqual((state / "leases.json").read_text(encoding="utf-8"), "{broken")
 
 
-class FinishStartsToolUpdatesTest(unittest.TestCase):
+class FinishStartsToolUpdatesTest(ToolUpdateTestCase):
     """AC3: a finish that leaves nothing in flight starts the detached tool-update pass, and changes nothing else."""
 
     def setUp(self):
-        from oah import paths
         from oah.toolupdate import records
         from oah.toolupdate import run as passes
 
+        super().setUp()
         self.records, self.passes = records, passes
-        self.home = make_tmp_dir(self) / "home"
-        isolate_git_home(self, self.home)
-        git = paths.git_argv()[0]
-        self.launched = guard_subprocesses(self, lambda argv: bool(argv) and argv[0] in ("git", git))
         self.repo = make_git_repo(self)
         git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n",
                                ".oah/config.toml": "[updates]\nafter_finish = true\n"})
@@ -634,6 +630,52 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
             [sys.executable, "-m", "oah", "update", "--after-finish", "--repo", str(self.repo)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(self.repo),
             env=dict(os.environ, OAH_STATE_DIR=str(self.state.resolve())), close_fds=True, **options)
+
+    def test_finish_and_pass_never_acquire_pass_lock_under_repository_lock(self):
+        from oah.lockfile import StateLock
+        from oah.toolkit import update
+
+        self.start()
+        held, events = [], []
+        enter, leave = StateLock.__enter__, StateLock.__exit__
+
+        def checked_enter(lock):
+            if lock.path == self.records.lock_path():
+                self.assertNotIn(self.state / ".lock", held, "pass.lock requested under repository state lock")
+            result = enter(lock)
+            held.append(lock.path)
+            events.append((lock.path, tuple(held)))
+            return result
+
+        def checked_leave(lock, *exc):
+            try:
+                return leave(lock, *exc)
+            finally:
+                held.remove(lock.path)
+
+        def kit(root, state, env, now, stamp, timeout_seconds=600):
+            with update.idle_state(state):
+                self.assertIn(self.records.lock_path(), held)
+            return {"oah-skills": self.records.component("current", "1", "1", "", stamp)}
+
+        def child_starts(argv, **options):
+            self.passes.run_pass(self.repo, self.state, env=options["env"], trigger="after-finish",
+                                 out=lambda line: None, kit=kit)
+
+        self.popen.side_effect = child_starts
+        with patch.object(StateLock, "__enter__", checked_enter), patch.object(StateLock, "__exit__", checked_leave):
+            with patch.object(self.passes, "Cli") as cli, \
+                    patch.object(self.passes.steps, "cli_update", return_value={}), \
+                    patch.object(self.passes.steps, "claude_plugins", return_value={}):
+                cli.return_value.base = None
+                code, out, err = self.finish()
+                self.assertEqual(code, 0, err)
+                self.popen.assert_called_once()
+                self.passes.run_pass(self.repo, self.state, env=os.environ, trigger="manual", out=lambda line: None,
+                                     kit=kit)
+        self.assertEqual(held, [])
+        self.assertTrue(any(path == self.state / ".lock" and self.records.lock_path() in locks
+                            for path, locks in events), events)
 
     def test_relative_state_from_a_subdirectory_is_preserved_for_the_child_readiness_check(self):
         from oah.cli import main
@@ -700,7 +742,8 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
         now = self.records.stamp(self.records.utc_now())
         (updates / "state.json").write_text(json.dumps({
             "version": 1, "last_started": now, "trigger": "manual", "last_finished": now, "outcome": "complete",
-            "components": {}, "models_refresh": []}), encoding="utf-8")
+            "components": {name: self.records.component("current", "1", "1", "", now)
+                           for name in self.records.COMPONENTS}, "models_refresh": []}), encoding="utf-8")
         self.start()
         code, _out, err = self.finish()
         self.assertEqual(code, 0, err)

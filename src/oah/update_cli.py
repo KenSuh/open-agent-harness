@@ -17,10 +17,11 @@ EXIT_CODES = {"complete": EXIT_OK, "needs-attention": EXIT_ATTENTION, "deferred"
 
 def register(commands: argparse._SubParsersAction) -> None:
     update = commands.add_parser(
-        "update", help="update Claude Code, Codex, their plugins and oah's skills now; `status` shows the last pass",
+        "update", help="update Claude Code, Codex, Claude Code plugins and oah's skills now; `status` shows the last pass",
         description="Run the tool-update pass now: each tool's own update command, in a fixed order, only when "
                     "[updates] after_finish is on and no task or run is in flight, every result checked by reading "
-                    "what is installed. MCP servers are never changed. `oah update status` prints the last pass and "
+                    "what is installed. Codex plugins are updated manually. MCP servers are never changed. "
+                    "`oah update status` prints the last pass and "
                     "runs nothing.")
     update.add_argument("action", nargs="?", choices=("status",), help="status: print the last pass; runs nothing")
     update.add_argument("--after-finish", action="store_true", help=argparse.SUPPRESS)

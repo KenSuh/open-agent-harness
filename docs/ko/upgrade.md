@@ -186,8 +186,13 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
 - 켜 두면 리스와 진행 중인 run을 남기지 않는 `oah finish`가 백그라운드로 패스를 시작하며, `interval_hours`(기본
   24)마다 많아야 한 번이다. 지금 돌리려면 `oah update`를 실행한다. `oah update status`는 아무것도 실행하지 않고
   마지막 패스를 보여 준다.
-- MCP 서버는 바꾸지 않는다. 마켓플레이스가 선언한 명령에 확인이 필요한 Claude Code 플러그인과 `/hooks`에서 훅을 다시
-  승인해야 하는 Codex 플러그인은 직접 처리하도록 알려 준다. 이미 실행 중인 세션은 다시 시작할 때까지 원래 버전을 쓴다.
+- MCP 서버는 바꾸지 않는다. 마켓플레이스가 선언한 명령에 확인이 필요한 Claude Code 플러그인은 직접 처리하도록
+  알려 준다. Codex 플러그인은 자동 갱신하지 않는다. `codex plugin marketplace upgrade`로 직접 갱신한 뒤 `/hooks`에서
+  훅을 다시 승인한다. 설치된 플러그인이 있거나 설정을 읽을 수 없으면 요약과 status가 이 안내를 되풀이하며, 전체
+  결과에는 영향을 주지 않는다. 훅 상태나 승인을 기록하지 않는다. 이미 실행 중인 세션은 다시 시작할 때까지 원래 버전과
+  플러그인을 쓴다.
+- Claude 마켓플레이스 갱신을 포함한 고정 구성요소마다 검증된 결과나 `unsupported` 결과가 있어야만 `complete`다.
+  근거가 없으면 `needs-attention`이며 `oah update status`가 다음 명령을 보여 준다.
 
 자세한 내용은 [작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에 있고, 코드는
 [문제 해결](troubleshooting.md#도구-업데이트)에 있다.

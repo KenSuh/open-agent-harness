@@ -193,9 +193,13 @@ describes `main`, which is not in a release yet.
 - With it on, an `oah finish` that leaves no lease and no run in flight starts a pass in the background, at most once
   every `interval_hours` (24 by default). Run `oah update` to run one now; `oah update status` prints the last pass
   without running anything.
-- MCP servers are never changed. A Claude Code plugin whose marketplace-declared command needs your confirmation, and a
-  Codex plugin whose hooks need approval again in `/hooks`, are reported for you to handle. Sessions already running
-  keep their version until you restart them.
+- MCP servers are never changed. A Claude Code plugin whose marketplace-declared command needs your confirmation is
+  reported for you to handle. Codex plugins are never updated automatically: update them with
+  `codex plugin marketplace upgrade`, then approve their hooks again in `/hooks`. When any are installed, or their
+  config cannot be read, the summary and status repeat this notice; it does not affect the pass's outcome. No hook
+  state or approval is recorded. Sessions already running keep their version and plugins until you restart them.
+- A pass is `complete` only with a verified or unsupported result for every fixed component, including the Claude
+  marketplace refresh. Missing evidence means `needs-attention`; `oah update status` shows the next commands.
 
 [Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) has the details, and
 [Troubleshooting](troubleshooting.md#tool-updates) lists the codes.

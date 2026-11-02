@@ -1,4 +1,4 @@
-# 도구 업데이트 패스 검사 — 임시 홈과 가짜 claude·codex 만 있는 bin 폴더에서 스위치·판정·기록·잠금·Codex 플러그인 훅·실행 중 세션 안내를 본다.
+# 도구 업데이트 패스 검사 — 임시 홈과 가짜 claude·codex 만 있는 bin 폴더에서 스위치·판정·기록·잠금·Codex 플러그인 수동 업데이트 안내·실행 중 세션 안내를 본다.
 from __future__ import annotations
 
 import datetime as dt
@@ -15,7 +15,7 @@ from unittest import mock
 from oah.lockfile import StateLock
 from oah.toolupdate import probes, records, steps
 from oah.toolupdate import run as passes
-from tests.helpers import guard_subprocesses, isolate_git_home, make_tmp_dir, require_node
+from tests.helpers import ToolUpdateTestCase, make_tmp_dir, require_node
 
 FORBIDDEN_WORDS = {"-y", "--yes", "--accept-command", "mcp"}
 FORBIDDEN_PROGRAMS = {"npm", "npx", "brew", "ps", "tasklist", "pgrep", "pkill", "kill", "taskkill"}
@@ -135,36 +135,7 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 """,
-    "plugin": """Manage Codex plugins
 
-Usage: codex plugin [OPTIONS] <COMMAND>
-
-Commands:
-  add          Install a plugin from a configured or remote marketplace
-  list         List plugins available from configured and remote marketplaces
-  marketplace  Add, list, upgrade, or remove configured plugin marketplaces
-  remove       Uninstall a plugin and remove its local cache
-  help         Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help (see a summary with '-h')
-""",
-    "plugin marketplace": """Add, list, upgrade, or remove configured plugin marketplaces
-
-Usage: codex plugin marketplace [OPTIONS] <COMMAND>
-
-Commands:
-  add      Add a local or Git marketplace to the configured marketplace sources
-  list     List plugin marketplaces Codex is currently considering and their roots
-  upgrade  Refresh configured Git marketplace snapshots
-  remove   Remove a configured marketplace source by name
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help (see a summary with '-h')
-""",
 }
 
 # The fake CLI: one Python script that plays claude or codex from a JSON world file and logs every argv.
@@ -224,7 +195,11 @@ def main():
         print(json.dumps(me.get("plugins", []), indent=2))
         return 0
     if tool == "claude" and args == ["plugin", "marketplace", "update"]:
-        return act(me.get("marketplace_update", {"stdout": "Successfully updated 1 marketplace(s)\n"}))
+        spec = me.get("marketplace_update", {"stdout": "All marketplaces are up to date.\n"})
+        code = act(spec)
+        if "set_revision" in spec:
+            pathlib.Path(world["marketplace_head"]).write_text(spec["set_revision"], encoding="utf-8")
+        return code
     if tool == "claude" and args[:2] == ["plugin", "update"] and len(args) >= 3:
         spec = me.get("plugin_update", {}).get(args[2], {})
         code = act(spec)
@@ -235,17 +210,6 @@ def main():
                 if entry.get("id") == args[2] and entry.get("scope") == "user":
                     entry["version"] = spec["set_version"]
             save()
-        return code
-    if tool == "codex" and args == ["plugin", "marketplace", "upgrade"]:
-        spec = me.get("upgrade", {})
-        code = act(spec)
-        home = pathlib.Path(os.environ["CODEX_HOME"])
-        for relative, text in spec.get("write_files", {}).items():
-            path = home / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-        if spec.get("config_text") is not None:
-            (home / "config.toml").write_text(spec["config_text"], encoding="utf-8")
         return code
     print(f"fake {tool}: unsupported arguments {args}", file=sys.stderr)
     return 2
@@ -274,7 +238,6 @@ def toml_config(marketplaces: dict[str, str | None], plugins: tuple[str, ...] = 
         lines.append("")
     for ident in plugins:
         lines += [f'[plugins."{ident}"]', "enabled = true", ""]
-    lines += ["[hooks.state]", '"omo@sisyphuslabs:hooks" = { trusted_hash = "sha256:00" }', ""]
     return "\n".join(lines)
 
 
@@ -283,16 +246,22 @@ class FakeTools:
 
     def __init__(self, test: unittest.TestCase) -> None:
         self.tmp = make_tmp_dir(test)
-        self.home = self.tmp / "home"
+        self.home = test.home
         self.bin = self.tmp / "bin"
         self.codex_home = self.home / ".codex"
         for folder in (self.home, self.bin, self.codex_home):
-            folder.mkdir(parents=True)
+            folder.mkdir(parents=True, exist_ok=True)
+        (self.codex_home / "config.toml").write_text("", encoding="utf-8")
+        git = self.home / ".claude" / "plugins" / "marketplaces" / "m" / ".git"
+        git.mkdir(parents=True)
+        (git / "HEAD").write_text("a" * 40, encoding="utf-8")
+        (self.home / ".claude" / "plugins" / "known_marketplaces.json").write_text(
+            json.dumps({"m": {"installLocation": str(git.parent)}}), encoding="utf-8")
         self.log = self.tmp / "argv.jsonl"
         self.world_path = self.tmp / "world.json"
         self.script = self.bin / "fake_tool.py"
         self.script.write_text(FAKE_TOOL, encoding="utf-8")
-        self.world = {"log": str(self.log),
+        self.world = {"log": str(self.log), "marketplace_head": str(git / "HEAD"),
                       "claude": {"version": "2.1.316", "help": dict(CLAUDE_HELP), "plugins": [],
                                  "update": {"stdout": CLAUDE_CURRENT}},
                       "codex": {"version": "0.166.0", "help": dict(CODEX_HELP),
@@ -301,9 +270,9 @@ class FakeTools:
         node = pathlib.Path(require_node(test)) if os.name == "nt" else None
         for name in ("claude", "codex"):
             self._install(name, node)
-        self.env = {"PATH": str(self.bin), "HOME": str(self.home), "USERPROFILE": str(self.home),
+        self.env = dict(test.isolated_env, **{"PATH": str(self.bin), "HOME": str(self.home), "USERPROFILE": str(self.home),
                     "CODEX_HOME": str(self.codex_home), "FAKE_TOOLS_WORLD": str(self.world_path),
-                    "FAKE_TOOLS_PYTHON": sys.executable, "FAKE_TOOLS_SCRIPT": str(self.script)}
+                    "FAKE_TOOLS_PYTHON": sys.executable, "FAKE_TOOLS_SCRIPT": str(self.script), "CLAUDE_CONFIG_DIR": str(self.home / ".claude")})
         for name in ("SYSTEMROOT", "SystemRoot", "WINDIR", "TEMP", "TMP", "PATHEXT", "COMSPEC"):
             if os.name == "nt" and name in os.environ:
                 self.env[name] = os.environ[name]
@@ -349,24 +318,14 @@ class FakeTools:
         except OSError:
             return False
 
-    def plugin(self, market: str, name: str, version: str, files: dict[str, str]) -> pathlib.Path:
-        folder = self.codex_home / "plugins" / "cache" / market / name / version
-        for relative, text in files.items():
-            path = folder / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-        return folder.parent
 
 
-class FakeToolsCase(unittest.TestCase):
+class FakeToolsCase(ToolUpdateTestCase):
     """Every test here: fake tools only, a temporary home, and a guard that fails on any other program."""
 
     def setUp(self):
+        super().setUp()
         self.fake = FakeTools(self)
-        self.launched = guard_subprocesses(self, self.allowed)
-        self.fake.env.update(isolate_git_home(self, self.fake.home))
-        self.enterContext(mock.patch.dict(os.environ, {"CODEX_HOME": str(self.fake.codex_home)}))
-        self.enterContext(mock.patch.object(records, "home", return_value=self.fake.home))
         self.enterContext(mock.patch.object(pathlib.Path, "home", side_effect=AssertionError("Path.home() was used")))
         self.addCleanup(self.check_launches)
         self.root = make_tmp_dir(self) / "project"
@@ -375,11 +334,13 @@ class FakeToolsCase(unittest.TestCase):
         self.lines: list[str] = []
 
     def allowed(self, argv: list[str]) -> bool:
-        return self.fake.allowed(argv)
+        return hasattr(self, "fake") and self.fake.allowed(argv)
 
     def check_launches(self):
         for tool, argv in self.fake.argv():
             self.assertFalse(FORBIDDEN_WORDS & set(argv), (tool, argv))
+            if tool == "codex":
+                self.assertNotIn("plugin", argv, "the pass ran a Codex plugin command")
         for argv in self.launched:
             self.assertNotIn(pathlib.Path(argv[0]).stem.lower(), FORBIDDEN_PROGRAMS, argv)
 
@@ -389,7 +350,7 @@ class FakeToolsCase(unittest.TestCase):
         config.write_text("[skills]\nauto_update = false\n" + (f"[updates]\n{updates}" if updates is not None else ""),
                           encoding="utf-8")
 
-    def run_pass(self, *, trigger="manual", kit=None, env=None, now=None):
+    def run_pass(self, *, trigger="manual", kit=steps.kit_skills, env=None, now=None):
         options = {"now": now} if now is not None else {}
         return passes.run_pass(self.root, self.state, env=env or self.fake.env, trigger=trigger,
                                out=self.lines.append, kit=kit, **options)
@@ -445,7 +406,7 @@ class SwitchTest(FakeToolsCase):
         self.assertEqual((settings.after_finish, settings.interval_hours, settings.timeout_seconds), (True, 24.0, 600.0))
 
 
-class ParserTest(unittest.TestCase):
+class ParserTest(ToolUpdateTestCase):
     """The parsers, against the help and output the installed CLIs print."""
 
     def test_commands_listed_in_claude_and_codex_help(self):
@@ -456,7 +417,6 @@ class ParserTest(unittest.TestCase):
         self.assertTrue({"update", "plugin", "exec", "help"} <= probes.listed_commands(CODEX_HELP[""]))
         self.assertNotIn("working", probes.listed_commands(CODEX_HELP[""]))
         self.assertNotIn("Optional", probes.listed_commands(CODEX_HELP[""]))
-        self.assertIn("upgrade", probes.listed_commands(CODEX_HELP["plugin marketplace"]))
         self.assertEqual(probes.listed_commands("Usage: x\n\nOptions:\n  -h, --help\n"), set())
 
     def test_flags_listed_in_help(self):
@@ -475,10 +435,8 @@ class ParserTest(unittest.TestCase):
             "codex-current-homebrew": ("Warning: Not upgrading codex, the latest version is already installed\n",
                                        "==> Upgrading 1 outdated package\n"),
             "codex-current-npm": ("\nup to date, audited 3 packages in 1s\n", "changed 1 package in 2s\n"),
-            "codex-marketplace-current": ("Marketplace `debug` is already up to date.\n",
-                                          "Upgraded marketplace `debug` to the latest configured revision.\n"),
-            "codex-marketplaces-current": ("All configured Git marketplaces are already up to date.\n",
-                                           "Upgraded 2 marketplace(s).\n"),
+            "claude-marketplaces-current": ("All marketplaces are up to date.\n",
+                                            "Successfully updated 1 marketplace(s)\n"),
             "claude-plugin-confirmation": ("Error: a marketplace-declared command must be confirmed\n",
                                            "Plugin x is already at the latest version\n"),
         }
@@ -487,8 +445,6 @@ class ParserTest(unittest.TestCase):
             with self.subTest(phrase=name):
                 self.assertTrue(probes.said(name, yes))
                 self.assertFalse(probes.said(name, no))
-        self.assertTrue(probes.marketplace_said_current("Marketplace `debug` is already up to date.", "debug"))
-        self.assertFalse(probes.marketplace_said_current("Marketplace `debug` is already up to date.", "other"))
 
     def test_verdict_is_ac5(self):
         rows = [  # before, after, said current, exit, timed out -> status
@@ -546,11 +502,78 @@ class ParserTest(unittest.TestCase):
 
 
 class PassTest(FakeToolsCase):
+    def test_marketplace_success_without_evidence_is_unverified(self):
+        self.fake.set("claude", marketplace_update={"stdout": "arbitrary output\n"})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["claude-marketplaces"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
+        self.assertIn("claude plugin marketplace update", entry["next_step"])
+
+    def test_skipping_any_fixed_component_requires_attention(self):
+        fixed = ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills")
+        stamp = "2026-11-03T00:00:00Z"
+        for skipped in fixed:
+            with self.subTest(skipped=skipped):
+                found = {name: records.component("current", "1", "1", "", stamp)
+                         for name in fixed if name != skipped}
+                with mock.patch.object(steps, "cli_update", return_value={}), \
+                        mock.patch.object(steps, "claude_plugins", return_value=found), \
+                        mock.patch.object(steps, "claude_marketplaces", return_value={}):
+                    self.assertEqual(self.run_pass(kit=None), "needs-attention")
+                self.assertEqual(self.components()[skipped]["status"], "unverified")
+
+    def test_codex_plugins_are_only_a_notice_and_never_run_commands(self):
+        config = self.fake.codex_home / "config.toml"
+        notice = ("Codex plugins are not updated automatically: update them with codex plugin marketplace "
+                  "upgrade, then approve their hooks again in /hooks")
+        for text in (toml_config({"m": "abc"}, ("hooked@m",)), "[plugins\n", "plugins = []\n"):
+            with self.subTest(config=text):
+                config.write_text(text, encoding="utf-8")
+                before = config.read_bytes()
+                self.lines.clear()
+                self.assertEqual(self.run_pass(), "complete")
+                self.assertIn(notice, "\n".join(self.lines))
+                self.assertIn(notice, "\n".join(passes.status_lines()))
+                self.assertEqual(config.read_bytes(), before)
+                self.assertFalse(any(tool == "codex" and "plugin" in argv for tool, argv in self.fake.argv()))
+                self.assertFalse(any(name.startswith("codex-") for name in self.components()))
+
+    def test_codex_plugin_notice_is_read_only_even_without_pass_records(self):
+        config = self.fake.codex_home / "config.toml"
+        for text, expected in ((toml_config({}, ("a@m",)), True), ("[plugins\n", True), ("[plugins]\n", False)):
+            with self.subTest(config=text):
+                config.write_text(text, encoding="utf-8")
+                lines = "\n".join(passes.status_lines())
+                self.assertEqual(steps.CODEX_PLUGINS_NOTE in lines, expected)
+                self.assertEqual(config.read_text("utf-8"), text)
+                self.assertEqual(self.launched, [])
+                self.assertFalse(records.updates_dir().exists())
+        config.unlink()
+        self.assertIn(steps.CODEX_PLUGINS_NOTE, "\n".join(passes.status_lines()))
+        self.assertEqual(self.launched, [])
+        self.assertFalse(records.updates_dir().exists())
+
+    def test_marketplace_revision_change_is_updated_and_unreadable_revision_cannot_settle(self):
+        self.fake.set("claude", marketplace_update={"stdout": "Successfully updated 1 marketplace(s)\n",
+                                                   "set_revision": "b" * 40})
+        self.assertEqual(self.run_pass(), "complete")
+        entry = self.components()["claude-marketplaces"]
+        self.assertEqual(entry["status"], "updated")
+        self.assertNotEqual(entry["before"], entry["after"])
+        self.assertIn(steps.RESTART_NOTE, entry["next_step"])
+        metadata = self.fake.home / ".claude" / "plugins" / "known_marketplaces.json"
+        metadata.write_text("{torn", encoding="utf-8")
+        self.fake.set("claude", marketplace_update={"stdout": "All marketplaces are up to date.\n"})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["claude-marketplaces"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
+
     def test_everything_current(self):
         self.assertEqual(self.run_pass(), "complete")
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
-                         {"claude": "current", "codex": "current"})
+                         {"claude": "current", "codex": "current", "claude-marketplaces": "current",
+                          "claude-plugins": "unsupported", "oah-skills": "unsupported"})
         self.assertEqual(components["claude"]["settled_version"], "2.1.316")
         self.assertTrue(self.fake.ran("claude", "update"))
         self.assertTrue(self.fake.ran("codex", "update"))
@@ -648,13 +671,8 @@ class PassTest(FakeToolsCase):
                 self.fake.set("claude", plugins=[{"id": "a@m", "version": "1", "scope": "user"}],
                               marketplace_update={stream: "ff", "exit": 1},
                               plugin_update={"a@m": {stream: "ff", "set_version": "2"}})
-                config = self.fake.codex_home / "config.toml"
-                config.write_text(toml_config({"m": "aaa"}, ("a@m",)), encoding="utf-8")
-                self.fake.plugin("m", "a", "1", {"skill.md": "old"})
-                self.fake.set("codex", upgrade={stream: "ff", "config_text": toml_config({"m": "bbb"}, ("a@m",)),
-                                               "write_files": {"plugins/cache/m/a/1/skill.md": "new"}})
                 self.assertEqual(self.run_pass(), "needs-attention")
-                for name in ("claude-marketplaces", "claude-plugin:a@m", "codex-marketplace:m", "codex-plugin:a@m"):
+                for name in ("claude-marketplaces", "claude-plugin:a@m", "claude-plugins"):
                     with self.subTest(component=name):
                         entry = self.components()[name]
                         self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
@@ -702,32 +720,11 @@ class PassTest(FakeToolsCase):
         self.assertEqual(components["claude-marketplaces"]["status"], "failed")
         self.assertEqual(components["claude-plugin:a@m"]["status"], "unverified")
 
-    def test_codex_marketplace_revisions_decide(self):
-        (self.fake.codex_home / "config.toml").write_text(toml_config({"fast": "a" * 40, "same": "b" * 40}),
-                                                           encoding="utf-8")
-        self.fake.set("codex", upgrade={"stdout": "Upgraded marketplace `fast` to the latest configured revision.\n"
-                                                  "Marketplace `same` is already up to date.\n",
-                                        "config_text": toml_config({"fast": "c" * 40, "same": "b" * 40})})
-        self.assertEqual(self.run_pass(), "complete")
-        components = self.components()
-        self.assertEqual(components["codex-marketplace:fast"]["status"], "updated")
-        self.assertEqual(components["codex-marketplace:same"]["status"], "current")
-        self.assertTrue(self.fake.ran("codex", "plugin", "marketplace", "upgrade"))
-
-    def test_no_git_marketplace_runs_no_upgrade(self):
-        self.run_pass()
-        self.assertFalse(self.fake.ran("codex", "plugin", "marketplace", "upgrade"))
-
-    def test_unreadable_codex_config_runs_no_upgrade(self):
-        (self.fake.codex_home / "config.toml").write_text("[marketplaces\n", encoding="utf-8")
-        self.run_pass()
-        self.assertEqual(self.components()["codex-marketplaces"]["status"], "unverified")
-        self.assertFalse(self.fake.ran("codex", "plugin", "marketplace", "upgrade"))
-
     def test_kit_step_runs_last_and_is_recorded(self):
         calls = []
 
-        def kit(root, state, env, now, checked_at):
+        def kit(root, state, env, now, checked_at, timeout_seconds):
+            self.assertEqual(timeout_seconds, 30)
             calls.append(len(self.fake.argv()))
             return {"oah-skills": records.component("current", "abc", "abc", "", checked_at)}
 
@@ -742,125 +739,7 @@ class PassTest(FakeToolsCase):
         commands = {tuple(argv) for _tool, argv in self.fake.argv()
                     if argv[-1:] not in (["--help"], ["--version"])}
         self.assertEqual(commands, {("update",), ("plugin", "list", "--json"), ("plugin", "marketplace", "update"),
-                                    ("plugin", "update", "a@m", "--scope", "user", "--json"),
-                                    ("plugin", "marketplace", "upgrade")})
-
-
-class HooksTest(FakeToolsCase):
-    """AC9: a Codex plugin whose files change and that declares hooks needs the user's approval in Codex."""
-
-    def setUp(self):
-        super().setUp()
-        self.config = toml_config({"m": "a" * 40}, ("hooked@m", "plain@m", "still@m"))
-        (self.fake.codex_home / "config.toml").write_text(self.config, encoding="utf-8")
-        manifest = json.dumps({"name": "hooked", "version": "1.0.0", "hooks": "./hooks/hooks.json"})
-        self.fake.plugin("m", "hooked", "1.0.0", {".codex-plugin/plugin.json": manifest,
-                                                  "hooks/hooks.json": '{"hooks": {}}'})
-        self.fake.plugin("m", "plain", "1.0.0", {".codex-plugin/plugin.json": '{"name": "plain"}'})
-        self.fake.plugin("m", "still", "1.0.0", {".codex-plugin/plugin.json": '{"name": "still", "hooks": {}}'})
-        self.fake.set("codex", upgrade={"stdout": "Upgraded 1 marketplace(s).\n", "write_files": {
-            "plugins/cache/m/hooked/1.0.0/hooks/hooks.json": '{"hooks": {"Stop": []}}',
-            "plugins/cache/m/plain/1.0.0/skills/new.md": "new skill\n"}})
-
-    def test_changed_plugin_with_hooks_needs_approval_and_codex_config_is_untouched(self):
-        before = (self.fake.codex_home / "config.toml").read_bytes()
-        self.assertEqual(self.run_pass(), "needs-attention")
-        components = self.components()
-        entry = components["codex-plugin:hooked@m"]
-        self.assertEqual((entry["status"], entry["next_step"]), ("needs-hook-approval", steps.HOOK_STEP))
-        self.assertEqual(components["codex-plugin:plain@m"]["status"], "updated")
-        self.assertNotIn("codex-plugin:still@m", components)
-        self.assertEqual((self.fake.codex_home / "config.toml").read_bytes(), before)
-        self.assertEqual(self.state_record()["outcome"], "needs-attention")
-        self.assertTrue(self.lines[-1].startswith("OAH_UPDATE_FINISHED: outcome needs-attention"), self.lines)
-        self.assertTrue(any("(needs-hook-approval); open Codex and approve its hooks again in /hooks" in line
-                            for line in self.lines), self.lines)
-
-    def test_hook_warning_survives_an_unchanged_pass_and_status(self):
-        config = self.fake.codex_home / "config.toml"
-        original = config.read_bytes()
-        self.run_pass()
-        self.assertEqual(self.components()["codex-plugin:hooked@m"].get("hook_approval_digest"), "absent")
-        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
-        self.assertEqual(self.run_pass(), "needs-attention")
-        entry = self.components()["codex-plugin:hooked@m"]
-        self.assertEqual((entry["status"], entry["next_step"]), ("needs-hook-approval", steps.HOOK_STEP))
-        launched = len(self.launched)
-        status = "\n".join(passes.status_lines())
-        self.assertIn("outcome needs-attention", status)
-        self.assertIn("(needs-hook-approval)", status)
-        self.assertEqual(len(self.launched), launched)
-        self.assertEqual(config.read_bytes(), original)
-
-    def test_only_a_changed_matching_approval_clears_the_warning(self):
-        config = self.fake.codex_home / "config.toml"
-        approval = '"hooked@m:hooks" = { trusted_hash = "private-approval-before" }\n'
-        config.write_text(self.config + approval, encoding="utf-8")
-        self.fake.world["codex"]["upgrade"]["stdout"] = "All configured Git marketplaces are already up to date.\n"
-        self.fake.save()
-        original = config.read_bytes()
-        self.run_pass()
-        self.assertEqual(config.read_bytes(), original)
-        digest = self.components()["codex-plugin:hooked@m"].get("hook_approval_digest", "")
-        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
-        for path in (records.state_path(), records.runs_path()):
-            self.assertNotIn("private-approval-before", path.read_text("utf-8"))
-        config.write_text((self.config + approval).replace("sha256:00", "sha256:unrelated"), encoding="utf-8")
-        self.assertIn("(needs-hook-approval)", "\n".join(passes.status_lines()))
-        config.write_text((self.config + approval).replace("private-approval-before", "private-approval-after"),
-                          encoding="utf-8")
-        approved = config.read_bytes()
-        saved_state = records.state_path().read_bytes()
-        status = "\n".join(passes.status_lines())
-        self.assertNotIn("(needs-hook-approval)", status)
-        self.assertIn("outcome complete", status)
-        self.assertEqual(records.state_path().read_bytes(), saved_state)  # status remains read-only
-        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
-        self.assertEqual(self.run_pass(), "complete")
-        self.assertNotIn("codex-plugin:hooked@m", self.components())
-        self.assertEqual(config.read_bytes(), approved)
-
-    def test_unreadable_hook_approval_keeps_the_warning_pending(self):
-        self.run_pass()
-        config = self.fake.codex_home / "config.toml"
-        config.write_bytes(b"[hooks.state\xff")
-        unreadable = config.read_bytes()
-        self.assertIn("(needs-hook-approval)", "\n".join(passes.status_lines()))
-        self.assertEqual(self.run_pass(), "needs-attention")
-        self.assertEqual(self.components()["codex-plugin:hooked@m"]["status"], "needs-hook-approval")
-        self.assertEqual(config.read_bytes(), unreadable)
-
-    def test_damaged_history_does_not_clear_a_pending_hook_warning(self):
-        self.run_pass()
-        with records.runs_path().open("ab") as handle:
-            handle.write(b"{torn\n")
-        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
-        self.assertEqual(self.run_pass(trigger="after-finish"), "needs-attention")
-        self.assertEqual(self.components()["codex-plugin:hooked@m"]["status"], "needs-hook-approval")
-        self.assertTrue(any("skipped 1" in line for line in self.lines))
-
-    def test_unreadable_plugin_folder_is_unverified(self):
-        shutil.rmtree(self.fake.codex_home / "plugins" / "cache" / "m" / "still")
-        self.run_pass()
-        self.assertEqual(self.components()["codex-plugin:still@m"]["status"], "unverified")
-
-    def test_digest_covers_every_file_and_follows_no_link(self):
-        folder = self.fake.codex_home / "plugins" / "cache" / "m" / "plain"
-        first = probes.plugin_digest(folder)
-        self.assertEqual(first, probes.plugin_digest(folder))
-        (folder / "1.0.0" / "extra.txt").write_text("x", encoding="utf-8")
-        second = probes.plugin_digest(folder)
-        self.assertNotEqual(first, second)
-        self.assertIsNone(probes.plugin_digest(folder / "missing"))
-        self.assertTrue(probes.declares_hooks(self.fake.codex_home / "plugins" / "cache" / "m" / "hooked"))
-        self.assertFalse(probes.declares_hooks(folder))
-        if os.name != "nt":
-            outside = self.fake.tmp / "outside.txt"
-            outside.write_text("one", encoding="utf-8")
-            (folder / "1.0.0" / "link.txt").symlink_to(outside)
-            linked = probes.plugin_digest(folder)
-            outside.write_text("two", encoding="utf-8")
-            self.assertEqual(probes.plugin_digest(folder), linked)  # the link is recorded, its target never read
+                                    ("plugin", "update", "a@m", "--scope", "user", "--json")})
 
 
 class SessionsTest(FakeToolsCase):
@@ -941,13 +820,96 @@ class SessionsTest(FakeToolsCase):
 
 
 class RecordsTest(FakeToolsCase):
+    def test_lone_surrogates_in_timestamp_separators_are_rejected(self):
+        good = self.a_valid_run()
+        surrogate_time = "2026-11-01\ud80000:00:00Z"
+        for field in ("started", "finished", "checked_at"):
+            with self.subTest(field=field):
+                bad = json.loads(json.dumps(good))
+                if field == "checked_at":
+                    bad["components"]["claude"][field] = surrogate_time
+                else:
+                    bad[field] = surrogate_time
+                state = {"version": 1, "last_started": bad["started"], "last_finished": bad["finished"],
+                         "trigger": bad["trigger"], "outcome": bad["outcome"], "components": bad["components"],
+                         "models_refresh": []}
+                self.write(records.state_path(), json.dumps(state))
+                with self.assertRaises(records.StateUnavailable):
+                    records.read_state()
+                self.write(records.runs_path(), json.dumps(bad) + "\n" + json.dumps(good) + "\n")
+                problems = []
+                self.assertEqual(records.read_runs(report=problems.append), [good])
+                self.assertIn("skipped 1", "\n".join(problems))
+
+    def test_removed_hook_status_and_approval_digest_are_invalid_records(self):
+        self.run_pass()
+        state = self.state_record()
+        for entry in (records.component("needs-hook-approval", "1", "2", "/hooks", state["last_started"]),
+                      dict(state["components"]["codex"], hook_approval_digest="absent")):
+            with self.subTest(fields=sorted(entry)):
+                bad = dict(state, components=dict(state["components"], codex=entry))
+                bad["outcome"] = records.outcome(bad["components"])
+                self.write(records.state_path(), json.dumps(bad))
+                with self.assertRaises(records.StateUnavailable):
+                    records.read_state()
+                run = dict(self.a_valid_run(bad["outcome"]), components=bad["components"])
+                self.write(records.runs_path(), json.dumps(run) + "\n")
+                problems = []
+                self.assertEqual(records.read_runs(report=problems.append), [])
+                self.assertIn("skipped 1", "\n".join(problems))
+
+    def test_lone_surrogate_history_line_is_skipped_and_later_pass_survives(self):
+        good = self.a_valid_run("needs-attention")
+        good["components"]["codex"] = records.component("unverified", None, None, "retry", good["started"])
+        bad = json.loads(json.dumps(good))
+        bad["components"]["codex"]["next_step"] = "\ud800"
+        self.write(records.runs_path(), json.dumps(bad) + "\n" + json.dumps(good) + "\n")
+        problems = []
+        self.assertEqual(records.read_runs(report=problems.append), [good])
+        self.assertIn("skipped 1", "\n".join(problems))
+        self.assertEqual(self.run_pass(), "complete")
+        self.assertEqual(len(records.read_runs()), 2)
+
+    def test_lone_surrogates_are_rejected_in_state_and_skipped_in_history(self):
+        self.run_pass()
+        good_state = self.state_record()
+        good_run = records.read_runs()[0]
+        for field in ("before", "after", "next_step"):
+            with self.subTest(field=field):
+                state = json.loads(json.dumps(good_state))
+                state["components"]["claude"][field] = "\ud800"
+                if field == "after":
+                    state["components"]["claude"]["settled_version"] = "\ud800"
+                self.write(records.state_path(), json.dumps(state))
+                with self.assertRaises(records.StateUnavailable):
+                    records.read_state()
+                bad_run = dict(good_run, components=state["components"])
+                self.write(records.runs_path(), json.dumps(bad_run) + "\n" + json.dumps(good_run) + "\n")
+                problems = []
+                self.assertEqual(records.read_runs(report=problems.append), [good_run])
+                self.assertIn("skipped 1", "\n".join(problems))
+                self.assertEqual(self.run_pass(), "complete")
+
+    def test_finished_records_must_cover_every_fixed_component(self):
+        self.run_pass()
+        good_state = self.state_record()
+        good_run = records.read_runs()[0]
+        for missing in ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills"):
+            with self.subTest(missing=missing):
+                components = {name: entry for name, entry in good_state["components"].items() if name != missing}
+                state = dict(good_state, components=components, outcome=records.outcome(components))
+                run = dict(good_run, components=components, outcome=records.outcome(components))
+                self.assertIsNotNone(records.state_problem(state))
+                self.assertIsNotNone(records.run_problem(run))
+
     def write(self, path: pathlib.Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
     def a_valid_run(self, outcome="complete") -> dict:
         return {"version": 1, "started": "2026-11-01T00:00:00Z", "finished": "2026-11-01T00:01:00Z",
-                "trigger": "manual", "outcome": outcome, "components": {}, "models_refresh": []}
+                "trigger": "manual", "outcome": outcome, "components": {name: records.component("current", "1", "1", "", "2026-11-01T00:00:00Z")
+                               for name in records.COMPONENTS}, "models_refresh": []}
 
     def test_only_updated_and_current_are_settled(self):
         self.fake.set("claude", update={"stdout": "ok\n", "set_version": "2.1.320"})
@@ -979,7 +941,7 @@ class RecordsTest(FakeToolsCase):
                 self.run_pass()
                 self.assertTrue(any(line.startswith("OAH_UPDATE_STATE_UNAVAILABLE") for line in self.lines))
                 self.assertTrue(self.fake.ran("claude", "update") and self.fake.ran("codex", "update"))
-                self.assertEqual(set(self.components()), {"claude", "codex"})  # a fresh, valid record
+                self.assertEqual(set(self.components()), set(records.COMPONENTS))  # a fresh, valid record
 
     def test_a_missing_updates_folder_is_fresh(self):
         self.assertIsNone(records.read_state())
@@ -988,7 +950,7 @@ class RecordsTest(FakeToolsCase):
 
     def assert_invalid_component(self, entry):
         now = records.stamp(records.utc_now())
-        run = dict(self.a_valid_run(), components={"claude": entry}, started=now, finished=now)
+        run = dict(self.a_valid_run(), components=dict(self.a_valid_run()["components"], claude=entry), started=now, finished=now)
         self.assertIsNotNone(records.run_problem(run))
         state = {"version": 1, "last_started": run["started"], "last_finished": run["finished"],
                  "trigger": run["trigger"], "outcome": run["outcome"], "components": run["components"],
@@ -1022,7 +984,7 @@ class RecordsTest(FakeToolsCase):
             with self.subTest(status=status):
                 now = records.stamp(records.utc_now())
                 entry = records.component(status, "1", "1", "", now)
-                run = dict(self.a_valid_run(claimed), started=now, finished=now, components={"claude": entry})
+                run = dict(self.a_valid_run(claimed), started=now, finished=now, components=dict(self.a_valid_run()["components"], claude=entry))
                 self.assertIsNotNone(records.run_problem(run))
                 state = {"version": 1, "last_started": now, "last_finished": now, "trigger": "manual",
                          "outcome": claimed, "components": run["components"], "models_refresh": []}
@@ -1084,8 +1046,8 @@ class RecordsTest(FakeToolsCase):
         self.assertNotEqual(kept[-1]["started"], "2026-11-01T00:00:00Z")
 
     def test_status_survives_a_bad_state_and_runs_no_subprocess(self):
-        self.write(records.runs_path(), "{torn\n" + json.dumps(dict(self.a_valid_run(), components={
-            "claude": records.component("current", "1", "1", "", "2026-11-01T00:00:00Z")})) + "\n")
+        self.write(records.runs_path(), "{torn\n" + json.dumps(dict(self.a_valid_run(), components=dict(self.a_valid_run()["components"],
+            claude=records.component("current", "1", "1", "", "2026-11-01T00:00:00Z")))) + "\n")
         self.write(records.state_path(), "{not json")
         lines = passes.status_lines()
         self.assertTrue(lines[0].startswith("OAH_UPDATE_STATE_UNAVAILABLE"))
@@ -1113,6 +1075,76 @@ class LockTest(FakeToolsCase):
         self.assertEqual(self.launched, [])
         self.assertTrue(self.lines[0].startswith("OAH_UPDATE_BUSY: another update pass is running"))
         self.assertFalse(records.state_path().exists())
+
+
+class KitAdapterTest(FakeToolsCase):
+    def test_fetch_timeout_is_bounded_and_reported(self):
+        import importlib
+        from oah.engines.proc import RunResult
+        from oah.toolkit import update
+
+        fetch = importlib.import_module("oah.toolkit.fetch")
+        calls = []
+
+        def runner(argv, *, timeout, **options):
+            calls.append((argv, timeout))
+            return RunResult(0, "", "", "fetch" in argv)
+
+        def scheduled(**options):
+            try:
+                options.get("fetcher", fetch.fetch)("https://example.invalid/kit.git", "main",
+                                                    self.fake.tmp / "fetch")
+            except fetch.FetchError as exc:
+                return "ran", [update.UpdateResult("kit", "failed", reasons=[str(exc)])]
+            self.fail("the fake fetch must time out")
+
+        self.configure("after_finish = true\ntimeout_seconds = 2\n")
+        with mock.patch.object(fetch, "run_command", runner), \
+                mock.patch.object(update, "scheduled_update", scheduled), \
+                mock.patch.object(steps, "kit_version", return_value="abc"):
+            self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
+        self.assertEqual([timeout for argv, timeout in calls if "fetch" in argv], [2])
+        entry = self.components()["oah-skills"]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+        self.assertIn("oah skills update", entry["next_step"])
+
+    def test_scan_timeout_keeps_kit_limit_and_reports_partial_update(self):
+        from oah.engines.proc import Resolved, RunResult
+        from oah.toolkit import checks, update
+
+        timeouts = []
+
+        def runner(argv, *, timeout, **options):
+            timeouts.append(timeout)
+            return RunResult(None, "", "", True)
+
+        def scheduled(**options):
+            problems = checks.gitleaks_problems(self.fake.tmp, Resolved(("fake-gitleaks",), "fake", "native"),
+                                                runner=runner)
+            return "ran", [update.UpdateResult("kit", "rolled-back", reasons=problems)]
+
+        with mock.patch.object(update, "scheduled_update", scheduled), \
+                mock.patch.object(steps, "kit_version", return_value="abc"):
+            self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
+        self.assertEqual(timeouts, [checks.GITLEAKS_TIMEOUT])
+        entry = self.components()["oah-skills"]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+        self.assertIn("oah skills update", entry["next_step"])
+
+    def test_kit_timeout_exception_reports_partial_update(self):
+        from oah.toolkit import update
+
+        for error in (TimeoutError(), subprocess.TimeoutExpired(["fake"], 2)):
+            with self.subTest(error=type(error).__name__), \
+                    mock.patch.object(update, "scheduled_update", side_effect=error), \
+                    mock.patch.object(steps, "kit_version", return_value="abc"):
+                self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
+                entry = self.components()["oah-skills"]
+                self.assertEqual(entry["status"], "failed")
+                self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+                self.assertIn("oah skills update", entry["next_step"])
 
 
 def write_lease(state: pathlib.Path, *, expires: str) -> None:
@@ -1159,6 +1191,45 @@ class ReadinessTest(FakeToolsCase):
         write_run(self.state, json.dumps({"status": "finished"}))
         self.assertIsNone(passes.readiness(self.state))
         self.assertEqual(self.run_pass(), "complete")
+
+    def test_linked_task_storage_defers_without_following_it(self):
+        if os.name == "nt":
+            self.skipTest("directory symlinks require Windows developer mode")
+        outside = make_tmp_dir(self)
+        write_run(outside, json.dumps({"status": "running"}))
+        runs = self.state / "runs"
+        runs.mkdir(parents=True)
+        (runs / "t1").symlink_to(outside / "runs" / "t1", target_is_directory=True)
+        self.assertIsNotNone(passes.readiness(self.state))
+        self.assertEqual(self.run_pass(), "deferred")
+        self.assertEqual(self.fake.argv(), [])
+
+    def test_files_in_place_of_run_directories_defer(self):
+        runs = self.state / "runs"
+        for relative in ("runs", "runs/t1", "runs/t1/r20261103T000000Z-0a1b2c3d"):
+            with self.subTest(path=relative):
+                shutil.rmtree(runs, ignore_errors=True)
+                runs.unlink(missing_ok=True)
+                path = self.state / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("not a directory", encoding="utf-8")
+                self.assertIsNotNone(passes.readiness(self.state))
+                self.assertEqual(self.run_pass(), "deferred")
+                self.assertEqual(self.fake.argv(), [])
+
+    def test_unreadable_result_defers(self):
+        write_run(self.state, json.dumps({"status": "finished"}))
+        read_bytes = pathlib.Path.read_bytes
+
+        def denied(path):
+            if path.name == "result.json":
+                raise PermissionError("result denied")
+            return read_bytes(path)
+
+        with mock.patch.object(pathlib.Path, "read_bytes", denied):
+            self.assertIsNotNone(passes.readiness(self.state))
+            self.assertEqual(self.run_pass(), "deferred")
+        self.assertEqual(self.fake.argv(), [])
 
 
 class StartAfterFinishTest(FakeToolsCase):
@@ -1249,14 +1320,14 @@ class AfterFinishPassTest(FakeToolsCase):
     def test_log_holds_the_lines_and_a_not_due_pass_keeps_the_last_log(self):
         log = records.log_path()
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="after-finish",
-                                         out=self.lines.append, log=log, kit=None), "complete")
+                                         out=self.lines.append, log=log, kit=steps.kit_skills), "complete")
         first = log.read_text("utf-8")
         self.assertIn("OAH_UPDATE_FINISHED: outcome complete", first)
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="after-finish",
-                                         out=self.lines.append, log=log, kit=None), "skipped")
+                                         out=self.lines.append, log=log, kit=steps.kit_skills), "skipped")
         self.assertEqual(log.read_text("utf-8"), first)
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="manual",
-                                         out=self.lines.append, kit=None), "complete")
+                                         out=self.lines.append, kit=steps.kit_skills), "complete")
 
 
 class DoctorNoticesTest(FakeToolsCase):
@@ -1275,12 +1346,13 @@ class DoctorNoticesTest(FakeToolsCase):
         launched = len(self.launched)
         notices = passes.doctor_notices(self.root)
         self.assertEqual([(notice["code"], notice.get("component")) for notice in notices],
-                         [("OAH_UPDATE_UNSETTLED", "codex")])
+                         [("OAH_UPDATE_UNSETTLED", "codex"), ("OAH_UPDATE_UNSETTLED", "claude-plugins"),
+                          ("OAH_UPDATE_UNSETTLED", "oah-skills")])
         self.assertIn("(unverified); run codex update yourself", notices[0]["message"])
         self.assertEqual(len(self.launched), launched)  # doctor stays offline: it reads the records only
 
 
-class CodesTest(unittest.TestCase):
+class CodesTest(ToolUpdateTestCase):
     def test_every_update_code_has_a_next_step_and_both_troubleshooting_rows(self):
         import re
 
