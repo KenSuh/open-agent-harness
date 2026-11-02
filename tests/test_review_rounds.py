@@ -14,7 +14,7 @@ import sys
 import unittest
 from unittest import mock
 
-from oah import briefs, call, call_cli, intent
+from oah import briefs, call, call_cli, intent, scoring
 from oah.engines.effort import EngineError
 from oah.engines.proc import RunResult
 from oah.impact.errors import ImpactError
@@ -26,6 +26,7 @@ from oah.review.settings import ReviewSettings
 from oah.runs import RunError
 from oah.secrets import NoKeychain
 from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
+from tests.test_call import SCORES, write_models
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
 FAKE_REVIEWER = FAKES / "fake_review_codex.py"
@@ -76,7 +77,8 @@ class Project:
             {"slug": "gpt-test-a", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in LEVELS]}]}), encoding="utf-8")
         command = [sys.executable, str(FAKE_REVIEWER), "--script", str(self.script)]
-        settings = f"[engines.codex]\ncommand = {toml_list(command)}\n" + config
+        order = "" if "quality_order" in config else 'quality_order = ["gpt-test-a"]\n'
+        settings = f"[engines.codex]\ncommand = {toml_list(command)}\n{order}" + config
         self.base = git_commit(self.repo, {".gitattributes": "* -text\n", "README.md": "hello\n",
                                            ".oah/config.toml": settings,
                                            ".oah/tasks/t1/PACKET.md": packet.replace("\n", newline).encode("utf-8"),
@@ -818,6 +820,151 @@ class DecisionTest(unittest.TestCase):
         self.assertIs(project.receipt(2)["extra_round"], False)
         events = (project.state / "events.jsonl").read_text(encoding="utf-8")
         self.assertIn("--extra-round", events)
+
+
+class AdmissionRoundTest(unittest.TestCase):
+    """`oah review` passes admission before its round starts, so a refusal spends neither a round nor an attempt."""
+
+    def scored(self, config: str = "") -> Project:
+        project = Project(self, config="quality_order = []\n" + config)
+        write_models(project.home)
+        patcher = mock.patch.object(scoring, "bundled", return_value=SCORES)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return project
+
+    def test_a_refused_review_spends_no_round_and_no_attempt(self):
+        project = self.scored("[review]\nmax_rounds = 1\nround_attempts = 1\n")
+        for _ in range(3):
+            with self.assertRaises(EngineError) as caught:
+                project.review(tier="low")
+            self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+            self.assertEqual([line["event"] for line in project.round_log() if line["event"] != "limit"], [])
+        self.assertEqual(project.calls(), [])
+        result = project.review(tier="medium")
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED")
+        self.assertEqual((result.receipt["round"], result.receipt["series_round"]), (1, 1))
+        started = [line for line in project.round_log() if line["event"] == "start"]
+        self.assertEqual([(line["round"], line["attempt"]) for line in started], [(1, 1)])
+
+    def test_a_floor_no_allowed_model_reaches_spends_no_round_and_no_attempt(self):
+        project = self.scored('allowed_models = ["gpt-6-luna"]\n[review]\nmax_rounds = 1\nround_attempts = 1\n')
+        for _ in range(3):
+            with self.assertRaises(EngineError) as caught:
+                project.review(tier="medium")
+            self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+            self.assertIn("allowed_models", str(caught.exception))
+            self.assertEqual([line["event"] for line in project.round_log() if line["event"] != "limit"], [])
+        self.assertEqual(project.calls(), [])
+
+    def test_a_refusal_keeps_the_decision_and_extra_round_unused(self):
+        project = self.scored()
+        events = project.state / "events.jsonl"
+        before = events.read_bytes()
+        with self.assertRaises(EngineError):
+            project.review(tier="low", decision="go on", extra_round=True)
+        self.assertEqual(events.read_bytes(), before, "a call that never started leaves no note of starting")
+        self.assertEqual([line for line in project.round_log() if line["event"] != "limit"], [])
+
+    def test_a_refused_review_leaves_no_run_and_no_snapshot(self):
+        project = self.scored()
+        with self.assertRaises(EngineError):
+            project.review(tier="low")
+        self.assertFalse((project.state / "runs" / "t1").exists() and list((project.state / "runs" / "t1").iterdir()))
+        self.assertEqual(list(project.temp_root.iterdir()), [])
+
+    def test_a_refused_call_leaves_an_approval_current(self):
+        project = self.scored()
+        self.assertEqual(project.review(tier="medium").code, "OAH_REVIEW_CONVERGED")
+        tools = call_cli.intent_tools()
+        with self.assertRaises(EngineError) as caught:
+            call.prepare(call.CallRequest(engine="codex", stage="review", task="t1", tier="low"),
+                         call_cli.load_settings(project.repo), root=project.repo, state_dir=project.state,
+                         env=project.env, footer=tools.footer, has_footer=tools.has_footer, keychain=NoKeychain())
+        self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+        self.assertEqual(project.review(tier="medium").code, "OAH_REVIEW_CONVERGED")
+        self.assertEqual(len(project.calls()), 1, "the approval stands, so no second reviewer call is paid for")
+
+    def test_a_failure_after_admission_keeps_its_spend(self):
+        project = self.scored("[review]\nmax_rounds = 1\n")
+        with mock.patch.object(call, "_brief_skills", side_effect=RuntimeError("private-fixture-marker")):
+            with self.assertRaises(RuntimeError):
+                project.review(tier="medium")
+        events = [line["event"] for line in project.round_log()]
+        self.assertEqual(events[-2:], ["start", "finish"])
+        project.refused("OAH_REVIEW_ROUNDS_EXHAUSTED", tier="medium")
+
+    def test_the_decision_of_a_stopped_task_passes_the_budget_check_before_the_judge(self):
+        project = self.scored()
+        project.queue({"findings": [bug(fix_kind="design")]})
+        self.assertEqual(project.review(tier="medium").code, rounds.NEEDS_DECISION)
+        project.commit({"src/app.py": "print('v2')\n"})
+        self.assertEqual(project.review(tier="medium", decision="keep this design").code, "OAH_REVIEW_CONVERGED")
+
+    def test_an_extra_round_passes_the_budget_check_before_the_judge(self):
+        project = self.scored("[review]\nmax_rounds = 1\n")
+        project.review(tier="medium")
+        project.commit({"src/app.py": "print('v2')\n"})
+        project.refused("OAH_REVIEW_ROUNDS_EXHAUSTED", tier="medium")
+        self.assertEqual(project.review(tier="medium", extra_round=True).code, "OAH_REVIEW_CONVERGED")
+
+    def test_admit_runs_before_and_after_the_judge_on_a_review(self):
+        project = self.scored()
+        with mock.patch.object(call, "admit", wraps=call.admit) as spy:
+            project.review(tier="medium")
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_args.kwargs["stage"], "review")
+
+    def test_refusal_precedes_the_judge_and_start(self):
+        project = self.scored()
+        with mock.patch.object(call, "judge_engine") as judge, self.assertRaises(EngineError):
+            project.review(tier="low")
+        judge.assert_not_called()
+        self.assertEqual([line for line in project.round_log() if line["event"] != "limit"], [])
+
+    def test_an_interrupted_judge_keeps_its_round_and_attempt_on_retry(self):
+        project = self.scored('[review]\nmax_rounds = 1\nround_attempts = 1\n')
+        with mock.patch("oah.rerank.judge_model", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                project.review(tier="medium")
+        events = [line for line in project.round_log() if line["event"] != "limit"]
+        self.assertEqual([line["event"] for line in events], ["start", "finish"])
+        self.assertEqual([(line["round"], line["attempt"]) for line in events], [(1, 1), (1, 1)])
+        with mock.patch.object(call, "judge_engine") as judge:
+            project.refused("OAH_REVIEW_ROUNDS_EXHAUSTED", tier="medium")
+            project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED", tier="medium", extra_round=True)
+        judge.assert_not_called()
+        self.assertEqual(project.calls(), [])
+        self.assertEqual(list(project.temp_root.iterdir()), [])
+
+    def test_the_receipt_shows_what_was_chosen_and_from_which_scores(self):
+        project = self.scored()
+        reviewer = project.review(tier="medium").receipt["reviewer"]
+        self.assertEqual({key: reviewer[key] for key in ("model", "family", "floor_tier", "floor_checked", "profile",
+                                                         "model_source", "score_source", "score_date", "score_credit")},
+                         {"model": "gpt-6.1-terra", "family": "terra", "floor_tier": "medium", "floor_checked": True,
+                          "profile": "balanced", "model_source": "scored", "score_source": "Epoch AI",
+                          "score_date": "2026-11-02", "score_credit": "Epoch AI, a credit line."})
+        self.assertEqual(project.receipt(1)["schema"], receipts.SCHEMA)
+
+    def test_every_reader_takes_a_receipt_with_and_without_the_new_keys(self):
+        project = self.scored()
+        project.review(tier="medium")
+        records = receipts.load(project.state, "t1")
+        self.assertEqual(records.problems, ())
+        path = project.folder() / "R1.json"
+        old = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("family", "floor_tier", "floor_checked", "profile", "score_source", "score_date", "score_credit",
+                    "model_source"):
+            old["reviewer"].pop(key)
+        self.assertEqual(receipts._receipt_shape(old), None)
+
+    def test_a_low_tier_review_of_a_risky_change_refuses_with_no_flag_needed(self):
+        project = self.scored()
+        project.commit({"src/auth/login.py": "x = 1\n"})
+        with self.assertRaises(EngineError) as caught:
+            project.review(tier="low")
+        self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
 
 
 class ValidationTest(unittest.TestCase):

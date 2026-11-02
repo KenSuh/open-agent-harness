@@ -1,4 +1,4 @@
-# 모델 카탈로그 — CLI 가 보고하는 모델·effort 목록을 상태 폴더에 두고 버전 변경·TTL 로 새로 읽으며, 단을 품질 순서로 모델에 잇고 바뀐 값을 기록한다.
+# 모델 카탈로그 — CLI 가 보고하는 모델·effort 목록을 상태 폴더에 두고 버전 변경·TTL 로 새로 읽으며, 고정·풀·품질 목록·점수 규칙 순으로 단을 모델에 잇고 바뀐 값을 기록한다.
 """Models follow updates (A14).
 
 Catalog
@@ -11,24 +11,32 @@ Catalog
     with `OAH_MODELS_REFRESH_FAILED`; nothing is ever downgraded.
 
 Mapping
-    `map_tier` applies the precedence: an explicit tier model (a pin) always wins; then the automatic
-    mapping (the engine's strongest-first `quality_order` filtered to reported models: low takes the
-    last, medium the second or the only one, high and max the first; for Codex without a user list,
-    a model the CLI marks as default); then the effective configuration (Codex's config files). Nothing
-    resolvable raises `OAH_MODEL_UNRESOLVED`.
+    `map_tier` applies the precedence. A tier model (a pin) always wins. With no usable entry nothing else
+    can run: `OAH_MODEL_CATALOG_UNAVAILABLE` names the one-line pin. Then `tier_pools`: the first listed pool
+    model of the tier, and `OAH_MODEL_UNRESOLVED` when a configured tier has none. Then `quality_order`
+    (strongest first, over listed models: low takes the last, medium the second or the only one, high and
+    max the first), which needs no family and no score, so it is the way out when a family is renamed. If it names
+    no listed model, the score rule in `oah.scoring` decides, and `OAH_MODEL_NO_SCORES` says so when it has no
+    scores, or `OAH_MODEL_UNRESOLVED` when no allowed model reaches the floor.
+    `allowed_models` filters pool and `quality_order` picks. The CLI's default flag and Codex's own
+    configuration never choose a model. The old Claude template default
+    `["opus", "sonnet", "haiku"]` counts as unset (`user_order`), so every existing config gets scores with
+    no file edited.
 
 Candidates (amendment 6)
     `build_candidates` makes the closed set a judge may pick from for one call: listed (never hidden)
     models, intersected with `allowed_models` (empty = all), each with its supported ordinary efforts at
     most the model's `effort_caps` entry. With a ranking (`quality_order` names listed models, including
     the floor tier's model), no model weaker than the floor tier's deterministic model; always, no
-    effort below the floor tier's effort. Without a ranking (Revision 3), `tier_pools` declares which
+    effort below the floor tier's effort. With neither a user ranking nor pools, a scored call offers
+    `scoring.band`: mode `scored`, the rule's choice and the models up to the next step's required score.
+    Without a ranking (Revision 3), `tier_pools` declares which
     models the user qualifies for each tier: a model is a candidate only when it is in the pool of the
     call's floor tier and of the call's tier. Models in a pool are peers, in the user's order, with no
     rank inferred; `allowed_models` only filters and never qualifies a model. Pool models left out (below
     the floor effort, above a cap, hidden) and allowed models in no applicable pool are in `excluded`
     with the rule. Configured pools always require both memberships; a missing or empty applicable pool
-    leaves no judged candidates. When neither pools nor a usable ranking are configured, only the
+    leaves no judged candidates. When a partial ranking or partial pools leave no other mode, only the
     deterministic model's effort is judged. `CandidateSet.reject_reason` is the one rule: the
     candidate list is every listed pair it accepts, and a judged answer is used only when it accepts
     that answer too.
@@ -47,7 +55,10 @@ Unpooled notices
 Changes
     `Catalog.record_resolution` stores the last resolved model and effort per engine and tier in
     `resolved.json` and appends `{ts, engine, tier, field, old, new, why}` to `changes.jsonl` for each
-    value that changed.
+    value that changed. A catalog rebuild compares the score rule's choice at each step under the old and
+    new entry (`model_changes`): the rebuild happens once, so its warning and its `changes.jsonl` line
+    need no new state and cannot repeat. A user whose pins, pools or `quality_order` leave no tier to the rule
+    hears nothing about it. `score_notices` names what a rebuild left out and why.
 """
 from __future__ import annotations
 
@@ -55,18 +66,25 @@ import datetime as dt
 import pathlib
 import re
 from dataclasses import dataclass, replace
-from typing import Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
+from oah import scoring
 from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
 from oah.engines import claude, codex
-from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, rank
+from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, highest, rank, resolve
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
 
-DEFAULTS = {"ttl_hours": 24.0}
+DEFAULTS = {"ttl_hours": 24.0, "profile": scoring.DEFAULT_PROFILE}
 PROBE_TIMEOUT = 30.0
-UNRESOLVED = "OAH_MODEL_UNRESOLVED"
+UNRESOLVED = scoring.UNRESOLVED
+CATALOG_UNAVAILABLE = "OAH_MODEL_CATALOG_UNAVAILABLE"
 NEW_UNPOOLED = "OAH_MODEL_NEW_UNPOOLED"
+OLD_CLAUDE_ORDER = ("opus", "sonnet", "haiku")  # the template default before scores: it counts as unset
+CHANGED = "OAH_MODEL_CHANGED"
+UNKNOWN_FAMILY = "OAH_MODEL_UNKNOWN_FAMILY"
+UNSCORED = "OAH_MODEL_UNSCORED"
+ORDER_IGNORED = "OAH_MODEL_ORDER_IGNORED"
 PLAIN_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # A damaged catalog must not stop advisory notice lookup.
 _NOTICE_FAILURES = (StateCorrupt, OSError, TypeError, ValueError, RecursionError)
@@ -81,6 +99,42 @@ class ModelInfo:
 
     def to_json(self) -> dict:
         return {"name": self.name, "efforts": list(self.efforts), "default": self.default, "listed": self.listed}
+
+
+@dataclass(frozen=True)
+class Runnable:
+    launch: str | None
+    reason: Literal["unsupported", "cap-below-floor"] | None = None
+    comparable: bool = False
+
+
+def runnable(info: ModelInfo, tier_effort: str, floor_effort: str, cap: str | None) -> Runnable:
+    """Resolve both efforts against this model, then clamp and check its own floor.
+
+    Literal efforts without catalog metadata still pass through, as for existing pins. Unknown labels
+    cannot be ordered; without a cap they retain the existing unverified-effort behavior.
+    """
+    try:
+        launch = resolve(tier_effort, info.efforts, model=info.name).launch
+        floor = resolve(floor_effort, info.efforts, model=info.name).launch
+    except EngineError:
+        return Runnable(None, "unsupported")
+    launch_rank, floor_rank = rank(launch), rank(floor)
+    if launch_rank is not None and floor_rank is not None and launch_rank < floor_rank:
+        return Runnable(None, "unsupported")
+    if cap is not None:
+        cap_rank = rank(cap)
+        if launch_rank is None or floor_rank is None or cap_rank is None:
+            return Runnable(None, "unsupported")
+        if launch_rank > cap_rank:
+            launch = highest([level for level in info.efforts or (cap,)
+                              if rank(level) is not None and rank(level) <= cap_rank])
+            if launch is None:
+                return Runnable(None, "cap-below-floor")
+            launch_rank = rank(launch)
+    if launch_rank is not None and floor_rank is not None and launch_rank < floor_rank:
+        return Runnable(None, "cap-below-floor")
+    return Runnable(launch, comparable=launch_rank is not None and floor_rank is not None)
 
 
 @dataclass(frozen=True)
@@ -121,6 +175,8 @@ class Freshness:
     refreshed: str | None  # why the entry was rebuilt now, or None
     warnings: tuple[str, ...]
     launch_version: str | None = None  # the current probe, independent of a retained catalog entry
+    previous: Entry | None = None  # the entry a rebuild replaced
+    scores: scoring.ScoreSet | None = None  # read once for this entry; `oah.call.check_catalog` fills it in
 
 
 def utc_now() -> dt.datetime:
@@ -200,8 +256,8 @@ class Catalog:
             write_json_atomic(self.catalog_path, data)
 
     def ensure_fresh(self, engine: str, *, base: Sequence[str], env: Mapping[str, str], ttl_hours: float,
-                     refresh: bool = False, now: dt.datetime | None = None) -> Freshness:
-        """The catalog entry to use for this launch, rebuilt first when it is due."""
+                     refresh: bool = False, now: dt.datetime | None = None, persist: bool = True) -> Freshness:
+        """The catalog entry to use for this launch, rebuilt first when it is due; `persist=False` stores nothing."""
         now = now or utc_now()
         stored = self.load(engine)
         version = probe_version(engine, base, env)
@@ -230,8 +286,9 @@ class Catalog:
                 return Freshness(stored, None, tuple(warnings), version)
             return Freshness(Entry(engine, version, None, (), source), None, tuple(warnings), version)
         entry = Entry(engine, version, _iso(now), models, source)
-        self._save(entry)
-        return Freshness(entry, reason, tuple(warnings), version)
+        if persist:
+            self._save(entry)
+        return Freshness(entry, reason, tuple(warnings), version, previous=stored)
 
     def resolved(self) -> dict:
         data = read_json(self.resolved_path, {})
@@ -256,6 +313,13 @@ class Catalog:
                                                      "at": stamp}
                 write_json_atomic(self.resolved_path, data)
         return changes
+
+    def record_changes(self, engine: str, changes: Sequence[Mapping], *, now: dt.datetime | None = None) -> None:
+        """Append one line per step whose rule choice a rebuild changed."""
+        stamp = _iso(now or utc_now())
+        with StateLock(self.lock_path):
+            for change in changes:
+                append_jsonl(self.changes_path, {"ts": stamp, "engine": engine, "field": "model", **change})
 
     def changes(self) -> list[dict]:
         return read_jsonl(self.changes_path)
@@ -285,30 +349,134 @@ def _by_tier(names: Sequence[str], tier: str) -> str:
     return names[0]
 
 
+def user_order(engine: str, quality_order: Sequence[str]) -> list[str]:
+    """The user's own ranking; the old Claude template default is no choice of theirs, so it counts as unset."""
+    return [] if engine == "claude" and tuple(quality_order) == OLD_CLAUDE_ORDER else list(quality_order)
+
+
+def pin_line(engine: str, tier: str) -> str:
+    return f'[engines.{engine}.tiers] {tier} = {{ model = "<model>" }}'
+
+
 def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], entry: Entry | None,
-             effective: str | None) -> tuple[str, str]:
-    """(model, source) for one tier; source is pin, quality_order, cli_default or effective_config."""
+             scores: scoring.ScoreSet | None, floor_tier: str = "low", profile: str = scoring.DEFAULT_PROFILE,
+             pools: Mapping[str, Sequence[str]] | None = None, allowed: Sequence[str] = (),
+             effort_rules: Callable[[str], bool] | None = None) -> tuple[str, str]:
+    """(model, source) for one tier; source is pin, pool, quality_order or scored."""
     if pin:
         return pin, "pin"
-    available = [model.name for model in entry.models] if entry else []
-    if quality_order:
-        listed = [name for name in quality_order if name in available]
-        if listed:
-            return _by_tier(listed, tier), "quality_order"
-        if engine == "claude" and not available:
-            # Claude Code resolves these aliases itself; the CLI's list could not be read.
-            return _by_tier(list(quality_order), tier), "quality_order(unconfirmed)"
-    elif engine == "codex":
-        defaults = [model.name for model in entry.models if model.default] if entry else []
-        if defaults:
-            return defaults[0], "cli_default"
-    if effective:
-        return effective, "effective_config"
-    reported = f" (it reports: {', '.join(available)})" if available else ""
-    raise EngineError(UNRESOLVED, f"no {engine} model could be resolved for tier {tier}: no tier model is set, "
-                      f"the CLI reports no model from quality_order or marked as default{reported}, and no default "
-                      f"is configured. Set [engines.{engine}.tiers] {tier} = {{ model = \"<model>\" }} in "
-                      f".oah/config.toml, or list a reported model in [engines.{engine}] quality_order")
+    listed = sorted(_listed(entry))
+    if not listed:
+        raise EngineError(CATALOG_UNAVAILABLE, f"oah has no list of {engine} models, so nothing can be chosen for tier "
+                          f"{tier}. Run the {engine} CLI once so it refreshes its model list, then `oah models "
+                          f"--refresh`, or set {pin_line(engine, tier)} in .oah/config.toml")
+    usable = [name for name in listed if not allowed or name in allowed]
+    pool = (pools or {}).get(tier)
+    if pool:
+        named = [name for name in pool if name in usable]
+        if not named:
+            raise EngineError(UNRESOLVED, f"[engines.{engine}.tier_pools] {tier} names no model the {engine} CLI lists "
+                              f"and allowed_models permits (it lists: {', '.join(listed)}). Fix that pool in "
+                              f".oah/config.toml, or set {pin_line(engine, tier)}")
+        runnable_names = [name for name in named if effort_rules is None or effort_rules(name)]
+        if not runnable_names:
+            raise scoring.FloorUnmet(UNRESOLVED, f"no model in [engines.{engine}.tier_pools] {tier} is runnable; "
+                                     "change its tier effort or effort_caps in .oah/config.toml")
+        return runnable_names[0], "pool"
+    order = [name for name in user_order(engine, quality_order) if name in usable]
+    if order:
+        runnable_order = [name for name in order if effort_rules is None or effort_rules(name)]
+        if not runnable_order:
+            raise scoring.FloorUnmet(UNRESOLVED, f"no model in [engines.{engine}] quality_order is runnable; "
+                                     "change its tier effort or effort_caps in .oah/config.toml")
+        return _by_tier(runnable_order, tier), "quality_order"
+    if scores is None:
+        raise EngineError(scoring.NO_SCORES, f"no benchmark scores are available for {engine}; run `oah doctor`, or set "
+                          f"{pin_line(engine, tier)} in .oah/config.toml")
+    return scoring.choose(scores, tier, floor_tier, profile, usable=effort_rules).model, "scored"
+
+
+def rule_decides(engine: str, section: Mapping, entry: Entry | None) -> bool:
+    """Whether the score rule picks any tier; with a user ranking or every tier pinned or pooled, it picks none."""
+    allowed = section["allowed_models"]
+    listed = _listed(entry)
+    order = [name for name in user_order(engine, section["quality_order"]) if name in listed
+             and (not allowed or name in allowed)]
+    return not order and any(not section["tiers"][tier]["model"] and not section["tier_pools"].get(tier)
+                             for tier in section["tiers"])
+
+
+def model_changes(before: scoring.ScoreSet, after: scoring.ScoreSet, profile: str, entry: Entry) -> list[dict]:
+    """One row per step where the rule now chooses another model; no scores on either side compares nothing."""
+    if not before.models or not after.models:
+        return []
+    known = {item.model for item in before.models}
+    listed = _listed(entry)
+    rows = []
+    for step in range(scoring.TOP_STEP + 1):
+        old, new = scoring.at_step(before, step, profile).model, scoring.at_step(after, step, profile).model
+        if old != new:
+            why = (f"{old} is no longer listed" if old not in listed else
+                   "newer generation" if after.left_out.get(old) == "superseded" or new not in known else
+                   "the eligible models changed")
+            rows.append({"step": step, "old": old, "new": new, "why": why})
+    return rows
+
+
+def changed_warning(engine: str, change: Mapping) -> str:
+    return (f"{CHANGED}: {engine} step {change['step']} now uses {change['new']} (was {change['old']}): {change['why']}; "
+            f"run `oah models` to see the scores, or set a pin in [engines.{engine}.tiers] to keep a model")
+
+
+def score_notices(engine: str, scores: scoring.ScoreSet) -> list[str]:
+    """What a rebuild tells the user about listed models the rule left out; only plain names are shown."""
+    notices = []
+    for name, reason in sorted(scores.left_out.items()):
+        if not PLAIN_MODEL.fullmatch(name):
+            continue
+        if reason == "unknown-family":
+            notices.append(f"{UNKNOWN_FAMILY}: the {engine} CLI lists {name}, which is no family oah knows, so it is "
+                           f"never chosen automatically. To use it, name it in [engines.{engine}] quality_order or a "
+                           "tier in .oah/config.toml, or update oah")
+        elif reason == "unscored":
+            stays = scores.stays.get(name)
+            kept = f", so {stays} stays" if stays else ""
+            notices.append(f"{UNSCORED}: the {engine} CLI lists {name}, which has no usable score yet{kept}. It joins "
+                           "when a score arrives; to use it now, name it in .oah/config.toml")
+    return notices
+
+
+def order_notice(engine: str, quality_order: Sequence[str]) -> str | None:
+    """The one line `oah models` says when the old template default is in the file; the file stays as it is."""
+    if user_order(engine, quality_order) == list(quality_order) or not quality_order:
+        return None
+    return (f"{ORDER_IGNORED}: [engines.{engine}] quality_order is the old default, so it was ignored and scores choose. "
+            "Remove the line, or list other models in .oah/config.toml to rank them yourself")
+
+
+def score_report(scores: scoring.ScoreSet, profile: str, *, left_out: Mapping[str, str] | None = None) -> dict:
+    """The profile, the scores with their credit, and each listed model left out with its reason."""
+    rows = [{"model": item.model, "family": item.family, "score": round(item.score, 1), "cost": item.cost}
+            for item in scores.models]
+    return {"profile": profile,
+            "scores": {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
+            if rows else None,
+            "left_out": {name: reason for name, reason in sorted({**scores.left_out, **(left_out or {})}.items())
+                         if PLAIN_MODEL.fullmatch(name)}}
+
+
+def offline_claude(allowed: Sequence[str] = ()) -> tuple[Entry | None, scoring.ScoreSet]:
+    """Every known Claude alias with the packaged scores, for `oah init`, which reads no catalog and runs no CLI."""
+    try:
+        known = scoring.families()
+        aliases = tuple(ModelInfo(alias, ()) for alias in known["engines"]["claude"]["aliases"])
+    except EngineError as exc:
+        return None, scoring.failed("claude", exc)
+    entry = Entry("claude", None, None, aliases, "packaged aliases")
+    try:
+        return entry, scoring.score_set("claude", entry, allowed=allowed, known=known)
+    except EngineError as exc:
+        return entry, scoring.failed("claude", exc)
 
 
 @dataclass(frozen=True)
@@ -330,8 +498,8 @@ class CandidateSet:
     deterministic: Pair
     floor_tier: str
     floor: Pair
-    # "ranked": quality_order ranks the models; "pools": the user's tier pools, unranked peers;
-    # "deterministic": effort only without pools; no candidates when an applicable pool is missing.
+    # "ranked": quality_order ranks the models; "pools": the user's tier pools, unranked peers; "scored": the
+    # score band; "deterministic": effort only without pools; no candidates when an applicable pool is missing.
     mode: str
     order: tuple[str, ...]  # the ranked listed models, strongest first (empty without a ranking)
     allowed: tuple[str, ...]
@@ -342,7 +510,9 @@ class CandidateSet:
     note: str | None = None  # why the model is not judged ("model choice off: ...")
     tier: str = ""
     pools: tuple[tuple[str, tuple[str, ...]], ...] = ()  # the configured tier pools, as given
-    qualified: tuple[str, ...] = ()  # in both the floor tier's and the call tier's pool (pools mode)
+    qualified: tuple[str, ...] = ()  # in both tiers' pools (pools mode), or in the score band (scored mode)
+    admission_rule: Callable[[str, str], str | None] | None = None  # the call's model-specific review checks
+    floor_effort: str | None = None  # the configured label, including highest; never another model's maximum
 
     @property
     def ranked(self) -> bool:
@@ -369,18 +539,17 @@ class CandidateSet:
         elif self.mode == "pools":
             if model not in self.qualified:
                 return "not-in-tier-pool"
+        elif self.mode == "scored":
+            if model not in self.qualified:
+                return "outside-score-bound"
         elif model != self.deterministic.model:
             return "outside-candidates"
-        floor_rank = rank(self.floor.effort)
-        if floor_rank is None:
-            if effort != self.deterministic.effort:
-                return "outside-candidates"
-        elif rank(effort) < floor_rank:
-            return "below-floor"
-        cap = dict(self.caps).get(model)
-        if cap is not None and rank(cap) is not None and rank(effort) > rank(cap):
+        result = runnable(info, effort, self.floor_effort or self.floor_tier, dict(self.caps).get(model))
+        if result.reason == "cap-below-floor" or (result.reason is None and result.launch != effort):
             return "above-cap"
-        return None
+        if result.reason is not None:
+            return "below-floor"
+        return self.admission_rule(model, effort) if self.admission_rule is not None else None
 
     def to_json(self) -> dict:
         return {"deterministic": self.deterministic.to_json(),
@@ -392,17 +561,21 @@ class CandidateSet:
 
 def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, tier: str, floor_tier: str,
                      floor: Pair, quality_order: Sequence[str], allowed_models: Sequence[str],
-                     effort_caps: Mapping[str, str], tier_pools: Mapping[str, Sequence[str]]) -> CandidateSet:
+                     effort_caps: Mapping[str, str], tier_pools: Mapping[str, Sequence[str]],
+                     scores: scoring.ScoreSet | None = None, profile: str = scoring.DEFAULT_PROFILE,
+                     admission_rule: Callable[[str, str], str | None] | None = None,
+                     tier_effort: str | None = None, floor_effort: str | None = None) -> CandidateSet:
     """The closed candidate set for one call (see Candidates above)."""
     listed = [model.name for model in entry.models if model.listed] if entry else []
-    order = tuple(name for name in quality_order if name in listed)
+    order = tuple(name for name in user_order(engine, quality_order) if name in listed)
     ranked = bool(order) and floor.model in order
     allowed = tuple(dict.fromkeys(allowed_models))
     pools = tuple((name, tuple(dict.fromkeys(tier_pools[name]))) for name in tier_pools)
     pool = dict(pools)
     applicable = tuple(dict.fromkeys((floor_tier, tier)))
     pooled = all(pool.get(name) for name in applicable)
-    mode = "ranked" if ranked else "pools" if pooled else "deterministic"
+    scored = scores is not None and bool(scores.models) and not order and not pools
+    mode = "ranked" if ranked else "pools" if pooled else "scored" if scored else "deterministic"
     note = None
     if mode == "deterministic":
         missing = " and ".join(name for name in applicable if not pool.get(name))
@@ -412,10 +585,19 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
     # Peers keep the call tier's pool order; a model must be in every applicable pool.
     qualified = tuple(name for name in pool.get(tier, ()) if all(name in pool[t] for t in applicable)) \
         if mode == "pools" else ()
+    if mode == "scored":
+        # The effort rules can move the rule's choice, so the model that would run is the one always offered.
+        def usable(name: str) -> bool:
+            info = entry.model(name) if entry is not None else None
+            return info is not None and runnable(info, tier_effort or tier,
+                                                  floor_effort or floor_tier, effort_caps.get(name)).reason is None
+
+        qualified = scoring.band(scores, replace(scoring.choose(scores, tier, floor_tier, profile, usable=usable),
+                                                 model=deterministic.model))
     rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
                         tuple(sorted(effort_caps.items())), entry, note=note, tier=tier, pools=pools,
-                        qualified=qualified)
-    names = list(order) if ranked else list(qualified) if mode == "pools" else [deterministic.model]
+                        qualified=qualified, admission_rule=admission_rule, floor_effort=floor_effort)
+    names = list(order) if ranked else list(qualified) if mode in ("pools", "scored") else [deterministic.model]
     found: list[Pair] = []
     excluded: list[tuple[str, str]] = []
     others = [name for name in dict.fromkeys([*(n for t in applicable for n in pool.get(t, ())), *allowed])

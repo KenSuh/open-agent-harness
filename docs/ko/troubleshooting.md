@@ -27,10 +27,28 @@
 | `OAH_CONFIG_UNKNOWN_KEY` | `.oah/config.toml`에 `oah`가 모르는 키가 있다. 오타인 경우가 많다. | 지우거나 메시지에 나온 키 가운데 하나로 바꾼다. |
 | `OAH_ENGINE_MISSING` | `claude`나 `codex`가 PATH에 없다. | 설치하거나(`oah doctor`가 명령을 알려 준다) `.oah/config.toml`의 `[engines.claude]`나 `[engines.codex]`에 `command`를 적는다. |
 | `OAH_UNSUPPORTED_BATCH_SHIM` | Windows에서 엔진이 `oah`가 안전하게 실행할 수 없는 `.cmd`나 `.bat` 파일이다. | 도구의 네이티브 실행 파일을 설치하거나 `.oah/config.toml`에 `command = ["<interpreter>.exe", "<script>"]`를 직접 적는다. |
-| `OAH_MODEL_UNRESOLVED` | tier에 쓸 모델을 찾지 못했다. 고정한 모델도, 카탈로그 항목도, 엔진 설정의 기본 모델도 없다. | `.oah/config.toml`에 그 tier의 `model`을 적거나, 엔진에 기본 모델이 생긴 뒤 `oah models --refresh`를 실행한다. |
 | `OAH_EFFORT_METADATA_MISSING` | tier가 `highest` 강도를 요청했는데 엔진이 모델의 추론 단계를 알려 주지 않았다. `oah`는 짐작하지 않는다. | 엔진을 한 번 실행해 모델 목록을 저장하게 한 뒤 `oah models --refresh`를 실행한다. 아니면 그 tier에 강도를 직접 적는다. |
 | `OAH_EFFORT_UNSUPPORTED` | tier의 강도가 모델이 밝힌 단계에 없다. | 메시지에 나온 단계 가운데 하나나 `highest`로 바꾼다. |
 | `OAH_STATE_LOCK_TIMEOUT` | 다른 `oah` 명령이 상태 잠금을 쥐고 있다. | 그 명령이 끝나기를 기다렸다가 다시 실행한다. |
+
+## 모델
+
+이 코드들은 `main`에 있고 아직 릴리스하지 않았다. 규칙은 [모델을 고르는 방법](concepts.md#모델을-고르는-방법)에 있고,
+`oah models`는 모델별 점수와 빠진 이유를 보여 준다.
+
+| 코드 | 뜻 | 다음에 할 일 |
+|---|---|---|
+| `OAH_MODEL_UNRESOLVED` | tier의 `tier_pools`에 CLI가 나열하고 `allowed_models`가 허용하는 모델이 없거나, 허용된 모델 가운데 이 일의 최저 기준에 닿는 모델이 없다. | 그 후보 목록을 고치거나 `.oah/config.toml`의 `allowed_models`에 더 강한 모델을 더한다. CLI가 나열하지 않으면 CLI를 업데이트한다. |
+| `OAH_MODEL_CATALOG_UNAVAILABLE` | `oah`에 엔진의 모델 목록이 없어서 아무것도 고를 수 없다. | 엔진을 한 번 실행해 목록을 새로 받은 뒤 `oah models --refresh`를 실행하거나 그 tier에 모델을 고정한다. |
+| `OAH_MODEL_NO_SCORES` | 벤치마크 점수로 모델을 고를 수 없다. 패키지 자료가 손상됐거나 나열된 모델에 쓸 수 있는 점수가 없다. | `oah models`로 이유를 보고 `oah`를 다시 설치하거나 그 tier에 모델을 고정한다. |
+| `OAH_MODEL_NOT_LISTED` | 새로 읽은 Codex 카탈로그에 이 tier에 고정한 모델이 없다. 아무것도 실행하지 않았다. | `oah models`를 실행하고 `.oah/config.toml`의 고정 모델을 바꾼다. |
+| `OAH_MODEL_BELOW_FLOOR` | 리뷰의 tier, 모델, 강도가 최저 기준 아래이거나 허용된 모델 가운데 그 기준에 닿는 모델이 없다. 라운드와 시도는 쓰지 않았다. | 메시지가 말한 tier를 쓰거나 `.oah/config.toml`의 고정 모델, 후보 목록, `quality_order`, `allowed_models`를 바꾼다. |
+| `OAH_MODEL_FLOOR_UNCHECKED` | 알림이다. 직접 적은 모델에 점수가 없어서 리뷰의 최저 기준을 확인하지 못했다. 영수증에 그렇게 남는다. | 확인을 원하면 점수가 있는 모델을 적는다. |
+| `OAH_MODEL_SUPERSEDED` | 알림이다. 직접 적은 모델에 더 새 세대가 있다. 그대로 실행한다. | 원할 때 `.oah/config.toml`의 그 줄을 바꾼다. |
+| `OAH_MODEL_UNSCORED` | 알림이다. CLI가 나열한 모델에 아직 쓸 수 있는 점수가 없어서 옛 모델이 남는다. | 할 일은 없다. 점수가 나오면 합류한다. 지금 쓰려면 `.oah/config.toml`에 이름을 적는다. |
+| `OAH_MODEL_UNKNOWN_FAMILY` | 알림이다. CLI가 나열한 모델의 모델군을 `oah`가 몰라서 자동으로 고르지 않는다. | `quality_order`나 tier에 이름을 적거나 `oah`를 업데이트한다. |
+| `OAH_MODEL_CHANGED` | 알림이다. 카탈로그 재구성으로 어떤 단계에서 규칙이 쓰는 모델이 바뀌었다. 한 번 나오고 `changes.jsonl`에 남는다. | 할 일은 없다. 모델을 지키려면 고정한다. |
+| `OAH_MODEL_ORDER_IGNORED` | `oah models`의 알림이다. `quality_order`가 옛 기본값이라 설정하지 않은 것으로 치고 점수가 고른다. | 그 줄을 지우거나 다른 모델을 적어 직접 순서를 정한다. |
 
 ## 리스
 

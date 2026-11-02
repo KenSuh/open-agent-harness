@@ -100,17 +100,24 @@ not replace Claude Code or Codex: it drives them and keeps the records that make
 
 Nothing below is **available in v0.2.0** yet. Plans can change as the tools change.
 
-### v0.3.0: model choices you can check
+### v0.3.0: models chosen from benchmarks
 
 Planned, after v0.2.0:
 
-- When Jev has low confidence, the rule-based choice runs. A call is never blocked.
-- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later.
-  Counts alone do not prove Jev helped.
-- Benchmark data, opt-in and with its source and date, supports model choice. A new model shows its evidence and joins
-  your tier pools only when you confirm it.
-- AI task classification and three profiles (performance, balanced, efficient) arrive in record-only mode: they record
-  what they would choose and do not change the model that runs. Applying them comes after that data has been reviewed.
+- Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs. Balanced takes
+  the cheapest model that reaches it, efficient the best score per price, and performance the top scorer for the hardest work. No table ties a difficulty to a
+  model, and every current model is a candidate in every profile.
+- Scores come from Epoch AI, with no key and no account. With your own Artificial Analysis key, oah uses those instead. Published
+  scores measure general quality, not your repository.
+- A new model generation joins once it has a score, and superseded or removed models drop out, with no file edited. Each change
+  shows a plain notice and stays in the run record.
+- TypeSafe Jev judges difficulty from the task's Intent and Scope paths. When Jev is off or has low confidence, the rule-based
+  difficulty runs. A call is never blocked.
+- A review never runs below the floor for its risk, whatever a flag, packet, profile or judge says.
+- After the last lease finishes, `oah` can update Claude Code, Codex, plugins, MCP servers and skills, then re-read the model lists.
+  `oah init` asks once, and you can turn it off.
+- `oah models report` counts how model choices were made, and an export saves them as cases you can compare later. Counts alone do
+  not prove Jev helped.
 
 Your pinned models, tier pools, effort caps and task floors stay in force throughout.
 
@@ -505,17 +512,22 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 
 아래 내용은 모두 **v0.2.0에서는 아직 쓸 수 없다**. 도구가 바뀌면 계획도 바뀔 수 있다.
 
-#### v0.3.0: 확인할 수 있는 모델 선택
+#### v0.3.0: 벤치마크로 고르는 모델
 
 다음 내용은 v0.2.0 다음으로 계획하고 있다.
 
-- Jev의 확신도가 낮으면 규칙이 고른 선택으로 실행한다. 호출을 막지는 않는다.
-- `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가
-  증명되지는 않는다.
-- 사용자가 켜면 출처와 날짜가 붙은 벤치마크 자료를 모델 선택의 근거로 쓴다. 새 모델은 근거를 보여 주고, 사용자가
-  확인해야 tier 후보에 들어간다.
-- AI 작업 분류와 세 프로필(performance, balanced, efficient)은 기록 전용으로 먼저 들어간다. 무엇을 골랐을지 기록할
-  뿐 실행 모델은 바꾸지 않으며, 그 자료를 검토한 뒤 적용한다.
+- 벤치마크 점수가 모델을 고른다. 난이도와 프로필(performance, balanced, efficient)이 작업에 필요한 점수를 정한다. balanced는 그
+  점수에 닿는 가장 싼 모델을, efficient는 가격 대비 점수가 가장 좋은 모델을, performance는 가장 어려운 일에 최고점 모델을 쓴다. 난이도마다 모델을 정해 둔 표는 없고, 현재 모델은 모든
+  프로필에서 후보가 된다.
+- 점수는 키나 계정 없이 Epoch AI에서 가져온다. 자기 Artificial Analysis 키가 있으면 그 점수를 대신 쓴다. 공개 점수는 모델의 일반 성능을
+  재는 것이고, 내 저장소에서의 성능을 재는 것은 아니다.
+- 새 세대 모델은 점수가 나오면 합류하고, 낡거나 사라진 모델은 빠진다. 파일은 고치지 않는다. 바뀔 때마다 쉬운 말로 알리고 실행 기록에 남긴다.
+- TypeSafe Jev가 작업의 Intent와 Scope 경로를 보고 난이도를 판정한다. Jev가 꺼져 있거나 확신도가 낮으면 규칙이 정한 난이도로 실행한다.
+  호출을 막지는 않는다.
+- 리뷰는 플래그, 패킷, 프로필, 판정이 무엇을 말해도 위험도에 맞는 하한 아래로 실행하지 않는다.
+- 마지막 임대가 끝나면 `oah`가 Claude Code, Codex, 플러그인, MCP 서버, 스킬을 갱신하고 모델 목록을 다시 읽을 수 있다. `oah init`에서 한 번
+  묻고, 끌 수 있다.
+- `oah models report`가 모델 선택 기록을 집계하고, 내보내기로 나중에 비교할 사례를 남긴다. 횟수만으로 Jev의 효과가 증명되지는 않는다.
 
 고정한 모델, tier 후보, 추론 강도 상한, 작업별 최저 기준은 그대로 유지된다.
 

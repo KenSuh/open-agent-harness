@@ -175,7 +175,8 @@ class ConfigTest(unittest.TestCase):
         template = resources.files("oah").joinpath("templates/init/config.toml").read_text(encoding="utf-8")
         self.assertEqual(template.count("The highest effort any call may use"), 2)
         self.assertEqual(template.count("including for model pins and without Jev"), 2)
-        self.assertEqual(template.count("floor effort refuses with OAH_CONFIG_INVALID"), 2)
+        self.assertEqual(template.count("floor effort skips that model"), 2)
+        self.assertEqual(template.count("model pin refuses with OAH_CONFIG_INVALID"), 2)
         self.assertNotIn("never lowered by a cap", template)
 
     def test_configured_keys_load(self):
@@ -312,7 +313,7 @@ class JudgeCallTest(unittest.TestCase):
             ("error:bad-response", {}, FakeJudge(answer=("m-strong",)), {}),
             ("error:bad-response", {}, FakeJudge(answer=None), {}),
             ("one-candidate", {"extra": '[engines.codex.effort_caps]\n"m-mid" = "medium"\n'
-                                        '"m-strong" = "low"\n'}, FakeJudge(), {}),
+                                        '"m-strong" = "low"\n"m-light" = "low"\n'}, FakeJudge(), {}),
         ]
         for reason, options, provider, fields in rows:
             with self.subTest(reason=reason):
@@ -379,7 +380,7 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["model_judge"], {"disabled": "unused(not-enabled)",
                     "rejected": "rejected(above-cap)", "pinned": "unused(pinned)", "used": "used"}[mode])
 
-    def test_cap_below_kind_floor_refuses_before_launch_in_every_mode(self):
+    def test_cap_below_kind_floor_skips_automatic_choices_and_refuses_pins(self):
         for mode in ("disabled", "rejected", "pinned", "used"):
             with self.subTest(mode=mode):
                 extra = '[engines.codex.effort_caps]\n"m-strong" = "medium"\n'
@@ -387,15 +388,21 @@ class JudgeCallTest(unittest.TestCase):
                     extra += '[engines.codex.tiers.high]\nmodel = "m-strong"\n'
                 project = judged_project(self, extra=extra, jev=mode != "disabled")
                 provider = FakeJudge(("m-extra", "high"))
-                with judge(project, provider), self.assertRaises(EngineError) as caught:
-                    project.run(stage="review", axes={"kind": "security"})
-                self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
-                self.assertIn("effort_caps", str(caught.exception))
-                self.assertIn("floor", str(caught.exception))
-                self.assertIn(".oah/config.toml", str(caught.exception))
-                self.assertEqual(provider.calls, [])
-                self.assertFalse(project.record.exists())
-                self.assertEqual(project.runs(), [])
+                with judge(project, provider):
+                    if mode == "pinned":
+                        with self.assertRaises(EngineError) as caught:
+                            project.run(stage="review", axes={"kind": "security"})
+                        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+                        self.assertIn("effort_caps", str(caught.exception))
+                        self.assertIn("floor", str(caught.exception))
+                        self.assertEqual(provider.calls, [])
+                        self.assertFalse(project.record.exists())
+                        self.assertEqual(project.runs(), [])
+                        self.assertEqual(calls.spent(project), [])
+                    else:
+                        data = project.run(stage="review", axes={"kind": "security"})
+                        self.assertEqual((data["status"], data["resolved_model"], data["launch_effort"]),
+                                         ("finished", "m-mid", "high"))
 
     def test_clamp_uses_a_supported_effort_below_the_cap(self):
         project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "xhigh"\n', jev=False)
@@ -414,22 +421,20 @@ class JudgeCallTest(unittest.TestCase):
         argv = project.recorded()["argv"]
         self.assertEqual(argv[argv.index("--effort") + 1], "medium")
 
-    def test_cap_refuses_when_no_supported_effort_can_meet_the_floor(self):
+    def test_cap_skips_a_model_when_no_supported_effort_can_meet_the_floor(self):
         project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "medium"\n', jev=False)
         catalog = json.loads((project.home / "models_cache.json").read_bytes())
         catalog["models"][0]["supported_reasoning_levels"] = [{"effort": e} for e in ("low", "high", "max")]
         (project.home / "models_cache.json").write_bytes(json.dumps(catalog).encode("utf-8"))
-        with self.assertRaises(EngineError) as caught:
-            project.run(stage="review", axes={"reasoning": "high"})
-        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
-        self.assertFalse(project.record.exists())
+        data = project.run(stage="review", axes={"reasoning": "high"})
+        self.assertEqual((data["resolved_model"], data["launch_effort"]), ("m-mid", "high"))
 
     def test_cap_does_not_guess_an_order_for_behaviour_changing_effort(self):
         project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "high"\n'
                                  '[engines.codex.tiers.high]\neffort = "ultra"\n', jev=False)
         with self.assertRaises(EngineError) as caught:
             project.run(stage="review", axes={"reasoning": "high"})
-        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
         self.assertFalse(project.record.exists())
 
     def test_missing_or_empty_applicable_pool_skips_judging(self):
@@ -441,8 +446,8 @@ class JudgeCallTest(unittest.TestCase):
                         pools.pop(absent)
                         if empty:
                             pools[absent] = []
-                        extra = '[engines.codex.tier_pools]\n' + "".join(
-                            f"{tier} = {json.dumps(names)}\n" for tier, names in pools.items())
+                        extra = ("" if ranked else 'quality_order = ["m-strong"]\n') + '[engines.codex.tier_pools]\n'
+                        extra += "".join(f"{tier} = {json.dumps(names)}\n" for tier, names in pools.items())
                         if cap is not None:
                             extra += f'[engines.codex.effort_caps]\n"m-strong" = "{cap}"\n'
                         project = judged_project(self, ranked=ranked, extra=extra)
@@ -453,25 +458,98 @@ class JudgeCallTest(unittest.TestCase):
                         self.assertEqual(data["model_choice"]["candidates"], [])
                         self.assertIsNone(data["model_choice"]["proposal"])
                         self.assertEqual(provider.calls, [])
-                        self.assertEqual(launched(project), ("m-strong", cap or "max"))
+                        # A pool of the call's own tier now picks the model; without one the order does.
+                        self.assertEqual(launched(project), ("m-extra", "high") if pools.get("max")
+                                         else ("m-strong", cap or "max"))
 
-    def test_without_a_ranking_only_the_effort_is_judged(self):
-        for answer, status, expected in ((("m-strong", "xhigh"), "used", ("m-strong", "xhigh")),
-                                         (("m-mid", "high"), "rejected(outside-candidates)", ("m-strong", "medium"))):
+    def test_without_a_ranking_the_judge_picks_inside_the_score_band(self):
+        rows = ((("gpt-6.1-sol", "high"), "used", ("gpt-6.1-sol", "high")),
+                (("gpt-6-astra", "xhigh"), "used", ("gpt-6-astra", "xhigh")),
+                (("gpt-6-luna", "high"), "rejected(outside-score-bound)", ("gpt-6.1-terra", "high")))
+        for answer, status, expected in rows:
             with self.subTest(answer=answer):
-                project = judged_project(self, ranked=False)
+                project = calls.scored_project(self, JEV_ON)
+                project.env[KEY_NAME] = fake_key()
                 with judge(project, FakeJudge(answer)):
-                    data = project.run(stage="review")
+                    data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
                 self.assertEqual(data["model_judge"], status)
-                self.assertEqual(data["model_choice"]["deterministic"]["source"], "cli_default")
-                self.assertEqual({pair[0] for pair in data["model_choice"]["candidates"]}, {"m-strong"})
-                self.assertEqual((data["model_choice"]["mode"], data["model_choice"]["note"]),
-                                 ("deterministic", "model choice off: no ranking and no tier pools"))
+                choice = data["model_choice"]
+                self.assertEqual(choice["deterministic"]["source"], "scored")
+                self.assertEqual(choice["deterministic"]["model"], "gpt-6.1-terra")
+                self.assertEqual({pair[0] for pair in choice["candidates"]},
+                                 {"gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"})
+                self.assertEqual((choice["mode"], choice["note"]), ("scored", None))
+                self.assertEqual(data["model_source"], "judge" if status == "used" else "scored")
                 self.assertEqual(launched(project), expected)
 
+    def test_a_judge_answer_below_a_review_floor_never_runs(self):
+        low = '[engines.codex.tier_pools]\nmedium = ["gpt-6.1-terra", "gpt-6-luna"]\n'
+        rows = (("scored", "", "rejected(outside-score-bound)"), ("pools", low, "rejected(below-floor)"))
+        for mode, extra, status in rows:
+            with self.subTest(mode=mode):
+                project = calls.scored_project(self, extra + JEV_ON)
+                project.env[KEY_NAME] = fake_key()
+                with judge(project, FakeJudge(("gpt-6-luna", "medium"))):
+                    data = project.run(stage="review", tier="medium")
+                self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
+                self.assertEqual(launched(project), ("gpt-6.1-terra", "medium"))
+
+    def test_review_candidates_and_answers_use_each_models_own_highest_effort(self):
+        for mode in ("scored", "pools", "ranked"):
+            for rule_max, proposal_max, answer, status in (
+                    ("high", "max", "high", "rejected(below-floor)"),
+                    ("high", "max", "max", "used"),
+                    ("max", "high", "high", "used")):
+                with self.subTest(mode=mode, rule_max=rule_max, proposal_max=proposal_max, answer=answer):
+                    extra = ('[engines.codex.tiers.medium]\neffort = "highest"\n'
+                             '[engines.codex.tiers.high]\neffort = "highest"\n'
+                             f'[engines.codex.effort_caps]\n"gpt-6.1-sol" = "{proposal_max}"\n')
+                    order = '["gpt-6.1-terra", "gpt-6.1-sol"]' if mode == "ranked" else "[]"
+                    if mode == "pools":
+                        extra += ('[engines.codex.tier_pools]\n'
+                                  'medium = ["gpt-6.1-terra", "gpt-6.1-sol"]\n'
+                                  'high = ["gpt-6.1-terra", "gpt-6.1-sol"]\n')
+                    project = calls.scored_project(self, extra + JEV_ON, order=order)
+                    project.env[KEY_NAME] = fake_key()
+                    levels = {"gpt-6.1-terra": ("low", "medium", "high", rule_max),
+                              "gpt-6.1-sol": ("low", "medium", "high", proposal_max)}
+                    (project.home / "models_cache.json").write_text(json.dumps({"models": [
+                        {"slug": name, "supported_reasoning_levels": [{"effort": e} for e in dict.fromkeys(
+                            levels.get(name, calls.EFFORTS))]} for name in calls.SCORED_MODELS]}), encoding="utf-8")
+                    provider = FakeJudge(("gpt-6.1-sol", answer))
+                    with judge(project, provider):
+                        data = project.run(stage="review", tier="high")
+                    self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
+                    pairs = data["model_choice"]["candidates"]
+                    self.assertIn(["gpt-6.1-terra", rule_max], pairs)
+                    self.assertIn(["gpt-6.1-sol", proposal_max], pairs)
+                    if proposal_max == "max":
+                        self.assertNotIn(["gpt-6.1-sol", "high"], pairs)
+                    self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in pairs})
+                    expected = ("gpt-6.1-terra", rule_max) if status.startswith("rejected") else (
+                        "gpt-6.1-sol", answer)
+                    self.assertEqual(launched(project), expected)
+
+    def test_a_review_judge_works_under_the_scope_floor_not_the_kind_floor(self):
+        project = calls.scored_project(self, JEV_ON)
+        project.packet("## Scope\n- src/auth/login.py\n")
+        project.env[KEY_NAME] = fake_key()
+        with judge(project, FakeJudge(("gpt-6.1-terra", "medium"))):
+            data = project.run(stage="review", axes={"kind": "quick"})
+        self.assertEqual((data["tier"], data["model_choice"]["floor"]["tier"]), ("high", "high"))
+        self.assertEqual(data["model_judge"], "rejected(below-floor)", "medium effort is below the high floor")
+
+    def test_efficient_stays_efficient_under_a_judge(self):
+        project = calls.scored_project(self, '[models]\nprofile = "efficient"\n' + JEV_ON)
+        project.env[KEY_NAME] = fake_key()
+        with judge(project, FakeJudge(("gpt-6-astra", "high"))):
+            data = project.run(stage="correction", tier="medium", axes={"kind": "quick"})
+        self.assertEqual(data["model_judge"], "rejected(outside-score-bound)")
+        self.assertEqual(launched(project), ("gpt-6.1-terra", "medium"))
+
     def test_tier_pools_qualify_peers_for_a_high_floor_call(self):
-        # AC8 (Revision 3): a security review has floor high; without a ranking the deterministic choice is the
-        # CLI default at high. Only models the user put in the high pool are candidates, as unordered peers.
+        # AC8 (Revision 3): a security review has floor high; the deterministic choice is the first listed model of
+        # the high pool. Only models the user put in the high pool are candidates, as unordered peers.
         pools = '[engines.codex.tier_pools]\nhigh = ["m-strong", "m-extra"]\nmax = ["m-strong", "m-extra"]\n'
         rows = [
             ("a pool peer other than the deterministic model", ("m-extra", "high"), "", "used", ("m-extra", "high")),
@@ -496,7 +574,7 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["status"], "finished")
                 self.assertEqual((data["tier"], data["model_judge"]), ("high", status))
                 choice = data["model_choice"]
-                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "high", "source": "cli_default"})
+                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "high", "source": "pool"})
                 self.assertEqual(choice["floor"], {"tier": "high", "model": "m-strong", "effort": "high"})
                 self.assertEqual((choice["mode"], choice["note"]), ("pools", None))
                 capped = "effort_caps" in extra
@@ -506,7 +584,7 @@ class JudgeCallTest(unittest.TestCase):
                                  else {"m-light": "not-in-tier-pool"} if "m-light" in extra else {})
                 self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in choice["candidates"]})
                 self.assertEqual((data["resolved_model"], data["launch_effort"]), expected)
-                self.assertEqual(data["model_source"], "judge" if status == "used" else "cli_default")
+                self.assertEqual(data["model_source"], "judge" if status == "used" else "pool")
                 self.assertEqual(launched(project), expected)
 
     def test_a_pin_overrides_any_pool(self):

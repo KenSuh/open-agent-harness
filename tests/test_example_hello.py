@@ -175,7 +175,7 @@ class WalkthroughTest(unittest.TestCase):
         for folder in (home, codex_home, bin_dir):
             folder.mkdir()
         (codex_home / "models_cache.json").write_text(json.dumps({"models": [
-            {"slug": "gpt-test-a", "is_default": True,
+            {"slug": "gpt-6.1-sol", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in ("low", "medium", "high", "xhigh")]}]}),
             encoding="utf-8")
         self.stub = StubNode(self.tmp / "stub")

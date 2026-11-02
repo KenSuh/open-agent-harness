@@ -32,7 +32,7 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Callable, Mapping, NamedTuple
 
-from oah import call, ci, hooks, intent, models, rerank, routing, rules, skillsel, unlazy
+from oah import call, ci, hooks, intent, models, rerank, routing, rules, scoring, skillsel, unlazy
 from oah.atomic import StateCorrupt, StorageError
 from oah.config import Config, ConfigError, parse_config
 from oah.engines import proc
@@ -232,15 +232,21 @@ def _yaml(value: str) -> str:
     return value if _PLAIN.fullmatch(value) else json.dumps(value, ensure_ascii=False)
 
 
-def agent_files(engines: Mapping) -> dict[str, bytes]:
-    """`.claude/agents/oah-<tier>.md` per tier: model by A14's mapping (a tier pin wins), effort from the tier."""
+def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE) -> dict[str, bytes]:
+    """`.claude/agents/oah-<tier>.md` per tier: model by A14's mapping (a tier pin wins), effort from the tier.
+
+    Offline: it reads no catalog and runs no CLI, so every alias competes on the packaged scores."""
     claude = engines["claude"]
+    entry, scores = models.offline_claude(claude["allowed_models"])
+    profile = profile if profile in scoring.PROFILES else scoring.DEFAULT_PROFILE  # `oah call` reports a bad value
     files = {}
     for tier in routing.TIERS:
         values = claude["tiers"][tier]
         try:
             model, _source = models.map_tier("claude", tier, pin=values["model"],
-                                             quality_order=claude["quality_order"], entry=None, effective=None)
+                                             quality_order=claude["quality_order"], entry=entry, scores=scores,
+                                             profile=profile, pools=claude["tier_pools"],
+                                             allowed=claude["allowed_models"])
         except EngineError:
             model = "inherit"  # nothing resolves: the subagent uses the session's model
         description = (f"oah {tier} tier: {TIER_WORK[tier]}. Model {model}, effort {values['effort']}, "
@@ -2466,6 +2472,7 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     has_config = existing is not None and existing.path is not None
     effective = existing if has_config and not force else parse_config(config)
     engines = effective.section("engines", call.ENGINE_DEFAULTS)
+    profile = effective.section("models", models.DEFAULTS)["profile"]
     wiki = WikiSettings.from_mapping(effective.section("wiki", WIKI_DEFAULTS))
     wiki = dataclasses.replace(wiki, dir=_wiki_dir(root, wiki.dir))
     ci_section = effective.section("ci", ci.DEFAULTS)
@@ -2477,7 +2484,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     unlazy_copy = unlazy_step is not None and (unlazy_step.action in ("install", "replace") or (
         unlazy_step.action == "present"
         and pathlib.Path(unlazy_step.folder) == root / (unlazy_step.target or UNLAZY_PROJECT)))
-    files = plan_files(root, config=config, wiki_dir=wiki.dir, agents=agent_files(engines) if values["agents"] else {},
+    files = plan_files(root, config=config, wiki_dir=wiki.dir,
+                       agents=agent_files(engines, profile=profile) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
     rules_step = plan_rules(root, lang=lang)
     aside_local, aside_rules = _plan_aside(root, rules_step) if "aside" in apps else (None, None)

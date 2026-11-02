@@ -142,12 +142,10 @@ stateDiagram-v2
   짐작하지 않고 `OAH_EFFORT_METADATA_MISSING`으로 거절한다.
 - **강도는 검증하고 몰래 낮추지 않는다.** Codex 헤더가 요청보다 낮은 강도를 보고하면 실행은
   `OAH_EFFORT_DOWNGRADED`로 실패한다. Claude Code처럼 관측할 수 없는 강도는 `unverified`로 기록한다.
-- **tier 후보는 선택 사항이다.** `.oah/config.toml`의 `[engines.<engine>.tier_pools]`에 tier마다 판정기가 고를 수 있는
-  모델을 적는다. 예를 들면 `high = ["model-a", "model-b"]`다. 판정기가 고르는 모델은 호출의 tier와 그 하한 tier
-  양쪽 후보에 모두 있어야 한다. `quality_order`가 모델 순위를 정하지 않으면 TypeSafe Jev가 그 안에서 모델과 강도를
-  고를 수 있다. 후보 목록은 규칙이 고른 선택을 제한하지 않으며, Jev를 쓰지 않거나 답이 거절되면 그 선택으로 실행한다.
-  tier 모델 고정이 없고 `quality_order`가 비어 있으면 규칙이 어느 후보에도 없는 새 Codex CLI 기본 모델을 따를 수 있다.
-  이를 막으려면 `.oah/config.toml`에 `[engines.<engine>.tiers] <tier> = { model = "<model>" }`로 모델을 고정한다.
+- **tier 후보는 선택 사항이다.** `.oah/config.toml`의 `[engines.<engine>.tier_pools]`에 tier마다 확인한 모델을 적는다.
+  예를 들면 `high = ["model-a", "model-b"]`다. 그 tier는 CLI가 나열한 첫 모델로 실행하고, 나열된 모델이 없으면
+  `OAH_MODEL_UNRESOLVED`로 알린다. 판정기가 고르는 모델은 호출의 tier와 그 하한 tier 양쪽 후보에 모두 있어야 한다.
+  `quality_order`가 모델 순위를 정하지 않으면 TypeSafe Jev가 그 안에서 모델과 강도를 고를 수 있다.
   후보 목록이 설정되어 있고 목록에 없는 모델이 보고되면 `oah models`, `oah doctor`, 카탈로그를 다시 읽은 실행이
   `OAH_MODEL_NEW_UNPOOLED`로 알려 준다. `oah doctor`는 CLI를 새로 읽지 않고 저장된 카탈로그를 쓴다.
   `oah`가 후보를 대신 고치지는 않는다.
@@ -189,6 +187,76 @@ flowchart TD
     class jev,used ai
     class unused note
 ```
+
+### 모델을 고르는 방법
+
+이 내용은 `main`에 있고 아직 릴리스하지 않았다. 어느 엔진이 어느 단계를 맡는지는 `[stages]`를 따른다. 여기서는 엔진 안의
+모델을 고른다. 호출, 워커, 수정, 리뷰 모두 같으며, 아래에서 먼저 해당하는 것을 쓴다.
+
+1. tier에 고정한 모델. `.oah/config.toml`의 `[engines.<engine>.tiers] <tier> = { model = "<model>" }`이다.
+2. 그 tier의 `tier_pools`에서 CLI가 나열한 첫 모델.
+3. 나열된 모델을 가리키는 `quality_order`. 모델군도 점수도 필요 없어서 모델군 이름이 바뀌었을 때 쓸 수 있다. 옛 기본값
+   `["opus", "sonnet", "haiku"]`는 설정하지 않은 것으로 치고 `oah models`가 알려 준다(`OAH_MODEL_ORDER_IGNORED`). 파일은
+   고치지 않는다.
+4. 점수 규칙.
+
+**점수 규칙.** 벤치마크 점수, 작업 난이도, `[models] profile`이 정한다. 난이도를 모델에 잇는 표는 없어서 점수가 바뀌면
+결과도 바뀐다. tier는 low 0, medium 1, high 2, max 3으로 센다. `performance`는 1을 더하고 `balanced`는 그대로 두며, 값은
+0에서 3 사이로 둔다. 이 단계는 작업 종류의 최저 기준 아래로 내려가지 않는다. 단계마다 필요한 점수는 척도를 3등분한 위치다.
+`performance`와 `balanced`는 그 점수에 닿은 모델 가운데 정가가 가장 싼 모델로 실행하고, 같으면 점수가 낮은 쪽을 쓴다. 그래서
+더 비싸면서 점수가 낮은 모델은 고르지 않는다. `efficient`는 tier의 단계를 그대로 두되 최저 기준을 넘지 않는 선에서 한 단계
+아래까지 볼 수 있다. 거기서부터 위로 정가 대비 점수가 가장 높은 모델을 쓰고, 같으면 점수가 낮은 쪽을 쓴다. 그래서 더 강한
+모델이 값어치가 더 좋으면 그 모델이 이긴다. `balanced`와 `efficient`는 기준보다 척도의 2퍼센트 안쪽으로 낮은 모델도 받는다.
+그만한 차이로 비싼 모델을 살 이유가 없기 때문이다. `performance`에는 이 여유가 없고 최저 기준에도 없다. 고를 수 있는 모델이
+그 단계에 닿지 못하면 최저 기준을 넘는 가장 강한 모델로 실행한다. 추론 강도는 여전히 tier가 정한다.
+
+모든 프로필은 먼저 tier의 강도로 최저 기준을 지키며 실행할 수 없는 모델을 뺀다. `highest`를 포함한 두 강도는 각 모델
+자신의 지원 목록에서 구한다. `effort_caps`는 지원하는 단계로 강도를 낮추되, 그 모델의 최저 강도보다 낮은 상한이면 모델을
+건너뛴다. 실행할 모델이 없으면 리뷰는 `OAH_MODEL_BELOW_FLOOR`, 다른 호출은 `OAH_MODEL_UNRESOLVED`로 멈추고 고칠 tier 강도나
+상한을 알려 준다. 실행할 수 없는 고정 모델은 `OAH_CONFIG_INVALID`로 멈춘다. 상한으로 강도를 낮추면 여전히 `OAH_EFFORT_CAPPED`를
+기록하고, `left_out`에 `not-runnable`과 이유를 표시한다.
+
+`efficient`는 점수 자체를 따지는데, 모든 공통 과제에서 꼴찌인 모델의 점수는 0이다. 그래서 `balanced`가 그 꼴찌 모델을 고를
+자리에서도 기준에 닿는 다른 모델을 쓰고, 낮은 tier에서는 `balanced`보다 비쌀 수 있다.
+
+**척도.** 점수와 단계별 기준은 내 컴퓨터가 아니라 자료에서 나온다. 척도는 아는 모델군 전부(Codex는 `luna`, `terra`, `sol`,
+`astra`, Claude는 `haiku`, `sonnet`, `opus`, `fable`)에 걸쳐 있고, 모델군마다 자료에 있는 가장 새 세대를 쓴다. 점수는 그 모델들이
+함께 가진 과제마다 최저와 최고 사이의 위치를 0에서 100으로 매긴 평균이고, 공통 과제가 3개 이상 있어야 한다. 그래서 내 CLI가
+나열하지 않거나 `allowed_models`가 뺀 모델도 척도의 자리를 지키며, 어느 쪽도 점수를 바꾸거나 최저 기준을 낮출 수 없다.
+
+**후보가 되는 모델.** CLI가 나열하고 숨기지 않았으며, 모델군을 알고, 공통 과제를 모두 가졌고, 그 모델군에서 그런 모델 가운데
+가장 새 세대이며, `allowed_models`가 허용하는 모델이다. 점수가 없는 새 세대는 기다리고 옛 세대가 남으므로 모델군이 비지 않는다
+(`OAH_MODEL_UNSCORED`). CLI가 가장 새 세대를 나열하지 않을 때도 옛 세대가 대신한다. 이 모델은 같은 척도로 점수를 받고 척도를
+넓히지 않는다. `oah`가 모르는 모델군은 자동으로 고르지 않는다(`OAH_MODEL_UNKNOWN_FAMILY`). 직접 이름을 적은 모델은 이 검사를
+건너뛰고, 옛 세대를 적었다면 `OAH_MODEL_SUPERSEDED`를 알리고 실행한다.
+
+**점수가 재는 것.** 점수는 Epoch AI가 공개한 벤치마크에서 Epoch 자체 과제만 가져오며, 각 모델의 최대 강도 결과다. 이 과제는
+대부분 수학, 퍼즐, 추론이다. 코딩 과제가 아니고 수도 적으며 내 저장소에 대해서는 아무것도 말하지 않는다. 점수는 그 과제에서
+모델을 비교할 뿐 어떤 모델이 전반적으로 낫다는 뜻이 아니다. 정가는 실제 비용을 대신할 뿐이고 구독은 사용량으로 낸다. 점수가
+틀렸거나 오래됐으면 더 약한 모델로 일이 갈 수 있으므로 `oah models`가 출처와 날짜를 보여 준다. 새 모델은 점수가 공개될
+때까지 며칠이나 몇 주를 기다릴 수 있다. 직접 정하려면 모델을 고정한다.
+
+**리뷰에는 최저 기준이 있다.** 리뷰의 최저 기준은 `medium`이고, 범위에 위험한 경로가 있거나 작업 종류가 요구하면 `high`다.
+범위에서 다시 계산하므로 플래그, 패킷의 축, 프로필, 판정기의 답으로 낮출 수 없고, 고정된 척도 위의 기준이므로
+`allowed_models`로도 낮출 수 없다. tier, 모델, 강도가 기준 아래인 리뷰는 `OAH_MODEL_BELOW_FLOOR`로 멈추고, 이 거절은 라운드나
+시도를 쓰지 않는다. 직접 적은 모델에 점수가 없으면 `OAH_MODEL_FLOOR_UNCHECKED`를 알리고 실행하며, 영수증에 기준을 확인하지
+못했다고 남긴다.
+
+**실행을 멈추는 경우.** 모델 목록이 없으면 `OAH_MODEL_CATALOG_UNAVAILABLE`, 쓸 수 있는 점수가 없으면 `OAH_MODEL_NO_SCORES`다. 둘 다
+모델을 고정하면 넘어가고, `oah`가 기본 모델로 대신 실행하는 일은 없다. 허용된 모델 가운데 그 일의 최저 기준에 닿는 모델이
+없으면 리뷰는 `OAH_MODEL_BELOW_FLOOR`로, 다른 호출은 `OAH_MODEL_UNRESOLVED`로 멈추고 둘 다 `allowed_models`를 알려 준다. 새로
+읽은 Codex 카탈로그에 없는 고정 모델은 `OAH_MODEL_NOT_LISTED`로 멈춘다. Claude Code는 출력하지 않는 이름도 받으므로 Claude
+고정 모델은 확인하지 않는다.
+
+**선택 확인하기.** `oah models`와 `oah doctor`는 프로필, 출처와 날짜, 출처 표시가 붙은 점수, tier별 모델, 빠진 모델과 이유를
+보여 준다. `oah doctor`는 로컬 상태만 읽는다. `oah recommend --engine <engine> --stage <stage>`는 작업 하나에 대한 답을 주며
+아무것도 실행하거나 쓰지 않는다. 리뷰 영수증에는 모델군, 최저 기준, 프로필, 모델의 출처, 쓴 점수가 남는다. 카탈로그 재구성으로
+선택이 바뀌면 `OAH_MODEL_CHANGED`가 한 번 알리고 `changes.jsonl`에 남는다.
+
+점수 출처는 다음과 같다.
+
+Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from
+'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026. Licence: CC BY 4.0.
 
 ## 스킬 선택
 
@@ -436,9 +504,9 @@ flowchart LR
 
 모델과 스킬은 나아지는데 하네스가 그대로면 점점 뒤처진다. 그래서 `oah`는 업데이트를 따라간다.
 
-- **모델.** Claude의 tier는 Claude Code의 별칭(`opus`, `sonnet`, `haiku`)을 쓰고 이 별칭은 최신 모델로 풀린다.
-  Codex의 tier는 내 Codex 설정이 쓰는 모델에서 출발하고, 더 새 모델은 Codex가 기본값으로 표시하거나 내
-  `quality_order`에 이름이 있을 때만 쓴다. `oah`는 실행할 때마다 먼저 모델 카탈로그가 최신인지 확인한다.
+- **모델.** 각 CLI가 나열한 모델 가운데 점수로 고른다. 알려진 모델군의 새 세대는 점수가 생기면 다음 카탈로그
+  재구성부터 쓰고, 대체되거나 사라진 모델은 같은 재구성부터 고르지 않는다. 규칙은
+  [모델을 고르는 방법](#모델을-고르는-방법)에 있다. `oah`는 실행할 때마다 먼저 모델 카탈로그가 최신인지 확인한다.
   사용자가 고정한 모델이 늘 이기고, 바뀔 때마다 이전 값과 새 값, 시각, 이유를 기록한다.
 - **스킬.** `[skills] auto_update = true`이면 `oah` 상태 폴더의 키트 캐시를 하루에 많아야 한 번 확인하고 리스가
   열려 있으면 하지 않는다. 업데이트는 반영하기 전에 라이선스, 읽기, 개인정보 스캔을 검사하고 실패하면

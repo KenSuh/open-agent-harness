@@ -564,12 +564,13 @@ class CheckedInTimesTest(unittest.TestCase):
     def test_ci_keeps_five_shards_and_the_limit_and_describes_the_basis(self):
         text = text_of(ROOT / ".github" / "workflows" / "ci.yml")
         self.assertRegex(text, r"(?m)^ +shard: \[1, 2, 3, 4, 5\]$")
-        self.assertRegex(text, r"(?m)^ +timeout-minutes: 45$")
+        self.assertIn("    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 45 }}\n", text)
         self.assertIn("run: python tools/test_shard.py ${{ matrix.shard }} 5 -v", text)
         self.assertNotIn("balanced by test count", text)
         self.assertIn("tools/test_shard_times.json", text)
         self.assertIn("tools/shard_times.py", text)
-        self.assertIn("not by a higher limit or more shards", text)
+        self.assertIn("60 minutes on Windows and 45 on macOS", text)
+        self.assertIn("balanced split with fresh data comes first", text)
 
 
 def log_line(clock, text=""):

@@ -30,10 +30,28 @@ cannot point at a code that is gone.
 | `OAH_CONFIG_UNKNOWN_KEY` | `.oah/config.toml` has a key `oah` does not know, often a typo. | Remove it, or use one of the keys the message lists. |
 | `OAH_ENGINE_MISSING` | `claude` or `codex` is not on your PATH. | Install it (`oah doctor` prints the command), or set `command` under `[engines.claude]` or `[engines.codex]` in `.oah/config.toml`. |
 | `OAH_UNSUPPORTED_BATCH_SHIM` | Windows: the engine is a `.cmd` or `.bat` file that `oah` cannot start safely. | Install the tool's native executable, or set an explicit `command = ["<interpreter>.exe", "<script>"]` in `.oah/config.toml`. |
-| `OAH_MODEL_UNRESOLVED` | No model could be found for a tier: no pin, no catalog entry and no default in the engine's own configuration. | Set the tier's `model` in `.oah/config.toml`, or run `oah models --refresh` after the engine has a default model. |
 | `OAH_EFFORT_METADATA_MISSING` | A tier asks for `highest` effort, but the engine has not reported the model's reasoning levels, so `oah` does not guess. | Run the engine once so it caches its model list, then `oah models --refresh`; or set a literal effort for the tier. |
 | `OAH_EFFORT_UNSUPPORTED` | The tier's effort is not one the model lists. | Set the tier's effort to one of the levels in the message, or to `highest`. |
 | `OAH_STATE_LOCK_TIMEOUT` | Another `oah` command holds the state lock. | Wait for it to finish, then run your command again. |
+
+## Models
+
+These appear on `main`, which is not in a release yet. [How a model is chosen](concepts.md#how-a-model-is-chosen) has the
+rule, and `oah models` shows each model's score and why a model was left out.
+
+| Code | What it means | What to do next |
+|---|---|---|
+| `OAH_MODEL_UNRESOLVED` | A tier's `tier_pools` names no model the CLI lists and `allowed_models` permits, or no allowed model reaches the floor this work needs. | Fix that pool, or add a stronger model to `allowed_models` in `.oah/config.toml`. If the CLI lists none, update it. |
+| `OAH_MODEL_CATALOG_UNAVAILABLE` | `oah` has no list of the engine's models, so nothing can be chosen. | Run the engine once so it refreshes its list, then `oah models --refresh`, or pin a model for the tier. |
+| `OAH_MODEL_NO_SCORES` | No benchmark scores can choose a model: the packaged data is damaged, or no listed model has a usable score. | Run `oah models` to see why, reinstall `oah`, or pin a model for the tier. |
+| `OAH_MODEL_NOT_LISTED` | A fresh Codex catalog no longer lists the model pinned for this tier. Nothing was launched. | Run `oah models`, then change the pin in `.oah/config.toml`. |
+| `OAH_MODEL_BELOW_FLOOR` | A review's tier, model or effort is below its floor, or no allowed model reaches that floor. No round or attempt was spent. | Use the tier the message names, or change the pin, pool, `quality_order` or `allowed_models` in `.oah/config.toml`. |
+| `OAH_MODEL_FLOOR_UNCHECKED` | A notice: a review ran on a model you named that has no score, so its floor was not checked. The receipt says so. | Name a scored model if you want the check. |
+| `OAH_MODEL_SUPERSEDED` | A notice: a model you named has a newer generation. It still runs. | Change that line in `.oah/config.toml` when you choose to. |
+| `OAH_MODEL_UNSCORED` | A notice: the CLI lists a model with no usable score yet, so the older one stays. | Nothing. It joins when a score arrives. To use it now, name it in `.oah/config.toml`. |
+| `OAH_MODEL_UNKNOWN_FAMILY` | A notice: the CLI lists a model of a family `oah` does not know, so it is never chosen automatically. | Name it in `quality_order` or a tier, or update `oah`. |
+| `OAH_MODEL_CHANGED` | A notice: a catalog rebuild changed the model the rule uses at a step. It appears once and stays in `changes.jsonl`. | Nothing. To keep a model, pin it. |
+| `OAH_MODEL_ORDER_IGNORED` | A notice from `oah models`: `quality_order` is the old default, so it counts as unset and scores choose. | Remove the line, or list other models to rank them yourself. |
 
 ## Leases
 

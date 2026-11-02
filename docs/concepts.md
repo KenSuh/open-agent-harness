@@ -149,13 +149,11 @@ each engine.
 - **Effort is verified, never lowered silently.** When Codex's header reports a lower effort than requested,
   the run fails with `OAH_EFFORT_DOWNGRADED`. An effort that cannot be observed, such as Claude Code's, is
   recorded as `unverified`.
-- **Tier pools are optional.** `[engines.<engine>.tier_pools]` in `.oah/config.toml` lists the models the judge
-  may pick for each tier, for example `high = ["model-a", "model-b"]`. A judged model must be in the pool of
-  the call's tier and of its floor tier. When `quality_order` does not rank the models, TypeSafe Jev may pick a
-  model and effort among those candidates. Pools do not limit the rule-based choice, which runs when Jev is
-  unused or its answer is rejected. With no tier model pin and an empty `quality_order`, that choice can follow
-  a new Codex CLI default outside every pool. To prevent this, set
-  `[engines.<engine>.tiers] <tier> = { model = "<model>" }` in `.oah/config.toml`.
+- **Tier pools are optional.** `[engines.<engine>.tier_pools]` in `.oah/config.toml` lists the models you have
+  checked for each tier, for example `high = ["model-a", "model-b"]`. That tier runs the first one the CLI lists,
+  and `OAH_MODEL_UNRESOLVED` says so when it lists none. A judged model must be in the pool of the call's tier and
+  of its floor tier. When `quality_order` does not rank the models, TypeSafe Jev may pick a model and effort among
+  those candidates.
   With pools configured, a listed model in no pool gets `OAH_MODEL_NEW_UNPOOLED` from `oah models`, `oah doctor`
   and a launch that rebuilt the catalog. `oah doctor` uses the stored catalog without rereading the CLI.
   `oah` never edits your pools.
@@ -198,6 +196,81 @@ flowchart TD
     class jev,used ai
     class unused note
 ```
+
+### How a model is chosen
+
+This is on `main` and not in a release yet. Which engine does a stage stays as `[stages]` says. This picks the model
+inside the engine, for every call, worker, correction and review, and takes the first of these that applies:
+
+1. A model you pinned for the tier: `[engines.<engine>.tiers] <tier> = { model = "<model>" }` in `.oah/config.toml`.
+2. The first model the CLI lists from that tier's `tier_pools`.
+3. `quality_order`, when it names a listed model. It needs no family and no score, so it is your way out when a family
+   is renamed. The old default `["opus", "sonnet", "haiku"]` counts as unset, and `oah models` says so
+   (`OAH_MODEL_ORDER_IGNORED`). Your file is not edited.
+4. The score rule.
+
+**The score rule.** Benchmark scores, the task's difficulty and `[models] profile` decide. No table maps a difficulty
+to a model, so the result moves when the scores move. Tiers count low 0, medium 1, high 2 and max 3. `performance` adds
+1 and `balanced` adds nothing, kept within 0 to 3, and the step never goes below the floor of the task's kind. A step
+needs a score that many thirds along the scale. `performance` and `balanced` take the cheapest model by list price that
+reaches the step, then the lower score, so a costlier model with a lower score is not chosen. `efficient` keeps the
+tier's step and may go one step lower, never below the floor. From there up it takes the most score per list price, then
+the lower score, so a stronger model wins when it is the better value. `balanced` and `efficient` also accept a model
+within 2 percent of the scale below the mark, because a gap that small should not buy a costlier model. `performance` has
+no such margin, and a floor never has one. When nothing that may be picked reaches the step, the strongest model that
+meets the floor runs. The tier still sets the effort.
+
+Every profile first skips models that cannot run the tier's effort at the floor. Both efforts, including `highest`,
+resolve against each model's own supported levels. `effort_caps` clamps to a supported level; a cap below that model's
+floor skips it. If none can run, a review stops with `OAH_MODEL_BELOW_FLOOR`, and another call with
+`OAH_MODEL_UNRESOLVED`, naming the tier effort or cap to change. An unrunnable pin stops with `OAH_CONFIG_INVALID`.
+Clamps still record `OAH_EFFORT_CAPPED`, and `left_out` reports `not-runnable` with the reason.
+
+`efficient` weighs the score itself, and a model last on every common task scores 0. So it takes another model that
+clears, even where `balanced` would take the last one, and it can cost more than `balanced` at a low tier.
+
+**The scale.** The scores and the mark of each step come from the data, not from your machine. The scale runs over every
+known family, `luna`, `terra`, `sol` and `astra` for Codex and `haiku`, `sonnet`, `opus` and `fable` for Claude, using each
+family's newest generation in the data. Each score is the mean, over the tasks those models share, of the model's place
+from 0 to 100 between the lowest and highest of them, and at least 3 common tasks are required. So a model your CLI does
+not list, or `allowed_models` leaves out, keeps its place on the scale, and neither can move a score or lower a floor.
+
+**Which models compete.** A model competes when the CLI lists it and does not hide it, its family is known, it has every
+common task, it is the newest generation of its family with those tasks, and `allowed_models` permits it. A new
+generation with no score waits and the older one stays, so a family never goes empty (`OAH_MODEL_UNSCORED`). An older
+generation also stands in when the CLI does not list the newest one: it is scored on the same scale and does not stretch
+it. A family `oah` does not know is never chosen automatically (`OAH_MODEL_UNKNOWN_FAMILY`). A model you name yourself
+skips these tests, and an older generation you name runs with `OAH_MODEL_SUPERSEDED`.
+
+**What the scores measure.** They come from Epoch AI's published benchmarks, on Epoch's own tasks only, with each model
+at its maximum effort. Those tasks are mostly maths, puzzles and reasoning. They are not coding tasks, there are few of
+them, and they say nothing about your repository. A score compares models on those tasks and does not say one model is
+better in general. List prices stand in for what you pay, and a subscription pays in quota instead. A wrong or stale
+score can send work to a weaker model, so `oah models` shows the source and the date. A new model waits for a published
+score, which can take days or weeks. To decide for yourself, pin a model.
+
+**Reviews have a floor.** A review's floor is `medium`, or `high` when a path in its scope is risky or its kind needs it.
+It is scored again from the scope, so no flag, packet axis, profile or judge answer can lower it, and it is a mark on the
+fixed scale, so `allowed_models` cannot either. A review whose tier, model or effort is below the floor stops with
+`OAH_MODEL_BELOW_FLOOR`, and the refusal spends no round or attempt. A model you named that has no score runs with
+`OAH_MODEL_FLOOR_UNCHECKED`, and the receipt says the floor was not checked.
+
+**What stops a launch.** With no list of models, `OAH_MODEL_CATALOG_UNAVAILABLE`. With no usable scores,
+`OAH_MODEL_NO_SCORES`. A pin gets past both, and `oah` never falls back to a default model. When no allowed model reaches the
+floor of the work, a review stops with `OAH_MODEL_BELOW_FLOOR` and any other call with `OAH_MODEL_UNRESOLVED`, and both name
+`allowed_models`. A pin that a fresh Codex catalog no longer lists stops with `OAH_MODEL_NOT_LISTED`. Claude Code accepts names
+it does not print, so its pins are not checked.
+
+**Seeing the choice.** `oah models` and `oah doctor` show the profile, the scores with their source, date and credit, each
+tier's model, and each listed model left out with its reason. `oah doctor` reads local state only. `oah recommend --engine
+<engine> --stage <stage>` gives the answer for one task, launches nothing and writes nothing. A review receipt records
+the family, floor, profile, source of the model and the scores used. When a catalog rebuild changes a choice,
+`OAH_MODEL_CHANGED` says so once and `changes.jsonl` keeps it.
+
+Scores come from this source:
+
+Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from
+'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026. Licence: CC BY 4.0.
 
 ## Skill selection
 
@@ -456,10 +529,10 @@ flowchart LR
 
 A harness that stays the same while models and skills improve slowly falls behind, so `oah` follows updates:
 
-- **Models.** Claude tiers use Claude Code's aliases (`opus`, `sonnet`, `haiku`), which resolve to its newest
-  models. Codex tiers start from the model your Codex configuration uses and adopt a newer one only when Codex
-  marks it as default or your `quality_order` names it. Before every launch `oah` checks that its model catalog
-  is fresh. A model you pin always wins, and every change is logged with old, new, when and why.
+- **Models.** Scores choose among the models each CLI lists. A newer generation of a known family is used from
+  the next catalog rebuild once it has a score, and a superseded or vanished model stops being chosen at that same
+  rebuild. [How a model is chosen](#how-a-model-is-chosen) has the rule. Before every launch `oah` checks that its
+  model catalog is fresh. A model you pin always wins, and every change is logged with old, new, when and why.
 - **Skills.** With `[skills] auto_update = true`, the kit cache in `oah`'s state folder is checked at most once
   a day and never while a lease is active. Updates are checked (license, loading, privacy scan) before they are
   published and roll back on failure. Your project's tracked skill copies stay pinned until you run

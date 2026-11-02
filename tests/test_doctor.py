@@ -14,6 +14,7 @@ from unittest import mock
 
 from oah.console import make_safe
 from oah.doctor import check_tools, exit_code, gates_in_use, project_root, python_status, render_json, render_text
+from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.models import Catalog, Entry, ModelInfo
 from oah.setup import catalog, display
@@ -435,6 +436,104 @@ class McpNoticeDoctorTest(unittest.TestCase):
                 self.assertNotIn("9.9.9", out)
 
 
+class ModelChoiceDoctorTest(unittest.TestCase):
+    """oah doctor shows what `oah models` shows, from local state alone: no network and no engine CLI."""
+
+    SCORES = {"schema": 1, "source": "Epoch AI", "date": "2026-11-02", "license": "CC BY 4.0", "url": "https://x",
+              "credit": "Epoch AI, a credit line.",
+              "scores": {"gpt-6-luna": dict.fromkeys(("t1", "t2", "t3"), 0.1),
+                         "gpt-6.1-sol": dict.fromkeys(("t1", "t2", "t3"), 1.0),
+                         "gpt-6-sol": dict.fromkeys(("t1", "t2", "t3"), 0.9)}}
+
+    def setUp(self):
+        from tests.fixtures.toolkit.registry import forbid_network
+
+        forbid_network(self)
+        self.repo = make_git_repo(self)
+        self.state = make_tmp_dir(self) / "state"
+        self.catalog = Catalog(self.state)
+        config = self.repo / ".oah" / "config.toml"
+        config.parent.mkdir()
+        config.write_text('[engines.codex]\ncommand = ["/no/such/codex"]\n[models]\nprofile = "efficient"\n',
+                          encoding="utf-8")
+        efforts = ("low", "medium", "high", "xhigh", "max")
+        self.catalog._save(Entry("codex", "1.0.0", "2026-10-27T09:00:00Z", (
+            ModelInfo("gpt-6-luna", efforts), ModelInfo("gpt-6.1-sol", efforts), ModelInfo("gpt-6-sol", efforts),
+            ModelInfo("gpt-7-nova", efforts)), "fixture"))
+        patcher = mock.patch("oah.scoring.bundled", return_value=self.SCORES)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def doctor(self, *, json_output=False):
+        import oah.doctor as doctor
+
+        out = io.StringIO()
+        with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
+                mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                mock.patch.dict(os.environ, {"OAH_STATE_DIR": str(self.state)}), \
+                contextlib.redirect_stdout(out):
+            code = doctor.doctor_main(json_output=json_output)
+        return code, out.getvalue()
+
+    def test_json_shows_the_choice_the_scores_and_each_model_left_out(self):
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        row = next(item for item in json.loads(out)["model_choices"] if item["engine"] == "codex")
+        self.assertEqual(row["profile"], "efficient")
+        self.assertEqual((row["scores"]["source"], row["scores"]["date"], row["scores"]["credit"]),
+                         ("Epoch AI", "2026-11-02", "Epoch AI, a credit line."))
+        self.assertEqual(row["left_out"], {"gpt-6-sol": "superseded", "gpt-7-nova": "unknown-family"})
+        self.assertEqual(row["tiers"]["low"], {"model": "gpt-6.1-sol", "source": "scored"}, "luna scores 0 here")
+        self.assertEqual(row["tiers"]["max"], {"model": "gpt-6.1-sol", "source": "scored"})
+
+    def test_text_shows_the_same(self):
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        for text in ("no network used", "profile efficient", "scores Epoch AI 2026-11-02", "Epoch AI, a credit line.",
+                     "gpt-6-sol (superseded)", "gpt-7-nova (unknown-family)", "low gpt-6.1-sol"):
+            self.assertIn(text, out)
+
+    def test_the_engine_clis_are_never_run(self):
+        import oah.doctor as doctor
+
+        with mock.patch("oah.models.run_command", side_effect=AssertionError("no engine CLI")), \
+                mock.patch("oah.engines.proc.run_command", side_effect=AssertionError("no engine CLI")):
+            found = doctor.model_choices(self.repo, {"OAH_STATE_DIR": str(self.state)})
+        self.assertEqual([row["engine"] for row in found], ["codex"])
+
+    def test_an_engine_with_no_stored_catalog_is_skipped(self):
+        import oah.doctor as doctor
+
+        self.assertEqual(doctor.model_choices(None, {}), [])
+        self.assertEqual([row["engine"] for row in doctor.model_choices(self.repo, {"OAH_STATE_DIR": str(self.state)})],
+                         ["codex"])
+
+    def test_a_corrupt_catalog_shows_nothing_and_does_not_abort(self):
+        self.catalog.catalog_path.write_text("{", encoding="utf-8")
+        code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["model_choices"], [])
+
+    def test_damaged_data_is_shown_by_name(self):
+        with mock.patch("oah.scoring.bundled", side_effect=EngineError("OAH_MODEL_NO_SCORES", "damaged; pin one")):
+            code, out = self.doctor(json_output=True)
+        self.assertEqual(code, 0, out)
+        row = json.loads(out)["model_choices"][0]
+        self.assertIsNone(row["scores"])
+        self.assertEqual(row["tiers"]["high"], {"error": "OAH_MODEL_NO_SCORES: damaged; pin one"})
+
+    def test_a_name_that_is_not_plain_is_never_echoed(self):
+        self.catalog._save(Entry("codex", "1.0.0", "2026-10-27T09:00:00Z", (
+            ModelInfo("gpt-6-luna", ("high",)), ModelInfo("gpt-6\x1b[2J", ("high",))), "fixture"))
+        _, out = self.doctor()
+        self.assertNotIn("\x1b", out)
+
+    def test_doctor_writes_nothing(self):
+        before = {path: path.read_bytes() for path in self.state.rglob("*") if path.is_file()}
+        self.doctor()
+        self.assertEqual({path: path.read_bytes() for path in self.state.rglob("*") if path.is_file()}, before)
+
+
 class ModelNoticeDoctorTest(unittest.TestCase):
     """oah doctor derives unpooled-model notices from the stored catalog and current config."""
 
@@ -485,7 +584,7 @@ class ModelNoticeDoctorTest(unittest.TestCase):
         self.assertIn(".oah/config.toml", out)
         _, raw = self.doctor(json_output=True)
         data = json.loads(raw)
-        self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices"])
+        self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices", "model_choices"])
         notice = data["model_notices"][0]
         self.assertEqual((notice["code"], notice["engine"], notice["model"], notice["date"]),
                          ("OAH_MODEL_NEW_UNPOOLED", "codex", "m-new", "2026-10-27"))

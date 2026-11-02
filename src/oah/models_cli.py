@@ -8,7 +8,7 @@ import os
 import pathlib
 import sys
 
-from oah import call, models, routing
+from oah import call, models, routing, scoring
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.lockfile import LockTimeout
@@ -40,30 +40,55 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
               "unpooled": unpooled}
     for tier in routing.TIERS:
         try:
-            resolution = call.resolve_engine(engine, tier, settings, root=root, state_dir=state, env=os.environ,
-                                             checked=checked)
-            floor = call._resolve_floor(resolution, settings, floor_tier=tier, entry=entry, root=root,
-                                       env=os.environ)
+            resolution = call.resolve_engine(engine, tier, settings, state_dir=state, env=os.environ, checked=checked,
+                                              floor_tier=tier)
+            floor = models.Pair(resolution.model, resolution.launch_effort)
+            candidates = None
+            if not section["tiers"][tier]["model"]:
+                # The candidates a judge may pick from for a call whose floor tier is this tier (amendment 6).
+                candidates = models.build_candidates(
+                    engine, entry=entry, deterministic=floor, tier=tier, floor_tier=tier,
+                    floor=floor, quality_order=section["quality_order"], allowed_models=section["allowed_models"],
+                    effort_caps=section["effort_caps"], tier_pools=section["tier_pools"],
+                    scores=checked[1].scores, profile=settings.models["profile"],
+                    tier_effort=section["tiers"][tier]["effort"], floor_effort=section["tiers"][tier]["effort"])
         except EngineError as exc:
             report["tiers"][tier] = {"error": str(exc)}
             continue
         report["warnings"] += [warning for warning in resolution.warnings if warning not in report["warnings"]]
-        # The candidates a judge may pick from for a call whose floor tier is this tier (amendment 6).
-        pair = models.Pair(resolution.model, resolution.launch_effort)
-        candidates = models.build_candidates(engine, entry=entry, deterministic=pair, tier=tier, floor_tier=tier,
-                                             floor=floor, quality_order=section["quality_order"],
-                                             allowed_models=section["allowed_models"],
-                                             effort_caps=section["effort_caps"], tier_pools=section["tier_pools"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
-                                 "floor": {"tier": tier, **floor.to_json()}, "mode": candidates.mode,
-                                 "note": candidates.note,
-                                 "candidates": [[item.model, item.effort] for item in candidates.pairs],
-                                 "excluded": dict(candidates.excluded)}
+                                 "floor": {"tier": tier, **floor.to_json()},
+                                 "mode": candidates.mode if candidates is not None else None,
+                                 "note": candidates.note if candidates is not None else "unused(pinned)",
+                                 "candidates": [[item.model, item.effort] for item in candidates.pairs]
+                                 if candidates is not None else [],
+                                 "excluded": dict(candidates.excluded) if candidates is not None else {}}
     # This report always names them: a launch does so only after a rebuild (call.check_catalog).
     notices = [models.unpooled_warning(engine, name) for name in unpooled]
+    ignored = models.order_notice(engine, section["quality_order"])
+    if ignored is not None:
+        notices.append(ignored)
+    scores = checked[1].scores
+    if not scores.models:
+        notices.append(f"{scoring.NO_SCORES}: {scores.failure}")
     report["warnings"] += [notice for notice in notices if notice not in report["warnings"]]
+    report.update(models.score_report(scores, settings.models["profile"],
+                                      left_out=call._effort_left_out(engine, settings, checked[1])))
     return report
+
+
+def _score_lines(report: dict) -> list[str]:
+    scores = report["scores"]
+    if scores is None:
+        lines = [f"profile {report['profile']} · no usable scores"]
+    else:
+        rows = ", ".join(f"{row['model']} {row['score']:.1f}" for row in scores["models"])
+        lines = [f"profile {report['profile']} · scores {scores['source']} {scores['date']}: {rows}",
+                 f"credit: {scores['credit']}"]
+    if report["left_out"]:
+        lines.append("left out: " + " · ".join(f"{name} ({why})" for name, why in report["left_out"].items()))
+    return lines
 
 
 def _candidates_text(pairs: list) -> str:
@@ -101,6 +126,8 @@ def run(args: argparse.Namespace) -> int:
         caps = ", ".join(f"{model}={effort}" for model, effort in report["effort_caps"].items()) or "none"
         pools = "; ".join(f"{tier}: {', '.join(names)}" for tier, names in report["tier_pools"].items() if names)
         print(f"  judge: allowed {', '.join(report['allowed_models']) or 'any'} · caps {caps} · pools {pools or 'none'}")
+        for line in _score_lines(report):
+            print(f"  {line}")
         for tier, row in report["tiers"].items():
             if "error" in row:
                 print(f"  {tier:6} {row['error']}")

@@ -600,7 +600,7 @@ class EndToEndTest(unittest.TestCase):
         accepted = path.read_text(encoding="utf-8")
         path.write_text(accepted.replace("the digest is stable", "the digest never changes"), encoding="utf-8", newline="")
         self.assertEqual(repo.status()["t1"]["intent_state"], "stale")
-        refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
+        refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_INTENT_NOT_CURRENT"), refused.stderr)
         self.assertIn("is stale", refused.stderr)
@@ -637,7 +637,8 @@ class EndToEndTest(unittest.TestCase):
              "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "max")]}]}),
             encoding="utf-8")
         fake_codex = [sys.executable, str(FAKES / "fake_codex.py")]
-        git_commit(repo.root, {".oah/config.toml": f"[engines.codex]\ncommand = {toml_list(fake_codex)}\n"},
+        git_commit(repo.root, {".oah/config.toml": f"[engines.codex]\ncommand = {toml_list(fake_codex)}\n"
+                                                   'quality_order = ["gpt-test-a"]\n'},
                    "configure local engine")
         record = make_tmp_dir(self) / "record.json"
         repo.env.update(CODEX_HOME=str(codex_home), FAKE_RECORD=str(record))

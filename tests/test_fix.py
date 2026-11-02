@@ -101,7 +101,8 @@ class FixProject:
             {"slug": "gpt-test-a", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in LEVELS]}]}), encoding="utf-8")
         command = [sys.executable, str(FAKE_FIX), "--fix-script", str(self.fix_script), "--script", str(self.script)]
-        files = {"README.md": "hello\n", ".oah/config.toml": f"[engines.codex]\ncommand = {toml_list(command)}\n" + config,
+        order = "" if "quality_order" in config else 'quality_order = ["gpt-test-a"]\n'
+        files = {"README.md": "hello\n", ".oah/config.toml": f"[engines.codex]\ncommand = {toml_list(command)}\n{order}" + config,
                  ".oah/tasks/t1/PACKET.md": packet.replace("\n", newline).encode("utf-8"), **(files or {})}
         if attributes is not None:
             files[".gitattributes"] = attributes
@@ -480,6 +481,32 @@ FIXED = {"src/app.py": "print('fixed')\n"}
 
 
 class RefusalTest(unittest.TestCase):
+    def test_a_refused_admission_starts_no_attempt_and_spends_nothing(self):
+        project = FixProject(self, config='[engines.codex.tiers.low]\nmodel = "gpt-gone"\n')
+        project.changes_requested()
+        before = receipts.read_round_log(project.state, "t1")
+        error = project.refused("OAH_MODEL_NOT_LISTED", project.fix, tier="low")
+        self.assertIn("oah models", str(error))
+        self.assertEqual(receipts.read_round_log(project.state, "t1"), before)
+
+    def test_admit_runs_before_and_after_the_judge_on_a_correction(self):
+        project = FixProject(self)
+        project.changes_requested()
+        project.queue_fix({"write": {"src/app.py": "print('fixed')\n"}})
+        with mock.patch.object(call, "admit", wraps=call.admit) as spy:
+            project.fix()
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_args.kwargs["stage"], "correction")
+
+    def test_every_model_code_has_a_fixed_diagnostic_with_a_next_step(self):
+        for code in ("OAH_MODEL_NO_SCORES", "OAH_MODEL_CATALOG_UNAVAILABLE", "OAH_MODEL_BELOW_FLOOR",
+                     "OAH_MODEL_NOT_LISTED", "OAH_MODEL_SUPERSEDED", "OAH_MODEL_CHANGED", "OAH_MODEL_UNKNOWN_FAMILY",
+                     "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED"):
+            with self.subTest(code=code):
+                self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
+                self.assertEqual(runs._correction_record({"warnings": [f"{code}: a model name"]}, ("warnings",))["warnings"],
+                                 [code])
+
     def test_fix_and_manual_refuse_intent_different_from_source_review(self):
         source = ".oah/tasks/t1/PACKET.md"
         for change in ("revision", "source", "committed bytes"):
@@ -2284,12 +2311,13 @@ class SecretTest(unittest.TestCase):
                  "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
                  "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
                  "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
-                 "ranked", "pools", "deterministic", "unused(error:timeout)",
+                 "ranked", "pools", "scored", "pool", "deterministic", "unused(error:timeout)",
+                 "performance", "balanced", "efficient",
                  "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
-                 "not-in-tier-pool", "below-floor", "above-cap",
+                 "not-in-tier-pool", "below-floor", "above-cap", "outside-score-bound",
                  *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort",
                                                      "unranked-model", "not-in-tier-pool", "below-floor",
-                                                     "above-cap"))}
+                                                     "above-cap", "outside-score-bound"))}
         codes = {"OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED",
                  "OAH_FIX_WARNING", "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
                  "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED",
@@ -2651,13 +2679,13 @@ class SecretTest(unittest.TestCase):
             self.assertEqual(project.fix().outcome, "no-change")
         planned_reads = dict.fromkeys(watched, 1)
         log_path = project.state / "reviews/t1/rounds.jsonl"
-        planned_reads[log_path] = 3  # Capture plus checks before skill ranking and model judgment.
+        planned_reads[log_path] = 4  # Capture, then checks before model judgment and around skill ranking.
         self.assertEqual(at_plan, [planned_reads], "capture inputs once; revalidate the live task budget before paid steps")
         expected = dict.fromkeys(watched, 3)  # Capture, start comparison and terminal comparison.
         expected[project.state / "transaction.json"] = 1  # Pending journal checks use existence after capture.
         for name in ("models/catalog.json", "models/resolved.json", "models/changes.jsonl"):
             expected[project.state / name] = 2  # Only the start publication depends on model inputs.
-        expected[log_path] = 6  # Also revalidate the live task budget immediately before the engine starts.
+        expected[log_path] = 7  # Also revalidate the live task budget immediately before the engine starts.
         self.assertEqual(reads, expected)
 
     def test_invalid_model_pins_leave_the_complete_state_tree_unchanged(self):
@@ -2673,7 +2701,7 @@ class SecretTest(unittest.TestCase):
                         shutil.rmtree(project.state / "models")
 
                     before = state_snapshot(project.state)
-                    code = "OAH_MODEL_UNRESOLVED" if pin.startswith("-") else "OAH_FIX_SENSITIVE_INPUT"
+                    code = "OAH_MODEL_NOT_LISTED" if pin.startswith("-") else "OAH_FIX_SENSITIVE_INPUT"
                     error = project.refused(code, project.fix)
                     self.assertNotIn(pin, str(error))
                     self.assertEqual(state_snapshot(project.state), before,
@@ -2681,7 +2709,7 @@ class SecretTest(unittest.TestCase):
 
     def test_rejected_model_metadata_leaves_the_complete_state_tree_unchanged(self):
         for field in ("pin", "quality-order", "cache", "stored-catalog", "escaped-catalog", "escaped-changes",
-                      "stored-resolution", "effective", "resolution", "late-brief", "no-model-state"):
+                      "stored-resolution", "resolution", "late-brief", "no-model-state"):
             with self.subTest(field=field):
                 project = FixProject(self)
                 project.changes_requested()
@@ -2690,8 +2718,9 @@ class SecretTest(unittest.TestCase):
                 if field == "pin":
                     config += '\n[engines.codex.tiers.high]\nmodel = ' + json.dumps(marker) + '\n'
                 elif field == "quality-order":
-                    config += '\nquality_order = [' + json.dumps(marker) + ']\n'
-                elif field in ("cache", "effective", "late-brief"):
+                    config = config.replace('quality_order = ["gpt-test-a"]',
+                                            'quality_order = [' + json.dumps(marker) + ', "gpt-test-a"]')
+                elif field in ("cache", "late-brief"):
                     # Force a real catalog refresh even though the preceding review populated it.
                     catalog = project.state / "models/catalog.json"
                     catalog.unlink()
@@ -2700,8 +2729,6 @@ class SecretTest(unittest.TestCase):
                         data = json.loads(cache.read_bytes())
                         data["models"].append({"slug": marker, "supported_reasoning_levels": []})
                         cache.write_bytes(json.dumps(data).encode("utf-8"))
-                    elif field == "effective":
-                        (project.home / "config.toml").write_bytes(('model = ' + json.dumps(marker) + '\n').encode())
                 else:
                     if field in ("stored-catalog", "stored-resolution", "escaped-catalog"):
                         path = project.state / ("models/resolved.json" if field == "stored-resolution" else "models/catalog.json")
@@ -2735,6 +2762,17 @@ class SecretTest(unittest.TestCase):
                     error = project.refused("OAH_FIX_SENSITIVE_INPUT", project.fix)
                 self.assertNotIn(marker, str(error))
                 self.assertEqual(state_snapshot(project.state), before, "refusal must leave every state file and directory unchanged")
+
+    def test_a_value_in_the_codex_configuration_never_reaches_a_correction(self):
+        project = FixProject(self)
+        project.changes_requested()
+        marker = "s" + "k-" + token_source.token_hex(20)
+        (project.home / "config.toml").write_bytes(("model = " + json.dumps(marker) + "\n").encode("utf-8"))
+        (project.state / "models/catalog.json").unlink()
+        project.fix()
+        for path in project.state.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(marker.encode("utf-8"), path.read_bytes(), path)
 
     def test_recovery_and_binding_notes_use_fixed_actor_metadata(self):
         for operation in ("abort", "bind-override"):

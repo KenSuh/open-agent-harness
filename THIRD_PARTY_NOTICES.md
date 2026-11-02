@@ -22,6 +22,18 @@ Ideas only, credited. No text or code is copied from these:
 
 If code from any project is ever copied verbatim, its license text is added here first.
 
+## Benchmark data
+
+`src/oah/templates/engines/benchmarks.json` is part of Epoch AI's published benchmark data, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from
+'https://epoch.ai/benchmarks/use-this-data'. Accessed 2 Nov 2026.
+
+Changes: `tools/build_benchmarks.py` keeps only the latest successful result of each model at maximum effort on
+the Epoch tasks it allow-lists. Data from external projects keeps its own licence and is left out. `oah` scales
+these results to compare models. Epoch AI does not endorse `oah` or its model choices.
+
 ## Vendored skills (amendment 3, A13)
 
 These skills are vendored under `skills/<name>/`, byte for byte as published upstream at the pinned

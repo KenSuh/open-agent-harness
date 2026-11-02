@@ -119,16 +119,36 @@ The [Toolkit](toolkit.md) page lists each server with its source and license.
 
 ## 6. Models
 
-Models follow updates without edits:
+Models follow updates without edits. This describes `main`, which is not in a release yet.
 
-- Claude tiers use Claude Code's own aliases (`opus`, `sonnet`, `haiku`), which Claude Code resolves to its
-  newest models.
-- Codex tiers start from the model your Codex configuration uses, and adopt a newer one only when Codex marks
-  it as its default or your `quality_order` names it.
+- Benchmark scores, the task's difficulty and `[models] profile` pick each automatic model for Claude and Codex.
+  [How a model is chosen](concepts.md#how-a-model-is-chosen) has the rule.
+- A newer generation of a known family is used from the next catalog rebuild once it has a score, and a superseded
+  or vanished model stops being chosen at that rebuild. A rebuild happens when the CLI version changes, after
+  `[models] ttl_hours`, or with `oah models --refresh`. `OAH_MODEL_CHANGED` says once what moved.
+- The scores ship with `oah`, so newer scores arrive with a new `oah` version (step 1).
 - Before every launch `oah` checks that its model catalog is fresh. A model you pinned for a tier always wins.
 - Every change of model or effort is logged with the old value, the new one, when and why.
 
-`oah models` shows the model and effort each tier uses now.
+`oah` does not edit your config, and it keeps working:
+
+- Pins, `tier_pools`, your own `quality_order`, `allowed_models` and `effort_caps` keep their meaning.
+- The old default `quality_order = ["opus", "sonnet", "haiku"]` counts as unset, so scores choose.
+  `OAH_MODEL_ORDER_IGNORED` says so in `oah models`. Remove the line, or list other models to rank them yourself.
+- Codex's default flag and the model in your Codex configuration no longer choose. To keep one model, pin it with
+  `[engines.<engine>.tiers] <tier> = { model = "<model>" }` in `.oah/config.toml`.
+
+What can stop a launch after you update:
+
+- A review below its floor refuses with `OAH_MODEL_BELOW_FLOOR`, for example with `--tier low`. Use the tier the
+  message names.
+- With no model list, or an unreadable `claude --help`, automatic choice stops with `OAH_MODEL_CATALOG_UNAVAILABLE`,
+  and with no usable scores with `OAH_MODEL_NO_SCORES`. A pin gets past both.
+- A narrow `allowed_models` no longer lowers a floor. When no allowed model reaches it, a review stops with
+  `OAH_MODEL_BELOW_FLOOR` and any other call with `OAH_MODEL_UNRESOLVED`.
+
+`oah models` shows the profile, the scores with their source and date, the model and effort each tier uses now, and
+each listed model left out with its reason. [Troubleshooting](troubleshooting.md#models) lists the codes.
 
 ## 7. What `docs/UPSTREAM_SYNC.md` records
 

@@ -41,7 +41,7 @@ UNVERIFIED_FIELDS = ("cli_version", "resolved_model", "requested_effort", "launc
 RESULT_FIELDS = (
     "run_id", "task", "engine", "stage", "status", "created_at", "started_at", "finished_at", "duration_s",
     "exit_code", "timed_out", "pid", "command", "cwd", "read_only", "cli_path", "cli_version",
-    "requested_model", "resolved_model", "model_source", "observed_models", "model_judge", "model_choice",
+    "requested_model", "resolved_model", "model_source", "observed_models", "model_judge", "model_choice", "admission",
     "header_model",
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
@@ -54,27 +54,31 @@ _CORRECTION_ENUMS = frozenset({
     "claude", "codex", "human", "initial", "review", "correction", "attempt-start", "attempt-outcome", "attempt-head",
     "created", "prepared", "queued", "running", *TERMINAL, "applied", "no-change", "aborted", "unverified",
     "match", "mismatch", "downgraded", "low", "medium", "high", "xhigh", "max", "highest", "none", "minimal",
-    "normal", "critical", "flag", "packet", "rules", "pin", "quality_order", "quality_order(unconfirmed)",
-    "cli_default", "effective_config", "quick", "docs", "research", "implementation", "refactor", "broad-audit",
-    "adversarial-review", "migration", "security", "high-risk-review",
+    "normal", "critical", "flag", "packet", "rules", "pin", "pool", "scored", "quality_order",
+    # Older runs recorded these three sources; nothing chooses them now, but those records stay readable.
+    "quality_order(unconfirmed)", "cli_default", "effective_config",
+    "quick", "docs", "research", "implementation", "refactor", "broad-audit", "design",
+    "adversarial-review", "migration", "security", "high-risk-review", "performance", "balanced", "efficient",
     "OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED", "OAH_FIX_WARNING",
     "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
     # The model judge's fixed vocabulary; model/provider identities and notes stay hashed.
-    "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED", "ranked", "pools", "deterministic",
+    "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED", "ranked", "pools", "scored", "deterministic",
     "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model", "not-in-tier-pool",
-    "below-floor", "above-cap",
+    "below-floor", "above-cap", "outside-score-bound", "superseded", "unknown-family", "unscored",
     "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
     "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
     *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
-                                        "not-in-tier-pool", "below-floor", "above-cap")),
+                                        "not-in-tier-pool", "below-floor", "above-cap", "outside-score-bound")),
 })
 _CORRECTION_FORMS = re.compile(
     r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"
     r"A[1-9][0-9]*|R[1-9][0-9]*(?:-[FC][1-9][0-9]*)?|R[1-9][0-9]*\.json|"
     r"A[1-9][0-9]*-(?:start|outcome|head)\.json|\[file [1-9][0-9]*\]|"
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
-_CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256"})
+_CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256",
+                                     "family", "floor_tier", "floor_checked", "profile", "score_source", "score_date",
+                                     "score_credit"})
 _CORRECTION_JUDGE_ERROR = re.compile(
     r"unused\(error:(?:timeout|rate-limited|unauthorized|overloaded|network|insecure-url|invalid-header|"
     r"bad-request|bad-response|key-name|internal|provider|http-[1-5][0-9]{2})\)")
