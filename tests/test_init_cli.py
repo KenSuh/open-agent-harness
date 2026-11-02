@@ -555,7 +555,7 @@ class QuestionsTest(unittest.TestCase):
         code, out, err = run_init(repo, machine)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(machine.ask.prompts), 11)
-        self.assertIn("Keep Claude Code, Codex, their plugins and oah's skills up to date", machine.ask.prompts[9])
+        self.assertIn("Keep Claude Code, Codex and Claude Code plugins up to date after your work finishes?", machine.ask.prompts[9])
         self.assertIn("  tool updates: off; MCP servers are never changed", out)
         self.assertIn("after_finish = false", (repo / ".oah" / "config.toml").read_text(encoding="utf-8"))
         self.assertFalse((repo / ".claude" / "agents").exists())
