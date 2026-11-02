@@ -24,19 +24,21 @@ Score set
 
 Rule
     `choose` numbers the tiers low 0 to max 3, adds the profile's offset, keeps the step in 0 to 3 and takes the
-    larger of the step and the floor step. The required score sits step/3 of the way from the lowest to the
-    highest eligible score. Balanced and efficient also accept a model within 2 percent of that range below it, so
-    a gap that small buys nothing. Performance has no such margin. A floor never has one: `clears` is the floor
-    test, and `choose` applies it too, so the rule cannot pick a model the admission check would refuse.
+    larger of the step and the floor step. The required score sits step/3 of the way along the fixed scale.
+    Balanced and efficient also accept a model within 2 percent of the scale below it, so a gap that small buys
+    nothing. Performance has no such margin. A floor never has one: `clears` is the floor test, and `choose`
+    applies it too, so the rule cannot pick a model the admission check would refuse.
 
-    Performance and balanced take the cheapest model that clears, then the lower score, then the name, so a
-    choice never flips. When nothing that may be picked reaches the step, for example on a machine that does not list
-    the top of the scale, the strongest model that meets the floor runs. When nothing meets the floor,
-    `FloorUnmet` says so, and a call turns it into `OAH_MODEL_BELOW_FLOOR` for a review. Efficient does not step down by itself: its lowest allowed step is one below the tier,
-    and among the models that clear it and pass the effort rules (`usable`) it takes the most score per cost,
-    then the lower score, the lower cost and the name. So a stronger model wins when it is the better value.
-    The effort rules bind only here. Efforts stay the tier's, and a cap still clamps: `usable` drops a model the
-    launch would refuse, and when it would drop them all the launch keeps that refusal.
+    Performance and balanced take the cheapest model that clears, then the lower score, then the name, so a choice
+    never flips. Efficient does not step down by itself: its lowest allowed step is one below the tier, and among
+    the models that clear it and pass the effort rules (`usable`) it takes the most score per cost, then the lower
+    score, the lower cost and the name. So a stronger model wins when it is the better value. The effort rules bind
+    only here. Efforts stay the tier's, and a cap still clamps: `usable` drops a model the launch would refuse, and
+    when it would drop them all the launch keeps that refusal.
+
+    When nothing that may be picked reaches the step, for example on a machine that does not list the top of the
+    scale, the strongest model that meets the floor runs. When nothing meets the floor, `FloorUnmet` says so, and
+    a call turns it into `OAH_MODEL_BELOW_FLOOR` for a review.
 
     No table maps a difficulty to a model: the result follows the scores and moves when they move.
     `band` is what a judge may pick from: the rule's choice, and the models from the lowest allowed step's required
