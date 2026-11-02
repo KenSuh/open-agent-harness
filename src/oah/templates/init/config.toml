@@ -12,6 +12,12 @@ correction = "codex"
 # one step lower up.
 [models]
 profile = "balanced"
+# When oah rebuilds its list of models (after a CLI update, or once ttl_hours, 24 by default, have passed), it
+# downloads fresh public scores: Epoch AI's benchmark file from epoch.ai and, only if you stored your own
+# ARTIFICIAL_ANALYSIS_API_KEY, Artificial Analysis's model list from artificialanalysis.ai with that key. A request
+# carries oah's name and version and nothing about you, your project or your tasks; the scores stay on this machine.
+# false: no request, and the scores shipped with oah choose.
+fetch_scores = true
 
 [engines.claude]
 command = ["claude"]

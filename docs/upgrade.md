@@ -126,7 +126,12 @@ Models follow updates without edits. This describes `main`, which is not in a re
 - A newer generation of a known family is used from the next catalog rebuild once it has a score, and a superseded
   or vanished model stops being chosen at that rebuild. A rebuild happens when the CLI version changes, after
   `[models] ttl_hours`, or with `oah models --refresh`. `OAH_MODEL_CHANGED` says once what moved.
-- The scores ship with `oah`, so newer scores arrive with a new `oah` version (step 1).
+- At a catalog rebuild `oah` now downloads Epoch AI's public benchmark file from epoch.ai, so newer scores arrive
+  without an `oah` update. The request sends nothing about your project. `[models] fetch_scores = false` in
+  `.oah/config.toml` stops it, and the snapshot shipped with `oah` then chooses. With your own
+  `ARTIFICIAL_ANALYSIS_API_KEY` ([Keys](keys.md#artificial-analysis-scores)) it uses Artificial Analysis's scores instead.
+- Claude's `haiku` may now be chosen: a free check, which cannot be billed, confirms the Claude aliases that
+  `claude --help` leaves out.
 - Before every launch `oah` checks that its model catalog is fresh. A model you pinned for a tier always wins.
 - Every change of model or effort is logged with the old value, the new one, when and why.
 
@@ -148,7 +153,8 @@ What can stop a launch after you update:
   `OAH_MODEL_BELOW_FLOOR` and any other call with `OAH_MODEL_UNRESOLVED`.
 
 `oah models` shows the profile, the scores with their source and date, the model and effort each tier uses now, and
-each listed model left out with its reason. [Troubleshooting](troubleshooting.md#models) lists the codes.
+each listed model left out with its reason. `oah doctor` now shows a pin that cannot run as the error a call would give.
+[Troubleshooting](troubleshooting.md#models) lists the codes.
 
 ## 7. What `docs/UPSTREAM_SYNC.md` records
 

@@ -199,6 +199,13 @@ _ERROR_DIAGNOSTICS = {
                                  "a scored model in .oah/config.toml.",
     "OAH_MODEL_ORDER_IGNORED": "the old default quality_order counts as unset, so scores choose; list other models in "
                                ".oah/config.toml to rank them yourself.",
+    "OAH_SCORES_REFRESH_FAILED": "fresh benchmark scores could not be fetched, so the last good scores chose; oah tries "
+                                 "again at the next catalog rebuild, or set [models] fetch_scores = false in "
+                                 ".oah/config.toml.",
+    "OAH_SCORES_AA_UNUSED": "Artificial Analysis scores lack a listed model, so Epoch AI scores chose; run oah models to "
+                            "see the scores in use.",
+    "OAH_SCORES_FILE_INVALID": "a stored score file is invalid and counts as absent; delete it, or run "
+                               "oah models --refresh to fetch it again.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

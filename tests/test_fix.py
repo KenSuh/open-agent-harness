@@ -501,7 +501,8 @@ class RefusalTest(unittest.TestCase):
     def test_every_model_code_has_a_fixed_diagnostic_with_a_next_step(self):
         for code in ("OAH_MODEL_NO_SCORES", "OAH_MODEL_CATALOG_UNAVAILABLE", "OAH_MODEL_BELOW_FLOOR",
                      "OAH_MODEL_NOT_LISTED", "OAH_MODEL_SUPERSEDED", "OAH_MODEL_CHANGED", "OAH_MODEL_UNKNOWN_FAMILY",
-                     "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED"):
+                     "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED",
+                     "OAH_SCORES_REFRESH_FAILED", "OAH_SCORES_AA_UNUSED", "OAH_SCORES_FILE_INVALID"):
             with self.subTest(code=code):
                 self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
                 self.assertEqual(runs._correction_record({"warnings": [f"{code}: a model name"]}, ("warnings",))["warnings"],

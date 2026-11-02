@@ -123,7 +123,11 @@ oah doctor
 - 알려진 모델군의 새 세대는 점수가 생기면 다음 카탈로그 재구성부터 쓰고, 대체되거나 사라진 모델은 같은 재구성부터
   고르지 않는다. 재구성은 CLI 버전이 바뀌거나 `[models] ttl_hours`가 지나거나 `oah models --refresh`를 실행할 때 한다.
   `OAH_MODEL_CHANGED`가 무엇이 바뀌었는지 한 번 알린다.
-- 점수는 `oah`에 실려 오므로 새 점수는 `oah` 새 버전과 함께 온다(1단계).
+- 이제 `oah`는 카탈로그를 다시 만들 때 epoch.ai에서 Epoch AI의 공개 벤치마크 파일을 받으므로, 새 점수가 `oah`
+  업데이트 없이도 들어온다. 요청은 프로젝트에 대해 아무것도 보내지 않는다. `.oah/config.toml`에
+  `[models] fetch_scores = false`를 두면 멈추고, 그때는 `oah`와 함께 배포된 사본이 고른다. 자신의
+  `ARTIFICIAL_ANALYSIS_API_KEY`([키](keys.md#artificial-analysis-점수))가 있으면 Artificial Analysis의 점수를 대신 쓴다.
+- 이제 Claude의 `haiku`가 골라질 수 있다. 과금될 수 없는 무료 확인으로 `claude --help`가 빼먹은 Claude 별칭을 확인한다.
 - `oah`는 실행할 때마다 먼저 모델 카탈로그가 최신인지 확인한다. 사용자가 tier에 고정한 모델이 늘 이긴다.
 - 모델이나 추론 강도가 바뀔 때마다 이전 값과 새 값, 시각, 이유를 기록한다.
 
@@ -144,7 +148,7 @@ oah doctor
   `OAH_MODEL_BELOW_FLOOR`로, 다른 호출은 `OAH_MODEL_UNRESOLVED`로 멈춘다.
 
 `oah models`는 프로필, 출처와 날짜가 붙은 점수, 지금 tier마다 쓰는 모델과 추론 강도, 빠진 모델과 이유를 보여 준다.
-코드는 [문제 해결](troubleshooting.md#모델)에 있다.
+이제 `oah doctor`는 실행할 수 없는 고정 모델을 호출과 같은 오류로 보여 준다. 코드는 [문제 해결](troubleshooting.md#모델)에 있다.
 
 ## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
 

@@ -25,6 +25,7 @@ fixtures.
 | your Claude Code sign-in | Claude Code. `oah` checks it with `claude auth status` and never reads it. | `oah call claude` cannot run |
 | your Codex sign-in | Codex CLI. `oah` checks it with `codex login status` and never reads it. | `oah review` and `oah fix` cannot run |
 | `TYPESAFE_API_KEY` | the optional TypeSafe Jev re-ranker | `rerank=unused(no key)`: the fixed rules decide alone |
+| `ARTIFICIAL_ANALYSIS_API_KEY` | optional scores from Artificial Analysis for choosing models; see [below](#artificial-analysis-scores) | Epoch AI's public scores choose, and nothing is sent to Artificial Analysis |
 | `CONTEXT7_API_KEY`, `OPENAI_API_KEY` | MCP servers from the toolkit's templates in `mcp/`, read by Claude Code or Codex when they start the server | that server does not start, or runs without the optional key; see [Toolkit](toolkit.md) |
 
 ## Claude Code and Codex use their own sign-ins
@@ -85,7 +86,7 @@ Windows (Command Prompt or PowerShell):
 cmdkey /generic:oah:TYPESAFE_API_KEY /user:oah /pass
 ```
 
-## A key alone never turns a feature on
+## A key alone never turns the re-ranker on
 
 The TypeSafe Jev re-ranker runs only when **you enabled it and the key is present**. A key in your environment
 does not enable it. Guided `oah init` asks once, says what it sends and that TypeSafe may charge for requests,
@@ -107,6 +108,35 @@ Every packet plan, brief, run record and impact result then says `rerank=used` o
 | `rerank=unused(disabled-by-brief)` | The command ran with `--no-rerank`, or the packet turned it off. |
 
 To use another variable name, set `key_name` under `[rerank.typesafe]`.
+
+## Artificial Analysis scores
+
+Model choice uses Epoch AI's public scores and needs no key. If you have your own Artificial Analysis key, `oah` uses
+its scores instead. Store the key under the name `ARTIFICIAL_ANALYSIS_API_KEY`, in the environment as above or in the OS
+keychain.
+
+macOS:
+
+```sh
+security add-generic-password -s oah -a ARTIFICIAL_ANALYSIS_API_KEY -w
+```
+
+Windows (Command Prompt or PowerShell):
+
+```powershell
+cmdkey /generic:oah:ARTIFICIAL_ANALYSIS_API_KEY /user:oah /pass
+```
+
+Unlike the re-ranker, the key alone turns this on, because `[models] fetch_scores` is `true` by default. Set it to
+`false` to stop every score request, to Epoch AI as well.
+
+- `oah` looks the key up only right before it asks Artificial Analysis, when it rebuilds a model catalog, and sends it
+  only in the request's `x-api-key` header. It never stores, prints or records the key.
+- The data stays on your machine, in `oah`'s state folder as `models/benchmarks-aa.json`, never in your repository.
+  `oah` keeps one index value per matched model and nothing else from the reply.
+- Artificial Analysis asks for attribution, so wherever `oah` shows these scores it shows
+  `Artificial Analysis, https://artificialanalysis.ai/`.
+- Remove the key and `oah` stops using the data and deletes its copy at the next refresh.
 
 ## What keeps keys out of git
 
