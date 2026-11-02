@@ -20,7 +20,7 @@ Fetching
     stored copy is absent, invalid or older than `[models] ttl_hours`. Each source is fetched at most once per
     command. A request is an HTTPS GET with no body, no query string, no cookie and no project, user or task data,
     sent with `User-Agent: oah/<version>` through an opener that takes no proxy from the environment and follows no
-    redirect, with a 10 second timeout (`TIMEOUT`) for each wait and in total between reads, and a byte limit read in
+    redirect, with one 10 second deadline (`TIMEOUT`) across socket waits, and a byte limit read in
     chunks (`LIMITS`). A failed, oversized or invalid reply keeps the last good copy and warns once
     (`OAH_SCORES_REFRESH_FAILED`); a launch never fails because of it.
 
@@ -55,7 +55,11 @@ import http.client
 import io
 import json
 import math
+import os
 import re
+import socket
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -241,6 +245,8 @@ def read_stored(source: str, raw: bytes | None) -> tuple[dict | None, str | None
     is no file. Every read goes through here, so no unchecked value reaches a choice or the output."""
     if raw is None:
         return None, None
+    if len(raw) > LIMITS[source]:
+        return None, f"has more than {_size(LIMITS[source])}"
     try:
         data = json.loads(raw.decode("utf-8"), parse_constant=scoring._reject_constant)
     except (ValueError, RecursionError):  # UnicodeDecodeError and JSONDecodeError are ValueErrors
@@ -364,9 +370,115 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
             del self, req, fp, code, msg, headers, newurl
 
 
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
+def _resolve(address, deadline):
+    """getaddrinfo has no timeout. Wait for one isolated resolver child, then kill/reap it on expiry.
+
+    Only the fixed source host/port travel to it; it inherits no credentials or project environment.
+    There is no background resolver or thread left running when the fetch returns."""
+    command = [sys.executable, "-I", "-S", "-c",
+               "import json,socket,sys; print(json.dumps(socket.getaddrinfo("
+               "sys.argv[1],int(sys.argv[2]),type=socket.SOCK_STREAM)))", str(address[0]), str(address[1])]
+    env = {name: os.environ[name] for name in ("SystemRoot", "WINDIR") if name in os.environ}
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, timeout=_remaining(deadline), check=True)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError from None
+    _remaining(deadline)
+    return json.loads(result.stdout)
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Reset the socket timeout before *each* receive, including those inside header readline()."""
+
+    def __init__(self, sock, deadline):
+        self.sock, self.deadline = sock, deadline
+        self.raw = sock.makefile("rb", buffering=0)
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        self.sock.settimeout(_remaining(self.deadline))
+        result = self.raw.readinto(buffer)
+        _remaining(self.deadline)
+        return result
+
+    def close(self):
+        try:
+            self.raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineSocket:
+    """HTTPResponse only needs makefile; retain the socket's normal file ownership semantics."""
+
+    def __init__(self, sock, deadline):
+        self.sock, self.deadline = sock, deadline
+
+    def makefile(self, mode):
+        return io.BufferedReader(_DeadlineReader(self.sock, self.deadline))
+
+
+class _DeadlineResponse(http.client.HTTPResponse):
+    def begin(self):
+        super().begin()
+        # urllib requests Connection: close. Read through EOF so even an overlong fixed-length body is checked.
+        self.length = None
+
+
+class _DeadlineConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, deadline, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+        self._create_connection = self._connect_tcp
+        self.response_class = lambda sock, **options: _DeadlineResponse(
+            _DeadlineSocket(sock, deadline), **options)
+
+    def _connect_tcp(self, address, timeout=None, source_address=None):
+        _remaining(self.deadline)
+        addresses = _resolve(address, self.deadline)
+        error = OSError("no address")
+        for family, kind, protocol, _name, endpoint in addresses:
+            sock = socket.socket(family, kind, protocol)
+            try:
+                if source_address:
+                    sock.bind(source_address)
+                sock.settimeout(_remaining(self.deadline))
+                sock.connect(tuple(endpoint))
+                # HTTPSConnection uses this timeout for the complete TLS handshake.
+                sock.settimeout(_remaining(self.deadline))
+                return sock
+            except OSError as exc:
+                error = exc
+                sock.close()
+        raise error
+
+    def send(self, data):
+        if self.sock is None:
+            self.connect()
+        self.sock.settimeout(_remaining(self.deadline))
+        super().send(data)
+
+
+class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        deadline = request._oah_deadline
+        return self.do_open(lambda host, **options: _DeadlineConnection(host, deadline=deadline, **options),
+                            request, context=self._context)
+
+
 def _opener() -> urllib.request.OpenerDirector:
     """The one way a score fetch reaches the network: no proxy from the environment, no redirect and no cookie."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect, _DeadlineHTTPSHandler)
 
 
 class FetchFailed(Exception):
@@ -400,20 +512,28 @@ def _read_body(response, limit: int, deadline: float) -> tuple[bytes | None, str
     if status != 200:
         return None, f"answered HTTP {status}"
     length = response.headers.get("Content-Length")
-    if isinstance(length, str) and length.strip().isdigit() and int(length) > limit:
+    if length is not None:
+        if not isinstance(length, str) or not length.strip().isascii() or not length.strip().isdigit():
+            return None, "sent an invalid content length"
+        length = int(length)
+    if length is not None and length > limit:
         return None, f"sent more than {_size(limit)}"
     read = getattr(response, "read1", None) or response.read
     chunks: list[bytes] = []
     total = 0
     while True:
-        if time.monotonic() > deadline:
-            return None, _TIMED_OUT
+        _remaining(deadline)
         chunk = read(_CHUNK)
+        _remaining(deadline)
         if not chunk:
+            if length is not None and total != length:
+                return None, "sent a body that differs from its content length"
             return b"".join(chunks), None
         total += len(chunk)
         if total > limit:
             return None, f"sent more than {_size(limit)}"
+        if length is not None and total > length:
+            return None, "sent a body that differs from its content length"
         chunks.append(chunk)
 
 
@@ -434,20 +554,20 @@ def _transfer(url: str, limit: int, key) -> tuple[bytes | None, str | None]:
         request = urllib.request.Request(url, headers=headers, method="GET")
         headers = value = None
         deadline = time.monotonic() + TIMEOUT
-        try:
-            response = _opener().open(request, timeout=TIMEOUT)
-            request = None
-            return _read_body(response, limit, deadline)
-        except urllib.error.HTTPError as exc:
-            reason = _http(exc.code, key is not None)
-            _close(exc)
-            return None, reason
-        except urllib.error.URLError as exc:
-            return None, _TIMED_OUT if isinstance(exc.reason, TimeoutError) else _UNREACHABLE
-        except TimeoutError:
-            return None, _TIMED_OUT
-        except (OSError, http.client.HTTPException, ValueError):
-            return None, _UNREACHABLE
+        request._oah_deadline = deadline
+        response = _opener().open(request, timeout=TIMEOUT)
+        request = None
+        return _read_body(response, limit, deadline)
+    except urllib.error.HTTPError as exc:
+        reason = _http(exc.code, key is not None)
+        _close(exc)
+        return None, reason
+    except urllib.error.URLError as exc:
+        return None, _TIMED_OUT if isinstance(exc.reason, TimeoutError) else _UNREACHABLE
+    except TimeoutError:
+        return None, _TIMED_OUT
+    except Exception:
+        return None, _UNREACHABLE
     finally:
         if response is not None:
             _close(response)
@@ -475,17 +595,17 @@ def _checked(source: str, data: dict) -> dict:
 
 def fetch_epoch(now: dt.datetime) -> dict:
     """Epoch AI's CSV, read with `epoch_scores` and dated by the UTC day of `now`, as a stored file."""
-    body = _get(EPOCH_URL, limit=LIMITS[EPOCH])
-    scores = reason = None
+    reason = None
     try:
-        scores = epoch_scores(body)
-    except DataError as exc:
-        reason = f"sent data that {exc}"
-    if reason is not None:
-        raise FetchFailed(reason)
-    moment = now.astimezone(dt.timezone.utc)
-    return _checked(EPOCH, {**epoch_snapshot(scores, moment.date()), "fetched_at": _stamp(moment),
-                            "source_url": EPOCH_URL})
+        scores = epoch_scores(_get(EPOCH_URL, limit=LIMITS[EPOCH]))
+        moment = now.astimezone(dt.timezone.utc)
+        return _checked(EPOCH, {**epoch_snapshot(scores, moment.date()), "fetched_at": _stamp(moment),
+                                "source_url": EPOCH_URL})
+    except FetchFailed as exc:
+        reason = str(exc)
+    except Exception:
+        reason = "sent data oah cannot read"
+    raise FetchFailed(reason)
 
 
 def _json(body: bytes) -> object | None:
@@ -512,7 +632,8 @@ def aa_scores(reply: object, known: Mapping) -> dict[str, dict[str, float]] | No
     rows: dict[str, dict[str, tuple[int, dict[str, float]]]] = {"codex": {}, "claude": {}}
     for row in reply["data"]:
         creator = row.get("model_creator") if isinstance(row, dict) else None
-        engine = _CREATORS.get(creator.get("slug")) if isinstance(creator, dict) else None
+        creator_slug = creator.get("slug") if isinstance(creator, dict) else None
+        engine = _CREATORS.get(creator_slug) if isinstance(creator_slug, str) else None
         if engine is None or not isinstance(row.get("slug"), str):
             continue
         values = _indexes(row.get("evaluations"))
@@ -549,18 +670,27 @@ def aa_scores(reply: object, known: Mapping) -> dict[str, dict[str, float]] | No
 
 def fetch_aa(key, known: Mapping, now: dt.datetime) -> dict:
     """Artificial Analysis's model list, asked with the user's key, reduced to the matched index values."""
-    body = _get(AA_URL, limit=LIMITS[AA], key=key)
-    del key
-    scores = aa_scores(_json(body), known)
-    del body
-    if scores is None:
-        raise FetchFailed("sent a reply oah cannot read")
-    if not scores:
-        raise FetchFailed("sent no model of a family oah knows")
-    moment = now.astimezone(dt.timezone.utc)
-    return _checked(AA, {"schema": 1, "source": AA_SOURCE, "date": moment.date().isoformat(), "url": AA_SITE,
-                         "credit": AA_CREDIT, "min_tasks": 1, "scores": scores, "fetched_at": _stamp(moment),
-                         "source_url": AA_URL})
+    reason = None
+    try:
+        body = _get(AA_URL, limit=LIMITS[AA], key=key)
+        key = None
+        scores = aa_scores(_json(body), known)
+        del body
+        if scores is None:
+            raise FetchFailed("sent a reply oah cannot read")
+        if not scores:
+            raise FetchFailed("sent no model of a family oah knows")
+        moment = now.astimezone(dt.timezone.utc)
+        return _checked(AA, {"schema": 1, "source": AA_SOURCE, "date": moment.date().isoformat(), "url": AA_SITE,
+                             "credit": AA_CREDIT, "min_tasks": 1, "scores": scores, "fetched_at": _stamp(moment),
+                             "source_url": AA_URL})
+    except FetchFailed as exc:
+        reason = str(exc)
+    except Exception:
+        reason = "sent data oah cannot read"
+    finally:
+        key = None
+    raise FetchFailed(reason)
 
 
 def _due(data: Mapping | None, ttl_hours: float, now: dt.datetime) -> bool:

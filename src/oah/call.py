@@ -192,6 +192,13 @@ class Admission:
         return {name: value for name, value in dataclasses.asdict(self).items() if name != "warnings"}
 
 
+class _ScorePath(type(pathlib.Path())):
+    """Publication compares the same bounded score bytes that decided the correction's choice."""
+
+    def read_bytes(self):
+        return models._score_bytes(self)
+
+
 class _CorrectionCatalog(models.Catalog):
     """Resolve against captured bytes; start publication compares them before writing the plan.
 
@@ -220,17 +227,10 @@ class _CorrectionCatalog(models.Catalog):
     def score_bytes(self, name):
         path = self.dir / name
         if path not in self.scores:
-            try:
-                raw = path.read_bytes()
-            except FileNotFoundError:
-                raw = None
-            except OSError as exc:
-                from oah.atomic import StorageError
-
-                raise StorageError(path, exc) from exc
+            raw = super().score_bytes(name)
             self.scores[path] = raw
             if (capture := runs._CORRECTION_CAPTURE.get()) is not None:
-                capture[path] = raw  # compared at start publication, like the catalog
+                capture[_ScorePath(path)] = raw  # compared at start publication, like the catalog
         return self.scores[path]
 
     def _save(self, entry):

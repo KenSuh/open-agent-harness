@@ -1,10 +1,13 @@
 # 벤치마크 자료 검사 — Epoch AI CSV 해석이 도구와 같은지, 받은 점수 파일의 검증·출처 우선순위·네트워크 차단·키 노출 금지를 본다.
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import http.client
 import io
 import json
 import socket
+import subprocess
 import unittest
 import urllib.error
 import urllib.request
@@ -181,6 +184,40 @@ class StoredFileTest(unittest.TestCase):
         second = chosen(catalog, "claude", session=session)
         self.assertEqual(len(first.notices) + len(second.notices), 1)
 
+    def test_oversized_files_are_bounded_and_invalid_in_both_catalogs(self):
+        from oah import call, runs
+
+        for source, content in (("epoch", EPOCH), ("aa", AA)):
+            for correction in (False, True):
+                with self.subTest(source=source, correction=correction):
+                    raw = json.dumps(content).encode()
+                    limit = len(raw) + 16
+                    catalog = state_with(self, **{source: raw + b" " * 1024})
+                    token = call._CORRECTION_INPUT_CHECK.set(lambda value: None)
+                    self.addCleanup(call._CORRECTION_INPUT_CHECK.reset, token)
+                    if correction:
+                        catalog = call._CorrectionCatalog(catalog.state_dir)
+                    captured = {}
+                    capture_token = runs._CORRECTION_CAPTURE.set(captured)
+                    self.addCleanup(runs._CORRECTION_CAPTURE.reset, capture_token)
+                    with mock.patch.dict(benchmarks.LIMITS, {source: limit}):
+                        self.assertEqual(len(catalog.score_bytes(benchmarks.FILES[source])), limit + 1)
+                        with mock.patch.object(benchmarks.json, "loads", side_effect=AssertionError("decoded")):
+                            data, problem = benchmarks.read_stored(source, catalog.score_bytes(benchmarks.FILES[source]))
+                        self.assertIsNone(data)
+                        self.assertIn("more than", problem)
+                        selection = chosen(catalog, "codex")
+                        if correction:
+                            path = catalog.dir / benchmarks.FILES[source]
+                            self.assertIn(path, captured)
+                            for captured_path, expected in captured.items():
+                                if expected is not None:
+                                    self.assertEqual(captured_path.read_bytes(), expected)
+                    self.assertIsNone(selection.data)
+                    self.assertEqual(len(selection.notices), 1)
+                    self.assertIn("OAH_SCORES_FILE_INVALID:", selection.notices[0])
+                    self.assertIn("more than", selection.notices[0])
+
 
 class PrecedenceTest(unittest.TestCase):
     def test_artificial_analysis_beats_epoch_beats_the_snapshot(self):
@@ -319,16 +356,20 @@ class EpochFetchTest(unittest.TestCase):
             "a read that times out": (lambda request: TimeoutBody(), "10 seconds"),
             "HTTP 500": (http_error(EPOCH_URL, 500), "HTTP 500"),
             "a redirect": (http_error(EPOCH_URL, 302, {"Location": "https://elsewhere.example/"}), "redirect"),
-            "an oversized body": (FakeResponse(b"x" * 2048), "more than"),
+            "an oversized body": (FakeResponse(b"x" * 8192), "more than"),
             "an oversized length": (FakeResponse(b"", headers={"Content-Length": str(10 ** 9)}), "more than"),
-            "invalid UTF-8": (FakeResponse(b"\xff\xfe" + epoch_csv(CSV_VALUES)), "UTF-8"),
-            "no allowed task": (FakeResponse(epoch_csv(CSV_VALUES, tasks=("SWE-Bench verified",))), "no rows"),
+            "invalid UTF-8": (FakeResponse(b"\xff\xfe" + epoch_csv(CSV_VALUES)), "cannot read"),
+            "no allowed task": (FakeResponse(epoch_csv(CSV_VALUES, tasks=("SWE-Bench verified",))), "cannot read"),
             "another success status": (FakeResponse(epoch_csv(CSV_VALUES), status=203), "HTTP 203"),
+            "a short body": (FakeResponse(epoch_csv(CSV_VALUES),
+                                          headers={"Content-Length": str(len(epoch_csv(CSV_VALUES)) + 1)}),
+                             "length"),
+            "a long body": (FakeResponse(epoch_csv(CSV_VALUES), headers={"Content-Length": "1"}), "length"),
         }
 
     def test_each_failure_keeps_the_last_good_file_and_warns_once(self):
         for name, (answer, said) in self.failures().items():
-            limit = 1024 if "oversized" in name else benchmarks.LIMITS["epoch"]
+            limit = 4096 if "oversized" in name else benchmarks.LIMITS["epoch"]
             with self.subTest(name), mock.patch.dict(benchmarks.LIMITS, {"epoch": limit}):
                 opener = use_opener(self, FakeOpener({EPOCH_URL: answer}))
                 catalog = state_with(self, epoch=STALE_EPOCH)
@@ -400,6 +441,138 @@ class TimeoutBody(FakeResponse):
         raise TimeoutError("timed out")
 
 
+class DeadlineTest(unittest.TestCase):
+    def transfer(self, *, stage=None, declared=None, suffix=b""):
+        """Use urllib/http.client with fake TCP, TLS and time; no socket can reach the network."""
+        from tests import helpers
+
+        clock = [0.0]
+        body = epoch_csv(CSV_VALUES)
+        length = len(body) if declared is None else declared
+        header = f"HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n".encode()
+        parts = ([(1.0, bytes([byte])) for byte in header] if stage == "headers" else [(3.0, header)])
+        parts += [(6.0, body[:1]), (6.0, body[1:] + suffix)] if stage == "body" else [(0.0, body + suffix)]
+
+        class Wire(io.RawIOBase):
+            def readinto(self, buffer):
+                if not parts:
+                    return 0
+                delay, chunk = parts.pop(0)
+                sock.wait(delay)
+                count = min(len(chunk), len(buffer))
+                buffer[:count] = chunk[:count]
+                if count < len(chunk):
+                    parts.insert(0, (0.0, chunk[count:]))
+                return count
+
+            def readable(self):
+                return True
+
+        class Socket:
+            timeout = None
+            closed = False
+
+            def settimeout(self, timeout):
+                self.timeout = timeout
+
+            def wait(self, seconds):
+                if seconds >= self.timeout:
+                    clock[0] += self.timeout
+                    raise TimeoutError("a fake wait timed out")
+                clock[0] += seconds
+
+            def connect(self, endpoint):
+                self.wait(11.0 if stage == "connect" else 0.0)
+
+            def setsockopt(self, *args):
+                pass
+
+            def sendall(self, data):
+                self.wait(0.0)
+
+            def makefile(self, mode, buffering=None):
+                return wire if buffering == 0 else io.BufferedReader(wire)
+
+            def close(self):
+                self.closed = True
+
+        sock, wire = Socket(), Wire()
+        opener = helpers.REAL_OPENER()
+        handler = next(item for item in opener.handlers if isinstance(item, urllib.request.HTTPSHandler))
+
+        def open(request, timeout):
+            request.timeout = timeout
+            return handler.https_open(request)
+
+        catalog = state_with(self, epoch=STALE_EPOCH)
+        before = (catalog.dir / benchmarks.FILES["epoch"]).read_bytes()
+        with mock.patch.object(benchmarks.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(benchmarks, "_resolve", return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]), \
+                mock.patch.object(benchmarks.socket, "socket", return_value=sock), \
+                mock.patch("ssl.SSLContext.wrap_socket", side_effect=lambda sock, **kwargs: sock), \
+                mock.patch.object(benchmarks, "_opener", return_value=mock.Mock(open=open)):
+            selection = refreshed(catalog)
+        return selection, clock[0], sock, wire, before, (catalog.dir / benchmarks.FILES["epoch"]).read_bytes()
+
+    def test_one_deadline_covers_connect_headers_and_body(self):
+        for stage in ("connect", "headers", "body"):
+            with self.subTest(stage=stage):
+                selection, elapsed, sock, wire, before, after = self.transfer(stage=stage)
+                self.assertLessEqual(elapsed, 10.0)
+                self.assertEqual(elapsed, 10.0)
+                self.assertEqual(selection.data, STALE_EPOCH)
+                self.assertEqual(before, after)
+                warned = failed_notices(selection.notices)
+                self.assertEqual(len(warned), 1)
+                self.assertIn("10 seconds", warned[0])
+                self.assertTrue(sock.closed)
+                if stage != "connect":
+                    self.assertTrue(wire.closed)
+
+    def test_real_http_response_rejects_short_and_long_fixed_length_bodies(self):
+        body = epoch_csv(CSV_VALUES)
+        for declared, suffix in ((len(body) + 1, b""), (len(body), b"extra")):
+            with self.subTest(declared=declared, suffix=suffix):
+                selection, _elapsed, _sock, _wire, before, after = self.transfer(declared=declared, suffix=suffix)
+                self.assertEqual(selection.data, STALE_EPOCH)
+                self.assertEqual(before, after)
+                self.assertIn("length", failed_notices(selection.notices)[0])
+
+    def test_dns_uses_the_remaining_deadline_and_an_isolated_environment(self):
+        addresses = [[socket.AF_INET, socket.SOCK_STREAM, 6, "", ["127.0.0.1", 443]]]
+        result = mock.Mock(stdout=json.dumps(addresses).encode())
+        with mock.patch.object(benchmarks.time, "monotonic", return_value=7.0), \
+                mock.patch.object(benchmarks.subprocess, "run", return_value=result) as run, \
+                mock.patch.dict(benchmarks.os.environ, {KEY_NAME: "private-key", "PROJECT": "private-project"}):
+            self.assertEqual(benchmarks._resolve(("epoch.ai", 443), 10.0), addresses)
+        args, options = run.call_args
+        self.assertEqual(args[0][-2:], ["epoch.ai", "443"])
+        self.assertIn("-I", args[0])
+        self.assertEqual(options["timeout"], 3.0)
+        self.assertEqual(set(options["env"]) - {"SystemRoot", "WINDIR"}, set())
+        self.assertEqual(options["stderr"], subprocess.DEVNULL)
+
+    def test_a_dns_timeout_is_a_sanitized_fetch_failure(self):
+        from tests import helpers
+
+        opener = helpers.REAL_OPENER()
+        handler = next(item for item in opener.handlers if isinstance(item, urllib.request.HTTPSHandler))
+
+        def open(request, timeout):
+            request.timeout = timeout
+            return handler.https_open(request)
+
+        with mock.patch.object(benchmarks.subprocess, "run", side_effect=subprocess.TimeoutExpired("private", 10)), \
+                mock.patch.object(benchmarks, "_opener", return_value=mock.Mock(open=open)), \
+                mock.patch.object(benchmarks.socket, "socket", side_effect=AssertionError("no connection")):
+            catalog = state_with(self, epoch=STALE_EPOCH)
+            selection = refreshed(catalog)
+        self.assertEqual(selection.data, STALE_EPOCH)
+        self.assertIn("10 seconds", failed_notices(selection.notices)[0])
+        self.assertNotIn("private", str(selection.notices))
+
+
 class ArtificialAnalysisTest(unittest.TestCase):
     KEY = {KEY_NAME: "test-key-0f3a"}
 
@@ -457,6 +630,19 @@ class ArtificialAnalysisTest(unittest.TestCase):
             "gpt-6.1-sol": {CODING: 0.6}, "gpt-6.1-terra": {CODING: 0.3}, "gpt-6-luna": {CODING: 0.1},
             "claude-opus-5-5": {CODING: 0.65}, "claude-opus-5": {CODING: 0.45}, "claude-sonnet-5-5": {CODING: 0.35}})
 
+    def test_wrong_field_types_are_dropped_before_use(self):
+        for value in (None, [], {}, True, 123):
+            for field in ("creator", "slug", "evaluations", "index"):
+                with self.subTest(value=value, field=field):
+                    row = aa_row("openai", "gpt-6-1-sol-max", 50)
+                    if field == "creator":
+                        row["model_creator"]["slug"] = value
+                    elif field == "index":
+                        row["evaluations"]["artificial_analysis_coding_index"] = value
+                    else:
+                        row[field] = value
+                    self.assertEqual(benchmarks.aa_scores({"data": [row]}, scoring.families()), {})
+
     def test_an_engine_uses_the_intelligence_index_when_one_model_lacks_coding(self):
         rows = (aa_row("openai", "gpt-6-luna", 10, 30), aa_row("openai", "gpt-6-1-sol-max", 60, 70),
                 aa_row("anthropic", "claude-opus-5-5", 55, 80), aa_row("anthropic", "claude-sonnet-5-5", None, 50),
@@ -472,13 +658,16 @@ class ArtificialAnalysisTest(unittest.TestCase):
                  "a malformed body": (FakeResponse(b"{not json"), "cannot read"),
                  "deep nesting": (FakeResponse(b"[" * 100000 + b"]" * 100000), "cannot read"),
                  "no known model": (FakeResponse(aa_body(aa_row("openai", "gpt-6-nova", 50))), "no model"),
-                 "a bare list": (FakeResponse(json.dumps([AA_ROWS[0]]).encode()), "cannot read")}
+                 "a bare list": (FakeResponse(json.dumps([AA_ROWS[0]]).encode()), "cannot read"),
+                 "a malformed creator": (FakeResponse(b'{"data":[{"model_creator":{"slug":[]}}]}'), "no model")}
         for name, (answer, said) in cases.items():
             with self.subTest(name):
                 use_opener(self, FakeOpener({AA_URL: answer}))
                 catalog = state_with(self, aa=STALE_AA, epoch=EPOCH)
+                before = (catalog.dir / benchmarks.FILES["aa"]).read_bytes()
                 selection = refreshed(catalog, env=self.KEY)
                 self.assertEqual(selection.data, STALE_AA)
+                self.assertEqual((catalog.dir / benchmarks.FILES["aa"]).read_bytes(), before)
                 warned = failed_notices(selection.notices)
                 self.assertEqual(len(warned), 1, warned)
                 self.assertTrue(warned[0].startswith("OAH_SCORES_REFRESH_FAILED: Artificial Analysis "), warned[0])
@@ -498,6 +687,32 @@ class ArtificialAnalysisTest(unittest.TestCase):
             benchmarks.fetch_aa(Secret("test-key-0f3a"), scoring.families(), NOW)
         self.assertIsNone(caught.exception.__context__)
         self.assertIsNone(caught.exception.__cause__)
+
+
+class FetchBoundaryTest(unittest.TestCase):
+    def test_unexpected_open_read_and_parse_errors_are_sanitized(self):
+        for source, url, parser, good in (("epoch", EPOCH_URL, "epoch_scores", STALE_EPOCH),
+                                          ("aa", AA_URL, "aa_scores", STALE_AA)):
+            for stage in ("open", "read", "parse"):
+                for error_type in (TypeError, KeyError, ValueError, OSError, http.client.HTTPException):
+                    with self.subTest(source=source, stage=stage, error=error_type.__name__):
+                        error = error_type("private-key/raw-body?query=private")
+                        response = FakeResponse(b"unused")
+                        if stage == "read":
+                            response.read1 = mock.Mock(side_effect=error)
+                        use_opener(self, FakeOpener({url: error if stage == "open" else response}))
+                        catalog = state_with(self, epoch=STALE_EPOCH, aa=STALE_AA)
+                        before = (catalog.dir / benchmarks.FILES[source]).read_bytes()
+                        patcher = (mock.patch.object(benchmarks, parser, side_effect=error) if stage == "parse"
+                                   else contextlib.nullcontext())
+                        with patcher:
+                            session = benchmarks.Session(files={source: good})
+                            notices = benchmarks._refresh(source, catalog, session, known=scoring.families(),
+                                                           env={KEY_NAME: "private-key"}, keychain=NoKeychain(), now=NOW)
+                        self.assertEqual(session.files[source], good)
+                        self.assertEqual((catalog.dir / benchmarks.FILES[source]).read_bytes(), before)
+                        self.assertEqual(len(failed_notices(notices)), 1)
+                        self.assertNotIn("private", str(notices))
 
 
 def models_cli_run(project, *argv: str) -> tuple[int, str, str]:
@@ -558,6 +773,18 @@ def both_sources() -> dict:
 
 
 class FetchWhenTest(unittest.TestCase):
+    def test_a_malformed_aa_creator_keeps_the_last_good_file_and_permits_launch(self):
+        project = project_with_key(self, "test-key-0f3a")
+        catalog = Catalog(project.state)
+        catalog.save_scores("benchmarks-epoch.json", STALE_EPOCH)
+        catalog.save_scores("benchmarks-aa.json", STALE_AA)
+        before = (catalog.dir / "benchmarks-aa.json").read_bytes()
+        use_opener(self, FakeOpener({AA_URL: FakeResponse(b'{"data":[{"model_creator":{"slug":[]}}]}')}))
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual(data["status"], "finished")
+        self.assertEqual(data["admission"]["score_source"], "Artificial Analysis")
+        self.assertEqual((catalog.dir / "benchmarks-aa.json").read_bytes(), before)
+
     """AC1 and AC6: a fetch happens at a catalog rebuild only, at most once per source per command."""
 
     def test_oah_models_refresh_fetches_each_source_once_for_both_engines(self):

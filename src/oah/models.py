@@ -245,6 +245,14 @@ def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str],
             "claude --help + alias check" if confirmed else "claude --help")
 
 
+def _score_bytes(path: pathlib.Path) -> bytes:
+    from oah.benchmarks import FILES, LIMITS
+
+    limit = next(LIMITS[source] for source, filename in FILES.items() if filename == path.name)
+    with path.open("rb") as stream:
+        return stream.read(limit + 1)
+
+
 class Catalog:
     def __init__(self, state_dir: pathlib.Path) -> None:
         self.state_dir = pathlib.Path(state_dir)
@@ -258,7 +266,7 @@ class Catalog:
         """The raw bytes of one stored score file, or None when there is none; `oah.benchmarks` checks them."""
         path = self.dir / name
         try:
-            return _retry_permission(path.read_bytes, RETRY_SECONDS)
+            return _retry_permission(lambda: _score_bytes(path), RETRY_SECONDS)
         except FileNotFoundError:
             return None
         except OSError as exc:

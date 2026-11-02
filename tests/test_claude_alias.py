@@ -75,6 +75,18 @@ class AliasCheckTest(unittest.TestCase):
         self.assertEqual([model.name for model in entry.models], ["fable", "opus", "sonnet"])
         self.assertEqual([run["argv"][4] for run in runs][1:], ["haiku"])
 
+    def test_temporary_directory_setup_failure_leaves_the_alias_out(self):
+        for stage in ("construction", "entry"):
+            with self.subTest(stage=stage):
+                with mock.patch.object(claude_alias.tempfile, "TemporaryDirectory") as folder:
+                    if stage == "construction":
+                        folder.side_effect = OSError("unavailable")
+                    else:
+                        folder.return_value.__enter__.side_effect = OSError("unavailable")
+                    _project, entry, runs = self.check("real")
+                self.assertEqual([model.name for model in entry.models], ["fable", "opus", "sonnet"])
+                self.assertEqual(runs, [])
+
     def test_an_alias_the_help_lists_is_not_checked(self):
         _project, entry, runs = self.check("real", aliases="haiku,sonnet,opus,fable")
         self.assertEqual(runs, [])

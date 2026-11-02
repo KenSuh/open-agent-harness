@@ -44,11 +44,11 @@ def child_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def _run(base: Sequence[str], alias: str, env: Mapping[str, str]) -> RunResult | None:
-    with tempfile.TemporaryDirectory(prefix="oah-alias-", ignore_cleanup_errors=True) as folder:
-        try:
+    try:
+        with tempfile.TemporaryDirectory(prefix="oah-alias-", ignore_cleanup_errors=True) as folder:
             return run_command(argv(base, alias), timeout=TIMEOUT, cwd=folder, env=child_env(env))
-        except (OSError, ValueError, UnsupportedBatchShim):
-            return None
+    except (OSError, ValueError, UnsupportedBatchShim):
+        return None
 
 
 def confirm(base: Sequence[str], aliases: Sequence[str], env: Mapping[str, str]) -> tuple[str, ...]:
