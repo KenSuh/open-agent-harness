@@ -100,7 +100,7 @@ class CliTest(unittest.TestCase):
                 trusted = FAKE_REVIEWER.read_bytes()
                 pinned = hashlib.sha256(trusted).hexdigest()
                 command = [executable, "tools/reviewer.py", "--script", str(project.script)]
-                config = (f"[engines.codex]\ncommand = {toml_list(command)}\n"
+                config = (f"[engines.codex]\ncommand = {toml_list(command)}\nquality_order = [\"gpt-test-a\"]\n"
                           f'[review]\ncodex_sha256 = "{pinned}"\n')
                 project.base = project.commit({".oah/config.toml": config, "tools/reviewer.py": trusted})
                 git(project.repo, "worktree", "add", "-q", "--detach", str(caller), project.base)

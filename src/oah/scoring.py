@@ -48,7 +48,7 @@ MARGIN = 0.02
 MIN_COMMON_TASKS = 3
 TOP_STEP = len(TIERS) - 1
 SCHEMA = 1
-_PIN = 'pin a model with [engines.<engine>.tiers] <tier> = { model = "<model>" } in .oah/config.toml'
+_PIN = 'pin a model with [engines.{engine}.tiers] <tier> = {{ model = "<model>" }} in .oah/config.toml'
 _NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _TASK = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()-]{0,79}")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -98,7 +98,7 @@ class _Candidate:
 
 def _unusable(name: str, why: str) -> EngineError:
     return EngineError(NO_SCORES, f"the packaged file templates/engines/{name} {why}, so scores cannot choose a model; "
-                       f"reinstall oah, or {_PIN}")
+                       f"reinstall oah, or {_PIN.format(engine='<engine>')}")
 
 
 def _packaged(name: str) -> bytes:
@@ -238,7 +238,7 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     competing = list(newest.values())
     if not competing:
         raise EngineError(NO_SCORES, f"no model the {engine} CLI lists has a usable score, so scores cannot choose "
-                          f"one; run `oah models` to see why each was left out, or {_PIN}")
+                          f"one; run `oah models` to see why each was left out, or {_PIN.format(engine=engine)}")
     common = sorted(set.intersection(*(set(item.tasks) for item in competing)))
     bounds = {task: (min(item.tasks[task] for item in competing), max(item.tasks[task] for item in competing))
               for task in common}
@@ -259,7 +259,8 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
         ranked = [item for item in ranked if item.model in allowed]
     if not ranked:
         raise EngineError(NO_SCORES, f"no model in [engines.{engine}] allowed_models has a usable score, so scores "
-                          f"cannot choose one; run `oah models` to see why each was left out, or {_PIN}")
+                          f"cannot choose one; run `oah models` to see why each was left out, or "
+                          f"{_PIN.format(engine=engine)}")
     return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(ranked), left_out, tuple(retired))
 
 
@@ -270,7 +271,8 @@ def failed(engine: str, error: EngineError) -> ScoreSet:
 
 def _bounds(scores: ScoreSet) -> tuple[float, float]:
     if not scores.models:
-        raise EngineError(NO_SCORES, scores.failure or f"no scores are available for {scores.engine}; {_PIN}")
+        raise EngineError(NO_SCORES, scores.failure or f"no scores are available for {scores.engine}; "
+                          f"{_PIN.format(engine=scores.engine)}")
     values = [model.score for model in scores.models]
     return min(values), max(values)
 

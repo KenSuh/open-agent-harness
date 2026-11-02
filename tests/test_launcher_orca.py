@@ -23,6 +23,7 @@ from oah import briefs, call, call_cli, intent, launchers, skillsel
 from oah.engines.effort import EngineError
 from oah.engines.proc import resolve_command, run_command
 from oah.launchers import orca
+from oah.review import receipts
 from oah.lease import Store
 from oah.paths import repo_info
 from oah.runs import UNVERIFIED, find_run, new_run
@@ -302,7 +303,7 @@ class OrcaProject:
     def queued(self, engine: str = "codex", stage: str = "review", *, override: bool = False) -> call.Prepared:
         self.orca_state.mkdir(parents=True, exist_ok=True)
         (self.orca_state / "controls.json").write_text(json.dumps({"FAKE_ORCA_HOLD": "1"}), encoding="utf-8")
-        prepared = call.prepare(call.CallRequest(engine=engine, stage=stage, task="t1", tier="low",
+        prepared = call.prepare(call.CallRequest(engine=engine, stage=stage, task="t1", tier="high",
                                                  override_stage=override), call_cli.load_settings(self.repo),
                                 root=self.repo, state_dir=self.state, env=self.env, footer=FOOTER,
                                 has_footer=has_footer, parse_intent=parse_intent, read_source=call._read_text)
@@ -339,7 +340,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_process_run_records_no_launcher(self):
         project = Project(self)
-        code, out, err = run_cli(project, "call", "codex", "--stage", "review", "--tier", "low", "--json")
+        code, out, err = run_cli(project, "call", "codex", "--stage", "review", "--tier", "medium", "--json")
         self.assertEqual(code, 0, err)
         data = json.loads(out)
         self.assertIn("launcher", data)
@@ -565,10 +566,31 @@ class DispatchTest(unittest.TestCase):
                                      for argv in project.orca_calls()))
                 self.assertFalse(project.record.exists())
 
-    def test_review_can_still_run_in_a_new_orca_worktree(self):
+    def test_a_refused_admission_opens_no_terminal_and_spends_nothing(self):
         project = OrcaProject(self)
         project.start_host()
         code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+                                     "--launcher", "orca")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_MODEL_BELOW_FLOOR", err)
+        self.assertFalse(project.record.exists())
+        self.assertFalse([argv for argv in project.orca_calls() if argv[:2] == ["terminal", "create"]])
+        self.assertEqual([line for line in receipts.read_round_log(project.state, "t1") if line["event"] != "limit"], [])
+
+    def test_admit_runs_once_at_prepare_and_the_worker_replays_that_record(self):
+        project = OrcaProject(self)
+        project.start_host()
+        with mock.patch.object(call, "admit", wraps=call.admit) as spy:
+            code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
+                                         "--launcher", "orca", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(json.loads(out)["admission"]["floor_tier"], "medium")
+
+    def test_review_can_still_run_in_a_new_orca_worktree(self):
+        project = OrcaProject(self)
+        project.start_host()
+        code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
                                      "--launcher", "orca", "--json")
         self.assertEqual(code, 0, err)
         data = json.loads(out)
@@ -587,7 +609,7 @@ class DispatchTest(unittest.TestCase):
             return prepared
 
         with mock.patch.object(call, "prepare", side_effect=changed):
-            code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+            code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
                                          "--launcher", "orca", "--worktree", str(project.repo), "--background")
         self.assertEqual(code, 1, out + err)
         self.assertIn("OAH_LEASE_CHANGED", err)
@@ -1018,7 +1040,7 @@ raise SystemExit(code)
         packet.parent.mkdir(parents=True, exist_ok=True)
         packet.write_bytes((section + "## Scope\n- src/a.py\n").replace("\n", "\r\n").encode("utf-8"))
         project.bind(root=lane)
-        code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low",
+        code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
                                      "--launcher", "orca", "--worktree", "lane-a", "--json")
         self.assertEqual(code, 0, err)
         data = json.loads(out)

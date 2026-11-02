@@ -477,6 +477,27 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["model_source"], "judge" if status == "used" else "scored")
                 self.assertEqual(launched(project), expected)
 
+    def test_a_judge_answer_below_a_review_floor_never_runs(self):
+        low = '[engines.codex.tier_pools]\nmedium = ["gpt-6.1-terra", "gpt-6-luna"]\n'
+        rows = (("scored", "", "rejected(outside-score-bound)"), ("pools", low, "rejected(below-floor)"))
+        for mode, extra, status in rows:
+            with self.subTest(mode=mode):
+                project = calls.scored_project(self, extra + JEV_ON)
+                project.env[KEY_NAME] = fake_key()
+                with judge(project, FakeJudge(("gpt-6-luna", "medium"))):
+                    data = project.run(stage="review", tier="medium")
+                self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
+                self.assertEqual(launched(project), ("gpt-6.1-terra", "medium"))
+
+    def test_a_review_judge_works_under_the_scope_floor_not_the_kind_floor(self):
+        project = calls.scored_project(self, JEV_ON)
+        project.packet("## Scope\n- src/auth/login.py\n")
+        project.env[KEY_NAME] = fake_key()
+        with judge(project, FakeJudge(("gpt-6.1-terra", "medium"))):
+            data = project.run(stage="review", axes={"kind": "quick"})
+        self.assertEqual((data["tier"], data["model_choice"]["floor"]["tier"]), ("high", "high"))
+        self.assertEqual(data["model_judge"], "rejected(below-floor)", "medium effort is below the high floor")
+
     def test_efficient_stays_efficient_under_a_judge(self):
         project = calls.scored_project(self, '[models]\nprofile = "efficient"\n' + JEV_ON)
         project.env[KEY_NAME] = fake_key()

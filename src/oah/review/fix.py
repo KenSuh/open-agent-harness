@@ -180,6 +180,24 @@ _ERROR_DIAGNOSTICS = {
     "OAH_STATE_PENDING": "a state transaction is pending; recover the state transaction before retrying.",
     "OAH_STATE_LOCK_TIMEOUT": "state storage is busy; wait for the other operation to finish before retrying.",
     "OAH_MODEL_UNRESOLVED": "the Codex model cannot be resolved; refresh the model catalog before retrying.",
+    "OAH_MODEL_NO_SCORES": "no benchmark scores can choose a model; reinstall oah, or pin a model in .oah/config.toml.",
+    "OAH_MODEL_CATALOG_UNAVAILABLE": "oah has no list of Codex models; run oah models --refresh, or pin a model in "
+                                     ".oah/config.toml.",
+    "OAH_MODEL_BELOW_FLOOR": "the model or effort is below this review's floor; run oah models to see the choice, or "
+                             "change the tier, pin or pool in .oah/config.toml.",
+    "OAH_MODEL_NOT_LISTED": "the Codex catalog no longer lists the pinned model; run oah models and change the pin in "
+                            ".oah/config.toml.",
+    "OAH_MODEL_SUPERSEDED": "a newer generation of the named model is available; run oah models, and change the pin, "
+                            "pool or quality_order in .oah/config.toml when you choose to.",
+    "OAH_MODEL_CHANGED": "the automatic model changed after a catalog rebuild; run oah models to see why.",
+    "OAH_MODEL_UNKNOWN_FAMILY": "the CLI lists a model of an unknown family, which is never chosen automatically; run "
+                                "oah models, and name it in .oah/config.toml to use it.",
+    "OAH_MODEL_UNSCORED": "a listed model has no usable score yet, so the older generation stays; run oah models, and "
+                          "name it in .oah/config.toml to use it now.",
+    "OAH_MODEL_FLOOR_UNCHECKED": "the named model has no score, so the floor was not checked; run oah models, or name "
+                                 "a scored model in .oah/config.toml.",
+    "OAH_MODEL_ORDER_IGNORED": "the old default quality_order counts as unset, so scores choose; list other models in "
+                               ".oah/config.toml to rank them yourself.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

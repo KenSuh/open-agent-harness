@@ -396,7 +396,7 @@ class BudgetGateTest(unittest.TestCase):
                 path.write_bytes(invalid)
                 for args in (("review", "--task", "t1", "--decision", "continue", "--extra-round"),
                              ("fix", "--task", "t1"),
-                             ("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")):
+                             ("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")):
                     done = oah(project, *args)
                     self.assertIn("OAH_REVIEW_STATE_INVALID", done.stderr)
                     self.assertNotIn("private-fixture-marker", done.stdout + done.stderr)
@@ -454,7 +454,7 @@ class BudgetGateTest(unittest.TestCase):
         log = receipts.read_round_log(project.state, "t1")
         self.assertTrue(any(line.get("max_rounds") == 2 for line in log))
         project.commit({".oah/config.toml": original})
-        call.execute(prepare(project, stage="review", tier="low"), base_env=project.env)
+        call.execute(prepare(project, stage="review", tier="medium"), base_env=project.env)
         done = oah(project, "call", "codex", "--stage", "correction", "--task", "t1", "--tier", "low")
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
@@ -468,7 +468,7 @@ class BudgetGateTest(unittest.TestCase):
                 original = getattr(call, name)
 
                 def advice(*args, **kwargs):
-                    done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
+                    done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
                     competing.append(done)
                     return original(*args, **kwargs)
 
@@ -509,7 +509,7 @@ class BudgetGateTest(unittest.TestCase):
         with mock.patch.object(call, "advise", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 project.prepare()
-        done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
+        done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
         self.assertFalse(project.record.exists())
@@ -581,7 +581,7 @@ class BudgetGateTest(unittest.TestCase):
 
     def test_raw_review_counts_toward_structured_review_limit(self):
         project = FixProject(self, config="[review]\nmax_rounds = 1\n")
-        call.execute(prepare(project, stage="review", tier="low"), base_env=project.env)
+        call.execute(prepare(project, stage="review", tier="medium"), base_env=project.env)
         with self.assertRaises(ReviewError) as caught:
             project.review()
         self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
@@ -594,7 +594,7 @@ class BudgetGateTest(unittest.TestCase):
     def test_background_review_is_counted_once_at_engine_start(self):
         project = CallProject(self, config="[review]\nmax_rounds = 2\n")
         project.bind()
-        done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "low", "--background")
+        done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium", "--background")
         self.assertEqual(done.returncode, 0, done.stderr)
         run_id = done.stdout.split("run=", 1)[1].split()[0]
         waited = oah(project, "wait", run_id, "--timeout-seconds", "60")
@@ -608,7 +608,7 @@ class BudgetGateTest(unittest.TestCase):
 
     def test_a_stop_during_background_handoff_keeps_its_named_code(self):
         project = CallProject(self)
-        pending = project.prepare(tier="low")
+        pending = project.prepare(tier="medium")
         checked = call.check_prepared
 
         def stop_after_check(prepared):
@@ -625,7 +625,7 @@ class BudgetGateTest(unittest.TestCase):
 
     def test_a_busy_task_refuses_and_records_zero_engine_calls(self):
         project = CallProject(self)
-        pending = project.prepare(tier="low")
+        pending = project.prepare(tier="medium")
         with StateLock(receipts.task_lock_path(project.state, "t1")):
             with self.assertRaises(Exception) as caught:
                 call.execute(pending, base_env=project.env)
@@ -635,8 +635,8 @@ class BudgetGateTest(unittest.TestCase):
 
     def test_the_budget_belongs_to_one_task(self):
         project = CallProject(self, config="[review]\nmax_rounds = 1\n")
-        project.run(tier="low")
-        project.run(task="t2", tier="low")
+        project.run(tier="medium")
+        project.run(task="t2", tier="medium")
         self.assertEqual(len(project.runs()), 1)
         log = receipts.read_round_log(project.state, "t2")
         self.assertEqual([line["event"] for line in log], ["limit", "reservation", "dispatch"])

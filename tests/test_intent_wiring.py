@@ -600,7 +600,7 @@ class EndToEndTest(unittest.TestCase):
         accepted = path.read_text(encoding="utf-8")
         path.write_text(accepted.replace("the digest is stable", "the digest never changes"), encoding="utf-8", newline="")
         self.assertEqual(repo.status()["t1"]["intent_state"], "stale")
-        refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "low")
+        refused = repo.oah("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
         self.assertEqual(refused.returncode, 1)
         self.assertTrue(refused.stderr.startswith("OAH_INTENT_NOT_CURRENT"), refused.stderr)
         self.assertIn("is stale", refused.stderr)

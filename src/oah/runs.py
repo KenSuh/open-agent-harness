@@ -41,7 +41,7 @@ UNVERIFIED_FIELDS = ("cli_version", "resolved_model", "requested_effort", "launc
 RESULT_FIELDS = (
     "run_id", "task", "engine", "stage", "status", "created_at", "started_at", "finished_at", "duration_s",
     "exit_code", "timed_out", "pid", "command", "cwd", "read_only", "cli_path", "cli_version",
-    "requested_model", "resolved_model", "model_source", "observed_models", "model_judge", "model_choice",
+    "requested_model", "resolved_model", "model_source", "observed_models", "model_judge", "model_choice", "admission",
     "header_model",
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
@@ -76,7 +76,9 @@ _CORRECTION_FORMS = re.compile(
     r"A[1-9][0-9]*|R[1-9][0-9]*(?:-[FC][1-9][0-9]*)?|R[1-9][0-9]*\.json|"
     r"A[1-9][0-9]*-(?:start|outcome|head)\.json|\[file [1-9][0-9]*\]|"
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
-_CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256"})
+_CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "stdout", "stderr", "bytes", "sha256",
+                                     "family", "floor_tier", "floor_checked", "profile", "score_source", "score_date",
+                                     "score_credit"})
 _CORRECTION_JUDGE_ERROR = re.compile(
     r"unused\(error:(?:timeout|rate-limited|unauthorized|overloaded|network|insecure-url|invalid-header|"
     r"bad-request|bad-response|key-name|internal|provider|http-[1-5][0-9]{2})\)")

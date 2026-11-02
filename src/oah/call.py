@@ -4,14 +4,19 @@
 `prepare` decides everything before launch and writes the run folder:
 - the stage's engine (`OAH_STAGE_ENGINE_MISMATCH` unless overridden, which is logged as an event);
 - the tier: `--tier` (source `flag`), else the packet's `## Plan` line for this stage (`packet`), else the
-  rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given). The re-ranker's
-  advisory judgement is recorded next to it and never changes the tier;
-- the model through the catalog (`models.map_tier`) and the launch effort through the adapter;
+  rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given), lifted to a review's
+  floor. The re-ranker's advisory judgement is recorded next to it and never changes the tier;
+- the model through the catalog and the scores read once (`check_catalog`, `models.map_tier`), and the launch
+  effort through the adapter;
 - the judged model and effort (`judge_engine`, amendment 6): unless a tier model is explicitly pinned,
   an enabled re-ranker with a key picks one pair from
   `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
   the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
   (with the candidate `mode`, the pool or allowed models left out and why, and why the model is not judged);
+- the one admission check (`admit`) on the final model and effort. Every launch path passes it here: foreground,
+  background, Orca, review and fix all prepare through this function, and a queued run replays the admitted
+  record. Selection, the judge and `admit` run before the reservation or a review's round start, so a
+  refusal has spent nothing and there is nothing to release. Everything after them keeps its reservation;
 - the brief (`briefs.build`) and the argv; a review is always read-only.
 `execute` refuses a Codex header model other than the launched one (`OAH_MODEL_MISMATCH`), like the
 effort check, and holds the lease lock through process creation and uses `oah.engines.proc`'s job/tree handling
@@ -69,10 +74,15 @@ _CORRECTION_CLEANUP = ContextVar("oah_correction_cleanup", default=False)
 _CORRECTION_INPUT_CHECK = ContextVar("oah_correction_input_check", default=None)
 _CORRECTION_INPUTS = ContextVar("oah_correction_inputs", default=None)
 _PREPARATION_RUN = ContextVar("oah_preparation_run", default=None)
+_PREPARATION_START = ContextVar("oah_preparation_start", default=None)  # `oah review` starts its round after admission
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
 DEFAULT_TASK = "adhoc"
 MODEL_MISMATCH = "OAH_MODEL_MISMATCH"
+BELOW_FLOOR = "OAH_MODEL_BELOW_FLOOR"
+NOT_LISTED = "OAH_MODEL_NOT_LISTED"
+SUPERSEDED = "OAH_MODEL_SUPERSEDED"
+FLOOR_UNCHECKED = "OAH_MODEL_FLOOR_UNCHECKED"
 STAGE_DEFAULTS = {"initial": "claude", "review": "codex", "correction": "codex"}
 TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
 ENGINE_DEFAULTS = {
@@ -163,6 +173,23 @@ class Resolution:
     changes: tuple[dict, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class Admission:
+    """What the admission check found; a run and a review receipt keep it."""
+
+    family: str | None
+    floor_tier: str
+    floor_checked: bool
+    profile: str
+    score_source: str | None
+    score_date: str | None
+    score_credit: str | None
+    warnings: tuple[str, ...] = ()
+
+    def to_json(self) -> dict:
+        return {name: value for name, value in dataclasses.asdict(self).items() if name != "warnings"}
+
+
 class _CorrectionCatalog(models.Catalog):
     """Resolve against captured bytes; start publication compares them before writing the plan."""
 
@@ -250,6 +277,12 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
                                      scores=read_scores(engine, freshness.entry, settings))
 
 
+def _fresh(freshness: models.Freshness) -> bool:
+    entry = freshness.entry
+    return bool(entry.models) and entry.checked_at is not None and not any(
+        warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
+
+
 def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: models.Entry | None):
     """A1's effort of a tier for one model, from the levels the catalog lists for it."""
     requested = settings.engines[engine]["tiers"][tier]["effort"]
@@ -285,10 +318,8 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pat
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
         check(dataclasses.asdict(freshness))
-    fresh = bool(entry.models) and entry.checked_at is not None and not any(
-        warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
-    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh,
-                                     pools=section["tier_pools"])
+    cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry,
+                                     fresh=_fresh(freshness), pools=section["tier_pools"])
     model, source, effort = _deterministic(engine, tier, settings, freshness, floor_tier=floor_tier)
     cap = section["effort_caps"].get(model)
     if cap is not None:
@@ -400,9 +431,82 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     model, effort = judged.proposal
     choice["proposal"] = {"model": model, "effort": effort}
     rule = candidates.reject_reason(model, effort)
+    if (rule is None and stage == "review" and scoring.scored(freshness.scores, model) is not None
+            and not scoring.clears(freshness.scores, model, routing.TIERS.index(floor_tier))):
+        rule = "below-floor"  # a pool or ranking is not bounded by scores, and a floor still is
     if rule is not None:
         return record(f"rejected({rule})")
     return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort))
+
+
+def _shown(model: str) -> str:
+    """A model name for a message: only a plain name is echoed, since a pin is text from a config file."""
+    return model if models.PLAIN_MODEL.fullmatch(model) else "this model"
+
+
+def _call_floor(stage: str | None, scope: Sequence[str], kind: str) -> str:
+    """The floor tier of a call. A review's comes from its scope alone, so no caller input can lower it."""
+    return routing.review_floor(scope, kind) if stage == "review" else routing.floor_tier(kind)
+
+
+def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: str, floor_tier: str,
+                          freshness: models.Freshness, warnings: list[str]) -> bool:
+    """Refuse a review below its floor; False when the user's named model leaves nothing to check against."""
+    engine, model, effort = resolution.engine, resolution.model, resolution.launch_effort
+    scores = freshness.scores
+    next_step = (f"Nothing was launched or spent. Use a tier of {floor_tier} or higher, or change the pin, pool or "
+                 "quality_order in .oah/config.toml; `oah models` shows each model's score")
+    if routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
+        raise EngineError(BELOW_FLOOR, f"tier {tier} is below the {floor_tier} floor of this review. {next_step}")
+    step = routing.TIERS.index(floor_tier)
+    value = scoring.score_of(scores, model)
+    if value is not None and not scoring.clears(scores, model, step):
+        raise EngineError(BELOW_FLOOR, f"{_shown(model)} scores {value:.1f}, below the {scoring.required(scores, step):.1f} "
+                          f"the {floor_tier} floor of this review needs. {next_step}")
+    try:
+        floor_effort = _tier_effort(engine, floor_tier, model, settings, freshness.entry).launch
+    except EngineError:
+        raise EngineError(BELOW_FLOOR, f"{_shown(model)} does not support the effort of the {floor_tier} floor of this "
+                          f"review. {next_step}") from None
+    comparable = rank(effort) is not None and rank(floor_effort) is not None
+    if comparable and rank(effort) < rank(floor_effort):
+        raise EngineError(BELOW_FLOOR, f"effort {effort} is below the {floor_effort} of the {floor_tier} floor of this "
+                          f"review. {next_step}")
+    if value is None or not comparable:
+        warnings.append(f"{FLOOR_UNCHECKED}: {_shown(model)} has no score or an effort oah cannot rank, so the "
+                        f"{floor_tier} floor of this review was not checked; the receipt says so. Run `oah models` to "
+                        "see the scored models, or name one in .oah/config.toml")
+        return False
+    return True
+
+
+def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier: str, floor_tier: str,
+          freshness: models.Freshness) -> Admission:
+    """The one check on the final model and effort; it reads nothing, on the entry and scores of this call.
+
+    A refusal raises before the call has spent anything. A selection that cannot start at all has
+    already raised its named failure in `models.map_tier` (no catalog, no scores, an empty pool). A floor is
+    checked on the model's own score, so a pin of a superseded or not-allowed model cannot get under it."""
+    engine, model = resolution.engine, resolution.model
+    scores = freshness.scores
+    warnings: list[str] = []
+    # The Claude CLI accepts full names it does not print, and a hidden Codex model is still one it knows.
+    if (engine == "codex" and resolution.model_source == "pin" and _fresh(freshness)
+            and freshness.entry.model(model) is None):
+        raise EngineError(NOT_LISTED, f"the codex CLI no longer lists {_shown(model)}, the model pinned for this tier, "
+                          "so nothing was launched or spent. Run `oah models` to see the listed models, then change "
+                          "the pin in .oah/config.toml")
+    if scores.left_out.get(model) == "superseded":
+        old = scoring.scored(scores, model)
+        family = next((item for item in scores.models if old is not None and item.family == old.family), None)
+        newer = f" {family.model} is the newer generation." if family is not None else ""
+        warnings.append(f"{SUPERSEDED}: {_shown(model)} was named in .oah/config.toml, so it runs, but it is superseded."
+                        f"{newer} Run `oah models`, and change that line when you choose to")
+    checked = stage == "review" and _review_floor_checked(resolution, settings, tier=tier, floor_tier=floor_tier,
+                                                          freshness=freshness, warnings=warnings)
+    found = scoring.scored(scores, model)
+    return Admission(found.family if found else None, floor_tier, checked, settings.models["profile"],
+                     scores.source or None, scores.date or None, scores.credit or None, tuple(warnings))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1064,24 +1168,25 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     given = recorded.to_json() if recorded is not None else {}
     given.update({axis: value for axis, value in request.axes.items() if value is not None})
     scored = routing.score_axes(stage=request.stage, kind=given.pop("kind", None), scope=scope, overrides=given)
+    floor_tier = _call_floor(request.stage, scope, scored.axes.kind)
     planned_run = None
     if inputs is None:
         from oah.lease import Store
 
         planned_run = _PREPARATION_RUN.get() or runs._plan_run(
             state_dir, request.task, request.engine, request.stage, now=now)
-        with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
-            _check_dispatch_lease(live, root, stage=request.stage)
-            _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
-                                reserve=True, run_id=planned_run[0].id)
     axes = scored.axes if recorded is not None else None
+    # `oah review` passed its own gate under the task lock, with its decision and extra round, which only a
+    # logged start carries. Until that start, the gate below would not know them.
+    start_round = _PREPARATION_START.get()
+    gated = start_round is None
 
     def check_budget():
         from oah.lease import LeaseError
 
         if inputs is not None:
             inputs.budget_check()
-        else:
+        elif gated:
             try:
                 with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
                     _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
@@ -1089,8 +1194,11 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
             except LeaseError as exc:
                 raise EngineError(exc.code, str(exc).split(": ", 1)[1]) from None
 
+    if inputs is None:  # `oah fix` passed the same gate when it captured its inputs
+        check_budget()
     reasons = None
     advisory = "unused(tier-given)"
+    rule_scored = False
     if request.tier:
         tier, tier_source = request.tier, "flag"
     elif packet and request.stage in packet.plan:
@@ -1106,16 +1214,13 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
-        check_budget()
-        advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
-    skill_axes = scored.axes
-    check_budget()
-    selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
-                              state_dir=state_dir, env=env, keychain=keychain,
-                              brief_disabled=disabled, now=now)
+        rule_scored = True
+        if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
+            tier = floor_tier
+            reasons.append(f"floor {floor_tier}: this review's scope")
+    # Selection, the judge and the admission check come first: a refusal has spent no reservation or round.
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now)
-    floor_tier = routing.floor_tier(scored.axes.kind)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, now=now,
                                 checked=checked, floor_tier=floor_tier)
     warnings.extend(resolution.warnings)
@@ -1124,6 +1229,26 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
                                      freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
                                      brief_disabled=disabled, keychain=keychain)
+    admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
+    warnings.extend(admitted.warnings)
+    judge = {**judge, "admission": admitted.to_json()}
+    if inputs is None:
+        if start_round is not None:
+            start_round()
+            gated = True
+        with Store(state_dir).checked(task=request.task, lease_id=holder.id, generation=holder.generation) as live:
+            _check_dispatch_lease(live, root, stage=request.stage)
+            _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
+                                reserve=True, run_id=planned_run[0].id)
+    if rule_scored:
+        check_budget()
+        advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
+    skill_axes = scored.axes
+    check_budget()
+    selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,
+                              state_dir=state_dir, env=env, keychain=keychain,
+                              brief_disabled=disabled, now=now)
+    check_budget()
     fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
                   has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
                   reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder,

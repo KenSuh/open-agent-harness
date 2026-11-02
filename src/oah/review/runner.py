@@ -22,7 +22,9 @@ variables never pass through (in any letter case); sign in through `codex login`
 `codex login --with-api-key`. Structured output is redacted once, after JSON decoding and before retention
 or validation. The snapshot is removed as soon as the reviewer exits. A validated round publishes
 `R<n>.json` and its index line; every other call has no validated receipt in `rounds.jsonl`.
-The start reservation is durable before preparation; failed and interrupted calls retain that spend.
+A round starts once `oah.call` has admitted its final model and effort, before any further paid preparation or
+the reviewer. A refused admission logs nothing, so it spends no round and no attempt; from the start line on,
+failed and interrupted calls retain that spend.
 """
 from __future__ import annotations
 
@@ -416,19 +418,25 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         planned_run = runs._plan_run(state, task, ENGINE, "review")
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
                  "run_id": planned_run[0].id}
-        receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
-                                         "extra_attempt": extra_attempt, "decision": request.decision,
-                                         "max_rounds": conf.max_rounds,
-                                         "decision_for": s.task_latest.digest if s.task_latest else None})
-        for note in ([f"review R{number}: the user's decision before this round: {request.decision}"]
-                     if request.decision else []) + ([f"review R{number} runs beyond [review] max_rounds = "
-                                                      f"{conf.max_rounds} (--extra-round)"] if extra else []):
-            Store(state).log(task=task, agent=lease.agent, message=note)
-        if extra_attempt:
-            Store(state).log(task=task, agent=lease.agent,
-                             message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
+        started_round = []
+
+        def start_round() -> None:
+            receipts.log_round(state, task, {"event": "start", **where, "head": span.head, "extra_round": extra,
+                                             "extra_attempt": extra_attempt, "decision": request.decision,
+                                             "max_rounds": conf.max_rounds,
+                                             "decision_for": s.task_latest.digest if s.task_latest else None})
+            started_round.append(True)
+            for note in ([f"review R{number}: the user's decision before this round: {request.decision}"]
+                         if request.decision else []) + ([f"review R{number} runs beyond [review] max_rounds = "
+                                                          f"{conf.max_rounds} (--extra-round)"] if extra else []):
+                Store(state).log(task=task, agent=lease.agent, message=note)
+            if extra_attempt:
+                Store(state).log(task=task, agent=lease.agent,
+                                 message=f"review R{number} attempt {attempt}: one additional call (--extra-attempt)")
+
         try:
             token = call._PREPARATION_RUN.set(planned_run)
+            start_token = call._PREPARATION_START.set(start_round)
             try:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage="review", task=task, tier=request.tier,
@@ -439,13 +447,15 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                     footer=tools.footer, has_footer=tools.has_footer,
                     parse_intent=tools.parse, read_source=tools.read_source, keychain=keychain)
             finally:
+                call._PREPARATION_START.reset(start_token)
                 call._PREPARATION_RUN.reset(token)
             warnings.extend(prepared.warnings)
             run = call.execute(prepared, base_env=launch_env, rules=rules, redact=redact)
         except BaseException as exc:
-            receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
-                                             "code": getattr(exc, "code", type(exc).__name__),
-                                             "message": redact(str(exc))[:600]})
+            if started_round:
+                receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
+                                                 "code": getattr(exc, "code", type(exc).__name__),
+                                                 "message": redact(str(exc))[:600]})
             raise
         last = runs._contained_path(snap.tree.parent, final_path.name)
         raw = last.read_bytes() if last.is_file() else b""
@@ -504,7 +514,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                      "resolved_inference_effort": run.get("resolved_inference_effort"),
                      "normalization_basis": run.get("normalization_basis"),
                      "effort_verified": run.get("effort_verified") is True, "tier": run.get("tier"),
-                     "tier_source": run.get("tier_source"), "run_id": prepared.run_id},
+                     "tier_source": run.get("tier_source"), "run_id": prepared.run_id,
+                     "model_source": run.get("model_source"), **(run.get("admission") or {})},
         "author_engines": sorted(set(engines)), "authorship": [{"commit": sha, "engine": engine} for sha, engine in commits],
         "independent": independent, "verdict": output.verdict, "summary": output.summary,
         "findings": [finding.to_json() for finding in output.findings],
