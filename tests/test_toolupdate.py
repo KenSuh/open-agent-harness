@@ -179,6 +179,8 @@ def main():
         return 0
     if args and args[-1] == "--help":
         text = me["help"].get(" ".join(args[:-1]))
+        if isinstance(text, dict):
+            return act(text)
         if text is None:
             print(f"error: unknown command {' '.join(args[:-1])}", file=sys.stderr)
             return 2
@@ -350,10 +352,10 @@ class FakeToolsCase(ToolUpdateTestCase):
         config.write_text("[skills]\nauto_update = false\n" + (f"[updates]\n{updates}" if updates is not None else ""),
                           encoding="utf-8")
 
-    def run_pass(self, *, trigger="manual", kit=steps.kit_skills, env=None, now=None):
+    def run_pass(self, *, trigger="manual", env=None, now=None):
         options = {"now": now} if now is not None else {}
         return passes.run_pass(self.root, self.state, env=env or self.fake.env, trigger=trigger,
-                               out=self.lines.append, kit=kit, **options)
+                               out=self.lines.append, **options)
 
     def state_record(self) -> dict:
         return records.read_state()
@@ -510,7 +512,7 @@ class PassTest(FakeToolsCase):
         self.assertIn("claude plugin marketplace update", entry["next_step"])
 
     def test_skipping_any_fixed_component_requires_attention(self):
-        fixed = ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills")
+        fixed = ("claude", "codex", "claude-marketplaces", "claude-plugins")
         stamp = "2026-11-03T00:00:00Z"
         for skipped in fixed:
             with self.subTest(skipped=skipped):
@@ -519,7 +521,7 @@ class PassTest(FakeToolsCase):
                 with mock.patch.object(steps, "cli_update", return_value={}), \
                         mock.patch.object(steps, "claude_plugins", return_value=found), \
                         mock.patch.object(steps, "claude_marketplaces", return_value={}):
-                    self.assertEqual(self.run_pass(kit=None), "needs-attention")
+                    self.assertEqual(self.run_pass(), "needs-attention")
                 self.assertEqual(self.components()[skipped]["status"], "unverified")
 
     def test_codex_plugins_are_only_a_notice_and_never_run_commands(self):
@@ -573,7 +575,7 @@ class PassTest(FakeToolsCase):
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
                          {"claude": "current", "codex": "current", "claude-marketplaces": "current",
-                          "claude-plugins": "unsupported", "oah-skills": "unsupported"})
+                          "claude-plugins": "unsupported"})
         self.assertEqual(components["claude"]["settled_version"], "2.1.316")
         self.assertTrue(self.fake.ran("claude", "update"))
         self.assertTrue(self.fake.ran("codex", "update"))
@@ -720,17 +722,88 @@ class PassTest(FakeToolsCase):
         self.assertEqual(components["claude-marketplaces"]["status"], "failed")
         self.assertEqual(components["claude-plugin:a@m"]["status"], "unverified")
 
-    def test_kit_step_runs_last_and_is_recorded(self):
-        calls = []
+    def test_skills_keep_their_daily_check_outside_the_pass(self):
+        notice = "oah: oah's skills keep their own daily check (oah skills update)"
+        with mock.patch("oah.toolkit.update.scheduled_update", side_effect=AssertionError("kit check ran")) as check:
+            self.assertEqual(self.run_pass(), "complete")
+        check.assert_not_called()
+        self.assertNotIn("oah-skills", self.components())
+        self.assertEqual(self.lines.count(notice), 1)
+        self.assertEqual(passes.status_lines().count(notice), 1)
 
-        def kit(root, state, env, now, checked_at, timeout_seconds):
-            self.assertEqual(timeout_seconds, 30)
-            calls.append(len(self.fake.argv()))
-            return {"oah-skills": records.component("current", "abc", "abc", "", checked_at)}
+    def test_help_failures_never_become_unsupported(self):
+        cases = (({"exit": 2, "stderr": "help unavailable"}, "unverified", "exit 2"),
+                 ({"stdout_hex": "ff"}, "unverified", "UTF-8"),
+                 ({"stderr_hex": "ff"}, "unverified", "UTF-8"),
+                 ({"sleep": 30}, "failed", "help timed out"))
+        paths = (("codex", "", ("codex",)),
+                 ("claude", "", ("claude", "claude-marketplaces", "claude-plugins")),
+                 ("claude", "plugin", ("claude-marketplaces", "claude-plugins")),
+                 ("claude", "plugin marketplace", ("claude-marketplaces",)),
+                 ("claude", "plugin list", ("claude-plugins",)),
+                 ("claude", "plugin update", ("claude-plugins",)))
+        self.configure("after_finish = true\ntimeout_seconds = 1\n")
+        for tool, path, names in paths:
+            for spec, status, reason in cases:
+                with self.subTest(tool=tool, path=path, spec=spec):
+                    self.fake.set("claude", help=dict(CLAUDE_HELP))
+                    self.fake.set("codex", help=dict(CODEX_HELP))
+                    helps = dict(CLAUDE_HELP if tool == "claude" else CODEX_HELP)
+                    helps[path] = spec
+                    self.fake.set(tool, help=helps)
+                    self.fake.log.unlink(missing_ok=True)
+                    self.assertEqual(self.run_pass(), "needs-attention")
+                    for name in names:
+                        entry = self.components()[name]
+                        self.assertEqual((entry["status"], entry["settled_version"]), (status, None))
+                        self.assertIn(reason, entry["next_step"])
+                        self.assertIn("--help", entry["next_step"])
+                        self.assertNotIn("partly updated", entry["next_step"])
+                    if tool == "codex":
+                        self.assertFalse(self.fake.ran(tool, "update"))
+                    else:
+                        if "claude-marketplaces" in names:
+                            self.assertFalse(self.fake.ran(tool, "plugin", "marketplace", "update"))
+                        if "claude-plugins" in names:
+                            self.assertFalse(self.fake.ran(tool, "plugin", "list", "--json"))
+                            self.assertFalse(any(argv[:2] == ["plugin", "update"] and argv[-1:] != ["--help"]
+                                                 for name, argv in self.fake.argv() if name == tool))
 
-        self.run_pass(kit=kit)
-        self.assertEqual(calls, [len(self.fake.argv())])
-        self.assertEqual(self.components()["oah-skills"]["status"], "current")
+    def test_clean_help_without_plugin_capabilities_is_unsupported(self):
+        self.fake.set("claude", plugins=[{"id": "a@m", "version": "1", "scope": "user"}],
+                      plugin_update={"a@m": {"json": {"command": "update", "outcome": "ok",
+                                                      "updateOutcome": "up_to_date"}}})
+        for path, line, names in (
+                ("plugin", "  marketplace                          Manage Claude Code marketplaces\n",
+                 ("claude-marketplaces",)),
+                ("plugin marketplace", "  update [options] [name]     Update marketplace(s) from their source - updates\n",
+                 ("claude-marketplaces",)),
+                ("plugin update", "  --json                     Print one machine-readable result line on stdout\n",
+                 ("claude-plugins",))):
+            with self.subTest(path=path):
+                helps = dict(CLAUDE_HELP)
+                helps[path] = helps[path].replace(line, "")
+                self.fake.set("claude", help=helps)
+                self.fake.log.unlink(missing_ok=True)
+                self.assertEqual(self.run_pass(), "complete")
+                for name in names:
+                    self.assertEqual(self.components()[name]["status"], "unsupported")
+
+    def test_help_launch_error_is_unverified(self):
+        run = probes.Cli.run
+
+        def denied(cli, *args):
+            if cli.name == "codex" and args == ("--help",):
+                raise PermissionError("help denied")
+            return run(cli, *args)
+
+        with mock.patch.object(probes.Cli, "run", denied):
+            self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["codex"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
+        self.assertIn("PermissionError", entry["next_step"])
+        self.assertIn("codex --help", entry["next_step"])
+        self.assertFalse(self.fake.ran("codex", "update"))
 
     def test_full_pass_runs_only_the_listed_commands(self):
         (self.fake.codex_home / "config.toml").write_text(toml_config({"m": "a" * 40}), encoding="utf-8")
@@ -801,7 +874,7 @@ class SessionsTest(FakeToolsCase):
                         mock.patch.object(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
                         mock.patch.object(proc.subprocess, "Popen", return_value=command) as launch, \
                         mock.patch.object(cli, "version", side_effect=["1", "2"]), \
-                        mock.patch.object(cli, "lists", return_value=True):
+                        mock.patch.object(cli, "lists", return_value=probes.Capability(True)):
                     entry = steps.cli_update(context, cli)["claude"]
                 launch.assert_called_once()
                 self.assertEqual(launch.call_args.args[0], [*cli.base, "update"])
@@ -820,6 +893,77 @@ class SessionsTest(FakeToolsCase):
 
 
 class RecordsTest(FakeToolsCase):
+    def test_removed_kit_component_invalidates_state_and_history(self):
+        self.run_pass()
+        state = self.state_record()
+        state["components"]["oah-skills"] = records.component("current", "abc", "abc", "", state["last_started"])
+        self.write(records.state_path(), json.dumps(state))
+        with self.assertRaisesRegex(records.StateUnavailable, "OAH_UPDATE_STATE_UNAVAILABLE"):
+            records.read_state()
+        run = dict(self.a_valid_run(), components=state["components"])
+        self.write(records.runs_path(), json.dumps(run) + "\n")
+        problems = []
+        self.assertEqual(records.read_runs(report=problems.append), [])
+        self.assertIn("skipped 1", "\n".join(problems))
+
+    def test_history_changes_no_interval_or_settled_decision(self):
+        self.run_pass()
+        state = self.state_record()
+        good = records.runs_path().read_bytes()
+        for case in ("missing", "corrupt", "unreadable"):
+            with self.subTest(case=case):
+                records.runs_path().write_bytes(good)
+                if case == "missing":
+                    records.runs_path().unlink()
+                elif case == "corrupt":
+                    records.runs_path().write_bytes(b"{torn\n\xff\n")
+                real_read = pathlib.Path.read_bytes
+
+                def no_history_decision(path):
+                    if path == records.runs_path():
+                        raise AssertionError("a decision read history")
+                    return real_read(path)
+
+                self.fake.log.unlink(missing_ok=True)
+                self.lines.clear()
+                with mock.patch.object(pathlib.Path, "read_bytes", no_history_decision), \
+                        mock.patch.object(passes, "_popen") as launch:
+                    self.assertEqual(records.read_state(), state)
+                    self.assertEqual(self.run_pass(trigger="after-finish"), "skipped")
+                    self.assertFalse(passes.start_after_finish(self.root, self.state, self.fake.env,
+                                                              out=self.lines.append))
+                    launch.assert_not_called()
+                self.assertEqual(self.fake.argv(), [])
+                self.assertNotIn("UNAVAILABLE", "\n".join(self.lines))
+
+    def test_missing_state_is_due_regardless_of_history(self):
+        good = json.dumps(self.a_valid_run()) + "\n"
+        for text in (None, good, "{torn\n"):
+            with self.subTest(history=text):
+                shutil.rmtree(records.updates_dir(), ignore_errors=True)
+                if text is not None:
+                    self.write(records.runs_path(), text)
+                self.assertIsNone(records.read_state())
+                self.assertTrue(records.due(records.read_state(), records.read_settings(self.root), records.utc_now()))
+                self.fake.log.unlink(missing_ok=True)
+                self.lines.clear()
+                self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
+                self.assertTrue(self.fake.ran("claude", "update") and self.fake.ran("codex", "update"))
+                self.assertNotIn("OAH_UPDATE_STATE_UNAVAILABLE", "\n".join(self.lines))
+
+    def test_status_shows_newest_history_and_counts_bad_lines(self):
+        self.run_pass()
+        old = self.a_valid_run()
+        newest = dict(self.a_valid_run(), finished="2026-11-02T00:01:00Z")
+        self.write(records.runs_path(), json.dumps(old) + "\n{torn\n" + json.dumps(newest) + "\n")
+        launched = len(self.launched)
+        text = "\n".join(passes.status_lines())
+        self.assertIn("skipped 1", text)
+        self.assertIn(old["finished"], text)
+        self.assertIn(newest["finished"], text)
+        self.assertLess(text.index(newest["finished"]), text.index(old["finished"]))
+        self.assertEqual(len(self.launched), launched)
+
     def test_lone_surrogates_in_timestamp_separators_are_rejected(self):
         good = self.a_valid_run()
         surrogate_time = "2026-11-01\ud80000:00:00Z"
@@ -894,7 +1038,7 @@ class RecordsTest(FakeToolsCase):
         self.run_pass()
         good_state = self.state_record()
         good_run = records.read_runs()[0]
-        for missing in ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills"):
+        for missing in ("claude", "codex", "claude-marketplaces", "claude-plugins"):
             with self.subTest(missing=missing):
                 components = {name: entry for name, entry in good_state["components"].items() if name != missing}
                 state = dict(good_state, components=components, outcome=records.outcome(components))
@@ -920,7 +1064,7 @@ class RecordsTest(FakeToolsCase):
         self.assertIsNone(components["codex"]["settled_version"])
 
     def test_unavailable_state_is_reported_and_everything_is_checked_again(self):
-        bad = {"corrupt": "{not json", "wrong type": "[]", "unknown status": None, "missing": None}
+        bad = {"corrupt": "{not json", "wrong type": "[]", "unknown status": None}
         for case, text in bad.items():
             with self.subTest(case=case):
                 shutil.rmtree(self.fake.home / ".oah", ignore_errors=True)
@@ -993,34 +1137,7 @@ class RecordsTest(FakeToolsCase):
                 self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
                 self.assertTrue(any("OAH_UPDATE_STATE_UNAVAILABLE" in line for line in self.lines))
 
-    def test_missing_state_and_unreadable_history_are_reported_and_force_a_recheck(self):
-        records.updates_dir().mkdir(parents=True)
-        records.lock_path().touch()
-        records.log_path().write_text("old log\n", encoding="utf-8")
-        self.assertIsNone(records.read_state())
-        self.assertNotIn("UNAVAILABLE", "\n".join(passes.status_lines()))
-        self.write(records.runs_path(), json.dumps(self.a_valid_run()) + "\n")
-        with self.assertRaises(records.StateUnavailable):
-            records.read_state()
-        self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", "\n".join(passes.status_lines()))
-        self.run_pass()
-        real_read = pathlib.Path.read_bytes
-
-        def unreadable(path):
-            if path == records.runs_path():
-                raise PermissionError("history denied")
-            return real_read(path)
-
-        with mock.patch.object(pathlib.Path, "read_bytes", unreadable):
-            with self.assertRaises(records.StateUnavailable):
-                records.read_runs()
-            self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", "\n".join(passes.status_lines()))
-            self.lines.clear()
-            self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
-        self.assertTrue(any("OAH_UPDATE_STATE_UNAVAILABLE" in line for line in self.lines))
-        self.assertEqual(len(records.read_runs()), 1)
-
-    def test_bad_history_lines_are_counted_even_with_a_valid_state_and_force_a_recheck(self):
+    def test_bad_history_lines_are_display_only_and_a_later_pass_survives(self):
         self.run_pass()
         with records.runs_path().open("ab") as handle:
             handle.write(b'{torn\n\xff\n{"version": 1}\n')
@@ -1028,8 +1145,9 @@ class RecordsTest(FakeToolsCase):
         self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", status)
         self.assertIn("skipped 3", status)
         self.lines.clear()
-        self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
-        self.assertTrue(any("skipped 3" in line for line in self.lines))
+        self.assertEqual(self.run_pass(trigger="after-finish"), "skipped")
+        self.assertNotIn("UNAVAILABLE", "\n".join(self.lines))
+        self.assertEqual(self.run_pass(), "complete")
         self.assertEqual(len(records.read_runs()), 2)
 
     def test_bad_run_lines_are_skipped_and_the_file_is_capped(self):
@@ -1050,8 +1168,9 @@ class RecordsTest(FakeToolsCase):
             claude=records.component("current", "1", "1", "", "2026-11-01T00:00:00Z")))) + "\n")
         self.write(records.state_path(), "{not json")
         lines = passes.status_lines()
-        self.assertTrue(lines[0].startswith("OAH_UPDATE_STATE_UNAVAILABLE"))
-        self.assertIn("oah: Claude Code 1 (current)", lines)
+        self.assertTrue(any(line.startswith("OAH_UPDATE_STATE_UNAVAILABLE") for line in lines))
+        self.assertTrue(any("recent pass finished 2026-11-01T00:01:00Z" in line for line in lines))
+        self.assertNotIn("oah: Claude Code 1 (current)", lines)
         self.assertEqual(self.launched, [])
 
     def test_canary_environment_value_never_reaches_a_record(self):
@@ -1075,76 +1194,6 @@ class LockTest(FakeToolsCase):
         self.assertEqual(self.launched, [])
         self.assertTrue(self.lines[0].startswith("OAH_UPDATE_BUSY: another update pass is running"))
         self.assertFalse(records.state_path().exists())
-
-
-class KitAdapterTest(FakeToolsCase):
-    def test_fetch_timeout_is_bounded_and_reported(self):
-        import importlib
-        from oah.engines.proc import RunResult
-        from oah.toolkit import update
-
-        fetch = importlib.import_module("oah.toolkit.fetch")
-        calls = []
-
-        def runner(argv, *, timeout, **options):
-            calls.append((argv, timeout))
-            return RunResult(0, "", "", "fetch" in argv)
-
-        def scheduled(**options):
-            try:
-                options.get("fetcher", fetch.fetch)("https://example.invalid/kit.git", "main",
-                                                    self.fake.tmp / "fetch")
-            except fetch.FetchError as exc:
-                return "ran", [update.UpdateResult("kit", "failed", reasons=[str(exc)])]
-            self.fail("the fake fetch must time out")
-
-        self.configure("after_finish = true\ntimeout_seconds = 2\n")
-        with mock.patch.object(fetch, "run_command", runner), \
-                mock.patch.object(update, "scheduled_update", scheduled), \
-                mock.patch.object(steps, "kit_version", return_value="abc"):
-            self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
-        self.assertEqual([timeout for argv, timeout in calls if "fetch" in argv], [2])
-        entry = self.components()["oah-skills"]
-        self.assertEqual(entry["status"], "failed")
-        self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
-        self.assertIn("oah skills update", entry["next_step"])
-
-    def test_scan_timeout_keeps_kit_limit_and_reports_partial_update(self):
-        from oah.engines.proc import Resolved, RunResult
-        from oah.toolkit import checks, update
-
-        timeouts = []
-
-        def runner(argv, *, timeout, **options):
-            timeouts.append(timeout)
-            return RunResult(None, "", "", True)
-
-        def scheduled(**options):
-            problems = checks.gitleaks_problems(self.fake.tmp, Resolved(("fake-gitleaks",), "fake", "native"),
-                                                runner=runner)
-            return "ran", [update.UpdateResult("kit", "rolled-back", reasons=problems)]
-
-        with mock.patch.object(update, "scheduled_update", scheduled), \
-                mock.patch.object(steps, "kit_version", return_value="abc"):
-            self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
-        self.assertEqual(timeouts, [checks.GITLEAKS_TIMEOUT])
-        entry = self.components()["oah-skills"]
-        self.assertEqual(entry["status"], "failed")
-        self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
-        self.assertIn("oah skills update", entry["next_step"])
-
-    def test_kit_timeout_exception_reports_partial_update(self):
-        from oah.toolkit import update
-
-        for error in (TimeoutError(), subprocess.TimeoutExpired(["fake"], 2)):
-            with self.subTest(error=type(error).__name__), \
-                    mock.patch.object(update, "scheduled_update", side_effect=error), \
-                    mock.patch.object(steps, "kit_version", return_value="abc"):
-                self.assertEqual(self.run_pass(kit=steps.kit_skills), "needs-attention")
-                entry = self.components()["oah-skills"]
-                self.assertEqual(entry["status"], "failed")
-                self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
-                self.assertIn("oah skills update", entry["next_step"])
 
 
 def write_lease(state: pathlib.Path, *, expires: str) -> None:
@@ -1320,14 +1369,14 @@ class AfterFinishPassTest(FakeToolsCase):
     def test_log_holds_the_lines_and_a_not_due_pass_keeps_the_last_log(self):
         log = records.log_path()
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="after-finish",
-                                         out=self.lines.append, log=log, kit=steps.kit_skills), "complete")
+                                         out=self.lines.append, log=log), "complete")
         first = log.read_text("utf-8")
         self.assertIn("OAH_UPDATE_FINISHED: outcome complete", first)
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="after-finish",
-                                         out=self.lines.append, log=log, kit=steps.kit_skills), "skipped")
+                                         out=self.lines.append, log=log), "skipped")
         self.assertEqual(log.read_text("utf-8"), first)
         self.assertEqual(passes.run_pass(self.root, self.state, env=self.fake.env, trigger="manual",
-                                         out=self.lines.append, kit=steps.kit_skills), "complete")
+                                         out=self.lines.append), "complete")
 
 
 class DoctorNoticesTest(FakeToolsCase):
@@ -1346,8 +1395,7 @@ class DoctorNoticesTest(FakeToolsCase):
         launched = len(self.launched)
         notices = passes.doctor_notices(self.root)
         self.assertEqual([(notice["code"], notice.get("component")) for notice in notices],
-                         [("OAH_UPDATE_UNSETTLED", "codex"), ("OAH_UPDATE_UNSETTLED", "claude-plugins"),
-                          ("OAH_UPDATE_UNSETTLED", "oah-skills")])
+                         [("OAH_UPDATE_UNSETTLED", "codex"), ("OAH_UPDATE_UNSETTLED", "claude-plugins")])
         self.assertIn("(unverified); run codex update yourself", notices[0]["message"])
         self.assertEqual(len(self.launched), launched)  # doctor stays offline: it reads the records only
 

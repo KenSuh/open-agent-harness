@@ -855,8 +855,7 @@ class ToolUpdateDoctorTest(ToolUpdateTestCase):
                       "claude": component("current", "2.1.316", "2.1.316", "", stamp),
                       "codex": component("unverified", "0.166.0", "0.166.0", "run codex update yourself", stamp),
                       "claude-marketplaces": component("current", "abc", "abc", "", stamp),
-                      "claude-plugins": component("current", "abc", "abc", "", stamp),
-                      "oah-skills": component("current", "abc", "abc", "", stamp)}}
+                      "claude-plugins": component("current", "abc", "abc", "", stamp)}}
         self.records.updates_dir().mkdir(parents=True)
         self.records.state_path().write_text(json.dumps(record), encoding="utf-8")
         code, out = self.doctor()

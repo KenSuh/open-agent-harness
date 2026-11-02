@@ -33,7 +33,7 @@ from oah.lockfile import LockTimeout, StateLock
 from oah.runs import RUN_ID_RE, TERMINAL, RunError, _contained_path, task_directory
 from oah.toolupdate import records, steps
 from oah.toolupdate.probes import Cli, codex_plugins_installed
-from oah.toolupdate.steps import CODEX_PLUGINS_NOTE, RESTART_NOTE, label
+from oah.toolupdate.steps import CODEX_PLUGINS_NOTE, RESTART_NOTE, SKILLS_NOTE, label
 
 PASS_LOCK_TIMEOUT = 1.0
 IN_FLIGHT = ("created", "prepared", "queued", "running")
@@ -44,7 +44,7 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _popen = subprocess.Popen  # the one place the background pass is started; tests replace it
 STARTED = "OAH_UPDATE_STARTED: checking for tool updates in the background; see oah update status"
 MODELS_NOTE = "model lists refresh at the next oah call"
-RANK = ("claude", "codex", "claude-marketplaces", "claude-plugins", "claude-plugin", "oah-skills")
+RANK = ("claude", "codex", "claude-marketplaces", "claude-plugins", "claude-plugin")
 
 Out = Callable[[str], None]
 
@@ -131,25 +131,16 @@ def summary_line(outcome: str, components: Mapping[str, Mapping]) -> str:
     return f"OAH_UPDATE_FINISHED: outcome {outcome} ({records.counts(components)}); {step}"
 
 
-def _load_state(out: Out) -> tuple[dict | None, bool]:
+def _load_state(out: Out) -> dict | None:
     try:
-        record = records.read_state()
+        return records.read_state()
     except records.StateUnavailable as exc:
         out(str(exc))
-        record = None
-    problems: list[str] = []
-    try:
-        records.read_runs(report=problems.append)
-    except records.StateUnavailable as exc:
-        problems.append(str(exc))
-    for problem in problems:
-        out(problem)
-    return record, bool(problems)
+        return None
 
 
 def run_pass(root: pathlib.Path, state: pathlib.Path, *, env: Mapping[str, str], trigger: str, out: Out,
-             log: pathlib.Path | None = None, now: Callable[[], dt.datetime] = records.utc_now,
-             kit: steps.KitStep | None = steps.kit_skills) -> str:
+             log: pathlib.Path | None = None, now: Callable[[], dt.datetime] = records.utc_now) -> str:
     """Run one pass; returns skipped, busy, deferred, complete or needs-attention."""
     if env.get("OAH_WORKER") == "1":
         out("OAH_UPDATE_SKIPPED: dispatched workers never update tools; the dispatcher's oah finish starts the pass")
@@ -164,8 +155,6 @@ def run_pass(root: pathlib.Path, state: pathlib.Path, *, env: Mapping[str, str],
             "in .oah/config.toml to turn them on")
         return "skipped"
     try:
-        # Lock order: pass.lock -> repository state lock (the kit's idle_state needs it).
-        # Never request pass.lock while holding a repository state lock, including from finish.
         lock = StateLock(records.lock_path(), timeout=PASS_LOCK_TIMEOUT)
         lock.__enter__()
     except LockTimeout:
@@ -177,7 +166,7 @@ def run_pass(root: pathlib.Path, state: pathlib.Path, *, env: Mapping[str, str],
         return "skipped"
     lines = _Lines(out, log)
     try:
-        return _locked_pass(root, state, settings, env=env, trigger=trigger, out=lines, now=now, kit=kit)
+        return _locked_pass(root, state, settings, env=env, trigger=trigger, out=lines, now=now)
     finally:
         lines.close()
         lock.__exit__(None, None, None)
@@ -213,11 +202,11 @@ class _Lines:
 
 
 def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Settings, *, env: Mapping[str, str],
-                 trigger: str, out: _Lines, now: Callable[[], dt.datetime], kit: steps.KitStep | None) -> str:
+                 trigger: str, out: _Lines, now: Callable[[], dt.datetime]) -> str:
     redact = _redactor(env)
-    previous, history_unavailable = _load_state(out)
+    previous = _load_state(out)
     started = now()
-    if trigger == "after-finish" and not history_unavailable and not records.due(previous, settings, started):
+    if trigger == "after-finish" and not records.due(previous, settings, started):
         out(f"OAH_UPDATE_SKIPPED: a pass started less than {settings.interval_hours:g} hours ago; oah update runs "
             "one now")
         return "skipped"
@@ -231,7 +220,7 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     records.write_state({"version": records.FORMAT, "last_started": records.stamp(started), "trigger": trigger,
                          "last_finished": base["last_finished"], "outcome": base["outcome"],
                          "components": base["components"], "models_refresh": base["models_refresh"]})
-    out("oah: checking Claude Code, Codex, Claude Code plugins and oah's kit skills; this can take a few minutes")
+    out("oah: checking Claude Code, Codex and Claude Code plugins; this can take a few minutes")
     workdir = records.updates_dir()
     context = steps.Context(env=env, checked_at=records.stamp(started),
                             claude=Cli("claude", "Claude Code", env=env, timeout=settings.timeout_seconds, cwd=workdir),
@@ -241,8 +230,6 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     found.update(steps.cli_update(context, context.codex))
     found.update(steps.claude_marketplaces(context))
     found.update(steps.claude_plugins(context))
-    if kit is not None:
-        found.update(kit(root, state, env, started, context.checked_at, settings.timeout_seconds))
     components = {}
     for name, entry in records.redacted(found, redact).items():
         if records.COMPONENT_RE.fullmatch(name):
@@ -265,6 +252,7 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
         out(f"oah: {MODELS_NOTE} ({', '.join(steps.LABELS[engine] for engine in refresh)} changed)")
     if codex_plugins_installed(env) is not False:
         out(f"oah: {CODEX_PLUGINS_NOTE}")
+    out(f"oah: {SKILLS_NOTE}")
     out(summary_line(result, components))
     return result
 
@@ -300,8 +288,8 @@ def start_after_finish(root: pathlib.Path, state: pathlib.Path, env: Mapping[str
         state = state.resolve()
         if readiness(state) is not None:
             return False
-        previous, history_unavailable = _load_state(lambda _line: None)  # the child reports damaged records
-        if not history_unavailable and not records.due(previous, settings, now()):
+        previous = _load_state(lambda _line: None)  # the child reports damaged state
+        if not records.due(previous, settings, now()):
             return False
         _popen(pass_argv(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                cwd=str(root), env=dict(env, OAH_STATE_DIR=str(state)), close_fds=True, **detach_options(os_name))
@@ -317,24 +305,24 @@ def start_after_finish(root: pathlib.Path, state: pathlib.Path, env: Mapping[str
 
 def status_lines() -> list[str]:
     """The last pass, from the records only: no subprocess, no network, no write."""
-    lines: list[str] = ([f"oah: {CODEX_PLUGINS_NOTE}"]
-                        if codex_plugins_installed(os.environ) is not False else [])
+    lines = [f"oah: {SKILLS_NOTE}"]
+    if codex_plugins_installed(os.environ) is not False:
+        lines.append(f"oah: {CODEX_PLUGINS_NOTE}")
     try:
         runs = records.read_runs(report=lines.append)
     except records.StateUnavailable as exc:
         lines.append(str(exc))
         runs = []
+    for run in reversed(runs[-5:]):
+        lines.append(f"oah: recent pass finished {run['finished']} ({run['trigger']}), outcome "
+                     f"{run['outcome']} ({records.counts(run['components'])})")
     try:
         record = records.read_state()
     except records.StateUnavailable as exc:
-        lines.append(str(exc))
-        if not runs:
-            return lines + ["oah: no readable pass record; run oah update"]
-        last = runs[-1]
-        record = {"last_started": last["started"], "trigger": last["trigger"], "last_finished": last["finished"],
-                  "outcome": last["outcome"], "components": last["components"],
-                  "models_refresh": last["models_refresh"]}
+        return lines + [str(exc), "oah: no readable pass state; run oah update"]
     if record is None:
+        if runs:
+            return lines + ["oah: no readable pass state; run oah update"]
         return lines + ["oah: no pass has run yet; run oah update, or set after_finish = true under [updates]"]
     started, finished = records.parse_stamp(record["last_started"]), records.parse_stamp(record["last_finished"])
     if finished is None or finished < started:
@@ -365,8 +353,8 @@ def doctor_notices(root: pathlib.Path | None) -> list[dict]:
         return [{"code": exc.code, "message": f"[updates] cannot be read ({exc.code}); fix .oah/config.toml"}]
     if not settings.explicit:
         notices.append({"code": "OAH_UPDATE_OFF", "message": "tool updates are off: .oah/config.toml has no "
-                        "after_finish under [updates]. Set it to true to keep Claude Code, Codex, Claude Code plugins and "
-                        "oah's skills up to date after your work finishes (oah update then runs a pass now), or to "
+                        "after_finish under [updates]. Set it to true to keep Claude Code, Codex and Claude Code plugins "
+                        "up to date after your work finishes (oah update then runs a pass now), or to "
                         "false to keep them off and stop this notice"})
     try:
         record = records.read_state()

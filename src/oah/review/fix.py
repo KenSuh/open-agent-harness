@@ -229,8 +229,8 @@ _ERROR_DIAGNOSTICS = {
     "OAH_UPDATE_BUSY": "another tool-update pass is running on this machine; run oah update status when it finishes.",
     "OAH_UPDATE_DEFERRED": "a lease or run is still in flight, so no tool was updated; run oah update once the work "
                            "is finished.",
-    "OAH_UPDATE_STATE_UNAVAILABLE": "the tool-update record cannot be trusted, so every tool is checked again; "
-                                    "delete it and run oah update.",
+    "OAH_UPDATE_STATE_UNAVAILABLE": "the tool-update record cannot be read; only valid state.json drives decisions, "
+                                    "and runs.jsonl is display-only history; delete the damaged file and run oah update.",
     "OAH_UPDATE_FINISHED": "the tool-update pass finished; oah update status shows each result and its next step.",
     "OAH_UPDATE_OFF": "tool updates are off because .oah/config.toml has no after_finish under [updates]; set it to "
                       "true or false.",

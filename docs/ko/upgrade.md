@@ -169,7 +169,7 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
 - 세션 시작 훅을 설치했다면 `oah init`이 쓴 하위 에이전트 파일이 지금의 모델 선택을 따라가므로, git에
   `.claude/agents/oah-<tier>.md` 변경이 보일 수 있다. 직접 고친 파일은 그대로 두고 `oah doctor`가 알려 준다.
 
-### Claude Code, Codex와 그 플러그인
+### Claude Code, Codex와 Claude Code 플러그인
 
 이제 `oah`가 도구 자체도 최신으로 맞출 수 있어서, 업데이트를 기억하지 않아도 새 모델이 들어온다. 이 내용은 `main`
 기준이고 아직 릴리스하지 않았다.
@@ -183,6 +183,8 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
   ```
 
   새로 실행하는 `oah init`은 한 번 묻고(Yes 권장) 답을 거기에 적는다. `false`로 두면 계속 꺼지고 안내도 사라진다.
+- 패스는 Claude Code, Codex와 Claude Code 플러그인 및 그 마켓플레이스를 갱신한다. oah 스킬은 이 패스와 별도로
+  기존 일일 점검을 유지한다(`oah skills update`). 요약과 status가 이 사실을 한 줄로 알린다.
 - 켜 두면 리스와 진행 중인 run을 남기지 않는 `oah finish`가 백그라운드로 패스를 시작하며, `interval_hours`(기본
   24)마다 많아야 한 번이다. 지금 돌리려면 `oah update`를 실행한다. `oah update status`는 아무것도 실행하지 않고
   마지막 패스를 보여 준다.
@@ -193,6 +195,10 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
   플러그인을 쓴다.
 - Claude 마켓플레이스 갱신을 포함한 고정 구성요소마다 검증된 결과나 `unsupported` 결과가 있어야만 `complete`다.
   근거가 없으면 `needs-attention`이며 `oah update status`가 다음 명령을 보여 준다.
+  명령 미지원은 도움말을 제대로 읽어야 확인할 수 있다. 도움말을 읽지 못하면 unverified, 시간 초과면 failed다.
+- 간격과 확인된 버전은 유효한 `state.json`만으로 결정한다. 상태 파일이 없거나 잘못되면 패스를 실행할 때가 된 것으로
+  보고, 존재하는 파일이 잘못됐으면 `OAH_UPDATE_STATE_UNAVAILABLE`로 알린다. `runs.jsonl`은 표시용 이력이며 판단을
+  바꾸지 않는다.
 
 자세한 내용은 [작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에 있고, 코드는
 [문제 해결](troubleshooting.md#도구-업데이트)에 있다.

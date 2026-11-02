@@ -5,9 +5,10 @@ The switch is per repository: `[updates] after_finish` in `.oah/config.toml`, of
 The records and the lock are per machine, because installs are: `~/.oah/updates/`. `home()` is the only
 place this package asks for the home folder, so tests point it at a temporary folder.
 
-Every read validates the whole shape. A missing, unreadable or wrongly shaped `state.json` raises
-`StateUnavailable` (OAH_UPDATE_STATE_UNAVAILABLE) once the pass has ever recorded anything; the pass then
-checks every component again and writes a fresh record. Bad lines in `runs.jsonl` are skipped one by one.
+Only a valid `state.json` supplies decisions. A missing state makes the pass due with every component
+unknown; an existing but unreadable or wrongly shaped state raises `StateUnavailable`
+(OAH_UPDATE_STATE_UNAVAILABLE). The pass checks every component again and writes a fresh record.
+`runs.jsonl` is display-only history; bad lines are skipped one by one.
 """
 from __future__ import annotations
 
@@ -35,8 +36,8 @@ ENGINES = ("claude", "codex")
 RUNS_KEPT = 200
 TEXT_LIMIT = 600
 COMPONENT_FIELDS = ("status", "before", "after", "settled_version", "checked_at", "next_step")
-COMPONENTS = ("claude", "codex", "claude-marketplaces", "claude-plugins", "oah-skills")
-COMPONENT_RE = re.compile(r"(?:claude|codex|oah-skills|claude-plugins|claude-marketplaces)|"
+COMPONENTS = ("claude", "codex", "claude-marketplaces", "claude-plugins")
+COMPONENT_RE = re.compile(r"(?:claude|codex|claude-plugins|claude-marketplaces)|"
                           r"claude-plugin:[A-Za-z0-9][A-Za-z0-9._@-]{0,199}")
 STATE_UNAVAILABLE = "OAH_UPDATE_STATE_UNAVAILABLE"
 
@@ -227,23 +228,21 @@ class StateUnavailable(Exception):
 
     def __init__(self, path: pathlib.Path, why: str) -> None:
         self.path = path
-        super().__init__(f"{self.code}: {path} {why}, so oah trusts none of it and checks every tool again; "
+        effect = ("the log does not affect update decisions" if path == runs_path()
+                  else "oah trusts none of it and checks every tool again")
+        super().__init__(f"{self.code}: {path} {why}; {effect}; "
                          "delete it and run oah update to write a fresh record")
 
 
 def read_state() -> dict | None:
-    """The last pass's record. None only when the pass has never recorded anything."""
+    """The last pass's valid state, or None when it is missing; history never supplies state."""
     path = state_path()
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        try:
-            runs_path().lstat()
-        except FileNotFoundError:
-            return None  # the lock and the log share the folder, so only the records say a pass recorded anything
-        except OSError as exc:
-            raise StateUnavailable(runs_path(), f"cannot be read ({type(exc).__name__})") from None
-        raise StateUnavailable(path, "is missing although earlier passes were recorded") from None
+        if path.is_symlink():
+            raise StateUnavailable(path, "cannot be read (broken link)") from None
+        return None
     except OSError as exc:
         raise StateUnavailable(path, f"cannot be read ({type(exc).__name__})") from None
     try:
@@ -302,7 +301,7 @@ def append_run(record: Mapping[str, Any]) -> None:
     try:
         history = read_runs()
     except StateUnavailable:
-        history = []  # already reported at entry; unreadable history never prevents a later pass
+        history = []  # display-only history never prevents recording a later pass
     kept = [*history, dict(record)][-RUNS_KEPT:]
     write_text_atomic(runs_path(), "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n"
                                            for item in kept))

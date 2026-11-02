@@ -641,38 +641,41 @@ counts as off.
   (the switch must be on and nothing in flight, but the interval does not apply), and `oah update status` prints the
   last pass without running anything. One pass runs at a time on a machine; a second says `OAH_UPDATE_BUSY`.
 - **What, in this order.** `claude update`; `codex update`; `claude plugin marketplace update`, then
-  `claude plugin update <plugin> --scope user --json` for each plugin installed at user scope; and oah's kit
-  skills through the existing automatic check, which keeps
-  `[skills] auto_update` and its own rules. A command runs only when the installed CLI's `--help` lists it. The
+  `claude plugin update <plugin> --scope user --json` for each plugin installed at user scope.
+  A command runs only when the installed CLI's `--help` lists it. The
   model lists refresh at the next `oah` call, because a changed CLI version rebuilds the catalog.
+- **oah's skills.** They keep their own daily check (`oah skills update`), governed by `[skills] auto_update`.
+  The tool-update pass never runs that check; its summary and `oah update status` repeat this in one line.
 - **What never.** MCP servers and their configuration; npm, Homebrew or `npx` run by `oah`; a shell; a
   confirmation flag such as `-y` or `--accept-command`; or hook approval. `oah` never lists, signals or stops a
   process it did not start. The shared runner stops a command it started that exceeds `timeout_seconds`, records
   `failed` with "timed out; the tool may be partly updated" and the tool's own command to run, then the pass continues.
-  The kit's network fetch uses the smaller of this limit and its own; other kit Git commands keep their 600-second
-  limit and gitleaks keeps its 300-second limit. A kit timeout names `oah skills update` as the next step.
   Sessions already running keep the version and plugins they started with until you restart them.
 - **How a result is checked.** The version is read before and after each step. `updated` needs a readable version
   afterwards that differs from the one before; `current` needs the tool's own "up to date" answer and a readable,
   unchanged version. Anything else is, whatever the exit code, `unverified`, `needs-confirmation` (a Claude Code
   plugin whose marketplace-declared command needs you; the line names the command to run yourself),
-  `unsupported` (the installed CLI lacks the command, or no automatic update applies) or `failed`.
+  `unsupported` (clean help establishes that the command is absent, or no automatic update applies) or `failed`.
+  Failed or undecodable help is `unverified`; a help timeout is `failed` with "help timed out" and the help command
+  to run yourself. No update ran in that case.
   Claude marketplace refresh is a separate component: installed Git revisions and the tool's "up to date"
   answer verify it; exit zero with no evidence stays `unverified`. The fixed list covers Claude Code, Codex,
-  Claude marketplaces, Claude plugins and kit skills, plus each discovered Claude plugin. A pass is `complete`
+  Claude marketplaces and Claude plugins, plus each discovered Claude plugin. A pass is `complete`
   only when every required component has an `updated`, `current` or `unsupported` result; a missing result
-  counts as `unverified` and means `needs-attention`. A kit check skipped by its interval is `unverified`;
-  `[skills] auto_update = false` is `unsupported`.
+  counts as `unverified` and means `needs-attention`.
 - **Codex plugins.** They are never updated automatically, because an update invalidates hook approval. The pass
   only reads installed plugin entries from Codex's `config.toml`. If any are installed, or the file cannot be read,
   the summary and `oah update status` say: "Codex plugins are not updated automatically: update them with codex
   plugin marketplace upgrade, then approve their hooks again in /hooks". This notice does not change the outcome.
   No pending hook state is recorded and Codex configuration is never written.
-- **Records.** `~/.oah/updates/state.json` holds the last pass and `runs.jsonl` the newest 200, next to the lock
-  `pass.lock` and the background pass's `pass.log`. Every read is validated: a broken record is reported as
-  `OAH_UPDATE_STATE_UNAVAILABLE`, and every tool is checked again. Records keep versions, statuses and next steps,
+- **Records.** Only a valid `~/.oah/updates/state.json` decides the interval and settled results. Missing state makes
+  the pass due with every component unknown; existing but unreadable or invalid state is reported as
+  `OAH_UPDATE_STATE_UNAVAILABLE` and every tool is checked again. `runs.jsonl` keeps the newest 200 passes for
+  display only; `oah update status` shows its five newest entries and counts skipped invalid lines. Deleting or
+  corrupting this log changes no decision. The lock `pass.lock` and background pass's `pass.log` live beside them.
+  Records keep versions, statuses and next steps,
   never hook approvals, environment values or command output. Finished records missing a fixed component and
-  old records with the removed hook-approval status are invalid; strings must be strict UTF-8.
+  old records naming the removed kit-skills component or hook-approval status are invalid; strings must be strict UTF-8.
 - **Off.** `after_finish = false`, or no key at all, turns it off. Then no entry point runs an update command,
   reaches the network for one or writes a record.
 

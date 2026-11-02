@@ -70,7 +70,8 @@ class UpdateCliTest(FakeToolsCase):
 
     def test_status_runs_no_subprocess(self):
         code, out, _err = self.oah("update", "status")
-        self.assertEqual((code, out), (0, "oah: no pass has run yet; run oah update, or set after_finish = true "
+        self.assertEqual((code, out), (0, "oah: oah's skills keep their own daily check (oah skills update)\n"
+                                          "oah: no pass has run yet; run oah update, or set after_finish = true "
                                           "under [updates]\n"))
         self.oah("update")
         launched = len(self.launched)

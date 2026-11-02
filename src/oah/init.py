@@ -166,9 +166,10 @@ QUESTIONS = (
              "Turn on automatic skill updates?", True, recorded=True),
     Question("tool_updates", "Tool updates (recommended)", "Runs each tool's own update command when no task is "
              "active; MCP servers are never changed. After oah finish leaves no task or run in flight, at most once a "
-             "day: claude update, codex update, their plugin and marketplace updates and oah's kit skills, each "
-             "result checked by reading what is installed. Your answer is recorded in .oah/config.toml.",
-             "Keep Claude Code, Codex, their plugins and oah's skills up to date after your work finishes?", True,
+             "day: claude update, codex update and Claude Code plugin and marketplace updates, each result checked "
+             "by reading what is installed. Codex plugins are updated manually; oah's skills keep their own daily "
+             "check (oah skills update). Your answer is recorded in .oah/config.toml.",
+             "Keep Claude Code, Codex and Claude Code plugins up to date after your work finishes?", True,
              recorded=True),
 )
 ASK_ATTEMPTS = 5

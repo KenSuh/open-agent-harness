@@ -153,10 +153,11 @@ class ToolUpdatesQuestionTest(unittest.TestCase):
     def test_question_says_what_runs_and_that_mcp_servers_never_change(self):
         question = next(item for item in init.QUESTIONS if item.key == "tool_updates")
         self.assertEqual((question.default, question.recorded), (True, True))
-        self.assertEqual(question.prompt, "Keep Claude Code, Codex, their plugins and oah's skills up to date after "
+        self.assertEqual(question.prompt, "Keep Claude Code, Codex and Claude Code plugins up to date after "
                                           "your work finishes?")
         self.assertTrue(question.what.startswith("Runs each tool's own update command when no task is active; MCP "
                                                  "servers are never changed."))
+        self.assertIn("oah's skills keep their own daily check (oah skills update)", question.what)
         self.assertIn(".oah/config.toml", question.what)
 
     def test_answer_is_recorded_in_the_updates_section(self):

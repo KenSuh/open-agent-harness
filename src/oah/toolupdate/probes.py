@@ -25,7 +25,7 @@ import json
 import pathlib
 import re
 import tomllib
-from typing import Mapping
+from typing import Callable, Mapping
 
 from oah.engines import claude as claude_engine
 from oah.engines import codex as codex_engine
@@ -83,6 +83,7 @@ class Ran:
     stdout: str
     stderr: str
     timed_out: bool
+    problem: str = ""
 
     @property
     def clean(self) -> bool:
@@ -123,6 +124,15 @@ def lists_flag(text: str, flag: str) -> bool:
     return re.search(rf"(?m)^ {{2,6}}(?:-[A-Za-z], )?{re.escape(flag)}\b", text or "") is not None
 
 
+@dataclasses.dataclass(frozen=True)
+class Capability:
+    """Listed, absent from clean help, or unknown with the reason the help could not be read."""
+
+    listed: bool | None
+    reason: str = ""
+    timed_out: bool = False
+
+
 class Cli:
     """One CLI resolved once on the pass's PATH; every command it runs is an argv list with a timeout."""
 
@@ -131,7 +141,7 @@ class Cli:
         self.env, self.timeout, self.cwd = env, timeout, cwd
         self.base: tuple[str, ...] | None = None
         self.problem = ""
-        self._help: dict[tuple[str, ...], str | None] = {}
+        self._help: dict[tuple[str, ...], Ran] = {}
         try:
             found = resolve_command(name, env.get("PATH", ""))
         except UnsupportedBatchShim:
@@ -156,20 +166,34 @@ class Cli:
         parse = codex_engine.parse_version if self.name == "codex" else claude_engine.parse_version
         return parse(ran.stdout)
 
-    def help(self, *path: str) -> str | None:
+    def help(self, *path: str) -> Ran:
         if path not in self._help:
-            ran = self.run(*path, "--help")
-            self._help[path] = ran.stdout if ran.ok else None
+            try:
+                self._help[path] = self.run(*path, "--help")
+            except OSError as exc:
+                self._help[path] = Ran(None, "", "", False, type(exc).__name__)
         return self._help[path]
 
-    def lists(self, *path: str) -> bool:
-        """True when `<cli> <parent> --help` lists the last word of `path` as a command."""
-        text = self.help(*path[:-1])
-        return text is not None and path[-1] in listed_commands(text)
+    def _probe_help(self, path: tuple[str, ...], matches: Callable[[str], bool]) -> Capability:
+        ran = self.help(*path)
+        command = " ".join((self.name, *path, "--help"))
+        step = f"run {command} yourself to check support, then run oah update"
+        if ran.timed_out:
+            return Capability(None, f"help timed out; {step}", timed_out=True)
+        if not ran.clean:
+            return Capability(None, f"help was not clean UTF-8; {step}")
+        if ran.problem:
+            return Capability(None, f"help could not be read ({ran.problem}); {step}")
+        if not ran.ok:
+            return Capability(None, f"help could not be read (exit {ran.returncode}); {step}")
+        return Capability(matches(ran.stdout))
 
-    def has_flag(self, path: tuple[str, ...], flag: str) -> bool:
-        text = self.help(*path)
-        return text is not None and lists_flag(text, flag)
+    def lists(self, *path: str) -> Capability:
+        """Whether clean `<cli> <parent> --help` lists the last word, or why that is unknown."""
+        return self._probe_help(path[:-1], lambda text: path[-1] in listed_commands(text))
+
+    def has_flag(self, path: tuple[str, ...], flag: str) -> Capability:
+        return self._probe_help(path, lambda text: lists_flag(text, flag))
 
 
 # Claude Code plugins -------------------------------------------------------------------------------

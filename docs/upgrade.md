@@ -175,7 +175,7 @@ With TypeSafe Jev on (`[rerank] enabled = true`), this update changes what Jev r
 - With the session-start hook installed, the subagent files `oah init` wrote follow the current model choice, so git
   may show a change in `.claude/agents/oah-<tier>.md`. A file you edited is left alone, and `oah doctor` names it.
 
-### Claude Code, Codex and their plugins
+### Claude Code, Codex and Claude Code plugins
 
 `oah` can now keep the tools themselves current, so newer models reach you without you remembering to update. This
 describes `main`, which is not in a release yet.
@@ -190,6 +190,8 @@ describes `main`, which is not in a release yet.
 
   A new `oah init` asks once (Yes is recommended) and writes the answer there. `false` keeps it off and stops the
   notice.
+- The pass updates Claude Code, Codex and Claude Code plugins and their marketplaces. oah's skills keep their own
+  daily check (`oah skills update`), separate from this pass; the summary and status repeat that notice.
 - With it on, an `oah finish` that leaves no lease and no run in flight starts a pass in the background, at most once
   every `interval_hours` (24 by default). Run `oah update` to run one now; `oah update status` prints the last pass
   without running anything.
@@ -200,6 +202,9 @@ describes `main`, which is not in a release yet.
   state or approval is recorded. Sessions already running keep their version and plugins until you restart them.
 - A pass is `complete` only with a verified or unsupported result for every fixed component, including the Claude
   marketplace refresh. Missing evidence means `needs-attention`; `oah update status` shows the next commands.
+  Unsupported commands need successfully read help; unavailable help is unverified, and help timeouts are failed.
+- Only valid `state.json` drives interval and settled results. Missing or invalid state makes a pass due; an existing
+  bad state is reported as `OAH_UPDATE_STATE_UNAVAILABLE`. `runs.jsonl` is display-only history and changes no decision.
 
 [Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) has the details, and
 [Troubleshooting](troubleshooting.md#tool-updates) lists the codes.
