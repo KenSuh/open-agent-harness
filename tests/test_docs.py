@@ -233,6 +233,35 @@ class ReadmeLanguageTest(unittest.TestCase):
                          {"v030-models", "oah-로드맵", "개발", "개발-1"})
 
 
+def css_blocks(css: str) -> list[tuple[str, str]]:
+    """Top-level CSS blocks as (prelude, body), with nested braces kept inside the body."""
+    blocks, depth, start, prelude = [], 0, 0, ""
+    for index, char in enumerate(css):
+        if char == "{":
+            if depth == 0:
+                prelude, start = css[start:index].strip(), index + 1
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                blocks.append((prelude, css[start:index]))
+                start = index + 1
+    return blocks
+
+
+def keyframe_stops(body: str) -> dict[float, dict[str, str]]:
+    """The declarations at each keyframe offset, from 0.0 to 100.0."""
+    stops: dict[float, dict[str, str]] = {}
+    for selector, declarations in css_blocks(body):
+        values = dict((key.strip(), value.strip()) for key, _, value in
+                      (item.partition(":") for item in declarations.split(";") if item.strip()))
+        for offset in selector.split(","):
+            offset = offset.strip()
+            number = {"from": 0.0, "to": 100.0}.get(offset)
+            stops.setdefault(float(offset.rstrip("%")) if number is None else number, {}).update(values)
+    return stops
+
+
 class BannerTest(unittest.TestCase):
     def banner_files(self) -> list[pathlib.Path]:
         return [REPO / "docs" / "assets" / f"{prefix}{theme}.svg"
@@ -244,7 +273,7 @@ class BannerTest(unittest.TestCase):
         for path in self.banner_files():
             with self.subTest(banner=path.name):
                 raw = path.read_bytes()
-                self.assertLess(len(raw), 12 * 1024)
+                self.assertLess(len(raw), 24 * 1024)
                 text = raw.decode("utf-8")
                 self.assertIsNone(forbidden.search(text))
                 self.assertNotIn("bounded", text.lower())
@@ -252,6 +281,44 @@ class BannerTest(unittest.TestCase):
                 self.assertTrue(root.findtext(f"{SVG}title"))
                 self.assertTrue(root.findtext(f"{SVG}desc"))
                 self.assertGreaterEqual(len(root.findall(f".//{SVG}text")), 10)
+
+    def test_banner_motion_is_gentle_and_can_be_turned_off(self):
+        for path in self.banner_files():
+            with self.subTest(banner=path.name):
+                root = ET.parse(path).getroot()
+                css = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
+                self.assertRegex(css, r"@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\*\s*\{\s*"
+                                      r"animation:\s*none\s*!important;?\s*\}\s*\}")
+                self.assertNotRegex(css, r"steps\(|step-start|step-end")
+                defined = {prelude.split()[1]: keyframe_stops(body)
+                           for prelude, body in css_blocks(css) if prelude.startswith("@keyframes")}
+                uses = {}
+                for prelude, body in css_blocks(css):
+                    if prelude.startswith("@"):
+                        continue
+                    for value in re.findall(r"animation\s*:\s*([^;]+)", body):
+                        name = value.split()[0]
+                        self.assertIn(name, defined, value)
+                        times = re.findall(r"(?<![\w.])(\d*\.?\d+)(ms|s)\b", value)
+                        self.assertTrue(times, value)
+                        number, unit = times[0]
+                        self.assertGreaterEqual(float(number) / (1000 if unit == "ms" else 1), 1.0, value)
+                        self.assertRegex(prelude, r"^\.[\w-]+$")
+                        uses[prelude[1:]] = name
+                    self.assertNotIn("animation-duration", body)
+                self.assertTrue(uses)
+                self.assertEqual(set(uses.values()), set(defined))
+                # A still renderer shows the markup; the first frame and the end of each cycle must match it.
+                for cls, name in uses.items():
+                    stops = defined[name]
+                    start, end = stops.get(0.0, {}), stops.get(100.0, {})
+                    if "opacity" in start or "opacity" in end:
+                        self.assertEqual(start.get("opacity"), end.get("opacity"), name)
+                    elements = [node for node in root.iter() if cls in node.get("class", "").split()]
+                    self.assertTrue(elements, cls)
+                    for node in elements:
+                        if "opacity" in start:
+                            self.assertEqual(float(node.get("opacity", "1")), float(start["opacity"]), (cls, name))
 
     def test_korean_banners_name_korean_fonts_first(self):
         for path in self.banner_files():
