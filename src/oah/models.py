@@ -54,7 +54,10 @@ Unpooled notices
 Changes
     `Catalog.record_resolution` stores the last resolved model and effort per engine and tier in
     `resolved.json` and appends `{ts, engine, tier, field, old, new, why}` to `changes.jsonl` for each
-    value that changed.
+    value that changed. A catalog rebuild compares the score rule's choice at each step under the old and
+    new entry (`model_changes`): the rebuild happens once, so its warning and its `changes.jsonl` line
+    need no new state and cannot repeat. A user whose pins, pools or `quality_order` leave no tier to the rule
+    hears nothing about it. `score_notices` names what a rebuild left out and why.
 """
 from __future__ import annotations
 
@@ -77,6 +80,10 @@ UNRESOLVED = "OAH_MODEL_UNRESOLVED"
 CATALOG_UNAVAILABLE = "OAH_MODEL_CATALOG_UNAVAILABLE"
 NEW_UNPOOLED = "OAH_MODEL_NEW_UNPOOLED"
 OLD_CLAUDE_ORDER = ("opus", "sonnet", "haiku")  # the template default before scores: it counts as unset
+CHANGED = "OAH_MODEL_CHANGED"
+UNKNOWN_FAMILY = "OAH_MODEL_UNKNOWN_FAMILY"
+UNSCORED = "OAH_MODEL_UNSCORED"
+ORDER_IGNORED = "OAH_MODEL_ORDER_IGNORED"
 PLAIN_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # A damaged catalog must not stop advisory notice lookup.
 _NOTICE_FAILURES = (StateCorrupt, OSError, TypeError, ValueError, RecursionError)
@@ -270,6 +277,13 @@ class Catalog:
                 write_json_atomic(self.resolved_path, data)
         return changes
 
+    def record_changes(self, engine: str, changes: Sequence[Mapping], *, now: dt.datetime | None = None) -> None:
+        """Append one line per step whose rule choice a rebuild changed."""
+        stamp = _iso(now or utc_now())
+        with StateLock(self.lock_path):
+            for change in changes:
+                append_jsonl(self.changes_path, {"ts": stamp, "engine": engine, "field": "model", **change})
+
     def changes(self) -> list[dict]:
         return read_jsonl(self.changes_path)
 
@@ -334,6 +348,74 @@ def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], 
         raise EngineError(scoring.NO_SCORES, f"no benchmark scores are available for {engine}; run `oah doctor`, or set "
                           f"{pin_line(engine, tier)} in .oah/config.toml")
     return scoring.choose(scores, tier, floor_tier, profile).model, "scored"
+
+
+def rule_decides(engine: str, section: Mapping, entry: Entry | None) -> bool:
+    """Whether the score rule picks any tier; with a user ranking or every tier pinned or pooled, it picks none."""
+    allowed = section["allowed_models"]
+    listed = _listed(entry)
+    order = [name for name in user_order(engine, section["quality_order"]) if name in listed
+             and (not allowed or name in allowed)]
+    return not order and any(not section["tiers"][tier]["model"] and not section["tier_pools"].get(tier)
+                             for tier in section["tiers"])
+
+
+def model_changes(before: scoring.ScoreSet, after: scoring.ScoreSet, profile: str, entry: Entry) -> list[dict]:
+    """One row per step where the rule now chooses another model; no scores on either side compares nothing."""
+    if not before.models or not after.models:
+        return []
+    known = {item.model for item in before.models}
+    listed = _listed(entry)
+    rows = []
+    for step in range(scoring.TOP_STEP + 1):
+        old, new = scoring.at_step(before, step, profile).model, scoring.at_step(after, step, profile).model
+        if old != new:
+            why = (f"{old} is no longer listed" if old not in listed else
+                   "newer generation" if after.left_out.get(old) == "superseded" or new not in known else
+                   "the eligible models changed")
+            rows.append({"step": step, "old": old, "new": new, "why": why})
+    return rows
+
+
+def changed_warning(engine: str, change: Mapping) -> str:
+    return (f"{CHANGED}: {engine} step {change['step']} now uses {change['new']} (was {change['old']}): {change['why']}; "
+            f"run `oah models` to see the scores, or set a pin in [engines.{engine}.tiers] to keep a model")
+
+
+def score_notices(engine: str, scores: scoring.ScoreSet) -> list[str]:
+    """What a rebuild tells the user about listed models the rule left out; only plain names are shown."""
+    notices = []
+    for name, reason in sorted(scores.left_out.items()):
+        if not PLAIN_MODEL.fullmatch(name):
+            continue
+        if reason == "unknown-family":
+            notices.append(f"{UNKNOWN_FAMILY}: the {engine} CLI lists {name}, which is no family oah knows, so it is "
+                           f"never chosen automatically. To use it, name it in [engines.{engine}] quality_order or a "
+                           "tier in .oah/config.toml, or update oah")
+        elif reason == "unscored":
+            stays = scores.stays.get(name)
+            kept = f", so {stays} stays" if stays else ""
+            notices.append(f"{UNSCORED}: the {engine} CLI lists {name}, which has no usable score yet{kept}. It joins "
+                           "when a score arrives; to use it now, name it in .oah/config.toml")
+    return notices
+
+
+def order_notice(engine: str, quality_order: Sequence[str]) -> str | None:
+    """The one line `oah models` says when the old template default is in the file; the file stays as it is."""
+    if user_order(engine, quality_order) == list(quality_order) or not quality_order:
+        return None
+    return (f"{ORDER_IGNORED}: [engines.{engine}] quality_order is the old default, so it was ignored and scores choose. "
+            "Remove the line, or list other models in .oah/config.toml to rank them yourself")
+
+
+def score_report(scores: scoring.ScoreSet, profile: str) -> dict:
+    """The profile, the scores with their credit, and each listed model left out with its reason."""
+    rows = [{"model": item.model, "family": item.family, "score": round(item.score, 1), "cost": item.cost}
+            for item in scores.models]
+    return {"profile": profile,
+            "scores": {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
+            if rows else None,
+            "left_out": {name: reason for name, reason in sorted(scores.left_out.items()) if PLAIN_MODEL.fullmatch(name)}}
 
 
 def offline_claude(allowed: Sequence[str] = ()) -> tuple[Entry | None, scoring.ScoreSet]:

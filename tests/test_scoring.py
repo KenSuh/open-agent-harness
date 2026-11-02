@@ -203,6 +203,7 @@ class ScoreSetTest(unittest.TestCase):
         scores = codex_set(("gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-luna"), self.ALL)
         self.assertEqual(scores.left_out, {"gpt-6.2-sol": "unscored"})
         self.assertIn("gpt-6.1-sol", names_of(scores))
+        self.assertEqual(scores.stays, {"gpt-6.2-sol": "gpt-6.1-sol"})
 
     def test_a_model_gone_from_the_entry_is_not_chosen(self):
         scores = codex_set(("gpt-6-sol", "gpt-6-luna"), self.ALL)

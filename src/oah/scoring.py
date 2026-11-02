@@ -76,6 +76,7 @@ class ScoreSet:
     left_out: Mapping[str, str]  # listed model -> superseded | unknown-family | unscored | not-allowed
     retired: tuple[Scored, ...] = ()  # left-out models on the same scale; only a floor check reads these
     failure: str = ""  # why no scores could be read, kept until a choice needs them
+    stays: Mapping[str, str] = field(default_factory=dict)  # an unscored model -> the one its family keeps using
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,7 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     data = bundled() if data is None else data
     spec = known["engines"][engine]
     left_out: dict[str, str] = {}
+    stays: dict[str, str] = {}
     candidates: list[_Candidate] = []
     for model in entry.models if entry is not None else ():
         if model.listed:
@@ -233,6 +235,8 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
         best = newest.get(item.family)
         if best is None or item.generation > best.generation:
             left_out[item.model] = "unscored"
+            if best is not None:
+                stays[item.model] = best.model
         elif item is not best:
             left_out[item.model] = "superseded"
     competing = list(newest.values())
@@ -261,7 +265,8 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
         raise EngineError(NO_SCORES, f"no model in [engines.{engine}] allowed_models has a usable score, so scores "
                           f"cannot choose one; run `oah models` to see why each was left out, or "
                           f"{_PIN.format(engine=engine)}")
-    return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(ranked), left_out, tuple(retired))
+    return ScoreSet(engine, data["source"], data["date"], data["credit"], tuple(ranked), left_out, tuple(retired),
+                     stays=stays)
 
 
 def failed(engine: str, error: EngineError) -> ScoreSet:

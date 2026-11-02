@@ -8,7 +8,7 @@ import os
 import pathlib
 import sys
 
-from oah import call, models, routing
+from oah import call, models, routing, scoring
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.lockfile import LockTimeout
@@ -61,8 +61,28 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
                                  "excluded": dict(candidates.excluded)}
     # This report always names them: a launch does so only after a rebuild (call.check_catalog).
     notices = [models.unpooled_warning(engine, name) for name in unpooled]
+    ignored = models.order_notice(engine, section["quality_order"])
+    if ignored is not None:
+        notices.append(ignored)
+    scores = checked[1].scores
+    if not scores.models:
+        notices.append(f"{scoring.NO_SCORES}: {scores.failure}")
     report["warnings"] += [notice for notice in notices if notice not in report["warnings"]]
+    report.update(models.score_report(scores, settings.models["profile"]))
     return report
+
+
+def _score_lines(report: dict) -> list[str]:
+    scores = report["scores"]
+    if scores is None:
+        lines = [f"profile {report['profile']} · no usable scores"]
+    else:
+        rows = ", ".join(f"{row['model']} {row['score']:.1f}" for row in scores["models"])
+        lines = [f"profile {report['profile']} · scores {scores['source']} {scores['date']}: {rows}",
+                 f"credit: {scores['credit']}"]
+    if report["left_out"]:
+        lines.append("left out: " + " · ".join(f"{name} ({why})" for name, why in report["left_out"].items()))
+    return lines
 
 
 def _candidates_text(pairs: list) -> str:
@@ -100,6 +120,8 @@ def run(args: argparse.Namespace) -> int:
         caps = ", ".join(f"{model}={effort}" for model, effort in report["effort_caps"].items()) or "none"
         pools = "; ".join(f"{tier}: {', '.join(names)}" for tier, names in report["tier_pools"].items() if names)
         print(f"  judge: allowed {', '.join(report['allowed_models']) or 'any'} · caps {caps} · pools {pools or 'none'}")
+        for line in _score_lines(report):
+            print(f"  {line}")
         for tier, row in report["tiers"].items():
             if "error" in row:
                 print(f"  {tier:6} {row['error']}")

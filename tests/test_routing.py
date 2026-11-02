@@ -5,11 +5,18 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import pathlib
 import unittest
+from unittest import mock
 
 from oah import recommend_cli
+from oah.engines.effort import EngineError
+from oah.paths import NotARepo
 from oah.routing import (INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, Axes, RoutingError,
                          check_stage, floor_tier, recommend, review_floor, same_engine_warning, score_axes)
+
+from tests.helpers import make_tmp_dir
 
 STAGES = {"initial": "claude", "review": "codex", "correction": "codex"}
 
@@ -197,6 +204,137 @@ class RecommendCliTest(unittest.TestCase):
             parser.parse_args(["recommend", "--kind", "nope", "--intensity", "low", "--reasoning", "low",
                                "--risk", "low"])
         self.assertEqual(ctx.exception.code, 2)
+
+
+def recommend_in(project, *argv: str) -> tuple[int, str, str]:
+    previous = os.getcwd()
+    os.chdir(project.repo)
+    try:
+        with mock.patch.dict(os.environ, project.env, clear=True):
+            return run_recommend(*argv)
+    finally:
+        os.chdir(previous)
+
+
+AXES = ("--kind", "review", "--intensity", "low", "--reasoning", "low", "--risk", "low")
+QUICK = ("--kind", "quick", "--intensity", "low", "--reasoning", "low", "--risk", "low")
+
+
+def tree(folder: pathlib.Path) -> dict:
+    return {path: path.read_bytes() if path.is_file() else None for path in sorted(folder.rglob("*"))}
+
+
+class RecommendModelTest(unittest.TestCase):
+    def project(self, config: str = "", **fields):
+        from tests import test_call as calls
+
+        return calls.scored_project(self, config, **fields)
+
+    def test_it_prints_the_model_effort_source_and_floor(self):
+        code, out, err = recommend_in(self.project(), *AXES, "--engine", "codex", "--stage", "review")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith("OAH_RECOMMEND tier=medium"), out)
+        line = next(item for item in out.splitlines() if item.startswith("OAH_RECOMMEND_MODEL"))
+        for text in ("engine=codex", "stage=review", "tier=medium", "model=gpt-6.1-terra", "effort=medium",
+                     "source=scored", "floor=medium", "profile=balanced", "scores=Epoch AI 2026-11-02"):
+            self.assertIn(text, line)
+        self.assertIn("Epoch AI, a credit line.", out)
+
+    def test_json_carries_the_same(self):
+        code, out, err = recommend_in(self.project(), *AXES, "--engine", "codex", "--stage", "review", "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["tier"], "medium")
+        self.assertEqual(data["model"], {
+            "engine": "codex", "stage": "review", "tier": "medium", "model": "gpt-6.1-terra", "effort": "medium",
+            "source": "scored", "floor_tier": "medium", "floor_checked": True, "family": "terra", "profile": "balanced",
+            "score_source": "Epoch AI", "score_date": "2026-11-02", "score_credit": "Epoch AI, a credit line."})
+
+    def test_low_axes_are_lifted_like_a_real_review(self):
+        code, out, err = recommend_in(self.project(), *QUICK, "--engine", "codex", "--stage", "review", "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual((data["tier"], data["model"]["tier"], data["model"]["floor_tier"]), ("low", "medium", "medium"))
+
+    def test_the_engine_alone_uses_the_kind_floor(self):
+        code, out, err = recommend_in(self.project(), *QUICK, "--engine", "codex", "--json")
+        self.assertEqual(code, 0, err)
+        model = json.loads(out)["model"]
+        self.assertEqual((model["stage"], model["floor_tier"], model["model"]), (None, "low", "gpt-6-luna"))
+
+    def test_the_stage_alone_finds_its_engine(self):
+        code, out, err = recommend_in(self.project(), *AXES, "--stage", "review", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["model"]["engine"], "codex")
+
+    def test_a_new_kind_gets_a_model_too(self):
+        for kind in ("design", "packet"):
+            with self.subTest(kind=kind):
+                code, out, err = recommend_in(self.project(), "--kind", kind, "--intensity", "low", "--reasoning", "low",
+                                              "--risk", "low", "--engine", "codex", "--json")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads(out)["model"]["floor_tier"], "medium")
+
+    def test_it_refuses_exactly_what_a_call_would_refuse(self):
+        project = self.project('[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
+        code, out, err = recommend_in(project, *AXES, "--engine", "codex", "--stage", "review")
+        self.assertEqual(code, 1, err)
+        self.assertIn("OAH_MODEL_BELOW_FLOOR", err)
+        with self.assertRaises(EngineError) as caught:
+            project.prepare(stage="review")
+        self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+
+    def test_it_writes_nothing_to_a_state_folder_that_does_not_exist(self):
+        project = self.project()
+        code, out, err = recommend_in(project, *AXES, "--engine", "codex", "--stage", "review")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(project.state.exists(), "not even the folder")
+        self.assertFalse(project.record.exists(), "it launches nothing")
+
+    def test_it_writes_nothing_over_a_stale_catalog(self):
+        from tests import test_call as calls
+
+        project = self.project()
+        project.prepare(stage="correction", tier="high")
+        before = tree(project.state)
+        calls.write_models(project.home, ("gpt-6-luna", "gpt-6.1-sol"))
+        project.env["FAKE_CODEX_VERSION"] = "0.164.0"
+        for flags in (("--engine", "codex"), ("--engine", "codex", "--stage", "review"), ("--stage", "correction")):
+            with self.subTest(flags=flags):
+                code, out, err = recommend_in(project, *AXES, *flags)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(tree(project.state), before)
+                self.assertNotIn("OAH_MODEL_CHANGED", out + err)
+
+    def test_it_uses_the_list_the_cli_reports_now(self):
+        from tests import test_call as calls
+
+        project = self.project()
+        project.prepare(stage="correction", tier="high")
+        calls.write_models(project.home, ("gpt-6-luna", "gpt-6.1-sol"))
+        project.env["FAKE_CODEX_VERSION"] = "0.164.0"
+        code, out, err = recommend_in(project, *AXES, "--engine", "codex", "--stage", "review", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["model"]["model"], "gpt-6.1-sol")
+
+    def test_a_missing_repository_is_a_message_not_a_traceback(self):
+        missing = NotARepo("OAH_NOT_A_REPO: this folder is not inside a git repository")
+        with mock.patch("oah.paths.repo_info", side_effect=missing):
+            code, out, err = run_recommend(*AXES, "--engine", "codex")
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_NOT_A_REPO", err)
+
+    def test_axes_alone_still_need_no_repository_and_read_nothing(self):
+        folder = make_tmp_dir(self)
+        previous = os.getcwd()
+        os.chdir(folder)
+        try:
+            with mock.patch("oah.paths.repo_info", side_effect=AssertionError("no repository needed")):
+                code, out, err = run_recommend(*AXES)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("OAH_RECOMMEND_MODEL", out)
 
 
 class FloorTierTest(unittest.TestCase):

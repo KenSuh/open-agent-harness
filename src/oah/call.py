@@ -225,6 +225,17 @@ class _CorrectionCatalog(models.Catalog):
         _CORRECTION_INPUT_CHECK.get()(data)
         self.writes[path] = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
+    def _plan_changes(self, changes):
+        text = self.writes.get(self.changes_path, self.original[self.changes_path]) + "".join(
+            json.dumps(change, ensure_ascii=False, sort_keys=True) + "\n" for change in changes)
+        _CORRECTION_INPUT_CHECK.get()(text)
+        self.writes[self.changes_path] = text
+
+    def record_changes(self, engine, changes, *, now=None):
+        stamp = _iso(now or models.utc_now())
+        self._plan_changes({"ts": stamp, "engine": engine, "field": "model", **change,
+                            "why": "OAH_FIX_MODEL_RESOLUTION"} for change in changes)
+
     def record_resolution(self, engine, tier, **fields):
         fields["why"] = "OAH_FIX_MODEL_RESOLUTION"
         data = self.resolved()
@@ -234,10 +245,7 @@ class _CorrectionCatalog(models.Catalog):
                     "new": fields[field], "why": fields["why"]}
                    for field in ("model", "effort") if old.get(field) != fields[field]]
         if changes:
-            text = self.original[self.changes_path] + "".join(
-                json.dumps(change, ensure_ascii=False, sort_keys=True) + "\n" for change in changes)
-            _CORRECTION_INPUT_CHECK.get()(text)
-            self.writes[self.changes_path] = text
+            self._plan_changes(changes)
         if changes or old.get("source") != fields["source"]:
             data.setdefault(engine, {})[tier] = {key: fields[key] for key in ("model", "effort", "source")}
             data[engine][tier]["at"] = stamp
@@ -250,12 +258,24 @@ def _catalog(state_dir):
     return inputs.catalog if inputs is not None else models.Catalog(state_dir)
 
 
-def read_scores(engine: str, entry: models.Entry | None, settings: Settings) -> scoring.ScoreSet:
-    """The score set of one entry. A failure is kept in it, not raised: a pin still runs and only a choice fails."""
+def read_scores(engine: str, entry: models.Entry | None, settings: Settings, *,
+                previous: models.Entry | None = None) -> tuple[scoring.ScoreSet, scoring.ScoreSet | None]:
+    """The score sets of an entry and of the entry it replaced, from one read of the data.
+
+    A failure is kept in the set, not raised: a pin still runs and only a choice fails."""
+    allowed = settings.engines[engine]["allowed_models"]
     try:
-        return scoring.score_set(engine, entry, allowed=settings.engines[engine]["allowed_models"])
+        known, data = scoring.families(), scoring.bundled()
     except EngineError as exc:
-        return scoring.failed(engine, exc)
+        return scoring.failed(engine, exc), None
+
+    def one(item: models.Entry | None) -> scoring.ScoreSet:
+        try:
+            return scoring.score_set(engine, item, allowed=allowed, data=data, known=known)
+        except EngineError as exc:
+            return scoring.failed(engine, exc)
+
+    return one(entry), one(previous) if previous is not None else None
 
 
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
@@ -269,12 +289,34 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     catalog = _catalog(state_dir)
     freshness = catalog.ensure_fresh(engine, base=base, env=env, ttl_hours=settings.models["ttl_hours"],
                                      refresh=refresh, now=now, persist=persist)
+    rebuilt = bool(freshness.refreshed) and persist
+    scores, before = read_scores(engine, freshness.entry, settings, previous=freshness.previous if rebuilt else None)
     notices: list[str] = []
-    if freshness.refreshed and persist:
-        unpooled = models.unpooled_models(freshness.entry, settings.engines[engine]["tier_pools"])
+    if rebuilt:
+        section = settings.engines[engine]
+        unpooled = models.unpooled_models(freshness.entry, section["tier_pools"])
         notices = [models.unpooled_warning(engine, name) for name in unpooled]
-    return base, dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices),
-                                     scores=read_scores(engine, freshness.entry, settings))
+        notices += models.score_notices(engine, scores)
+        if before is not None and models.rule_decides(engine, section, freshness.entry):
+            changes = models.model_changes(before, scores, settings.models["profile"], freshness.entry)
+            if changes:
+                catalog.record_changes(engine, changes, now=now)
+            notices += [models.changed_warning(engine, change) for change in changes]
+    return base, dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices), scores=scores)
+
+
+def stored_choices(engine: str, entry: models.Entry, settings: Settings) -> dict:
+    """What `oah models` shows, from a stored entry alone: no CLI runs and nothing is recorded."""
+    scores = read_scores(engine, entry, settings)[0]
+    freshness = models.Freshness(entry, None, (), scores=scores)
+    tiers: dict[str, dict] = {}
+    for tier in routing.TIERS:
+        try:
+            model, source = _selected(engine, tier, settings, freshness)
+            tiers[tier] = {"model": _shown(model), "source": source}
+        except EngineError as exc:
+            tiers[tier] = {"error": str(exc)}
+    return {"engine": engine, **models.score_report(scores, settings.models["profile"]), "tiers": tiers}
 
 
 def _fresh(freshness: models.Freshness) -> bool:
@@ -294,14 +336,19 @@ def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: 
     return claude.resolve_effort(requested, efforts=levels, model=model)
 
 
+def _selected(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
+              floor_tier: str = "low") -> tuple[str, str]:
+    section = settings.engines[engine]
+    return models.map_tier(engine, tier, pin=section["tiers"][tier]["model"], quality_order=section["quality_order"],
+                           entry=freshness.entry, scores=freshness.scores, floor_tier=floor_tier,
+                           profile=settings.models["profile"], pools=section["tier_pools"],
+                           allowed=section["allowed_models"])
+
+
 def _deterministic(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
                    floor_tier: str = "low"):
     """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
-    section = settings.engines[engine]
-    model, source = models.map_tier(engine, tier, pin=section["tiers"][tier]["model"],
-                                    quality_order=section["quality_order"], entry=freshness.entry,
-                                    scores=freshness.scores, floor_tier=floor_tier, profile=settings.models["profile"],
-                                    pools=section["tier_pools"], allowed=section["allowed_models"])
+    model, source = _selected(engine, tier, settings, freshness, floor_tier=floor_tier)
     return model, source, _tier_effort(engine, tier, model, settings, freshness.entry)
 
 
@@ -478,6 +525,21 @@ def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: s
                         "see the scored models, or name one in .oah/config.toml")
         return False
     return True
+
+
+def preview(engine: str, stage: str | None, tier: str, kind: str, settings: Settings, *, state_dir: pathlib.Path,
+            env: Mapping[str, str]) -> tuple[dict, tuple[str, ...]]:
+    """What a call at this tier would use, through the same selection and `admit`; it launches and writes nothing."""
+    floor_tier = _call_floor(stage, (), kind)
+    if stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
+        tier = floor_tier
+    checked = check_catalog(engine, settings, state_dir=state_dir, env=env, persist=False)
+    resolution = resolve_engine(engine, tier, settings, state_dir=state_dir, env=env, checked=checked,
+                                floor_tier=floor_tier, record=False)
+    admitted = admit(resolution, settings, stage=stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
+    return ({"engine": engine, "stage": stage, "tier": tier, "model": _shown(resolution.model),
+             "effort": resolution.launch_effort, "source": resolution.model_source, **admitted.to_json()},
+            (*resolution.warnings, *admitted.warnings))
 
 
 def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier: str, floor_tier: str,

@@ -832,7 +832,8 @@ class UnpooledNoticeTest(unittest.TestCase):
         report = json.loads(out)["engines"]["codex"]
         self.assertEqual(report["unpooled"], ["m-new"])
         self.assertEqual(list(report), ["cli_version", "checked_at", "source", "refreshed", "warnings", "models",
-                                        "allowed_models", "effort_caps", "tier_pools", "tiers", "unpooled"])
+                                        "allowed_models", "effort_caps", "tier_pools", "tiers", "unpooled",
+                                        "profile", "scores", "left_out"])
         self.assertEqual(len(notices("\n".join(report["warnings"]))), 1)
         self.assertIn("[engines.codex.tier_pools]", notices("\n".join(report["warnings"]))[0])
         self.assertEqual(len(notices(err)), 1)
@@ -904,6 +905,264 @@ class UnpooledNoticeTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["engines"]["codex"]["unpooled"], ["m-new", "m-old"])
         self.assertEqual(len(notices(err)), 2)
+
+
+def scored_project(test: unittest.TestCase, config: str = "", **fields):
+    from tests import test_call as calls
+
+    return calls.scored_project(test, config, **fields)
+
+
+def run_in(project, *argv: str) -> tuple[int, str, str]:
+    with inside(project.repo, project.env):
+        return run_models(*argv)
+
+
+def warned(warnings, code: str) -> list[str]:
+    return [line for line in warnings if line.startswith(code + ":")]
+
+
+class ScoreReportTest(unittest.TestCase):
+    def report(self, *argv: str, **fields) -> dict:
+        from tests import test_call as calls
+
+        fields.setdefault("models", (*calls.SCORED_MODELS, "gpt-6-sol", "gpt-7-nova"))
+        fields.setdefault("scores", calls.OLD_SCORES)
+        project = scored_project(self, fields.pop("config", ""), **fields)
+        code, out, err = run_in(project, "--json", *argv)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)["engines"]["codex"]
+
+    def test_json_adds_the_profile_scores_and_what_was_left_out(self):
+        report = self.report(hidden=("gpt-reserve",))
+        self.assertEqual(report["profile"], "balanced")
+        scores = report["scores"]
+        self.assertEqual((scores["source"], scores["date"], scores["credit"]),
+                         ("Epoch AI", "2026-11-02", "Epoch AI, a credit line."))
+        self.assertEqual([row["model"] for row in scores["models"]],
+                         ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+        self.assertEqual(scores["models"][0], {"model": "gpt-6-astra", "family": "astra", "score": 100.0, "cost": 60})
+        self.assertEqual(report["left_out"], {"gpt-6-sol": "superseded", "gpt-7-nova": "unknown-family"})
+
+    def test_every_tier_row_keeps_its_keys(self):
+        row = self.report()["tiers"]["high"]
+        self.assertEqual(list(row), ["model", "model_source", "requested_effort", "effort", "floor", "mode", "note",
+                                     "candidates", "excluded"])
+        self.assertEqual((row["model"], row["model_source"], row["mode"]), ("gpt-6.1-terra", "scored", "scored"))
+
+    def test_the_text_report_credits_the_source_and_names_each_model_left_out(self):
+        from tests import test_call as calls
+
+        project = scored_project(self, models=(*calls.SCORED_MODELS, "gpt-6-sol"), scores=calls.OLD_SCORES)
+        code, out, err = run_in(project)
+        self.assertEqual(code, 0, err)
+        self.assertIn("profile balanced", out)
+        self.assertIn("scores Epoch AI 2026-11-02", out)
+        self.assertIn("credit: Epoch AI, a credit line.", out)
+        self.assertIn("gpt-6-astra 100.0", out)
+        self.assertIn("left out: gpt-6-sol (superseded)", out)
+
+    def test_the_profile_is_reported_and_moves_the_tiers(self):
+        report = self.report(config='[models]\nprofile = "performance"\n')
+        self.assertEqual(report["profile"], "performance")
+        self.assertEqual(report["tiers"]["high"]["model"], "gpt-6-astra")
+
+    def test_a_catalog_name_that_is_not_plain_is_never_echoed(self):
+        from tests import test_call as calls
+
+        bad = "gpt-6\x1b[2J-sol"
+        report = self.report(models=(*calls.SCORED_MODELS, bad))
+        self.assertNotIn(bad, report["left_out"])
+
+    def test_damaged_data_is_named_with_no_traceback_and_no_default(self):
+        from tests import test_call as calls
+
+        project = calls.Project(self, "quality_order = []\n")
+        calls.write_models(project.home)
+        with mock.patch.object(scoring, "_packaged", side_effect=OSError("gone")):
+            code, out, err = run_in(project, "--json")
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)["engines"]["codex"]
+        self.assertIsNone(report["scores"])
+        self.assertEqual(report["left_out"], {})
+        self.assertEqual({row["error"].split(":")[0] for row in report["tiers"].values()}, {"OAH_MODEL_NO_SCORES"})
+        self.assertTrue(warned(report["warnings"], "OAH_MODEL_NO_SCORES"))
+        self.assertNotIn("Traceback", out + err)
+
+    def test_the_old_default_list_is_reported_as_ignored_and_the_file_stays(self):
+        from tests import test_call as calls
+
+        project = calls.Project(self)
+        config = project.repo / ".oah" / "config.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace(
+            'quality_order = ["opus", "sonnet"]', 'quality_order = ["opus", "sonnet", "haiku"]'), encoding="utf-8")
+        before = config.read_bytes()
+        code, out, err = run_in(project, "--json")
+        self.assertEqual(code, 0, err)
+        claude_report = json.loads(out)["engines"]["claude"]
+        self.assertEqual(len(warned(claude_report["warnings"], "OAH_MODEL_ORDER_IGNORED")), 1)
+        self.assertIn("quality_order", warned(claude_report["warnings"], "OAH_MODEL_ORDER_IGNORED")[0])
+        self.assertFalse(warned(json.loads(out)["engines"]["codex"]["warnings"], "OAH_MODEL_ORDER_IGNORED"))
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_a_real_list_is_not_reported_as_ignored(self):
+        from tests import test_call as calls
+
+        code, out, err = run_in(calls.Project(self), "--json")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(warned(json.loads(out)["engines"]["claude"]["warnings"], "OAH_MODEL_ORDER_IGNORED"))
+
+
+class RebuildNoticeTest(unittest.TestCase):
+    TWO = ("gpt-6-luna", "gpt-6.1-sol")
+    NEWER = "gpt-6.2-sol"
+
+    def project(self, *, config: str = "", models=TWO, order: str = "[]", extra: float | None = 0.99):
+        from tests import test_call as calls
+
+        scores = dict(calls.SCORES["scores"])
+        if extra is not None:
+            scores[self.NEWER] = dict.fromkeys(calls.FOUR, extra)
+        project = scored_project(self, config, models=models, order=order, scores=dict(calls.SCORES, scores=scores))
+        self.first = project.prepare(stage="correction", tier="high")
+        return project
+
+    def rebuild(self, project, models, *, version: str = "0.164.0", **fields):
+        from tests import test_call as calls
+
+        calls.write_models(project.home, models)
+        return project.prepare(stage="correction", tier="high", env={"FAKE_CODEX_VERSION": version}, **fields)
+
+    def test_a_newer_generation_warns_once_per_step_and_is_logged(self):
+        project = self.project()
+        prepared = self.rebuild(project, (*self.TWO, self.NEWER))
+        changed = warned(prepared.warnings, "OAH_MODEL_CHANGED")
+        self.assertEqual([line.split(";")[0] for line in changed],
+                         [f"OAH_MODEL_CHANGED: codex step {step} now uses {self.NEWER} (was gpt-6.1-sol): newer generation"
+                          for step in (1, 2, 3)])
+        self.assertIn("oah models", changed[0])
+        logged = [line for line in Catalog(project.state).changes() if "step" in line]
+        self.assertEqual([(line["step"], line["field"], line["old"], line["new"], line["why"]) for line in logged],
+                         [(step, "model", "gpt-6.1-sol", self.NEWER, "newer generation") for step in (1, 2, 3)])
+
+    def test_it_appears_once_across_repeated_launches(self):
+        project = self.project()
+        self.rebuild(project, (*self.TWO, self.NEWER))
+        for _ in range(3):
+            prepared = project.prepare(stage="correction", tier="high", env={"FAKE_CODEX_VERSION": "0.164.0"})
+            self.assertEqual(warned(prepared.warnings, "OAH_MODEL_CHANGED"), [])
+        self.assertEqual(len([line for line in Catalog(project.state).changes() if "step" in line]), 3)
+
+    def test_a_model_that_left_the_list_says_so(self):
+        project = self.project(models=("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"))
+        changed = warned(self.rebuild(project, ("gpt-6-luna", "gpt-6.1-sol")).warnings, "OAH_MODEL_CHANGED")
+        self.assertTrue(changed)
+        self.assertIn("gpt-6.1-terra is no longer listed", changed[0])
+
+    def test_a_rebuild_that_changes_nothing_stays_silent(self):
+        project = self.project()
+        before = len(Catalog(project.state).changes())
+        prepared = self.rebuild(project, self.TWO)
+        self.assertEqual(warned(prepared.warnings, "OAH_MODEL_CHANGED"), [])
+        self.assertEqual(len(Catalog(project.state).changes()), before)
+
+    def test_oah_models_can_be_the_command_that_rebuilds(self):
+        from tests import test_call as calls
+
+        project = self.project()
+        calls.write_models(project.home, (*self.TWO, self.NEWER))
+        code, out, err = run_in(project, "--refresh")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err.count("OAH_MODEL_CHANGED:"), 3)
+        self.assertEqual(warned(project.prepare(stage="correction", tier="high").warnings, "OAH_MODEL_CHANGED"), [])
+
+    def test_a_user_who_chooses_models_hears_nothing_about_the_rule(self):
+        for config, order in (("", '["gpt-6.1-sol"]'),
+                              ("".join(f'[engines.codex.tiers.{tier}]\nmodel = "gpt-6.1-sol"\n' for tier in TIERS), "[]")):
+            with self.subTest(order=order):
+                project = self.project(config=config, order=order)
+                self.assertEqual(warned(self.rebuild(project, (*self.TWO, self.NEWER)).warnings, "OAH_MODEL_CHANGED"), [])
+
+    def test_one_rebuild_reads_the_data_once_for_both_entries(self):
+        import collections
+
+        project = self.project()
+        reads = collections.Counter()
+        real = scoring._packaged
+
+        def spy(name):
+            reads[name] += 1
+            return real(name)
+
+        with mock.patch.object(scoring, "_packaged", side_effect=spy):
+            self.rebuild(project, (*self.TWO, self.NEWER))
+        self.assertEqual(reads["families.json"], 1)
+
+    def test_a_rebuild_names_an_unknown_family(self):
+        project = self.project()
+        prepared = self.rebuild(project, (*self.TWO, "gpt-7-nova"))
+        found = warned(prepared.warnings, "OAH_MODEL_UNKNOWN_FAMILY")
+        self.assertEqual(len(found), 1)
+        self.assertIn("gpt-7-nova", found[0])
+        self.assertIn(".oah/config.toml", found[0])
+        self.assertEqual(warned(project.prepare(stage="correction", tier="high",
+                                                env={"FAKE_CODEX_VERSION": "0.164.0"}).warnings,
+                                "OAH_MODEL_UNKNOWN_FAMILY"), [])
+
+    def test_a_rebuild_names_an_unscored_model_and_the_model_that_stays(self):
+        project = self.project(extra=None)
+        found = warned(self.rebuild(project, (*self.TWO, self.NEWER)).warnings, "OAH_MODEL_UNSCORED")
+        self.assertEqual(len(found), 1)
+        self.assertIn(self.NEWER, found[0])
+        self.assertIn("gpt-6.1-sol stays", found[0])
+
+    def test_a_name_that_is_not_plain_is_left_out_of_rebuild_notices(self):
+        project = self.project()
+        bad = "gpt-7\x1b[2J-nova"
+        prepared = self.rebuild(project, (*self.TWO, bad))
+        self.assertFalse([line for line in prepared.warnings if "\x1b" in line])
+
+    def test_a_correction_plans_the_change_lines_with_its_other_writes(self):
+        from tests import test_call as calls
+        from oah import call
+
+        project = self.project()
+        calls.write_models(project.home, (*self.TWO, self.NEWER))
+        before = {path: path.read_bytes() for path in (project.state / "models").iterdir()}
+        token = call._CORRECTION_INPUT_CHECK.set(lambda value: None)
+        try:
+            catalog = call._CorrectionCatalog(project.state)
+            inputs_token = call._CORRECTION_INPUTS.set(mock.Mock(catalog=catalog))
+            try:
+                _, freshness = call.check_catalog("codex", project.settings(), state_dir=project.state,
+                                                  env=project.env, refresh=True)
+                catalog.record_resolution("codex", "high", model="gpt-6.2-sol", effort="high", source="scored", why="x")
+            finally:
+                call._CORRECTION_INPUTS.reset(inputs_token)
+        finally:
+            call._CORRECTION_INPUT_CHECK.reset(token)
+        self.assertEqual(len(warned(freshness.warnings, "OAH_MODEL_CHANGED")), 3)
+        self.assertEqual({path: path.read_bytes() for path in (project.state / "models").iterdir()}, before)
+        planned = catalog.writes[catalog.changes_path]
+        self.assertEqual(planned.count('"step"'), 3, "the resolution line must not overwrite the planned change lines")
+        self.assertIn('"tier": "high"', planned)
+
+
+class NoUserFileTest(unittest.TestCase):
+    def test_nothing_here_edits_the_project_config(self):
+        from tests import test_call as calls
+        from tests import test_routing as routing_tests
+
+        project = scored_project(self)
+        config = project.repo / ".oah" / "config.toml"
+        before = config.read_bytes()
+        run_in(project, "--refresh")
+        project.run(stage="review", tier="medium")
+        calls.write_models(project.home, ("gpt-6-luna", "gpt-6.1-sol"))
+        project.run(stage="review", tier="medium", env={"FAKE_CODEX_VERSION": "0.164.0"})
+        routing_tests.recommend_in(project, "--kind", "review", "--intensity", "low", "--reasoning", "low",
+                                   "--risk", "low", "--engine", "codex", "--stage", "review")
+        self.assertEqual(config.read_bytes(), before)
 
 
 if __name__ == "__main__":

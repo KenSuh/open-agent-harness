@@ -191,6 +191,25 @@ def model_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
         {engine: settings.engines[engine]["tier_pools"] for engine in ENGINES})
 
 
+def model_choices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]:
+    """What `oah models` shows, from the stored catalog and current config; no network or engine CLI calls."""
+    if root is None:
+        return []
+    from oah import call
+    from oah.call_cli import load_settings
+    from oah.models import _NOTICE_FAILURES, Catalog
+    from oah.paths import repo_info, state_dir
+    from oah.routing import ENGINES
+
+    settings = load_settings(root)
+    catalog = Catalog(state_dir(repo_info(root), env))
+    try:
+        entries = {engine: catalog.load(engine) for engine in ENGINES}
+    except _NOTICE_FAILURES:  # a damaged catalog must not stop an advisory report
+        return []
+    return [call.stored_choices(engine, entry, settings) for engine, entry in entries.items() if entry is not None]
+
+
 def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
     if not notices:
         return []
@@ -214,8 +233,26 @@ def _model_lines(notices: Sequence[Mapping]) -> list[str]:
     return lines
 
 
+def _choice_lines(choices: Sequence[Mapping]) -> list[str]:
+    if not choices:
+        return []
+    lines = ["", "Model choice (from the stored catalog, packaged scores and current config; no network used):"]
+    for row in choices:
+        scores = row["scores"]
+        where = f"scores {scores['source']} {scores['date']}" if scores else "no usable scores"
+        lines.append(f"  {row['engine']}: profile {row['profile']} · {where}")
+        lines.append("      " + " · ".join(f"{tier} {item.get('model') or item['error'].split(':')[0]}"
+                                           for tier, item in row["tiers"].items()))
+        if row["left_out"]:
+            lines.append("      left out: " + " · ".join(f"{name} ({why})" for name, why in row["left_out"].items()))
+        if scores:
+            lines.append(f"      credit: {scores['credit']}")
+    return lines
+
+
 def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
-                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None) -> str:
+                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
+                model_choices: Sequence[Mapping] = ()) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -234,6 +271,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
             lines.append(f"      {url}")
     lines += _mcp_lines(mcp_notices)
     lines += _model_lines(model_notices)
+    lines += _choice_lines(model_choices)
     if model_notices_error is not None:
         lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
@@ -242,14 +280,16 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
 
 
 def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
-                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None) -> str:
+                model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
+                model_choices: Sequence[Mapping] = ()) -> str:
     rows = []
     for status in statuses:
         commands, url = _install_texts(status.name, platform)
         rows.append(dict(dataclasses.asdict(status), install=commands, url=url))
     payload = {"ok": exit_code(statuses) == 0, "platform": platform, "tools": rows,
                "mcp_notices": [dict(notice) for notice in mcp_notices],
-               "model_notices": [dict(notice) for notice in model_notices]}
+               "model_notices": [dict(notice) for notice in model_notices],
+               "model_choices": [dict(row) for row in model_choices]}
     if model_notices_error is not None:
         payload["model_notices_error"] = model_notices_error
     return json.dumps(payload, indent=2, ensure_ascii=True)
@@ -292,9 +332,10 @@ def doctor_main(*, json_output: bool) -> int:
     model_error = None
     try:
         models = model_notices(root, os.environ)
+        choices = model_choices(root, os.environ)
     except Exception as exc:
-        models = []
+        models, choices = [], []
         model_error = type(exc).__name__
     render = render_json if json_output else render_text
-    print(render(statuses, sys.platform, mcp, models, model_error))
+    print(render(statuses, sys.platform, mcp, models, model_error, choices))
     return exit_code(statuses)
