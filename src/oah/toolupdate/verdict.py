@@ -101,6 +101,10 @@ def decide(evidence: ComponentEvidence) -> tuple[str, str, str]:
         reason = evidence.help.reason or "the command is absent from clean help"
         return UNSUPPORTED, reason, evidence.unsupported_step or reason
 
+    if evidence.kind == "plugins" and evidence.inventory is not None and evidence.inventory.state == "absent":
+        reason = evidence.inventory.reason or "no Claude Code plugins installed"
+        return UNSUPPORTED, reason, reason
+
     supported = evidence.cli.state == "confirmed" and evidence.help is not None and evidence.help.state == "confirmed"
     inventory_known = (evidence.kind not in ("plugin", "plugins") or
                        (evidence.inventory is not None and evidence.inventory.state == "confirmed"))

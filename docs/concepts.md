@@ -657,8 +657,10 @@ counts as off.
   plugin whose marketplace-declared command needs you; the line names the command to run yourself),
   `unsupported` (the CLI is not installed, or clean help establishes that the command is absent) or `failed`.
   One verdict checks all the evidence; unknown evidence cannot settle a result. An installed but unrunnable CLI
-  or malformed user-plugin inventory stays `unverified`. A readable empty user-plugin inventory is
-  `current`: there are no user plugins to update. A nonzero exit without a readable changed version is `unverified`.
+  or malformed user-plugin inventory stays `unverified`. A CLI counts as not installed only when every PATH
+  folder can be read and none contains a file with its name (including Windows executable extensions); an
+  unreadable folder or an unrunnable candidate stays `unverified`. A clean empty user-plugin inventory is
+  `unsupported`: there are no user plugins to update. A nonzero exit without a readable changed version is `unverified`.
   Failed or undecodable help is `unverified`; a help timeout is `failed` with "help timed out" and the help command
   to run yourself. No update ran in that case. A version timeout is also `failed`: before the update it says
   "version check timed out"; afterwards it warns "timed out; the tool may be partly updated" and names the update

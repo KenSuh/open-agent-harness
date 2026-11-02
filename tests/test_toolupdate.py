@@ -506,7 +506,7 @@ class ParserTest(ToolUpdateTestCase):
                     confirmed.append(verdict.confirmed("1"))
                 if name == "update" and kind in ("plugin", "plugins"):
                     confirmed.append(verdict.confirmed(verdict.CONFIRMATION))
-                choices.append((*confirmed, verdict.absent(), verdict.unknown(name),
+                choices.append((*confirmed, verdict.absent("no Claude Code plugins installed") if name == "inventory" and kind == "plugins" else verdict.absent(), verdict.unknown(name),
                                 verdict.unknown(name + " timed out", timed_out=True)))
             for combination in itertools.product(*choices):
                 evidence = verdict.ComponentEvidence(kind=kind, command="claude update", attempted=True,
@@ -521,13 +521,52 @@ class ParserTest(ToolUpdateTestCase):
                     self.assertEqual(status, "failed", message)
                     self.assertIn("timed out; the tool may be partly updated", reason)
                     self.assertIn(evidence.command, next_step)
+                if (kind == "plugins" and evidence.inventory.state == "absent" and
+                        all(item.state == "confirmed" for name, item in zip(fields, combination) if name != "inventory")):
+                    self.assertEqual(status, "unsupported", message)
                 if status == "unsupported":
-                    self.assertTrue(evidence.cli.state == "absent" or evidence.help.state == "absent", message)
+                    self.assertTrue(evidence.cli.state == "absent" or evidence.help.state == "absent" or
+                                    (kind == "plugins" and evidence.inventory.state == "absent"), message)
                 if status in ("updated", "current"):
                     self.assertTrue(all(item.state == "confirmed" for item in combination), message)
                 self.assertIn(status, records.STATUSES)
         self.assertEqual(observed, set(records.STATUSES))
         self.assertEqual(observed, set(verdict.STATUSES))
+
+    def test_resolver_miss_requires_readable_path_and_no_candidate(self):
+        root = make_tmp_dir(self)
+        folder = root / "bin"
+        folder.mkdir()
+        candidate = folder / "claude"
+        candidate.write_text("not executable")
+        candidate.chmod(0o644)
+        def check(platform, path, pathext=".COM;.EXE;.BAT;.CMD"):
+            with mock.patch.object(probes, "resolve_command", return_value=None), \
+                 mock.patch.object(sys, "platform", platform):
+                return probes.Cli("claude", "Claude Code", env={"PATH": str(path), "PATHEXT": pathext},
+                                  timeout=1, cwd=root).resolution
+        for case in ("posix_candidate", "windows_candidate", "clean_posix", "clean_windows",
+                     "unreadable_posix", "unreadable_windows"):
+            with self.subTest(case=case):
+                candidate.unlink(missing_ok=True)
+                windows_candidate = folder / "ClAuDe.cMd"
+                windows_candidate.unlink(missing_ok=True)
+                if case == "posix_candidate":
+                    candidate.write_text("not executable")
+                    candidate.chmod(0o644)
+                if case == "windows_candidate":
+                    windows_candidate.write_text("shim")
+                platform = "win32" if "windows" in case else "darwin"
+                if case.startswith("unreadable"):
+                    with mock.patch.object(pathlib.Path, "iterdir", side_effect=PermissionError):
+                        result = check(platform, folder)
+                else:
+                    result = check(platform, folder)
+                self.assertEqual(result.state, "absent" if case.startswith("clean") else "unknown")
+                if case.endswith("candidate"):
+                    self.assertIn("found but cannot be run", result.reason)
+                if case.startswith("unreadable"):
+                    self.assertIn("PATH folder could not be read", result.reason)
 
     def test_confirmation_verdict_only_applies_to_plugin_components(self):
         from oah.toolupdate import verdict
@@ -599,6 +638,27 @@ class ParserTest(ToolUpdateTestCase):
 
 
 class PassTest(FakeToolsCase):
+    def test_empty_inventory_is_absent_without_an_update_attempt(self):
+        from oah.toolupdate import verdict
+
+        self.fake.set("claude", plugins=[])
+        seen = []
+        decide = verdict.decide
+        def capture(evidence):
+            if evidence.kind == "plugins":
+                seen.append(evidence)
+            return decide(evidence)
+        with mock.patch.object(verdict, "decide", side_effect=capture):
+            self.run_pass()
+        entry = self.components()["claude-plugins"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("unsupported", None))
+        self.assertIn("no Claude Code plugins installed", entry["next_step"])
+        self.assertEqual(seen[0].inventory.state, "absent")
+        self.assertFalse(seen[0].attempted)
+        self.assertIsNone(seen[0].update)
+        self.assertFalse(any(argv[:2] == ["plugin", "update"] and "--help" not in argv for name, argv in self.fake.argv()
+                             if name == "claude"))
+
     def test_plugin_confirmation_keeps_a_partly_changed_group_unsettled(self):
         self.fake.set("claude", plugins=[{"id": ident, "scope": "user", "version": "1"}
                                          for ident in ("fresh@m", "risky@m")], plugin_update={
@@ -776,7 +836,7 @@ class PassTest(FakeToolsCase):
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
                          {"claude": "current", "codex": "current", "claude-marketplaces": "current",
-                          "claude-plugins": "current"})
+                          "claude-plugins": "unsupported"})
         self.assertEqual(components["claude"]["settled_version"], "2.1.316")
         self.assertTrue(self.fake.ran("claude", "update"))
         self.assertTrue(self.fake.ran("codex", "update"))
@@ -1598,7 +1658,7 @@ class DoctorNoticesTest(FakeToolsCase):
         launched = len(self.launched)
         notices = passes.doctor_notices(self.root)
         self.assertEqual([(notice["code"], notice.get("component")) for notice in notices],
-                         [("OAH_UPDATE_UNSETTLED", "codex")])
+                         [("OAH_UPDATE_UNSETTLED", "codex"), ("OAH_UPDATE_UNSETTLED", "claude-plugins")])
         self.assertIn("(unverified); run codex update yourself", notices[0]["message"])
         self.assertEqual(len(self.launched), launched)  # doctor stays offline: it reads the records only
 

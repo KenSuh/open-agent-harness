@@ -17,8 +17,11 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import pathlib
 import re
+import stat
+import sys
 import tomllib
 from typing import Callable, Mapping
 
@@ -103,6 +106,28 @@ def lists_flag(text: str, flag: str) -> bool:
     return re.search(rf"(?m)^ {{2,6}}(?:-[A-Za-z], )?{re.escape(flag)}\b", text or "") is not None
 
 
+def _missing_cli(name: str, env: Mapping[str, str], cwd: pathlib.Path) -> verdict.Evidence:
+    """A resolver miss proves absence only after every PATH folder is readable."""
+    windows = sys.platform == "win32"
+    extensions = env.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+    names = {name.lower() + ext.lower() for ext in extensions
+             if ext.startswith(".") and "/" not in ext and "\\" not in ext} if windows else {name}
+    for entry in env.get("PATH", "").split(";" if windows else os.pathsep):
+        if windows and entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
+        folder = pathlib.Path(entry or ".")
+        if not folder.is_absolute():
+            folder = cwd / folder
+        try:
+            folder.stat()
+            for item in folder.iterdir():
+                if (item.name.lower() if windows else item.name) in names and stat.S_ISREG(item.stat().st_mode):
+                    return verdict.unknown(f"{name} found but cannot be run")
+        except OSError:
+            return verdict.unknown("PATH folder could not be read")
+    return verdict.absent()
+
+
 class Cli:
     """One CLI resolved once on the pass's PATH; every command it runs is an argv list with a timeout."""
 
@@ -124,8 +149,10 @@ class Cli:
             self.resolution = verdict.unknown(self.problem)
             return
         if found is None:
-            self.problem = f"{label} is not installed; install it (oah doctor prints the command), then run oah update"
-            self.resolution = verdict.absent(self.problem)
+            missing = _missing_cli(name, env, cwd)
+            self.problem = (f"{label} is not installed; install it (oah doctor prints the command), then run oah update"
+                            if missing.state == "absent" else missing.reason)
+            self.resolution = verdict.absent(self.problem) if missing.state == "absent" else missing
             return
         self.base = found.argv
         self.resolution = verdict.confirmed(found.argv)

@@ -146,6 +146,8 @@ def claude_plugins(context: Context) -> dict:
     if support.state != "confirmed":
         return {"claude-plugins": _entry(context, evidence)}
     before = _inventory(cli)
+    if before.state == "confirmed" and not before.value:
+        before = verdict.absent("no Claude Code plugins installed")
     evidence = dataclasses.replace(evidence, before=_plugin_version(before), inventory=before)
     if before.state != "confirmed":
         return {"claude-plugins": _entry(context, evidence)}
