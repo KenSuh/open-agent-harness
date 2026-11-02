@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc" xml:lang="en">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="565" viewBox="0 0 1200 565" role="img" aria-labelledby="title desc" xml:lang="en">
 <title id="title">open-agent-harness</title>
 <desc id="desc">open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository. Claude Code implements, Codex CLI reviews and fixes until the review converges, and the work lands after you confirm. TypeSafe Jev, an optional judge, judges difficulty, model choice and ranking. Review ends on convergence or stops for a decision; a round limit is optional. Leases, gates, the impact map and the wiki are the rails.</desc>
 <defs>
@@ -15,35 +15,35 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", 
 .hint { font-size: 34px; fill: #d1d9e0; }
 .rail { font-size: 34px; font-weight: 600; fill: #d1d9e0; }
 </style>
-<rect x="1" y="1" width="1198" height="598" rx="20" fill="url(#bg)" stroke="#30363d" stroke-width="2"/>
-<text class="title" x="600" y="104">open-agent-harness</text>
-<text class="pitch" x="600" y="156">Claude Code and Codex CLI as one disciplined team</text>
-<text class="pitch" x="600" y="198">on your own repository</text>
-<rect x="270" y="220" width="660" height="86" rx="16" fill="#271c3f" stroke="#a371f7" stroke-width="2.5"/>
-<text class="jev" x="600" y="255">TypeSafe Jev · optional judge</text>
-<text class="jevhint" x="600" y="295">judges difficulty, model choice and ranking</text>
-<path d="M420,306 C420,326 220,320 220,336" fill="none" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
-<line x1="600" y1="306" x2="600" y2="336" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
-<rect x="60" y="340" width="320" height="116" rx="16" fill="#2e2410" stroke="#d29922" stroke-width="2.5"/>
-<text class="name" x="220" y="390">Claude Code</text>
-<text class="hint" x="220" y="424">implements</text>
-<rect x="440" y="340" width="320" height="116" rx="16" fill="#0f2e1b" stroke="#3fb950" stroke-width="2.5"/>
-<text class="name" x="600" y="384">Codex CLI</text>
-<text class="hint" x="600" y="416">reviews &amp; fixes</text>
-<text class="hint" x="600" y="442">until converged</text>
-<rect x="820" y="340" width="320" height="116" rx="16" fill="#0c2a47" stroke="#58a6ff" stroke-width="2.5"/>
-<text class="name" x="980" y="384">Lands</text>
-<text class="hint" x="980" y="416">after you confirm</text>
-<line x1="382" y1="398" x2="436" y2="398" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
-<line x1="762" y1="398" x2="816" y2="398" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
-<path d="M630,458 C630,486 570,486 570,462" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="80" y1="558" x2="1120" y2="558" stroke="#8b949e" stroke-width="2"/>
-<rect x="125" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="225" y="566">leases</text>
-<rect x="375" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="475" y="566">gates</text>
-<rect x="625" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="725" y="566">impact map</text>
-<rect x="875" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="975" y="566">wiki</text>
+<rect x="1" y="1" width="1198" height="563" rx="20" fill="url(#bg)" stroke="#30363d" stroke-width="2"/>
+<text class="title" x="600" y="85">open-agent-harness</text>
+<text class="pitch" x="600" y="133">Claude Code and Codex CLI as one disciplined team</text>
+<text class="pitch" x="600" y="175">on your own repository</text>
+<rect x="120" y="195" width="960" height="100" rx="16" fill="#271c3f" stroke="#a371f7" stroke-width="2.5"/>
+<text class="jev" x="600" y="230">TypeSafe Jev · optional judge</text>
+<text class="jevhint" x="600" y="272">judges difficulty, model choice and ranking</text>
+<path d="M420,295 C420,315 200,309 200,321" fill="none" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<line x1="560" y1="295" x2="560" y2="321" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<rect x="40" y="325" width="320" height="135" rx="16" fill="#2e2410" stroke="#d29922" stroke-width="2.5"/>
+<text class="name" x="200" y="380">Claude Code</text>
+<text class="hint" x="200" y="421">implements</text>
+<rect x="385" y="325" width="350" height="135" rx="16" fill="#0f2e1b" stroke="#3fb950" stroke-width="2.5"/>
+<text class="name" x="560" y="360">Codex CLI</text>
+<text class="hint" x="560" y="401">reviews &amp; fixes</text>
+<text class="hint" x="560" y="442">until converged</text>
+<rect x="760" y="325" width="400" height="135" rx="16" fill="#0c2a47" stroke="#58a6ff" stroke-width="2.5"/>
+<text class="name" x="960" y="380">Lands</text>
+<text class="hint" x="960" y="421">after you confirm</text>
+<line x1="362" y1="392" x2="381" y2="392" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
+<line x1="737" y1="392" x2="756" y2="392" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M590,462 C590,482 530,482 530,462" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="80" y1="517" x2="1120" y2="517" stroke="#8b949e" stroke-width="2"/>
+<rect x="110" y="490" width="230" height="54" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="225" y="525">leases</text>
+<rect x="360" y="490" width="230" height="54" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="475" y="525">gates</text>
+<rect x="600" y="490" width="250" height="54" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="725" y="525">impact map</text>
+<rect x="860" y="490" width="230" height="54" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="975" y="525">wiki</text>
 </svg>

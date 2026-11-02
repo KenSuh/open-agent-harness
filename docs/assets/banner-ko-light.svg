@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc" xml:lang="ko">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="565" viewBox="0 0 1200 565" role="img" aria-labelledby="title desc" xml:lang="ko">
 <title id="title">open-agent-harness</title>
 <desc id="desc">open-agent-harness. Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일한다. Claude Code가 1차 구현을 하고, Codex CLI가 리뷰가 수렴할 때까지 리뷰하고 고치며, 작업은 사용자가 확인한 뒤 반영된다. 켜서 쓰는 판정기 TypeSafe Jev가 난이도, 모델 선택, 순서를 판정한다. 리뷰는 수렴하면 끝나고, 결정이 필요하면 멈춰서 묻는다. 라운드 상한은 선택이다. 리스, 게이트, 영향 지도, 위키가 작업을 받친다.</desc>
 <defs>
@@ -15,35 +15,35 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "M
 .hint { font-size: 34px; fill: #424a53; }
 .rail { font-size: 34px; font-weight: 600; fill: #424a53; }
 </style>
-<rect x="1" y="1" width="1198" height="598" rx="20" fill="url(#bg)" stroke="#d0d7de" stroke-width="2"/>
-<text class="title" x="600" y="104">open-agent-harness</text>
-<text class="pitch" x="600" y="156">Claude Code와 Codex CLI가 내 저장소에서</text>
-<text class="pitch" x="600" y="198">한 팀처럼 일한다</text>
-<rect x="270" y="220" width="660" height="86" rx="16" fill="#fbefff" stroke="#8250df" stroke-width="2.5"/>
-<text class="jev" x="600" y="255">TypeSafe Jev · 켜서 쓰는 판정기</text>
-<text class="jevhint" x="600" y="295">난이도, 모델 선택, 순서를 판정한다</text>
-<path d="M420,306 C420,326 220,320 220,336" fill="none" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
-<line x1="600" y1="306" x2="600" y2="336" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
-<rect x="60" y="340" width="320" height="116" rx="16" fill="#fff8c5" stroke="#9a6700" stroke-width="2.5"/>
-<text class="name" x="220" y="390">Claude Code</text>
-<text class="hint" x="220" y="424">1차 구현</text>
-<rect x="440" y="340" width="320" height="116" rx="16" fill="#dafbe1" stroke="#1a7f37" stroke-width="2.5"/>
-<text class="name" x="600" y="384">Codex CLI</text>
-<text class="hint" x="600" y="416">수렴할 때까지</text>
-<text class="hint" x="600" y="442">리뷰하고 고친다</text>
-<rect x="820" y="340" width="320" height="116" rx="16" fill="#ddf4ff" stroke="#0969da" stroke-width="2.5"/>
-<text class="name" x="980" y="384">반영</text>
-<text class="hint" x="980" y="416">사용자가 확인한 뒤</text>
-<line x1="382" y1="398" x2="436" y2="398" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
-<line x1="762" y1="398" x2="816" y2="398" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
-<path d="M630,458 C630,486 570,486 570,462" fill="none" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow)"/>
-<line x1="80" y1="558" x2="1120" y2="558" stroke="#6e7781" stroke-width="2"/>
-<rect x="125" y="538" width="200" height="40" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
-<text class="rail" x="225" y="566">리스</text>
-<rect x="375" y="538" width="200" height="40" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
-<text class="rail" x="475" y="566">게이트</text>
-<rect x="625" y="538" width="200" height="40" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
-<text class="rail" x="725" y="566">영향 지도</text>
-<rect x="875" y="538" width="200" height="40" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
-<text class="rail" x="975" y="566">위키</text>
+<rect x="1" y="1" width="1198" height="563" rx="20" fill="url(#bg)" stroke="#d0d7de" stroke-width="2"/>
+<text class="title" x="600" y="85">open-agent-harness</text>
+<text class="pitch" x="600" y="133">Claude Code와 Codex CLI가 내 저장소에서</text>
+<text class="pitch" x="600" y="175">한 팀처럼 일한다</text>
+<rect x="120" y="195" width="960" height="100" rx="16" fill="#fbefff" stroke="#8250df" stroke-width="2.5"/>
+<text class="jev" x="600" y="230">TypeSafe Jev · 켜서 쓰는 판정기</text>
+<text class="jevhint" x="600" y="272">난이도, 모델 선택, 순서를 판정한다</text>
+<path d="M420,295 C420,315 200,309 200,321" fill="none" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<line x1="560" y1="295" x2="560" y2="321" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<rect x="40" y="325" width="320" height="135" rx="16" fill="#fff8c5" stroke="#9a6700" stroke-width="2.5"/>
+<text class="name" x="200" y="380">Claude Code</text>
+<text class="hint" x="200" y="421">1차 구현</text>
+<rect x="385" y="325" width="350" height="135" rx="16" fill="#dafbe1" stroke="#1a7f37" stroke-width="2.5"/>
+<text class="name" x="560" y="360">Codex CLI</text>
+<text class="hint" x="560" y="401">수렴할 때까지</text>
+<text class="hint" x="560" y="442">리뷰하고 고친다</text>
+<rect x="760" y="325" width="400" height="135" rx="16" fill="#ddf4ff" stroke="#0969da" stroke-width="2.5"/>
+<text class="name" x="960" y="380">반영</text>
+<text class="hint" x="960" y="421">사용자가 확인한 뒤</text>
+<line x1="362" y1="392" x2="381" y2="392" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
+<line x1="737" y1="392" x2="756" y2="392" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M590,462 C590,482 530,482 530,462" fill="none" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="80" y1="517" x2="1120" y2="517" stroke="#6e7781" stroke-width="2"/>
+<rect x="110" y="490" width="230" height="54" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
+<text class="rail" x="225" y="525">리스</text>
+<rect x="360" y="490" width="230" height="54" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
+<text class="rail" x="475" y="525">게이트</text>
+<rect x="600" y="490" width="250" height="54" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
+<text class="rail" x="725" y="525">영향 지도</text>
+<rect x="860" y="490" width="230" height="54" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
+<text class="rail" x="975" y="525">위키</text>
 </svg>

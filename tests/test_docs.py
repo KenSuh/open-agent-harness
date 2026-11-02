@@ -287,6 +287,50 @@ class BannerTest(unittest.TestCase):
                     for size in sizes:
                         self.assertGreaterEqual(size, 10 * width / 360)
 
+    def test_banner_text_fits_its_rectangles(self):
+        for path in self.banner_files():
+            with self.subTest(banner=path.name):
+                root = ET.parse(path).getroot()
+                styles = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
+                self.assertRegex(styles, r"text-anchor\s*:\s*middle\s*;")
+                sizes = {selector.strip()[1:]: float(size)
+                         for selector, size in re.findall(
+                             r"(\.[\w-]+)\s*\{[^{}]*font-size\s*:\s*([\d.]+)px", styles)}
+                rectangles = []
+                for rect in root.findall(f".//{SVG}rect"):
+                    x, y, width, height = (float(rect.get(key, "0"))
+                                           for key in ("x", "y", "width", "height"))
+                    rectangles.append((x, y, width, height))
+                groups = {}
+                for node in root.findall(f".//{SVG}text"):
+                    x, y = float(node.attrib["x"]), float(node.attrib["y"])
+                    size = sizes[node.attrib["class"]]
+                    containing = [rect for rect in rectangles
+                                  if rect[0] <= x <= rect[0] + rect[2]
+                                  and rect[1] <= y <= rect[1] + rect[3]]
+                    self.assertTrue(containing, ET.tostring(node, encoding="unicode"))
+                    rect = min(containing, key=lambda r: r[2] * r[3])
+                    rx, ry, width, height = rect
+                    label = "".join(node.itertext())
+                    estimated = size * sum(1.0 if "가" <= char <= "힣" else 0.62
+                                           for char in label)
+                    self.assertGreaterEqual(x - estimated / 2, rx + 16, label)
+                    self.assertLessEqual(x + estimated / 2, rx + width - 16, label)
+                    self.assertGreaterEqual(y - ry, 0.9 * size, label)
+                    self.assertGreaterEqual(ry + height - y, 0.35 * size, label)
+                    groups.setdefault(rect, []).append((y, size, label))
+                    if node.get("class") == "rail":
+                        self.assertGreaterEqual(height, 1.5 * size, label)
+                canvas = max(rectangles, key=lambda r: r[2] * r[3])
+                for rect, labels in groups.items():
+                    if rect == canvas:  # The background is not a text box.
+                        continue
+                    labels.sort()
+                    for previous, current in zip(labels, labels[1:]):
+                        self.assertGreaterEqual(current[0] - previous[0],
+                                                1.2 * max(previous[1], current[1]),
+                                                (previous[2], current[2]))
+
     def test_readmes_pick_banner_by_theme_with_alt_matching_desc(self):
         class PictureParser(HTMLParser):
             def __init__(self):
