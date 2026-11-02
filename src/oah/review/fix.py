@@ -206,6 +206,10 @@ _ERROR_DIAGNOSTICS = {
                             "see the scores in use.",
     "OAH_SCORES_FILE_INVALID": "a stored score file is invalid and counts as absent; delete it, or run "
                                "oah models --refresh to fetch it again.",
+    "OAH_RERANK_SCOPE_WIDENED": "Jev now receives the task's Intent text and Scope paths to judge its difficulty; set "
+                                "enabled = false under [rerank] in .oah/config.toml to stop it.",
+    "OAH_RERANK_SECRET": "Jev was not asked, because a privacy rule flagged the Intent text or Scope paths; remove "
+                         "that text from the packet, or keep the rule tier and run oah fix again.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

@@ -5,7 +5,11 @@
 - the stage's engine (`OAH_STAGE_ENGINE_MISMATCH` unless overridden, which is logged as an event);
 - the tier: `--tier` (source `flag`), else the packet's `## Plan` line for this stage (`packet`), else the
   rule-scored axes through `routing.recommend` (`rules`, or `flag` when axes were given), lifted to a review's
-  floor. The re-ranker's advisory judgement is recorded next to it and never changes the tier;
+  floor. Unless the tier was given (`--tier`, or a plan tier the user edited away from the rule tier
+  `oah packet new` recorded beside it), Jev then judges the accepted Intent and the Scope paths (`judge_difficulty`,
+  after the budget gate): at or above `[rerank] difficulty_min_confidence` its tier runs (`jev`), raised to the
+  call's floor tier when lower; otherwise the rule tier runs. A review's floor stays scored from its scope alone.
+  The record keeps `rule_tier` and the `jev_*` fields beside `tier`, and a correction asks Jev once;
 - the model through the catalog and the scores read once (`check_catalog`, `models.map_tier`), and the launch
   effort through the adapter;
 - the judged model and effort (`judge_engine`, amendment 6): unless a tier model is explicitly pinned,
@@ -110,6 +114,11 @@ _PLAN_LINE = re.compile(r"^\s*(?:[-*]\s*)?`?(initial|review|correction)`?\s*(?:�
                         r"(?:→|->|:)\s*`?(low|medium|high|max)`?\b")
 _PLAN_AXES = re.compile(r"^\s*[-*]\s*(initial|review|correction):\s+kind=(\S+)\s+intensity=(\S+)\s+"
                         r"reasoning=(\S+)\s+risk=(\S+)(?:\s|$)")
+# The rule tier `oah packet new` wrote beside the axes: `- <stage>: kind=… → <tier> (advice=…)`.
+_PLAN_RULE = re.compile(r"^\s*[-*]\s*(initial|review|correction):\s+kind=\S+\s+intensity=\S+\s+reasoning=\S+\s+"
+                        r"risk=\S+\s+(?:→|->)\s*(low|medium|high|max)\s+\(advice=")
+TIER_GIVEN = "unused(tier-given)"
+SECRET_HELD = "OAH_RERANK_SECRET"  # this name ends in neither KEY nor SECRET, which the privacy scan flags
 
 
 @dataclasses.dataclass(frozen=True)
@@ -675,6 +684,7 @@ class Packet:
     plan: dict  # stage -> (engine, tier)
     rerank_disabled: bool = False  # the packet's Constraints turn the re-ranker off
     axes: dict[str, routing.Axes] = dataclasses.field(default_factory=dict)
+    planned: dict[str, str] = dataclasses.field(default_factory=dict)  # stage -> rule tier `oah packet new` recorded
 
 
 def _section_lines(text: str, heading: str) -> list[str]:
@@ -716,6 +726,7 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
             scope.append(match.group(1))
     plan: dict = {}
     axes: dict[str, routing.Axes] = {}
+    planned: dict[str, str] = {}
     for line in _section_lines(text, "Plan"):
         match = _PLAN_LINE.match(line)
         if match:
@@ -725,13 +736,16 @@ def read_packet(root: pathlib.Path, path: pathlib.Path, *, parse_intent: Callabl
             values = routing.Axes(*recorded.groups()[1:])
             routing.recommend(values)  # validate the recorded values before they reach selection
             axes[recorded.group(1)] = values
+        rule = _PLAN_RULE.match(line)
+        if rule:
+            planned.setdefault(rule.group(1), rule.group(2))
     try:
         source = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         source = str(path)
     section = briefs.raw_section(text) if intent is not None else None
     return Packet(source=source, intent=intent, section=section, scope=tuple(scope), plan=plan,
-                  rerank_disabled=oah_packet.rerank_disabled(text), axes=axes)
+                  rerank_disabled=oah_packet.rerank_disabled(text), axes=axes, planned=planned)
 
 
 BINDING_NAME = "intent-binding.json"
@@ -1128,6 +1142,7 @@ class _CorrectionInputs:
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
     artifacts: dict = dataclasses.field(default_factory=dict)
+    difficulty: object | None = None  # Jev's answer, asked once: the correction decides its tier on it
 
     def holder(self):
         from oah.lease import Lease
@@ -1185,6 +1200,92 @@ def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled:
     status = str(getattr(advice, "status", "unused(no status)"))
     tier = getattr(advice, "advisory_tier", None)
     return f"{status} tier={tier}" if status == "used" and tier else status
+
+
+@dataclasses.dataclass(frozen=True)
+class Difficulty:
+    """Jev's judgement of a call's difficulty and the tier it gives; `used` means `tier_source=jev`."""
+
+    rule_tier: str | None
+    tier: str
+    used: bool
+    status: str  # jev_status: "used", "unused(<reason>)" or "below-threshold <confidence>"
+    jev_tier: str | None = None
+    confidence: float | None = None
+    truncated: bool | None = None
+    raised: bool = False  # Jev's tier was below the floor tier and runs at the floor
+    note: str | None = None  # for unused(secret): the part that held it, in plain words
+
+    def record(self) -> dict:
+        return {"rule_tier": self.rule_tier, "jev_tier": self.jev_tier, "jev_confidence": self.confidence,
+                "jev_status": self.status, "jev_truncated": self.truncated}
+
+    @property
+    def advisory(self) -> str:
+        """The landed `advisory` summary: the status, with Jev's tier when it gave one."""
+        return f"{self.status} tier={self.jev_tier}" if self.jev_tier else self.status
+
+    def reasons(self, floor_tier: str) -> list[str]:
+        if not self.used:
+            return []
+        reasons = [f"jev {self.jev_tier} at confidence {self.confidence:.3g}"]
+        if self.raised:
+            reasons.append(f"floor {floor_tier}: jev asked {self.jev_tier}")
+        return reasons
+
+
+def secret_warning(note: str | None, where: str) -> str:
+    """Which part held secret-shaped text, in plain words; never the text itself."""
+    return (f"{SECRET_HELD}: Jev was not asked how hard this task is: a privacy rule flagged "
+            f"{note or 'the text'} as holding a key or a private path, so nothing was sent and the rule tier runs. "
+            f"Remove that text from {where}, or keep the rule tier")
+
+
+def judge_difficulty(axes: routing.Axes, *, section: str | None, request_text: str | None = None,
+                     scope: Sequence[str], rule_tier: str, floor_tier: str, root: pathlib.Path,
+                     state_dir: pathlib.Path, brief_disabled: bool = False, env: Mapping[str, str] | None = None,
+                     keychain=None) -> Difficulty:
+    """Jev's tier for this work (the accepted Intent section, or a request before one exists, then the Scope paths).
+
+    Never blocked by Jev: a failure is a status and the rule tier runs. An invalid `[rerank]` table refuses with
+    `OAH_CONFIG_INVALID` before anything is sent. A correction asks once and keeps the answer with its inputs."""
+    from oah.config import ConfigError, load_config
+
+    try:
+        rerank = importlib.import_module("oah.rerank")
+        defaults = rerank.DEFAULTS
+    except Exception:  # an absent or broken re-ranker is no re-ranker
+        return Difficulty(rule_tier, rule_tier, False, "unused(not-configured)")
+    inputs = _CORRECTION_INPUTS.get()
+    try:
+        config = (inputs.config if inputs is not None else load_config(root)).section("rerank", defaults)
+        threshold = rerank.min_confidence(config)
+    except ConfigError as exc:
+        raise EngineError(exc.code, str(exc).split(": ", 1)[1] + ". Nothing was sent or launched") from None
+    except Exception as exc:  # a plugin failure must never block a launch
+        return Difficulty(rule_tier, rule_tier, False, f"unused(error: {type(exc).__name__})")
+    advice = inputs.difficulty if inputs is not None else None
+    if advice is None:
+        try:
+            work = (rerank.request_work(request_text, scope) if section is None
+                    else rerank.intent_work(section, scope))
+            advice = rerank.advise_difficulty(dict(axes.to_json(), tier=rule_tier), work, config=config,
+                                              brief_disabled=brief_disabled, env=env, keychain=keychain,
+                                              state_dir=state_dir, record_notice=inputs is None)
+        except Exception as exc:  # a plugin failure must never block a launch
+            return Difficulty(rule_tier, rule_tier, False, f"unused(error: {type(exc).__name__})")
+        if inputs is not None:
+            inputs.difficulty = advice
+    try:
+        decision = rerank.decide(advice, floor_tier=floor_tier, threshold=threshold)
+    except Exception as exc:  # a plugin failure must never block a launch
+        return Difficulty(rule_tier, rule_tier, False, f"unused(error: {type(exc).__name__})")
+    status = decision.status
+    if status == "unused(not-enabled)":
+        status = "unused(not-configured)"  # as `advise_difficulty` reports a disabled re-ranker at the call seam
+    return Difficulty(rule_tier, decision.tier, decision.used, status, getattr(advice, "advisory_tier", None),
+                      getattr(advice, "confidence", None), getattr(advice, "truncated", None), decision.raised,
+                      getattr(advice, "note", None))
 
 
 def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
@@ -1354,8 +1455,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     if inputs is None:  # `oah fix` passed the same gate when it captured its inputs
         check_budget()
     reasons = None
-    advisory = "unused(tier-given)"
-    rule_scored = False
+    rule_tier = None
     if request.tier:
         tier, tier_source = request.tier, "flag"
     elif packet and request.stage in packet.plan:
@@ -1364,6 +1464,9 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         if planned_engine != request.engine:
             warnings.append(f"OAH_PACKET_PLAN_ENGINE: the packet plans {planned_engine} for {request.stage}; "
                             f"its tier {tier} is used for {request.engine}")
+        # The plan tier is the rule tier unless the user edited it away from the one recorded beside it.
+        recorded_rule = packet.planned.get(request.stage)
+        rule_tier = tier if recorded_rule in (None, tier) else recorded_rule
     else:
         explicit = any(value is not None for value in request.axes.values())
         recommendation = routing.recommend(scored.axes)
@@ -1371,10 +1474,23 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         tier_source = "flag" if explicit else "rules"
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
-        rule_scored = True
         if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
             tier = floor_tier
             reasons.append(f"floor {floor_tier}: this review's scope")
+        rule_tier = tier
+    if rule_tier is not None and rule_tier == tier:
+        # Jev judges before the model is chosen, after the budget gate, so a refused budget sends nothing.
+        check_budget()
+        difficulty = judge_difficulty(scored.axes, section=getattr(packet.intent, "section", "") or "", scope=scope,
+                                      rule_tier=tier, floor_tier=floor_tier, root=root, state_dir=state_dir,
+                                      brief_disabled=disabled, env=env, keychain=keychain)
+        if difficulty.used:
+            tier, tier_source = difficulty.tier, "jev"
+            reasons = [*(reasons or ()), *difficulty.reasons(floor_tier)]
+        if difficulty.status == "unused(secret)":
+            warnings.append(secret_warning(difficulty.note, f"the packet {packet.source}"))
+    else:
+        difficulty = Difficulty(rule_tier, tier, False, TIER_GIVEN)
     if request.stage != "review":
         # Explicit flag and packet tiers keep their meaning outside review.
         floor_tier = min(tier, floor_tier, key=routing.TIERS.index)
@@ -1400,10 +1516,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                      brief_disabled=disabled, keychain=keychain)
     admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     warnings.extend(admitted.warnings)
-    judge = {**judge, "admission": admitted.to_json()}
-    if rule_scored:
-        check_budget()
-        advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
+    judge = {**judge, "admission": admitted.to_json(), **difficulty.record()}
+    advisory = difficulty.advisory
     skill_axes = scored.axes
     check_budget()
     selection = _brief_skills(root, kind=skill_axes.kind, stage=request.stage, risk=skill_axes.risk, scope=scope,

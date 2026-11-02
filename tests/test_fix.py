@@ -498,11 +498,76 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual(spy.call_count, 2)
         self.assertEqual(spy.call_args.kwargs["stage"], "correction")
 
+    def test_a_correction_decides_its_tier_on_one_jev_answer(self):
+        from oah import rerank
+        from tests.test_call import Judge
+
+        project = FixProject(self, config='[rerank]\nenabled = true\nprovider = "fake"\n')
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        key = "fake-" + token_source.token_hex(16)
+
+        class Chain:  # the corrector's environment is allowlisted, so its Jev key comes from the keychain
+            def lookup(self, name):
+                return key if name == "FAKE_RERANK_KEY" else None
+
+        judge = Judge(("high", 0.9), ("low", 0.9))  # a second, different answer must never be used
+        with mock.patch.dict(rerank.PROVIDERS, {"fake": judge}), contextlib.redirect_stderr(io.StringIO()):
+            result = fix.correct(fix.Request(task="t1"), cwd=project.repo, env=project.env, keychain=Chain(),
+                                 rules=RULES, temp_root=project.temp_root)
+        self.assertEqual(result.code, "OAH_FIX_APPLIED", result.message)
+        run = runs.find_run(project.state, result.run_id).read()
+        self.assertEqual((run["tier"], run["tier_source"], run["rule_tier"], run["jev_tier"], run["jev_status"],
+                          run["launch_effort"]), ("high", "jev", "medium", "high", "used", "high"))
+        self.assertEqual(len(judge.sent), 1)
+        self.assertFalse((project.state / rerank.NOTICE_MARKER).exists(), "a correction writes no state to show it")
+
+    def test_one_correction_keeps_its_first_jev_answer(self):
+        from oah import rerank, routing
+        from oah.config import load_config
+        from tests.test_call import SECTION as CALL_SECTION, Judge
+
+        root = make_git_repo(self)
+        (root / ".oah").mkdir()
+        (root / ".oah" / "config.toml").write_text('[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        key = "fake-" + token_source.token_hex(16)
+
+        class Chain:
+            def lookup(self, name):
+                return key if name == "FAKE_RERANK_KEY" else None
+
+        inputs = call._CorrectionInputs(make_tmp_dir(self), "{}", "null", None, None, load_config(root), "{}")
+        judge = Judge(("high", 0.9), ("low", 0.9))
+        token = call._CORRECTION_INPUTS.set(inputs)
+        try:
+            with mock.patch.dict(rerank.PROVIDERS, {"fake": judge}), contextlib.redirect_stderr(io.StringIO()):
+                tiers = [call.judge_difficulty(routing.Axes("implementation", "low", "medium", "normal"),
+                                               section=CALL_SECTION, scope=("src/app.py",), rule_tier="medium",
+                                               floor_tier="medium", root=root, state_dir=inputs.state, env={},
+                                               keychain=Chain()).tier for _ in range(2)]
+        finally:
+            call._CORRECTION_INPUTS.reset(token)
+        self.assertEqual(tiers, ["high", "high"])
+        self.assertEqual(len(judge.sent), 1)
+
+    def test_correction_records_keep_the_jev_fields_in_their_closed_words(self):
+        fields = {"tier": "high", "tier_source": "jev", "rule_tier": "medium", "jev_tier": "high",
+                  "jev_confidence": 0.9, "jev_status": "used", "jev_truncated": False}
+        self.assertEqual(runs._correction_record(fields, runs.RESULT_FIELDS), fields)
+        for status in ("below-threshold 0.5", "below-threshold none", "unused(tier-given)", "unused(secret)",
+                       "unused(no-text)", "unused(error:timeout)", "unused(not-configured)"):
+            with self.subTest(status=status):
+                self.assertEqual(runs._correction_record({"jev_status": status}, runs.RESULT_FIELDS),
+                                 {"jev_status": status})
+        hashed = runs._correction_record({"jev_status": "below-threshold the key"}, runs.RESULT_FIELDS)
+        self.assertTrue(hashed["jev_status"].startswith("sha256:"))
+
     def test_every_model_code_has_a_fixed_diagnostic_with_a_next_step(self):
         for code in ("OAH_MODEL_NO_SCORES", "OAH_MODEL_CATALOG_UNAVAILABLE", "OAH_MODEL_BELOW_FLOOR",
                      "OAH_MODEL_NOT_LISTED", "OAH_MODEL_SUPERSEDED", "OAH_MODEL_CHANGED", "OAH_MODEL_UNKNOWN_FAMILY",
                      "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED",
-                     "OAH_SCORES_REFRESH_FAILED", "OAH_SCORES_AA_UNUSED", "OAH_SCORES_FILE_INVALID"):
+                     "OAH_SCORES_REFRESH_FAILED", "OAH_SCORES_AA_UNUSED", "OAH_SCORES_FILE_INVALID",
+                     "OAH_RERANK_SCOPE_WIDENED", "OAH_RERANK_SECRET"):
             with self.subTest(code=code):
                 self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
                 self.assertEqual(runs._correction_record({"warnings": [f"{code}: a model name"]}, ("warnings",))["warnings"],
