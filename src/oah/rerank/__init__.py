@@ -54,7 +54,7 @@ from oah.toolkit.checks import CONTENT_RULES
 
 __all__ = ["DEFAULTS", "PROVIDERS", "TIERS", "WORK_LIMIT", "Advice", "Candidate", "Decision", "ModelJudgement",
            "Provider", "ProviderError", "RerankResult", "Work", "advise_difficulty", "decide", "intent_work",
-           "judge_model", "min_confidence", "request_work", "rerank"]
+           "judge_model", "min_confidence", "request_work", "rerank", "scope_work"]
 
 DEFAULTS = {
     "enabled": False,
@@ -151,6 +151,11 @@ def request_work(text: str, scope: Sequence[str]) -> Work:
     """The user's request as written, before an Intent exists, then the Scope paths one per line."""
     body = _body(text.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
     return _work([(REQUEST_TEXT, "Request", body), *_scope(scope)])
+
+
+def scope_work(scope: Sequence[str]) -> Work:
+    """The Scope paths alone, one per line: what a new packet has before its Intent is written."""
+    return _work(_scope(scope))
 
 
 def _plain(text: str) -> Work:

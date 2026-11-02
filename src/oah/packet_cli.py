@@ -1,7 +1,8 @@
 # 패킷 명령 — oah packet new/check 의 인자, 저장소 루트 찾기, 결과 출력과 종료 코드를 맡는다.
 # `oah packet new` refreshes the impact map first (A11), then scores each stage's difficulty axes by rules
-# (A10), selects and optionally re-ranks its skills (A9, A15) and records all of it in `## Plan`. No module
-# docstring: `oah --help` names command groups by it.
+# (A10), selects and optionally re-ranks its skills (A9, A15) and records all of it in `## Plan`. It warns
+# OAH_DESIGN_UNJUDGED, never blocking, when `oah recommend --request-file` recorded no design judgement for the
+# task. No module docstring: `oah --help` names command groups by it.
 from __future__ import annotations
 
 import argparse
@@ -13,7 +14,7 @@ from oah import packet
 from oah.config import ConfigError
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
 from oah.preflight import ImpactRefused, ImpactUnavailable, refresh_impact
-from oah.recommend_cli import add_axis_arguments
+from oah.recommend_cli import add_axis_arguments, judgement_path
 
 EXIT_OK, EXIT_REFUSED, EXIT_ENVIRONMENT = 0, 1, 69
 COMMANDS = ("packet",)
@@ -84,8 +85,8 @@ def _stage_plans(args: argparse.Namespace, root: pathlib.Path, state: pathlib.Pa
                                             brief_disabled=args.no_rerank)
         plans.append(packet.StagePlan(stage, stages.get(stage, call.STAGE_DEFAULTS[stage]), scored.axes,
                                       recommendation.tier, tuple(scored.reasons) + recommendation.reasons,
-                                      call.advise(scored.axes, args.task, root=root, brief_disabled=args.no_rerank,
-                                                  env=os.environ), selection, status))
+                                      call.advise(scored.axes, scope, root=root, state_dir=state,
+                                                  brief_disabled=args.no_rerank, env=os.environ), selection, status))
     return plans
 
 
@@ -104,10 +105,14 @@ def _new(args: argparse.Namespace) -> int:
         impact_line = f"impact=map {impact.action} at {impact.commit[:12]}"
     except ImpactUnavailable as exc:
         impact_line = f"impact=unavailable({exc})"
-    plans = _stage_plans(args, root, state_dir(info, os.environ), scope)
+    state = state_dir(info, os.environ)
+    plans = _stage_plans(args, root, state, scope)
     path = packet.create(root, args.task, plan=packet.plan_text(plans), scope=scope)
     for warning in dict.fromkeys(w for plan in plans for w in plan.selection.warnings if "OAH_SCOPE_EMPTY" in w):
         print(f"warning {warning}", file=sys.stderr)
+    if not _design_judged(state, args.task):
+        print(f"OAH_DESIGN_UNJUDGED: no design judgement is recorded for task {args.task}; before writing the design, "
+              f"run oah recommend --kind design --task {args.task} --request-file <your request file>", file=sys.stderr)
     print(impact_line)
     print(f"OAH_PACKET_CREATED {display(path, root)}")
     print("plan: " + "; ".join(f"{plan.stage} → {plan.engine} → {plan.tier}" for plan in plans))
@@ -116,6 +121,14 @@ def _new(args: argparse.Namespace) -> int:
     print("Next: describe the problem, the outcome and checkable success conditions, check the Scope paths and "
           f"the plan, then change 'Status: draft' to 'Status: accepted' and run: oah packet check {args.task}")
     return EXIT_OK
+
+
+def _design_judged(state: pathlib.Path, task: str) -> bool:
+    """Whether `oah recommend --request-file` recorded a design judgement for the task; unreadable reads as none."""
+    try:
+        return judgement_path(state, task, "design").is_file()
+    except Exception:  # a warning never blocks the packet
+        return False
 
 
 def _check(args: argparse.Namespace) -> int:

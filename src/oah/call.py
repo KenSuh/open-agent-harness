@@ -1183,9 +1183,11 @@ class _CorrectionInputs:
         write_text_atomic(self.run.file_path("lease.json"), plan.lease_record)
 
 
-def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled: bool = False,
-           env: Mapping[str, str] | None = None, keychain=None) -> str:
-    """The re-ranker's advisory difficulty status (lane P3s); it never changes the tier."""
+def advise(axes: routing.Axes, scope: Sequence[str], *, root: pathlib.Path, state_dir: pathlib.Path | None = None,
+           brief_disabled: bool = False, env: Mapping[str, str] | None = None, keychain=None) -> str:
+    """The re-ranker's advisory difficulty status for a new packet's plan, recorded and never applied.
+
+    No Intent exists yet, so it reads the Scope paths alone: never the task name."""
     try:
         rerank = importlib.import_module("oah.rerank")
     except ImportError:
@@ -1193,8 +1195,8 @@ def advise(axes: routing.Axes, task: str, *, root: pathlib.Path, brief_disabled:
     try:
         inputs = _CORRECTION_INPUTS.get()
         config = {"config": inputs.config.section("rerank", rerank.DEFAULTS)} if inputs is not None else {}
-        advice = rerank.advise_difficulty(axes, task, root=root, brief_disabled=brief_disabled, env=env, **config,
-                                          keychain=keychain)
+        advice = rerank.advise_difficulty(axes, rerank.scope_work(scope), root=root, brief_disabled=brief_disabled,
+                                          env=env, **config, keychain=keychain, state_dir=state_dir)
     except Exception as exc:  # a plugin failure must never block a launch
         return f"unused(error: {type(exc).__name__})"
     status = str(getattr(advice, "status", "unused(no status)"))
@@ -1280,10 +1282,7 @@ def judge_difficulty(axes: routing.Axes, *, section: str | None, request_text: s
         decision = rerank.decide(advice, floor_tier=floor_tier, threshold=threshold)
     except Exception as exc:  # a plugin failure must never block a launch
         return Difficulty(rule_tier, rule_tier, False, f"unused(error: {type(exc).__name__})")
-    status = decision.status
-    if status == "unused(not-enabled)":
-        status = "unused(not-configured)"  # as `advise_difficulty` reports a disabled re-ranker at the call seam
-    return Difficulty(rule_tier, decision.tier, decision.used, status, getattr(advice, "advisory_tier", None),
+    return Difficulty(rule_tier, decision.tier, decision.used, decision.status, getattr(advice, "advisory_tier", None),
                       getattr(advice, "confidence", None), getattr(advice, "truncated", None), decision.raised,
                       getattr(advice, "note", None))
 
@@ -1484,6 +1483,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         difficulty = judge_difficulty(scored.axes, section=getattr(packet.intent, "section", "") or "", scope=scope,
                                       rule_tier=tier, floor_tier=floor_tier, root=root, state_dir=state_dir,
                                       brief_disabled=disabled, env=env, keychain=keychain)
+        if difficulty.status == "unused(not-enabled)":  # a disabled re-ranker reads as before at this seam
+            difficulty = dataclasses.replace(difficulty, status="unused(not-configured)")
         if difficulty.used:
             tier, tier_source = difficulty.tier, "jev"
             reasons = [*(reasons or ()), *difficulty.reasons(floor_tier)]

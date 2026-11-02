@@ -7,16 +7,18 @@ import io
 import json
 import os
 import pathlib
+import secrets as token_source
 import unittest
 from unittest import mock
 
-from oah import recommend_cli
+from oah import recommend_cli, rerank
 from oah.engines.effort import EngineError
 from oah.paths import NotARepo
+from oah.secrets import NoKeychain
 from oah.routing import (INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, Axes, RoutingError,
                          check_stage, floor_tier, recommend, review_floor, same_engine_warning, score_axes)
 
-from tests.helpers import make_tmp_dir
+from tests.helpers import make_git_repo, make_tmp_dir
 
 STAGES = {"initial": "claude", "review": "codex", "correction": "codex"}
 
@@ -389,6 +391,182 @@ class ReviewFloorTest(unittest.TestCase):
         result = recommend(Axes("design", "low", "low", "normal"))
         self.assertEqual((result.tier, result.base), ("high", "medium"))
         self.assertIn("floor high: kind design", result.reasons)
+
+
+class RecommendRequestTest(unittest.TestCase):
+    """`oah recommend --request-file` asks Jev about design and packet work before an Intent exists."""
+
+    JEV_ON = '[rerank]\nenabled = true\nprovider = "fake"\n'
+
+    def setUp(self):
+        from tests.test_call import Judge
+
+        self.repo = make_git_repo(self)
+        work = make_tmp_dir(self)
+        self.state = work / "state"
+        self.request = work / "request.md"
+        self.canary = "Canary request " + token_source.token_hex(8)
+        self.request.write_text(f"{self.canary}: add a dark mode to the settings page.\n", encoding="utf-8")
+        self.key = "fake-" + token_source.token_hex(16)
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith(("OAH_", "FAKE_"))}
+        self.env.update(OAH_STATE_DIR=str(self.state), FAKE_RERANK_KEY=self.key, HOME=str(work / "home"),
+                        USERPROFILE=str(work / "home"))
+        self.judge = Judge(("max", 0.9))
+        self.configure(self.JEV_ON)
+
+    def configure(self, text: str) -> None:
+        (self.repo / ".oah").mkdir(exist_ok=True)
+        (self.repo / ".oah" / "config.toml").write_text(text, encoding="utf-8")
+
+    def ask(self, *argv: str) -> tuple[int, str, str]:
+        previous = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            with mock.patch.dict(os.environ, self.env, clear=True), \
+                    mock.patch.dict(rerank.PROVIDERS, {"fake": self.judge}), \
+                    mock.patch("oah.secrets.system_keychain", return_value=NoKeychain()):
+                return run_recommend(*argv)
+        finally:
+            os.chdir(previous)
+
+    def design(self, *extra: str) -> tuple[int, str, str]:
+        return self.ask("--kind", "design", "--task", "demo", "--request-file", str(self.request), *extra)
+
+    def record(self, kind: str = "design") -> dict:
+        return json.loads((self.state / "difficulty" / "demo" / f"{kind}.json").read_text(encoding="utf-8"))
+
+    def test_design_used_runs_at_jev_tier_never_below_high(self):
+        for answer, tier in ((("max", 0.9), "max"), (("medium", 0.9), "high")):
+            with self.subTest(answer=answer):
+                self.judge.answers = [answer]
+                code, out, err = self.design("--json")
+                self.assertEqual(code, 0, err)
+                data = json.loads(out)
+                self.assertEqual((data["tier"], data["rule_tier"], data["jev"]["status"], data["jev"]["tier"],
+                                  data["jev"]["confidence"], data["tier_source"]),
+                                 (tier, "high", "used", answer[0], 0.9, "jev"))
+                self.assertEqual(self.record()["tier"], tier)
+        self.assertEqual(self.judge.sent[0][1], f"### Request\n{self.canary}: add a dark mode to the settings page.")
+
+    def test_scope_paths_follow_the_request_and_the_text_output_says_why(self):
+        code, out, err = self.design("--scope", "src/settings.py", "--scope", "docs/settings.md")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.judge.sent[0][1].endswith("### Scope\nsrc/settings.py\ndocs/settings.md"))
+        first = out.splitlines()[0]
+        self.assertTrue(first.startswith("OAH_RECOMMEND tier=max rule_tier=high jev=used"), first)
+        self.assertIn("\n  jev max at confidence 0.9\n", out)
+        self.assertIn("OAH_RERANK_SCOPE_WIDENED", err)
+
+    def test_unjudged_design_runs_at_max(self):
+        secret = "s" + "k-" + token_source.token_hex(16)
+        cases = (("no key", lambda: self.env.pop("FAKE_RERANK_KEY"), "unused(no key)"),
+                 ("off", lambda: self.configure('[rerank]\nenabled = false\nprovider = "fake"\n'),
+                  "unused(not-enabled)"),
+                 ("secret", lambda: self.request.write_text(f"Rotate {secret} tonight.\n", encoding="utf-8"),
+                  "unused(secret)"),
+                 ("below threshold", lambda: setattr(self.judge, "answers", [("medium", 0.3)]),
+                  "below-threshold 0.3"))
+        for name, change, status in cases:
+            with self.subTest(case=name):
+                self.setUp()
+                change()
+                code, out, err = self.design("--json")
+                self.assertEqual(code, 0, err)
+                data = json.loads(out)
+                self.assertEqual((data["tier"], data["rule_tier"], data["jev"]["status"], data["tier_source"]),
+                                 ("max", "high", status, "rules"))
+                self.assertEqual(data["reason"], f"design unjudged: {status}")
+                self.assertEqual((self.record()["tier"], self.record()["jev_status"]), ("max", status))
+                self.assertNotIn(secret, out + err)
+                if name == "secret":
+                    self.assertEqual(self.judge.sent, [])
+                    self.assertIn("OAH_RERANK_SECRET", err)
+                    self.assertIn("the request text", err)
+
+    def test_unjudged_packet_keeps_the_rule_tier(self):
+        self.env.pop("FAKE_RERANK_KEY")
+        code, out, err = self.ask("--kind", "packet", "--task", "demo", "--request-file", str(self.request), "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual((data["tier"], data["rule_tier"], data["jev"]["status"]), ("medium", "medium", "unused(no key)"))
+        self.assertEqual(self.record("packet")["tier"], "medium")
+        self.judge.answers = [("high", 0.9)]
+        self.env["FAKE_RERANK_KEY"] = self.key
+        code, out, err = self.ask("--kind", "packet", "--task", "demo", "--request-file", str(self.request), "--json")
+        self.assertEqual(json.loads(out)["tier"], "high")
+
+    def test_the_record_holds_no_request_text_scope_or_key(self):
+        code, out, err = self.design("--scope", "src/secret-plan.py")
+        self.assertEqual(code, 0, err)
+        record = self.record()
+        self.assertEqual(set(record), {"kind", "rule_tier", "jev_tier", "jev_confidence", "jev_status", "tier", "at",
+                                       "oah_version"})
+        self.assertEqual((record["kind"], record["jev_status"], record["tier"]), ("design", "used", "max"))
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                data = path.read_bytes()
+                for needle in (self.canary, "secret-plan", self.key):
+                    self.assertNotIn(needle.encode("utf-8"), data, f"{needle} reached {path.name}")
+
+    def test_a_request_over_the_bound_is_refused(self):
+        self.request.write_bytes(b"x" * (1024 * 1024 + 1))
+        code, out, err = self.design()
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_RECOMMEND_REQUEST_TOO_LARGE"), err)
+        self.assertEqual(self.judge.sent, [])
+        self.assertFalse(self.state.exists())
+
+    def test_an_unreadable_request_is_refused(self):
+        for name, prepare in (("missing", lambda: self.request.unlink()),
+                              ("not utf-8", lambda: self.request.write_bytes(b"caf\xe9\n"))):
+            with self.subTest(case=name):
+                self.setUp()
+                prepare()
+                code, out, err = self.design()
+                self.assertEqual(code, 1)
+                self.assertTrue(err.startswith("OAH_RECOMMEND_REQUEST_UNREADABLE"), err)
+                self.assertEqual(self.judge.sent, [])
+
+    def test_usage_mistakes_name_the_fix(self):
+        cases = (("--kind", "implementation", "--task", "demo", "--request-file", str(self.request)),
+                 ("--kind", "design", "--request-file", str(self.request)),
+                 ("--kind", "design", "--task", "../demo", "--request-file", str(self.request)),
+                 ("--kind", "review", "--intensity", "low"),
+                 ("--kind", "review", "--intensity", "low", "--reasoning", "low", "--risk", "low", "--task", "demo"))
+        for argv in cases:
+            with self.subTest(argv=argv):
+                code, out, err = self.ask(*argv)
+                self.assertEqual(code, 2, err)
+                self.assertTrue(err.startswith("OAH_RECOMMEND_USAGE"), err)
+                self.assertIn("--request-file", err)
+        self.assertEqual(self.judge.sent, [])
+
+    def test_an_invalid_threshold_refuses(self):
+        self.configure(self.JEV_ON + "difficulty_min_confidence = 2\n")
+        code, out, err = self.design()
+        self.assertEqual(code, 1)
+        self.assertIn("OAH_CONFIG_INVALID", err)
+        self.assertEqual(self.judge.sent, [])
+
+    def test_no_network_without_a_request_file(self):
+        spy = mock.Mock(side_effect=AssertionError("recommend asked Jev without --request-file"))
+        with mock.patch.object(rerank, "advise_difficulty", spy):
+            code, out, err = self.ask(*AXES, "--json")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((spy.call_count, self.judge.sent), (0, []))
+        self.assertNotIn("jev", json.loads(out))
+        self.assertFalse(self.state.exists())
+
+    def test_the_model_follows_the_final_tier(self):
+        from tests import test_call as calls
+
+        project = calls.scored_project(self, self.JEV_ON)
+        project.env.update(FAKE_RERANK_KEY=self.key)
+        self.repo, self.env, self.state = project.repo, project.env, project.state
+        code, out, err = self.design("--engine", "codex", "--json")
+        self.assertEqual(code, 0, err)
+        data = json.loads(out)
+        self.assertEqual((data["tier"], data["model"]["tier"]), ("max", "max"))
 
 
 if __name__ == "__main__":
