@@ -441,8 +441,8 @@ class JudgeCallTest(unittest.TestCase):
                         pools.pop(absent)
                         if empty:
                             pools[absent] = []
-                        extra = '[engines.codex.tier_pools]\n' + "".join(
-                            f"{tier} = {json.dumps(names)}\n" for tier, names in pools.items())
+                        extra = ("" if ranked else 'quality_order = ["m-strong"]\n') + '[engines.codex.tier_pools]\n'
+                        extra += "".join(f"{tier} = {json.dumps(names)}\n" for tier, names in pools.items())
                         if cap is not None:
                             extra += f'[engines.codex.effort_caps]\n"m-strong" = "{cap}"\n'
                         project = judged_project(self, ranked=ranked, extra=extra)
@@ -453,25 +453,41 @@ class JudgeCallTest(unittest.TestCase):
                         self.assertEqual(data["model_choice"]["candidates"], [])
                         self.assertIsNone(data["model_choice"]["proposal"])
                         self.assertEqual(provider.calls, [])
-                        self.assertEqual(launched(project), ("m-strong", cap or "max"))
+                        # A pool of the call's own tier now picks the model; without one the order does.
+                        self.assertEqual(launched(project), ("m-extra", "high") if pools.get("max")
+                                         else ("m-strong", cap or "max"))
 
-    def test_without_a_ranking_only_the_effort_is_judged(self):
-        for answer, status, expected in ((("m-strong", "xhigh"), "used", ("m-strong", "xhigh")),
-                                         (("m-mid", "high"), "rejected(outside-candidates)", ("m-strong", "medium"))):
+    def test_without_a_ranking_the_judge_picks_inside_the_score_band(self):
+        rows = ((("gpt-6.1-sol", "high"), "used", ("gpt-6.1-sol", "high")),
+                (("gpt-6-astra", "xhigh"), "used", ("gpt-6-astra", "xhigh")),
+                (("gpt-6-luna", "high"), "rejected(outside-score-bound)", ("gpt-6.1-terra", "high")))
+        for answer, status, expected in rows:
             with self.subTest(answer=answer):
-                project = judged_project(self, ranked=False)
+                project = calls.scored_project(self, JEV_ON)
+                project.env[KEY_NAME] = fake_key()
                 with judge(project, FakeJudge(answer)):
-                    data = project.run(stage="review")
+                    data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
                 self.assertEqual(data["model_judge"], status)
-                self.assertEqual(data["model_choice"]["deterministic"]["source"], "cli_default")
-                self.assertEqual({pair[0] for pair in data["model_choice"]["candidates"]}, {"m-strong"})
-                self.assertEqual((data["model_choice"]["mode"], data["model_choice"]["note"]),
-                                 ("deterministic", "model choice off: no ranking and no tier pools"))
+                choice = data["model_choice"]
+                self.assertEqual(choice["deterministic"]["source"], "scored")
+                self.assertEqual(choice["deterministic"]["model"], "gpt-6.1-terra")
+                self.assertEqual({pair[0] for pair in choice["candidates"]},
+                                 {"gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"})
+                self.assertEqual((choice["mode"], choice["note"]), ("scored", None))
+                self.assertEqual(data["model_source"], "judge" if status == "used" else "scored")
                 self.assertEqual(launched(project), expected)
 
+    def test_efficient_stays_efficient_under_a_judge(self):
+        project = calls.scored_project(self, '[models]\nprofile = "efficient"\n' + JEV_ON)
+        project.env[KEY_NAME] = fake_key()
+        with judge(project, FakeJudge(("gpt-6-astra", "high"))):
+            data = project.run(stage="correction", tier="medium", axes={"kind": "quick"})
+        self.assertEqual(data["model_judge"], "rejected(outside-score-bound)")
+        self.assertEqual(launched(project), ("gpt-6-luna", "medium"))
+
     def test_tier_pools_qualify_peers_for_a_high_floor_call(self):
-        # AC8 (Revision 3): a security review has floor high; without a ranking the deterministic choice is the
-        # CLI default at high. Only models the user put in the high pool are candidates, as unordered peers.
+        # AC8 (Revision 3): a security review has floor high; the deterministic choice is the first listed model of
+        # the high pool. Only models the user put in the high pool are candidates, as unordered peers.
         pools = '[engines.codex.tier_pools]\nhigh = ["m-strong", "m-extra"]\nmax = ["m-strong", "m-extra"]\n'
         rows = [
             ("a pool peer other than the deterministic model", ("m-extra", "high"), "", "used", ("m-extra", "high")),
@@ -496,7 +512,7 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(data["status"], "finished")
                 self.assertEqual((data["tier"], data["model_judge"]), ("high", status))
                 choice = data["model_choice"]
-                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "high", "source": "cli_default"})
+                self.assertEqual(choice["deterministic"], {"model": "m-strong", "effort": "high", "source": "pool"})
                 self.assertEqual(choice["floor"], {"tier": "high", "model": "m-strong", "effort": "high"})
                 self.assertEqual((choice["mode"], choice["note"]), ("pools", None))
                 capped = "effort_caps" in extra
@@ -506,7 +522,7 @@ class JudgeCallTest(unittest.TestCase):
                                  else {"m-light": "not-in-tier-pool"} if "m-light" in extra else {})
                 self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in choice["candidates"]})
                 self.assertEqual((data["resolved_model"], data["launch_effort"]), expected)
-                self.assertEqual(data["model_source"], "judge" if status == "used" else "cli_default")
+                self.assertEqual(data["model_source"], "judge" if status == "used" else "pool")
                 self.assertEqual(launched(project), expected)
 
     def test_a_pin_overrides_any_pool(self):

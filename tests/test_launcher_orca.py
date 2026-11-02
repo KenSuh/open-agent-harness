@@ -196,8 +196,8 @@ class OrcaProject:
         self.orca_command = [*FAKE_ORCA, "--state", str(self.orca_state)]
         orca_line = "" if orca_command == [] else f"orca_command = {toml_list(orca_command or self.orca_command)}\n"
         files = {"README.md": "x\n", ".oah/config.toml":
-                 f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\n"
-                 f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n"
+                 f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\nquality_order = [\"opus\", \"sonnet\"]\n"
+                 f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\nquality_order = [\"gpt-test-a\"]\n"
                  f"[call]\n{orca_line}{config}"}
         for task in ("t1", "adhoc"):
             files[f".oah/tasks/{task}/PACKET.md"] = SECTION.replace("Intent-ID: t1", f"Intent-ID: {task}").encode("utf-8")

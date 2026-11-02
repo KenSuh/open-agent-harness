@@ -9,7 +9,7 @@ import unittest
 
 from oah import recommend_cli
 from oah.routing import (INTENSITY_SCORES, KIND_SCORES, REASONING_SCORES, RISK_SCORES, Axes, RoutingError,
-                         check_stage, floor_tier, recommend, same_engine_warning, score_axes)
+                         check_stage, floor_tier, recommend, review_floor, same_engine_warning, score_axes)
 
 STAGES = {"initial": "claude", "review": "codex", "correction": "codex"}
 
@@ -74,7 +74,7 @@ class ScoringTableTest(unittest.TestCase):
     def test_every_axis_value_scores(self):
         self.assertEqual(KIND_SCORES, {
             "quick": 1, "docs": 1, "research": 1,
-            "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2,
+            "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "design": 2, "packet": 2,
             "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3})
         self.assertEqual(INTENSITY_SCORES, {"low": 0, "medium": 1, "high": 2, "max": 3})
         self.assertEqual(REASONING_SCORES, {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4})
@@ -208,6 +208,33 @@ class FloorTierTest(unittest.TestCase):
         self.assertEqual(floor_tier("migration"), "high")
         self.assertEqual(floor_tier("review"), "medium")
         self.assertEqual(floor_tier("quick"), "low")
+
+
+
+class ReviewFloorTest(unittest.TestCase):
+    def test_medium_for_an_ordinary_scope(self):
+        for scope in ((), ("src/app.py",), ("docs/a.md", "README.md"), ("repo",)):
+            with self.subTest(scope=scope):
+                self.assertEqual(review_floor(scope, "review"), "medium")
+
+    def test_a_risky_path_lifts_the_floor_to_high_with_no_flag(self):
+        for path in ("src/auth/login.py", ".github/workflows/ci.yml", "db/migrations/001.py", "schema.sql",
+                     "src/billing.py"):
+            with self.subTest(path=path):
+                self.assertEqual(review_floor(("src/app.py", path), "review"), "high")
+
+    def test_a_kind_can_raise_the_floor_but_never_lower_it(self):
+        self.assertEqual(review_floor(("src/app.py",), "quick"), "medium")
+        self.assertEqual(review_floor(("src/auth/login.py",), "quick"), "high")
+        self.assertEqual(review_floor(("src/app.py",), "security"), "high")
+        self.assertEqual(review_floor(("src/app.py",), "high-risk-review"), "high")
+
+    def test_design_and_packet_kinds_score_like_implementation(self):
+        for kind in ("design", "packet"):
+            with self.subTest(kind=kind):
+                self.assertEqual(KIND_SCORES[kind], KIND_SCORES["implementation"])
+                self.assertEqual(floor_tier(kind), "medium")
+                self.assertEqual(recommend(Axes(kind, "low", "low", "normal")).tier, "medium")
 
 
 if __name__ == "__main__":

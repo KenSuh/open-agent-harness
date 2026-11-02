@@ -1,4 +1,4 @@
-# 모델 카탈로그 검사 — Claude 별칭·Codex 유효 기본값·CLI 기본 모델 채택과 기록·사용자 품질 목록·고정 우선·메타데이터 유실·새 설치 거부·oah models 출력을 본다.
+# 모델 카탈로그·선택 검사 — 고정·풀·품질 목록·점수 규칙의 우선순위, 옛 기본값 무시, 후보 범위, 메타데이터 유실, 새 설치 거부, oah models 출력을 본다.
 from __future__ import annotations
 
 import argparse
@@ -12,11 +12,11 @@ import sys
 import unittest
 from unittest import mock
 
-from oah import models_cli
+from oah import models_cli, scoring
 from oah.engines.effort import EngineError
 from oah.engines import codex
 from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
-                        resolve_base, unpooled_models, unpooled_warning)
+                        resolve_base, unpooled_models, unpooled_warning, user_order)
 from tests.helpers import make_git_repo, make_tmp_dir
 
 FAKES = pathlib.Path(__file__).resolve().parent / "fakes"
@@ -49,7 +49,140 @@ class Fixture:
                                          refresh=refresh, now=now)
 
 
-CLAUDE_ORDER = ["opus", "sonnet", "haiku"]
+OLD_DEFAULT = ["opus", "sonnet", "haiku"]
+CLAUDE_ORDER = ["opus", "sonnet", "fable"]
+
+
+def scored_set(engine: str = "codex", **fields) -> scoring.ScoreSet:
+    rows = {"codex": (("gpt-6-luna", "luna", (6, 0), 0.0, 0.6), ("gpt-6.1-terra", "terra", (6, 1), 89.0, 6),
+                      ("gpt-6.1-sol", "sol", (6, 1), 99.0, 12), ("gpt-6-astra", "astra", (6, 0), 100.0, 60)),
+            "claude": (("haiku", "haiku", (5, 5), 7.0, 0.6), ("sonnet", "sonnet", (5, 5), 75.0, 12),
+                       ("opus", "opus", (5, 5), 100.0, 24), ("fable", "fable", (5, 1), 62.0, 60))}[engine]
+    return scoring.ScoreSet(engine, "Epoch AI", "2026-11-02", "credit", tuple(scoring.Scored(*row) for row in rows),
+                            fields.get("left_out", {}))
+
+
+def listing(engine: str, *names: str, hidden: tuple[str, ...] = ()) -> Entry:
+    models = [ModelInfo(name, ("low", "medium", "high", "max")) for name in names]
+    models += [ModelInfo(name, ("low", "medium", "high", "max"), listed=False) for name in hidden]
+    return Entry(engine, "1", "2026-11-02T00:00:00Z", tuple(models), "test")
+
+
+CODEX_LIST = listing("codex", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra")
+CLAUDE_LIST = listing("claude", "haiku", "sonnet", "opus", "fable")
+
+
+def picked(engine: str, tier: str, *, entry=None, pin: str = "", order=(), scores=None, **fields) -> tuple[str, str]:
+    entry = entry if entry is not None else (CODEX_LIST if engine == "codex" else CLAUDE_LIST)
+    return map_tier(engine, tier, pin=pin, quality_order=list(order), entry=entry,
+                    scores=scored_set(engine) if scores is None else scores, **fields)
+
+
+class SelectionTest(unittest.TestCase):
+    """The precedence of `map_tier`: a pin, then a pool, then quality_order, then the score rule."""
+
+    def test_with_no_user_choice_the_model_comes_only_from_the_score_rule(self):
+        for engine in ("codex", "claude"):
+            for tier in TIERS:
+                for profile in ("performance", "balanced", "efficient"):
+                    with self.subTest(engine=engine, tier=tier, profile=profile):
+                        expected = scoring.choose(scored_set(engine), tier, "low", profile).model
+                        self.assertEqual(picked(engine, tier, profile=profile), (expected, "scored"))
+
+    def test_the_default_flag_of_the_cli_does_not_choose(self):
+        marked = Entry("codex", "1", "x", (ModelInfo("gpt-6-astra", ("low", "high"), True), *CODEX_LIST.models[:3]), "t")
+        self.assertEqual(picked("codex", "low", entry=marked), ("gpt-6-luna", "scored"))
+
+    def test_a_floor_lifts_the_scored_model(self):
+        self.assertEqual(picked("codex", "low"), ("gpt-6-luna", "scored"))
+        self.assertEqual(picked("codex", "low", floor_tier="high"), ("gpt-6.1-terra", "scored"))
+        self.assertEqual(picked("codex", "low", floor_tier="high", profile="efficient"), ("gpt-6.1-terra", "scored"))
+
+    def test_a_pin_wins_with_no_entry_and_no_scores(self):
+        self.assertEqual(map_tier("codex", "max", pin="gpt-pinned", quality_order=["gpt-6-luna"], entry=None, scores=None),
+                         ("gpt-pinned", "pin"))
+        self.assertEqual(picked("codex", "low", pin="gpt-pinned", pools={"low": ["gpt-6-astra"]}),
+                         ("gpt-pinned", "pin"))
+
+    def test_a_pool_takes_its_first_listed_model_before_quality_order(self):
+        pools = {"high": ["gpt-gone", "gpt-6-astra", "gpt-6-luna"]}
+        self.assertEqual(picked("codex", "high", pools=pools, order=["gpt-6-luna"]), ("gpt-6-astra", "pool"))
+
+    def test_a_tier_without_a_pool_goes_on_to_the_next_step(self):
+        pools = {"high": ["gpt-6-astra"], "low": []}
+        self.assertEqual(picked("codex", "low", pools=pools), ("gpt-6-luna", "scored"))
+        self.assertEqual(picked("codex", "medium", pools=pools, order=["gpt-6-luna"]), ("gpt-6-luna", "quality_order"))
+
+    def test_a_pool_skips_a_hidden_model(self):
+        entry = listing("codex", "gpt-6-luna", hidden=("gpt-6-astra",))
+        self.assertEqual(picked("codex", "high", entry=entry, pools={"high": ["gpt-6-astra", "gpt-6-luna"]}),
+                         ("gpt-6-luna", "pool"))
+
+    def test_a_configured_tier_with_none_listed_is_unresolved(self):
+        for fields in ({"pools": {"high": ["gpt-gone"]}},
+                       {"pools": {"high": ["gpt-6-astra"]}, "allowed": ["gpt-6-luna"]}):
+            with self.subTest(fields=fields), self.assertRaises(EngineError) as caught:
+                picked("codex", "high", **fields)
+            self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
+            self.assertIn("tier_pools", str(caught.exception))
+            self.assertIn(".oah/config.toml", str(caught.exception))
+
+    def test_quality_order_needs_no_family_and_no_score(self):
+        entry = listing("codex", "m-strong", "m-light", "gpt-6-luna")
+        self.assertEqual(picked("codex", "high", entry=entry, order=["m-strong", "m-light"]),
+                         ("m-strong", "quality_order"))
+        self.assertEqual(map_tier("codex", "low", pin="", quality_order=["m-strong", "m-light"], entry=entry, scores=None),
+                         ("m-light", "quality_order"))
+
+    def test_quality_order_keeps_its_tier_positions(self):
+        self.assertEqual([picked("codex", tier, order=["gpt-z", "gpt-6-astra", "gpt-6-luna"])[0] for tier in TIERS],
+                         ["gpt-6-luna", "gpt-6-luna", "gpt-6-astra", "gpt-6-astra"])
+
+    def test_quality_order_skips_a_hidden_model(self):
+        entry = listing("codex", "gpt-6-luna", hidden=("gpt-6-astra",))
+        self.assertEqual(picked("codex", "high", entry=entry, order=["gpt-6-astra", "gpt-6-luna"]),
+                         ("gpt-6-luna", "quality_order"))
+
+    def test_quality_order_naming_nothing_listed_falls_through_to_the_rule(self):
+        self.assertEqual(picked("codex", "high", order=["gpt-z"]), ("gpt-6.1-terra", "scored"))
+
+    def test_allowed_models_apply_to_pool_and_quality_order_picks(self):
+        self.assertEqual(picked("codex", "high", pools={"high": ["gpt-6-astra", "gpt-6-luna"]}, allowed=["gpt-6-luna"]),
+                         ("gpt-6-luna", "pool"))
+        self.assertEqual(picked("codex", "high", order=["gpt-6-astra", "gpt-6-luna"], allowed=["gpt-6-luna"]),
+                         ("gpt-6-luna", "quality_order"))
+
+    def test_the_old_claude_default_counts_as_unset(self):
+        for tier in TIERS:
+            with self.subTest(tier=tier):
+                self.assertEqual(picked("claude", tier, order=OLD_DEFAULT), picked("claude", tier))
+                self.assertEqual(picked("claude", tier, order=OLD_DEFAULT)[1], "scored")
+        self.assertEqual(user_order("claude", OLD_DEFAULT), [])
+
+    def test_a_real_user_list_wins(self):
+        for order in (["opus", "sonnet"], ["sonnet", "opus", "haiku"], ["opus", "sonnet", "haiku", "fable"]):
+            with self.subTest(order=order):
+                self.assertEqual(user_order("claude", order), order)
+                self.assertEqual(picked("claude", "high", order=order), (order[0], "quality_order"))
+
+    def test_the_old_default_is_only_a_claude_rule(self):
+        self.assertEqual(user_order("codex", OLD_DEFAULT), OLD_DEFAULT)
+
+    def test_no_usable_entry_names_the_one_line_pin(self):
+        for entry in (None, Entry("codex", "1", None, (), "test"), listing("codex", hidden=("gpt-6-astra",))):
+            with self.subTest(entry=entry), self.assertRaises(EngineError) as caught:
+                map_tier("codex", "high", pin="", quality_order=["gpt-6-astra"], entry=entry, scores=scored_set(),
+                         pools={"high": ["gpt-6-astra"]})
+            self.assertEqual(caught.exception.code, "OAH_MODEL_CATALOG_UNAVAILABLE")
+            self.assertIn('[engines.codex.tiers] high = { model = "<model>" }', str(caught.exception))
+
+    def test_no_scores_is_a_named_failure_never_a_default(self):
+        failed = scoring.failed("codex", EngineError(scoring.NO_SCORES, "the data is damaged; pin one"))
+        for scores in (None, failed):
+            with self.subTest(scores=scores), self.assertRaises(EngineError) as caught:
+                map_tier("codex", "high", pin="", quality_order=[], entry=CODEX_LIST, scores=scores)
+            self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+            self.assertIn(".oah/config.toml" if scores is None else "the data is damaged", str(caught.exception))
 
 
 class ClaudeMappingTest(unittest.TestCase):
@@ -58,64 +191,50 @@ class ClaudeMappingTest(unittest.TestCase):
         entry = fixture.fresh("claude").entry
         self.assertEqual([model.name for model in entry.models], ["fable", "opus", "sonnet"])
         self.assertEqual(entry.model("opus").efforts, ("low", "medium", "high", "xhigh", "max"))
-        mapped = {tier: map_tier("claude", tier, pin="", quality_order=CLAUDE_ORDER, entry=entry, effective=None)
+        mapped = {tier: map_tier("claude", tier, pin="", quality_order=CLAUDE_ORDER, entry=entry, scores=None)
                   for tier in TIERS}
-        self.assertEqual(mapped, {"low": ("sonnet", "quality_order"), "medium": ("sonnet", "quality_order"),
+        self.assertEqual(mapped, {"low": ("fable", "quality_order"), "medium": ("sonnet", "quality_order"),
                                   "high": ("opus", "quality_order"), "max": ("opus", "quality_order")})
 
     def test_three_aliases_use_last_second_first(self):
         fixture = Fixture(self)
         entry = fixture.fresh("claude", FAKE_CLAUDE_ALIASES="haiku,sonnet,opus").entry
-        self.assertEqual([map_tier("claude", t, pin="", quality_order=CLAUDE_ORDER, entry=entry, effective=None)[0]
-                          for t in TIERS], ["haiku", "sonnet", "opus", "opus"])
+        self.assertEqual([map_tier("claude", t, pin="", quality_order=["opus", "sonnet", "haiku", "x"], entry=entry,
+                                   scores=None)[0] for t in TIERS], ["haiku", "sonnet", "opus", "opus"])
 
     def test_one_alias_serves_every_tier(self):
         entry = Entry("claude", "1", "x", (ModelInfo("opus", ()),), "test")
-        self.assertEqual({map_tier("claude", t, pin="", quality_order=CLAUDE_ORDER, entry=entry, effective=None)[0]
+        self.assertEqual({map_tier("claude", t, pin="", quality_order=CLAUDE_ORDER, entry=entry, scores=None)[0]
                           for t in TIERS}, {"opus"})
 
-    def test_unreadable_help_uses_configured_aliases_unconfirmed(self):
+    def test_unreadable_help_is_a_named_failure_not_an_unconfirmed_alias(self):
         fixture = Fixture(self)
         freshness = fixture.fresh("claude", FAKE_CLAUDE_ALIASES="-")
         self.assertTrue(any(w.startswith("OAH_MODELS_REFRESH_FAILED") for w in freshness.warnings))
-        self.assertEqual(map_tier("claude", "low", pin="", quality_order=CLAUDE_ORDER, entry=freshness.entry,
-                                  effective=None), ("haiku", "quality_order(unconfirmed)"))
+        with self.assertRaises(EngineError) as caught:
+            map_tier("claude", "low", pin="", quality_order=CLAUDE_ORDER, entry=freshness.entry, scores=None)
+        self.assertEqual(caught.exception.code, "OAH_MODEL_CATALOG_UNAVAILABLE")
+        self.assertEqual(map_tier("claude", "low", pin="opus", quality_order=[], entry=freshness.entry, scores=None),
+                         ("opus", "pin"))
 
 
 class CodexMappingTest(unittest.TestCase):
-    def test_codex_effective_default(self):
+    def test_a_changed_model_is_logged_once(self):
         fixture = Fixture(self)
-        write_cache(fixture.home, ("gpt-a", ["low", "high"], False), ("gpt-b", ["low"], False))
-        entry = fixture.fresh("codex").entry
-        for tier in TIERS:
-            self.assertEqual(map_tier("codex", tier, pin="", quality_order=[], entry=entry, effective="gpt-cfg"),
-                             ("gpt-cfg", "effective_config"))
-
-    def test_new_default_model_adopted_and_logged(self):
-        fixture = Fixture(self)
-        write_cache(fixture.home, ("gpt-a", ["low", "high", "max"], True))
-        entry = fixture.fresh("codex").entry
-        model, source = map_tier("codex", "high", pin="", quality_order=[], entry=entry, effective="gpt-cfg")
-        self.assertEqual((model, source), ("gpt-a", "cli_default"))
-        fixture.catalog.record_resolution("codex", "high", model=model, effort="high", source=source,
+        fixture.catalog.record_resolution("codex", "high", model="gpt-6-sol", effort="high", source="scored",
                                           why="first launch", now=NOW)
-        # The CLI updates: a newer model is now marked as default.
-        write_cache(fixture.home, ("gpt-a", ["low", "high", "max"], False), ("gpt-b", ["low", "high", "max"], True))
-        freshness = fixture.fresh("codex", now=NOW + dt.timedelta(hours=1), FAKE_CODEX_VERSION="0.164.0")
-        self.assertEqual(freshness.refreshed, "CLI version changed 0.163.0 -> 0.164.0")
-        model, source = map_tier("codex", "high", pin="", quality_order=[], entry=freshness.entry, effective="gpt-cfg")
-        self.assertEqual(model, "gpt-b")
-        changes = fixture.catalog.record_resolution("codex", "high", model=model, effort="high", source=source,
-                                                    why=freshness.refreshed, now=NOW + dt.timedelta(hours=1))
+        changes = fixture.catalog.record_resolution("codex", "high", model="gpt-6.1-sol", effort="high", source="scored",
+                                                    why="CLI version changed 0.163.0 -> 0.164.0",
+                                                    now=NOW + dt.timedelta(hours=1))
         self.assertEqual(changes, [{"ts": "2026-10-23T13:00:00Z", "engine": "codex", "tier": "high",
-                                    "field": "model", "old": "gpt-a", "new": "gpt-b",
+                                    "field": "model", "old": "gpt-6-sol", "new": "gpt-6.1-sol",
                                     "why": "CLI version changed 0.163.0 -> 0.164.0"}])
         logged = fixture.catalog.changes()
         self.assertEqual([(c["field"], c["old"], c["new"]) for c in logged],
-                         [("model", None, "gpt-a"), ("effort", None, "high"), ("model", "gpt-a", "gpt-b")])
+                         [("model", None, "gpt-6-sol"), ("effort", None, "high"), ("model", "gpt-6-sol", "gpt-6.1-sol")])
         # Recording the same values again logs nothing.
-        self.assertEqual(fixture.catalog.record_resolution("codex", "high", model="gpt-b", effort="high",
-                                                           source=source, why="again"), [])
+        self.assertEqual(fixture.catalog.record_resolution("codex", "high", model="gpt-6.1-sol", effort="high",
+                                                           source="scored", why="again"), [])
 
     def test_version_change_and_ttl_refresh(self):
         fixture = Fixture(self)
@@ -128,29 +247,35 @@ class CodexMappingTest(unittest.TestCase):
         expired = fixture.fresh("codex", now=NOW + dt.timedelta(hours=24))
         self.assertEqual(expired.refreshed, "catalog older than 24 h")
         self.assertEqual(expired.entry.models[0].name, "gpt-b")
+        self.assertEqual(expired.previous.models[0].name, "gpt-a")
         write_cache(fixture.home, ("gpt-c", ["low"], True))
         forced = fixture.fresh("codex", refresh=True, now=NOW + dt.timedelta(hours=24, minutes=1))
         self.assertEqual((forced.refreshed, forced.entry.models[0].name), ("refresh requested", "gpt-c"))
+
+    def test_a_probe_without_persist_writes_nothing(self):
+        fixture = Fixture(self)
+        write_cache(fixture.home, ("gpt-a", ["low"], True))
+        base = FAKE_CODEX
+        freshness = fixture.catalog.ensure_fresh("codex", base=base, env=fixture.env, ttl_hours=24, now=NOW, persist=False)
+        self.assertEqual((freshness.refreshed, freshness.entry.models[0].name), ("no catalog yet", "gpt-a"))
+        self.assertFalse(fixture.state.exists(), "a read-only look creates no state at all")
 
     def test_user_quality_list_for_codex(self):
         fixture = Fixture(self)
         write_cache(fixture.home, ("gpt-a", ["low"], True), ("gpt-b", ["low"], False))
         entry = fixture.fresh("codex").entry
         order = ["gpt-z", "gpt-b", "gpt-a"]
-        self.assertEqual([map_tier("codex", t, pin="", quality_order=order, entry=entry, effective="gpt-cfg")[0]
+        self.assertEqual([map_tier("codex", t, pin="", quality_order=order, entry=entry, scores=None)[0]
                           for t in TIERS], ["gpt-a", "gpt-a", "gpt-b", "gpt-b"])
-        # A listed model the CLI does not report is not adopted; the effective config is kept.
-        self.assertEqual(map_tier("codex", "high", pin="", quality_order=["gpt-z"], entry=entry, effective="gpt-cfg"),
-                         ("gpt-cfg", "effective_config"))
 
     def test_pin_wins_over_catalog(self):
         fixture = Fixture(self)
         write_cache(fixture.home, ("gpt-a", ["low"], True))
         entry = fixture.fresh("codex").entry
-        self.assertEqual(map_tier("codex", "max", pin="gpt-pinned", quality_order=["gpt-a"], entry=entry,
-                                  effective="gpt-cfg"), ("gpt-pinned", "pin"))
-        self.assertEqual(map_tier("claude", "low", pin="opus", quality_order=CLAUDE_ORDER, entry=None,
-                                  effective=None), ("opus", "pin"))
+        self.assertEqual(map_tier("codex", "max", pin="gpt-pinned", quality_order=["gpt-a"], entry=entry, scores=None),
+                         ("gpt-pinned", "pin"))
+        self.assertEqual(map_tier("claude", "low", pin="opus", quality_order=CLAUDE_ORDER, entry=None, scores=None),
+                         ("opus", "pin"))
 
     def test_fresh_install_refuses(self):
         fixture = Fixture(self)
@@ -158,8 +283,8 @@ class CodexMappingTest(unittest.TestCase):
         self.assertEqual(freshness.entry.models, ())
         self.assertTrue(any(w.startswith("OAH_MODELS_REFRESH_FAILED") for w in freshness.warnings))
         with self.assertRaises(EngineError) as ctx:
-            map_tier("codex", "high", pin="", quality_order=[], entry=freshness.entry, effective=None)
-        self.assertEqual(ctx.exception.code, "OAH_MODEL_UNRESOLVED")
+            map_tier("codex", "high", pin="", quality_order=[], entry=freshness.entry, scores=None)
+        self.assertEqual(ctx.exception.code, "OAH_MODEL_CATALOG_UNAVAILABLE")
         self.assertIn(".oah/config.toml", str(ctx.exception))
 
     def test_lost_metadata_keeps_last_good_mapping(self):
@@ -170,8 +295,8 @@ class CodexMappingTest(unittest.TestCase):
         freshness = fixture.fresh("codex", FAKE_CODEX_VERSION="0.164.0")
         self.assertIsNone(freshness.refreshed)
         self.assertTrue(any("keeping the catalog checked at 2026-10-23T12:00:00Z" in w for w in freshness.warnings))
-        self.assertEqual(map_tier("codex", "high", pin="", quality_order=[], entry=freshness.entry, effective=None),
-                         ("gpt-a", "cli_default"))
+        self.assertEqual(map_tier("codex", "high", pin="", quality_order=["gpt-a"], entry=freshness.entry, scores=None),
+                         ("gpt-a", "quality_order"))
         self.assertEqual(freshness.entry.model("gpt-a").efforts, ("low", "high"))
         self.assertEqual(freshness.launch_version, "0.164.0")
         self.assertEqual(fixture.catalog.load("codex").cli_version, "0.163.0")
@@ -225,7 +350,7 @@ def run_models(*argv: str) -> tuple[int, str, str]:
 
 class ModelsCliTest(unittest.TestCase):
     def test_models_cli_json(self):
-        repo = project_with_fakes(self, '[engines.codex.tiers.low]\nmodel = "gpt-pinned"\n')
+        repo = project_with_fakes(self, 'quality_order = ["gpt-a"]\n[engines.codex.tiers.low]\nmodel = "gpt-pinned"\n')
         state, home = make_tmp_dir(self), make_tmp_dir(self)
         write_cache(home, ("gpt-a", ["low", "medium", "high", "xhigh", "max", "ultra"], True))
         with inside(repo, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
@@ -237,7 +362,7 @@ class ModelsCliTest(unittest.TestCase):
         self.assertEqual(codex_tiers["low"]["model_source"], "pin")
         self.assertEqual((codex_tiers["max"]["model"], codex_tiers["max"]["effort"]), ("gpt-a", "max"))
         self.assertEqual(data["engines"]["codex"]["cli_version"], "0.163.0")
-        self.assertEqual(data["engines"]["claude"]["tiers"]["high"]["model"], "opus")
+        self.assertEqual(data["engines"]["claude"]["tiers"]["high"]["model_source"], "scored")
         self.assertIn("gpt-a", [m["name"] for m in data["engines"]["codex"]["models"]])
 
     def test_shows_candidates_and_caps(self):
@@ -292,23 +417,24 @@ class ModelsCliTest(unittest.TestCase):
         self.assertIn("pools low: m-mid, m-light; medium: m-mid; high: m-strong; max: m-strong", text)
         self.assertIn("candidates at floor low: m-mid (low, medium) · m-light (low)", text)
         self.assertIn("m-new (not-in-tier-pool)", text)
-        off = project_with_fakes(self, 'allowed_models = ["m-mid", "m-light"]\n')
+        # Pools for one tier only: the other tiers fall to scores, and the judge has no pool to choose from.
+        write_cache(home, ("gpt-6-luna", ["low", "medium", "high"], True), ("gpt-6.1-sol", ["low", "medium", "high"], False))
+        off = project_with_fakes(self, '[engines.codex.tier_pools]\nhigh = ["gpt-6.1-sol"]\n')
         with inside(off, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
-            code, out, err = run_models("--json")
+            code, out, err = run_models("--json", "--refresh")
             _, text, _ = run_models()
         self.assertEqual(code, 0, err)
         low = json.loads(out)["engines"]["codex"]["tiers"]["low"]
-        self.assertEqual((low["mode"], low["note"]), ("deterministic", "model choice off: no ranking and no tier pools"))
-        self.assertIn("model choice off: no ranking and no tier pools", text)
-        self.assertIn("· pools none", text)
+        self.assertEqual((low["mode"], low["note"]), ("deterministic", "model choice off: no ranking and no tier pool for low"))
+        self.assertIn("model choice off: no ranking and no tier pool for low", text)
 
-    def test_models_cli_reports_unresolved_tier(self):
+    def test_models_cli_reports_a_tier_with_no_catalog(self):
         repo = project_with_fakes(self)
         state, home = make_tmp_dir(self), make_tmp_dir(self)
         with inside(repo, {"OAH_STATE_DIR": str(state), "CODEX_HOME": str(home)}):
             code, out, err = run_models()
         self.assertEqual(code, 0)
-        self.assertIn("OAH_MODEL_UNRESOLVED", out)
+        self.assertIn("OAH_MODEL_CATALOG_UNAVAILABLE", out)
         self.assertIn("OAH_MODELS_REFRESH_FAILED", err)
 
     def test_cap_conflicts_report_the_same_uncapped_floor_as_calls(self):
@@ -317,7 +443,8 @@ class ModelsCliTest(unittest.TestCase):
         for engine in ("codex", "claude"):
             with self.subTest(engine=engine):
                 model = "m-default" if engine == "codex" else "opus"
-                project = calls.Project(self, f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n')
+                project = calls.Project(self, 'quality_order = ["m-default"]\n'
+                                              f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n')
                 write_cache(project.home, ("m-default", ["low", "medium", "high", "max"], True))
                 with inside(project.repo, project.env):
                     code, out, err = run_models("--json")
@@ -351,6 +478,14 @@ def candidates(*, ranking=RANKING, floor=("m-mid", "medium"), deterministic=("m-
     return build_candidates("codex", entry=JUDGE_ENTRY, deterministic=Pair(*deterministic), tier=tier,
                             floor_tier=floor_tier, floor=Pair(*floor), quality_order=list(ranking),
                             allowed_models=list(allowed), effort_caps=dict(caps or {}), tier_pools=dict(pools or {}))
+
+
+def scored_candidates(*, deterministic, floor, tier, floor_tier, ranking=(), caps=None, pools=None, scores=None,
+                      profile="balanced"):
+    return build_candidates("codex", entry=CODEX_LIST, deterministic=Pair(*deterministic), tier=tier,
+                            floor_tier=floor_tier, floor=Pair(*floor), quality_order=list(ranking), allowed_models=[],
+                            effort_caps=dict(caps or {}), tier_pools=dict(pools or {}),
+                            scores=scored_set() if scores is None else scores, profile=profile)
 
 
 def pairs(candidate_set) -> list[tuple[str, str]]:
@@ -536,6 +671,54 @@ class CandidateTableTest(unittest.TestCase):
         self.assertEqual(data["allowed_models"], ["m-strong", "m-mid"])
         self.assertIn(["m-mid", "high"], data["candidates"])
 
+    def test_a_scored_call_offers_the_score_band(self):
+        built = scored_candidates(tier="medium", floor_tier="low", deterministic=("gpt-6.1-terra", "medium"),
+                                  floor=("gpt-6-luna", "low"))
+        self.assertEqual((built.mode, built.note, built.ranked), ("scored", None, False))
+        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6.1-terra"},
+                         "medium needs 33.3 and the next step 66.7: only the rule's choice is near it here")
+
+    def test_the_band_reaches_one_step_up_and_never_below(self):
+        built = scored_candidates(tier="high", floor_tier="medium", deterministic=("gpt-6.1-terra", "high"),
+                                  floor=("gpt-6.1-terra", "medium"))
+        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"})
+        self.assertIsNone(built.reject_reason("gpt-6.1-sol", "high"))
+        self.assertEqual(built.reject_reason("gpt-6-luna", "high"), "outside-score-bound")
+
+    def test_efficient_cannot_become_performance_through_the_band(self):
+        built = scored_candidates(tier="medium", floor_tier="low", profile="efficient",
+                                  deterministic=("gpt-6-luna", "medium"), floor=("gpt-6-luna", "low"))
+        self.assertEqual({pair.model for pair in built.pairs}, {"gpt-6-luna"})
+        self.assertEqual(built.reject_reason("gpt-6.1-sol", "high"), "outside-score-bound")
+
+    def test_the_band_keeps_the_existing_effort_rules(self):
+        built = scored_candidates(tier="high", floor_tier="medium", deterministic=("gpt-6.1-terra", "high"),
+                                  floor=("gpt-6.1-terra", "medium"), caps={"gpt-6.1-sol": "medium"})
+        self.assertEqual(built.reject_reason("gpt-6.1-sol", "high"), "above-cap")
+        self.assertEqual(built.reject_reason("gpt-6.1-sol", "low"), "below-floor")
+        self.assertEqual(built.reject_reason("gpt-6.1-sol", "ultra"), "unsupported-effort")
+        self.assertIsNone(built.reject_reason("gpt-6.1-sol", "medium"))
+
+    def test_a_user_ranking_or_pools_are_not_replaced_by_the_band(self):
+        ranked = scored_candidates(ranking=["gpt-6.1-sol", "gpt-6-luna"], tier="high", floor_tier="low",
+                                   deterministic=("gpt-6.1-sol", "high"), floor=("gpt-6-luna", "low"))
+        self.assertEqual(ranked.mode, "ranked")
+        pooled = scored_candidates(pools={"high": ["gpt-6-luna"]}, tier="high", floor_tier="high",
+                                   deterministic=("gpt-6-luna", "high"), floor=("gpt-6-luna", "high"))
+        self.assertEqual(pooled.mode, "pools")
+
+    def test_the_old_claude_default_gets_the_band_too(self):
+        built = build_candidates("claude", entry=CLAUDE_LIST, deterministic=Pair("sonnet", "high"), tier="high",
+                                 floor_tier="medium", floor=Pair("sonnet", "medium"), quality_order=OLD_DEFAULT,
+                                 allowed_models=[], effort_caps={}, tier_pools={}, scores=scored_set("claude"))
+        self.assertEqual(built.mode, "scored")
+
+    def test_no_scores_keeps_the_model_and_says_why(self):
+        failed = scoring.failed("codex", EngineError(scoring.NO_SCORES, "damaged; pin one"))
+        built = scored_candidates(scores=failed, tier="high", floor_tier="high", deterministic=("gpt-6-astra", "high"),
+                                  floor=("gpt-6-astra", "high"))
+        self.assertEqual((built.mode, built.note), ("deterministic", "model choice off: no ranking and no tier pools"))
+
     def test_pools_and_off_record_why(self):
         off = candidates(ranking=[], floor=("m-strong", "medium"))
         self.assertEqual((off.mode, off.note), ("deterministic", "model choice off: no ranking and no tier pools"))
@@ -674,15 +857,14 @@ class UnpooledNoticeTest(unittest.TestCase):
 
     def test_notice_survives_every_tier_failing_to_resolve(self):
         write_cache(self.home, ("m-a", LEVELS, False), ("m-b", LEVELS, False))
-        repo = project_with_fakes(self, '[engines.codex.tier_pools]\nhigh = ["m-a"]\n')
-        with mock.patch("oah.call._effective", return_value=None):
-            code, out, err = self.cli(repo, "--json")
+        repo = project_with_fakes(self, "[engines.codex.tier_pools]\n" + "".join(f'{tier} = ["m-gone"]\n' for tier in TIERS))
+        code, out, err = self.cli(repo, "--json")
         self.assertEqual(code, 0, err)
         report = json.loads(out)["engines"]["codex"]
         self.assertEqual({row.get("error", "").split(":")[0] for row in report["tiers"].values()},
                          {"OAH_MODEL_UNRESOLVED"})
-        self.assertEqual(report["unpooled"], ["m-b"])
-        self.assertEqual(len(notices(err)), 1)
+        self.assertEqual(report["unpooled"], ["m-a", "m-b"])
+        self.assertEqual(len(notices(err)), 2)
 
     def test_resolved_models_do_not_change_and_config_is_untouched(self):
         repo = project_with_fakes(self, POOLS)

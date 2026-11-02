@@ -55,7 +55,7 @@ from typing import Callable, Mapping, Sequence
 
 import oah.intent as oah_intent
 import oah.packet as oah_packet
-from oah import briefs, launchers, models, routing, runs, skillsel
+from oah import briefs, launchers, models, routing, runs, scoring, skillsel
 from oah.engines import claude, codex
 from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, highest, load_rules, rank,
                                 verify_inference)
@@ -78,7 +78,7 @@ TIMEOUTS = {"low": 15, "medium": 30, "high": 60, "max": 90}
 ENGINE_DEFAULTS = {
     "claude": {
         "command": ["claude"],
-        "quality_order": ["opus", "sonnet", "haiku"],
+        "quality_order": [],
         "allowed_models": [],
         "effort_caps": {},
         "tier_pools": {},
@@ -142,6 +142,8 @@ class Settings:
                     raise invalid(f"engines.{engine}.tiers.{tier}.timeout_min must be a positive number of minutes")
         if models_section["ttl_hours"] <= 0:
             raise invalid("models.ttl_hours must be a positive number of hours")
+        if models_section["profile"] not in scoring.PROFILES:
+            raise invalid(f"models.profile = {models_section['profile']!r}; use one of: {', '.join(scoring.PROFILES)}")
         return cls(stages=stages, engines=engines, models=models_section)
 
 
@@ -221,62 +223,73 @@ def _catalog(state_dir):
     return inputs.catalog if inputs is not None else models.Catalog(state_dir)
 
 
+def read_scores(engine: str, entry: models.Entry | None, settings: Settings) -> scoring.ScoreSet:
+    """The score set of one entry. A failure is kept in it, not raised: a pin still runs and only a choice fails."""
+    try:
+        return scoring.score_set(engine, entry, allowed=settings.engines[engine]["allowed_models"])
+    except EngineError as exc:
+        return scoring.failed(engine, exc)
+
+
 def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, env: Mapping[str, str],
-                  refresh: bool = False, now: dt.datetime | None = None) -> tuple[list[str], models.Freshness]:
-    """The engine's argv prefix and its catalog entry, after the freshness check that runs before every launch.
+                  refresh: bool = False, now: dt.datetime | None = None,
+                  persist: bool = True) -> tuple[list[str], models.Freshness]:
+    """The engine's argv prefix, its catalog entry and that entry's scores: the one read of both for a launch.
 
     A rebuild warns about the listed models in no pool; this is the one place that decides when a
-    launch hears of them, so a launch that rebuilt nothing stays quiet."""
+    launch hears of them, so a launch that rebuilt nothing stays quiet. `persist=False` writes nothing."""
     base = models.resolve_base(engine, settings.engines[engine]["command"])
     catalog = _catalog(state_dir)
     freshness = catalog.ensure_fresh(engine, base=base, env=env, ttl_hours=settings.models["ttl_hours"],
-                                     refresh=refresh, now=now)
-    if freshness.refreshed:
+                                     refresh=refresh, now=now, persist=persist)
+    notices: list[str] = []
+    if freshness.refreshed and persist:
         unpooled = models.unpooled_models(freshness.entry, settings.engines[engine]["tier_pools"])
         notices = [models.unpooled_warning(engine, name) for name in unpooled]
-        freshness = dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices))
-    return base, freshness
+    return base, dataclasses.replace(freshness, warnings=(*freshness.warnings, *notices),
+                                     scores=read_scores(engine, freshness.entry, settings))
 
 
-def _effective(engine: str, root: pathlib.Path, env: Mapping[str, str]) -> str | None:
-    return codex.effective_model(root, codex.codex_home(env)) if engine == "codex" else None
-
-
-def _deterministic(engine: str, tier: str, settings: Settings, entry: models.Entry | None,
-                   effective: str | None):
-    """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
-    section = settings.engines[engine]
-    tier_settings = section["tiers"][tier]
-    model, source = models.map_tier(engine, tier, pin=tier_settings["model"], quality_order=section["quality_order"],
-                                    entry=entry, effective=effective)
+def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: models.Entry | None):
+    """A1's effort of a tier for one model, from the levels the catalog lists for it."""
+    requested = settings.engines[engine]["tiers"][tier]["effort"]
     info = entry.model(model) if entry else None
     levels = info.efforts if info and info.efforts else None
     if engine == "codex":
         cache = {model: codex.CachedModel(model, levels, info.default)} if levels else None
-        effort = codex.resolve_effort(model, tier_settings["effort"], cache=cache)
-    else:
-        effort = claude.resolve_effort(tier_settings["effort"], efforts=levels, model=model)
-    return model, source, effort
+        return codex.resolve_effort(model, requested, cache=cache)
+    return claude.resolve_effort(requested, efforts=levels, model=model)
 
 
-def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.Path, state_dir: pathlib.Path,
+def _deterministic(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
+                   floor_tier: str = "low"):
+    """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
+    section = settings.engines[engine]
+    model, source = models.map_tier(engine, tier, pin=section["tiers"][tier]["model"],
+                                    quality_order=section["quality_order"], entry=freshness.entry,
+                                    scores=freshness.scores, floor_tier=floor_tier, profile=settings.models["profile"],
+                                    pools=section["tier_pools"], allowed=section["allowed_models"])
+    return model, source, _tier_effort(engine, tier, model, settings, freshness.entry)
+
+
+def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pathlib.Path,
                    env: Mapping[str, str], refresh: bool = False, now: dt.datetime | None = None,
-                   checked: tuple[list[str], models.Freshness] | None = None) -> Resolution:
+                   checked: tuple[list[str], models.Freshness] | None = None, floor_tier: str = "low",
+                   record: bool = True) -> Resolution:
     """Model and effort for one engine and tier; the change log records anything that differs from last time."""
     section = settings.engines[engine]
     tier_settings = section["tiers"][tier]
     base, freshness = checked or check_catalog(engine, settings, state_dir=state_dir, env=env, refresh=refresh, now=now)
     catalog = _catalog(state_dir)
     entry = freshness.entry
-    effective = _effective(engine, root, env)
     check = _CORRECTION_INPUT_CHECK.get()
     if check is not None:
-        check((dataclasses.asdict(freshness), effective))
+        check(dataclasses.asdict(freshness))
     fresh = bool(entry.models) and entry.checked_at is not None and not any(
         warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
     cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry, fresh=fresh,
                                      pools=section["tier_pools"])
-    model, source, effort = _deterministic(engine, tier, settings, entry, effective)
+    model, source, effort = _deterministic(engine, tier, settings, freshness, floor_tier=floor_tier)
     cap = section["effort_caps"].get(model)
     if cap is not None:
         if rank(effort.launch) is None:
@@ -297,7 +310,7 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
     changes = catalog.record_resolution(engine, tier, model=model, effort=effort.launch, source=source, why=why,
-                                        now=now)
+                                        now=now) if record else []
     return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.launch_version,
                       requested_model=tier_settings["model"], model=model, model_source=source,
                       requested_effort=effort.requested, launch_effort=effort.launch,
@@ -305,13 +318,13 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, root: pathlib.
                       warnings=(*freshness.warnings, *cap_warnings), changes=tuple(changes))
 
 
-def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: str, entry: models.Entry | None,
-                   root: pathlib.Path, env: Mapping[str, str]) -> models.Pair:
+def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: str,
+                   freshness: models.Freshness) -> models.Pair:
     """Resolve the uncapped floor and check the launch cap against it, for calls and model reports."""
     engine = resolution.engine
     cap = settings.engines[engine]["effort_caps"].get(resolution.model)
     try:
-        model, _, effort = _deterministic(engine, floor_tier, settings, entry, _effective(engine, root, env))
+        model, _, effort = _deterministic(engine, floor_tier, settings, freshness, floor_tier=floor_tier)
     except EngineError:
         if cap is not None:
             raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
@@ -326,8 +339,8 @@ def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: st
 
 
 def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
-                 entry: models.Entry | None, root: pathlib.Path, env: Mapping[str, str], brief_disabled: bool = False,
-                 keychain=None) -> tuple[Resolution, dict]:
+                 freshness: models.Freshness, root: pathlib.Path, env: Mapping[str, str], floor_tier: str,
+                 brief_disabled: bool = False, keychain=None) -> tuple[Resolution, dict]:
     """The call's model and effort after the re-ranker's judgement, and the `model_judge`/`model_choice` record.
 
     The deterministic resolution is kept unless the judged pair passes `CandidateSet.reject_reason`.
@@ -349,9 +362,8 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     cap = section["effort_caps"].get(resolution.model)
     if pinned and cap is None:
         return record("unused(pinned)")
-    floor_tier = routing.floor_tier(axes.kind)
     try:
-        floor = _resolve_floor(resolution, settings, floor_tier=floor_tier, entry=entry, root=root, env=env)
+        floor = _resolve_floor(resolution, settings, floor_tier=floor_tier, freshness=freshness)
     except EngineError:
         if cap is not None:
             raise
@@ -359,10 +371,10 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     if pinned:
         return record("unused(pinned)")
     candidates = models.build_candidates(
-        engine, entry=entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
+        engine, entry=freshness.entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
         floor=floor, quality_order=section["quality_order"],
         allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
-        tier_pools=section["tier_pools"])
+        tier_pools=section["tier_pools"], scores=freshness.scores, profile=settings.models["profile"])
     choice["floor"] = {"tier": floor_tier, **floor.to_json()}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
     choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))
@@ -1103,14 +1115,15 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                               brief_disabled=disabled, now=now)
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now)
-    resolution = resolve_engine(request.engine, tier, settings, root=root, state_dir=state_dir, env=env, now=now,
-                                checked=checked)
+    floor_tier = routing.floor_tier(scored.axes.kind)
+    resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, now=now,
+                                checked=checked, floor_tier=floor_tier)
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
     check_budget()
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
-                                     entry=checked[1].entry, root=root, env=env, brief_disabled=disabled,
-                                     keychain=keychain)
+                                     freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
+                                     brief_disabled=disabled, keychain=keychain)
     fields = dict(root=root, state_dir=state_dir, packet=packet, scope=scope, stored=stored, footer=footer,
                   has_footer=has_footer, resolution=resolution, tier=tier, tier_source=tier_source, axes=axes,
                   reasons=reasons, advisory=advisory, warnings=warnings, selection=selection, checked_lease=holder,

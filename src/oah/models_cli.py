@@ -40,10 +40,8 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
               "unpooled": unpooled}
     for tier in routing.TIERS:
         try:
-            resolution = call.resolve_engine(engine, tier, settings, root=root, state_dir=state, env=os.environ,
-                                             checked=checked)
-            floor = call._resolve_floor(resolution, settings, floor_tier=tier, entry=entry, root=root,
-                                       env=os.environ)
+            resolution = call.resolve_engine(engine, tier, settings, state_dir=state, env=os.environ, checked=checked)
+            floor = call._resolve_floor(resolution, settings, floor_tier=tier, freshness=checked[1])
         except EngineError as exc:
             report["tiers"][tier] = {"error": str(exc)}
             continue
@@ -53,7 +51,8 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
         candidates = models.build_candidates(engine, entry=entry, deterministic=pair, tier=tier, floor_tier=tier,
                                              floor=floor, quality_order=section["quality_order"],
                                              allowed_models=section["allowed_models"],
-                                             effort_caps=section["effort_caps"], tier_pools=section["tier_pools"])
+                                             effort_caps=section["effort_caps"], tier_pools=section["tier_pools"],
+                                             scores=checked[1].scores, profile=settings.models["profile"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
                                  "floor": {"tier": tier, **floor.to_json()}, "mode": candidates.mode,

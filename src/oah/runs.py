@@ -54,20 +54,22 @@ _CORRECTION_ENUMS = frozenset({
     "claude", "codex", "human", "initial", "review", "correction", "attempt-start", "attempt-outcome", "attempt-head",
     "created", "prepared", "queued", "running", *TERMINAL, "applied", "no-change", "aborted", "unverified",
     "match", "mismatch", "downgraded", "low", "medium", "high", "xhigh", "max", "highest", "none", "minimal",
-    "normal", "critical", "flag", "packet", "rules", "pin", "quality_order", "quality_order(unconfirmed)",
-    "cli_default", "effective_config", "quick", "docs", "research", "implementation", "refactor", "broad-audit",
-    "adversarial-review", "migration", "security", "high-risk-review",
+    "normal", "critical", "flag", "packet", "rules", "pin", "pool", "scored", "quality_order",
+    # Older runs recorded these three sources; nothing chooses them now, but those records stay readable.
+    "quality_order(unconfirmed)", "cli_default", "effective_config",
+    "quick", "docs", "research", "implementation", "refactor", "broad-audit", "design",
+    "adversarial-review", "migration", "security", "high-risk-review", "performance", "balanced", "efficient",
     "OAH_FIX_ROUTING_RULE", "OAH_FIX_ADVISORY_UNUSED", "OAH_FIX_ADVISORY_USED", "OAH_FIX_WARNING",
     "OAH_FIX_NORMALIZATION", "OAH_FIX_COMMIT_COMMAND",
     # The model judge's fixed vocabulary; model/provider identities and notes stay hashed.
-    "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED", "ranked", "pools", "deterministic",
+    "OAH_MODEL_MISMATCH", "OAH_EFFORT_CAPPED", "ranked", "pools", "scored", "deterministic",
     "outside-candidates", "not-allowed", "unsupported-effort", "unranked-model", "not-in-tier-pool",
-    "below-floor", "above-cap",
+    "below-floor", "above-cap", "outside-score-bound", "superseded", "unknown-family", "unscored",
     "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
     "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
     *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
-                                        "not-in-tier-pool", "below-floor", "above-cap")),
+                                        "not-in-tier-pool", "below-floor", "above-cap", "outside-score-bound")),
 })
 _CORRECTION_FORMS = re.compile(
     r"(?:sha256:)?[0-9a-f]{64}|[0-9a-f]{40}|r[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}|"

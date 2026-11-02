@@ -21,7 +21,7 @@ ENGINES = ("claude", "codex")
 
 KIND_SCORES = {
     "quick": 1, "docs": 1, "research": 1,
-    "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2,
+    "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "design": 2, "packet": 2,
     "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3,
 }
 INTENSITY_SCORES = {"low": 0, "medium": 1, "high": 2, "max": 3}
@@ -29,7 +29,7 @@ REASONING_SCORES = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 RISK_SCORES = {"low": 0, "normal": 0, "high": 2, "critical": 4}
 
 FLOOR_HIGH = ("broad-audit", "migration", "security", "high-risk-review")
-FLOOR_MEDIUM = ("research", "review", "implementation", "refactor", "adversarial-review")
+FLOOR_MEDIUM = ("research", "review", "implementation", "refactor", "adversarial-review", "design", "packet")
 
 STAGE_KINDS = {"initial": "implementation", "review": "review", "correction": "implementation"}
 DOC_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc")
@@ -86,6 +86,12 @@ def _at_least(tier: str, floor: str) -> str:
 def floor_tier(kind: str) -> str:
     """The lowest tier a kind may run at: the kind floors of PLAN 5.5, low for kinds without one."""
     return "high" if kind in FLOOR_HIGH else "medium" if kind in FLOOR_MEDIUM else "low"
+
+
+def review_floor(scope: Sequence[str], kind: str) -> str:
+    """The lowest tier a review may run at, scored again from the scope alone: no caller axis can lower it."""
+    risk = score_axes(stage="review", kind=None, scope=scope).axes.risk
+    return _at_least("high" if risk in ("high", "critical") else "medium", floor_tier(kind))
 
 
 def recommend(axes: Axes) -> Recommendation:

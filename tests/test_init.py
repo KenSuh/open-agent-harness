@@ -17,8 +17,9 @@ import sys
 import unittest
 from unittest import mock
 
-from oah import call, hooks, init, intent, models, preflight, rerank, rules, skillsel, unlazy
+from oah import call, hooks, init, intent, models, preflight, rerank, rules, scoring, skillsel, unlazy
 from oah.config import parse_config
+from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult
 from oah.impact import defaults as impact_defaults
 from oah.impact import mapstore
@@ -77,7 +78,8 @@ class ConfigTest(unittest.TestCase):
                     self.assertEqual(found["call"].stages,
                                      {"initial": "claude", "review": "codex", "correction": "codex"})
                     claude = found["call"].engines["claude"]
-                    self.assertEqual(claude["quality_order"], ["opus", "sonnet", "haiku"])
+                    self.assertEqual(claude["quality_order"], [])
+                    self.assertEqual(found["call"].models["profile"], "balanced")
                     self.assertEqual({tier: claude["tiers"][tier]["effort"] for tier in claude["tiers"]},
                                      {"low": "low", "medium": "medium", "high": "high", "max": "max"})
                     codex = found["call"].engines["codex"]
@@ -160,8 +162,21 @@ class DefaultBranchTest(unittest.TestCase):
 
 
 class AgentFilesTest(unittest.TestCase):
+    SCORES = {"schema": 1, "source": "Epoch AI", "date": "2026-11-02", "license": "CC BY 4.0", "url": "https://x",
+              "credit": "credit", "scores": {f"claude-{name}-5-5": dict.fromkeys(("t1", "t2", "t3"), value) for name, value
+                                             in (("haiku", 0.1), ("sonnet", 0.7), ("opus", 0.9), ("fable", 0.6))}}
+
+    def setUp(self):
+        patcher = mock.patch.object(scoring, "bundled", return_value=self.SCORES)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def frontmatter(self, data: bytes) -> dict:
         return parse_frontmatter(data.decode("utf-8"))
+
+    def models(self, *args, **kwargs) -> dict[str, str]:
+        return {path.rsplit("/", 1)[1].removesuffix(".md"): self.frontmatter(data)["model"]
+                for path, data in init.agent_files(*args, **kwargs).items()}
 
     def test_agent_files(self):
         files = init.agent_files(call.ENGINE_DEFAULTS)
@@ -171,7 +186,7 @@ class AgentFilesTest(unittest.TestCase):
         self.assertEqual({path.rsplit("/", 1)[1]: (meta["name"], meta["model"], meta["effort"])
                           for path, meta in found.items()},
                          {"oah-low.md": ("oah-low", "haiku", "low"), "oah-medium.md": ("oah-medium", "sonnet", "medium"),
-                          "oah-high.md": ("oah-high", "opus", "high"), "oah-max.md": ("oah-max", "opus", "max")})
+                          "oah-high.md": ("oah-high", "sonnet", "high"), "oah-max.md": ("oah-max", "opus", "max")})
         for path, data in files.items():
             with self.subTest(path=path):
                 text = data.decode("utf-8")
@@ -188,13 +203,39 @@ class AgentFilesTest(unittest.TestCase):
         engines = {"claude": dict(call.ENGINE_DEFAULTS["claude"], tiers={
             tier: dict(values, model="pinned-model" if tier == "medium" else "")
             for tier, values in call.ENGINE_DEFAULTS["claude"]["tiers"].items()})}
-        files = init.agent_files(engines)
-        self.assertEqual(self.frontmatter(files[".claude/agents/oah-medium.md"])["model"], "pinned-model")
-        self.assertEqual(self.frontmatter(files[".claude/agents/oah-low.md"])["model"], "haiku")
-        engines["claude"]["quality_order"] = []
-        files = init.agent_files(engines)
-        self.assertEqual(self.frontmatter(files[".claude/agents/oah-high.md"])["model"], "inherit")
-        self.assertEqual(self.frontmatter(files[".claude/agents/oah-medium.md"])["model"], "pinned-model")
+        self.assertEqual(self.models(engines)["oah-medium"], "pinned-model")
+        self.assertEqual(self.models(engines)["oah-low"], "haiku")
+        with mock.patch.object(scoring, "_packaged", side_effect=FileNotFoundError("gone")):
+            damaged = self.models(engines)
+        self.assertEqual(damaged["oah-high"], "inherit")
+        self.assertEqual(damaged["oah-medium"], "pinned-model")
+
+    def test_broken_scores_alone_inherit_too(self):
+        with mock.patch.object(scoring, "bundled", side_effect=EngineError("OAH_MODEL_NO_SCORES", "damaged; pin one")):
+            self.assertEqual(set(self.models(call.ENGINE_DEFAULTS).values()), {"inherit"})
+
+    def test_the_mapping_needs_no_catalog_and_runs_no_cli(self):
+        with mock.patch("oah.models.run_command", side_effect=AssertionError("oah init must stay offline")):
+            self.assertEqual(self.models(call.ENGINE_DEFAULTS)["oah-max"], "opus")
+
+    def test_every_alias_competes_even_those_claude_help_omits(self):
+        self.assertIn("haiku", self.models(call.ENGINE_DEFAULTS).values())
+
+    def test_the_old_default_list_counts_as_unset_and_a_real_list_wins(self):
+        def engines(order):
+            return {"claude": dict(call.ENGINE_DEFAULTS["claude"], quality_order=order)}
+
+        self.assertEqual(self.models(engines(["opus", "sonnet", "haiku"])), self.models(call.ENGINE_DEFAULTS))
+        self.assertEqual(self.models(engines(["opus", "sonnet"])),
+                         {"oah-low": "sonnet", "oah-medium": "sonnet", "oah-high": "opus", "oah-max": "opus"})
+
+    def test_the_profile_moves_the_mapping(self):
+        self.assertEqual(self.models(call.ENGINE_DEFAULTS, profile="efficient"),
+                         {"oah-low": "haiku", "oah-medium": "haiku", "oah-high": "sonnet", "oah-max": "sonnet"})
+        self.assertEqual(self.models(call.ENGINE_DEFAULTS, profile="unknown"), self.models(call.ENGINE_DEFAULTS))
+
+    def test_files_keep_aliases_not_full_names(self):
+        self.assertLessEqual(set(self.models(call.ENGINE_DEFAULTS).values()), {"haiku", "sonnet", "opus", "fable"})
 
 
 class GitignoreTest(unittest.TestCase):

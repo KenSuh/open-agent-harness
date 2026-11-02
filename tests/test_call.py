@@ -9,6 +9,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import secrets as token_source
 import subprocess
 import sys
@@ -17,8 +18,9 @@ import types
 import unittest
 from unittest import mock
 
-from oah import call, call_cli, intent, models_cli, rerank
+from oah import call, call_cli, intent, models_cli, rerank, scoring
 from oah.briefs import VERIFY_FOOTER, VERIFY_MARKER, BriefError, raw_section
+from oah.config import ConfigError
 from oah.engines.effort import EngineError
 from oah.lease import Store
 from oah.paths import repo_info
@@ -66,9 +68,11 @@ class Project:
              "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")]},
         ]}), encoding="utf-8")
         (self.repo / ".oah").mkdir()
+        # These fixtures name their models, so that no launch test depends on the bundled scores.
+        order = "" if "quality_order" in config else 'quality_order = ["gpt-test-a"]\n'
         (self.repo / ".oah" / "config.toml").write_text(
-            f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\n"
-            f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n" + config, encoding="utf-8")
+            f"[engines.claude]\ncommand = {toml_list(FAKE_CLAUDE)}\nquality_order = [\"opus\", \"sonnet\"]\n"
+            f"[engines.codex]\ncommand = {toml_list(FAKE_CODEX)}\n{order}" + config, encoding="utf-8")
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("FAKE_", "OAH_")) and key != "CLAUDE_CONFIG_DIR"}
         self.env.update(CODEX_HOME=str(self.home), FAKE_RECORD=str(self.record), OAH_STATE_DIR=str(self.state),
@@ -120,6 +124,113 @@ class Project:
     def runs(self) -> list[str]:
         folder = self.state / "runs" / "t1"
         return sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
+
+
+SCORES = {"schema": 1, "source": "Epoch AI", "date": "2026-11-02", "license": "CC BY 4.0",
+          "url": "https://epoch.ai/benchmarks/use-this-data", "credit": "Epoch AI, a credit line.",
+          "scores": {"gpt-6-luna": dict.fromkeys(("t1", "t2", "t3", "t4"), 0.1),
+                     "gpt-6.1-terra": dict.fromkeys(("t1", "t2", "t3", "t4"), 0.8),
+                     "gpt-6.1-sol": dict.fromkeys(("t1", "t2", "t3", "t4"), 0.95),
+                     "gpt-6-astra": dict.fromkeys(("t1", "t2", "t3", "t4"), 1.0)}}
+SCORED_MODELS = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra")
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def scored_project(test: unittest.TestCase, config: str = "", *, models=SCORED_MODELS) -> Project:
+    """A project with no user choice of model, so the score rule decides, on scores no data refresh can move."""
+    project = Project(test, "quality_order = []\n" + config)
+    (project.home / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": slug, "supported_reasoning_levels": [{"effort": effort} for effort in EFFORTS]} for slug in models]}),
+        encoding="utf-8")
+    patcher = mock.patch.object(scoring, "bundled", return_value=SCORES)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    return project
+
+
+class ScoredCallTest(unittest.TestCase):
+    def test_the_rule_picks_the_codex_model_at_every_tier(self):
+        rows = {"low": "gpt-6-luna", "medium": "gpt-6.1-terra", "high": "gpt-6.1-terra", "max": "gpt-6-astra"}
+        for tier, model in rows.items():
+            with self.subTest(tier=tier):
+                project = scored_project(self)
+                data = project.run(stage="correction", tier=tier, axes={"kind": "quick"})
+                self.assertEqual((data["status"], data["resolved_model"], data["model_source"]),
+                                 ("finished", model, "scored"))
+
+    def test_the_profile_moves_the_choice_with_no_other_edit(self):
+        rows = {"performance": "gpt-6-astra", "balanced": "gpt-6.1-terra", "efficient": "gpt-6.1-terra"}
+        for profile, model in rows.items():
+            with self.subTest(profile=profile):
+                project = scored_project(self, f'[models]\nprofile = "{profile}"\n')
+                self.assertEqual(project.run(stage="correction", tier="high")["resolved_model"], model)
+
+    def test_every_kind_of_call_is_chosen_by_difficulty(self):
+        project = scored_project(self)
+        easy = project.run(stage="correction", axes={"kind": "docs", "intensity": "low", "reasoning": "low", "risk": "low"})
+        hard = project.run(stage="correction", axes={"kind": "security", "reasoning": "max"})
+        self.assertEqual((easy["tier"], easy["resolved_model"]), ("low", "gpt-6-luna"))
+        self.assertEqual((hard["tier"], hard["resolved_model"]), ("max", "gpt-6-astra"))
+
+    def test_a_kind_floor_lifts_the_scored_model_of_an_explicit_tier(self):
+        project = scored_project(self)
+        data = project.run(stage="correction", tier="low", axes={"kind": "security"})
+        self.assertEqual((data["tier"], data["launch_effort"], data["resolved_model"]), ("low", "low", "gpt-6.1-terra"))
+
+    def test_the_codex_configuration_and_default_flag_no_longer_choose(self):
+        project = scored_project(self)
+        (project.home / "config.toml").write_text('model = "gpt-6-astra"\n', encoding="utf-8")
+        cache = json.loads((project.home / "models_cache.json").read_text(encoding="utf-8"))
+        next(item for item in cache["models"] if item["slug"] == "gpt-6-astra")["is_default"] = True
+        (project.home / "models_cache.json").write_text(json.dumps(cache), encoding="utf-8")
+        data = project.run(stage="correction", tier="low", axes={"kind": "quick"})
+        self.assertEqual((data["resolved_model"], data["model_source"]), ("gpt-6-luna", "scored"))
+
+    def test_an_unreadable_codex_configuration_no_longer_stops_a_scored_call(self):
+        project = scored_project(self)
+        (project.home / "config.toml").write_text("not toml [", encoding="utf-8")
+        self.assertEqual(project.run(stage="correction", tier="low")["status"], "finished")
+
+    def test_claude_is_chosen_from_scores_with_the_old_default_list_in_the_file(self):
+        project = Project(self, '[engines.claude.tiers.max]\neffort = "max"\n')
+        config = project.repo / ".oah" / "config.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace('quality_order = ["opus", "sonnet"]',
+                                                                     'quality_order = ["opus", "sonnet", "haiku"]'),
+                          encoding="utf-8")
+        before = config.read_bytes()
+        scores = dict(SCORES, scores={"claude-opus-5-5": dict.fromkeys(("t1", "t2", "t3"), 1.0),
+                                      "claude-sonnet-5-5": dict.fromkeys(("t1", "t2", "t3"), 0.2),
+                                      "claude-fable-5-1": dict.fromkeys(("t1", "t2", "t3"), 0.1)})
+        with mock.patch.object(scoring, "bundled", return_value=scores):
+            low = project.run(engine="claude", stage="initial", tier="low", axes={"kind": "quick"})
+            high = project.run(engine="claude", stage="initial", tier="high", axes={"kind": "quick"})
+        self.assertEqual((low["resolved_model"], low["model_source"]), ("sonnet", "scored"))
+        self.assertEqual((high["resolved_model"], high["model_source"]), ("opus", "scored"))
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_effort_caps_still_clamp_a_scored_model(self):
+        project = scored_project(self, '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "medium"\n')
+        data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
+        self.assertEqual((data["resolved_model"], data["launch_effort"], data["requested_effort"]),
+                         ("gpt-6.1-terra", "medium", "high"))
+        self.assertTrue(any(warning.startswith("OAH_EFFORT_CAPPED:") for warning in data["warnings"]))
+
+    def test_there_is_no_built_in_effort_cap(self):
+        project = scored_project(self)
+        data = project.run(stage="correction", tier="max", axes={"kind": "quick"})
+        self.assertEqual(data["launch_effort"], "max")
+
+    def test_an_unknown_profile_is_refused_like_any_bad_setting(self):
+        project = Project(self, '[models]\nprofile = "fast"\n')
+        with self.assertRaises(EngineError) as caught:
+            project.settings()
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+        self.assertIn("models.profile", str(caught.exception))
+        self.assertIn("performance, balanced, efficient", str(caught.exception))
+        project = Project(self, "[models]\nprofile = 3\n")
+        with self.assertRaises(ConfigError) as caught:
+            project.settings()
+        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
 
 
 class RunFolderTest(unittest.TestCase):
@@ -222,7 +333,7 @@ class RunFolderTest(unittest.TestCase):
                           "stdout.log"])
         self.assertEqual(set(data), set(RESULT_FIELDS))
         expected = {"status": "finished", "exit_code": 0, "timed_out": False, "engine": "codex", "stage": "review",
-                    "cli_version": "0.163.0", "resolved_model": "gpt-test-a", "model_source": "cli_default",
+                    "cli_version": "0.163.0", "resolved_model": "gpt-test-a", "model_source": "quality_order",
                     "requested_effort": "high", "launch_effort": "high", "header_effort": "high",
                     "header_check": "match", "resolved_inference_effort": UNVERIFIED,
                     "normalization_basis": "unverified: no normalization rule for codex 0.163.0 gpt-test-a effort high",
@@ -272,14 +383,14 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(settings.stages, {"initial": "claude", "review": "codex", "correction": "codex"})
         claude, codex = settings.engines["claude"], settings.engines["codex"]
         self.assertEqual((claude["command"], claude["quality_order"], claude["permission_mode"]),
-                         (["claude"], ["opus", "sonnet", "haiku"], "acceptEdits"))
+                         (["claude"], [], "acceptEdits"))
         self.assertEqual((codex["command"], codex["quality_order"]), (["codex"], []))
         self.assertEqual({tier: (row["model"], row["effort"], row["timeout_min"]) for tier, row in claude["tiers"].items()},
                          {"low": ("", "low", 15), "medium": ("", "medium", 30), "high": ("", "high", 60),
                           "max": ("", "max", 90)})
         self.assertEqual({tier: row["effort"] for tier, row in codex["tiers"].items()},
                          {"low": "low", "medium": "medium", "high": "high", "max": "highest"})
-        self.assertEqual(settings.models, {"ttl_hours": 24.0})
+        self.assertEqual(settings.models, {"ttl_hours": 24.0, "profile": "balanced"})
         self.assertEqual(settings, call.Settings.defaults())
 
     def test_settings_from_config_and_bad_values(self):
@@ -417,7 +528,7 @@ class RoutingTest(unittest.TestCase):
         (project.home / "models_cache.json").unlink()
         with self.assertRaises(EngineError) as ctx:
             project.prepare(tier="high")
-        self.assertEqual(ctx.exception.code, "OAH_MODEL_UNRESOLVED")
+        self.assertEqual(ctx.exception.code, "OAH_MODEL_CATALOG_UNAVAILABLE")
         self.assertFalse((project.state / "runs").exists())
         self.assertFalse(project.record.exists())
 
@@ -1559,7 +1670,9 @@ class UnpooledNoticeTest(unittest.TestCase):
     def test_empty_configured_pool_warns_on_rebuild(self):
         project = self.project()
         config = project.repo / ".oah" / "config.toml"
-        config.write_text(config.read_text(encoding="utf-8").replace('["gpt-test-a"]', '[]'), encoding="utf-8")
+        pools = re.sub(r'^(low|medium|high|max) = \["gpt-test-a"\]', r"\1 = []", config.read_text(encoding="utf-8"),
+                       flags=re.MULTILINE)
+        config.write_text(pools, encoding="utf-8")
         prepared = project.prepare(tier="low")
         self.assertEqual(prepared.model, "gpt-test-a")
         found = [warning for warning in prepared.warnings if warning.startswith("OAH_MODEL_NEW_UNPOOLED: ")]

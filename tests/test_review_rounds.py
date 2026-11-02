@@ -76,7 +76,8 @@ class Project:
             {"slug": "gpt-test-a", "is_default": True,
              "supported_reasoning_levels": [{"effort": level} for level in LEVELS]}]}), encoding="utf-8")
         command = [sys.executable, str(FAKE_REVIEWER), "--script", str(self.script)]
-        settings = f"[engines.codex]\ncommand = {toml_list(command)}\n" + config
+        order = "" if "quality_order" in config else 'quality_order = ["gpt-test-a"]\n'
+        settings = f"[engines.codex]\ncommand = {toml_list(command)}\n{order}" + config
         self.base = git_commit(self.repo, {".gitattributes": "* -text\n", "README.md": "hello\n",
                                            ".oah/config.toml": settings,
                                            ".oah/tasks/t1/PACKET.md": packet.replace("\n", newline).encode("utf-8"),
