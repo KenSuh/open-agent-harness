@@ -655,9 +655,14 @@ counts as off.
   afterwards that differs from the one before; `current` needs the tool's own "up to date" answer and a readable,
   unchanged version. Anything else is, whatever the exit code, `unverified`, `needs-confirmation` (a Claude Code
   plugin whose marketplace-declared command needs you; the line names the command to run yourself),
-  `unsupported` (clean help establishes that the command is absent, or no automatic update applies) or `failed`.
+  `unsupported` (the CLI is not installed, or clean help establishes that the command is absent) or `failed`.
+  One verdict checks all the evidence; unknown evidence cannot settle a result. An installed but unrunnable CLI
+  or malformed user-plugin inventory stays `unverified`. A readable empty user-plugin inventory is
+  `current`: there are no user plugins to update. A nonzero exit without a readable changed version is `unverified`.
   Failed or undecodable help is `unverified`; a help timeout is `failed` with "help timed out" and the help command
-  to run yourself. No update ran in that case.
+  to run yourself. No update ran in that case. A version timeout is also `failed`: before the update it says
+  "version check timed out"; afterwards it warns "timed out; the tool may be partly updated" and names the update
+  command to run yourself. Only `updated` and `current` record a settled version.
   Claude marketplace refresh is a separate component: installed Git revisions and the tool's "up to date"
   answer verify it; exit zero with no evidence stays `unverified`. The fixed list covers Claude Code, Codex,
   Claude marketplaces and Claude plugins, plus each discovered Claude plugin. A pass is `complete`

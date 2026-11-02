@@ -22,14 +22,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from oah.atomic import write_json_atomic, write_text_atomic
 from oah.config import ConfigError, load_config
+from oah.toolupdate.verdict import COMPLETE, SETTLED, STATUSES
 
 SECTION = "updates"
 DEFAULTS = {"after_finish": False, "interval_hours": 24.0, "timeout_seconds": 600.0}
 MAX_TIMEOUT_SECONDS = 86400.0
 FORMAT = 1
-STATUSES = ("updated", "current", "unverified", "needs-confirmation", "unsupported", "failed")
-SETTLED = ("updated", "current")
-COMPLETE = ("updated", "current", "unsupported")  # anything else makes a pass "needs-attention"
 TRIGGERS = ("after-finish", "manual")
 OUTCOMES = ("complete", "needs-attention")
 ENGINES = ("claude", "codex")

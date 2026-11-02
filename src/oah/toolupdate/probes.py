@@ -1,14 +1,9 @@
 # 도구 업데이트 판독 — CLI 를 argv 로만 실행해 엄격한 UTF-8 로 읽고, 도움말·버전·문구표·플러그인 목록·Codex 플러그인 설치 여부로 결과를 판정한다.
-"""What the pass reads from the tools, and the one rule that turns it into a status.
+"""What the pass reads from the tools, preserved as tri-state evidence for `verdict.decide`.
 
 `Cli.run` goes through `engines.proc.run_command` with the pass's timeout; output that is not strict UTF-8
 (the decoder had to replace a byte) marks the read unclean, and an unclean read never supplies a version or
 an "up to date" answer. A command is used only when the CLI's own `--help` lists it (`listed_commands`).
-
-`verdict` is AC5: `updated` only when the version read after is readable and differs from the one read
-before (whatever the exit code); `current` only when the tool said it is up to date, the exit code is 0
-and the version is readable and unchanged; otherwise `failed` (a timeout, or a non-zero exit) or
-`unverified`.
 
 PHRASES is the one table of answers the CLIs print; each entry has a test. Claude Code plugin updates
 answer in JSON (`updateOutcome`, `refreshFailed`, `failureCode`, `shownCommand`) and are read from fields.
@@ -30,7 +25,7 @@ from typing import Callable, Mapping
 from oah.engines import claude as claude_engine
 from oah.engines import codex as codex_engine
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
-from oah.toolupdate import records
+from oah.toolupdate import records, verdict
 
 REPLACEMENT = "�"
 PLUGIN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}@[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
@@ -57,22 +52,6 @@ CURRENT_PHRASES = {"claude": ("claude-current",), "codex": ("codex-current-homeb
 
 def said(name: str, text: str) -> bool:
     return PHRASES[name].search(text) is not None
-
-
-def verdict(before: str | None, after: str | None, *, said_current: bool, returncode: int | None,
-            timed_out: bool, clean: bool = True) -> str:
-    """AC5: the version read after decides `updated`; the tool's own answer plus an unchanged version, `current`."""
-    if timed_out:
-        return "failed"
-    if not clean:
-        return "unverified"
-    if before is not None and after is not None and after != before:
-        return "updated"
-    if returncode != 0:
-        return "failed"
-    if said_current and before is not None and after is not None:
-        return "current"
-    return "unverified"
 
 
 # Running a CLI -------------------------------------------------------------------------------------
@@ -124,15 +103,6 @@ def lists_flag(text: str, flag: str) -> bool:
     return re.search(rf"(?m)^ {{2,6}}(?:-[A-Za-z], )?{re.escape(flag)}\b", text or "") is not None
 
 
-@dataclasses.dataclass(frozen=True)
-class Capability:
-    """Listed, absent from clean help, or unknown with the reason the help could not be read."""
-
-    listed: bool | None
-    reason: str = ""
-    timed_out: bool = False
-
-
 class Cli:
     """One CLI resolved once on the pass's PATH; every command it runs is an argv list with a timeout."""
 
@@ -147,24 +117,36 @@ class Cli:
         except UnsupportedBatchShim:
             self.problem = (f"{label} is installed as a batch file oah does not run; install its native executable "
                             "(oah doctor shows how), then run oah update")
+            self.resolution = verdict.unknown(self.problem)
+            return
+        except OSError as exc:
+            self.problem = f"{label} could not be resolved ({type(exc).__name__}); run oah doctor, then oah update"
+            self.resolution = verdict.unknown(self.problem)
             return
         if found is None:
             self.problem = f"{label} is not installed; install it (oah doctor prints the command), then run oah update"
+            self.resolution = verdict.absent(self.problem)
             return
         self.base = found.argv
+        self.resolution = verdict.confirmed(found.argv)
 
     def run(self, *args: str) -> Ran:
         assert self.base is not None
-        result = run_command([*self.base, *args], timeout=self.timeout, cwd=str(self.cwd), env=self.env)
+        try:
+            result = run_command([*self.base, *args], timeout=self.timeout, cwd=str(self.cwd), env=self.env)
+        except OSError as exc:
+            return Ran(None, "", "", False, type(exc).__name__)
         return Ran(result.returncode, result.stdout, result.stderr, result.timed_out)
 
-    def version(self) -> str | None:
+    def version(self) -> verdict.Evidence:
         """The installed version from `<cli> --version`, read with the existing version parsers."""
         ran = self.run("--version")
-        if not ran.ok:
-            return None
+        problem = read_problem(ran, "version check")
+        if problem is not None:
+            return problem
         parse = codex_engine.parse_version if self.name == "codex" else claude_engine.parse_version
-        return parse(ran.stdout)
+        version = parse(ran.stdout)
+        return verdict.confirmed(version) if version else verdict.unknown("version could not be read")
 
     def help(self, *path: str) -> Ran:
         if path not in self._help:
@@ -174,26 +156,47 @@ class Cli:
                 self._help[path] = Ran(None, "", "", False, type(exc).__name__)
         return self._help[path]
 
-    def _probe_help(self, path: tuple[str, ...], matches: Callable[[str], bool]) -> Capability:
+    def _probe_help(self, path: tuple[str, ...], matches: Callable[[str], bool]) -> verdict.Evidence:
         ran = self.help(*path)
         command = " ".join((self.name, *path, "--help"))
         step = f"run {command} yourself to check support, then run oah update"
-        if ran.timed_out:
-            return Capability(None, f"help timed out; {step}", timed_out=True)
-        if not ran.clean:
-            return Capability(None, f"help was not clean UTF-8; {step}")
-        if ran.problem:
-            return Capability(None, f"help could not be read ({ran.problem}); {step}")
-        if not ran.ok:
-            return Capability(None, f"help could not be read (exit {ran.returncode}); {step}")
-        return Capability(matches(ran.stdout))
+        problem = read_problem(ran, "help")
+        if problem is not None:
+            return verdict.unknown(f"{problem.reason}; {step}", timed_out=problem.timed_out)
+        return verdict.confirmed(True) if matches(ran.stdout) else verdict.absent()
 
-    def lists(self, *path: str) -> Capability:
+    def lists(self, *path: str) -> verdict.Evidence:
         """Whether clean `<cli> <parent> --help` lists the last word, or why that is unknown."""
         return self._probe_help(path[:-1], lambda text: path[-1] in listed_commands(text))
 
-    def has_flag(self, path: tuple[str, ...], flag: str) -> Capability:
+    def has_flag(self, path: tuple[str, ...], flag: str) -> verdict.Evidence:
         return self._probe_help(path, lambda text: lists_flag(text, flag))
+
+
+def read_problem(ran: Ran, what: str) -> verdict.Evidence | None:
+    if ran.timed_out:
+        return verdict.unknown(f"{what} timed out", timed_out=True)
+    if not ran.clean:
+        return verdict.unknown(f"{what} was not clean UTF-8")
+    if ran.problem:
+        return verdict.unknown(f"{what} could not be read ({ran.problem})")
+    if not ran.ok:
+        return verdict.unknown(f"{what} could not be read (exit {ran.returncode})")
+    return None
+
+
+def update_evidence(ran: Ran, before: verdict.Evidence, after: verdict.Evidence, *,
+                    said_current: bool, confirmation: bool = False) -> verdict.Evidence:
+    """A readable changed version can verify a nonzero exit, but never a timeout or undecodable output."""
+    if ran.timed_out or not ran.clean or ran.problem:
+        return read_problem(ran, "update")
+    if before.state == after.state == "confirmed" and before.value != after.value:
+        return verdict.confirmed(verdict.CHANGED)
+    if confirmation:
+        return verdict.confirmed(verdict.CONFIRMATION)
+    if ran.ok and said_current:
+        return verdict.confirmed(verdict.UP_TO_DATE)
+    return read_problem(ran, "update") or verdict.unknown("the tool did not report an up-to-date result")
 
 
 # Claude Code plugins -------------------------------------------------------------------------------
@@ -210,11 +213,16 @@ def user_plugins(stdout: str) -> dict[str, str | None] | None:
         return None
     found: dict[str, str | None] = {}
     for entry in data:
-        if not isinstance(entry, dict) or entry.get("scope") != "user":
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("scope") in ("project", "local", "managed"):
             continue
+        if entry.get("scope") != "user":
+            return None
         ident = entry.get("id")
-        if (not isinstance(ident, str) or not PLUGIN_ID_RE.fullmatch(ident)
-                or ident.rpartition("@")[2] in SPECIAL_MARKETPLACES):
+        if not isinstance(ident, str) or not PLUGIN_ID_RE.fullmatch(ident) or ident in found:
+            return None
+        if ident.rpartition("@")[2] in SPECIAL_MARKETPLACES:
             continue
         version = entry.get("version")
         readable = isinstance(version, str) and VERSION_RE.fullmatch(version) and version != "unknown"

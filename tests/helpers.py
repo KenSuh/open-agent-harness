@@ -1,6 +1,7 @@
 # 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout), 점수 받기용 가짜 연결과 네트워크 차단을 만든다.
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -111,6 +112,9 @@ def isolate_git_home(test: unittest.TestCase, home: pathlib.Path) -> dict[str, s
     return isolated
 
 
+_TOOLUPDATE_ALLOWLISTS = []
+
+
 def guard_subprocesses(test: unittest.TestCase, allowed) -> list[list[str]]:
     """Guard setup as well as the operation; a swallowed refusal still fails at cleanup."""
     import subprocess
@@ -127,8 +131,47 @@ def guard_subprocesses(test: unittest.TestCase, allowed) -> list[list[str]]:
         return real_popen(args, *rest, **options)
 
     test.enterContext(mock.patch("subprocess.Popen", guarded))
+    _TOOLUPDATE_ALLOWLISTS.append(allowed)
+    test.addCleanup(_TOOLUPDATE_ALLOWLISTS.remove, allowed)
     test.addCleanup(lambda: test.assertEqual(violations, []))
     return launched
+
+
+@contextlib.contextmanager
+def toolupdate_module_isolation():
+    """A baseline guard before any class setup, including a setup that forgets its base class."""
+    import subprocess
+
+    from oah import paths
+    from oah.toolupdate import records
+    from oah.toolupdate import run as passes
+
+    baseline = unittest.TestCase()
+    try:
+        baseline.home = make_tmp_dir(baseline) / "home"
+        isolate_git_home(baseline, baseline.home)
+        baseline.enterContext(mock.patch.object(records, "home", return_value=baseline.home))
+        baseline.enterContext(mock.patch.object(pathlib.Path, "home", return_value=baseline.home))
+        baseline.enterContext(mock.patch.dict(os.environ, {
+            "CODEX_HOME": str(baseline.home / ".codex"), "CLAUDE_CONFIG_DIR": str(baseline.home / ".claude")}))
+        for name in ("OAH_WORKER", "OAH_STATE_DIR", "OAH_KIT_DIR"):
+            os.environ.pop(name, None)
+        git = paths.git_argv()[0]
+        real_popen = subprocess.Popen
+
+        def guarded(args, *rest, **options):
+            argv = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+            allowed = bool(argv) and (argv[0] in ("git", git) or
+                                      any(check(argv) for check in _TOOLUPDATE_ALLOWLISTS))
+            if not allowed or options.get("shell"):
+                raise AssertionError(f"a test tried to start a program outside its allowlist: {argv[:1]}")
+            return real_popen(args, *rest, **options)
+
+        baseline.enterContext(mock.patch("subprocess.Popen", guarded))
+        baseline.enterContext(mock.patch.object(passes, "_popen", guarded))
+        yield baseline
+    finally:
+        baseline.doCleanups()
 
 
 class ToolUpdateTestCase(unittest.TestCase):

@@ -12,8 +12,23 @@ from unittest import mock
 from oah import paths, update_cli
 from oah.cli import build_parser, main
 from oah.toolupdate import records
-from tests.helpers import ToolUpdateTestCase, guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
+from tests.helpers import (ToolUpdateTestCase, guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir,
+                           toolupdate_module_isolation)
 from tests.test_toolupdate import FakeToolsCase
+
+_module_isolation = None
+
+
+def setUpModule():
+    global _module_isolation
+    _module_isolation = toolupdate_module_isolation()
+    _module_isolation.__enter__()
+
+
+def tearDownModule():
+    global _module_isolation
+    _module_isolation.__exit__(None, None, None)
+    _module_isolation = None
 
 
 class UpdateCliTest(FakeToolsCase):
@@ -100,6 +115,49 @@ class UpdateCliTest(FakeToolsCase):
 
 
 class RepositorySetupIsolationTest(ToolUpdateTestCase):
+    def test_module_guards_protect_a_broken_setup(self):
+        from tests import test_toolupdate, test_update_cli
+
+        for module in (test_toolupdate, test_update_cli):
+            self.assertTrue(callable(getattr(module, "setUpModule", None)), module.__name__)
+            self.assertTrue(callable(getattr(module, "tearDownModule", None)), module.__name__)
+            if module.__name__ == type(self).__module__:
+                self.assertIsNotNone(module._module_isolation)
+
+        from oah.toolupdate import probes
+        from oah.toolupdate import run as passes
+        launches = (lambda: subprocess.Popen(["claude", "--version"]),
+                    lambda: probes.run_command(["codex", "--version"], timeout=1),
+                    lambda: passes._popen(["npm", "--version"]))
+        for launch in launches:
+            with self.subTest(launch=launch), mock.patch("subprocess.Popen") as escaped:
+                with toolupdate_module_isolation() as baseline:
+                    seen = []
+
+                    class BrokenSetup(ToolUpdateTestCase):
+                        def setUp(self):
+                            seen.append((pathlib.Path.home(), records.home(), dict(os.environ)))
+                            launch()  # This deliberately never calls the base setUp.
+
+                        def runTest(self):
+                            self.fail("the module guard did not stop the setup command")
+
+                    result = unittest.TestResult()
+                    BrokenSetup().run(result)
+                    self.assertFalse(result.wasSuccessful())
+                    self.assertIn("outside its allowlist", str(result.failures) + str(result.errors))
+                    observed_home, record_home, env = seen[0]
+                    self.assertEqual((observed_home, record_home), (baseline.home, baseline.home))
+                    self.assertNotEqual(observed_home, self.home)
+                    self.assertEqual(env["HOME"], env["USERPROFILE"])
+                    self.assertEqual(env["HOME"], str(baseline.home))
+                    self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+                    self.assertEqual(env["GIT_CONFIG_KEY_0"], "core.hooksPath")
+                    for key in ("GIT_TEMPLATE_DIR", "GIT_CONFIG_VALUE_0", "XDG_CONFIG_HOME"):
+                        self.assertEqual(list(pathlib.Path(env[key]).iterdir()), [])
+                    self.assertEqual(pathlib.Path(env["GIT_CONFIG_GLOBAL"]).read_bytes(), b"")
+                escaped.assert_not_called()
+
     def test_setup_ignores_a_hostile_global_git_hook_and_guards_setup_commands(self):
         from tests.test_lease_cli import FinishStartsToolUpdatesTest
         from tests.test_doctor import ToolUpdateDoctorTest

@@ -619,9 +619,14 @@ flowchart LR
 - **결과 확인.** 단계마다 버전을 앞뒤로 읽는다. `updated`는 뒤에 읽은 버전을 읽을 수 있고 앞과 달라야 하고,
   `current`는 도구가 스스로 최신이라고 답했고 버전을 읽을 수 있으며 바뀌지 않아야 한다. 그 밖에는 종료 코드와
   상관없이 `unverified`, `needs-confirmation`(마켓플레이스가 선언한 명령에 사람의 확인이 필요한 Claude Code
-  플러그인이며, 직접 실행할 명령을 줄에 적는다), `unsupported`(깨끗하게 읽은 도움말로 명령이 없음을 확인했거나 자동
-  갱신할 대상이 없다), `failed` 가운데 하나다. 도움말을 읽지 못하거나 UTF-8이 깨졌으면 `unverified`다. 도움말 시간
-  초과는 `failed`와 «help timed out» 및 직접 실행할 도움말 명령을 남긴다. 이때는 업데이트를 실행하지 않았다.
+  플러그인이며, 직접 실행할 명령을 줄에 적는다), `unsupported`(CLI가 설치되지 않았거나 깨끗하게 읽은 도움말로
+  명령이 없음을 확인했다), `failed` 가운데 하나다. 하나의 판정 함수가 모든 근거를 확인한다. 설치됐지만 실행할 수
+  없는 CLI, 잘못된 사용자 플러그인 목록 등 미확인 근거가 있으면 `unverified`이며 결과를 확인 완료로 기록하지 않는다.
+  사용자 플러그인 목록을 읽었고 비어 있으면 갱신할 플러그인이 없으므로 `current`다. 종료 코드가 0이 아니고 읽을 수 있는
+  버전 변화도 없으면 `unverified`다. 도움말을 읽지 못하거나 UTF-8이 깨졌으면 `unverified`다. 도움말 시간 초과는
+  `failed`와 «help timed out» 및 직접 실행할 도움말 명령을 남긴다. 이때는 업데이트를 실행하지 않았다. 버전 확인 시간
+  초과도 `failed`다. 갱신 전에는 «version check timed out», 갱신 뒤에는 «timed out; the tool may be partly updated»와
+  직접 실행할 업데이트 명령을 남긴다. `updated`와 `current`만 확인된 버전을 기록한다.
   Claude 마켓플레이스 갱신은 별도 구성요소이며, 설치된 Git 리비전과 도구의 최신이라는
   답으로 확인한다. 근거 없이 종료 코드만 0이면 `unverified`다. 고정 목록은 Claude Code, Codex, Claude 마켓플레이스,
   Claude 플러그인이고, 발견한 Claude 플러그인도 각각 기록한다. 필수 구성요소마다 `updated`, `current`,

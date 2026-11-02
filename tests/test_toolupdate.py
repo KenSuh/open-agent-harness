@@ -1,7 +1,9 @@
 # 도구 업데이트 패스 검사 — 임시 홈과 가짜 claude·codex 만 있는 bin 폴더에서 스위치·판정·기록·잠금·Codex 플러그인 수동 업데이트 안내·실행 중 세션 안내를 본다.
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import itertools
 import json
 import os
 import pathlib
@@ -15,7 +17,21 @@ from unittest import mock
 from oah.lockfile import StateLock
 from oah.toolupdate import probes, records, steps
 from oah.toolupdate import run as passes
-from tests.helpers import ToolUpdateTestCase, make_tmp_dir, require_node
+from tests.helpers import ToolUpdateTestCase, make_tmp_dir, require_node, toolupdate_module_isolation
+
+_module_isolation = None
+
+
+def setUpModule():
+    global _module_isolation
+    _module_isolation = toolupdate_module_isolation()
+    _module_isolation.__enter__()
+
+
+def tearDownModule():
+    global _module_isolation
+    _module_isolation.__exit__(None, None, None)
+    _module_isolation = None
 
 FORBIDDEN_WORDS = {"-y", "--yes", "--accept-command", "mcp"}
 FORBIDDEN_PROGRAMS = {"npm", "npx", "brew", "ps", "tasklist", "pgrep", "pkill", "kill", "taskkill"}
@@ -449,6 +465,8 @@ class ParserTest(ToolUpdateTestCase):
                 self.assertFalse(probes.said(name, no))
 
     def test_verdict_is_ac5(self):
+        from oah.toolupdate import verdict
+
         rows = [  # before, after, said current, exit, timed out -> status
             ("1", "2", False, 0, False, "updated"),
             ("1", "2", False, 1, False, "updated"),
@@ -457,14 +475,82 @@ class ParserTest(ToolUpdateTestCase):
             ("1", None, True, 0, False, "unverified"),
             (None, "1", True, 0, False, "unverified"),
             (None, None, True, 0, False, "unverified"),
-            ("1", "1", True, 1, False, "failed"),
-            ("1", None, False, 1, False, "failed"),
+            ("1", "1", True, 1, False, "unverified"),
+            ("1", None, False, 1, False, "unverified"),
             ("1", "2", True, None, True, "failed"),
         ]
         for before, after, said, code, timed_out, expected in rows:
             with self.subTest(before=before, after=after, said=said, code=code, timed_out=timed_out):
-                self.assertEqual(probes.verdict(before, after, said_current=said, returncode=code,
-                                                timed_out=timed_out), expected)
+                old = verdict.confirmed(before) if before else verdict.unknown("unreadable before version")
+                new = verdict.confirmed(after) if after else verdict.unknown("unreadable after version")
+                ran = probes.Ran(code, "", "", timed_out)
+                evidence = verdict.ComponentEvidence(
+                    kind="cli", command="claude update", cli=verdict.confirmed("claude"),
+                    help=verdict.confirmed(True), before=old, after=new,
+                    update=probes.update_evidence(ran, old, new, said_current=said), attempted=True)
+                self.assertEqual(verdict.decide(evidence)[0], expected)
+
+    def test_every_evidence_combination_obeys_the_verdict_invariants(self):
+        from oah.toolupdate import verdict
+
+        observed = set()
+        for kind in ("cli", "marketplace", "plugin", "plugins"):
+            fields = {"cli": "/fake/cli", "help": True, "before": "1", "after": "2",
+                      "update": verdict.UP_TO_DATE}
+            if kind in ("plugin", "plugins"):
+                fields["inventory"] = {"good@m": "2"}
+            choices = []
+            for name, value in fields.items():
+                confirmed = [verdict.confirmed(value)]
+                if name == "after":
+                    confirmed.append(verdict.confirmed("1"))
+                if name == "update" and kind in ("plugin", "plugins"):
+                    confirmed.append(verdict.confirmed(verdict.CONFIRMATION))
+                choices.append((*confirmed, verdict.absent(), verdict.unknown(name),
+                                verdict.unknown(name + " timed out", timed_out=True)))
+            for combination in itertools.product(*choices):
+                evidence = verdict.ComponentEvidence(kind=kind, command="claude update", attempted=True,
+                                                       **dict(zip(fields, combination)))
+                status, reason, next_step = verdict.decide(evidence)
+                observed.add(status)
+                unknowns = [item for item in combination if item.state == "unknown"]
+                message = (kind, combination, status)
+                if unknowns:
+                    self.assertNotIn(status, ("updated", "current", "unsupported"), message)
+                if any(item.timed_out for item in unknowns):
+                    self.assertEqual(status, "failed", message)
+                    self.assertIn("timed out; the tool may be partly updated", reason)
+                    self.assertIn(evidence.command, next_step)
+                if status == "unsupported":
+                    self.assertTrue(evidence.cli.state == "absent" or evidence.help.state == "absent", message)
+                if status in ("updated", "current"):
+                    self.assertTrue(all(item.state == "confirmed" for item in combination), message)
+                self.assertIn(status, records.STATUSES)
+        self.assertEqual(observed, set(records.STATUSES))
+        self.assertEqual(observed, set(verdict.STATUSES))
+
+    def test_confirmation_verdict_only_applies_to_plugin_components(self):
+        from oah.toolupdate import verdict
+
+        statuses = set()
+        for kind in ("cli", "marketplace", "plugin", "plugins"):
+            evidence = verdict.ComponentEvidence(kind=kind, command="claude plugin update a@m",
+                cli=verdict.confirmed("claude"), help=verdict.confirmed(True),
+                before=verdict.confirmed("1"), after=verdict.confirmed("1"),
+                inventory=verdict.confirmed({"a@m": "1"}) if kind in ("plugin", "plugins") else None,
+                update=verdict.confirmed(verdict.CONFIRMATION), attempted=True)
+            status, _reason, next_step = verdict.decide(evidence)
+            statuses.add(status)
+            self.assertEqual(status, "needs-confirmation" if kind in ("plugin", "plugins") else "unverified")
+            self.assertIn(evidence.command, next_step)
+        self.assertEqual(statuses, {"needs-confirmation", "unverified"})
+
+    def test_steps_and_run_cannot_choose_status_literals(self):
+        for module in (steps, passes):
+            tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+            literals = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                        and isinstance(node.value, str) and node.value in records.STATUSES]
+            self.assertEqual(literals, [], module.__name__)
 
     def test_plugin_list_keeps_user_scope_plugins(self):
         listing = json.dumps([
@@ -473,13 +559,22 @@ class ParserTest(ToolUpdateTestCase):
             {"id": "local@corp", "version": "1.0.0", "scope": "local", "enabled": True},
             {"id": "mine@skills-dir", "version": "1.0.0", "scope": "user", "enabled": True},
             {"id": "odd@m", "version": "unknown", "scope": "user", "enabled": True},
-            {"id": "-x@m", "version": "1.0.0", "scope": "user"},
             {"id": "long@m", "version": "1" * 200, "scope": "user"},
         ])
         self.assertEqual(probes.user_plugins(listing),
                          {"superpowers@claude-plugins-official": "5.1.0", "odd@m": None, "long@m": None})
+        self.assertIsNone(probes.user_plugins(json.dumps(json.loads(listing) + [
+            {"id": "-x@m", "version": "1.0.0", "scope": "user"}])))
         self.assertEqual(probes.user_plugins(json.dumps({"installed": [], "available": []})), {})
         self.assertIsNone(probes.user_plugins("Installed plugins:\n"))
+
+    def test_mixed_valid_and_malformed_plugin_list_is_unreadable(self):
+        good = {"id": "good@m", "version": "1", "scope": "user"}
+        for bad in ({"scope": "user", "version": "1"}, {"id": "-x@m", "scope": "user"},
+                    {"id": "good@m", "scope": "user", "version": "2"},
+                    {"id": "other@m", "scope": "mystery"}, "broken", {}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(probes.user_plugins(json.dumps([good, bad])))
 
     def test_plugin_update_result_line(self):
         ok = {"command": "update", "outcome": "ok", "updateOutcome": "up_to_date", "nonce": "n"}
@@ -504,6 +599,112 @@ class ParserTest(ToolUpdateTestCase):
 
 
 class PassTest(FakeToolsCase):
+    def test_plugin_confirmation_keeps_a_partly_changed_group_unsettled(self):
+        self.fake.set("claude", plugins=[{"id": ident, "scope": "user", "version": "1"}
+                                         for ident in ("fresh@m", "risky@m")], plugin_update={
+            "fresh@m": {"set_version": "2"},
+            "risky@m": {"exit": 1, "json": {"command": "update", "outcome": "failed",
+                                             "failureCode": "command_source_refused"}}})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        group = self.components()["claude-plugins"]
+        self.assertNotIn(group["status"], records.SETTLED)
+        self.assertIsNone(group["settled_version"])
+        self.assertIn("claude plugin update risky@m", group["next_step"])
+
+    def test_plugin_update_timeout_fails_the_group_with_the_update_command(self):
+        self.fake.set("claude", plugins=[{"id": "slow@m", "scope": "user", "version": "1"}])
+        run = probes.Cli.run
+
+        def timeout(cli, *args):
+            if args == ("plugin", "update", "slow@m", "--scope", "user", "--json"):
+                return probes.Ran(None, "", "", True)
+            return run(cli, *args)
+
+        with mock.patch.object(probes.Cli, "run", timeout):
+            self.assertEqual(self.run_pass(), "needs-attention")
+        for name in ("claude-plugin:slow@m", "claude-plugins"):
+            entry = self.components()[name]
+            self.assertEqual((entry["status"], entry["settled_version"]), ("failed", None))
+            self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+            self.assertIn("claude plugin update slow@m", entry["next_step"])
+
+    def test_post_update_inventory_errors_cannot_settle_members_or_group(self):
+        good = {"id": "good@m", "scope": "user", "version": "1"}
+        self.fake.set("claude", plugins=[good], plugin_update={"good@m": {"json": {
+            "command": "update", "outcome": "ok", "updateOutcome": "up_to_date"}}})
+        run = probes.Cli.run
+        for problem, expected in ((probes.Ran(0, json.dumps([good, {"scope": "user"}]), "", False), "unverified"),
+                                  (probes.Ran(None, "", "", True), "failed")):
+            with self.subTest(problem=problem):
+                calls = 0
+
+                def unreadable(cli, *args):
+                    nonlocal calls
+                    if args == ("plugin", "list", "--json"):
+                        calls += 1
+                        if calls == 2:
+                            return problem
+                    return run(cli, *args)
+
+                with mock.patch.object(probes.Cli, "run", unreadable):
+                    self.assertEqual(self.run_pass(), "needs-attention")
+                for name in ("claude-plugin:good@m", "claude-plugins"):
+                    entry = self.components()[name]
+                    self.assertEqual((entry["status"], entry["settled_version"]), (expected, None))
+
+    def test_malformed_user_inventory_never_settles_the_plugin_group(self):
+        good = {"id": "good@m", "scope": "user", "version": "1"}
+        self.fake.set("claude", plugins=[good, {"scope": "user", "version": "1"}],
+                      plugin_update={"good@m": {"json": {"command": "update", "outcome": "ok",
+                                                         "updateOutcome": "up_to_date"}}})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["claude-plugins"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
+        self.assertIn("inventory", entry["next_step"])
+
+    def test_unrunnable_installed_cli_and_dependents_are_unverified(self):
+        resolve = probes.resolve_command
+        for tool, names in (("claude", ("claude", "claude-marketplaces", "claude-plugins")),
+                            ("codex", ("codex",))):
+            with self.subTest(tool=tool):
+                def shim(name, search_path):
+                    if name == tool:
+                        raise probes.UnsupportedBatchShim(str(self.fake.bin / (name + ".cmd")), "no native entry")
+                    return resolve(name, search_path)
+
+                self.fake.log.unlink(missing_ok=True)
+                with mock.patch.object(probes, "resolve_command", side_effect=shim):
+                    self.assertEqual(self.run_pass(), "needs-attention")
+                for name in names:
+                    entry = self.components()[name]
+                    self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
+                    self.assertIn("batch file", entry["next_step"])
+                    self.assertIn("native executable", entry["next_step"])
+                self.assertFalse(any(name == tool for name, _argv in self.fake.argv()))
+
+    def test_version_timeouts_before_and_after_are_failed_with_the_command(self):
+        run = probes.Cli.run
+        for tool in ("claude", "codex"):
+            for phase in ("before", "after"):
+                with self.subTest(tool=tool, phase=phase):
+                    calls = 0
+
+                    def version_timeout(cli, *args):
+                        nonlocal calls
+                        if cli.name == tool and args == ("--version",):
+                            calls += 1
+                            if calls == (1 if phase == "before" else 2):
+                                return probes.Ran(None, "", "", True)
+                        return run(cli, *args)
+
+                    with mock.patch.object(probes.Cli, "run", version_timeout):
+                        self.assertEqual(self.run_pass(), "needs-attention")
+                    entry = self.components()[tool]
+                    self.assertEqual((entry["status"], entry["settled_version"]), ("failed", None))
+                    self.assertIn("version check timed out" if phase == "before" else
+                                  "timed out; the tool may be partly updated", entry["next_step"])
+                    self.assertIn(f"{tool} update", entry["next_step"])
+
     def test_marketplace_success_without_evidence_is_unverified(self):
         self.fake.set("claude", marketplace_update={"stdout": "arbitrary output\n"})
         self.assertEqual(self.run_pass(), "needs-attention")
@@ -575,7 +776,7 @@ class PassTest(FakeToolsCase):
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
                          {"claude": "current", "codex": "current", "claude-marketplaces": "current",
-                          "claude-plugins": "unsupported"})
+                          "claude-plugins": "current"})
         self.assertEqual(components["claude"]["settled_version"], "2.1.316")
         self.assertTrue(self.fake.ran("claude", "update"))
         self.assertTrue(self.fake.ran("codex", "update"))
@@ -620,11 +821,11 @@ class PassTest(FakeToolsCase):
         self.run_pass()
         self.assertEqual(self.components()["codex"]["status"], "updated")
 
-    def test_non_zero_exit_with_the_same_version_is_failed(self):
+    def test_non_zero_exit_with_the_same_version_is_unverified(self):
         self.fake.set("codex", update={"stderr": "Failed\n", "exit": 1})
         self.run_pass()
         entry = self.components()["codex"]
-        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["status"], "unverified")
         self.assertIn("run codex update yourself", entry["next_step"])
 
     def test_subcommand_missing_from_help_is_unsupported_and_not_run(self):
@@ -719,7 +920,7 @@ class PassTest(FakeToolsCase):
                                                       "up_to_date", "refreshFailed": True}}})
         self.assertEqual(self.run_pass(), "needs-attention")
         components = self.components()
-        self.assertEqual(components["claude-marketplaces"]["status"], "failed")
+        self.assertEqual(components["claude-marketplaces"]["status"], "unverified")
         self.assertEqual(components["claude-plugin:a@m"]["status"], "unverified")
 
     def test_skills_keep_their_daily_check_outside_the_pass(self):
@@ -858,6 +1059,7 @@ class SessionsTest(FakeToolsCase):
 
     def test_windows_cleanup_terminates_and_closes_only_the_started_job(self):
         from oah.engines import proc
+        from oah.toolupdate import verdict
 
         cli = probes.Cli("claude", "Claude Code", env=self.fake.env, timeout=0.1, cwd=self.root)
         context = steps.Context(self.fake.env, records.stamp(records.utc_now()), cli, cli)
@@ -873,8 +1075,9 @@ class SessionsTest(FakeToolsCase):
                 with mock.patch.object(proc, "os", windows), mock.patch.object(proc, "_WindowsJob", return_value=job), \
                         mock.patch.object(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
                         mock.patch.object(proc.subprocess, "Popen", return_value=command) as launch, \
-                        mock.patch.object(cli, "version", side_effect=["1", "2"]), \
-                        mock.patch.object(cli, "lists", return_value=probes.Capability(True)):
+                        mock.patch.object(cli, "version", side_effect=[
+                            verdict.confirmed("1"), verdict.confirmed("2")]), \
+                        mock.patch.object(cli, "lists", return_value=verdict.confirmed(True)):
                     entry = steps.cli_update(context, cli)["claude"]
                 launch.assert_called_once()
                 self.assertEqual(launch.call_args.args[0], [*cli.base, "update"])
@@ -1395,7 +1598,7 @@ class DoctorNoticesTest(FakeToolsCase):
         launched = len(self.launched)
         notices = passes.doctor_notices(self.root)
         self.assertEqual([(notice["code"], notice.get("component")) for notice in notices],
-                         [("OAH_UPDATE_UNSETTLED", "codex"), ("OAH_UPDATE_UNSETTLED", "claude-plugins")])
+                         [("OAH_UPDATE_UNSETTLED", "codex")])
         self.assertIn("(unverified); run codex update yourself", notices[0]["message"])
         self.assertEqual(len(self.launched), launched)  # doctor stays offline: it reads the records only
 

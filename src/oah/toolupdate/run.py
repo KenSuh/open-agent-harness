@@ -31,7 +31,7 @@ from oah.journal import PendingTransaction
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
 from oah.runs import RUN_ID_RE, TERMINAL, RunError, _contained_path, task_directory
-from oah.toolupdate import records, steps
+from oah.toolupdate import records, steps, verdict
 from oah.toolupdate.probes import Cli, codex_plugins_installed
 from oah.toolupdate.steps import CODEX_PLUGINS_NOTE, RESTART_NOTE, SKILLS_NOTE, label
 
@@ -117,7 +117,7 @@ def _show(version: str | None) -> str:
 def component_line(name: str, entry: Mapping) -> str:
     """One plain line for a component."""
     before, after, status = _show(entry["before"]), _show(entry["after"]), entry["status"]
-    if status == "updated":
+    if status == verdict.UPDATED:
         versions = f" {before} -> {after}"
     else:
         versions = f" {after or before}" if after or before else ""
@@ -235,9 +235,9 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
         if records.COMPONENT_RE.fullmatch(name):
             components[name] = entry
     for name in records.COMPONENTS:
-        components.setdefault(name, records.component("unverified", None, None,
-            "this step recorded no result; run oah update to check it again", context.checked_at))
-    refresh = [engine for engine in records.ENGINES if components.get(engine, {}).get("status") == "updated"]
+        if name not in components:
+            components[name] = steps.missing(context)
+    refresh = [engine for engine in records.ENGINES if components.get(engine, {}).get("status") == verdict.UPDATED]
     result = records.outcome(components)
     finished = records.stamp(now())
     records.write_state({"version": records.FORMAT, "last_started": records.stamp(started), "trigger": trigger,
@@ -246,7 +246,7 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     records.append_run({"version": records.FORMAT, "started": records.stamp(started), "finished": finished,
                         "trigger": trigger, "outcome": result, "components": components, "models_refresh": refresh})
     for name in sorted(components, key=_order):
-        if components[name]["status"] != "current":
+        if components[name]["status"] != verdict.CURRENT:
             out(component_line(name, components[name]))
     if refresh:
         out(f"oah: {MODELS_NOTE} ({', '.join(steps.LABELS[engine] for engine in refresh)} changed)")
@@ -337,7 +337,7 @@ def status_lines() -> list[str]:
     if record["models_refresh"]:
         changed = ", ".join(steps.LABELS[engine] for engine in record["models_refresh"])
         lines.append(f"oah: {MODELS_NOTE} ({changed} changed)")
-    if any(entry["status"] == "updated" for entry in components.values()):
+    if any(entry["status"] == verdict.UPDATED for entry in components.values()):
         lines.append(f"oah: {RESTART_NOTE}")
     return lines
 
