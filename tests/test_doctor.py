@@ -807,9 +807,10 @@ class AgentFileDoctorTest(unittest.TestCase):
     """oah doctor names an edited subagent file, and a stale one when no session-start hook will update it."""
 
     def setUp(self):
-        from tests.fixtures.toolkit.registry import forbid_network
-
-        forbid_network(self)
+        network = mock.patch("socket.create_connection", side_effect=AssertionError("no network"))
+        self.network = network.start()
+        self.addCleanup(network.stop)
+        self.addCleanup(self.network.assert_not_called)
         self.repo = make_git_repo(self)
         self.state = make_tmp_dir(self) / "state"
         Catalog(self.state)._save(Entry("claude", "2.1.316", "2026-11-02T00:00:00Z",
@@ -866,9 +867,13 @@ class AgentFileDoctorTest(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
                     mock.patch.object(doctor, "project_root", return_value=self.repo), \
-                    mock.patch.dict(os.environ, self.env), mock.patch("oah.models.run_command", side_effect=forbidden), \
-                    mock.patch.object(Catalog, "ensure_fresh", side_effect=forbidden), contextlib.redirect_stdout(out):
+                    mock.patch.dict(os.environ, self.env), \
+                    mock.patch("oah.models.run_command", side_effect=forbidden) as run, \
+                    mock.patch.object(Catalog, "ensure_fresh", side_effect=forbidden) as fresh, \
+                    contextlib.redirect_stdout(out):
                 code = doctor.doctor_main(json_output=json_output)
+            run.assert_not_called()
+            fresh.assert_not_called()
             self.assertEqual(code, 0, out.getvalue())
             if json_output:
                 self.assertEqual([item["code"] for item in json.loads(out.getvalue())["agent_notices"]],
