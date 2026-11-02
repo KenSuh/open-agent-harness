@@ -333,8 +333,9 @@ def check_catalog(engine: str, settings: Settings, *, state_dir: pathlib.Path, e
     base = models.resolve_base(engine, settings.engines[engine]["command"])
     catalog = _catalog(state_dir)
     known = _families()
+    aliases = tuple(known["engines"]["claude"]["aliases"]) if engine == "claude" and known is not None else ()
     freshness = catalog.ensure_fresh(engine, base=base, env=env, ttl_hours=settings.models["ttl_hours"],
-                                     refresh=refresh, now=now, persist=persist)
+                                     refresh=refresh, now=now, persist=persist, aliases=aliases)
     rebuilt = bool(freshness.refreshed) and persist
     previous = freshness.previous if rebuilt else None
     chosen = benchmarks.data_for(engine, freshness.entry, catalog=catalog, settings=settings.models, known=known,

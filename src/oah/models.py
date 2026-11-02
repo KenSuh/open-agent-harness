@@ -4,7 +4,8 @@
 Catalog
     `Catalog(state_dir)` keeps `<state>/models/catalog.json`: per engine the CLI version, when it was
     checked, and the models the CLI reports (Codex: `models_cache.json` with each model's
-    `supported_reasoning_levels`; Claude: the aliases and effort levels in `claude --help`).
+    `supported_reasoning_levels`; Claude: the aliases and effort levels in `claude --help`, plus each known alias
+    the help omits that the free alias check confirms, `oah.engines.claude_alias`).
     `ensure_fresh` runs before every launch: it probes `<cli> --version` and rebuilds the entry when
     the version changed, the TTL passed or a refresh was asked for. Entries missing explicit visibility
     metadata are invalidated first. A rebuild that reads no models keeps the last valid entry and warns
@@ -71,7 +72,7 @@ from typing import Callable, Literal, Mapping, Sequence
 from oah import scoring
 from oah.atomic import (RETRY_SECONDS, StateCorrupt, StorageError, _retry_permission, append_jsonl, read_json,
                         read_jsonl, write_json_atomic)
-from oah.engines import claude, codex
+from oah.engines import claude, claude_alias, codex
 from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, highest, rank, resolve
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
@@ -224,8 +225,12 @@ def probe_version(engine: str, base: Sequence[str], env: Mapping[str, str]) -> s
     return (codex.parse_version if engine == "codex" else claude.parse_version)(result.stdout)
 
 
-def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str]) -> tuple[tuple[ModelInfo, ...], str]:
-    """The models the CLI reports now, and where they were read; an empty tuple means none were readable."""
+def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str],
+                 aliases: Sequence[str] = ()) -> tuple[tuple[ModelInfo, ...], str]:
+    """The models the CLI reports now, and where they were read; an empty tuple means none were readable.
+
+    For Claude, a known alias in `aliases` that the help omits is listed when the free alias check confirms it. A
+    help text that names no alias stops here, so the last good entry stays in use."""
     if engine == "codex":
         home = codex.codex_home(env)
         cache = codex.read_models_cache(home) or {}
@@ -233,7 +238,11 @@ def probe_models(engine: str, base: Sequence[str], env: Mapping[str, str]) -> tu
                 f"{codex.CACHE_NAME} in CODEX_HOME")
     result = run_command([*base, "--help"], timeout=PROBE_TIMEOUT, env=env)
     info = claude.parse_help(result.stdout if result.returncode == 0 else "")
-    return tuple(ModelInfo(alias, info.efforts) for alias in info.aliases), "claude --help"
+    if not info.aliases:
+        return (), "claude --help"
+    confirmed = claude_alias.confirm(base, [alias for alias in aliases if alias not in info.aliases], env)
+    return (tuple(ModelInfo(alias, info.efforts) for alias in (*info.aliases, *confirmed)),
+            "claude --help + alias check" if confirmed else "claude --help")
 
 
 class Catalog:
@@ -281,8 +290,10 @@ class Catalog:
             write_json_atomic(self.catalog_path, data)
 
     def ensure_fresh(self, engine: str, *, base: Sequence[str], env: Mapping[str, str], ttl_hours: float,
-                     refresh: bool = False, now: dt.datetime | None = None, persist: bool = True) -> Freshness:
-        """The catalog entry to use for this launch, rebuilt first when it is due; `persist=False` stores nothing."""
+                     refresh: bool = False, now: dt.datetime | None = None, persist: bool = True,
+                     aliases: Sequence[str] = ()) -> Freshness:
+        """The catalog entry to use for this launch, rebuilt first when it is due; `persist=False` stores nothing.
+        `aliases` are the known Claude aliases a rebuild may confirm when the help omits them."""
         now = now or utc_now()
         stored = self.load(engine)
         version = probe_version(engine, base, env)
@@ -302,7 +313,7 @@ class Catalog:
             reason = f"catalog older than {ttl_hours:g} h"
         if reason is None:
             return Freshness(stored, None, tuple(warnings), version)
-        models, source = probe_models(engine, base, env)
+        models, source = probe_models(engine, base, env, aliases)
         if not models:
             kept = f"keeping the catalog checked at {stored.checked_at}" if stored else "no earlier catalog exists"
             warnings.append(f"OAH_MODELS_REFRESH_FAILED: {engine} reported no models ({source}); {kept}. Run the "
