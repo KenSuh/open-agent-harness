@@ -1,4 +1,4 @@
-# 문서 검사 — 문제 해결 문서의 OAH_* 코드가 src/oah 에 실제로 있는지, 고정 effort 상한 주장·깨진 링크·한국어 쌍·콜론 종결이 없는지 본다.
+# 문서 검사 — 문제 해결 문서의 OAH_* 코드가 src/oah 에 실제로 있는지, 고정 effort 상한 주장·깨진 링크·한국어 쌍·콜론 종결이 없는지, README 언어 전환 줄·앵커·배너 SVG 규칙을 본다.
 from __future__ import annotations
 
 import importlib.util
@@ -6,6 +6,7 @@ import pathlib
 import re
 import shutil
 import unittest
+import xml.etree.ElementTree as ET
 
 from tests.helpers import make_tmp_dir
 from oah.toolkit import update
@@ -68,6 +69,45 @@ def prose_lines(text: str):
             continue
         if not fenced:
             yield number, line
+
+
+READMES = {"README.md": ("English", "한국어"), "README.ko.md": ("한국어", "English")}
+BANNERS = {"README.md": "banner-", "README.ko.md": "banner-ko-"}
+KOREAN_FONTS = ('"Apple SD Gothic Neo"', '"Malgun Gothic"', '"Noto Sans KR"')
+SVG = "{http://www.w3.org/2000/svg}"
+
+
+def heading_anchors(text: str) -> set[str]:
+    """GitHub's anchors for the headings outside fenced code: lowercase, punctuation dropped, spaces to hyphens."""
+    anchors: set[str] = set()
+    for _, line in prose_lines(text):
+        match = re.match(r"#{1,6} +(.+?) *#*$", line)
+        if not match:
+            continue
+        slug = re.sub(r"[^\w\- ]", "", match.group(1).lower()).replace(" ", "-")
+        anchor, n = slug, 0
+        while anchor in anchors:
+            n += 1
+            anchor = f"{slug}-{n}"
+        anchors.add(anchor)
+    return anchors
+
+
+def missing_anchors(page: pathlib.Path, text: str | None = None) -> list[str]:
+    """Links to #anchors in the same page, or in a README beside it, that no heading there produces."""
+    text = read(page) if text is None else text
+    missing = []
+    for _, line in prose_lines(text):
+        for target in LINK.findall(line):
+            path, _, anchor = target.partition("#")
+            if not anchor or re.match(r"[a-z]+:", target):
+                continue
+            if path and path not in READMES:
+                continue
+            other = text if not path else read(page.parent / path)
+            if anchor not in heading_anchors(other):
+                missing.append(target)
+    return missing
 
 
 class TroubleshootingCodesTest(unittest.TestCase):
@@ -155,6 +195,83 @@ class AccuracyTest(unittest.TestCase):
             for words in ("TYPESAFE_API_KEY", "unused(no key)", "codex login --with-api-key", "oah:<NAME>"):
                 with self.subTest(page=str(page.relative_to(REPO)), words=words):
                     self.assertIn(words, text)
+
+
+class ReadmeLanguageTest(unittest.TestCase):
+    def test_switch_row_sits_between_badges_and_title(self):
+        for name, (current, other) in READMES.items():
+            lines = read(REPO / name).splitlines()
+            with self.subTest(page=name):
+                title = lines.index("# open-agent-harness (`oah`)")
+                badges_end = lines.index("</p>", max(i for i, line in enumerate(lines[:title]) if "badge" in line))
+                between = [line for line in lines[badges_end + 1:title] if line.strip()]
+                self.assertEqual(len(between), 1, between)
+                row = between[0]
+                self.assertTrue(row.startswith('<p align="center">') and row.endswith("</p>"), row)
+                self.assertIn(f"<strong>{current}</strong>", row)
+                self.assertNotIn(f">{current}</a>", row)
+                self.assertIn(f'<a href="{"README.ko.md" if name == "README.md" else "README.md"}">{other}</a>', row)
+                self.assertEqual(sum(">English<" in line or ">한국어<" in line for line in lines), 1)
+
+    def test_readme_holds_one_language(self):
+        english, korean = read(REPO / "README.md"), read(REPO / "README.ko.md")
+        self.assertNotIn("## 한국어", english)
+        self.assertIsNone(re.search(r"^#+ .*[가-힣]", english, re.MULTILINE))
+        self.assertIn("## 이 프로젝트의 목적", korean)
+        self.assertNotIn("## Purpose", korean)
+
+    def test_same_file_anchors_resolve(self):
+        for name in READMES:
+            with self.subTest(page=name):
+                self.assertEqual(missing_anchors(REPO / name), [])
+
+    def test_anchor_check_catches_a_broken_anchor(self):
+        text = "# Title\n\n## Install it\n\n[ok](#install-it) [bad](#nope) [en](README.md#nope)\n"
+        self.assertEqual(missing_anchors(REPO / "README.ko.md", text), ["#nope", "README.md#nope"])
+        self.assertEqual(heading_anchors("## v0.3.0: models\n## `oah` 로드맵\n## 개발\n## 개발\n"),
+                         {"v030-models", "oah-로드맵", "개발", "개발-1"})
+
+
+class BannerTest(unittest.TestCase):
+    def banner_files(self) -> list[pathlib.Path]:
+        return [REPO / "docs" / "assets" / f"{prefix}{theme}.svg"
+                for prefix in BANNERS.values() for theme in ("light", "dark")]
+
+    def test_banner_files_are_self_contained(self):
+        forbidden = re.compile(r"<script|<foreignObject|<image|@import|@font-face|url\((?!#)|href=[\"'](?!#)",
+                               re.IGNORECASE)
+        for path in self.banner_files():
+            with self.subTest(banner=path.name):
+                raw = path.read_bytes()
+                self.assertLess(len(raw), 12 * 1024)
+                text = raw.decode("utf-8")
+                self.assertIsNone(forbidden.search(text))
+                self.assertNotIn("bounded", text.lower())
+                root = ET.fromstring(text)
+                self.assertTrue(root.findtext(f"{SVG}title"))
+                self.assertTrue(root.findtext(f"{SVG}desc"))
+                self.assertGreaterEqual(len(root.findall(f".//{SVG}text")), 10)
+
+    def test_korean_banners_name_korean_fonts_first(self):
+        for path in self.banner_files():
+            if "-ko-" not in path.name:
+                continue
+            with self.subTest(banner=path.name):
+                family = re.search(r"font-family: ([^;]+);", read(path)).group(1)
+                positions = [family.find(font) for font in KOREAN_FONTS]
+                self.assertTrue(all(0 <= p < family.rindex("sans-serif") for p in positions), family)
+
+    def test_readmes_pick_banner_by_theme_with_alt_matching_desc(self):
+        for name, prefix in BANNERS.items():
+            text = read(REPO / name)
+            with self.subTest(page=name):
+                self.assertIn(f'<source media="(prefers-color-scheme: dark)" srcset="docs/assets/{prefix}dark.svg">',
+                              text)
+                alt = re.search(rf'<img src="docs/assets/{prefix}light.svg" alt="([^"]+)" width="100%">', text).group(1)
+                for theme in ("light", "dark"):
+                    desc = ET.parse(REPO / "docs" / "assets" / f"{prefix}{theme}.svg").getroot().findtext(f"{SVG}desc")
+                    self.assertEqual(desc, alt)
+                self.assertLess(text.index("<picture>"), text.index("badge-license.svg"))
 
 
 if __name__ == "__main__":
