@@ -211,20 +211,30 @@ inside the engine, for every call, worker, correction and review, and takes the 
 
 **The score rule.** Benchmark scores, the task's difficulty and `[models] profile` decide. No table maps a difficulty
 to a model, so the result moves when the scores move. Tiers count low 0, medium 1, high 2 and max 3. `performance` adds
-1, `balanced` adds nothing and `efficient` takes 1 away, kept within 0 to 3, and the step never goes below the floor of
-the task's kind. A step needs a score that far along the range from the lowest to the highest eligible score, in
-thirds. The cheapest model by list price that reaches it runs, then the lower score, so a costlier model with a lower
-score is not chosen. `balanced` and `efficient` also accept a model within 2 percent of the range below the mark,
-because a gap that small should not buy a costlier model. `performance` has no such margin, and a floor never has one.
-The tier still sets the effort.
+1 and `balanced` adds nothing, kept within 0 to 3, and the step never goes below the floor of the task's kind. A step
+needs a score that many thirds along the scale. `performance` and `balanced` take the cheapest model by list price that
+reaches the step, then the lower score, so a costlier model with a lower score is not chosen. `efficient` keeps the
+tier's step and may go one step lower, never below the floor. From there up it takes the most score per list price, then
+the lower score, so a stronger model wins when it is the better value. `balanced` and `efficient` also accept a model
+within 2 percent of the scale below the mark, because a gap that small should not buy a costlier model. `performance` has
+no such margin, and a floor never has one. When nothing that may be picked reaches the step, the strongest model that
+meets the floor runs. The tier still sets the effort.
 
-**Which models compete.** A model competes when the CLI lists it and does not hide it, its family is known (`luna`,
-`terra`, `sol` and `astra` for Codex, `haiku`, `sonnet`, `opus` and `fable` for Claude), it has a score, it is the newest
-generation of its family with a score, and `allowed_models` permits it. Each score is the mean, over the tasks all
-competing models have, of the model's place from 0 to 100 between the lowest and highest of them, and at least 3 common
-tasks are required. A new generation with no score waits and the older one stays, so a family never goes empty
-(`OAH_MODEL_UNSCORED`). A family `oah` does not know is never chosen automatically (`OAH_MODEL_UNKNOWN_FAMILY`). A model
-you name yourself skips these tests, and an older generation you name runs with `OAH_MODEL_SUPERSEDED`.
+`efficient` weighs the score itself, and a model last on every common task scores 0. So it takes another model that
+clears, even where `balanced` would take the last one, and it can cost more than `balanced` at a low tier.
+
+**The scale.** The scores and the mark of each step come from the data, not from your machine. The scale runs over every
+known family, `luna`, `terra`, `sol` and `astra` for Codex and `haiku`, `sonnet`, `opus` and `fable` for Claude, using each
+family's newest generation in the data. Each score is the mean, over the tasks those models share, of the model's place
+from 0 to 100 between the lowest and highest of them, and at least 3 common tasks are required. So a model your CLI does
+not list, or `allowed_models` leaves out, keeps its place on the scale, and neither can move a score or lower a floor.
+
+**Which models compete.** A model competes when the CLI lists it and does not hide it, its family is known, it has every
+common task, it is the newest generation of its family with those tasks, and `allowed_models` permits it. A new
+generation with no score waits and the older one stays, so a family never goes empty (`OAH_MODEL_UNSCORED`). An older
+generation also stands in when the CLI does not list the newest one: it is scored on the same scale and does not stretch
+it. A family `oah` does not know is never chosen automatically (`OAH_MODEL_UNKNOWN_FAMILY`). A model you name yourself
+skips these tests, and an older generation you name runs with `OAH_MODEL_SUPERSEDED`.
 
 **What the scores measure.** They come from Epoch AI's published benchmarks, on Epoch's own tasks only, with each model
 at its maximum effort. Those tasks are mostly maths, puzzles and reasoning. They are not coding tasks, there are few of
@@ -234,13 +244,16 @@ score can send work to a weaker model, so `oah models` shows the source and the 
 score, which can take days or weeks. To decide for yourself, pin a model.
 
 **Reviews have a floor.** A review's floor is `medium`, or `high` when a path in its scope is risky or its kind needs it.
-It is scored again from the scope, so no flag, packet axis, profile or judge answer can lower it. A review whose tier,
-model or effort is below the floor stops with `OAH_MODEL_BELOW_FLOOR`, and the refusal spends no round or attempt. A model
-you named that has no score runs with `OAH_MODEL_FLOOR_UNCHECKED`, and the receipt says the floor was not checked.
+It is scored again from the scope, so no flag, packet axis, profile or judge answer can lower it, and it is a mark on the
+fixed scale, so `allowed_models` cannot either. A review whose tier, model or effort is below the floor stops with
+`OAH_MODEL_BELOW_FLOOR`, and the refusal spends no round or attempt. A model you named that has no score runs with
+`OAH_MODEL_FLOOR_UNCHECKED`, and the receipt says the floor was not checked.
 
 **What stops a launch.** With no list of models, `OAH_MODEL_CATALOG_UNAVAILABLE`. With no usable scores,
-`OAH_MODEL_NO_SCORES`. A pin gets past both, and `oah` never falls back to a default model. A pin that a fresh Codex catalog
-no longer lists stops with `OAH_MODEL_NOT_LISTED`. Claude Code accepts names it does not print, so its pins are not checked.
+`OAH_MODEL_NO_SCORES`. A pin gets past both, and `oah` never falls back to a default model. When no allowed model reaches the
+floor of the work, a review stops with `OAH_MODEL_BELOW_FLOOR` and any other call with `OAH_MODEL_UNRESOLVED`, and both name
+`allowed_models`. A pin that a fresh Codex catalog no longer lists stops with `OAH_MODEL_NOT_LISTED`. Claude Code accepts names
+it does not print, so its pins are not checked.
 
 **Seeing the choice.** `oah models` and `oah doctor` show the profile, the scores with their source, date and credit, each
 tier's model, and each listed model left out with its reason. `oah doctor` reads local state only. `oah recommend --engine

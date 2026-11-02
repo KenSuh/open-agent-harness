@@ -116,16 +116,35 @@ oah doctor
 
 ## 6. 모델
 
-모델은 설정을 고치지 않아도 업데이트를 따라간다.
+모델은 설정을 고치지 않아도 업데이트를 따라간다. 이 내용은 `main` 기준이고 아직 릴리스하지 않았다.
 
-- Claude의 tier는 Claude Code 자체 별칭(`opus`, `sonnet`, `haiku`)을 쓰고 Claude Code가 이 별칭을 최신 모델로
-  풀어 준다.
-- Codex의 tier는 내 Codex 설정이 쓰는 모델에서 출발한다. 더 새 모델은 Codex가 기본값으로 표시하거나 내
-  `quality_order`에 이름이 있을 때만 쓴다.
+- 벤치마크 점수, 작업 난이도, `[models] profile`이 Claude와 Codex의 자동 모델을 고른다. 규칙은
+  [모델을 고르는 방법](concepts.md#모델을-고르는-방법)에 있다.
+- 알려진 모델군의 새 세대는 점수가 생기면 다음 카탈로그 재구성부터 쓰고, 대체되거나 사라진 모델은 같은 재구성부터
+  고르지 않는다. 재구성은 CLI 버전이 바뀌거나 `[models] ttl_hours`가 지나거나 `oah models --refresh`를 실행할 때 한다.
+  `OAH_MODEL_CHANGED`가 무엇이 바뀌었는지 한 번 알린다.
+- 점수는 `oah`에 실려 오므로 새 점수는 `oah` 새 버전과 함께 온다(1단계).
 - `oah`는 실행할 때마다 먼저 모델 카탈로그가 최신인지 확인한다. 사용자가 tier에 고정한 모델이 늘 이긴다.
 - 모델이나 추론 강도가 바뀔 때마다 이전 값과 새 값, 시각, 이유를 기록한다.
 
-`oah models`는 지금 tier마다 쓰는 모델과 추론 강도를 보여 준다.
+`oah`는 내 설정을 고치지 않고, 설정은 그대로 동작한다.
+
+- 고정한 모델, `tier_pools`, 내가 적은 `quality_order`, `allowed_models`, `effort_caps`는 뜻이 그대로다.
+- 옛 기본값 `quality_order = ["opus", "sonnet", "haiku"]`는 설정하지 않은 것으로 치므로 점수가 고른다.
+  `oah models`에서 `OAH_MODEL_ORDER_IGNORED`로 알려 준다. 그 줄을 지우거나 다른 모델을 적어 직접 순서를 정한다.
+- Codex의 기본값 표시와 내 Codex 설정의 모델은 더 이상 모델을 고르지 않는다. 모델 하나를 계속 쓰려면
+  `.oah/config.toml`에 `[engines.<engine>.tiers] <tier> = { model = "<model>" }`로 고정한다.
+
+업데이트한 뒤 실행이 멈출 수 있는 경우는 다음과 같다.
+
+- 최저 기준 아래의 리뷰는 `OAH_MODEL_BELOW_FLOOR`로 거절한다. `--tier low`가 그런 예다. 메시지가 말한 tier를 쓴다.
+- 모델 목록이 없거나 `claude --help`를 읽지 못하면 자동 선택이 `OAH_MODEL_CATALOG_UNAVAILABLE`로 멈추고, 쓸 수 있는 점수가
+  없으면 `OAH_MODEL_NO_SCORES`로 멈춘다. 모델을 고정하면 둘 다 넘어간다.
+- `allowed_models`를 좁혀도 최저 기준은 낮아지지 않는다. 허용된 모델 가운데 기준에 닿는 모델이 없으면 리뷰는
+  `OAH_MODEL_BELOW_FLOOR`로, 다른 호출은 `OAH_MODEL_UNRESOLVED`로 멈춘다.
+
+`oah models`는 프로필, 출처와 날짜가 붙은 점수, 지금 tier마다 쓰는 모델과 추론 강도, 빠진 모델과 이유를 보여 준다.
+코드는 [문제 해결](troubleshooting.md#모델)에 있다.
 
 ## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
 
