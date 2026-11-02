@@ -218,6 +218,10 @@ _ERROR_DIAGNOSTICS = {
                                        "run oah recommend again.",
     "OAH_RECOMMEND_REQUEST_UNREADABLE": "the request file cannot be read as UTF-8 text; save it as UTF-8 and run oah "
                                         "recommend again.",
+    "OAH_AGENT_FILE_EDITED": "a subagent file oah generated was edited, so oah leaves it alone; delete it and run oah "
+                             "init --with-agents to hand it back.",
+    "OAH_AGENT_FILE_STALE": "a generated subagent file names an older model and no hook updates it; run oah hooks "
+                            "install session-start, or delete it and run oah init --with-agents.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

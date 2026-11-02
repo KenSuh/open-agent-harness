@@ -232,12 +232,89 @@ def _yaml(value: str) -> str:
     return value if _PLAIN.fullmatch(value) else json.dumps(value, ensure_ascii=False)
 
 
-def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE) -> dict[str, bytes]:
-    """`.claude/agents/oah-<tier>.md` per tier: model by A14's mapping (a tier pin wins), effort from the tier.
+@dataclasses.dataclass(frozen=True)
+class TierAgents:
+    """What oah writes to each `.claude/agents/oah-<tier>.md` now, and the scores that chose it."""
 
-    Offline: it reads no catalog and runs no CLI, so every alias competes on the packaged scores."""
+    files: dict[str, bytes]
+    scores: str  # "<source> <date>" of the score set that chose, or "none"
+
+
+def agent_text(tier: str, model: str, effort: str) -> bytes:
+    """The exact bytes oah generates for one tier file that names this model and effort."""
+    description = f"oah {tier} tier: {TIER_WORK[tier]}. Model {model}, effort {effort}, from .oah/config.toml."
+    text = _template("agent.md", NAME=f"oah-{tier}", DESCRIPTION=json.dumps(description, ensure_ascii=False),
+                     MODEL=_yaml(model), EFFORT=_yaml(effort), TIER=tier, FOOTER=intent.FOOTER)
+    return text.encode("utf-8")
+
+
+def agent_values(data: bytes) -> tuple[str, str] | None:
+    """The `model:` and `effort:` a tier file's front matter names, or None when it names no such pair."""
+    try:
+        lines = data.decode("utf-8").replace("\r\n", "\n").split("\n")
+    except UnicodeDecodeError:
+        return None
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return None
+    values: dict[str, str] = {}
+    for line in lines[1:lines.index("---", 1)]:
+        name, separator, value = line.partition(": ")
+        if separator and name in ("model", "effort") and name not in values:
+            try:
+                values[name] = json.loads(value) if value.startswith('"') else value
+            except ValueError:
+                return None
+    if set(values) != {"model", "effort"} or not all(isinstance(value, str) for value in values.values()):
+        return None
+    return values["model"], values["effort"]
+
+
+def agent_check(tier: str, data: bytes, expected: bytes) -> tuple[str, bytes | None]:
+    """("current", None), ("stale", the bytes to write, in the file's own line endings) or ("edited", None).
+
+    A file is stale only when it is exactly what oah generates for the model and effort it names, with LF or CRLF
+    line endings throughout, and those differ from `expected`; every other file counts as edited and is left alone."""
+    if data in (expected, expected.replace(b"\n", b"\r\n")):
+        return "current", None
+    values = agent_values(data)
+    if values is not None:
+        generated = agent_text(tier, *values)
+        for newline in (b"\n", b"\r\n"):
+            if data == generated.replace(b"\n", newline):
+                return "stale", expected.replace(b"\n", newline)
+    return "edited", None
+
+
+def _stored_claude(claude: Mapping, models_section: Mapping,
+                   state: pathlib.Path) -> tuple[models.Entry, scoring.ScoreSet] | None:
+    """The stored Claude catalog entry and its scores, read only; None when no usable entry is stored."""
+    from oah import benchmarks
+
+    catalog = models.Catalog(state)
+    entry = catalog.load("claude")
+    if entry is None or not any(model.listed for model in entry.models):
+        return None
+    known = scoring.families()
+    chosen = benchmarks.data_for("claude", entry, catalog=catalog, settings=models_section, known=known)
+    data = chosen.data if chosen.data is not None else scoring.bundled()
+    return entry, scoring.score_set("claude", entry, allowed=claude["allowed_models"], data=data, known=known)
+
+
+def tier_agents(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE, models_section: Mapping | None = None,
+                state_dir: pathlib.Path | None = None) -> TierAgents:
+    """`.claude/agents/oah-<tier>.md` per tier from the current choice: model by A14's mapping (a tier pin wins),
+    effort from the tier. `oah init` writes these bytes; the session-start hook and `oah doctor` compare with them.
+
+    With `state_dir`, the stored Claude catalog entry and stored scores choose when they are readable. This reads only:
+    it runs no CLI, fetches nothing and writes nothing. Otherwise every known alias competes on the packaged scores."""
     claude = engines["claude"]
-    entry, scores = models.offline_claude(claude["allowed_models"])
+    found = None
+    if state_dir is not None:
+        try:
+            found = _stored_claude(claude, models_section or models.DEFAULTS, pathlib.Path(state_dir))
+        except Exception:  # an unreadable store counts as none; the packaged snapshot still chooses
+            found = None
+    entry, scores = found or models.offline_claude(claude["allowed_models"])
     profile = profile if profile in scoring.PROFILES else scoring.DEFAULT_PROFILE  # `oah call` reports a bad value
     files = {}
     for tier in routing.TIERS:
@@ -249,12 +326,15 @@ def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE) -> 
                                              allowed=claude["allowed_models"])
         except EngineError:
             model = "inherit"  # nothing resolves: the subagent uses the session's model
-        description = (f"oah {tier} tier: {TIER_WORK[tier]}. Model {model}, effort {values['effort']}, "
-                       "from .oah/config.toml.")
-        text = _template("agent.md", NAME=f"oah-{tier}", DESCRIPTION=json.dumps(description, ensure_ascii=False),
-                         MODEL=_yaml(model), EFFORT=_yaml(values["effort"]), TIER=tier, FOOTER=intent.FOOTER)
-        files[f"{AGENTS_DIR}/oah-{tier}.md"] = text.encode("utf-8")
-    return files
+        files[f"{AGENTS_DIR}/oah-{tier}.md"] = agent_text(tier, model, values["effort"])
+    label = f"{scores.source} {scores.date}" if scores is not None and scores.source else "none"
+    return TierAgents(files, label)
+
+
+def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE, models_section: Mapping | None = None,
+                state_dir: pathlib.Path | None = None) -> dict[str, bytes]:
+    """The bytes of each tier file (`tier_agents`)."""
+    return tier_agents(engines, profile=profile, models_section=models_section, state_dir=state_dir).files
 
 
 def _gitignore_groups(unlazy_copy: bool) -> list[tuple[str, list[str]]]:
@@ -2472,7 +2552,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     has_config = existing is not None and existing.path is not None
     effective = existing if has_config and not force else parse_config(config)
     engines = effective.section("engines", call.ENGINE_DEFAULTS)
-    profile = effective.section("models", models.DEFAULTS)["profile"]
+    models_section = effective.section("models", models.DEFAULTS)
+    profile = models_section["profile"]
     wiki = WikiSettings.from_mapping(effective.section("wiki", WIKI_DEFAULTS))
     wiki = dataclasses.replace(wiki, dir=_wiki_dir(root, wiki.dir))
     ci_section = effective.section("ci", ci.DEFAULTS)
@@ -2485,7 +2566,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         unlazy_step.action == "present"
         and pathlib.Path(unlazy_step.folder) == root / (unlazy_step.target or UNLAZY_PROJECT)))
     files = plan_files(root, config=config, wiki_dir=wiki.dir,
-                       agents=agent_files(engines, profile=profile) if values["agents"] else {},
+                       agents=agent_files(engines, profile=profile, models_section=models_section,
+                                          state_dir=state_dir(repo_info(root), machine.env)) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
     rules_step = plan_rules(root, lang=lang)
     aside_local, aside_rules = _plan_aside(root, rules_step) if "aside" in apps else (None, None)

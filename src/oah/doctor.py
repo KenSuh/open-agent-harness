@@ -21,6 +21,7 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
 PLATFORM_LABELS = {"darwin": "macOS", "win32": "Windows"}
+AGENT_EDITED, AGENT_STALE = "OAH_AGENT_FILE_EDITED", "OAH_AGENT_FILE_STALE"
 
 
 @dataclass
@@ -214,6 +215,61 @@ def model_choices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dic
             for engine, entry in entries.items() if entry is not None]
 
 
+def _session_hook_installed(root: pathlib.Path) -> bool:
+    """Whether oah's SessionStart hook is in the project's Claude Code settings, local or shared."""
+    from oah import hooks
+
+    for shared in (False, True):
+        try:
+            _, data = hooks._load_settings(hooks.settings_path(root, shared))
+        except hooks.HookError:
+            continue
+        if hooks._claude_installed(data, "session-start"):
+            return True
+    return False
+
+
+def agent_notices(root: pathlib.Path | None, env: Mapping[str, str]) -> list[dict]:
+    """Subagent files oah generated that an edit, or a stale choice no hook will update, left behind.
+
+    From the stored catalog and scores and the current config (`init.tier_agents`): no network, no engine CLI, and
+    nothing is written."""
+    if root is None:
+        return []
+    from oah import call, init, models, routing
+    from oah.paths import repo_info, state_dir
+
+    root = pathlib.Path(root)
+    present = [tier for tier in routing.TIERS
+               if (root / init.AGENTS_DIR / f"oah-{tier}.md").is_file()
+               and not (root / init.AGENTS_DIR / f"oah-{tier}.md").is_symlink()]
+    if not present:
+        return []
+    config = load_config(root)
+    section = config.section("models", models.DEFAULTS)
+    expected = init.tier_agents(config.section("engines", call.ENGINE_DEFAULTS), profile=section["profile"],
+                                models_section=section, state_dir=state_dir(repo_info(root), env))
+    hooked = _session_hook_installed(root)
+    step = "delete it and run `oah init --with-agents` to have oah write it again"
+    notices = []
+    for tier in present:
+        relative = f"{init.AGENTS_DIR}/oah-{tier}.md"
+        data = (root / relative).read_bytes()
+        found, update = init.agent_check(tier, data, expected.files[relative])
+        if found == "edited":
+            notices.append({"code": AGENT_EDITED, "file": relative,
+                            "message": f"{AGENT_EDITED}: {relative} was edited, so it is left alone and oah no longer "
+                                       f"keeps its model current. To hand it back to oah, {step}"})
+        elif found == "stale" and not hooked:
+            (old, old_effort), (new, effort) = init.agent_values(data), init.agent_values(update)
+            notices.append({"code": AGENT_STALE, "file": relative,
+                            "message": f"{AGENT_STALE}: {relative} names {call._shown(old)} at effort "
+                                       f"{call._shown(old_effort)}, but oah now chooses {call._shown(new)} at effort "
+                                       f"{call._shown(effort)}, and no session-start hook will update it. Install it "
+                                       f"with `oah hooks install session-start`, or {step}"})
+    return notices
+
+
 def _mcp_lines(notices: Sequence[Mapping]) -> list[str]:
     if not notices:
         return []
@@ -234,6 +290,17 @@ def _model_lines(notices: Sequence[Mapping]) -> list[str]:
         checked = f" (checked {notice['date']})" if notice.get("date") else ""
         lines.append(f"  {notice['message']}{checked}")
     lines.append("      this includes every currently unpooled model, not only new ones")
+    return lines
+
+
+def _agent_lines(notices: Sequence[Mapping], error: str | None) -> list[str]:
+    if not notices and error is None:
+        return []
+    lines = ["", "Subagent files (from the stored catalog, the stored or packaged scores and current config; "
+             "no network used):"]
+    lines += [f"  {notice['message']}" for notice in notices]
+    if error is not None:
+        lines.append(f"  The subagent files could not be checked ({error}); fix .oah/config.toml, then run oah doctor")
     return lines
 
 
@@ -261,7 +328,8 @@ def _choice_lines(choices: Sequence[Mapping]) -> list[str]:
 
 def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
-                model_choices: Sequence[Mapping] = ()) -> str:
+                model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
+                agent_notices_error: str | None = None) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -281,6 +349,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
     lines += _mcp_lines(mcp_notices)
     lines += _model_lines(model_notices)
     lines += _choice_lines(model_choices)
+    lines += _agent_lines(agent_notices, agent_notices_error)
     if model_notices_error is not None:
         lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
@@ -290,7 +359,8 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
 
 def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequence[Mapping] = (),
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
-                model_choices: Sequence[Mapping] = ()) -> str:
+                model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
+                agent_notices_error: str | None = None) -> str:
     rows = []
     for status in statuses:
         commands, url = _install_texts(status.name, platform)
@@ -301,6 +371,10 @@ def render_json(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
                "model_choices": [dict(row) for row in model_choices]}
     if model_notices_error is not None:
         payload["model_notices_error"] = model_notices_error
+    if agent_notices:  # only when there is something to say, so the landed shape stays as it was
+        payload["agent_notices"] = [dict(notice) for notice in agent_notices]
+    if agent_notices_error is not None:
+        payload["agent_notices_error"] = agent_notices_error
     return json.dumps(payload, indent=2, ensure_ascii=True)
 
 
@@ -345,6 +419,11 @@ def doctor_main(*, json_output: bool) -> int:
     except Exception as exc:
         models, choices = [], []
         model_error = type(exc).__name__
+    agent_error = None
+    try:
+        agents = agent_notices(root, os.environ)
+    except Exception as exc:  # an advisory check must not stop the report
+        agents, agent_error = [], type(exc).__name__
     render = render_json if json_output else render_text
-    print(render(statuses, sys.platform, mcp, models, model_error, choices))
+    print(render(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error))
     return exit_code(statuses)

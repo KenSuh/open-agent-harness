@@ -568,7 +568,8 @@ class RefusalTest(unittest.TestCase):
                      "OAH_MODEL_UNSCORED", "OAH_MODEL_FLOOR_UNCHECKED", "OAH_MODEL_ORDER_IGNORED",
                      "OAH_SCORES_REFRESH_FAILED", "OAH_SCORES_AA_UNUSED", "OAH_SCORES_FILE_INVALID",
                      "OAH_RERANK_SCOPE_WIDENED", "OAH_RERANK_SECRET", "OAH_DESIGN_UNJUDGED", "OAH_RECOMMEND_USAGE",
-                     "OAH_RECOMMEND_REQUEST_TOO_LARGE", "OAH_RECOMMEND_REQUEST_UNREADABLE"):
+                     "OAH_RECOMMEND_REQUEST_TOO_LARGE", "OAH_RECOMMEND_REQUEST_UNREADABLE", "OAH_AGENT_FILE_EDITED",
+                     "OAH_AGENT_FILE_STALE"):
             with self.subTest(code=code):
                 self.assertRegex(fix._ERROR_DIAGNOSTICS[code], r"oah |\.oah/config\.toml")
                 self.assertEqual(runs._correction_record({"warnings": [f"{code}: a model name"]}, ("warnings",))["warnings"],
