@@ -242,12 +242,19 @@ class ScoredCallTest(unittest.TestCase):
         self.assertEqual((easy["tier"], easy["resolved_model"]), ("low", "gpt-6-luna"))
         self.assertEqual((hard["tier"], hard["resolved_model"]), ("max", "gpt-6-astra"))
 
-    def test_an_explicit_tier_with_effort_below_its_kind_floor_is_unresolved(self):
-        project = scored_project(self)
-        with self.assertRaises(EngineError) as caught:
-            project.prepare(stage="correction", tier="low", axes={"kind": "security"})
-        self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
-        self.assertEqual(spent(project), [])
+    def test_an_explicit_non_review_tier_can_be_below_its_kind_floor(self):
+        for stage, engine in (("correction", "codex"), ("initial", "claude")):
+            for source in ("flag", "packet"):
+                with self.subTest(stage=stage, source=source):
+                    project = scored_project(self)
+                    if source == "packet":
+                        project.packet(f"## Plan\n- {stage} → {engine} → low\n")
+                    fields = {"tier": "low"} if source == "flag" else {}
+                    data = project.run(engine=engine, stage=stage, axes={"kind": "security"}, **fields)
+                    self.assertEqual((data["status"], data["tier"], data["tier_source"], data["launch_effort"]),
+                                     ("finished", "low", source, "low"))
+                    self.assertEqual(data["admission"]["floor_tier"], "low")
+                    self.assertEqual(data["model_choice"]["floor"]["tier"], "low")
 
     def test_the_codex_configuration_and_default_flag_no_longer_choose(self):
         project = scored_project(self)
@@ -355,11 +362,13 @@ class AdmissionTest(unittest.TestCase):
         return str(caught.exception)
 
     def test_a_tier_below_the_review_floor_refuses_and_says_what_to_do(self):
-        for fields in ({"tier": "low"}, {"tier": "low", "axes": {"kind": "quick"}}):
+        for fields, floor in (({"tier": "low"}, "medium"),
+                              ({"tier": "low", "axes": {"kind": "quick"}}, "medium"),
+                              ({"tier": "low", "axes": {"kind": "security"}}, "high")):
             with self.subTest(fields=fields):
                 message = self.refused(scored_project(self), **fields)
                 self.assertIn("tier low", message)
-                self.assertIn("medium", message)
+                self.assertIn(floor, message)
 
     def test_a_planned_tier_below_the_floor_refuses(self):
         project = scored_project(self)

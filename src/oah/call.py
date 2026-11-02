@@ -1316,6 +1316,9 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
             tier = floor_tier
             reasons.append(f"floor {floor_tier}: this review's scope")
+    if request.stage != "review":
+        # Explicit flag and packet tiers keep their meaning outside review.
+        floor_tier = min(tier, floor_tier, key=routing.TIERS.index)
     # Admit the rule's pair before reserving any spend, then account durably before the paid judge.
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now)
