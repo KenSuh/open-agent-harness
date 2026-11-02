@@ -4,6 +4,8 @@ Claude Code and Codex CLI both follow these rules in this repository.
 
 **Dispatched workers:** when `OAH_WORKER=1` is set, `oah` launched you for one task. Skip any session-entry procedure (status tours, handoff reading, greetings) and do only the task in your prompt. Initial and correction workers use the dispatcher's leased worktree; reviews stay read-only and may use another tree.
 
+**Design and packets (lead session):** before you write a design or a packet, run `oah recommend --kind design --task <task> --request-file <file with the user's request>` (`--kind packet` for a packet) and send the work to the `oah-<tier>` subagent it names.
+
 1. **Stage order.** Claude Code does the initial implementation. Codex CLI then reviews, corrects and re-reviews in bounded rounds (`oah review`, `oah fix`). The initial implementer returns review findings instead of fixing them.
 2. **Leases.** Dispatched workers use the dispatcher's lease and never start, renew or finish a lease; stay inside its scope and return changes and evidence to the dispatcher. For the dispatcher: before editing, run `oah start --task <task> --agent <you> --scope <path>` (repeat `--scope`); widen scope with `oah renew --scope …` and close with `oah finish --summary "…"`. If another lease overlaps, stop and report.
 3. **Packets and intent.** `.oah/tasks/<task>/PACKET.md` holds the task's intent, scope, plan and acceptance. Never edit the intent to fit your work; a changed goal raises its Revision. Return the `INTENT` line and one `AC<n>: met|unmet|deferred` line per success condition.

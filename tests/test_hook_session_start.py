@@ -10,8 +10,12 @@ import subprocess
 import sys
 import unittest
 
-from oah import hook_session_start, hooks
+from unittest import mock
+
+from oah import hook_session_start, hooks, init, scoring
+from oah.atomic import StorageError
 from oah.lease import Store, utc_now
+from oah.models import Catalog, Entry, ModelInfo
 from oah.paths import repo_info, state_dir
 from tests.helpers import git_commit, make_git_repo, make_tmp_dir
 
@@ -168,6 +172,202 @@ class SessionStartTest(unittest.TestCase):
         self.assertTrue(hooks.hook_available("session-start"))
         change = hooks.install("session-start", self.repo, dry_run=True)
         self.assertIn("oah hook session-start", change.diff)
+
+
+class AgentFileHookTest(unittest.TestCase):
+    """The hook keeps the subagent files oah generated on the current model choice, and nothing else (AC6)."""
+
+    def setUp(self):
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"README.md": "hello\n"}, "first")
+        self.info = repo_info(self.repo)
+        self.state = state_dir(self.info, {})
+        self.agents = self.repo / ".claude" / "agents"
+        self.agents.mkdir(parents=True)
+        Catalog(self.state)._save(Entry("claude", "2.1.316", "2026-11-02T00:00:00Z",
+                                        (ModelInfo("sonnet", ("low", "medium", "high", "max")),), "claude --help"))
+        data = scoring.bundled()
+        self.scores = f"(scores {data['source']} {data['date']})"
+
+    def write(self, tier: str, model: str, *, newline: str = "\n") -> pathlib.Path:
+        path = self.agents / f"oah-{tier}.md"
+        path.write_bytes(init.agent_text(tier, model, tier).replace(b"\n", newline.encode("ascii")))
+        return path
+
+    def refresh(self) -> list[str]:
+        return hook_session_start.agent_lines(self.info, {})
+
+    def test_a_generated_stale_file_is_rewritten_with_one_line(self):
+        path = self.write("max", "opus")
+        self.assertEqual(self.refresh(), [f"oah: updated .claude/agents/oah-max.md: model opus -> sonnet {self.scores}"])
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "sonnet", "max"))
+        self.assertEqual(self.refresh(), [], "a current file is left alone")
+
+    def test_windows_newlines_are_recognised_and_kept(self):
+        path = self.write("high", "opus", newline="\r\n")
+        self.assertEqual(len(self.refresh()), 1)
+        self.assertEqual(path.read_bytes(), init.agent_text("high", "sonnet", "high").replace(b"\n", b"\r\n"))
+
+    def test_an_edited_file_is_left_alone(self):
+        for change in (lambda data: data + b"- My own rule.\n", lambda data: data.replace(b"model: opus", b"model: haiku")):
+            with self.subTest():
+                path = self.write("max", "opus")
+                edited = change(path.read_bytes())
+                path.write_bytes(edited)
+                self.assertEqual(self.refresh(), [])
+                self.assertEqual(path.read_bytes(), edited)
+
+    def test_a_concurrent_edit_is_left_alone(self):
+        path = self.write("max", "opus")
+        edited = path.read_bytes() + b"- Saved during session start.\n"
+        check = init.agent_check
+
+        def edit(*args):
+            result = check(*args)
+            path.write_bytes(edited)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=edit):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertEqual(path.read_bytes(), edited)
+        self.assertEqual(list(self.agents.iterdir()), [path], "staging files must be cleaned up")
+
+    def test_a_concurrently_deleted_file_is_never_recreated(self):
+        path = self.write("max", "opus")
+        check = init.agent_check
+
+        def delete(*args):
+            result = check(*args)
+            path.unlink()
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=delete):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertFalse(path.exists())
+        self.assertEqual(list(self.agents.iterdir()), [])
+
+    def test_a_concurrent_replacement_with_identical_bytes_is_left_alone(self):
+        path = self.write("max", "opus")
+        before = path.read_bytes()
+        replacement = self.agents / "saved.md"
+        replacement.write_bytes(before)
+        check = init.agent_check
+
+        def replace(*args):
+            result = check(*args)
+            os.replace(replacement, path)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=replace):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertEqual(path.read_bytes(), before)
+
+    @unittest.skipIf(os.name == "nt", "creating a symlink needs a privilege on Windows")
+    def test_a_concurrent_symlink_is_never_followed(self):
+        path = self.write("max", "opus")
+        elsewhere = make_tmp_dir(self) / "saved.md"
+        elsewhere.write_bytes(path.read_bytes())
+        check = init.agent_check
+
+        def link(*args):
+            result = check(*args)
+            path.unlink()
+            path.symlink_to(elsewhere)
+            return result
+
+        with mock.patch.object(init, "agent_check", side_effect=link):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("file changed, vanished", found[0])
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(elsewhere.read_bytes(), init.agent_text("max", "opus", "max"))
+
+    def test_a_missing_file_is_never_created(self):
+        self.write("max", "opus")
+        self.refresh()
+        self.assertEqual(sorted(path.name for path in self.agents.iterdir()), ["oah-max.md"])
+        self.agents.joinpath("oah-max.md").unlink()
+        self.agents.rmdir()
+        self.assertEqual(self.refresh(), [])
+        self.assertFalse(self.agents.exists())
+
+    @unittest.skipIf(os.name == "nt", "creating a symlink needs a privilege on Windows")
+    def test_nothing_is_written_through_a_linked_folder(self):
+        elsewhere = make_tmp_dir(self) / "shared-agents"
+        elsewhere.mkdir()
+        path = elsewhere / "oah-max.md"
+        path.write_bytes(init.agent_text("max", "opus", "max"))
+        self.agents.rmdir()
+        self.agents.symlink_to(elsewhere, target_is_directory=True)
+        self.assertEqual(self.refresh(), [])
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "opus", "max"))
+
+    def test_a_write_failure_prints_one_plain_line(self):
+        self.write("max", "opus")
+        self.write("low", "haiku")
+        failure = StorageError(self.agents / "oah-low.md", PermissionError("read-only"))
+        with mock.patch.object(init, "_publish", side_effect=failure):
+            found = self.refresh()
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].startswith("oah: could not update"), found[0])
+        self.assertIn("oah doctor", found[0])
+
+    @unittest.skipIf(os.name == "nt", "a read-only folder does not stop writes on Windows")
+    def test_the_hook_exits_0_when_the_folder_is_read_only(self):
+        path = self.write("max", "opus")
+        before = path.read_bytes()
+        os.chmod(self.agents, 0o500)
+        self.addCleanup(os.chmod, self.agents, 0o755)
+        result = run_hook(self.repo, worker=False)
+        self.assertEqual(result.returncode, 0)
+        failures = [line for line in result.stdout.decode("utf-8").splitlines() if line.startswith("oah: could not")]
+        self.assertEqual(len(failures), 1, result.stdout)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_the_whole_hook_updates_and_only_repository_lookup_runs_subprocesses(self):
+        path = self.write("max", "opus")
+        forbidden = AssertionError("the subagent refresh runs no subprocess")
+        refresh = hook_session_start.agent_lines
+
+        def offline_refresh(*args):
+            with mock.patch("subprocess.Popen", side_effect=forbidden) as popen, \
+                    mock.patch("os.system", side_effect=forbidden) as system:
+                result = refresh(*args)
+            self.assertEqual(popen.call_count, 0)
+            self.assertEqual(system.call_count, 0)
+            return result
+
+        with mock.patch.object(hook_session_start, "agent_lines", side_effect=offline_refresh), \
+                mock.patch("subprocess.Popen", wraps=subprocess.Popen) as processes:
+            found = hook_session_start.lines(self.repo, {})
+        self.assertIn(f"oah: updated .claude/agents/oah-max.md: model opus -> sonnet {self.scores}", found)
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "sonnet", "max"))
+        self.assertGreater(processes.call_count, 0, "the hook must exercise its real Git repository lookup")
+        for invocation in processes.call_args_list:
+            argv = invocation.args[0] if invocation.args else invocation.kwargs["args"]
+            self.assertFalse({pathlib.PureWindowsPath(part).stem.lower() for part in argv} & {"claude", "codex"},
+                             argv)
+
+    def test_a_dispatched_worker_changes_nothing(self):
+        path = self.write("max", "opus")
+        before = path.read_bytes()
+        result = run_hook(self.repo, worker=True)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_session_shows_the_update(self):
+        path = self.write("max", "opus")
+        result = run_hook(self.repo, worker=False)
+        self.assertEqual((result.returncode, result.stderr), (0, b""))
+        self.assertIn(f"oah: updated .claude/agents/oah-max.md: model opus -> sonnet {self.scores}".encode("utf-8"),
+                      result.stdout)
+        self.assertEqual(path.read_bytes(), init.agent_text("max", "sonnet", "max"))
 
 
 if __name__ == "__main__":

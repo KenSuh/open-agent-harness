@@ -19,6 +19,16 @@ def block_of(data: bytes) -> bytes:
 
 
 class RulesTest(unittest.TestCase):
+    def test_the_lead_asks_for_a_design_or_packet_tier_before_writing_one(self):
+        for lang in ("en", "ko"):
+            with self.subTest(lang=lang):
+                rules.sync(self.root, lang=lang)
+                text = self.agents.read_text(encoding="utf-8")
+                line = next(line for line in text.splitlines() if "--request-file" in line)
+                for part in ("oah recommend --kind design", "--task <task>", "oah-<tier>"):
+                    self.assertIn(part, line)
+                self.assertFalse(line.rstrip().endswith(":"))
+
     def test_dispatched_workers_are_exempt_from_lease_lifecycle_commands(self):
         for lang in ("en", "ko"):
             with self.subTest(lang=lang):

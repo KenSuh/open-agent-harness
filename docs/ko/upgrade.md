@@ -150,6 +150,25 @@ oah doctor
 `oah models`는 프로필, 출처와 날짜가 붙은 점수, 지금 tier마다 쓰는 모델과 추론 강도, 빠진 모델과 이유를 보여 준다.
 이제 `oah doctor`는 실행할 수 없는 고정 모델을 호출과 같은 오류로 보여 준다. 코드는 [문제 해결](troubleshooting.md#모델)에 있다.
 
+### 이제 Jev가 난이도를 판정한다
+
+TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev가 받는 내용과 그 답이 하는 일이 바뀐다.
+
+- 작업이 얼마나 어려운지 판정하려고 Jev는 이제 작업 이름만이 아니라 작업의 Intent 글(Problem, Desired outcome,
+  Success conditions, Constraints, Non-goals)과 Scope 경로를 합쳐 최대 16,000자까지 받는다. 코드, diff, 파일 내용은
+  보내지 않고, 개인정보 규칙에 걸린 글이 있으면 아무것도 보내지 않는다. 프로젝트에서 처음 그런 요청을 보낼 때
+  `OAH_RERANK_SCOPE_WIDENED`를 한 번 알리고 다시 묻지 않는다. 멈추려면 `.oah/config.toml`의 `[rerank]`에
+  `enabled = false`를 둔다.
+- 이제 호출의 tier가 규칙 tier와 다를 수 있다. Jev의 확신이 `[rerank] difficulty_min_confidence`(따로 정하지 않으면
+  0.6) 이상이면 Jev의 tier로 실행하되 최저 기준 아래로는 내려가지 않고, 실행 기록에 `tier_source=jev`와 규칙
+  tier(`rule_tier`)가 남는다. `--tier`나 직접 고친 계획 tier는 그대로 이긴다. Jev가 꺼져 있거나 실패하거나 확신이 낮으면
+  전처럼 규칙 tier로 실행한다.
+- 키트 규칙은 이제 리드 세션이 설계나 패킷을 쓰기 전에 `oah recommend --kind design --task <task> --request-file <file>`을
+  실행하게 하고, 그 단계를 건너뛰면 `oah packet new`가 `OAH_DESIGN_UNJUDGED`로 경고한다. 새 규칙을 `AGENTS.md`에
+  들이려면 `oah rules sync`를 실행한다.
+- 세션 시작 훅을 설치했다면 `oah init`이 쓴 하위 에이전트 파일이 지금의 모델 선택을 따라가므로, git에
+  `.claude/agents/oah-<tier>.md` 변경이 보일 수 있다. 직접 고친 파일은 그대로 두고 `oah doctor`가 알려 준다.
+
 ## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
 
 `oah`는 소유자의 하네스가 나아지는 것을 따라간다. [`docs/UPSTREAM_SYNC.md`](../UPSTREAM_SYNC.md)는 그 하네스에서

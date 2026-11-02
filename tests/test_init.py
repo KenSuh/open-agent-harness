@@ -117,6 +117,20 @@ class ConfigTest(unittest.TestCase):
                                   today=TODAY)
         self.assertEqual(sections(text)["preflight"]["default_branch"], 'odd"name\\x')
 
+    def test_jev_disclosures_say_what_difficulty_judgement_sends(self):
+        question = next(item for item in init.QUESTIONS if item.key == "jev").what
+        on = init.render_config(branch="main", how="", jev=True, skill_updates=True, today=TODAY)
+        for name, text in (("question", question), ("rerank on", init._template("rerank-on.toml", DATE="2026-11-02")),
+                           ("rerank off", init._template("rerank-off.toml", DATE="2026-11-02"))):
+            with self.subTest(text=name):
+                flat = " ".join(text.replace("#", " ").split())
+                for part in ("Intent", "Scope paths", "16,000 characters"):
+                    self.assertIn(part, flat)
+                self.assertNotIn("task summary", flat)
+                self.assertNotIn("500 characters", flat)
+        self.assertIn("difficulty_min_confidence", on)
+        self.assertEqual(sections(on)["rerank"]["difficulty_min_confidence"], 0.6)
+
     def test_key_alone_never_enables_jev(self):
         key = "fake-" + token_source.token_hex(16)
         env = {"TYPESAFE_API_KEY": key}
@@ -215,8 +229,9 @@ class AgentFilesTest(unittest.TestCase):
             self.assertEqual(set(self.models(call.ENGINE_DEFAULTS).values()), {"inherit"})
 
     def test_the_mapping_needs_no_catalog_and_runs_no_cli(self):
-        with mock.patch("oah.models.run_command", side_effect=AssertionError("oah init must stay offline")):
+        with mock.patch("oah.models.run_command", side_effect=AssertionError("oah init must stay offline")) as run:
             self.assertEqual(self.models(call.ENGINE_DEFAULTS)["oah-max"], "opus")
+        self.assertEqual(run.call_count, 0)
 
     def test_every_alias_competes_even_those_claude_help_omits(self):
         self.assertIn("haiku", self.models(call.ENGINE_DEFAULTS).values())
@@ -237,6 +252,67 @@ class AgentFilesTest(unittest.TestCase):
 
     def test_files_keep_aliases_not_full_names(self):
         self.assertLessEqual(set(self.models(call.ENGINE_DEFAULTS).values()), {"haiku", "sonnet", "opus", "fable"})
+
+    def stored(self, *aliases: str) -> pathlib.Path:
+        """A state folder whose stored Claude catalog lists only these aliases."""
+        state = make_tmp_dir(self) / "state"
+        models.Catalog(state)._save(models.Entry("claude", "2.1.316", "2026-11-02T00:00:00Z", tuple(
+            models.ModelInfo(alias, ("low", "medium", "high", "max")) for alias in aliases), "claude --help"))
+        return state
+
+    def test_a_readable_stored_catalog_chooses_and_the_snapshot_backs_it_up(self):
+        state = self.stored("sonnet")
+        chosen = init.tier_agents(call.ENGINE_DEFAULTS, state_dir=state)
+        self.assertEqual({path.rsplit("/", 1)[1]: self.frontmatter(data)["model"] for path, data in chosen.files.items()},
+                         dict.fromkeys(("oah-low.md", "oah-medium.md", "oah-high.md", "oah-max.md"), "sonnet"))
+        self.assertEqual(chosen.scores, "Epoch AI 2026-11-02")
+        self.assertEqual(init.agent_files(call.ENGINE_DEFAULTS, state_dir=state), chosen.files)
+        offline = init.agent_files(call.ENGINE_DEFAULTS)
+        self.assertEqual(init.tier_agents(call.ENGINE_DEFAULTS).files, offline)
+        self.assertEqual(self.models(call.ENGINE_DEFAULTS)["oah-max"], "opus")
+        for broken in ("{broken", '{"claude": {"models": []}}'):
+            with self.subTest(catalog=broken):
+                (state / "models" / "catalog.json").write_text(broken, encoding="utf-8")
+                self.assertEqual(init.tier_agents(call.ENGINE_DEFAULTS, state_dir=state).files, offline)
+
+    def test_reading_the_choice_runs_nothing_fetches_nothing_and_writes_nothing(self):
+        state = self.stored("sonnet", "opus")
+        before = {path: path.read_bytes() for path in state.rglob("*") if path.is_file()}
+        forbidden = AssertionError("the agent files are chosen from local state only")
+        with mock.patch("subprocess.Popen", side_effect=forbidden) as popen, \
+                mock.patch.object(models.Catalog, "ensure_fresh", side_effect=forbidden) as fresh, \
+                mock.patch("oah.benchmarks._refresh", side_effect=forbidden) as refresh:
+            init.tier_agents(call.ENGINE_DEFAULTS, state_dir=state)
+        self.assertEqual(popen.call_count, 0)
+        self.assertEqual(fresh.call_count, 0)
+        self.assertEqual(refresh.call_count, 0)
+        self.assertEqual({path: path.read_bytes() for path in state.rglob("*") if path.is_file()}, before)
+
+    def test_the_file_names_the_values_it_was_generated_for(self):
+        for tier, model, effort in (("max", "opus", "max"), ("low", "claude-haiku-4-5", "low"),
+                                    ("high", "inherit", "high"), ("medium", "a model: quoted", "medium")):
+            with self.subTest(model=model):
+                data = init.agent_text(tier, model, effort)
+                self.assertEqual(init.agent_values(data), (model, effort))
+                self.assertEqual(init.agent_values(data.replace(b"\n", b"\r\n")), (model, effort))
+        self.assertEqual(init.agent_text("high", "sonnet", "high"), init.agent_files(call.ENGINE_DEFAULTS)[
+            ".claude/agents/oah-high.md"])
+        for data in (b"no front matter\n", b"---\nmodel: opus\n---\n", b"---\nmodel: \"open\neffort: max\n---\n"):
+            with self.subTest(data=data):
+                self.assertIsNone(init.agent_values(data))
+
+    def test_a_file_is_current_stale_or_edited(self):
+        expected = init.agent_text("max", "sonnet", "max")
+        stale = init.agent_text("max", "opus", "max")
+        self.assertEqual(init.agent_check("max", expected, expected), ("current", None))
+        self.assertEqual(init.agent_check("max", stale, expected), ("stale", expected))
+        crlf = stale.replace(b"\n", b"\r\n")
+        self.assertEqual(init.agent_check("max", crlf, expected), ("stale", expected.replace(b"\n", b"\r\n")))
+        self.assertEqual(init.agent_check("max", expected.replace(b"\n", b"\r\n"), expected), ("current", None))
+        for edited in (stale + b"- my rule\n", stale.replace(b"model: opus", b"model: haiku"),
+                       stale.replace(b"\n", b"\r\n", 1)):
+            with self.subTest(edited=edited[:40]):
+                self.assertEqual(init.agent_check("max", edited, expected), ("edited", None))
 
 
 class GitignoreTest(unittest.TestCase):
@@ -468,9 +544,9 @@ class WriteFilesTest(unittest.TestCase):
     def test_wiki_opens_the_lock_without_reading_its_bytes(self):
         read = init._current
 
-        def current(root, relative, folder):
+        def current(root, relative, folder, **kwargs):
             self.assertNotEqual(relative, ".lock", "a shared writable lock must be opened directly")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=current):
             # Start with an existing lock so the only open is the shared writable lock open.
@@ -683,7 +759,7 @@ class WriteFilesTest(unittest.TestCase):
         read = init._current
         changed = False
 
-        def swap(root, relative, folder):
+        def swap(root, relative, folder, **kwargs):
             nonlocal changed
             if not changed and root == self.repo and relative == init.CONFIG_PATH:
                 changed = True
@@ -691,7 +767,7 @@ class WriteFilesTest(unittest.TestCase):
                 parent.mkdir()
                 # Matching bytes cannot bless a different parent object.
                 target.write_bytes(b"before\r\n")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=swap):
             written, problems = init.write_files(self.repo, [change], wiki=self.wiki)
@@ -706,7 +782,7 @@ class WriteFilesTest(unittest.TestCase):
         read = init._current
         swapped = []
 
-        def swap(root, relative, folder):
+        def swap(root, relative, folder, **kwargs):
             if not swapped and root == self.repo and relative == "published":
                 staging, = self.repo.glob(".published.*.tmp")
                 swapped.append(staging)
@@ -714,7 +790,7 @@ class WriteFilesTest(unittest.TestCase):
                 staging.mkdir()
                 sentinel = staging / "file.tmp"
                 sentinel.write_bytes(b"unrelated bytes\r\n\x00")
-            return read(root, relative, folder)
+            return read(root, relative, folder, **kwargs)
 
         with mock.patch.object(init, "_current", side_effect=swap):
             self.assertFalse(init._publish(self.repo, "published", b"planned bytes\r\n"))

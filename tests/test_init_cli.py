@@ -533,6 +533,20 @@ class QuestionsTest(unittest.TestCase):
         self.assertTrue((repo / ".graphifyignore").is_file())
         self.assertFalse((repo / ".claude" / "settings.local.json").exists())
 
+    def test_the_agent_files_follow_a_stored_catalog(self):
+        from oah import models
+        from oah.paths import repo_info, state_dir
+
+        repo = committed_repo(self)
+        state = state_dir(repo_info(repo), {})
+        init._private_state_directory(state, create=True)  # oah init refuses a state folder others can read
+        models.Catalog(state)._save(models.Entry(
+            "claude", "2.1.316", "2026-11-02T00:00:00Z", (models.ModelInfo("sonnet", ("low", "medium", "high", "max")),),
+            "claude --help"))
+        code, out, err = run_init(repo, make_machine(self, FakeTools()), *flags(agents=True))
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nmodel: sonnet\n", (repo / ".claude" / "agents" / "oah-max.md").read_text(encoding="utf-8"))
+
     def test_interactive_answers_shape_the_environment(self):
         repo = committed_repo(self)
         # agents, hooks, unlazy, graph, ci, orca, aside, jev, skill updates; then "Apply this plan?"

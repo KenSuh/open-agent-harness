@@ -53,6 +53,22 @@
 | `OAH_SCORES_AA_UNUSED` | 알림이다. Artificial Analysis 사본에 CLI가 나열한 모델의 점수가 없어서 그 엔진은 Epoch AI 점수로 골랐다. | 할 일이 없다. Artificial Analysis가 그 모델에 점수를 매기면 사라진다. |
 | `OAH_SCORES_FILE_INVALID` | 알림이다. `oah` 상태 폴더의 점수 사본이 손상되었거나 바뀌어서 없는 것으로 쳤다. | 메시지가 말한 파일을 지우거나 `oah models --refresh`로 다시 받는다. |
 
+## Jev와 난이도
+
+이 코드들은 `main`에 있고 아직 릴리스하지 않았다. Jev가 무엇을 받고 그 tier를 언제 쓰는지는
+[Jev가 난이도를 판정한다](concepts.md#jev가-난이도를-판정한다)에 있다.
+
+| 코드 | 뜻 | 다음에 할 일 |
+|---|---|---|
+| `OAH_RERANK_SCOPE_WIDENED` | 프로젝트마다 한 번 나오는 알림이다. 이제 Jev가 난이도를 판정하려고 작업의 Intent 글과 Scope 경로를 최대 16,000자까지 받는다. | 할 일이 없다. Jev 요청을 모두 멈추려면 `.oah/config.toml`의 `[rerank]`에 `enabled = false`를 둔다. |
+| `OAH_RERANK_SECRET` | 메시지가 말한 부분(Intent 글, Scope 경로, 요청 글)에 키나 개인 경로가 있다고 개인정보 규칙이 판단해서 Jev에게 묻지 않고 규칙 tier로 실행했다. 보낸 것은 없다. | 패킷이나 요청 파일에서 그 글을 지우거나, 규칙 tier를 그대로 쓴다. |
+| `OAH_DESIGN_UNJUDGED` | `oah packet new`의 경고다. 이 작업에 기록된 설계 판정이 없다. 패킷은 그래도 만들었다. | 설계를 쓰기 전에 메시지가 말한 명령 `oah recommend --kind design --task <task> --request-file <file>`을 실행한다. |
+| `OAH_RECOMMEND_USAGE` | `oah recommend` 인자가 서로 맞지 않는다. `--kind design`이나 `packet` 없이, 또는 올바른 `--task` 없이 `--request-file`을 줬거나, `--request-file` 없이 `--task`나 `--scope`를 줬거나, 축이 빠졌다. | 메시지가 보여 주는 명령이나 `oah recommend --help`를 따른다. |
+| `OAH_RECOMMEND_REQUEST_TOO_LARGE` | 요청 파일이 1 MB를 넘는다. 보내거나 기록한 것은 없다. | 요청 자체만 더 작은 파일에 쓴다. Jev는 최대 16,000자만 읽는다. |
+| `OAH_RECOMMEND_REQUEST_UNREADABLE` | 요청 파일이 없거나, 파일이 아니거나, 읽을 수 없거나, UTF-8이 아니다. 보내거나 기록한 것은 없다. | 요청을 UTF-8 텍스트 파일로 저장하고 그 경로를 준다. |
+| `OAH_AGENT_FILE_EDITED` | `oah doctor`의 알림이다. `.claude/agents/oah-<tier>.md` 파일이 `oah`가 만드는 내용과 달라서 그대로 두며, 그 모델은 더 이상 최신으로 유지하지 않는다. | 그대로 쓰거나, 지우고 `oah init --with-agents`를 실행해 `oah`가 다시 쓰게 한다. |
+| `OAH_AGENT_FILE_STALE` | `oah doctor`의 알림이다. `oah`가 만든 하위 에이전트 파일의 모델이나 추론 강도가 지금의 선택과 다르고, 이를 고칠 세션 시작 훅이 없다. | `oah hooks install session-start`로 훅을 설치하거나, 파일을 지우고 `oah init --with-agents`를 실행한다. |
+
 ## 리스
 
 | 코드 | 뜻 | 다음에 할 일 |

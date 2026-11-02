@@ -156,6 +156,25 @@ What can stop a launch after you update:
 each listed model left out with its reason. `oah doctor` now shows a pin that cannot run as the error a call would give.
 [Troubleshooting](troubleshooting.md#models) lists the codes.
 
+### Jev now judges difficulty
+
+With TypeSafe Jev on (`[rerank] enabled = true`), this update changes what Jev receives and what its answer does:
+
+- To judge how hard a task is, Jev now receives the task's Intent text (Problem, Desired outcome, Success conditions,
+  Constraints and Non-goals) and its Scope paths, up to 16,000 characters in all, where it used to receive only the
+  task name. It never receives code, diffs or file contents, and when a privacy rule flags the text nothing is sent.
+  The first such request in a project prints `OAH_RERANK_SCOPE_WIDENED` once, and you are not asked again. To stop
+  it, set `enabled = false` under `[rerank]` in `.oah/config.toml`.
+- A call's tier can now differ from the rule tier. When Jev's confidence is at or above
+  `[rerank] difficulty_min_confidence` (0.6 unless you set it), Jev's tier runs, never below the floor, and the run
+  record says `tier_source=jev` and keeps the rule tier in `rule_tier`. `--tier`, or a plan tier you edited, still
+  wins. With Jev off, failing or unsure, the rule tier runs as before.
+- The kit's rules now have the lead session run `oah recommend --kind design --task <task> --request-file <file>`
+  before it writes a design or a packet, and `oah packet new` warns `OAH_DESIGN_UNJUDGED` when that step was skipped.
+  Run `oah rules sync` to take the new rule into `AGENTS.md`.
+- With the session-start hook installed, the subagent files `oah init` wrote follow the current model choice, so git
+  may show a change in `.claude/agents/oah-<tier>.md`. A file you edited is left alone, and `oah doctor` names it.
+
 ## 7. What `docs/UPSTREAM_SYNC.md` records
 
 `oah` follows the owner's own harness as it improves. [`docs/UPSTREAM_SYNC.md`](UPSTREAM_SYNC.md) records the

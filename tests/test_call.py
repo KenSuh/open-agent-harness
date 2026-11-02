@@ -1122,41 +1122,39 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(data["tier"], "high")
         self.assertTrue(any("workflow" in reason for reason in data["tier_reasons"]))
 
-    def test_advice_never_changes_tier(self):
+    def test_a_broken_or_keyless_re_ranker_never_blocks_or_changes_the_tier(self):
         project = Project(self)
-        for status, tier in (("used", "max"), ("used", "low")):
-            advice = types.SimpleNamespace(status=status, advisory_tier=tier)
-            module = types.SimpleNamespace(advise_difficulty=lambda axes, task, *, root, advice=advice, **kw: advice)
-            with mock.patch.dict(sys.modules, {"oah.rerank": module}):
-                data = project.run(stage="review")
-            self.assertEqual((data["tier"], data["advisory"]), ("medium", f"used tier={tier}"))
 
-        def broken(axes, task, *, root, **kw):
+        def broken(*args, **kw):
             raise RuntimeError("provider down")
 
-        with mock.patch.dict(sys.modules, {"oah.rerank": types.SimpleNamespace(advise_difficulty=broken)}):
+        with mock.patch.object(rerank, "advise_difficulty", broken):
             data = project.run(stage="review")
-        self.assertEqual((data["tier"], data["advisory"]), ("medium", "unused(error: RuntimeError)"))
-        no_key = types.SimpleNamespace(
-            advise_difficulty=lambda axes, task, *, root, **kw: types.SimpleNamespace(status="unused(no key)"))
-        with mock.patch.dict(sys.modules, {"oah.rerank": no_key}):
-            self.assertEqual(project.run(stage="review")["advisory"], "unused(no key)")
+        self.assertEqual((data["tier"], data["tier_source"], data["advisory"]),
+                         ("medium", "rules", "unused(error: RuntimeError)"))
+        no_key = rerank.Advice("medium", None, None, "unused(no key)")
+        with mock.patch.object(rerank, "advise_difficulty", return_value=no_key):
+            data = project.run(stage="review")
+        self.assertEqual((data["tier"], data["advisory"], data["jev_status"]), ("medium", "unused(no key)",
+                                                                                "unused(no key)"))
+        with mock.patch.dict(sys.modules, {"oah.rerank": types.SimpleNamespace()}):
+            data = project.run(stage="review")
+        self.assertEqual((data["status"], data["tier"], data["tier_source"]), ("finished", "medium", "rules"))
 
-    def test_real_advice_records_provider_tier_without_changing_launch_tier(self):
+    def test_real_advice_sets_the_launch_tier_within_the_floor(self):
         project = Project(self, '[rerank]\nenabled = true\nprovider = "fake"\n')
         provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
                                          advise=mock.Mock())
         project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
-        with contextlib.chdir(project.repo), \
+        with contextlib.chdir(project.repo), contextlib.redirect_stderr(io.StringIO()), \
                 mock.patch.dict(rerank.PROVIDERS, {"fake": provider}):
-            for tier in ("max", "low"):
-                with self.subTest(advisory_tier=tier):
+            for advised, tier in (("max", "max"), ("low", "medium")):
+                with self.subTest(advisory_tier=advised):
                     provider.advise.reset_mock()
-                    provider.advise.return_value = (tier, 0.8)
+                    provider.advise.return_value = (advised, 0.8)
                     data = project.run(stage="review")
-                    self.assertEqual((data["tier"], data["tier_source"], data["advisory"]),
-                                     ("medium", "rules", f"used tier={tier}"))
-                    self.assertEqual(data["launch_effort"], "medium")
+                    self.assertEqual((data["tier"], data["tier_source"], data["rule_tier"], data["advisory"]),
+                                     (tier, "jev", "medium", f"used tier={advised}"))
                     provider.advise.assert_called_once()
 
     def test_fresh_install_refuses_before_launch(self):
@@ -2333,6 +2331,234 @@ class UnpooledNoticeTest(unittest.TestCase):
         self.assertTrue(any(w.startswith("OAH_MODEL_NEW_UNPOOLED: ") for w in freshness.warnings))
         self.assertEqual(set(catalog.writes), {catalog.catalog_path})
         self.assertEqual({path: path.read_bytes() for path in (project.state / "models").iterdir()}, before)
+
+
+class Judge:
+    """A fake Jev: answers each difficulty question in turn and records exactly what it was sent."""
+
+    name = "fake"
+
+    def __init__(self, *answers) -> None:
+        self.answers = list(answers) or [("high", 0.8)]
+        self.sent: list[tuple[dict, str]] = []
+
+    def key_name(self, config) -> str:
+        return "FAKE_RERANK_KEY"
+
+    def advise(self, axes, work, *, key, config):
+        self.sent.append((dict(axes), work))
+        answer = self.answers[min(len(self.sent), len(self.answers)) - 1]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+JEV_ON = '[rerank]\nenabled = true\nprovider = "fake"\n'
+
+
+def jev_project(test: unittest.TestCase, config: str = "", *, scored: bool = False) -> Project:
+    """Jev on, with a fake provider's key in the environment; `config` continues the [rerank] table."""
+    project = scored_project(test, JEV_ON + config) if scored else Project(test, JEV_ON + config)
+    project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
+    return project
+
+
+@contextlib.contextmanager
+def judged(project: Project, judge: Judge):
+    err = io.StringIO()
+    with mock.patch.dict(rerank.PROVIDERS, {"fake": judge}), contextlib.chdir(project.repo), \
+            contextlib.redirect_stderr(err):
+        yield err
+
+
+class JevDifficultyTest(unittest.TestCase):
+    """With Jev on, its judgement of the accepted Intent and the Scope sets the tier, never below the floor."""
+
+    def run_call(self, project: Project, judge: Judge, **fields) -> tuple[dict, str]:
+        with judged(project, judge) as err:
+            data = project.run(**fields)
+        return data, err.getvalue()
+
+    def jev(self, data: dict) -> tuple:
+        return (data["rule_tier"], data["jev_tier"], data["jev_status"], data["tier"], data["tier_source"])
+
+    def test_jev_raises_the_tier_and_both_tiers_are_recorded(self):
+        project = jev_project(self)
+        judge = Judge(("high", 0.8))
+        data, _ = self.run_call(project, judge, stage="review")
+        self.assertEqual(self.jev(data), ("medium", "high", "used", "high", "jev"))
+        self.assertEqual((data["jev_confidence"], data["jev_truncated"], data["launch_effort"], data["advisory"]),
+                         (0.8, False, "high", "used tier=high"))
+        self.assertTrue(any(reason.startswith("jev high") for reason in data["tier_reasons"]))
+        self.assertEqual(len(judge.sent), 1)
+
+    def test_jev_lowers_the_tier(self):
+        project = jev_project(self)
+        project.packet("## Scope\n- .github/workflows/ci.yml\n")
+        data, _ = self.run_call(project, Judge(("medium", 0.9)), stage="correction")
+        self.assertEqual(self.jev(data), ("high", "medium", "used", "medium", "jev"))
+        self.assertEqual(data["launch_effort"], "medium")
+
+    def test_a_jev_tier_below_the_floor_is_raised_to_the_floor(self):
+        project = jev_project(self)
+        data, _ = self.run_call(project, Judge(("low", 0.9)), stage="correction")
+        self.assertEqual(self.jev(data), ("medium", "low", "used", "medium", "jev"))
+        self.assertTrue(any("floor medium" in reason for reason in data["tier_reasons"]), data["tier_reasons"])
+
+    def test_below_the_threshold_or_without_confidence_the_rule_tier_runs(self):
+        for answer, status in ((("max", 0.5), "below-threshold 0.5"), (("max", None), "below-threshold none")):
+            with self.subTest(answer=answer):
+                data, _ = self.run_call(jev_project(self), Judge(answer), stage="review")
+                self.assertEqual(self.jev(data), ("medium", "max", status, "medium", "rules"))
+                self.assertEqual(data["jev_confidence"], answer[1])
+        data, _ = self.run_call(jev_project(self, "difficulty_min_confidence = 0.4\n"), Judge(("max", 0.5)),
+                                stage="review")
+        self.assertEqual((data["tier"], data["tier_source"]), ("max", "jev"))
+
+    def test_an_invalid_threshold_refuses_before_anything_is_sent(self):
+        for value in ("1.5", "nan", '"high"'):
+            with self.subTest(value=value):
+                project = jev_project(self, f"difficulty_min_confidence = {value}\n")
+                judge = Judge(("max", 0.9))
+                with judged(project, judge), self.assertRaises(EngineError) as caught:
+                    project.prepare(stage="review")
+                self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
+                self.assertIn("difficulty_min_confidence", str(caught.exception))
+                self.assertEqual(judge.sent, [])
+                self.assertFalse((project.state / "runs").exists())
+
+    def test_a_failing_provider_never_blocks_the_call(self):
+        project = jev_project(self)
+        data, _ = self.run_call(project, Judge(RuntimeError("provider down")), stage="review")
+        self.assertEqual((data["status"], *self.jev(data)),
+                         ("finished", "medium", None, "unused(error:internal)", "medium", "rules"))
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("module down")
+
+        with mock.patch.object(rerank, "advise_difficulty", broken):
+            data, _ = self.run_call(project, Judge(("max", 0.9)), stage="review")
+        self.assertEqual((data["status"], data["tier"], data["jev_status"], data["advisory"]),
+                         ("finished", "medium", "unused(error: RuntimeError)", "unused(error: RuntimeError)"))
+
+    def test_off_stops_every_request_and_the_rule_tier_runs(self):
+        project = Project(self, '[rerank]\nenabled = false\nprovider = "fake"\n')
+        project.env["FAKE_RERANK_KEY"] = "fake-" + token_source.token_hex(16)
+        judge = Judge(("max", 0.9))
+        data, err = self.run_call(project, judge, stage="review")
+        self.assertEqual(self.jev(data), ("medium", None, "unused(not-configured)", "medium", "rules"))
+        self.assertEqual(judge.sent, [])
+        self.assertNotIn("OAH_RERANK_SCOPE_WIDENED", err)
+
+    def test_an_explicit_tier_leaves_jev_unused(self):
+        project = jev_project(self)
+        judge = Judge(("max", 0.9))
+        data, _ = self.run_call(project, judge, stage="review", tier="high")
+        self.assertEqual(self.jev(data), (None, None, "unused(tier-given)", "high", "flag"))
+        self.assertEqual(judge.sent, [])
+
+    PLAN = ("## Plan\n- review → codex → {tier}\n\nScored by rules when oah packet new made this packet.\n"
+            "- review: kind=review intensity=low reasoning=medium risk=normal → medium "
+            "(advice=unused(not-configured))\n")
+
+    def test_an_edited_packet_tier_leaves_jev_unused_and_an_unedited_one_asks(self):
+        project = jev_project(self)
+        project.packet(self.PLAN.format(tier="high"))
+        judge = Judge(("max", 0.9))
+        data, _ = self.run_call(project, judge, stage="review")
+        self.assertEqual(self.jev(data), ("medium", None, "unused(tier-given)", "high", "packet"))
+        self.assertEqual(judge.sent, [])
+        for plan in (self.PLAN.format(tier="medium"), "## Plan\n- review → codex → medium\n"):
+            with self.subTest(plan=plan):
+                project = jev_project(self)
+                project.packet(plan)
+                data, _ = self.run_call(project, Judge(("max", 0.9)), stage="review")
+                self.assertEqual(self.jev(data), ("medium", "max", "used", "max", "jev"))
+
+    def test_a_review_never_runs_below_its_scope_floor(self):
+        project = jev_project(self)
+        project.packet("## Scope\n- src/auth/login.py\n")
+        data, _ = self.run_call(project, Judge(("low", 0.95)), stage="review")
+        self.assertEqual(self.jev(data), ("high", "low", "used", "high", "jev"))
+        self.assertEqual(data["admission"]["floor_tier"], "high")
+
+    def test_the_model_is_chosen_for_jev_tier(self):
+        by_flag = scored_project(self).run(stage="review", tier="max")
+        rule = scored_project(self).run(stage="review")
+        data, _ = self.run_call(jev_project(self, scored=True), Judge(("max", 0.9)), stage="review")
+        self.assertEqual((data["tier"], data["tier_source"]), ("max", "jev"))
+        self.assertEqual((data["resolved_model"], data["launch_effort"], data["admission"]),
+                         (by_flag["resolved_model"], by_flag["launch_effort"], by_flag["admission"]))
+        self.assertNotEqual(data["resolved_model"], rule["resolved_model"], "the rule tier's model was not used")
+
+    def test_admission_refuses_what_the_same_tier_by_flag_refuses(self):
+        pin = '[engines.codex.tiers.high]\nmodel = "gpt-6-luna"\n'
+        with self.assertRaises(EngineError) as by_flag:
+            scored_project(self, pin).prepare(stage="review", tier="high")
+        project = jev_project(self, pin, scored=True)
+        with judged(project, Judge(("high", 0.9))), self.assertRaises(EngineError) as by_jev:
+            project.prepare(stage="review")
+        self.assertEqual((by_jev.exception.code, by_flag.exception.code), ("OAH_MODEL_BELOW_FLOOR",) * 2)
+        self.assertFalse((project.state / "runs").exists())
+        medium = scored_project(self, pin).run(stage="review", tier="medium")
+        data, _ = self.run_call(jev_project(self, pin, scored=True), Judge(("medium", 0.9)), stage="review")
+        self.assertEqual((data["status"], data["resolved_model"]), ("finished", medium["resolved_model"]))
+
+    def test_a_refused_budget_sends_nothing(self):
+        project = jev_project(self)
+        judge = Judge(("max", 0.9))
+        refusal = EngineError("OAH_REVIEW_ROUNDS_EXHAUSTED", "no round is left")
+        with judged(project, judge), mock.patch.object(call, "_task_dispatch_gate", side_effect=refusal), \
+                self.assertRaises(EngineError) as caught:
+            project.prepare(stage="review")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        self.assertEqual(judge.sent, [])
+
+    def test_jev_reads_the_intent_parts_and_scope_paths_and_nothing_else(self):
+        project = jev_project(self)
+        canary = "CANARY " + token_source.token_hex(8)
+        git_commit(project.repo, {"src/report.py": f"# {canary}\n"})
+        sha = token_source.token_hex(20)
+        project.packet("## Scope\n- src/report.py\n- docs/report.md\n",
+                       section=SECTION.replace("Reports miss files.", f"Since {sha}, reports miss files."))
+        judge = Judge(("high", 0.8))
+        first, err = self.run_call(project, judge, stage="review")
+        second, again = self.run_call(project, judge, stage="review")
+        axes, work = judge.sent[0]
+        self.assertEqual(work, f"### Problem\nSince {sha}, reports miss files.\n### Desired outcome\nEvery file is "
+                               "listed.\n### Success conditions\n- AC1: the report lists every file\n### Constraints\n"
+                               "### Non-goals\n### Scope\nsrc/report.py\ndocs/report.md")
+        self.assertNotIn(canary, work)
+        self.assertEqual(axes, {"kind": "review", "intensity": "low", "reasoning": "medium", "risk": "normal",
+                                "tier": "medium"})
+        self.assertEqual((err.count("OAH_RERANK_SCOPE_WIDENED"), again.count("OAH_RERANK_SCOPE_WIDENED")), (1, 0))
+        for data in (first, second):
+            record = (find_run(project.state, data["run_id"]).path / "result.json").read_text(encoding="utf-8")
+            self.assertNotIn("reports miss files", record)
+
+    def test_a_cut_is_recorded(self):
+        project = jev_project(self)
+        project.packet("", section=SECTION.replace("Reports miss files.", "y" * 40_000))
+        judge = Judge(("high", 0.8))
+        data, _ = self.run_call(project, judge, stage="review")
+        self.assertEqual((data["jev_truncated"], len(judge.sent[0][1])), (True, 16_000))
+
+    def test_secret_shaped_text_sends_nothing_and_names_its_part(self):
+        secret = "s" + "k-" + token_source.token_hex(16)
+        cases = (("## Scope\n- src/" + secret + ".py\n", SECTION, "the Scope paths"),
+                 ("", SECTION.replace("Reports miss files.", f"Use {secret} to read reports."), "the Intent text"))
+        for body, section, part in cases:
+            with self.subTest(part=part):
+                project = jev_project(self)
+                project.packet(body, section=section)
+                judge = Judge(("max", 0.9))
+                data, err = self.run_call(project, judge, stage="review")
+                self.assertEqual(self.jev(data)[2:], ("unused(secret)", "medium", "rules"))
+                self.assertEqual(judge.sent, [])
+                warning = next(item for item in data["warnings"] if item.startswith("OAH_RERANK_SECRET:"))
+                self.assertIn(part, warning)
+                self.assertNotIn(secret, warning)
+                self.assertNotIn("OAH_RERANK_SCOPE_WIDENED", err)
 
 
 if __name__ == "__main__":

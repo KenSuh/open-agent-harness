@@ -947,6 +947,33 @@ class AdmissionRoundTest(unittest.TestCase):
                           "score_date": "2026-11-02", "score_credit": "Epoch AI, a credit line."})
         self.assertEqual(project.receipt(1)["schema"], receipts.SCHEMA)
 
+    def test_the_receipt_keeps_the_rule_tier_and_the_jev_judgement(self):
+        import contextlib
+        import io
+
+        from oah import rerank
+        from tests.test_call import Judge
+
+        project = self.scored('[rerank]\nenabled = true\nprovider = "fake"\n')
+        key = "fake-" + token_source.token_hex(16)
+
+        class Chain:  # a review's environment is allowlisted, so its Jev key comes from the keychain
+            def lookup(self, name):
+                return key if name == "FAKE_RERANK_KEY" else None
+
+        judge = Judge(("high", 0.9))
+        with mock.patch.dict(rerank.PROVIDERS, {"fake": judge}), contextlib.redirect_stderr(io.StringIO()):
+            result = runner.review(runner.Request(task="t1"), cwd=project.repo, env=project.env, keychain=Chain(),
+                                   temp_root=project.temp_root, rules=RULES)
+        reviewer = result.receipt["reviewer"]
+        self.assertEqual({name: reviewer[name] for name in ("tier", "tier_source", "rule_tier", "jev_tier",
+                                                            "jev_confidence", "jev_status")},
+                         {"tier": "high", "tier_source": "jev", "rule_tier": "medium", "jev_tier": "high",
+                          "jev_confidence": 0.9, "jev_status": "used"})
+        self.assertEqual(reviewer["floor_tier"], "medium", "the floor stays scored from the scope alone")
+        self.assertEqual(len(judge.sent), 1)
+        self.assertEqual(receipts.load(project.state, "t1").problems, ())
+
     def test_every_reader_takes_a_receipt_with_and_without_the_new_keys(self):
         project = self.scored()
         project.review(tier="medium")

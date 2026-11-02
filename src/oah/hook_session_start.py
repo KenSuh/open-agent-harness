@@ -1,10 +1,17 @@
-# Claude Code SessionStart 훅 — 세션 시작 때 규칙 위치·활성 리스·최근 위키 기록·작업 시작법을 짧게 알리고, 발주된 작업자(OAH_WORKER=1)에게는 아무것도 출력하지 않는다.
+# Claude Code SessionStart 훅 — 세션 시작 때 규칙 위치·활성 리스·최근 위키 기록·작업 시작법을 짧게 알리고, oah 가 만든 하위 에이전트 파일을 현재 모델 선택에 맞춰 고치며, 발주된 작업자(OAH_WORKER=1)에게는 아무것도 하지 않는다.
 """`oah hook session-start`: the opt-in Claude Code SessionStart hook (PLAN 5.12, row 11, A6).
 
 Claude Code adds what a SessionStart hook prints to the new session's context, so this prints a short
 session-entry guide: where the rules are, the repository's active leases, the newest wiki log entries
 and how to start a task. A dispatched worker (`OAH_WORKER=1`) skips any session-entry procedure, so it
-gets nothing at all. The hook writes nothing and always exits 0; outside a repository it prints nothing.
+gets nothing at all and nothing is written. Outside a repository it prints nothing.
+
+Its one write: each existing `.claude/agents/oah-<tier>.md` whose model or effort is no longer oah's choice is
+rewritten in place, and one line says so, but only when the file is exactly what oah generates for the values it
+names (`init.agent_check`, LF or CRLF), so an edited file is left alone and a missing one is never created. The
+choice comes from the stored catalog and scores (`init.tier_agents`). Repository lookup still runs git through
+`repo_info`, as before; the refresh step runs no subprocess or engine CLI and reaches no network. Any failure is
+one plain line, and the hook always exits 0.
 """
 from __future__ import annotations
 
@@ -12,6 +19,8 @@ import argparse
 import json
 import os
 import pathlib
+import re
+import stat
 import sys
 from typing import Mapping
 
@@ -39,9 +48,10 @@ def lines(cwd: pathlib.Path, env: Mapping[str, str]) -> list[str]:
     out += _log(info.root)
     out.append("Before you edit: run `oah status` and `oah preflight`, then take a lease with "
                "`oah start --task <task> --agent <you> --scope <paths>`.")
-    return [line if _preview_text(line.encode("utf-8")) is not None else
-            "OAH_SESSION_START_UNSAFE: omitted unsafe session guidance; remove private or control data "
-            "from the source entry before starting another session." for line in out]
+    guide = [line if _preview_text(line.encode("utf-8")) is not None else
+             "OAH_SESSION_START_UNSAFE: omitted unsafe session guidance; remove private or control data "
+             "from the source entry before starting another session." for line in out]
+    return guide + agent_lines(info, env)  # built from fixed paths, plain model names and checked score labels
 
 
 def _leases(info, env: Mapping[str, str]) -> list[str]:
@@ -72,6 +82,80 @@ def _log(root: pathlib.Path) -> list[str]:
         return []
     where = pathlib.PurePosixPath(folder.replace("\\", "/")) / "log.md"
     return [f"Newest wiki log entries ({where}):"] + [f"- {entry.date} {entry.title}" for entry in entries]
+
+
+def _agent_file(root: pathlib.Path, tier: str) -> pathlib.Path | None:
+    """The tier file when it is a regular file reached through no link or junction, as `oah init` requires."""
+    from oah.init import AGENTS_DIR
+    from oah.runs import RunError, _contained_path
+
+    try:
+        path = _contained_path(root, *AGENTS_DIR.split("/"), f"oah-{tier}.md")
+        return path if stat.S_ISREG(path.lstat().st_mode) else None
+    except (OSError, RunError):
+        return None
+
+
+def _shown(name: str) -> str:
+    from oah.models import PLAIN_MODEL
+
+    return name if PLAIN_MODEL.fullmatch(name) else "a named model"
+
+
+def _agent_snapshot(root: pathlib.Path, relative: str) -> tuple[bytes, tuple[int, int] | bytes]:
+    """Read bytes and identity from one no-follow handle, with every parent pinned."""
+    from oah import init
+
+    path = root / relative
+    with init._parents(root, relative, create_parents=False) as folder:
+        fd = (init._windows_read_fd(path) if os.name == "nt" else
+              os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError("non-regular subagent file")
+            identity = init._windows_file_identity(handle.fileno()) if os.name == "nt" else (info.st_dev, info.st_ino)
+            return handle.read(), identity
+
+
+def _label(scores: str) -> str:
+    return scores if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", scores) else "unknown"
+
+
+def agent_lines(info, env: Mapping[str, str]) -> list[str]:
+    """Bring each generated `.claude/agents/oah-<tier>.md` to the current model and effort; one line per change."""
+    from oah import call, init, models, routing
+
+    out: list[str] = []
+    try:
+        present = {tier: path for tier in routing.TIERS
+                   if (path := _agent_file(pathlib.Path(info.root), tier)) is not None}
+        if not present:
+            return out
+        config = load_config(info.root)
+        section = config.section("models", models.DEFAULTS)
+        expected = init.tier_agents(config.section("engines", call.ENGINE_DEFAULTS), profile=section["profile"],
+                                    models_section=section, state_dir=state_dir(info, env))
+        for tier, path in present.items():
+            relative = f"{init.AGENTS_DIR}/oah-{tier}.md"
+            data, identity = _agent_snapshot(info.root, relative)
+            found, update = init.agent_check(tier, data, expected.files[relative])
+            if found != "stale":
+                continue  # current, or edited by the user: `oah doctor` names an edited file
+            (old_model, old_effort), (model, effort) = init.agent_values(data), init.agent_values(update)
+            if not init._publish(info.root, relative, update, before=data, before_identity=identity,
+                                 create_parents=False):
+                out.append(f"oah: could not update {relative}: file changed, vanished or could not be safely "
+                           "replaced; run `oah doctor` to see the manual step")
+                continue
+            what = f"model {_shown(old_model)} -> {_shown(model)}"
+            if effort != old_effort:
+                what += f", effort {_shown(old_effort)} -> {_shown(effort)}"
+            out.append(f"oah: updated {relative}: {what} (scores {_label(expected.scores)})")
+    except Exception as exc:  # the hook must never block or break a session
+        out.append(f"oah: could not update the oah subagent files in {init.AGENTS_DIR} ({type(exc).__name__}); "
+                   "run `oah doctor` to see the manual step")
+    return out
 
 
 def _payload_cwd() -> pathlib.Path | None:

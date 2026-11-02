@@ -152,9 +152,11 @@ QUESTIONS = (
              "for web tasks through MCP. Installs it from its official source and asks before each setup step.",
              "Set up Aside?", False),
     Question("jev", "TypeSafe Jev re-ranker (recommended)", "Jev re-orders the skills and impact results that oah's "
-             "fixed rules chose; it never adds or drops one. Cost: TypeSafe may charge for each request. Data sent: "
-             "the task kind, the query, and each candidate's name and description (up to 200 characters); for "
-             "difficulty advice, the four difficulty axes and the task summary (up to 500 characters). Your key is "
+             "fixed rules chose; it never adds or drops one. It also judges how hard each task is, and its tier sets "
+             "the call's tier, never below the floor. Cost: TypeSafe may charge for each request. Data sent: the task "
+             "kind, the query, and each candidate's name and description (up to 200 characters); to judge difficulty, "
+             "the four difficulty axes, the task's Intent text (or your request before an Intent exists) and its "
+             "Scope paths, up to 16,000 characters in all, never code or file contents. Your key is "
              "read at run time from ${TYPESAFE_API_KEY} or the OS keychain; oah never asks for it or stores it, and "
              "without it Jev stays off. Your answer is recorded in .oah/config.toml.",
              "Turn on Jev? Yes is recommended. Type y or n:", None, recorded=True),
@@ -232,12 +234,89 @@ def _yaml(value: str) -> str:
     return value if _PLAIN.fullmatch(value) else json.dumps(value, ensure_ascii=False)
 
 
-def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE) -> dict[str, bytes]:
-    """`.claude/agents/oah-<tier>.md` per tier: model by A14's mapping (a tier pin wins), effort from the tier.
+@dataclasses.dataclass(frozen=True)
+class TierAgents:
+    """What oah writes to each `.claude/agents/oah-<tier>.md` now, and the scores that chose it."""
 
-    Offline: it reads no catalog and runs no CLI, so every alias competes on the packaged scores."""
+    files: dict[str, bytes]
+    scores: str  # "<source> <date>" of the score set that chose, or "none"
+
+
+def agent_text(tier: str, model: str, effort: str) -> bytes:
+    """The exact bytes oah generates for one tier file that names this model and effort."""
+    description = f"oah {tier} tier: {TIER_WORK[tier]}. Model {model}, effort {effort}, from .oah/config.toml."
+    text = _template("agent.md", NAME=f"oah-{tier}", DESCRIPTION=json.dumps(description, ensure_ascii=False),
+                     MODEL=_yaml(model), EFFORT=_yaml(effort), TIER=tier, FOOTER=intent.FOOTER)
+    return text.encode("utf-8")
+
+
+def agent_values(data: bytes) -> tuple[str, str] | None:
+    """The `model:` and `effort:` a tier file's front matter names, or None when it names no such pair."""
+    try:
+        lines = data.decode("utf-8").replace("\r\n", "\n").split("\n")
+    except UnicodeDecodeError:
+        return None
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return None
+    values: dict[str, str] = {}
+    for line in lines[1:lines.index("---", 1)]:
+        name, separator, value = line.partition(": ")
+        if separator and name in ("model", "effort") and name not in values:
+            try:
+                values[name] = json.loads(value) if value.startswith('"') else value
+            except ValueError:
+                return None
+    if set(values) != {"model", "effort"} or not all(isinstance(value, str) for value in values.values()):
+        return None
+    return values["model"], values["effort"]
+
+
+def agent_check(tier: str, data: bytes, expected: bytes) -> tuple[str, bytes | None]:
+    """("current", None), ("stale", the bytes to write, in the file's own line endings) or ("edited", None).
+
+    A file is stale only when it is exactly what oah generates for the model and effort it names, with LF or CRLF
+    line endings throughout, and those differ from `expected`; every other file counts as edited and is left alone."""
+    if data in (expected, expected.replace(b"\n", b"\r\n")):
+        return "current", None
+    values = agent_values(data)
+    if values is not None:
+        generated = agent_text(tier, *values)
+        for newline in (b"\n", b"\r\n"):
+            if data == generated.replace(b"\n", newline):
+                return "stale", expected.replace(b"\n", newline)
+    return "edited", None
+
+
+def _stored_claude(claude: Mapping, models_section: Mapping,
+                   state: pathlib.Path) -> tuple[models.Entry, scoring.ScoreSet] | None:
+    """The stored Claude catalog entry and its scores, read only; None when no usable entry is stored."""
+    from oah import benchmarks
+
+    catalog = models.Catalog(state)
+    entry = catalog.load("claude")
+    if entry is None or not any(model.listed for model in entry.models):
+        return None
+    known = scoring.families()
+    chosen = benchmarks.data_for("claude", entry, catalog=catalog, settings=models_section, known=known)
+    data = chosen.data if chosen.data is not None else scoring.bundled()
+    return entry, scoring.score_set("claude", entry, allowed=claude["allowed_models"], data=data, known=known)
+
+
+def tier_agents(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE, models_section: Mapping | None = None,
+                state_dir: pathlib.Path | None = None) -> TierAgents:
+    """`.claude/agents/oah-<tier>.md` per tier from the current choice: model by A14's mapping (a tier pin wins),
+    effort from the tier. `oah init` writes these bytes; the session-start hook and `oah doctor` compare with them.
+
+    With `state_dir`, the stored Claude catalog entry and stored scores choose when they are readable. This reads only:
+    it runs no CLI, fetches nothing and writes nothing. Otherwise every known alias competes on the packaged scores."""
     claude = engines["claude"]
-    entry, scores = models.offline_claude(claude["allowed_models"])
+    found = None
+    if state_dir is not None:
+        try:
+            found = _stored_claude(claude, models_section or models.DEFAULTS, pathlib.Path(state_dir))
+        except Exception:  # an unreadable store counts as none; the packaged snapshot still chooses
+            found = None
+    entry, scores = found or models.offline_claude(claude["allowed_models"])
     profile = profile if profile in scoring.PROFILES else scoring.DEFAULT_PROFILE  # `oah call` reports a bad value
     files = {}
     for tier in routing.TIERS:
@@ -249,12 +328,15 @@ def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE) -> 
                                              allowed=claude["allowed_models"])
         except EngineError:
             model = "inherit"  # nothing resolves: the subagent uses the session's model
-        description = (f"oah {tier} tier: {TIER_WORK[tier]}. Model {model}, effort {values['effort']}, "
-                       "from .oah/config.toml.")
-        text = _template("agent.md", NAME=f"oah-{tier}", DESCRIPTION=json.dumps(description, ensure_ascii=False),
-                         MODEL=_yaml(model), EFFORT=_yaml(values["effort"]), TIER=tier, FOOTER=intent.FOOTER)
-        files[f"{AGENTS_DIR}/oah-{tier}.md"] = text.encode("utf-8")
-    return files
+        files[f"{AGENTS_DIR}/oah-{tier}.md"] = agent_text(tier, model, values["effort"])
+    label = f"{scores.source} {scores.date}" if scores is not None and scores.source else "none"
+    return TierAgents(files, label)
+
+
+def agent_files(engines: Mapping, *, profile: str = scoring.DEFAULT_PROFILE, models_section: Mapping | None = None,
+                state_dir: pathlib.Path | None = None) -> dict[str, bytes]:
+    """The bytes of each tier file (`tier_agents`)."""
+    return tier_agents(engines, profile=profile, models_section=models_section, state_dir=state_dir).files
 
 
 def _gitignore_groups(unlazy_copy: bool) -> list[tuple[str, list[str]]]:
@@ -545,7 +627,8 @@ def _parents(root: pathlib.Path, relative: str, *, create_parents: bool = True, 
             os.close(handle)
 
 
-def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | None:
+def _current(root: pathlib.Path, relative: str, folder: int | None, *,
+             identity: tuple[int, int] | bytes | None = None) -> bytes | None:
     """Read a regular target through its pinned parent; never follow its final component."""
     if _linked(root, relative) is not None:
         raise OSError("linked publication path")
@@ -561,8 +644,13 @@ def _current(root: pathlib.Path, relative: str, folder: int | None) -> bytes | N
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode) or _is_link(path):
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or _is_link(path):
             raise OSError("non-regular publication target")
+        if identity is not None:
+            actual = _windows_file_identity(handle.fileno()) if os.name == "nt" else (info.st_dev, info.st_ino)
+            if actual != identity:
+                raise OSError("publication target changed")
         return handle.read()
 
 
@@ -955,14 +1043,15 @@ def _file_restrictions(root: pathlib.Path, relative: str, folder: int | None) ->
 def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: bytes | None = None, *,
              executable: bool = False, source: str | None = None, source_digest: str = "",
              private: bool = False, source_root: pathlib.Path | None = None,
-             source_identity: str = "") -> bool:
+             source_identity: str = "", before_identity: tuple[int, int] | bytes | None = None,
+             create_parents: bool = True) -> bool:
     """The only file publication path: local destination, pinned parents, final digest check, atomic publish."""
     if source is not None:
         return False  # No directory may be moved out of or into the worktree (owner M).
     root = pathlib.Path(root).absolute()
     try:
         relative = _relative(relative)
-        with _parents(root, relative, private=private) as folder:
+        with _parents(root, relative, private=private, create_parents=create_parents) as folder:
             path = root / relative
             name = path if folder is None else path.name
             if os.name == "nt":
@@ -1003,7 +1092,7 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                                 if _macos_file_acl(handle.fileno()) != restrictions[1]:
                                     raise OSError("replacement ACL changed")
                         os.fsync(handle.fileno())
-                    current = _current(root, relative, folder)
+                    current = _current(root, relative, folder, identity=before_identity)
                     if ((current is None) != (before is None) or (current is not None and
                             hashlib.sha256(current).digest() != hashlib.sha256(before).digest())):
                         return False
@@ -1014,11 +1103,13 @@ def _publish(root: pathlib.Path, relative: str, data: bytes | None, before: byte
                             return False
                     elif current_restrictions != restrictions:
                         return False
-                    if _current(root, relative, folder) != current:
-                        return False
                     if os.name == "nt":
                         _require_staging(path.parent, parent_identity, private_staging=private)
                         _require_staging(temp.parent, staging_identity, private_staging=private)
+                    if _current(root, relative, folder, identity=before_identity) != current:
+                        return False
+                    # No portable compare-and-replace rename exists: a final read/rename race remains.
+                    # Keep the no-follow byte/identity check immediately before the atomic publication.
                     if before is not None:
                         os.replace(temporary, name, src_dir_fd=staging_folder, dst_dir_fd=folder)
                     elif os.name == "nt":
@@ -2472,7 +2563,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
     has_config = existing is not None and existing.path is not None
     effective = existing if has_config and not force else parse_config(config)
     engines = effective.section("engines", call.ENGINE_DEFAULTS)
-    profile = effective.section("models", models.DEFAULTS)["profile"]
+    models_section = effective.section("models", models.DEFAULTS)
+    profile = models_section["profile"]
     wiki = WikiSettings.from_mapping(effective.section("wiki", WIKI_DEFAULTS))
     wiki = dataclasses.replace(wiki, dir=_wiki_dir(root, wiki.dir))
     ci_section = effective.section("ci", ci.DEFAULTS)
@@ -2485,7 +2577,8 @@ def build_plan(root: pathlib.Path, answers: dict[str, Answer], *, given: Mapping
         unlazy_step.action == "present"
         and pathlib.Path(unlazy_step.folder) == root / (unlazy_step.target or UNLAZY_PROJECT)))
     files = plan_files(root, config=config, wiki_dir=wiki.dir,
-                       agents=agent_files(engines, profile=profile) if values["agents"] else {},
+                       agents=agent_files(engines, profile=profile, models_section=models_section,
+                                          state_dir=state_dir(repo_info(root), machine.env)) if values["agents"] else {},
                        graph=values["graph"], unlazy_copy=unlazy_copy, force=force, today=machine.today)
     rules_step = plan_rules(root, lang=lang)
     aside_local, aside_rules = _plan_aside(root, rules_step) if "aside" in apps else (None, None)

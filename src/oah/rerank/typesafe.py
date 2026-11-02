@@ -9,8 +9,9 @@ functions below, so an API change touches only them.
 Data sent, and nothing else:
 - re-rank: the task kind, the caller's query, and each candidate's name and description (cut to
   DESCRIPTION_LIMIT characters), with one yes/no (Noul) question per candidate in one request;
-- difficulty advice: the four difficulty axes and the task summary (cut to TASK_LIMIT characters),
-  with one Choice question over the tiers;
+- difficulty advice: the four difficulty axes and the work text (`oah.rerank.Work`: the task's accepted Intent,
+  or the user's request before one exists, then the Scope paths), cut to WORK_LIMIT characters in all, with one
+  Choice question over the tiers. Never source code, diffs, file contents or stored values;
 - model judgement: the stage, the tier, the four axes and the candidate (model, effort) pairs, with
   one Choice question over the candidates. No task text, code or paths.
 
@@ -34,7 +35,7 @@ DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
 DEFAULT_KEY_NAME = "TYPESAFE_API_KEY"
 DESCRIPTION_LIMIT = 200
-TASK_LIMIT = 500
+WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
 PROBABILITY_SUM_TOLERANCE = 0.01
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -156,15 +157,16 @@ def _parse_rerank_response(body: object, count: int) -> tuple[list[float] | None
         del body, count, answers, answer
 
 
-def build_advice_request(model: str, axes: Mapping[str, str], task: str) -> dict:
+def build_advice_request(model: str, axes: Mapping[str, str], work: str) -> dict:
     state = {
-        "task": task[:TASK_LIMIT],
+        "work": work[:WORK_LIMIT],  # a cut by characters, so a multi-byte character is never split
         "axes": {name: axes[name] for name in ("kind", "intensity", "reasoning", "risk") if name in axes},
     }
     questions = {
         "tier": {
             "type": "choice",
-            "instructions": "Which effort tier does `task` need, given its difficulty `axes`?",
+            "instructions": ("Which effort tier does the task described in `work` need, given its difficulty `axes`? "
+                             "`work` holds the task's intent or request and the file paths it may change."),
             "criteria": dict(TIER_CRITERIA),
         }
     }
@@ -438,29 +440,29 @@ class TypeSafeProvider:
         finally:
             del self, kind, query, candidates, key, config, model, body
 
-    def advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
+    def advise(self, axes: Mapping[str, str], work: str, *, key: Secret,
                config: Mapping) -> tuple[str, float | None]:
         result = code = None
         try:
             try:
-                result, code = _outcome(self._advise, axes, task, key=key, config=config)
+                result, code = _outcome(self._advise, axes, work, key=key, config=config)
             finally:
-                del self, axes, task, key, config
+                del self, axes, work, key, config
             return _finish(result, code)
         finally:
             del result, code
 
-    def _advise(self, axes: Mapping[str, str], task: str, *, key: Secret,
+    def _advise(self, axes: Mapping[str, str], work: str, *, key: Secret,
                 config: Mapping) -> tuple[tuple[str, float | None] | None, str | None]:
         model = body = None
         try:
             model = str(self._settings(config).get("model") or DEFAULT_MODEL)
-            body, code = self._post_result(build_advice_request(model, axes, task), key, config)
+            body, code = self._post_result(build_advice_request(model, axes, work), key, config)
             if code is not None:
                 return None, code
             return _parse_advice_response(body)
         finally:
-            del self, axes, task, key, config, model, body
+            del self, axes, work, key, config, model, body
 
     def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
                      config: Mapping) -> tuple[str, str]:

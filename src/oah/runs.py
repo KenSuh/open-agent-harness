@@ -46,7 +46,7 @@ RESULT_FIELDS = (
     "requested_effort", "launch_effort", "header_effort", "header_check", "header_code",
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
     "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
-    "launcher", "worker_output",
+    "launcher", "worker_output", "rule_tier", "jev_tier", "jev_confidence", "jev_status", "jev_truncated",
 )
 
 # Correction records have a closed vocabulary; shared helpers never supply retained prose.
@@ -54,7 +54,7 @@ _CORRECTION_ENUMS = frozenset({
     "claude", "codex", "human", "initial", "review", "correction", "attempt-start", "attempt-outcome", "attempt-head",
     "created", "prepared", "queued", "running", *TERMINAL, "applied", "no-change", "aborted", "unverified",
     "match", "mismatch", "downgraded", "low", "medium", "high", "xhigh", "max", "highest", "none", "minimal",
-    "normal", "critical", "flag", "packet", "rules", "pin", "pool", "scored", "quality_order",
+    "normal", "critical", "flag", "packet", "rules", "jev", "pin", "pool", "scored", "quality_order",
     # Older runs recorded these three sources; nothing chooses them now, but those records stay readable.
     "quality_order(unconfirmed)", "cli_default", "effective_config",
     "quick", "docs", "research", "implementation", "refactor", "broad-audit", "design",
@@ -68,6 +68,7 @@ _CORRECTION_ENUMS = frozenset({
     "judge", "used", "unused(pinned)", "unused(floor-unresolved)", "unused(disabled-by-brief)",
     "unused(not-enabled)", "unused(not-configured)", "unused(unknown-provider)", "unused(no key)",
     "unused(no-candidates)", "unused(no-pool-for-tier)", "unused(one-candidate)", "unused(too-many-candidates)",
+    "unused(tier-given)", "unused(secret)", "unused(no-text)",
     *(f"rejected({rule})" for rule in ("outside-candidates", "not-allowed", "unsupported-effort", "unranked-model",
                                         "not-in-tier-pool", "below-floor", "above-cap", "outside-score-bound")),
 })
@@ -82,6 +83,7 @@ _CORRECTION_NESTED_KEYS = frozenset({"kind", "intensity", "reasoning", "risk", "
 _CORRECTION_JUDGE_ERROR = re.compile(
     r"unused\(error:(?:timeout|rate-limited|unauthorized|overloaded|network|insecure-url|invalid-header|"
     r"bad-request|bad-response|key-name|internal|provider|http-[1-5][0-9]{2})\)")
+_CORRECTION_BELOW_THRESHOLD = re.compile(r"below-threshold (?:none|[0-9](?:\.[0-9]{1,6})?(?:e-[0-9]{2})?)")
 
 
 def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
@@ -131,6 +133,9 @@ def _correction_record(record: Mapping, allowed: Sequence[str]) -> dict:
         out["model_choice"] = model_choice(record["model_choice"])
     if isinstance(record.get("model_judge"), str) and _CORRECTION_JUDGE_ERROR.fullmatch(record["model_judge"]):
         out["model_judge"] = record["model_judge"]
+    if isinstance(record.get("jev_status"), str) and (_CORRECTION_JUDGE_ERROR.fullmatch(record["jev_status"])
+                                                    or _CORRECTION_BELOW_THRESHOLD.fullmatch(record["jev_status"])):
+        out["jev_status"] = record["jev_status"]
     if record.get("tier_reasons") is not None:
         out["tier_reasons"] = ["OAH_FIX_ROUTING_RULE" for _ in record["tier_reasons"]]
     if record.get("warnings") is not None:

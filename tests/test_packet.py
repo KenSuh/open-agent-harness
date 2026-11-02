@@ -436,6 +436,43 @@ class PacketPlanTest(unittest.TestCase):
         self.assertEqual(self.new("--scope", "src/app.py", "--no-rerank")[0], 0)
         self.assertIn("  - skills (rerank=unused(disabled-by-brief)):", self.plan().splitlines())
 
+    def test_new_warns_when_no_design_judgement_is_recorded(self):
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        warnings = [line for line in err.splitlines() if line.startswith("OAH_DESIGN_UNJUDGED")]
+        self.assertEqual(len(warnings), 1, err)
+        self.assertIn("task demo", warnings[0])
+        self.assertIn("oah recommend --kind design --task demo --request-file", warnings[0])
+        self.assertIn("OAH_PACKET_CREATED .oah/tasks/demo/PACKET.md", out)
+
+    def test_new_is_silent_once_a_design_judgement_is_recorded(self):
+        request = self.repo.parent / "request.md"
+        request.write_text("Add a report that lists every file.\n", encoding="utf-8")
+        code, out, err = run_cli(self.repo, "recommend", "--kind", "design", "--task", "demo", "--request-file",
+                                 str(request), home=self.home)
+        self.assertEqual(code, 0, out + err)
+        code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("OAH_DESIGN_UNJUDGED", err)
+        self.assertIn("OAH_PACKET_CREATED", out)
+
+    def test_new_asks_jev_about_the_scope_paths_never_the_task_name(self):
+        from oah import rerank
+
+        config = self.repo / ".oah" / "config.toml"
+        config.parent.mkdir(exist_ok=True)
+        config.write_text('[rerank]\nenabled = true\nprovider = "fake"\n', encoding="utf-8")
+        provider = types.SimpleNamespace(name="fake", key_name=lambda config: "FAKE_RERANK_KEY",
+                                         score=Mock(return_value=[]), advise=Mock(return_value=("high", 0.8)))
+        with patch.dict(os.environ, {"FAKE_RERANK_KEY": "fake-" + secrets.token_hex(16)}), \
+                patch.dict(rerank.PROVIDERS, {"fake": provider}):
+            code, out, err = self.new("--scope", "src/app.py")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(provider.advise.call_count, 3)
+        self.assertEqual({call.args[1] for call in provider.advise.call_args_list}, {"### Scope\nsrc/app.py"})
+        self.assertEqual(self.plan().count("(advice=used tier=high)"), 3)
+        self.assertEqual(err.count("OAH_RERANK_SCOPE_WIDENED"), 1)
+
     def test_no_rerank_skips_both_provider_methods(self):
         from oah import rerank
 

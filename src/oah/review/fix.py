@@ -206,6 +206,22 @@ _ERROR_DIAGNOSTICS = {
                             "see the scores in use.",
     "OAH_SCORES_FILE_INVALID": "a stored score file is invalid and counts as absent; delete it, or run "
                                "oah models --refresh to fetch it again.",
+    "OAH_RERANK_SCOPE_WIDENED": "Jev now receives the task's Intent text and Scope paths to judge its difficulty; set "
+                                "enabled = false under [rerank] in .oah/config.toml to stop it.",
+    "OAH_RERANK_SECRET": "Jev was not asked, because a privacy rule flagged the Intent text or Scope paths; remove "
+                         "that text from the packet, or keep the rule tier and run oah fix again.",
+    "OAH_DESIGN_UNJUDGED": "no design judgement is recorded for the task; run oah recommend --kind design --task <task> "
+                           "--request-file <file> before writing the design.",
+    "OAH_RECOMMEND_USAGE": "the recommend arguments do not fit together; run oah recommend --help, and use "
+                           "--request-file only with --kind design or packet and --task.",
+    "OAH_RECOMMEND_REQUEST_TOO_LARGE": "the request file is over 1 MB; write the request itself to a smaller file and "
+                                       "run oah recommend again.",
+    "OAH_RECOMMEND_REQUEST_UNREADABLE": "the request file cannot be read as UTF-8 text; save it as UTF-8 and run oah "
+                                        "recommend again.",
+    "OAH_AGENT_FILE_EDITED": "a subagent file oah generated was edited, so oah leaves it alone; delete it and run oah "
+                             "init --with-agents to hand it back.",
+    "OAH_AGENT_FILE_STALE": "a generated subagent file names an older model and no hook updates it; run oah hooks "
+                            "install session-start, or delete it and run oah init --with-agents.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

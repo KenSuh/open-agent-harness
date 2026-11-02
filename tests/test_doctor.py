@@ -801,3 +801,83 @@ class DoctorPinTest(unittest.TestCase):
         self.assertEqual(row["tiers"]["high"]["error"].split(":")[0], "OAH_CONFIG_INVALID")
         self.assertIn("high OAH_CONFIG_INVALID", doctor.render_text([], "darwin", model_choices=choices))
         self.assertEqual(row["tiers"]["medium"], {"model": "gpt-test-a", "source": "quality_order"}, "only that tier")
+
+
+class AgentFileDoctorTest(unittest.TestCase):
+    """oah doctor names an edited subagent file, and a stale one when no session-start hook will update it."""
+
+    def setUp(self):
+        network = mock.patch("socket.create_connection", side_effect=AssertionError("no network"))
+        self.network = network.start()
+        self.addCleanup(network.stop)
+        self.addCleanup(self.network.assert_not_called)
+        self.repo = make_git_repo(self)
+        self.state = make_tmp_dir(self) / "state"
+        Catalog(self.state)._save(Entry("claude", "2.1.316", "2026-11-02T00:00:00Z",
+                                        (ModelInfo("sonnet", ("low", "medium", "high", "max")),), "claude --help"))
+        self.agents = self.repo / ".claude" / "agents"
+        self.agents.mkdir(parents=True)
+        self.env = {"OAH_STATE_DIR": str(self.state)}
+
+    def notices(self) -> list[dict]:
+        import oah.doctor as doctor
+
+        return doctor.agent_notices(self.repo, self.env)
+
+    def test_an_edited_file_is_named_with_the_manual_step(self):
+        from oah import init
+
+        (self.agents / "oah-high.md").write_bytes(init.agent_text("high", "sonnet", "high") + b"- mine\n")
+        found = self.notices()
+        self.assertEqual([(item["code"], item["file"]) for item in found],
+                         [("OAH_AGENT_FILE_EDITED", ".claude/agents/oah-high.md")])
+        self.assertIn("left alone", found[0]["message"])
+        self.assertIn("oah init --with-agents", found[0]["message"])
+
+    def test_a_stale_generated_file_is_named_only_without_the_hook(self):
+        from oah import hooks, init
+
+        (self.agents / "oah-max.md").write_bytes(init.agent_text("max", "opus", "max"))
+        found = self.notices()
+        self.assertEqual([(item["code"], item["file"]) for item in found],
+                         [("OAH_AGENT_FILE_STALE", ".claude/agents/oah-max.md")])
+        for text in ("opus", "sonnet", "oah init --with-agents", "oah hooks install session-start"):
+            self.assertIn(text, found[0]["message"])
+        hooks.install("session-start", self.repo, dry_run=False)
+        self.assertEqual(self.notices(), [], "the hook updates it at the next session start")
+
+    def test_current_files_or_none_say_nothing(self):
+        import oah.doctor as doctor
+        from oah import init
+
+        self.assertEqual(self.notices(), [])
+        (self.agents / "oah-max.md").write_bytes(init.agent_text("max", "sonnet", "max"))
+        self.assertEqual(self.notices(), [])
+        self.assertEqual(doctor.agent_notices(None, {}), [])
+
+    def test_doctor_shows_them_offline_and_writes_nothing(self):
+        import oah.doctor as doctor
+        from oah import init
+
+        path = self.agents / "oah-high.md"
+        path.write_bytes(init.agent_text("high", "sonnet", "high") + b"- mine\n")
+        before = path.read_bytes()
+        forbidden = AssertionError("doctor stays offline and runs no engine CLI")
+        for json_output in (False, True):
+            out = io.StringIO()
+            with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
+                    mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                    mock.patch.dict(os.environ, self.env), \
+                    mock.patch("oah.models.run_command", side_effect=forbidden) as run, \
+                    mock.patch.object(Catalog, "ensure_fresh", side_effect=forbidden) as fresh, \
+                    contextlib.redirect_stdout(out):
+                code = doctor.doctor_main(json_output=json_output)
+            run.assert_not_called()
+            fresh.assert_not_called()
+            self.assertEqual(code, 0, out.getvalue())
+            if json_output:
+                self.assertEqual([item["code"] for item in json.loads(out.getvalue())["agent_notices"]],
+                                 ["OAH_AGENT_FILE_EDITED"])
+            else:
+                self.assertIn("OAH_AGENT_FILE_EDITED: .claude/agents/oah-high.md", out.getvalue())
+        self.assertEqual(path.read_bytes(), before)

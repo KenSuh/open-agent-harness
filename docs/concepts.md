@@ -142,7 +142,9 @@ each engine.
 - `oah packet new` scores the task and writes the stage routes in the packet's `## Plan`. It has no
   `--tier` option; edit the generated plan if you want to change a packet's tier.
 - `oah call` uses the packet's stage tier when present, otherwise the rules. Its call-time `--tier` option
-  overrides that choice for the run. Routing and overrides are recorded in run state; the packet is not rewritten.
+  overrides that choice for the run. With TypeSafe Jev on, Jev's judgement of the task can move the tier within its
+  floor ([Jev judges difficulty](#jev-judges-difficulty)). Routing and overrides are recorded in run state; the packet
+  is not rewritten.
 - **Effort is what the model supports, with no fixed cap.** A tier's effort is a level the engine lists for the
   model. `highest` means the top reasoning level Codex lists for the resolved model; when Codex has not reported
   the levels, `oah` refuses with `OAH_EFFORT_METADATA_MISSING` instead of guessing.
@@ -157,22 +159,22 @@ each engine.
   With pools configured, a listed model in no pool gets `OAH_MODEL_NEW_UNPOOLED` from `oah models`, `oah doctor`
   and a launch that rebuilt the catalog. `oah doctor` uses the stored catalog without rereading the CLI.
   `oah` never edits your pools.
-- Every run record keeps the axes, the tier and where it came from (`rules`, `packet` or `flag`), and the
-  requested and effective model and effort.
+- Every run record keeps the axes, the tier and where it came from (`rules`, `packet`, `flag` or `jev`), the rule
+  tier beside Jev's answer, and the requested and effective model and effort.
 
-The optional TypeSafe Jev re-ranker may add advice about the tier. It is recorded next to the rule result and
-never lowers the tier.
+The optional TypeSafe Jev re-ranker re-orders skills, and it judges how hard each task is. Its tier counts only at or
+above a confidence you can set, and never below the floor.
 
 ```mermaid
 flowchart TD
     task["Task: stage, kind and Scope paths<br/>axes you give explicitly win"]
     score["Fixed rules score four axes<br/>kind, intensity, reasoning, risk"]
     tier["Tier: low, medium, high or max<br/>risk critical = max, migration, security = at least high"]
-    pick["Packet stage tier, or oah call --tier<br/>source recorded: rules, packet or flag"]
+    pick["Packet stage tier, or oah call --tier<br/>source recorded: rules, packet, flag or jev"]
     model["Model and effort the CLI supports<br/>an effort that cannot be observed is recorded as unverified<br/>a lower launch effort fails: OAH_EFFORT_DOWNGRADED"]
     skills["Deterministic skill list<br/>with a reason for each skill"]
     ask{"Not --no-rerank, enabled by you,<br/>provider set AND key present?"}
-    jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops"]
+    jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops<br/>judges difficulty from the Intent and Scope paths"]
     used["rerank=used"]
     unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:CODE"]
     brief["Packet plan, brief and run record"]
@@ -187,7 +189,7 @@ flowchart TD
     jev -->|"error, original order kept"| unused
     used --> brief
     unused --> brief
-    tier -.->|"advisory tier, recorded, never applied"| jev
+    jev -.->|"its tier at or above difficulty_min_confidence, never below the floor"| pick
 
     classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
     classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
@@ -196,6 +198,53 @@ flowchart TD
     class jev,used ai
     class unused note
 ```
+
+### Jev judges difficulty
+
+The rules score the axes from the Scope alone, so a one-line concurrency fix can score low and a 20-file rename high.
+With TypeSafe Jev on (`[rerank] enabled = true` and a key), `oah` asks Jev how hard the task really is. This is on
+`main` and not in a release yet.
+
+- **What Jev receives.** The four axes, then a work text: the five parts of the task's accepted Intent (Problem,
+  Desired outcome, Success conditions, Constraints and Non-goals, with their headings), then the Scope paths, one per
+  line. Before an Intent exists, `oah recommend --request-file` sends the request you wrote instead of the Intent. The
+  text is cut to 16,000 characters, about 4,000 tokens, from its end, so the Scope paths go first, and the run record
+  says `jev_truncated`. Jev never receives code, diffs, file contents, stored values, the brief or your key, and a
+  path is sent as a path, never its contents.
+- **The secret check.** Before anything is sent, the privacy scanner's content rules read the text. When one flags a
+  part, for example a key or a private home path, nothing is sent, the status is `unused(secret)`, and
+  `OAH_RERANK_SECRET` names the part (the Intent text, the Scope paths or the request text), never the match.
+- **When Jev's tier counts.** A call whose tier came from the rules, or from a packet plan tier you did not edit, asks
+  Jev after the budget check and before the model is chosen, so the model, the effort and the admission check follow
+  the final tier. When Jev answers with confidence at or above `[rerank] difficulty_min_confidence` (0.6 unless you
+  set a number from 0 to 1; any other value refuses with `OAH_CONFIG_INVALID` before anything is sent), its tier runs
+  and is raised to the floor tier when lower; `tier_source` is `jev`.
+  Otherwise the rule tier runs, and `jev_status` says why: `unused(<reason>)` or `below-threshold <confidence>`. A
+  review's floor stays scored from its scope alone, so Jev can raise a review or lower it only down to that floor.
+  `--tier`, or a plan tier you changed from the rule tier `oah packet new` wrote beside it, leaves Jev out as
+  `unused(tier-given)`. A Jev failure never blocks a call, and a correction by `oah fix` asks once and keeps the answer.
+- **The record.** The run record and the review receipt keep `rule_tier`, `jev_tier`, `jev_confidence`, `jev_status`,
+  `tier` and `tier_source`.
+- **The notice.** The first request of a project prints `OAH_RERANK_SCOPE_WIDENED` once. There is no new question and
+  no setting to opt in. `enabled = false` under `[rerank]` stops every request.
+- **Design and packets.** Design and packet work comes before an Intent, so `oah call` cannot judge it. The lead session
+  runs `oah recommend --kind design --task <task> --request-file <file>` with the user's request (and `--scope <path>`
+  for paths it already knows), then sends the work to the `oah-<tier>` subagent of the tier it prints. Design never runs
+  below `high`, because a wrong design costs every step after it, and with no used judgement (no key, Jev off, a
+  secret, a failure or low confidence) it runs at `max`: unknown difficulty is not treated as easy. `--kind packet`
+  keeps its rule tier when unjudged. The outcome, Jev off included, is recorded under the task in the state folder,
+  without the request text, the Scope paths or the key, and `oah packet new` warns `OAH_DESIGN_UNJUDGED` when no
+  design judgement is recorded. It warns and never blocks. This is the only request `oah recommend` sends, and only
+  with `--request-file`.
+- **Subagent files.** `oah init` writes `.claude/agents/oah-<tier>.md` from the current choice: the stored Claude
+  catalog and scores when they can be read, else the snapshot shipped with `oah`. With the session-start hook
+  installed, each session start rewrites a file whose model or effort is no longer the choice, and says so in one line,
+  but only when the file is exactly what `oah` generates for the values it names. An edited file is left alone and a
+  missing one is never created. `oah doctor` names an edited file (`OAH_AGENT_FILE_EDITED`), and a stale one when the
+  hook is not installed (`OAH_AGENT_FILE_STALE`), with the step that fixes it.
+
+Without a Jev key, difficulty stays a count of files and paths, and a thin Intent gives a thin judgement. TypeSafe may
+charge for each request.
 
 ### How a model is chosen
 

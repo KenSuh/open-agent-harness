@@ -21,7 +21,9 @@ extra_rules = []
 # Off until you turn it on. A key alone never turns it on.
 # When on, re-ranking sends the task kind, the query, and each candidate's name and description
 # (up to 200 characters). For difficulty advice, oah sends the four axes (kind, intensity,
-# reasoning, risk) and the task summary (up to 500 characters).
+# reasoning, risk), the Intent sections or the request text, plus Scope paths, up to 16,000 characters
+# in all, after the privacy rules. Secret-shaped text is not sent; never code, diffs or stored values.
+# Jev sets the tier, never below the floor tier.
 # The provider may charge for either request type. Enable only if you consent to both.
 enabled = false
 provider = ""               # "typesafe" for TypeSafe Jev
