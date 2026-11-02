@@ -32,9 +32,8 @@ Rule
     Performance and balanced take the cheapest model that clears, then the lower score, then the name, so a choice
     never flips. Efficient does not step down by itself: its lowest allowed step is one below the tier, and among
     the models that clear it and pass the effort rules (`usable`) it takes the most score per cost, then the lower
-    score, the lower cost and the name. So a stronger model wins when it is the better value. The effort rules bind
-    only here. Efforts stay the tier's, and a cap still clamps: `usable` drops a model the launch would refuse, and
-    when it would drop them all the launch keeps that refusal.
+    score, the lower cost and the name. So a stronger model wins when it is the better value. In every profile,
+    `usable` drops models the effort rules refuse before choosing, including in the strongest-model fallback.
 
     When nothing that may be picked reaches the step, for example on a machine that does not list the top of the
     scale, the strongest model that meets the floor runs. When nothing meets the floor, `FloorUnmet` says so, and
@@ -385,9 +384,13 @@ def _pick(scores: ScoreSet, step: int, floor_step: int, profile: str,
     meets_floor = [model for model in scores.models if _reaches(scores, model.score, floor_step)]
     if not meets_floor:
         raise _floor_unmet(scores, floor_step)
+    meets_floor = [model for model in meets_floor if usable is None or usable(model.model)]
+    if not meets_floor:
+        raise FloorUnmet(UNRESOLVED, f"no model reaching the {TIERS[floor_step]} floor is runnable; nothing was "
+                         f"launched or spent. Change [engines.{scores.engine}.tiers] effort or "
+                         f"[engines.{scores.engine}.effort_caps] in .oah/config.toml, or widen allowed_models; "
+                         "`oah models` shows why each model was left out")
     fits = [model for model in meets_floor if _reaches(scores, model.score, base, slack)]
-    if efficient:
-        fits = [model for model in fits if usable is None or usable(model.model)] or fits
     if not fits:
         best = min(meets_floor, key=lambda model: (-model.score, *_price(model), model.model))
     elif efficient:

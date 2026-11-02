@@ -16,7 +16,7 @@ from unittest import mock
 from oah import models_cli, scoring
 from oah.engines.effort import EngineError
 from oah.engines import codex
-from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier,
+from oah.models import (Catalog, Entry, ModelInfo, Pair, build_candidates, check_caps, map_tier, runnable,
                         resolve_base, unpooled_models, unpooled_warning, user_order)
 from tests.helpers import make_git_repo, make_tmp_dir
 
@@ -77,6 +77,26 @@ def picked(engine: str, tier: str, *, entry=None, pin: str = "", order=(), score
     entry = entry if entry is not None else (CODEX_LIST if engine == "codex" else CLAUDE_LIST)
     return map_tier(engine, tier, pin=pin, quality_order=list(order), entry=entry,
                     scores=scored_set(engine) if scores is None else scores, **fields)
+
+
+class RunnableTest(unittest.TestCase):
+    def test_resolve_clamp_and_floor_all_use_the_same_model(self):
+        short = ModelInfo("short", ("medium", "high"))
+        tall = ModelInfo("tall", ("low", "medium", "high", "max"))
+        rows = ((short, "highest", "highest", "high", "high", None),
+                (tall, "highest", "highest", "high", None, "cap-below-floor"),
+                (short, "highest", "medium", "xhigh", "high", None),
+                (tall, "highest", "medium", "xhigh", "high", None),
+                (short, "max", "medium", None, None, "unsupported"),
+                (short, "high", "low", None, None, "unsupported"),
+                (tall, "low", "high", None, None, "unsupported"),
+                (short, "high", "medium", "low", None, "cap-below-floor"),
+                (ModelInfo("pin", ()), "high", "medium", "medium", "medium", None),
+                (ModelInfo("pin", ()), "highest", "medium", None, None, "unsupported"))
+        for info, tier, floor, cap, launch, reason in rows:
+            with self.subTest(model=info.name, tier=tier, floor=floor, cap=cap):
+                result = runnable(info, tier, floor, cap)
+                self.assertEqual((result.launch, result.reason), (launch, reason))
 
 
 class SelectionTest(unittest.TestCase):
@@ -451,14 +471,15 @@ class ModelsCliTest(unittest.TestCase):
         self.assertIn("OAH_MODEL_CATALOG_UNAVAILABLE", out)
         self.assertIn("OAH_MODELS_REFRESH_FAILED", err)
 
-    def test_cap_conflicts_report_the_same_uncapped_floor_as_calls(self):
+    def test_models_reports_no_runnable_manual_model_at_each_floor(self):
         from tests import test_call as calls
 
         for engine in ("codex", "claude"):
             with self.subTest(engine=engine):
                 model = "m-default" if engine == "codex" else "opus"
                 project = calls.Project(self, 'quality_order = ["m-default"]\n'
-                                              f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n')
+                                              f'[engines.{engine}.effort_caps]\n"{model}" = "medium"\n'
+                                              + ('"sonnet" = "medium"\n' if engine == "claude" else ''))
                 write_cache(project.home, ("m-default", ["low", "medium", "high", "max"], True))
                 with inside(project.repo, project.env):
                     code, out, err = run_models("--json")
@@ -468,9 +489,10 @@ class ModelsCliTest(unittest.TestCase):
                                         axes={"kind": "security"})
                 self.assertEqual(code, 0, err)
                 rows = json.loads(out)["engines"][engine]["tiers"]
-                self.assertEqual(rows["high"], {"error": str(caught.exception)})
-                self.assertIn("OAH_CONFIG_INVALID", rows["max"]["error"])
-                self.assertIn("floor effort high", text)
+                self.assertIn("OAH_MODEL_UNRESOLVED", rows["high"]["error"])
+                self.assertIn("OAH_MODEL_UNRESOLVED", rows["max"]["error"])
+                self.assertIn("runnable", str(caught.exception))
+                self.assertIn("effort_caps", text)
                 self.assertIn(".oah/config.toml", rows["high"]["error"])
                 self.assertEqual(rows["medium"]["floor"]["effort"], "medium")
                 self.assertFalse(project.record.exists())
@@ -491,7 +513,8 @@ def candidates(*, ranking=RANKING, floor=("m-mid", "medium"), deterministic=("m-
                allowed=(), caps=None, floor_tier="medium", tier="high", pools=None):
     return build_candidates("codex", entry=JUDGE_ENTRY, deterministic=Pair(*deterministic), tier=tier,
                             floor_tier=floor_tier, floor=Pair(*floor), quality_order=list(ranking),
-                            allowed_models=list(allowed), effort_caps=dict(caps or {}), tier_pools=dict(pools or {}))
+                            allowed_models=list(allowed), effort_caps=dict(caps or {}), tier_pools=dict(pools or {}),
+                            floor_effort=floor[1])
 
 
 def scored_candidates(*, deterministic, floor, tier, floor_tier, ranking=(), caps=None, pools=None, scores=None,
@@ -499,7 +522,7 @@ def scored_candidates(*, deterministic, floor, tier, floor_tier, ranking=(), cap
     return build_candidates("codex", entry=CODEX_LIST, deterministic=Pair(*deterministic), tier=tier,
                             floor_tier=floor_tier, floor=Pair(*floor), quality_order=list(ranking), allowed_models=[],
                             effort_caps=dict(caps or {}), tier_pools=dict(pools or {}),
-                            scores=scored_set() if scores is None else scores, profile=profile)
+                            scores=scored_set() if scores is None else scores, profile=profile, floor_effort=floor[1])
 
 
 def pairs(candidate_set) -> list[tuple[str, str]]:
@@ -507,6 +530,25 @@ def pairs(candidate_set) -> list[tuple[str, str]]:
 
 
 class CandidateTableTest(unittest.TestCase):
+    def test_highest_floor_and_caps_use_each_candidates_own_levels(self):
+        for engine in ("codex", "claude"):
+            for mode in ("ranked", "pools", "scored"):
+                with self.subTest(engine=engine, mode=mode):
+                    entry = Entry(engine, "1", "x", (ModelInfo("tall", ("low", "high", "max")),
+                                                      ModelInfo("short", ("low", "high"))), "test")
+                    scores = scoring.ScoreSet(engine, "test", "2026-11-02", "credit", (
+                        scoring.Scored("tall", "sol", (6, 0), 90, 1),
+                        scoring.Scored("short", "terra", (6, 0), 90, 2)), {})
+                    built = build_candidates(engine, entry=entry, deterministic=Pair("tall", "max"),
+                        tier="high", floor_tier="medium", floor=Pair("short", "high") if mode == "ranked" else Pair("tall", "max"),
+                        quality_order=["tall", "short"] if mode == "ranked" else [], allowed_models=[],
+                        effort_caps={"short": "high"},
+                        tier_pools={"medium": ["tall", "short"], "high": ["tall", "short"]} if mode == "pools" else {},
+                        scores=scores if mode == "scored" else None, tier_effort="highest", floor_effort="highest")
+                    self.assertEqual(pairs(built), [("tall", "max"), ("short", "high")])
+                    self.assertIsNone(built.reject_reason("short", "high"))
+                    self.assertEqual(built.reject_reason("tall", "high"), "below-floor")
+
     def test_hidden_models_are_parsed_and_kept_out_of_candidates(self):
         parsed = codex.parse_models_cache(json.dumps({"models": [
             {"slug": "m-a", "visibility": "list", "supported_reasoning_levels": ["low"]},
@@ -945,6 +987,26 @@ def warned(warnings, code: str) -> list[str]:
 
 
 class ScoreReportTest(unittest.TestCase):
+    def test_models_and_stored_doctor_choices_skip_caps_and_report_the_reason(self):
+        from oah import call
+
+        for profile, expected in (("balanced", "gpt-6.1-sol"), ("efficient", "gpt-6.1-sol"),
+                                  ("performance", "gpt-6-astra")):
+            with self.subTest(profile=profile):
+                project = scored_project(self, f'[models]\nprofile = "{profile}"\n'
+                                         '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "low"\n')
+                config = project.repo / ".oah" / "config.toml"
+                before = config.read_bytes()
+                code, out, err = run_in(project, "--json")
+                self.assertEqual(code, 0, err)
+                report = json.loads(out)["engines"]["codex"]
+                stored = call.stored_choices("codex", Catalog(project.state).load("codex"), project.settings())
+                for row in (report, stored):
+                    self.assertEqual(row["tiers"]["high"]["model"], expected)
+                    self.assertIn("not-runnable", row["left_out"]["gpt-6.1-terra"])
+                    self.assertIn("cap-below-floor", row["left_out"]["gpt-6.1-terra"])
+                self.assertEqual(config.read_bytes(), before)
+
     def report(self, *argv: str, **fields) -> dict:
         from tests import test_call as calls
 

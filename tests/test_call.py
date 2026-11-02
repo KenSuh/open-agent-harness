@@ -157,6 +157,24 @@ def scored_project(test: unittest.TestCase, config: str = "", *, models=SCORED_M
 
 
 class ScoredCallTest(unittest.TestCase):
+    def test_every_profile_can_launch_a_capped_model_with_its_own_highest_floor(self):
+        for profile in ("performance", "balanced", "efficient"):
+            with self.subTest(profile=profile):
+                extra = (f'[models]\nprofile = "{profile}"\n'
+                         '[engines.codex.tiers.medium]\neffort = "highest"\n'
+                         '[engines.codex.tiers.high]\neffort = "highest"\n'
+                         '[engines.codex.effort_caps]\n' + ''.join(
+                             f'"{name}" = "{"high" if name == "gpt-6.1-sol" else "low"}"\n' for name in SCORED_MODELS))
+                project = scored_project(self, extra)
+                cache = json.loads((project.home / "models_cache.json").read_bytes())
+                for info in cache["models"]:
+                    if info["slug"] == "gpt-6.1-sol":
+                        info["supported_reasoning_levels"] = [{"effort": e} for e in ("low", "medium", "high")]
+                (project.home / "models_cache.json").write_text(json.dumps(cache), encoding="utf-8")
+                data = project.run(stage="review", tier="high")
+                self.assertEqual((data["resolved_model"], data["launch_effort"]), ("gpt-6.1-sol", "high"))
+                self.assertTrue(data["admission"]["floor_checked"])
+
     def test_the_rule_picks_the_codex_model_at_every_tier(self):
         rows = {"low": "gpt-6-luna", "medium": "gpt-6.1-terra", "high": "gpt-6.1-terra", "max": "gpt-6-astra"}
         for tier, model in rows.items():
@@ -188,13 +206,13 @@ class ScoredCallTest(unittest.TestCase):
         self.assertEqual((data["status"], data["resolved_model"], data["launch_effort"]),
                          ("finished", "gpt-6.1-sol", "high"))
 
-    def test_the_other_profiles_still_refuse_that_cap(self):
+    def test_every_profile_skips_a_cap_below_the_floor(self):
         cap = '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "low"\n'
-        project = scored_project(self, cap)
-        with self.assertRaises(EngineError) as caught:
-            project.prepare(stage="correction", tier="high", axes={"kind": "security"})
-        self.assertEqual(caught.exception.code, "OAH_CONFIG_INVALID")
-        self.assertIn("floor effort", str(caught.exception))
+        for profile, expected in (("balanced", "gpt-6.1-sol"), ("performance", "gpt-6-astra")):
+            with self.subTest(profile=profile):
+                project = scored_project(self, f'[models]\nprofile = "{profile}"\n' + cap)
+                data = project.run(stage="correction", tier="high", axes={"kind": "security"})
+                self.assertEqual((data["status"], data["resolved_model"]), ("finished", expected))
 
     def test_efficient_still_clamps_a_capped_model_that_reaches_the_floor(self):
         cap = '[engines.codex.effort_caps]\n"gpt-6.1-terra" = "medium"\n'
@@ -210,7 +228,7 @@ class ScoredCallTest(unittest.TestCase):
             settings.engines["codex"]["effort_caps"].update({"gpt-a": cap} if cap else {})
             return call._passes_effort_rules("codex", tier, floor, "gpt-a", settings, entry)
 
-        self.assertTrue(passes("high", "low"), "a low floor asks nothing of a model that lists no low effort")
+        self.assertFalse(passes("high", "low"), "the model must support its configured floor effort too")
         self.assertFalse(passes("low", "low"), "the tier's own effort must be listed")
         self.assertTrue(passes("high", "medium"))
         self.assertFalse(passes("high", "medium", "low"), "the cap keeps it below the floor")
@@ -224,10 +242,12 @@ class ScoredCallTest(unittest.TestCase):
         self.assertEqual((easy["tier"], easy["resolved_model"]), ("low", "gpt-6-luna"))
         self.assertEqual((hard["tier"], hard["resolved_model"]), ("max", "gpt-6-astra"))
 
-    def test_a_kind_floor_lifts_the_scored_model_of_an_explicit_tier(self):
+    def test_an_explicit_tier_with_effort_below_its_kind_floor_is_unresolved(self):
         project = scored_project(self)
-        data = project.run(stage="correction", tier="low", axes={"kind": "security"})
-        self.assertEqual((data["tier"], data["launch_effort"], data["resolved_model"]), ("low", "low", "gpt-6.1-terra"))
+        with self.assertRaises(EngineError) as caught:
+            project.prepare(stage="correction", tier="low", axes={"kind": "security"})
+        self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
+        self.assertEqual(spent(project), [])
 
     def test_the_codex_configuration_and_default_flag_no_longer_choose(self):
         project = scored_project(self)
@@ -241,7 +261,7 @@ class ScoredCallTest(unittest.TestCase):
     def test_an_unreadable_codex_configuration_no_longer_stops_a_scored_call(self):
         project = scored_project(self)
         (project.home / "config.toml").write_text("not toml [", encoding="utf-8")
-        self.assertEqual(project.run(stage="correction", tier="low")["status"], "finished")
+        self.assertEqual(project.run(stage="correction", tier="low", axes={"kind": "quick"})["status"], "finished")
 
     def test_claude_is_chosen_from_scores_with_the_old_default_list_in_the_file(self):
         project = Project(self, '[engines.claude.tiers.max]\neffort = "max"\n')
@@ -297,6 +317,33 @@ def spent(project, task: str = "t1") -> list[dict]:
 
 
 class AdmissionTest(unittest.TestCase):
+    def test_capped_pin_with_highest_floor_needs_no_other_model_or_scores(self):
+        for stage in ("review", "correction"):
+            with self.subTest(stage=stage):
+                extra = ('[engines.codex.tiers.medium]\neffort = "highest"\n'
+                         '[engines.codex.tiers.high]\nmodel = "gpt-6.1-sol"\neffort = "highest"\n'
+                         '[engines.codex.effort_caps]\n"gpt-6.1-sol" = "high"\n')
+                project = scored_project(self, extra)
+                cache = json.loads((project.home / "models_cache.json").read_bytes())
+                for info in cache["models"]:
+                    if info["slug"] == "gpt-6.1-sol":
+                        info["supported_reasoning_levels"] = [{"effort": e} for e in ("low", "medium", "high")]
+                (project.home / "models_cache.json").write_text(json.dumps(cache), encoding="utf-8")
+                with mock.patch.object(scoring, "bundled", side_effect=EngineError(scoring.NO_SCORES, "damaged")):
+                    data = project.run(stage=stage, tier="high", axes={"kind": "review"})
+                self.assertEqual((data["status"], data["resolved_model"], data["launch_effort"]),
+                                 ("finished", "gpt-6.1-sol", "high"))
+                self.assertEqual(data["model_judge"], "unused(pinned)")
+
+    def test_none_runnable_refuses_without_spending_in_every_profile(self):
+        caps = '[engines.codex.effort_caps]\n' + ''.join(f'"{name}" = "low"\n' for name in SCORED_MODELS)
+        for profile in ("performance", "balanced", "efficient"):
+            for stage, code in (("review", FLOOR), ("correction", "OAH_MODEL_UNRESOLVED")):
+                with self.subTest(profile=profile, stage=stage):
+                    project = scored_project(self, f'[models]\nprofile = "{profile}"\n' + caps)
+                    message = self.refused(project, code, stage=stage, tier="high", axes={"kind": "security"})
+                    self.assertIn("effort_caps", message)
+
     def refused(self, project: Project, code: str = FLOOR, **fields) -> str:
         fields.setdefault("stage", "review")
         with self.assertRaises(EngineError) as caught:
@@ -507,7 +554,7 @@ class AdmissionTest(unittest.TestCase):
     def test_a_stale_catalog_cannot_judge_a_pin(self):
         project = scored_project(self, '[engines.codex.tiers.medium]\nmodel = "gpt-6-gone"\n'
                                        '[engines.codex.tiers.low]\nmodel = "gpt-6-luna"\n')
-        project.prepare(stage="correction", tier="low")
+        project.prepare(stage="correction", tier="low", axes={"kind": "quick"})
         (project.home / "models_cache.json").unlink()
         data = project.run(stage="correction", tier="medium", env={"FAKE_CODEX_VERSION": "0.164.0"})
         self.assertEqual((data["status"], data["resolved_model"]), ("finished", "gpt-6-gone"))
@@ -1346,7 +1393,7 @@ class LeaseBindingTest(unittest.TestCase):
 
     def prepare(self, **fields):
         fields.setdefault("task", "t1")
-        fields.setdefault("tier", "low")
+        fields.setdefault("tier", "medium")
         stage = fields.pop("stage", "correction")
         request = call.CallRequest(engine="codex", stage=stage, **fields)
         return call.prepare(request, self.project.settings(), root=self.project.repo, state_dir=self.project.state,

@@ -62,7 +62,7 @@ import oah.intent as oah_intent
 import oah.packet as oah_packet
 from oah import briefs, launchers, models, routing, runs, scoring, skillsel
 from oah.engines import claude, codex
-from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, highest, load_rules, rank,
+from oah.engines.effort import (ORDINARY, EngineError, HeaderCheck, compare_labels, load_rules,
                                 verify_inference)
 from oah.engines.proc import run_command
 
@@ -318,11 +318,13 @@ def stored_choices(engine: str, entry: models.Entry, settings: Settings) -> dict
     tiers: dict[str, dict] = {}
     for tier in routing.TIERS:
         try:
-            model, source = _selected(engine, tier, settings, freshness)
+            model, source = _selected(engine, tier, settings, freshness, floor_tier=tier)
             tiers[tier] = {"model": _shown(model), "source": source}
         except EngineError as exc:
             tiers[tier] = {"error": str(exc)}
-    return {"engine": engine, **models.score_report(scores, settings.models["profile"]), "tiers": tiers}
+    return {"engine": engine, **models.score_report(scores, settings.models["profile"],
+                                                    left_out=_effort_left_out(engine, settings, freshness)),
+            "tiers": tiers}
 
 
 def _fresh(freshness: models.Freshness) -> bool:
@@ -331,30 +333,32 @@ def _fresh(freshness: models.Freshness) -> bool:
         warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in freshness.warnings)
 
 
-def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: models.Entry | None):
-    """A1's effort of a tier for one model, from the levels the catalog lists for it."""
-    requested = settings.engines[engine]["tiers"][tier]["effort"]
-    info = entry.model(model) if entry else None
-    levels = info.efforts if info and info.efforts else None
-    if engine == "codex":
-        cache = {model: codex.CachedModel(model, levels, info.default)} if levels else None
-        return codex.resolve_effort(model, requested, cache=cache)
-    return claude.resolve_effort(requested, efforts=levels, model=model)
+def _runnable(engine: str, tier: str, floor_tier: str, model: str, settings: Settings,
+              entry: models.Entry | None, *, effort: str | None = None) -> models.Runnable:
+    section = settings.engines[engine]
+    info = (entry.model(model) if entry else None) or models.ModelInfo(model, ())
+    return models.runnable(info, effort if effort is not None else section["tiers"][tier]["effort"],
+                           section["tiers"][floor_tier]["effort"], section["effort_caps"].get(model))
 
 
 def _passes_effort_rules(engine: str, tier: str, floor_tier: str, model: str, settings: Settings,
                          entry: models.Entry | None) -> bool:
-    """Whether a launch at this tier would accept the model's effort: the tier's effort resolves for it, a floor above
-    low does too, and its cap, which clamps, leaves that floor. The test `resolve_engine` and `_resolve_floor` make."""
-    cap = settings.engines[engine]["effort_caps"].get(model)
-    try:
-        launch = rank(_tier_effort(engine, tier, model, settings, entry).launch)
-        if cap is None and floor_tier == "low":
-            return True
-        floor = rank(_tier_effort(engine, floor_tier, model, settings, entry).launch)
-    except EngineError:
-        return False
-    return cap is None or (None not in (launch, floor) and min(launch, rank(cap)) >= floor)
+    """The shared model-specific effort rule, used by automatic selection."""
+    return _runnable(engine, tier, floor_tier, model, settings, entry).reason is None
+
+
+def _effort_left_out(engine: str, settings: Settings, freshness: models.Freshness) -> dict[str, str]:
+    """Tier-specific effort exclusions for model reports, without changing the score set or its scale."""
+    left_out = {}
+    for item in freshness.scores.models:
+        reasons = []
+        for tier in routing.TIERS:
+            result = _runnable(engine, tier, tier, item.model, settings, freshness.entry)
+            if result.reason is not None:
+                reasons.append(f"{tier}: {result.reason}")
+        if reasons:
+            left_out[item.model] = f"not-runnable ({', '.join(reasons)})"
+    return left_out
 
 
 def _selected(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
@@ -368,13 +372,6 @@ def _selected(engine: str, tier: str, settings: Settings, freshness: models.Fres
                            entry=freshness.entry, scores=freshness.scores, floor_tier=floor_tier,
                            profile=settings.models["profile"], pools=section["tier_pools"],
                            allowed=section["allowed_models"], effort_rules=effort_rules)
-
-
-def _deterministic(engine: str, tier: str, settings: Settings, freshness: models.Freshness, *,
-                   floor_tier: str = "low"):
-    """(model, source, effort resolution) for one tier: A14's mapping, then A1's effort for that model."""
-    model, source = _selected(engine, tier, settings, freshness, floor_tier=floor_tier)
-    return model, source, _tier_effort(engine, tier, model, settings, freshness.entry)
 
 
 def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pathlib.Path,
@@ -393,27 +390,26 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pat
     cap_warnings = models.check_caps(engine, section["effort_caps"], section["allowed_models"], entry,
                                      fresh=_fresh(freshness), pools=section["tier_pools"])
     try:
-        model, source, effort = _deterministic(engine, tier, settings, freshness, floor_tier=floor_tier)
+        model, source = _selected(engine, tier, settings, freshness, floor_tier=floor_tier)
     except scoring.FloorUnmet as exc:
         if stage != "review":
             raise
-        raise EngineError(BELOW_FLOOR, str(exc).split(": ", 1)[1]) from None
+        raise EngineError(BELOW_FLOOR, f"tier {tier} effort {tier_settings['effort']}: "
+                          + str(exc).split(": ", 1)[1]) from None
     cap = section["effort_caps"].get(model)
-    if cap is not None:
-        if rank(effort.launch) is None:
-            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot bound effort "
-                              f"{effort.launch} for {model}; set an ordinary tier effort or remove the cap in "
-                              ".oah/config.toml")
-        if rank(effort.launch) > rank(cap):
-            launch = highest([level for level in effort.levels or (cap,)
-                              if rank(level) is not None and rank(level) <= rank(cap)])
-            if launch is None:
-                raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] leaves no supported "
-                                  f"effort for {model}; raise or remove its cap in .oah/config.toml")
-            cap_warnings.append(f"OAH_EFFORT_CAPPED: {model} effort {effort.launch} is capped to {launch}; "
-                                f"raise or remove its [engines.{engine}.effort_caps] entry in .oah/config.toml "
-                                "to permit a higher effort")
-            effort = dataclasses.replace(effort, launch=launch)
+    effort = _runnable(engine, tier, floor_tier, model, settings, entry)
+    if effort.reason is not None:
+        code = "OAH_CONFIG_INVALID" if source == "pin" or cap is not None else (
+            BELOW_FLOOR if stage == "review" else scoring.UNRESOLVED)
+        raise EngineError(code, f"{_shown(model)} cannot run effort {tier_settings['effort']} at the {floor_tier} "
+                          f"floor effort ({effort.reason}); change [engines.{engine}.tiers] effort or "
+                          f"[engines.{engine}.effort_caps] in .oah/config.toml")
+    info = entry.model(model) or models.ModelInfo(model, ())
+    uncapped = models.runnable(info, tier_settings["effort"], section["tiers"][floor_tier]["effort"], None) if cap else effort
+    if effort.launch != uncapped.launch:
+        cap_warnings.append(f"OAH_EFFORT_CAPPED: {model} effort {uncapped.launch} is capped to {effort.launch}; "
+                            f"raise or remove its [engines.{engine}.effort_caps] entry in .oah/config.toml "
+                            "to permit a higher effort")
     why = f"{source} mapping for tier {tier} with {engine} CLI {freshness.launch_version or 'unknown'}"
     if freshness.refreshed:
         why += f"; catalog rebuilt ({freshness.refreshed})"
@@ -421,28 +417,27 @@ def resolve_engine(engine: str, tier: str, settings: Settings, *, state_dir: pat
                                         now=now) if record else []
     return Resolution(engine=engine, tier=tier, base=tuple(base), cli_version=freshness.launch_version,
                       requested_model=tier_settings["model"], model=model, model_source=source,
-                      requested_effort=effort.requested, launch_effort=effort.launch,
+                      requested_effort=tier_settings["effort"], launch_effort=effort.launch,
                       timeout_s=float(tier_settings["timeout_min"]) * 60,
                       warnings=(*freshness.warnings, *cap_warnings), changes=tuple(changes))
 
 
 def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: str,
                    freshness: models.Freshness) -> models.Pair:
-    """Resolve the uncapped floor and check the launch cap against it, for calls and model reports."""
+    """The floor model used only for the user's quality_order ranking and report metadata."""
     engine = resolution.engine
-    cap = settings.engines[engine]["effort_caps"].get(resolution.model)
-    try:
-        model, _, effort = _deterministic(engine, floor_tier, settings, freshness, floor_tier=floor_tier)
-    except EngineError:
-        if cap is not None:
-            raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] cannot be checked against "
-                              f"the {floor_tier} floor; set a resolvable floor model and effort in .oah/config.toml") from None
-        raise
-    if cap is not None and (rank(effort.launch) is None or rank(cap) < rank(effort.launch)
-                            or rank(resolution.launch_effort) < rank(effort.launch)):
-        raise EngineError("OAH_CONFIG_INVALID", f"[engines.{engine}.effort_caps] for {resolution.model} cannot "
-                          f"meet the {floor_tier} floor effort {effort.launch}; raise or remove its cap "
-                          "in .oah/config.toml before calling again")
+    section = settings.engines[engine]
+    # This is ranking metadata, not a launch: caps must not move a user's quality_order floor.
+    model, _ = models.map_tier(engine, floor_tier, pin=section["tiers"][floor_tier]["model"],
+                               quality_order=section["quality_order"], entry=freshness.entry,
+                               scores=freshness.scores, floor_tier=floor_tier, profile=settings.models["profile"],
+                               pools=section["tier_pools"], allowed=section["allowed_models"])
+    info = freshness.entry.model(model) or models.ModelInfo(model, ())
+    requested = section["tiers"][floor_tier]["effort"]
+    effort = models.runnable(info, requested, requested, None)
+    if effort.reason is not None:
+        raise EngineError(scoring.UNRESOLVED, "the floor model is not runnable; change its tier effort or "
+                          "effort_caps in .oah/config.toml")
     return models.Pair(model, effort.launch)
 
 
@@ -467,17 +462,12 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         return chosen, {"model_judge": status, "model_choice": choice}
 
     section = settings.engines[engine]
-    cap = section["effort_caps"].get(resolution.model)
-    if pinned and cap is None:
+    if pinned:
         return record("unused(pinned)")
     try:
         floor = _resolve_floor(resolution, settings, floor_tier=floor_tier, freshness=freshness)
     except EngineError:
-        if cap is not None:
-            raise
         return record("unused(floor-unresolved)")
-    if pinned:
-        return record("unused(pinned)")
 
     def review_rule(model: str, effort: str) -> str | None:
         proposed = dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort)
@@ -492,6 +482,7 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         floor=floor, quality_order=section["quality_order"],
         allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
         tier_pools=section["tier_pools"], scores=freshness.scores, profile=settings.models["profile"],
+        tier_effort=section["tiers"][tier]["effort"], floor_effort=section["tiers"][floor_tier]["effort"],
         admission_rule=review_rule if stage == "review" else None)
     choice["floor"] = {"tier": floor_tier, **floor.to_json()}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
@@ -534,7 +525,7 @@ def _call_floor(stage: str | None, scope: Sequence[str], kind: str) -> str:
 
 
 def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: str, floor_tier: str,
-                          freshness: models.Freshness, warnings: list[str]) -> bool:
+                          freshness: models.Freshness, warnings: list[str], comparable: bool) -> bool:
     """Refuse a review below its floor; False when the user's named model leaves nothing to check against."""
     engine, model, effort = resolution.engine, resolution.model, resolution.launch_effort
     scores = freshness.scores
@@ -547,15 +538,6 @@ def _review_floor_checked(resolution: Resolution, settings: Settings, *, tier: s
     if value is not None and not scoring.clears(scores, model, step):
         raise EngineError(BELOW_FLOOR, f"{_shown(model)} scores {value:.1f}, below the {scoring.required(scores, step):.1f} "
                           f"the {floor_tier} floor of this review needs. {next_step}")
-    try:
-        floor_effort = _tier_effort(engine, floor_tier, model, settings, freshness.entry).launch
-    except EngineError:
-        raise EngineError(BELOW_FLOOR, f"{_shown(model)} does not support the effort of the {floor_tier} floor of this "
-                          f"review. {next_step}") from None
-    comparable = rank(effort) is not None and rank(floor_effort) is not None
-    if comparable and rank(effort) < rank(floor_effort):
-        raise EngineError(BELOW_FLOOR, f"effort {effort} is below the {floor_effort} of the {floor_tier} floor of this "
-                          f"review. {next_step}")
     if value is None or not comparable:
         warnings.append(f"{FLOOR_UNCHECKED}: {_shown(model)} has no score or an effort oah cannot rank, so the "
                         f"{floor_tier} floor of this review was not checked; the receipt says so. Run `oah models` to "
@@ -603,8 +585,14 @@ def _check_admission(resolution: Resolution, settings: Settings, *, stage: str |
         raise EngineError(NOT_LISTED, f"the codex CLI no longer lists {_shown(model)}, the model pinned for this tier, "
                           "so nothing was launched or spent. Run `oah models` to see the listed models, then change "
                           "the pin in .oah/config.toml")
-    if settings.engines[engine]["effort_caps"].get(model) is not None:
-        _resolve_floor(resolution, settings, floor_tier=floor_tier, freshness=freshness)
+    effort = _runnable(engine, tier, floor_tier, model, settings, freshness.entry,
+                       effort=resolution.launch_effort)
+    if effort.reason is not None or effort.launch != resolution.launch_effort:
+        code = "OAH_CONFIG_INVALID" if resolution.model_source == "pin" else (
+            BELOW_FLOOR if stage == "review" else scoring.UNRESOLVED)
+        raise EngineError(code, f"{_shown(model)} effort {resolution.launch_effort} cannot meet the {floor_tier} "
+                          f"floor effort or effort_caps ({effort.reason or 'above-cap'}); change "
+                          f"[engines.{engine}.tiers] effort or [engines.{engine}.effort_caps] in .oah/config.toml")
     if scores.left_out.get(model) == "superseded":
         old = scoring.scored(scores, model)
         family = next((item for item in scores.models if old is not None and item.family == old.family), None)
@@ -612,7 +600,8 @@ def _check_admission(resolution: Resolution, settings: Settings, *, stage: str |
         warnings.append(f"{SUPERSEDED}: {_shown(model)} was named in .oah/config.toml, so it runs, but it is superseded."
                         f"{newer} Run `oah models`, and change that line when you choose to")
     checked = stage == "review" and _review_floor_checked(resolution, settings, tier=tier, floor_tier=floor_tier,
-                                                          freshness=freshness, warnings=warnings)
+                                                          freshness=freshness, warnings=warnings,
+                                                          comparable=effort.comparable)
     found = scoring.scored(scores, model)
     return Admission(found.family if found else None, floor_tier, checked, settings.models["profile"],
                      scores.source or None, scores.date or None, scores.credit or None, tuple(warnings))

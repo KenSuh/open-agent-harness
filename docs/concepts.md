@@ -220,6 +220,12 @@ within 2 percent of the scale below the mark, because a gap that small should no
 no such margin, and a floor never has one. When nothing that may be picked reaches the step, the strongest model that
 meets the floor runs. The tier still sets the effort.
 
+Every profile first skips models that cannot run the tier's effort at the floor. Both efforts, including `highest`,
+resolve against each model's own supported levels. `effort_caps` clamps to a supported level; a cap below that model's
+floor skips it. If none can run, a review stops with `OAH_MODEL_BELOW_FLOOR`, and another call with
+`OAH_MODEL_UNRESOLVED`, naming the tier effort or cap to change. An unrunnable pin stops with `OAH_CONFIG_INVALID`.
+Clamps still record `OAH_EFFORT_CAPPED`, and `left_out` reports `not-runnable` with the reason.
+
 `efficient` weighs the score itself, and a model last on every common task scores 0. So it takes another model that
 clears, even where `balanced` would take the last one, and it can cost more than `balanced` at a low tier.
 

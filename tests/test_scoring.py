@@ -14,7 +14,7 @@ from unittest import mock
 
 from oah import scoring
 from oah.engines.effort import EngineError
-from oah.models import Entry, ModelInfo
+from oah.models import Entry, ModelInfo, runnable
 from oah.routing import TIERS
 from tests.helpers import make_tmp_dir
 
@@ -231,14 +231,32 @@ class EfficientValueTest(unittest.TestCase):
         self.assertEqual(scoring.choose(self.VALUE, "high", "low", "efficient",
                                         usable=lambda name: name != "m-c").model, "m-b")
 
-    def test_with_none_passing_the_effort_rules_the_refusal_stays_with_the_launch(self):
-        self.assertEqual(scoring.choose(self.VALUE, "high", "low", "efficient", usable=lambda _name: False).model, "m-c")
+    def test_no_runnable_model_is_a_named_refusal_in_every_profile(self):
+        for profile in PROFILES:
+            with self.subTest(profile=profile), self.assertRaises(scoring.FloorUnmet) as caught:
+                scoring.choose(self.VALUE, "high", "low", profile, usable=lambda _name: False)
+            self.assertEqual(caught.exception.code, "OAH_MODEL_UNRESOLVED")
+            self.assertIn("effort_caps", str(caught.exception))
 
-    def test_the_effort_rules_change_no_other_profile(self):
-        for profile in ("performance", "balanced"):
+    def test_every_profile_filters_before_picking_and_in_the_fallback(self):
+        for profile in PROFILES:
             with self.subTest(profile=profile):
-                self.assertEqual(scoring.choose(self.VALUE, "high", "low", profile, usable=lambda _name: False).model,
-                                 scoring.choose(self.VALUE, "high", "low", profile).model)
+                choice = scoring.choose(self.VALUE, "max", "low", profile, usable=lambda name: name != "m-c")
+                self.assertEqual(choice.model, "m-b")
+
+    def test_every_profile_uses_the_models_own_maximum_and_cap(self):
+        tied = hand_built("codex", scored("m-a", "luna", 100, 1), scored("m-b", "sol", 100, 2))
+        infos = {"m-a": ModelInfo("m-a", ("low", "medium")),
+                 "m-b": ModelInfo("m-b", ("low", "high", "max"))}
+        for profile in PROFILES:
+            for tier_effort, floor, caps, expected in (
+                    ("high", "low", {}, "m-b"),
+                    ("highest", "highest", {"m-b": "high"}, "m-a"),
+                    ("highest", "high", {"m-a": "low"}, "m-b")):
+                with self.subTest(profile=profile, tier_effort=tier_effort, floor=floor, caps=caps):
+                    choice = scoring.choose(tied, "max", "low", profile, usable=lambda name:
+                                            runnable(infos[name], tier_effort, floor, caps.get(name)).reason is None)
+                    self.assertEqual(choice.model, expected)
 
     def test_a_rebuild_compares_each_step_as_the_tier_of_that_number(self):
         for step, tier in enumerate(TIERS):

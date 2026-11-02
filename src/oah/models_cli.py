@@ -40,8 +40,9 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
               "unpooled": unpooled}
     for tier in routing.TIERS:
         try:
-            resolution = call.resolve_engine(engine, tier, settings, state_dir=state, env=os.environ, checked=checked)
-            floor = call._resolve_floor(resolution, settings, floor_tier=tier, freshness=checked[1])
+            resolution = call.resolve_engine(engine, tier, settings, state_dir=state, env=os.environ, checked=checked,
+                                              floor_tier=tier)
+            floor = models.Pair(resolution.model, resolution.launch_effort)
         except EngineError as exc:
             report["tiers"][tier] = {"error": str(exc)}
             continue
@@ -52,7 +53,9 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
                                              floor=floor, quality_order=section["quality_order"],
                                              allowed_models=section["allowed_models"],
                                              effort_caps=section["effort_caps"], tier_pools=section["tier_pools"],
-                                             scores=checked[1].scores, profile=settings.models["profile"])
+                                             scores=checked[1].scores, profile=settings.models["profile"],
+                                             tier_effort=section["tiers"][tier]["effort"],
+                                             floor_effort=section["tiers"][tier]["effort"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
                                  "floor": {"tier": tier, **floor.to_json()}, "mode": candidates.mode,
@@ -68,7 +71,8 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
     if not scores.models:
         notices.append(f"{scoring.NO_SCORES}: {scores.failure}")
     report["warnings"] += [notice for notice in notices if notice not in report["warnings"]]
-    report.update(models.score_report(scores, settings.models["profile"]))
+    report.update(models.score_report(scores, settings.models["profile"],
+                                      left_out=call._effort_left_out(engine, settings, checked[1])))
     return report
 
 

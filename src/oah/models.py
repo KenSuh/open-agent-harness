@@ -66,12 +66,12 @@ import datetime as dt
 import pathlib
 import re
 from dataclasses import dataclass, replace
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
 from oah import scoring
 from oah.atomic import StateCorrupt, append_jsonl, read_json, read_jsonl, write_json_atomic
 from oah.engines import claude, codex
-from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, rank
+from oah.engines.effort import BEHAVIOUR_CHANGING, EngineError, highest, rank, resolve
 from oah.engines.proc import UnsupportedBatchShim, resolve_command, run_command
 from oah.lockfile import StateLock
 
@@ -99,6 +99,42 @@ class ModelInfo:
 
     def to_json(self) -> dict:
         return {"name": self.name, "efforts": list(self.efforts), "default": self.default, "listed": self.listed}
+
+
+@dataclass(frozen=True)
+class Runnable:
+    launch: str | None
+    reason: Literal["unsupported", "cap-below-floor"] | None = None
+    comparable: bool = False
+
+
+def runnable(info: ModelInfo, tier_effort: str, floor_effort: str, cap: str | None) -> Runnable:
+    """Resolve both efforts against this model, then clamp and check its own floor.
+
+    Literal efforts without catalog metadata still pass through, as for existing pins. Unknown labels
+    cannot be ordered; without a cap they retain the existing unverified-effort behavior.
+    """
+    try:
+        launch = resolve(tier_effort, info.efforts, model=info.name).launch
+        floor = resolve(floor_effort, info.efforts, model=info.name).launch
+    except EngineError:
+        return Runnable(None, "unsupported")
+    launch_rank, floor_rank = rank(launch), rank(floor)
+    if launch_rank is not None and floor_rank is not None and launch_rank < floor_rank:
+        return Runnable(None, "unsupported")
+    if cap is not None:
+        cap_rank = rank(cap)
+        if launch_rank is None or floor_rank is None or cap_rank is None:
+            return Runnable(None, "unsupported")
+        if launch_rank > cap_rank:
+            launch = highest([level for level in info.efforts or (cap,)
+                              if rank(level) is not None and rank(level) <= cap_rank])
+            if launch is None:
+                return Runnable(None, "cap-below-floor")
+            launch_rank = rank(launch)
+    if launch_rank is not None and floor_rank is not None and launch_rank < floor_rank:
+        return Runnable(None, "cap-below-floor")
+    return Runnable(launch, comparable=launch_rank is not None and floor_rank is not None)
 
 
 @dataclass(frozen=True)
@@ -342,10 +378,18 @@ def map_tier(engine: str, tier: str, *, pin: str, quality_order: Sequence[str], 
             raise EngineError(UNRESOLVED, f"[engines.{engine}.tier_pools] {tier} names no model the {engine} CLI lists "
                               f"and allowed_models permits (it lists: {', '.join(listed)}). Fix that pool in "
                               f".oah/config.toml, or set {pin_line(engine, tier)}")
-        return named[0], "pool"
+        runnable_names = [name for name in named if effort_rules is None or effort_rules(name)]
+        if not runnable_names:
+            raise scoring.FloorUnmet(UNRESOLVED, f"no model in [engines.{engine}.tier_pools] {tier} is runnable; "
+                                     "change its tier effort or effort_caps in .oah/config.toml")
+        return runnable_names[0], "pool"
     order = [name for name in user_order(engine, quality_order) if name in usable]
     if order:
-        return _by_tier(order, tier), "quality_order"
+        runnable_order = [name for name in order if effort_rules is None or effort_rules(name)]
+        if not runnable_order:
+            raise scoring.FloorUnmet(UNRESOLVED, f"no model in [engines.{engine}] quality_order is runnable; "
+                                     "change its tier effort or effort_caps in .oah/config.toml")
+        return _by_tier(runnable_order, tier), "quality_order"
     if scores is None:
         raise EngineError(scoring.NO_SCORES, f"no benchmark scores are available for {engine}; run `oah doctor`, or set "
                           f"{pin_line(engine, tier)} in .oah/config.toml")
@@ -410,14 +454,15 @@ def order_notice(engine: str, quality_order: Sequence[str]) -> str | None:
             "Remove the line, or list other models in .oah/config.toml to rank them yourself")
 
 
-def score_report(scores: scoring.ScoreSet, profile: str) -> dict:
+def score_report(scores: scoring.ScoreSet, profile: str, *, left_out: Mapping[str, str] | None = None) -> dict:
     """The profile, the scores with their credit, and each listed model left out with its reason."""
     rows = [{"model": item.model, "family": item.family, "score": round(item.score, 1), "cost": item.cost}
             for item in scores.models]
     return {"profile": profile,
             "scores": {"source": scores.source, "date": scores.date, "credit": scores.credit, "models": rows}
             if rows else None,
-            "left_out": {name: reason for name, reason in sorted(scores.left_out.items()) if PLAIN_MODEL.fullmatch(name)}}
+            "left_out": {name: reason for name, reason in sorted({**scores.left_out, **(left_out or {})}.items())
+                         if PLAIN_MODEL.fullmatch(name)}}
 
 
 def offline_claude(allowed: Sequence[str] = ()) -> tuple[Entry | None, scoring.ScoreSet]:
@@ -467,6 +512,7 @@ class CandidateSet:
     pools: tuple[tuple[str, tuple[str, ...]], ...] = ()  # the configured tier pools, as given
     qualified: tuple[str, ...] = ()  # in both tiers' pools (pools mode), or in the score band (scored mode)
     admission_rule: Callable[[str, str], str | None] | None = None  # the call's model-specific review checks
+    floor_effort: str | None = None  # the configured label, including highest; never another model's maximum
 
     @property
     def ranked(self) -> bool:
@@ -498,16 +544,11 @@ class CandidateSet:
                 return "outside-score-bound"
         elif model != self.deterministic.model:
             return "outside-candidates"
-        if self.admission_rule is None:
-            floor_rank = rank(self.floor.effort)
-            if floor_rank is None:
-                if effort != self.deterministic.effort:
-                    return "outside-candidates"
-            elif rank(effort) < floor_rank:
-                return "below-floor"
-        cap = dict(self.caps).get(model)
-        if cap is not None and rank(cap) is not None and rank(effort) > rank(cap):
+        result = runnable(info, effort, self.floor_effort or self.floor_tier, dict(self.caps).get(model))
+        if result.reason == "cap-below-floor" or (result.reason is None and result.launch != effort):
             return "above-cap"
+        if result.reason is not None:
+            return "below-floor"
         return self.admission_rule(model, effort) if self.admission_rule is not None else None
 
     def to_json(self) -> dict:
@@ -522,7 +563,8 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
                      floor: Pair, quality_order: Sequence[str], allowed_models: Sequence[str],
                      effort_caps: Mapping[str, str], tier_pools: Mapping[str, Sequence[str]],
                      scores: scoring.ScoreSet | None = None, profile: str = scoring.DEFAULT_PROFILE,
-                     admission_rule: Callable[[str, str], str | None] | None = None) -> CandidateSet:
+                     admission_rule: Callable[[str, str], str | None] | None = None,
+                     tier_effort: str | None = None, floor_effort: str | None = None) -> CandidateSet:
     """The closed candidate set for one call (see Candidates above)."""
     listed = [model.name for model in entry.models if model.listed] if entry else []
     order = tuple(name for name in user_order(engine, quality_order) if name in listed)
@@ -545,11 +587,16 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
         if mode == "pools" else ()
     if mode == "scored":
         # The effort rules can move the rule's choice, so the model that would run is the one always offered.
-        qualified = scoring.band(scores, replace(scoring.choose(scores, tier, floor_tier, profile),
+        def usable(name: str) -> bool:
+            info = entry.model(name) if entry is not None else None
+            return info is not None and runnable(info, tier_effort or tier,
+                                                  floor_effort or floor_tier, effort_caps.get(name)).reason is None
+
+        qualified = scoring.band(scores, replace(scoring.choose(scores, tier, floor_tier, profile, usable=usable),
                                                  model=deterministic.model))
     rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
                         tuple(sorted(effort_caps.items())), entry, note=note, tier=tier, pools=pools,
-                        qualified=qualified, admission_rule=admission_rule)
+                        qualified=qualified, admission_rule=admission_rule, floor_effort=floor_effort)
     names = list(order) if ranked else list(qualified) if mode in ("pools", "scored") else [deterministic.model]
     found: list[Pair] = []
     excluded: list[tuple[str, str]] = []
