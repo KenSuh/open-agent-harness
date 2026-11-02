@@ -50,11 +50,11 @@ def missing_codes(doc_text: str, src_root: pathlib.Path) -> list[str]:
 
 def lane_docs() -> list[pathlib.Path]:
     pages = [REPO / "docs" / f"{page}.md" for page in PAGES] + [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES]
-    return [REPO / "README.md", *pages, EXAMPLE / "README.md", EXAMPLE / "README.ko.md"]
+    return [REPO / "README.md", REPO / "README.ko.md", *pages, EXAMPLE / "README.md", EXAMPLE / "README.ko.md"]
 
 
 def all_docs() -> list[pathlib.Path]:
-    docs = [REPO / "README.md", REPO / "CONTRIBUTING.md", *sorted((REPO / "docs").rglob("*.md")),
+    docs = [REPO / "README.md", REPO / "README.ko.md", REPO / "CONTRIBUTING.md", *sorted((REPO / "docs").rglob("*.md")),
             *sorted((REPO / "examples").rglob("*.md"))]
     return [path for path in docs if path.exists() and path.name != "PLAN.md" and "superpowers" not in path.parts]
 
@@ -125,7 +125,8 @@ class AccuracyTest(unittest.TestCase):
         self.assertTrue((EXAMPLE / "README.ko.md").is_file())
 
     def test_relative_links_resolve(self):
-        pages = [REPO / "README.md", *sorted((REPO / "docs").glob("*.md")), *sorted((REPO / "docs/ko").glob("*.md")),
+        pages = [REPO / "README.md", REPO / "README.ko.md", *sorted((REPO / "docs").glob("*.md")),
+                 *sorted((REPO / "docs/ko").glob("*.md")),
                  EXAMPLE / "README.md", EXAMPLE / "README.ko.md"]
         for page in pages:
             for number, line in prose_lines(read(page)):
@@ -139,9 +140,9 @@ class AccuracyTest(unittest.TestCase):
                         self.assertTrue((page.parent / path).exists(), f"{target} does not exist")
 
     def test_korean_sentences_do_not_end_with_a_colon(self):
-        pages = [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES] + [EXAMPLE / "README.ko.md"]
-        korean_readme = read(REPO / "README.md").split("## 한국어", 1)[1]
-        for name, text in [(str(p.relative_to(REPO)), read(p)) for p in pages] + [("README.md (한국어)", korean_readme)]:
+        pages = [REPO / "docs" / "ko" / f"{page}.md" for page in PAGES]
+        pages += [EXAMPLE / "README.ko.md", REPO / "README.ko.md"]
+        for name, text in [(str(p.relative_to(REPO)), read(p)) for p in pages]:
             for number, line in prose_lines(text):
                 if line.lstrip().startswith("|"):
                     continue
