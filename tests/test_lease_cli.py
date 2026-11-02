@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import unittest
@@ -579,6 +580,114 @@ class LeaseCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 69)
         self.assertTrue(result.stderr.startswith("OAH_STATE_CORRUPT"), result.stderr)
         self.assertEqual((state / "leases.json").read_text(encoding="utf-8"), "{broken")
+
+
+class FinishStartsToolUpdatesTest(unittest.TestCase):
+    """AC3: a finish that leaves nothing in flight starts the detached tool-update pass, and changes nothing else."""
+
+    def setUp(self):
+        from oah.toolupdate import records
+        from oah.toolupdate import run as passes
+
+        self.records, self.passes = records, passes
+        self.repo = make_git_repo(self)
+        git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n",
+                               ".oah/config.toml": "[updates]\nafter_finish = true\n"})
+        self.home = make_tmp_dir(self) / "home"
+        self.enterContext(patch.object(records, "home", return_value=self.home))
+        self.popen = self.enterContext(patch.object(passes, "_popen"))
+        self.enterContext(patch.dict(os.environ))
+        for name in ("OAH_WORKER", "OAH_STATE_DIR"):
+            os.environ.pop(name, None)
+        self.state = self.repo / ".git" / "oah"
+
+    def oah(self, *args: str) -> tuple[int, str, str]:
+        from oah.cli import main
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(args))
+        return code, out.getvalue(), err.getvalue()
+
+    def start(self, task="t1", agent="claude", scope="src"):
+        code, _out, err = self.oah("start", "--task", task, "--agent", agent, "--scope", scope)
+        self.assertEqual(code, 0, err)
+
+    def finish(self, task="t1", agent="claude"):
+        return self.oah("finish", "--task", task, "--agent", agent, "--summary", "done")
+
+    def test_all_clear_starts_one_detached_pass_after_the_existing_lines(self):
+        self.start()
+        code, out, err = self.finish()
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 2, out)
+        self.assertTrue(lines[0].startswith("OAH_LEASE_FINISHED task=t1 agent=claude changed=0 gates="), lines)
+        self.assertEqual(lines[1], self.passes.STARTED)
+        options = self.passes.detach_options(os.name)
+        self.popen.assert_called_once_with(
+            [sys.executable, "-m", "oah", "update", "--after-finish", "--repo", str(self.repo)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(self.repo),
+            close_fds=True, **options)
+
+    def test_switch_off_keeps_finish_exactly_as_it_was(self):
+        git_commit(self.repo, {".oah/config.toml": "[updates]\nafter_finish = false\n"})
+        self.start()
+        code, out, err = self.finish()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        self.popen.assert_not_called()
+        self.assertFalse(self.home.exists())
+
+    def test_another_active_lease_starts_nothing(self):
+        self.start()
+        self.start("t2", "codex", "docs")
+        code, out, err = self.finish()
+        self.assertEqual(code, 0, err)
+        self.popen.assert_not_called()
+        self.assertNotIn("OAH_UPDATE", out)
+
+    def test_a_run_in_flight_or_unreadable_starts_nothing(self):
+        for case, text in (("running", '{"status": "running"}'), ("queued", '{"status": "queued"}'),
+                           ("unreadable", "{torn")):
+            with self.subTest(case=case):
+                run = self.state / "runs" / "t9" / "r20261103T000000Z-0a1b2c3d"
+                shutil.rmtree(self.state / "runs", ignore_errors=True)
+                run.mkdir(parents=True)
+                (run / "result.json").write_text(text, encoding="utf-8")
+                self.start()
+                code, out, err = self.finish()
+                self.assertEqual(code, 0, err)
+                self.popen.assert_not_called()
+
+    def test_not_due_starts_nothing(self):
+        updates = self.home / ".oah" / "updates"
+        updates.mkdir(parents=True)
+        now = self.records.stamp(self.records.utc_now())
+        (updates / "state.json").write_text(json.dumps({
+            "version": 1, "last_started": now, "trigger": "manual", "last_finished": now, "outcome": "complete",
+            "components": {}, "models_refresh": []}), encoding="utf-8")
+        self.start()
+        code, _out, err = self.finish()
+        self.assertEqual(code, 0, err)
+        self.popen.assert_not_called()
+
+    def test_failed_start_prints_one_line_and_finish_still_exits_0(self):
+        self.popen.side_effect = OSError("cannot start")
+        self.start()
+        code, out, err = self.finish()
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 2, out)
+        self.assertTrue(lines[1].startswith("OAH_UPDATE_SKIPPED: the background update pass could not start"))
+
+    def test_worker_finish_is_refused_and_starts_nothing(self):
+        self.start()
+        os.environ["OAH_WORKER"] = "1"
+        code, _out, err = self.finish()
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("OAH_WORKER_LEASE_REFUSED"), err)
+        self.popen.assert_not_called()
 
 
 class TemporaryDirectoryTest(unittest.TestCase):
