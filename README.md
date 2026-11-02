@@ -104,8 +104,8 @@ Nothing below is **available in v0.2.0** yet. Plans can change as the tools chan
 
 Planned, after v0.2.0:
 
-- Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs, and oah
-  takes the cheapest model that reaches it. Performance takes the top scorer for the hardest work. No table ties a difficulty to a
+- Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs. Balanced takes
+  the cheapest model that reaches it, efficient the best score per price, and performance the top scorer for the hardest work. No table ties a difficulty to a
   model, and every current model is a candidate in every profile.
 - Scores come from Epoch AI, with no key and no account. With your own Artificial Analysis key, oah uses those instead. Published
   scores measure general quality, not your repository.
@@ -516,8 +516,8 @@ Codex를 대신하지 않는다. 두 도구를 움직이고 그 작업을 믿을
 
 다음 내용은 v0.2.0 다음으로 계획하고 있다.
 
-- 벤치마크 점수가 모델을 고른다. 난이도와 프로필(performance, balanced, efficient)이 작업에 필요한 점수를 정하면, oah는 그 점수에
-  닿는 가장 싼 모델을 쓴다. performance는 가장 어려운 일에 최고점 모델을 쓴다. 난이도마다 모델을 정해 둔 표는 없고, 현재 모델은 모든
+- 벤치마크 점수가 모델을 고른다. 난이도와 프로필(performance, balanced, efficient)이 작업에 필요한 점수를 정한다. balanced는 그
+  점수에 닿는 가장 싼 모델을, efficient는 가격 대비 점수가 가장 좋은 모델을, performance는 가장 어려운 일에 최고점 모델을 쓴다. 난이도마다 모델을 정해 둔 표는 없고, 현재 모델은 모든
   프로필에서 후보가 된다.
 - 점수는 키나 계정 없이 Epoch AI에서 가져온다. 자기 Artificial Analysis 키가 있으면 그 점수를 대신 쓴다. 공개 점수는 모델의 일반 성능을
   재는 것이고, 내 저장소에서의 성능을 재는 것은 아니다.
