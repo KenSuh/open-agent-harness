@@ -987,6 +987,52 @@ def warned(warnings, code: str) -> list[str]:
 
 
 class ScoreReportTest(unittest.TestCase):
+    def test_a_pin_outside_allowed_models_is_reported_in_text_and_json(self):
+        project = scored_project(self, 'allowed_models = ["gpt-6-luna"]\n'
+                                 '[engines.codex.tiers.medium]\nmodel = "gpt-6.1-sol"\n')
+        for argv in ((), ("--json",)):
+            with self.subTest(argv=argv):
+                code, out, err = run_in(project, *argv)
+                self.assertEqual(code, 0, err)
+                if argv:
+                    reports = json.loads(out)["engines"]
+                    tiers = reports["codex"]["tiers"]
+                    row = tiers["medium"]
+                    self.assertEqual(list(row), ["model", "model_source", "requested_effort", "effort", "floor",
+                                                 "mode", "note", "candidates", "excluded"])
+                    self.assertEqual((row["model"], row["model_source"]), ("gpt-6.1-sol", "pin"))
+                    self.assertIsNone(row["mode"])
+                    self.assertEqual(row["note"], "unused(pinned)")
+                    self.assertEqual((row["candidates"], row["excluded"]), ([], {}))
+                    self.assertEqual(tiers["low"]["model"], "gpt-6-luna")
+                    self.assertTrue(tiers["high"]["error"].startswith("OAH_MODEL_UNRESOLVED:"))
+                    self.assertIn("max", tiers)
+                    self.assertIn("tiers", reports["claude"])
+                else:
+                    self.assertIn("gpt-6.1-sol (pin) effort medium", out)
+                    self.assertIn("unused(pinned)", out)
+                    self.assertIn("OAH_MODEL_UNRESOLVED:", out)
+                    self.assertIn("claude: CLI", out)
+
+    def test_a_candidate_failure_stays_in_its_tier(self):
+        project = scored_project(self)
+        build = models_cli.models.build_candidates
+
+        def fail_high(engine, **fields):
+            if engine == "codex" and fields["tier"] == "high":
+                raise scoring.FloorUnmet(scoring.UNRESOLVED, "candidate floor unavailable")
+            return build(engine, **fields)
+
+        with mock.patch.object(models_cli.models, "build_candidates", side_effect=fail_high):
+            code, out, err = run_in(project, "--json")
+        self.assertEqual(code, 0, err)
+        reports = json.loads(out)["engines"]
+        tiers = reports["codex"]["tiers"]
+        self.assertEqual(tiers["high"], {"error": "OAH_MODEL_UNRESOLVED: candidate floor unavailable"})
+        self.assertEqual(tiers["medium"]["model"], "gpt-6.1-terra")
+        self.assertEqual(tiers["max"]["model"], "gpt-6-astra")
+        self.assertIn("tiers", reports["claude"])
+
     def test_models_and_stored_doctor_choices_skip_caps_and_report_the_reason(self):
         from oah import call
 

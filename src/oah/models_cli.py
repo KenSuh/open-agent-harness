@@ -43,25 +43,27 @@ def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, sta
             resolution = call.resolve_engine(engine, tier, settings, state_dir=state, env=os.environ, checked=checked,
                                               floor_tier=tier)
             floor = models.Pair(resolution.model, resolution.launch_effort)
+            candidates = None
+            if not section["tiers"][tier]["model"]:
+                # The candidates a judge may pick from for a call whose floor tier is this tier (amendment 6).
+                candidates = models.build_candidates(
+                    engine, entry=entry, deterministic=floor, tier=tier, floor_tier=tier,
+                    floor=floor, quality_order=section["quality_order"], allowed_models=section["allowed_models"],
+                    effort_caps=section["effort_caps"], tier_pools=section["tier_pools"],
+                    scores=checked[1].scores, profile=settings.models["profile"],
+                    tier_effort=section["tiers"][tier]["effort"], floor_effort=section["tiers"][tier]["effort"])
         except EngineError as exc:
             report["tiers"][tier] = {"error": str(exc)}
             continue
         report["warnings"] += [warning for warning in resolution.warnings if warning not in report["warnings"]]
-        # The candidates a judge may pick from for a call whose floor tier is this tier (amendment 6).
-        pair = models.Pair(resolution.model, resolution.launch_effort)
-        candidates = models.build_candidates(engine, entry=entry, deterministic=pair, tier=tier, floor_tier=tier,
-                                             floor=floor, quality_order=section["quality_order"],
-                                             allowed_models=section["allowed_models"],
-                                             effort_caps=section["effort_caps"], tier_pools=section["tier_pools"],
-                                             scores=checked[1].scores, profile=settings.models["profile"],
-                                             tier_effort=section["tiers"][tier]["effort"],
-                                             floor_effort=section["tiers"][tier]["effort"])
         report["tiers"][tier] = {"model": resolution.model, "model_source": resolution.model_source,
                                  "requested_effort": resolution.requested_effort, "effort": resolution.launch_effort,
-                                 "floor": {"tier": tier, **floor.to_json()}, "mode": candidates.mode,
-                                 "note": candidates.note,
-                                 "candidates": [[item.model, item.effort] for item in candidates.pairs],
-                                 "excluded": dict(candidates.excluded)}
+                                 "floor": {"tier": tier, **floor.to_json()},
+                                 "mode": candidates.mode if candidates is not None else None,
+                                 "note": candidates.note if candidates is not None else "unused(pinned)",
+                                 "candidates": [[item.model, item.effort] for item in candidates.pairs]
+                                 if candidates is not None else [],
+                                 "excluded": dict(candidates.excluded) if candidates is not None else {}}
     # This report always names them: a launch does so only after a rebuild (call.check_catalog).
     notices = [models.unpooled_warning(engine, name) for name in unpooled]
     ignored = models.order_notice(engine, section["quality_order"])
