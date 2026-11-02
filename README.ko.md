@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-ko-dark.svg">
-    <img src="docs/assets/banner-ko-light.svg" alt="open-agent-harness. Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일한다. Claude Code가 1차 구현을 하고, Codex CLI가 리뷰가 수렴할 때까지 리뷰하고 고치며, 작업은 사용자가 확인한 뒤 반영된다. 켜서 쓰는 판정기 TypeSafe Jev가 난이도, 모델 선택, 순서를 판정한다. 리스, 게이트, 영향 지도, 위키가 작업을 받친다." width="100%">
+    <img src="docs/assets/banner-ko-light.svg" alt="open-agent-harness. Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일한다. Claude Code가 1차 구현을 하고, Codex CLI가 리뷰가 수렴할 때까지 리뷰하고 고치며, 작업은 사용자가 확인한 뒤 반영된다. 켜서 쓰는 판정기 TypeSafe Jev가 난이도, 모델 선택, 순서를 판정한다. 리뷰는 수렴하면 끝나고, 결정이 필요하면 멈춰서 묻는다. 라운드 상한은 선택이다. 리스, 게이트, 영향 지도, 위키가 작업을 받친다." width="100%">
   </picture>
 </p>
 

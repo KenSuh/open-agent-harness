@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from html.parser import HTMLParser
 import pathlib
 import re
 import shutil
@@ -261,17 +262,82 @@ class BannerTest(unittest.TestCase):
                 positions = [family.find(font) for font in KOREAN_FONTS]
                 self.assertTrue(all(0 <= p < family.rindex("sans-serif") for p in positions), family)
 
+    def test_banner_text_is_legible_at_phone_width(self):
+        for path in self.banner_files():
+            with self.subTest(banner=path.name):
+                root = ET.parse(path).getroot()
+                width = float(root.attrib["viewBox"].split()[2])
+                styles = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
+                classes = {}
+                for selector, declarations in re.findall(r"([^{}]+)\{([^{}]+)\}", styles):
+                    size = re.search(r"font-size\s*:\s*([\d.]+)px\s*(?:;|$)", declarations)
+                    if size:
+                        self.assertRegex(selector.strip(), r"^\.[\w-]+$")
+                        classes[selector.strip()[1:]] = float(size.group(1))
+                for node in root.findall(f".//{SVG}text"):
+                    sizes = [classes[c] for c in node.get("class", "").split() if c in classes]
+                    if "font-size" in node.attrib:
+                        sizes.append(float(node.attrib["font-size"].removesuffix("px")))
+                    inline = node.get("style", "")
+                    if "font-size" in inline:
+                        match = re.search(r"font-size\s*:\s*([\d.]+)px", inline)
+                        self.assertIsNotNone(match)
+                        sizes.append(float(match.group(1)))
+                    self.assertTrue(sizes, ET.tostring(node, encoding="unicode"))
+                    for size in sizes:
+                        self.assertGreaterEqual(size, 10 * width / 360)
+
     def test_readmes_pick_banner_by_theme_with_alt_matching_desc(self):
+        class PictureParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.pictures = []
+                self.current = None
+                self.badge_seen = False
+                self.picture_before_badges = False
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "picture":
+                    if self.current is not None:
+                        self.current.append(("nested-picture", {}))
+                    else:
+                        self.current = []
+                        self.picture_before_badges = not self.badge_seen
+                elif self.current is not None:
+                    self.current.append((tag, attrs))
+                if "badge-license.svg" in attrs.get("src", ""):
+                    self.badge_seen = True
+
+            def handle_endtag(self, tag):
+                if tag == "picture" and self.current is not None:
+                    self.pictures.append(self.current)
+                    self.current = None
+                elif self.current is not None:
+                    self.current.append((f"/{tag}", {}))
+
         for name, prefix in BANNERS.items():
-            text = read(REPO / name)
             with self.subTest(page=name):
-                self.assertIn(f'<source media="(prefers-color-scheme: dark)" srcset="docs/assets/{prefix}dark.svg">',
-                              text)
-                alt = re.search(rf'<img src="docs/assets/{prefix}light.svg" alt="([^"]+)" width="100%">', text).group(1)
+                parser = PictureParser()
+                parser.feed(read(REPO / name))
+                self.assertIsNone(parser.current, "unclosed picture")
+                self.assertEqual(len(parser.pictures), 1)
+                self.assertTrue(parser.picture_before_badges)
+                picture = parser.pictures[0]
+                self.assertEqual(len(picture), 2)
+                self.assertEqual(picture[0], ("source", {
+                    "media": "(prefers-color-scheme: dark)",
+                    "srcset": f"docs/assets/{prefix}dark.svg"}))
+                tag, attrs = picture[1]
+                self.assertEqual(tag, "img")
+                self.assertEqual(set(attrs), {"src", "alt", "width"})
+                self.assertEqual(attrs["src"], f"docs/assets/{prefix}light.svg")
+                self.assertEqual(attrs["width"], "100%")
+                self.assertTrue(attrs["alt"])
                 for theme in ("light", "dark"):
-                    desc = ET.parse(REPO / "docs" / "assets" / f"{prefix}{theme}.svg").getroot().findtext(f"{SVG}desc")
-                    self.assertEqual(desc, alt)
-                self.assertLess(text.index("<picture>"), text.index("badge-license.svg"))
+                    root = ET.parse(REPO / "docs" / "assets" / f"{prefix}{theme}.svg").getroot()
+                    self.assertEqual(root.findtext(f"{SVG}title"), "open-agent-harness")
+                    self.assertEqual(root.findtext(f"{SVG}desc"), attrs["alt"])
 
 
 if __name__ == "__main__":

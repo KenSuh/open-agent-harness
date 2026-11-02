@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc" xml:lang="en">
 <title id="title">open-agent-harness</title>
-<desc id="desc">open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository. Claude Code implements, Codex CLI reviews and fixes until the review converges, and the work lands after you confirm. TypeSafe Jev, an optional judge, judges difficulty, model choice and ranking. Leases, gates, the impact map and the wiki are the rails.</desc>
+<desc id="desc">open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository. Claude Code implements, Codex CLI reviews and fixes until the review converges, and the work lands after you confirm. TypeSafe Jev, an optional judge, judges difficulty, model choice and ranking. Review ends on convergence or stops for a decision; a round limit is optional. Leases, gates, the impact map and the wiki are the rails.</desc>
 <defs>
 <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f6f8fa"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
 <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6e7781"/></marker>
@@ -9,20 +9,19 @@
 text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; text-anchor: middle; }
 .title { font-size: 72px; font-weight: 700; fill: #1f2328; }
 .pitch { font-size: 34px; fill: #424a53; }
-.jev { font-size: 26px; font-weight: 700; fill: #1f2328; }
-.jevhint { font-size: 22px; fill: #424a53; }
-.name { font-size: 30px; font-weight: 700; fill: #1f2328; }
-.hint { font-size: 24px; fill: #424a53; }
-.note { font-size: 22px; fill: #59636e; }
-.rail { font-size: 24px; font-weight: 600; fill: #424a53; }
+.jev { font-size: 34px; font-weight: 700; fill: #1f2328; }
+.jevhint { font-size: 34px; fill: #424a53; }
+.name { font-size: 34px; font-weight: 700; fill: #1f2328; }
+.hint { font-size: 34px; fill: #424a53; }
+.rail { font-size: 34px; font-weight: 600; fill: #424a53; }
 </style>
 <rect x="1" y="1" width="1198" height="598" rx="20" fill="url(#bg)" stroke="#d0d7de" stroke-width="2"/>
 <text class="title" x="600" y="104">open-agent-harness</text>
 <text class="pitch" x="600" y="156">Claude Code and Codex CLI as one disciplined team</text>
 <text class="pitch" x="600" y="198">on your own repository</text>
-<rect x="370" y="226" width="460" height="80" rx="16" fill="#fbefff" stroke="#8250df" stroke-width="2.5"/>
-<text class="jev" x="600" y="260">TypeSafe Jev · optional judge</text>
-<text class="jevhint" x="600" y="290">judges difficulty, model choice and ranking</text>
+<rect x="270" y="220" width="660" height="86" rx="16" fill="#fbefff" stroke="#8250df" stroke-width="2.5"/>
+<text class="jev" x="600" y="255">TypeSafe Jev · optional judge</text>
+<text class="jevhint" x="600" y="295">judges difficulty, model choice and ranking</text>
 <path d="M420,306 C420,326 220,320 220,336" fill="none" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
 <line x1="600" y1="306" x2="600" y2="336" stroke="#8250df" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
 <rect x="60" y="340" width="320" height="116" rx="16" fill="#fff8c5" stroke="#9a6700" stroke-width="2.5"/>
@@ -30,16 +29,14 @@ text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", 
 <text class="hint" x="220" y="424">implements</text>
 <rect x="440" y="340" width="320" height="116" rx="16" fill="#dafbe1" stroke="#1a7f37" stroke-width="2.5"/>
 <text class="name" x="600" y="384">Codex CLI</text>
-<text class="hint" x="600" y="416">reviews and fixes</text>
+<text class="hint" x="600" y="416">reviews &amp; fixes</text>
 <text class="hint" x="600" y="442">until converged</text>
 <rect x="820" y="340" width="320" height="116" rx="16" fill="#ddf4ff" stroke="#0969da" stroke-width="2.5"/>
 <text class="name" x="980" y="384">Lands</text>
-<text class="hint" x="980" y="416">after you confirm,</text>
-<text class="hint" x="980" y="442">the reviewed head</text>
+<text class="hint" x="980" y="416">after you confirm</text>
 <line x1="382" y1="398" x2="436" y2="398" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
 <line x1="762" y1="398" x2="816" y2="398" stroke="#6e7781" stroke-width="3" marker-end="url(#arrow)"/>
 <path d="M630,458 C630,486 570,486 570,462" fill="none" stroke="#1a7f37" stroke-width="2.5" marker-end="url(#arrow)"/>
-<text class="note" x="600" y="514">Review ends when it converges, or stops to ask you for a decision. A round limit is optional.</text>
 <line x1="80" y1="558" x2="1120" y2="558" stroke="#6e7781" stroke-width="2"/>
 <rect x="125" y="538" width="200" height="40" rx="20" fill="#ffffff" stroke="#8c959f" stroke-width="2"/>
 <text class="rail" x="225" y="566">leases</text>

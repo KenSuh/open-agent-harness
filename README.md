@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
-    <img src="docs/assets/banner-light.svg" alt="open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository. Claude Code implements, Codex CLI reviews and fixes until the review converges, and the work lands after you confirm. TypeSafe Jev, an optional judge, judges difficulty, model choice and ranking. Leases, gates, the impact map and the wiki are the rails." width="100%">
+    <img src="docs/assets/banner-light.svg" alt="open-agent-harness: Claude Code and Codex CLI as one disciplined team on your own repository. Claude Code implements, Codex CLI reviews and fixes until the review converges, and the work lands after you confirm. TypeSafe Jev, an optional judge, judges difficulty, model choice and ranking. Review ends on convergence or stops for a decision; a round limit is optional. Leases, gates, the impact map and the wiki are the rails." width="100%">
   </picture>
 </p>
 
