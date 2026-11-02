@@ -514,6 +514,44 @@ class BudgetGateTest(unittest.TestCase):
         self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
         self.assertFalse(project.record.exists())
 
+    def test_uncounted_retry_interruption_at_the_round_limit_survives_restart(self):
+        project = FixProject(self, config="[review]\nmax_rounds = 2\nround_attempts = 2\n")
+
+        def read_series():
+            return rounds.series(receipts.load(project.state, "t1"), receipts.read_round_log(project.state, "t1"),
+                                 project.base, head=project.head, is_ancestor=lambda a, b: True)
+
+        project.queue({"canary": "omit"})
+        self.assertEqual(project.review().code, "OAH_REVIEW_CANARY_MISSING")
+        first = read_series()
+        self.assertEqual(first.counted_rounds, 1, "one of the two round reservations remains")
+        self.assertEqual([(line["round"], line["attempt"]) for line in first.round_lines()
+                          if line["event"] == "start"], [(1, 1)])
+        self.assertIs(first.log[-1]["counted"], False)
+
+        with mock.patch.object(call, "advise", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                project.review(tier=None)
+        before = read_series()
+        self.assertEqual(before.counted_rounds, 2, "the interrupted retry keeps its own reservation")
+        self.assertEqual([(line["round"], line["attempt"]) for line in before.round_lines()
+                          if line["event"] == "start"], [(1, 1), (1, 2)])
+        self.assertEqual((before.log[-1]["counted"], before.log[-1]["code"]), (False, "KeyboardInterrupt"))
+        self.assertEqual(before.task_receipts, ())
+        calls = project.calls()
+        self.assertEqual(len(calls), 1)
+
+        done = oah(project, "review", "--task", "t1", "--tier", "high")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
+        after = read_series()
+        self.assertEqual(after.counted_rounds, before.counted_rounds)
+        self.assertEqual(after.round_lines(), before.round_lines())
+        self.assertEqual(after.log, before.log)
+        self.assertEqual(after.task_receipts, before.task_receipts)
+        self.assertEqual(project.calls(), calls, "the restarted refusal launches no reviewer")
+        self.assertEqual(project.fix_calls(), [])
+
     def test_every_paid_path_honours_task_stops(self):
         for stopped in (False, True):
             with self.subTest(stopped=stopped):

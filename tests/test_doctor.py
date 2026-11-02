@@ -456,9 +456,10 @@ class ModelChoiceDoctorTest(unittest.TestCase):
         config.parent.mkdir()
         config.write_text('[engines.codex]\ncommand = ["/no/such/codex"]\n[models]\nprofile = "efficient"\n',
                           encoding="utf-8")
+        efforts = ("low", "medium", "high", "xhigh", "max")
         self.catalog._save(Entry("codex", "1.0.0", "2026-10-27T09:00:00Z", (
-            ModelInfo("gpt-6-luna", ("high",)), ModelInfo("gpt-6.1-sol", ("high",)), ModelInfo("gpt-6-sol", ("high",)),
-            ModelInfo("gpt-7-nova", ("high",))), "fixture"))
+            ModelInfo("gpt-6-luna", efforts), ModelInfo("gpt-6.1-sol", efforts), ModelInfo("gpt-6-sol", efforts),
+            ModelInfo("gpt-7-nova", efforts)), "fixture"))
         patcher = mock.patch("oah.scoring.bundled", return_value=self.SCORES)
         patcher.start()
         self.addCleanup(patcher.stop)
