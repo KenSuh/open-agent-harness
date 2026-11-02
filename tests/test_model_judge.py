@@ -490,6 +490,41 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
                 self.assertEqual(launched(project), ("gpt-6.1-terra", "medium"))
 
+    def test_review_candidates_and_answers_use_each_models_own_highest_effort(self):
+        for mode in ("scored", "pools", "ranked"):
+            for rule_max, proposal_max, answer, status in (
+                    ("high", "max", "high", "rejected(below-floor)"),
+                    ("high", "max", "max", "used"),
+                    ("max", "high", "high", "used")):
+                with self.subTest(mode=mode, rule_max=rule_max, proposal_max=proposal_max, answer=answer):
+                    extra = ('[engines.codex.tiers.medium]\neffort = "highest"\n'
+                             '[engines.codex.tiers.high]\neffort = "highest"\n')
+                    order = '["gpt-6.1-terra", "gpt-6.1-sol"]' if mode == "ranked" else "[]"
+                    if mode == "pools":
+                        extra += ('[engines.codex.tier_pools]\n'
+                                  'medium = ["gpt-6.1-terra", "gpt-6.1-sol"]\n'
+                                  'high = ["gpt-6.1-terra", "gpt-6.1-sol"]\n')
+                    project = calls.scored_project(self, extra + JEV_ON, order=order)
+                    project.env[KEY_NAME] = fake_key()
+                    levels = {"gpt-6.1-terra": ("low", "medium", "high", rule_max),
+                              "gpt-6.1-sol": ("low", "medium", "high", proposal_max)}
+                    (project.home / "models_cache.json").write_text(json.dumps({"models": [
+                        {"slug": name, "supported_reasoning_levels": [{"effort": e} for e in dict.fromkeys(
+                            levels.get(name, calls.EFFORTS))]} for name in calls.SCORED_MODELS]}), encoding="utf-8")
+                    provider = FakeJudge(("gpt-6.1-sol", answer))
+                    with judge(project, provider):
+                        data = project.run(stage="review", tier="high")
+                    self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
+                    pairs = data["model_choice"]["candidates"]
+                    self.assertIn(["gpt-6.1-terra", rule_max], pairs)
+                    self.assertIn(["gpt-6.1-sol", proposal_max], pairs)
+                    if proposal_max == "max":
+                        self.assertNotIn(["gpt-6.1-sol", "high"], pairs)
+                    self.assertEqual(set(provider.calls[0][1]), {tuple(pair) for pair in pairs})
+                    expected = ("gpt-6.1-terra", rule_max) if status.startswith("rejected") else (
+                        "gpt-6.1-sol", answer)
+                    self.assertEqual(launched(project), expected)
+
     def test_a_review_judge_works_under_the_scope_floor_not_the_kind_floor(self):
         project = calls.scored_project(self, JEV_ON)
         project.packet("## Scope\n- src/auth/login.py\n")

@@ -478,11 +478,21 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         return record("unused(floor-unresolved)")
     if pinned:
         return record("unused(pinned)")
+
+    def review_rule(model: str, effort: str) -> str | None:
+        proposed = dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort)
+        try:
+            _check_admission(proposed, settings, stage=stage, tier=tier, floor_tier=floor_tier, freshness=freshness)
+        except EngineError:
+            return "below-floor"
+        return None
+
     candidates = models.build_candidates(
         engine, entry=freshness.entry, deterministic=deterministic, tier=tier, floor_tier=floor_tier,
         floor=floor, quality_order=section["quality_order"],
         allowed_models=section["allowed_models"], effort_caps=section["effort_caps"],
-        tier_pools=section["tier_pools"], scores=freshness.scores, profile=settings.models["profile"])
+        tier_pools=section["tier_pools"], scores=freshness.scores, profile=settings.models["profile"],
+        admission_rule=review_rule if stage == "review" else None)
     choice["floor"] = {"tier": floor_tier, **floor.to_json()}
     choice["candidates"] = [[pair.model, pair.effort] for pair in candidates.pairs]
     choice.update(mode=candidates.mode, note=candidates.note, excluded=dict(candidates.excluded))
@@ -508,9 +518,6 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     model, effort = judged.proposal
     choice["proposal"] = {"model": model, "effort": effort}
     rule = candidates.reject_reason(model, effort)
-    if (rule is None and stage == "review" and scoring.scored(freshness.scores, model) is not None
-            and not scoring.clears(freshness.scores, model, routing.TIERS.index(floor_tier))):
-        rule = "below-floor"  # a pool or ranking is not bounded by scores, and a floor still is
     if rule is not None:
         return record(f"rejected({rule})")
     return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort))
@@ -581,6 +588,12 @@ def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier
     already raised its named failure in `models.map_tier` (no catalog, no scores, an empty pool, a floor no
     allowed model reaches). A floor is checked on the model's own score on the fixed scale, so a pin of a superseded,
     not-allowed or unlisted model cannot get under it."""
+    return _check_admission(resolution, settings, stage=stage, tier=tier, floor_tier=floor_tier, freshness=freshness)
+
+
+def _check_admission(resolution: Resolution, settings: Settings, *, stage: str | None, tier: str, floor_tier: str,
+                     freshness: models.Freshness) -> Admission:
+    """Shared, read-free checks for admission, judge candidates and proposals, on each model's own effort."""
     engine, model = resolution.engine, resolution.model
     scores = freshness.scores
     warnings: list[str] = []

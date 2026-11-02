@@ -577,15 +577,26 @@ class DispatchTest(unittest.TestCase):
         self.assertFalse([argv for argv in project.orca_calls() if argv[:2] == ["terminal", "create"]])
         self.assertEqual([line for line in receipts.read_round_log(project.state, "t1") if line["event"] != "limit"], [])
 
-    def test_admit_runs_once_at_prepare_and_the_worker_replays_that_record(self):
+    def test_admit_runs_before_and_after_judge_and_worker_replays_without_preparation(self):
         project = OrcaProject(self)
         project.start_host()
         with mock.patch.object(call, "admit", wraps=call.admit) as spy:
             code, out, err = project.cli("call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium",
                                          "--launcher", "orca", "--json")
         self.assertEqual(code, 0, err)
-        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_count, 2)
         self.assertEqual(json.loads(out)["admission"]["floor_tier"], "medium")
+
+        queued = OrcaProject(self)
+        prepared = queued.queued()
+        with mock.patch.object(call, "prepare") as prepare, mock.patch.object(call, "admit") as admit, \
+                mock.patch.object(call, "judge_engine") as judge:
+            code, out, err = queued.cli("worker-run", prepared.run_id, "--stage", prepared.stage)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(prepared.run.read()["status"], "finished")
+        prepare.assert_not_called()
+        admit.assert_not_called()
+        judge.assert_not_called()
 
     def test_review_can_still_run_in_a_new_orca_worktree(self):
         project = OrcaProject(self)

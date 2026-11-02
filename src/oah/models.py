@@ -466,6 +466,7 @@ class CandidateSet:
     tier: str = ""
     pools: tuple[tuple[str, tuple[str, ...]], ...] = ()  # the configured tier pools, as given
     qualified: tuple[str, ...] = ()  # in both tiers' pools (pools mode), or in the score band (scored mode)
+    admission_rule: Callable[[str, str], str | None] | None = None  # the call's model-specific review checks
 
     @property
     def ranked(self) -> bool:
@@ -497,16 +498,17 @@ class CandidateSet:
                 return "outside-score-bound"
         elif model != self.deterministic.model:
             return "outside-candidates"
-        floor_rank = rank(self.floor.effort)
-        if floor_rank is None:
-            if effort != self.deterministic.effort:
-                return "outside-candidates"
-        elif rank(effort) < floor_rank:
-            return "below-floor"
+        if self.admission_rule is None:
+            floor_rank = rank(self.floor.effort)
+            if floor_rank is None:
+                if effort != self.deterministic.effort:
+                    return "outside-candidates"
+            elif rank(effort) < floor_rank:
+                return "below-floor"
         cap = dict(self.caps).get(model)
         if cap is not None and rank(cap) is not None and rank(effort) > rank(cap):
             return "above-cap"
-        return None
+        return self.admission_rule(model, effort) if self.admission_rule is not None else None
 
     def to_json(self) -> dict:
         return {"deterministic": self.deterministic.to_json(),
@@ -519,7 +521,8 @@ class CandidateSet:
 def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, tier: str, floor_tier: str,
                      floor: Pair, quality_order: Sequence[str], allowed_models: Sequence[str],
                      effort_caps: Mapping[str, str], tier_pools: Mapping[str, Sequence[str]],
-                     scores: scoring.ScoreSet | None = None, profile: str = scoring.DEFAULT_PROFILE) -> CandidateSet:
+                     scores: scoring.ScoreSet | None = None, profile: str = scoring.DEFAULT_PROFILE,
+                     admission_rule: Callable[[str, str], str | None] | None = None) -> CandidateSet:
     """The closed candidate set for one call (see Candidates above)."""
     listed = [model.name for model in entry.models if model.listed] if entry else []
     order = tuple(name for name in user_order(engine, quality_order) if name in listed)
@@ -546,7 +549,7 @@ def build_candidates(engine: str, *, entry: Entry | None, deterministic: Pair, t
                                                  model=deterministic.model))
     rule = CandidateSet(engine, deterministic, floor_tier, floor, mode, order if ranked else (), allowed,
                         tuple(sorted(effort_caps.items())), entry, note=note, tier=tier, pools=pools,
-                        qualified=qualified)
+                        qualified=qualified, admission_rule=admission_rule)
     names = list(order) if ranked else list(qualified) if mode in ("pools", "scored") else [deterministic.model]
     found: list[Pair] = []
     excluded: list[tuple[str, str]] = []
