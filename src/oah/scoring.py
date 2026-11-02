@@ -103,7 +103,7 @@ def _unusable(name: str, why: str) -> EngineError:
 
 
 def _packaged(name: str) -> bytes:
-    return resources.files("oah").joinpath("templates", "engines", name).read_bytes()
+    return resources.files("oah").joinpath(f"templates/engines/{name}").read_bytes()
 
 
 def _reject_constant(constant: str) -> None:

@@ -863,6 +863,18 @@ class AdmissionRoundTest(unittest.TestCase):
         self.assertFalse((project.state / "runs" / "t1").exists() and list((project.state / "runs" / "t1").iterdir()))
         self.assertEqual(list(project.temp_root.iterdir()), [])
 
+    def test_a_refused_call_leaves_an_approval_current(self):
+        project = self.scored()
+        self.assertEqual(project.review(tier="medium").code, "OAH_REVIEW_CONVERGED")
+        tools = call_cli.intent_tools()
+        with self.assertRaises(EngineError) as caught:
+            call.prepare(call.CallRequest(engine="codex", stage="review", task="t1", tier="low"),
+                         call_cli.load_settings(project.repo), root=project.repo, state_dir=project.state,
+                         env=project.env, footer=tools.footer, has_footer=tools.has_footer, keychain=NoKeychain())
+        self.assertEqual(caught.exception.code, "OAH_MODEL_BELOW_FLOOR")
+        self.assertEqual(project.review(tier="medium").code, "OAH_REVIEW_CONVERGED")
+        self.assertEqual(len(project.calls()), 1, "the approval stands, so no second reviewer call is paid for")
+
     def test_a_failure_after_admission_keeps_its_spend(self):
         project = self.scored("[review]\nmax_rounds = 1\n")
         with mock.patch.object(call, "_brief_skills", side_effect=RuntimeError("private-fixture-marker")):

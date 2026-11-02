@@ -436,15 +436,12 @@ class AdmissionTest(unittest.TestCase):
         self.assertTrue(any(warning.startswith("OAH_MODELS_REFRESH_FAILED") for warning in data["warnings"]))
 
     def test_no_usable_scores_refuse_by_name_and_nothing_runs(self):
-        for damage in (FileNotFoundError("gone"), b"not json"):
-            for name, config in (("codex", ""),):
-                with self.subTest(damage=damage), mock.patch.object(
-                        scoring, "_packaged", **({"side_effect": damage} if isinstance(damage, Exception)
-                                                 else {"return_value": damage})):
-                    project = Project(self, "quality_order = []\n" + config)
-                    write_models(project.home)
-                    self.assertIn(".oah/config.toml", self.refused(project, "OAH_MODEL_NO_SCORES", stage="correction",
-                                                                   tier="high"))
+        for damage in ({"side_effect": FileNotFoundError("gone")}, {"return_value": b"not json"}):
+            with self.subTest(damage=damage), mock.patch.object(scoring, "_packaged", **damage):
+                project = Project(self, "quality_order = []\n")
+                write_models(project.home)
+                self.assertIn(".oah/config.toml", self.refused(project, "OAH_MODEL_NO_SCORES", stage="correction",
+                                                               tier="high"))
 
     def test_a_catalog_of_unknown_families_refuses_and_never_guesses(self):
         project = scored_project(self, models=("gpt-7-nova", "codex-auto-review"))
@@ -469,13 +466,6 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(project.run(stage="review", tier="medium")["status"], "finished")
         self.assertEqual([line["event"] for line in spent(project)], ["reservation", "dispatch"])
 
-    def test_a_refusal_keeps_an_earlier_approval_current(self):
-        project = scored_project(self)
-        before = receipts.read_round_log(project.state, "t1")
-        self.refused(project, tier="low")
-        self.assertEqual(receipts.read_round_log(project.state, "t1")[:len(before)], before)
-        self.assertEqual(spent(project), [])
-
 
 class AdmissionPathTest(unittest.TestCase):
     """`admit` runs on the final pair of every launch path, and one launch reads the data once."""
@@ -491,7 +481,7 @@ class AdmissionPathTest(unittest.TestCase):
                 self.assertEqual(spy.call_count, 1)
                 self.assertEqual(spy.call_args.args[0].model, "gpt-6.1-terra")
 
-    def test_a_retry_from_a_saved_request_passes_it_again(self):
+    def test_each_prepared_call_passes_it_once(self):
         project = scored_project(self)
         with mock.patch.object(call, "admit", wraps=call.admit) as spy:
             project.prepare(stage="review", tier="medium")
