@@ -5,7 +5,8 @@
 `claude plugin update <id> --scope user --json` for each plugin installed at user scope; 4. `codex plugin
 marketplace upgrade`, with each Git marketplace's revision and each installed Codex plugin's file digest read
 before and after; 5. oah's kit skills through `toolkit.update.scheduled_update`. Nothing else is run: no
-package manager, no shell, no confirmation flag, nothing about MCP servers, no process listing or signal.
+package manager, no shell, no confirmation flag, nothing about MCP servers. Only a command started by
+the shared runner can be stopped on timeout; unrelated processes are never listed, signalled or stopped.
 """
 from __future__ import annotations
 
@@ -45,9 +46,10 @@ def _entry(context: Context, status: str, before: str | None, after: str | None,
     return records.component(status, before, after, next_step, context.checked_at)
 
 
-def _steps_for(command: str) -> dict[str, str]:
+def _steps_for(command: str, *, timed_out: bool = False) -> dict[str, str]:
     return {"unverified": f"run {command} yourself and read what it says",
-            "failed": f"run {command} yourself to see the error"}
+            "failed": (f"timed out; the tool may be partly updated; run {command} yourself to check it"
+                       if timed_out else f"run {command} yourself to see the error")}
 
 
 def cli_update(context: Context, cli: Cli) -> dict:
@@ -63,8 +65,9 @@ def cli_update(context: Context, cli: Cli) -> dict:
     after = cli.version()
     said_current = any(probes.said(name, ran.text) for name in probes.CURRENT_PHRASES[cli.name])
     status = probes.verdict(before, after, said_current=said_current, returncode=ran.returncode,
-                            timed_out=ran.timed_out)
-    return {cli.name: _entry(context, status, before, after, _steps_for(command).get(status, ""))}
+                            timed_out=ran.timed_out, clean=ran.clean)
+    return {cli.name: _entry(context, status, before, after,
+                             _steps_for(command, timed_out=ran.timed_out).get(status, ""))}
 
 
 def claude_plugins(context: Context) -> dict:
@@ -82,16 +85,18 @@ def claude_plugins(context: Context) -> dict:
     listing = cli.run("plugin", "list", "--json")
     before = probes.user_plugins(listing.stdout) if listing.ok else None
     if before is None:
-        status = "failed" if listing.timed_out or listing.returncode != 0 else "unverified"
-        return {"claude-plugins": _entry(context, status, None, None, "run claude plugin list yourself to see why "
-                                                                        "the plugin list cannot be read")}
+        status = probes.verdict(None, None, said_current=False, returncode=listing.returncode,
+                                timed_out=listing.timed_out, clean=listing.clean)
+        return {"claude-plugins": _entry(context, status, None, None,
+                                         _steps_for("claude plugin list", timed_out=listing.timed_out)[status])}
     results: dict[str, dict] = {}
     if cli.lists("plugin", "marketplace", "update"):
         refresh = cli.run("plugin", "marketplace", "update")
         if not refresh.ok:
-            status = "failed" if refresh.timed_out or refresh.returncode != 0 else "unverified"
+            status = probes.verdict(None, None, said_current=False, returncode=refresh.returncode,
+                                    timed_out=refresh.timed_out, clean=refresh.clean)
             results["claude-marketplaces"] = _entry(context, status, None, None, _steps_for(
-                "claude plugin marketplace update")[status])
+                "claude plugin marketplace update", timed_out=refresh.timed_out)[status])
     else:
         results["claude-marketplaces"] = _entry(context, "unsupported", None, None, "this Claude Code has no "
                                                 "`claude plugin marketplace update`; refresh them in Claude Code")
@@ -102,12 +107,12 @@ def claude_plugins(context: Context) -> dict:
         result = probes.plugin_result(ran.stdout) if ran.clean else None
         old, new = before[ident], after.get(ident)
         command = f"claude plugin update {ident}"
-        if probes.plugin_needs_confirmation(result, ran.text) and not (old and new and old != new):
+        if not ran.timed_out and probes.plugin_needs_confirmation(result, ran.text) and not (old and new and old != new):
             entry = _entry(context, "needs-confirmation", old, new, f"run: {command}")
         else:
             status = probes.verdict(old, new, said_current=probes.plugin_said_current(result),
-                                    returncode=ran.returncode, timed_out=ran.timed_out)
-            entry = _entry(context, status, old, new, _steps_for(command).get(status, ""))
+                                    returncode=ran.returncode, timed_out=ran.timed_out, clean=ran.clean)
+            entry = _entry(context, status, old, new, _steps_for(command, timed_out=ran.timed_out).get(status, ""))
         results[f"claude-plugin:{ident}"] = entry
     return results
 
@@ -144,21 +149,40 @@ def codex_plugins(context: Context) -> dict:
     for name in sorted(before.marketplaces):
         old, new = before.marketplaces[name], after.marketplaces.get(name)
         status = probes.verdict(old, new, said_current=probes.marketplace_said_current(ran.text, name),
-                                returncode=ran.returncode, timed_out=ran.timed_out)
-        results[f"codex-marketplace:{name}"] = _entry(context, status, old, new, _steps_for(command).get(status, ""))
+                                returncode=ran.returncode, timed_out=ran.timed_out, clean=ran.clean)
+        results[f"codex-marketplace:{name}"] = _entry(context, status, old, new,
+                                                     _steps_for(command, timed_out=ran.timed_out).get(status, ""))
     for ident, folder in sorted(after.plugins.items()):
         old, new = digests.get(ident), probes.plugin_digest(folder)
         if old is not None and old == new:
             continue  # the plugin's files did not change
-        if old is None or new is None:
+        if ran.timed_out or not ran.clean:
+            status = "failed" if ran.timed_out else "unverified"
+            entry = _entry(context, status, _short(old), _short(new),
+                           _steps_for(command, timed_out=ran.timed_out)[status])
+        elif old is None or new is None:
             entry = _entry(context, "unverified", _short(old), _short(new),
                            f"its folder under CODEX_HOME could not be read; open Codex and check {ident} in /plugins")
         elif probes.declares_hooks(folder):
             entry = _entry(context, "needs-hook-approval", _short(old), _short(new), HOOK_STEP)
+            entry["hook_approval_digest"] = probes.hook_approval_digest(home, ident)
         else:
             entry = _entry(context, "updated", _short(old), _short(new), "")
         results[f"codex-plugin:{ident}"] = entry
     return results
+
+
+def pending_hook_approvals(components: Mapping[str, dict], env: Mapping[str, str]) -> dict[str, dict]:
+    """Keep warnings until a fresh, readable approval entry differs; never write Codex's config."""
+    pending = {}
+    for name, entry in components.items():
+        if entry["status"] != "needs-hook-approval":
+            continue
+        digest = probes.hook_approval_digest(probes.codex_home(env), name.partition(":")[2])
+        previous = entry.get("hook_approval_digest")
+        if digest is None or previous is None or digest == previous:
+            pending[name] = dict(entry, hook_approval_digest=previous if previous is not None else digest)
+    return pending
 
 
 # oah's kit skills ----------------------------------------------------------------------------------

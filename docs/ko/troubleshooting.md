@@ -156,8 +156,8 @@
 | `OAH_UPDATE_SKIPPED` | 패스가 돌지 않았다. `[updates]`의 `after_finish`가 꺼져 있거나 읽을 수 없거나, 직전 패스가 `interval_hours` 안에 시작했거나, 호출한 쪽이 발주된 워커이거나, 백그라운드 시작이 실패한 경우다. | 줄에 적힌 이유를 읽는다. 켜려면 `.oah/config.toml`의 `[updates]`에 `after_finish = true`를 두고, 지금 돌리려면 `oah update`를 실행한다. |
 | `OAH_UPDATE_BUSY` | 이 컴퓨터의 다른 패스가 `~/.oah/updates/pass.lock`을 잡고 있다. | 기다렸다가 `oah update status`를 실행한다. `oah update`는 이 코드와 함께 1로 끝난다. |
 | `OAH_UPDATE_DEFERRED` | 리스가 살아 있거나 run이 진행 중이어서(또는 run 기록을 읽을 수 없어서) 아무것도 갱신하거나 기록하지 않았다. | 작업을 마친다. 진행 중인 것을 남기지 않는 다음 `oah finish`가 패스를 시작하고, 그때 `oah update`를 실행해도 된다. `running`에 멈춘 run은 계속 미루게 하므로 `oah wait <run-id>`로 확인한다. |
-| `OAH_UPDATE_STATE_UNAVAILABLE` | `~/.oah/updates/state.json`이 없거나 읽을 수 없거나 모양이 틀려서 `oah`가 그 내용을 믿지 않고 모든 도구를 다시 확인한다. | 그 파일을 지우고 `oah update`를 실행한다. 패스가 새 기록을 쓴다. |
-| `OAH_UPDATE_FINISHED` | 패스가 끝났다. `complete`는 모든 결과가 updated, current, unsupported라는 뜻이고 `needs-attention`은 하나라도 아니라는 뜻이다. | 그 위 `oah:` 줄마다 적힌 다음 단계를 따른다. `oah update status`가 다시 보여 준다. |
+| `OAH_UPDATE_STATE_UNAVAILABLE` | 이력은 있는데 `~/.oah/updates/state.json`이 없거나, 상태·이력 기록을 읽을 수 없거나 내용이 잘못돼 모든 도구를 다시 확인한다. 잘못된 이력 줄은 건너뛰며 `oah update status`가 그 수를 알린다. | 망가진 파일을 지우고 `oah update`를 실행한다. 패스가 새 기록을 쓴다. 두 기록이 모두 아직 없으면 신규 설치로 본다. |
+| `OAH_UPDATE_FINISHED` | 패스가 끝났다. `complete`는 모든 결과가 updated, current, unsupported라는 뜻이고 `needs-attention`은 하나라도 아니라는 뜻이다. `timeout_seconds`를 넘긴 명령은 멈추고 `failed` 및 «timed out; the tool may be partly updated»로 기록한다. | 그 위 `oah:` 줄마다 적힌 다음 단계를 따른다. 시간 초과라면 줄에 나온 도구 명령을 직접 실행해 설치 상태를 확인한다. `oah update status`가 다시 보여 준다. |
 | `OAH_UPDATE_OFF` | `oah doctor` 알림이다. `.oah/config.toml`의 `[updates]`에 `after_finish`가 없어서 도구 업데이트가 꺼져 있다. | 켜려면 `after_finish = true`를 두고(그다음 `oah update`가 지금 패스를 돌린다), 계속 끄고 알림을 없애려면 `false`를 둔다. |
 | `OAH_UPDATE_UNSETTLED` | `oah doctor` 알림이다. 마지막 패스가 `updated`나 `current`가 아닌 결과를 남겼다. | 그 줄의 다음 단계를 따른 뒤 `oah update`를 실행한다. |
 

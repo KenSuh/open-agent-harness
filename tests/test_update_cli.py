@@ -5,13 +5,14 @@ import contextlib
 import io
 import os
 import pathlib
+import subprocess
 import unittest
 from unittest import mock
 
 from oah import paths, update_cli
 from oah.cli import build_parser, main
 from oah.toolupdate import records
-from tests.helpers import make_git_repo, make_tmp_dir
+from tests.helpers import guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
 from tests.test_toolupdate import FakeToolsCase
 
 
@@ -20,8 +21,8 @@ class UpdateCliTest(FakeToolsCase):
 
     def setUp(self):
         self.git = paths.git_argv()[0]  # resolved before the guard and the cleared environment
-        self.repo = make_git_repo(self)
         super().setUp()
+        self.repo = make_git_repo(self)
         self.switch("[skills]\nauto_update = false\n[updates]\nafter_finish = true\ntimeout_seconds = 30\n")
         self.enterContext(mock.patch.dict(os.environ, self.fake.env, clear=True))
 
@@ -31,7 +32,7 @@ class UpdateCliTest(FakeToolsCase):
         config.write_text(text, encoding="utf-8")
 
     def allowed(self, argv: list[str]) -> bool:
-        return super().allowed(argv) or (bool(argv) and argv[0] == self.git)
+        return super().allowed(argv) or (bool(argv) and argv[0] in ("git", self.git))
 
     def oah(self, *args: str, cwd: pathlib.Path | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -40,7 +41,7 @@ class UpdateCliTest(FakeToolsCase):
         return code, out.getvalue(), err.getvalue()
 
     def fake_launches(self) -> list[list[str]]:
-        return [argv for argv in self.launched if argv[0] != self.git]
+        return [argv for argv in self.launched if argv[0] not in ("git", self.git)]
 
     def test_update_runs_a_pass_now_and_exits_by_outcome(self):
         code, out, _err = self.oah("update")
@@ -96,6 +97,53 @@ class UpdateCliTest(FakeToolsCase):
         self.assertEqual(code, 0)
         self.assertFalse((self.fake.home / ".oah").exists())
         self.assertEqual(self.fake_launches(), [])
+
+
+class RepositorySetupIsolationTest(unittest.TestCase):
+    def test_setup_ignores_a_hostile_global_git_hook_and_guards_setup_commands(self):
+        from tests.test_lease_cli import FinishStartsToolUpdatesTest
+
+        folder = make_tmp_dir(self)
+        isolated = isolate_git_home(self, folder / "hostile-home")
+        git = paths.git_argv()[0]
+        guard_subprocesses(self, lambda argv: bool(argv) and argv[0] in ("git", git))
+        hooks = folder / "hostile-hooks"
+        hooks.mkdir()
+        marker = folder / "hook-ran"
+        hook = hooks / "pre-commit"
+        hook.write_text(f"#!/bin/sh\nprintf ran > '{marker.as_posix()}'\nexit 91\n", encoding="utf-8")
+        hook.chmod(0o755)
+        hostile = folder / "hostile.gitconfig"
+        hostile.write_text(f'[core]\n    hooksPath = "{hooks.as_posix()}"\n', encoding="utf-8")
+        for case_type, method in ((UpdateCliTest, "test_status_runs_no_subprocess"),
+                                  (FinishStartsToolUpdatesTest, "test_another_active_lease_starts_nothing")):
+            with self.subTest(case=case_type.__name__):
+                seen = []
+                real_popen = subprocess.Popen
+
+                def observe(args, *rest, **options):
+                    seen.append((list(args), dict(options.get("env") or os.environ)))
+                    return real_popen(args, *rest, **options)
+
+                case = case_type(method)
+                with mock.patch.dict(os.environ, dict(isolated, GIT_CONFIG_GLOBAL=str(hostile), GIT_CONFIG_COUNT="0")), \
+                        mock.patch("subprocess.Popen", observe):
+                    try:
+                        case.setUp()
+                        self.assertFalse(marker.exists(), "repository setup executed a global Git hook")
+                        self.assertTrue(seen)
+                        for argv, env in seen:
+                            self.assertIn(argv, case.launched, "the guard was not active during setup")
+                            self.assertNotEqual(env["GIT_CONFIG_GLOBAL"], str(hostile))
+                            self.assertNotEqual(env["HOME"], isolated["HOME"])
+                            self.assertEqual(env["HOME"], env["USERPROFILE"])
+                            self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+                            self.assertEqual(env["GIT_CONFIG_KEY_0"], "core.hooksPath")
+                            for key in ("GIT_TEMPLATE_DIR", "GIT_CONFIG_VALUE_0", "XDG_CONFIG_HOME"):
+                                self.assertEqual(list(pathlib.Path(env[key]).iterdir()), [])
+                            self.assertEqual(pathlib.Path(env["GIT_CONFIG_GLOBAL"]).read_bytes(), b"")
+                    finally:
+                        case.doCleanups()
 
 
 class RegistrationTest(unittest.TestCase):

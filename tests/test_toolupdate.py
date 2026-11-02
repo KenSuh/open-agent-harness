@@ -15,7 +15,7 @@ from unittest import mock
 from oah.lockfile import StateLock
 from oah.toolupdate import probes, records, steps
 from oah.toolupdate import run as passes
-from tests.helpers import make_tmp_dir, require_node
+from tests.helpers import guard_subprocesses, isolate_git_home, make_tmp_dir, require_node
 
 FORBIDDEN_WORDS = {"-y", "--yes", "--accept-command", "mcp"}
 FORBIDDEN_PROGRAMS = {"npm", "npx", "brew", "ps", "tasklist", "pgrep", "pkill", "kill", "taskkill"}
@@ -191,6 +191,8 @@ def main():
             sys.stdout.buffer.write(bytes.fromhex(spec["stdout_hex"]))
         sys.stdout.write(spec.get("stdout", ""))
         sys.stdout.flush()
+        if "stderr_hex" in spec:
+            sys.stderr.buffer.write(bytes.fromhex(spec["stderr_hex"]))
         sys.stderr.write(spec.get("stderr", ""))
         sys.stderr.flush()
         return int(spec.get("exit", 0))
@@ -361,19 +363,9 @@ class FakeToolsCase(unittest.TestCase):
 
     def setUp(self):
         self.fake = FakeTools(self)
-        self.launched: list[list[str]] = []
-        self.violations: list[list[str]] = []
-        real_popen = subprocess.Popen
-
-        def guarded(args, *rest, **options):
-            argv = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
-            self.launched.append(argv)
-            if not self.allowed(argv):
-                self.violations.append(argv)
-                raise AssertionError(f"a test tried to start a program outside the fake bin folder: {argv[:1]}")
-            return real_popen(args, *rest, **options)
-
-        self.enterContext(mock.patch("subprocess.Popen", guarded))
+        self.launched = guard_subprocesses(self, self.allowed)
+        self.fake.env.update(isolate_git_home(self, self.fake.home))
+        self.enterContext(mock.patch.dict(os.environ, {"CODEX_HOME": str(self.fake.codex_home)}))
         self.enterContext(mock.patch.object(records, "home", return_value=self.fake.home))
         self.enterContext(mock.patch.object(pathlib.Path, "home", side_effect=AssertionError("Path.home() was used")))
         self.addCleanup(self.check_launches)
@@ -386,7 +378,6 @@ class FakeToolsCase(unittest.TestCase):
         return self.fake.allowed(argv)
 
     def check_launches(self):
-        self.assertEqual(self.violations, [])
         for tool, argv in self.fake.argv():
             self.assertFalse(FORBIDDEN_WORDS & set(argv), (tool, argv))
         for argv in self.launched:
@@ -627,11 +618,46 @@ class PassTest(FakeToolsCase):
         self.assertIn("oah doctor", entry["next_step"])
         self.assertNotIn("codex-marketplaces", self.components())
 
-    def test_timeout_is_failed(self):
-        self.configure("after_finish = true\ntimeout_seconds = 3\n")
+    def test_timeout_is_failed_and_the_pass_continues(self):
+        self.configure("after_finish = true\ntimeout_seconds = 1\n")
         self.fake.set("claude", update={"sleep": 30})
-        self.run_pass()
-        self.assertEqual(self.components()["claude"]["status"], "failed")
+        self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["claude"]
+        self.assertEqual((entry["status"], entry["settled_version"]), ("failed", None))
+        self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+        self.assertIn("claude update", entry["next_step"])
+        self.assertTrue(any("timed out; the tool may be partly updated" in line for line in self.lines))
+        self.assertEqual(self.components()["codex"]["status"], "current")
+        self.assertTrue(self.fake.ran("codex", "update"))
+
+    def test_undecodable_update_streams_never_settle_changed_versions(self):
+        for stream in ("stdout_hex", "stderr_hex"):
+            for tool in ("claude", "codex"):
+                with self.subTest(stream=stream, tool=tool):
+                    old = "2.1.316" if tool == "claude" else "0.166.0"
+                    new = "2.1.320" if tool == "claude" else "0.167.0"
+                    self.fake.set(tool, version=old, update={stream: "ff", "set_version": new})
+                    self.run_pass()
+                    entry = self.components()[tool]
+                    self.assertEqual((entry["status"], entry["before"], entry["after"], entry["settled_version"]),
+                                     ("unverified", old, new, None))
+
+    def test_undecodable_plugin_update_streams_never_settle(self):
+        for stream in ("stdout_hex", "stderr_hex"):
+            with self.subTest(stream=stream):
+                self.fake.set("claude", plugins=[{"id": "a@m", "version": "1", "scope": "user"}],
+                              marketplace_update={stream: "ff", "exit": 1},
+                              plugin_update={"a@m": {stream: "ff", "set_version": "2"}})
+                config = self.fake.codex_home / "config.toml"
+                config.write_text(toml_config({"m": "aaa"}, ("a@m",)), encoding="utf-8")
+                self.fake.plugin("m", "a", "1", {"skill.md": "old"})
+                self.fake.set("codex", upgrade={stream: "ff", "config_text": toml_config({"m": "bbb"}, ("a@m",)),
+                                               "write_files": {"plugins/cache/m/a/1/skill.md": "new"}})
+                self.assertEqual(self.run_pass(), "needs-attention")
+                for name in ("claude-marketplaces", "claude-plugin:a@m", "codex-marketplace:m", "codex-plugin:a@m"):
+                    with self.subTest(component=name):
+                        entry = self.components()[name]
+                        self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
 
     def test_plugins_at_user_scope_are_updated_and_checked(self):
         self.fake.set("claude", plugins=[
@@ -750,6 +776,69 @@ class HooksTest(FakeToolsCase):
         self.assertTrue(any("(needs-hook-approval); open Codex and approve its hooks again in /hooks" in line
                             for line in self.lines), self.lines)
 
+    def test_hook_warning_survives_an_unchanged_pass_and_status(self):
+        config = self.fake.codex_home / "config.toml"
+        original = config.read_bytes()
+        self.run_pass()
+        self.assertEqual(self.components()["codex-plugin:hooked@m"].get("hook_approval_digest"), "absent")
+        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        entry = self.components()["codex-plugin:hooked@m"]
+        self.assertEqual((entry["status"], entry["next_step"]), ("needs-hook-approval", steps.HOOK_STEP))
+        launched = len(self.launched)
+        status = "\n".join(passes.status_lines())
+        self.assertIn("outcome needs-attention", status)
+        self.assertIn("(needs-hook-approval)", status)
+        self.assertEqual(len(self.launched), launched)
+        self.assertEqual(config.read_bytes(), original)
+
+    def test_only_a_changed_matching_approval_clears_the_warning(self):
+        config = self.fake.codex_home / "config.toml"
+        approval = '"hooked@m:hooks" = { trusted_hash = "private-approval-before" }\n'
+        config.write_text(self.config + approval, encoding="utf-8")
+        self.fake.world["codex"]["upgrade"]["stdout"] = "All configured Git marketplaces are already up to date.\n"
+        self.fake.save()
+        original = config.read_bytes()
+        self.run_pass()
+        self.assertEqual(config.read_bytes(), original)
+        digest = self.components()["codex-plugin:hooked@m"].get("hook_approval_digest", "")
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        for path in (records.state_path(), records.runs_path()):
+            self.assertNotIn("private-approval-before", path.read_text("utf-8"))
+        config.write_text((self.config + approval).replace("sha256:00", "sha256:unrelated"), encoding="utf-8")
+        self.assertIn("(needs-hook-approval)", "\n".join(passes.status_lines()))
+        config.write_text((self.config + approval).replace("private-approval-before", "private-approval-after"),
+                          encoding="utf-8")
+        approved = config.read_bytes()
+        saved_state = records.state_path().read_bytes()
+        status = "\n".join(passes.status_lines())
+        self.assertNotIn("(needs-hook-approval)", status)
+        self.assertIn("outcome complete", status)
+        self.assertEqual(records.state_path().read_bytes(), saved_state)  # status remains read-only
+        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
+        self.assertEqual(self.run_pass(), "complete")
+        self.assertNotIn("codex-plugin:hooked@m", self.components())
+        self.assertEqual(config.read_bytes(), approved)
+
+    def test_unreadable_hook_approval_keeps_the_warning_pending(self):
+        self.run_pass()
+        config = self.fake.codex_home / "config.toml"
+        config.write_bytes(b"[hooks.state\xff")
+        unreadable = config.read_bytes()
+        self.assertIn("(needs-hook-approval)", "\n".join(passes.status_lines()))
+        self.assertEqual(self.run_pass(), "needs-attention")
+        self.assertEqual(self.components()["codex-plugin:hooked@m"]["status"], "needs-hook-approval")
+        self.assertEqual(config.read_bytes(), unreadable)
+
+    def test_damaged_history_does_not_clear_a_pending_hook_warning(self):
+        self.run_pass()
+        with records.runs_path().open("ab") as handle:
+            handle.write(b"{torn\n")
+        self.fake.set("codex", upgrade={"stdout": "All configured Git marketplaces are already up to date.\n"})
+        self.assertEqual(self.run_pass(trigger="after-finish"), "needs-attention")
+        self.assertEqual(self.components()["codex-plugin:hooked@m"]["status"], "needs-hook-approval")
+        self.assertTrue(any("skipped 1" in line for line in self.lines))
+
     def test_unreadable_plugin_folder_is_unverified(self):
         shutil.rmtree(self.fake.codex_home / "plugins" / "cache" / "m" / "still")
         self.run_pass()
@@ -775,27 +864,80 @@ class HooksTest(FakeToolsCase):
 
 
 class SessionsTest(FakeToolsCase):
-    """AC10: no process listing or signal; updated results and status carry the restart note."""
+    """AC10: only the runner's own command may be stopped; updated results and status carry the restart note."""
 
-    def test_full_pass_lists_and_signals_no_process(self):
+    def test_full_pass_never_lists_or_signals_unrelated_processes(self):
+        from oah.engines import proc
+
         self.fake.set("claude", update={"stdout": "Successfully updated\n", "set_version": "2.1.320"})
-        spies = [mock.patch.object(os, name, side_effect=AssertionError(name)) for name in ("kill", "killpg")
-                 if hasattr(os, name)]
-        spies += [mock.patch.object(signal, name, side_effect=AssertionError(name))
-                  for name in ("signal", "pthread_kill", "raise_signal") if hasattr(signal, name)]
-        started = [spy.start() for spy in spies]
-        try:
-            self.run_pass()
-        finally:
-            for spy in spies:
-                spy.stop()
-        for spy in started:
-            spy.assert_not_called()
+        owned = set()
+        kill_tree = proc.kill_tree
+
+        def stop_owned(command):
+            self.assertIn(command.args, self.launched)
+            self.assertTrue(self.fake.allowed(command.args))
+            owned.add(command.pid)
+            kill_tree(command)
+
+        def checked_signal(real):
+            def send(pid, signum):
+                self.assertIn(pid, owned, "a process outside the started command was signalled")
+                return real(pid, signum)
+            return send
+
+        self.enterContext(mock.patch.object(proc, "kill_tree", stop_owned))
+        for name in ("kill", "killpg"):
+            if hasattr(os, name):
+                self.enterContext(mock.patch.object(os, name, side_effect=checked_signal(getattr(os, name))))
+        for name in ("signal", "pthread_kill", "raise_signal"):
+            if hasattr(signal, name):
+                self.enterContext(mock.patch.object(signal, name, side_effect=AssertionError(name)))
+        self.run_pass()
         self.assertTrue(all(self.fake.allowed(argv) for argv in self.launched))
         self.assertIn(f"oah: Claude Code 2.1.316 -> 2.1.320 (updated); {steps.RESTART_NOTE}", self.lines)
         status = passes.status_lines()
         self.assertIn(f"oah: {steps.RESTART_NOTE}", status)
         self.assertTrue(any(line.endswith(steps.RESTART_NOTE) and "(updated)" in line for line in status))
+        self.configure("after_finish = true\ntimeout_seconds = 1\n")
+        self.fake.set("claude", update={"sleep": 30})
+        self.assertEqual(self.run_pass(), "needs-attention")
+        self.assertEqual(len(owned), 1)
+        self.assertIn("timed out; the tool may be partly updated", self.components()["claude"]["next_step"])
+
+    def test_windows_cleanup_terminates_and_closes_only_the_started_job(self):
+        from oah.engines import proc
+
+        cli = probes.Cli("claude", "Claude Code", env=self.fake.env, timeout=0.1, cwd=self.root)
+        context = steps.Context(self.fake.env, records.stamp(records.utc_now()), cli, cli)
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                command = mock.Mock(returncode=0)
+                command.communicate.side_effect = ([subprocess.TimeoutExpired(cli.base, 0.1), (b"", b"")]
+                                                   if timed_out else [(b"updated", b"")])
+                job = mock.Mock()
+                job.start.side_effect = lambda child: setattr(child, "_oah_job", job)
+                windows = mock.Mock()
+                windows.name = "nt"
+                with mock.patch.object(proc, "os", windows), mock.patch.object(proc, "_WindowsJob", return_value=job), \
+                        mock.patch.object(proc.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True), \
+                        mock.patch.object(proc.subprocess, "Popen", return_value=command) as launch, \
+                        mock.patch.object(cli, "version", side_effect=["1", "2"]), \
+                        mock.patch.object(cli, "lists", return_value=True):
+                    entry = steps.cli_update(context, cli)["claude"]
+                launch.assert_called_once()
+                self.assertEqual(launch.call_args.args[0], [*cli.base, "update"])
+                self.assertEqual(launch.call_args.kwargs["creationflags"], 0x204)
+                job.start.assert_called_once_with(command)
+                job.close.assert_called_once_with()
+                command.kill.assert_not_called()
+                if timed_out:
+                    job.terminate.assert_called_once_with()
+                    self.assertEqual((entry["status"], entry["settled_version"]), ("failed", None))
+                    self.assertIn("timed out; the tool may be partly updated", entry["next_step"])
+                    self.assertIn("claude update", entry["next_step"])
+                else:
+                    job.terminate.assert_not_called()
+                    self.assertEqual(entry["status"], "updated")
 
 
 class RecordsTest(FakeToolsCase):
@@ -843,6 +985,90 @@ class RecordsTest(FakeToolsCase):
         self.assertIsNone(records.read_state())
         self.run_pass()
         self.assertFalse(any("UNAVAILABLE" in line for line in self.lines))
+
+    def assert_invalid_component(self, entry):
+        now = records.stamp(records.utc_now())
+        run = dict(self.a_valid_run(), components={"claude": entry}, started=now, finished=now)
+        self.assertIsNotNone(records.run_problem(run))
+        state = {"version": 1, "last_started": run["started"], "last_finished": run["finished"],
+                 "trigger": run["trigger"], "outcome": run["outcome"], "components": run["components"],
+                 "models_refresh": []}
+        self.write(records.state_path(), json.dumps(state))
+        with self.assertRaises(records.StateUnavailable):
+            records.read_state()
+        with mock.patch.object(passes, "_popen") as launch:
+            self.assertTrue(passes.start_after_finish(self.root, self.state, self.fake.env, out=self.lines.append))
+        launch.assert_called_once()
+
+    def test_settled_results_require_readable_before_and_after(self):
+        for status in records.SETTLED:
+            for before, after in ((None, "1"), ("", "1"), ("1", None), ("1", ""), ("�", "1")):
+                with self.subTest(status=status, before=before, after=after):
+                    self.assert_invalid_component(records.component(status, before, after, "", "2026-11-01T00:00:00Z"))
+
+    def test_settled_status_requires_the_matching_version_relationship(self):
+        for status, before, after in (("updated", "1", "1"), ("current", "1", "2")):
+            with self.subTest(status=status):
+                self.assert_invalid_component(records.component(status, before, after, "", "2026-11-01T00:00:00Z"))
+        for status in records.STATUSES:
+            with self.subTest(status=status):
+                entry = records.component(status, "1", "2" if status == "updated" else "1", "",
+                                          "2026-11-01T00:00:00Z")
+                entry["settled_version"] = "wrong"
+                self.assert_invalid_component(entry)
+
+    def test_finished_outcome_must_match_components_and_bad_recent_state_is_due(self):
+        for status, claimed in (("failed", "complete"), ("current", "needs-attention")):
+            with self.subTest(status=status):
+                now = records.stamp(records.utc_now())
+                entry = records.component(status, "1", "1", "", now)
+                run = dict(self.a_valid_run(claimed), started=now, finished=now, components={"claude": entry})
+                self.assertIsNotNone(records.run_problem(run))
+                state = {"version": 1, "last_started": now, "last_finished": now, "trigger": "manual",
+                         "outcome": claimed, "components": run["components"], "models_refresh": []}
+                self.write(records.state_path(), json.dumps(state))
+                self.lines.clear()
+                self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
+                self.assertTrue(any("OAH_UPDATE_STATE_UNAVAILABLE" in line for line in self.lines))
+
+    def test_missing_state_and_unreadable_history_are_reported_and_force_a_recheck(self):
+        records.updates_dir().mkdir(parents=True)
+        records.lock_path().touch()
+        records.log_path().write_text("old log\n", encoding="utf-8")
+        self.assertIsNone(records.read_state())
+        self.assertNotIn("UNAVAILABLE", "\n".join(passes.status_lines()))
+        self.write(records.runs_path(), json.dumps(self.a_valid_run()) + "\n")
+        with self.assertRaises(records.StateUnavailable):
+            records.read_state()
+        self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", "\n".join(passes.status_lines()))
+        self.run_pass()
+        real_read = pathlib.Path.read_bytes
+
+        def unreadable(path):
+            if path == records.runs_path():
+                raise PermissionError("history denied")
+            return real_read(path)
+
+        with mock.patch.object(pathlib.Path, "read_bytes", unreadable):
+            with self.assertRaises(records.StateUnavailable):
+                records.read_runs()
+            self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", "\n".join(passes.status_lines()))
+            self.lines.clear()
+            self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
+        self.assertTrue(any("OAH_UPDATE_STATE_UNAVAILABLE" in line for line in self.lines))
+        self.assertEqual(len(records.read_runs()), 1)
+
+    def test_bad_history_lines_are_counted_even_with_a_valid_state_and_force_a_recheck(self):
+        self.run_pass()
+        with records.runs_path().open("ab") as handle:
+            handle.write(b'{torn\n\xff\n{"version": 1}\n')
+        status = "\n".join(passes.status_lines())
+        self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", status)
+        self.assertIn("skipped 3", status)
+        self.lines.clear()
+        self.assertEqual(self.run_pass(trigger="after-finish"), "complete")
+        self.assertTrue(any("skipped 3" in line for line in self.lines))
+        self.assertEqual(len(records.read_runs()), 2)
 
     def test_bad_run_lines_are_skipped_and_the_file_is_capped(self):
         lines = [json.dumps(self.a_valid_run()) for _ in range(records.RUNS_KEPT + 5)]
@@ -952,7 +1178,7 @@ class StartAfterFinishTest(FakeToolsCase):
         popen.assert_called_once_with(
             [sys.executable, "-m", "oah", "update", "--after-finish", "--repo", str(self.root)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(self.root),
-            close_fds=True, start_new_session=True)
+            env=dict(self.fake.env, OAH_STATE_DIR=str(self.state.resolve())), close_fds=True, start_new_session=True)
         self.assertEqual(lines, [passes.STARTED])
         self.assertEqual(self.launched, [])
 

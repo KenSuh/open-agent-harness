@@ -129,7 +129,7 @@ def component_problem(name: object, value: object) -> str | None:
     """Why one component entry is wrongly shaped, or None."""
     if not isinstance(name, str) or not COMPONENT_RE.fullmatch(name):
         return "names an unknown component"
-    if not isinstance(value, dict) or set(value) != set(COMPONENT_FIELDS):
+    if not isinstance(value, dict) or set(value) - {"hook_approval_digest"} != set(COMPONENT_FIELDS):
         return f"holds a component {name} with the wrong fields"
     status = value["status"]
     if status not in STATUSES:
@@ -144,6 +144,18 @@ def component_problem(name: object, value: object) -> str | None:
         return f"holds an {status} result for {name} without its settled version"
     if status not in SETTLED and settled is not None:
         return f"records a settled version for the {status} result of {name}"
+    if status in SETTLED:
+        before, after = value["before"], value["after"]
+        if any(not isinstance(version, str) or not version.strip() or "�" in version for version in (before, after)):
+            return f"holds an {status} result for {name} without readable before and after versions"
+        if (before != after) != (status == "updated"):
+            return f"holds an {status} result for {name} with contradictory versions"
+    if "hook_approval_digest" in value:
+        digest = value["hook_approval_digest"]
+        readable = (digest is None or digest == "absent" or
+                    isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None)
+        if status != "needs-hook-approval" or not name.startswith("codex-plugin:") or not readable:
+            return f"holds invalid hook approval evidence for {name}"
     return None
 
 
@@ -172,12 +184,17 @@ def state_problem(data: object) -> str | None:
         return f"is not a version-{FORMAT} record"
     if parse_stamp(data["last_started"]) is None or data["trigger"] not in TRIGGERS:
         return "holds no valid start time or trigger"
-    finished, outcome = data["last_finished"], data["outcome"]
-    if (finished is None) != (outcome is None):
+    finished, result = data["last_finished"], data["outcome"]
+    if (finished is None) != (result is None):
         return "holds a finish time and an outcome that disagree"
-    if finished is not None and (parse_stamp(finished) is None or outcome not in OUTCOMES):
+    if finished is not None and (parse_stamp(finished) is None or result not in OUTCOMES):
         return "holds no valid finish time or outcome"
-    return _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
+    problem = _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
+    if problem:
+        return problem
+    if finished is not None and result != outcome(data["components"]):
+        return "holds an outcome that contradicts its components"
+    return None
 
 
 def run_problem(data: object) -> str | None:
@@ -189,7 +206,12 @@ def run_problem(data: object) -> str | None:
         return "holds no valid times"
     if data["trigger"] not in TRIGGERS or data["outcome"] not in OUTCOMES:
         return "holds an unknown trigger or outcome"
-    return _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
+    problem = _components_problem(data["components"]) or _engines_problem(data["models_refresh"])
+    if problem:
+        return problem
+    if data["outcome"] != outcome(data["components"]):
+        return "holds an outcome that contradicts its components"
+    return None
 
 
 # Reading -------------------------------------------------------------------------------------------
@@ -209,8 +231,12 @@ def read_state() -> dict | None:
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        if not runs_path().exists():
+        try:
+            runs_path().lstat()
+        except FileNotFoundError:
             return None  # the lock and the log share the folder, so only the records say a pass recorded anything
+        except OSError as exc:
+            raise StateUnavailable(runs_path(), f"cannot be read ({type(exc).__name__})") from None
         raise StateUnavailable(path, "is missing although earlier passes were recorded") from None
     except OSError as exc:
         raise StateUnavailable(path, f"cannot be read ({type(exc).__name__})") from None
@@ -224,22 +250,32 @@ def read_state() -> dict | None:
     return data
 
 
-def read_runs() -> list[dict]:
-    """Every valid line of runs.jsonl, oldest first; a bad line is skipped, never fatal."""
+def read_runs(*, report: Callable[[str], None] | None = None) -> list[dict]:
+    """Valid lines, oldest first; report the skipped count, and raise StateUnavailable for unreadable history."""
     try:
         raw = runs_path().read_bytes()
-    except OSError:
+    except FileNotFoundError:
+        if runs_path().is_symlink():
+            raise StateUnavailable(runs_path(), "cannot be read (broken link)") from None
         return []
+    except OSError as exc:
+        raise StateUnavailable(runs_path(), f"cannot be read ({type(exc).__name__})") from None
     records = []
+    skipped = 0
     for line in raw.split(b"\n"):
         if not line.strip():
             continue
         try:
             data = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
+            skipped += 1
             continue
         if run_problem(data) is None:
             records.append(data)
+        else:
+            skipped += 1
+    if skipped and report is not None:
+        report(str(StateUnavailable(runs_path(), f"skipped {skipped} invalid run records")))
     return records
 
 
@@ -257,7 +293,11 @@ def append_run(record: Mapping[str, Any]) -> None:
     problem = run_problem(dict(record))
     if problem:
         raise ValueError(f"refusing to write a run record that {problem}")
-    kept = [*read_runs(), dict(record)][-RUNS_KEPT:]
+    try:
+        history = read_runs()
+    except StateUnavailable:
+        history = []  # already reported at entry; unreadable history never prevents a later pass
+    kept = [*history, dict(record)][-RUNS_KEPT:]
     write_text_atomic(runs_path(), "".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n"
                                            for item in kept))
 

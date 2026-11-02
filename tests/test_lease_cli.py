@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import errno
 import io
 import json
@@ -15,7 +16,7 @@ from unittest.mock import patch
 
 from oah import lease_cli
 from oah.cli import build_parser
-from tests.helpers import directory_alias, git_commit, make_git_repo, make_tmp_dir
+from tests.helpers import directory_alias, git_commit, guard_subprocesses, isolate_git_home, make_git_repo, make_tmp_dir
 
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 
@@ -586,14 +587,18 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
     """AC3: a finish that leaves nothing in flight starts the detached tool-update pass, and changes nothing else."""
 
     def setUp(self):
+        from oah import paths
         from oah.toolupdate import records
         from oah.toolupdate import run as passes
 
         self.records, self.passes = records, passes
+        self.home = make_tmp_dir(self) / "home"
+        isolate_git_home(self, self.home)
+        git = paths.git_argv()[0]
+        self.launched = guard_subprocesses(self, lambda argv: bool(argv) and argv[0] in ("git", git))
         self.repo = make_git_repo(self)
         git_commit(self.repo, {"src/a.py": "a = 1\n", "docs/readme.md": "hi\n",
                                ".oah/config.toml": "[updates]\nafter_finish = true\n"})
-        self.home = make_tmp_dir(self) / "home"
         self.enterContext(patch.object(records, "home", return_value=self.home))
         self.popen = self.enterContext(patch.object(passes, "_popen"))
         self.enterContext(patch.dict(os.environ))
@@ -601,11 +606,11 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
             os.environ.pop(name, None)
         self.state = self.repo / ".git" / "oah"
 
-    def oah(self, *args: str) -> tuple[int, str, str]:
+    def oah(self, *args: str, cwd: pathlib.Path | None = None) -> tuple[int, str, str]:
         from oah.cli import main
 
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.chdir(cwd or self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(list(args))
         return code, out.getvalue(), err.getvalue()
 
@@ -628,7 +633,36 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
         self.popen.assert_called_once_with(
             [sys.executable, "-m", "oah", "update", "--after-finish", "--repo", str(self.repo)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(self.repo),
-            close_fds=True, **options)
+            env=dict(os.environ, OAH_STATE_DIR=str(self.state.resolve())), close_fds=True, **options)
+
+    def test_relative_state_from_a_subdirectory_is_preserved_for_the_child_readiness_check(self):
+        from oah.cli import main
+        from tests.test_toolupdate import write_lease
+
+        subdir = self.repo / "subdir"
+        subdir.mkdir()
+        os.environ["OAH_STATE_DIR"] = "../../lease-store"
+        store = self.repo.parent / "lease-store"
+        code, _out, err = self.oah("start", "--task", "t1", "--agent", "claude", "--scope", "src", cwd=subdir)
+        self.assertEqual(code, 0, err)
+        child_output = io.StringIO()
+
+        def child_starts(argv, **options):
+            # The lease arrives after the parent's readiness check, before the child checks again.
+            write_lease(store, expires=self.records.stamp(self.records.utc_now() + dt.timedelta(hours=1)))
+            child_env = options.get("env", dict(os.environ))
+            with patch.dict(os.environ, child_env, clear=True), contextlib.chdir(options["cwd"]), \
+                    contextlib.redirect_stdout(child_output), \
+                    patch.object(self.passes, "Cli", side_effect=AssertionError("an update step started")):
+                self.assertEqual(main(argv[3:]), 0)
+
+        self.popen.side_effect = child_starts
+        code, out, err = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", cwd=subdir)
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.passes.STARTED, out)
+        self.assertIn("OAH_UPDATE_DEFERRED: task other holds a lease", child_output.getvalue())
+        self.assertFalse(self.records.state_path().exists())
+        self.assertEqual(os.environ["OAH_STATE_DIR"], "../../lease-store")
 
     def test_switch_off_keeps_finish_exactly_as_it_was(self):
         git_commit(self.repo, {".oah/config.toml": "[updates]\nafter_finish = false\n"})
@@ -637,7 +671,7 @@ class FinishStartsToolUpdatesTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(out.splitlines()), 1, out)
         self.popen.assert_not_called()
-        self.assertFalse(self.home.exists())
+        self.assertFalse((self.home / ".oah").exists())
 
     def test_another_active_lease_starts_nothing(self):
         self.start()

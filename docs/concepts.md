@@ -646,20 +646,23 @@ counts as off.
   `[skills] auto_update` and its own rules. A command runs only when the installed CLI's `--help` lists it. The
   model lists refresh at the next `oah` call, because a changed CLI version rebuilds the catalog.
 - **What never.** MCP servers and their configuration; npm, Homebrew or `npx` run by `oah`; a shell; a
-  confirmation flag such as `-y` or `--accept-command`; hook approval; and processes, which `oah` never lists,
-  signals or stops. Sessions already running keep the version and plugins they started with until you restart them.
+  confirmation flag such as `-y` or `--accept-command`; or hook approval. `oah` never lists, signals or stops a
+  process it did not start. The shared runner stops a command it started that exceeds `timeout_seconds`, records
+  `failed` with "timed out; the tool may be partly updated" and the tool's own command to run, then the pass continues.
+  Sessions already running keep the version and plugins they started with until you restart them.
 - **How a result is checked.** The version is read before and after each step. `updated` needs a readable version
   afterwards that differs from the one before; `current` needs the tool's own "up to date" answer and a readable,
   unchanged version. Anything else is, whatever the exit code, `unverified`, `needs-confirmation` (a Claude Code
   plugin whose marketplace-declared command needs you; the line names the command to run yourself),
   `needs-hook-approval` (a Codex plugin whose files changed and that declares hooks; open Codex and approve its hooks
-  again in `/hooks`), `unsupported` (the installed CLI lacks the command) or `failed`. Codex marketplaces are checked by
+  again in `/hooks`; this warning stays until that plugin's approval entry changes and remains pending if the config
+  cannot be read), `unsupported` (the installed CLI lacks the command) or `failed`. Codex marketplaces are checked by
   the revision Codex records in its own `config.toml`, and installed Codex plugins by a digest of their files. A pass
   is `complete` only when every result is `updated`, `current` or `unsupported`, and `needs-attention` otherwise.
 - **Records.** `~/.oah/updates/state.json` holds the last pass and `runs.jsonl` the newest 200, next to the lock
   `pass.lock` and the background pass's `pass.log`. Every read is validated: a broken record is reported as
   `OAH_UPDATE_STATE_UNAVAILABLE`, and every tool is checked again. Records keep versions, statuses and next steps,
-  never environment values or command output.
+  plus only a digest of a pending plugin's hook approval entry, never its value, environment values or command output.
 - **Off.** `after_finish = false`, or no key at all, turns it off. Then no entry point runs an update command,
   reaches the network for one or writes a record.
 

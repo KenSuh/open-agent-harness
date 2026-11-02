@@ -11,8 +11,9 @@ then does the pass record its start and run the steps.
 waits and never reads the child's output. The child (`python -m oah update --after-finish --repo <root>`)
 checks everything again under the lock and writes its lines to `~/.oah/updates/pass.log`.
 
-The pass never lists, signals or stops processes. Running Claude Code and Codex sessions keep the binaries
-and plugins they started with, which every `updated` result says.
+The pass never lists, signals or stops unrelated processes. The shared runner stops its own timed-out
+commands. Running Claude Code and Codex sessions keep the binaries and plugins they started with,
+which every `updated` result says.
 """
 from __future__ import annotations
 
@@ -125,12 +126,20 @@ def summary_line(outcome: str, components: Mapping[str, Mapping]) -> str:
     return f"OAH_UPDATE_FINISHED: outcome {outcome} ({records.counts(components)}); {step}"
 
 
-def _load_state(out: Out) -> dict | None:
+def _load_state(out: Out) -> tuple[dict | None, bool]:
     try:
-        return records.read_state()
+        record = records.read_state()
     except records.StateUnavailable as exc:
         out(str(exc))
-        return None
+        record = None
+    problems: list[str] = []
+    try:
+        records.read_runs(report=problems.append)
+    except records.StateUnavailable as exc:
+        problems.append(str(exc))
+    for problem in problems:
+        out(problem)
+    return record, bool(problems)
 
 
 def run_pass(root: pathlib.Path, state: pathlib.Path, *, env: Mapping[str, str], trigger: str, out: Out,
@@ -199,9 +208,9 @@ class _Lines:
 def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Settings, *, env: Mapping[str, str],
                  trigger: str, out: _Lines, now: Callable[[], dt.datetime], kit: steps.KitStep | None) -> str:
     redact = _redactor(env)
-    previous = _load_state(out)
+    previous, history_unavailable = _load_state(out)
     started = now()
-    if trigger == "after-finish" and not records.due(previous, settings, started):
+    if trigger == "after-finish" and not history_unavailable and not records.due(previous, settings, started):
         out(f"OAH_UPDATE_SKIPPED: a pass started less than {settings.interval_hours:g} hours ago; oah update runs "
             "one now")
         return "skipped"
@@ -227,6 +236,9 @@ def _locked_pass(root: pathlib.Path, state: pathlib.Path, settings: records.Sett
     found.update(steps.codex_plugins(context))
     if kit is not None:
         found.update(kit(root, state, env, started, context.checked_at))
+    for name, entry in steps.pending_hook_approvals(base["components"], env).items():
+        if found.get(name, {}).get("status") != "needs-hook-approval":
+            found[name] = dict(entry, checked_at=context.checked_at)
     components = {}
     for name, entry in records.redacted(found, redact).items():
         if records.COMPONENT_RE.fullmatch(name):
@@ -274,16 +286,16 @@ def start_after_finish(root: pathlib.Path, state: pathlib.Path, env: Mapping[str
         except ConfigError as exc:
             out(f"OAH_UPDATE_SKIPPED: {exc}. Tool updates stay off until [updates] can be read")
             return False
-        if not settings.after_finish or readiness(state) is not None:
+        if not settings.after_finish:
             return False
-        try:
-            previous = records.read_state()
-        except records.StateUnavailable:
-            previous = None  # an unreadable record is no reason to skip
-        if not records.due(previous, settings, now()):
+        state = state.resolve()
+        if readiness(state) is not None:
+            return False
+        previous, history_unavailable = _load_state(lambda _line: None)  # the child reports damaged records
+        if not history_unavailable and not records.due(previous, settings, now()):
             return False
         _popen(pass_argv(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-               cwd=str(root), close_fds=True, **detach_options(os_name))
+               cwd=str(root), env=dict(env, OAH_STATE_DIR=str(state)), close_fds=True, **detach_options(os_name))
     except Exception as exc:  # the finish already succeeded; this must never change that
         out(f"OAH_UPDATE_SKIPPED: the background update pass could not start ({type(exc).__name__}); run oah "
             "update to update now")
@@ -298,10 +310,14 @@ def status_lines() -> list[str]:
     """The last pass, from the records only: no subprocess, no network, no write."""
     lines: list[str] = []
     try:
+        runs = records.read_runs(report=lines.append)
+    except records.StateUnavailable as exc:
+        lines.append(str(exc))
+        runs = []
+    try:
         record = records.read_state()
     except records.StateUnavailable as exc:
         lines.append(str(exc))
-        runs = records.read_runs()
         if not runs:
             return lines + ["oah: no readable pass record; run oah update"]
         last = runs[-1]
@@ -316,9 +332,11 @@ def status_lines() -> list[str]:
                      "stopped early (oah update runs a new one)")
     if finished is None:
         return lines
-    components = record["components"]
+    components = {name: entry for name, entry in record["components"].items()
+                  if entry["status"] != "needs-hook-approval"}
+    components.update(steps.pending_hook_approvals(record["components"], os.environ))
     lines.append(f"oah: last pass finished {record['last_finished']} ({record['trigger']}), outcome "
-                 f"{record['outcome']} ({records.counts(components)})")
+                 f"{records.outcome(components)} ({records.counts(components)})")
     lines += [component_line(name, components[name]) for name in sorted(components, key=_order)]
     if record["models_refresh"]:
         changed = ", ".join(steps.LABELS[engine] for engine in record["models_refresh"])

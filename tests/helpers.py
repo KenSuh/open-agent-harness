@@ -93,6 +93,44 @@ def git_env() -> dict[str, str]:
                 GIT_COMMITTER_NAME="Someone", GIT_COMMITTER_EMAIL=NOREPLY_EMAIL)
 
 
+def isolate_git_home(test: unittest.TestCase, home: pathlib.Path) -> dict[str, str]:
+    """Opt in to a temporary home and Git configuration, including empty templates and disabled hooks."""
+    home.mkdir(parents=True, exist_ok=True)
+    folders = {name: home / name for name in ("xdg", "git-templates", "git-hooks")}
+    for folder in folders.values():
+        folder.mkdir(exist_ok=True)
+    config = home / "gitconfig-empty"
+    config.write_text("", encoding="utf-8")
+    isolated = {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(folders["xdg"]),
+                "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TEMPLATE_DIR": str(folders["git-templates"]), "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(folders["git-hooks"])}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(isolated)
+    test.enterContext(mock.patch.dict(os.environ, env, clear=True))
+    return isolated
+
+
+def guard_subprocesses(test: unittest.TestCase, allowed) -> list[list[str]]:
+    """Guard setup as well as the operation; a swallowed refusal still fails at cleanup."""
+    import subprocess
+
+    launched, violations = [], []
+    real_popen = subprocess.Popen
+
+    def guarded(args, *rest, **options):
+        argv = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+        launched.append(argv)
+        if not allowed(argv):
+            violations.append(argv)
+            raise AssertionError(f"a test tried to start a program outside its allowlist: {argv[:1]}")
+        return real_popen(args, *rest, **options)
+
+    test.enterContext(mock.patch("subprocess.Popen", guarded))
+    test.addCleanup(lambda: test.assertEqual(violations, []))
+    return launched
+
+
 def make_git_repo(test: unittest.TestCase) -> pathlib.Path:
     """A fresh repository on branch main, with no commits."""
     import subprocess

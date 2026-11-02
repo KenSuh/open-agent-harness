@@ -68,10 +68,12 @@ def said(name: str, text: str) -> bool:
 
 
 def verdict(before: str | None, after: str | None, *, said_current: bool, returncode: int | None,
-            timed_out: bool) -> str:
+            timed_out: bool, clean: bool = True) -> str:
     """AC5: the version read after decides `updated`; the tool's own answer plus an unchanged version, `current`."""
     if timed_out:
         return "failed"
+    if not clean:
+        return "unverified"
     if before is not None and after is not None and after != before:
         return "updated"
     if returncode != 0:
@@ -272,6 +274,23 @@ def read_codex(home: pathlib.Path) -> CodexView:
             name, _, market = ident.rpartition("@")
             installed[ident] = home / "plugins" / "cache" / market / name
     return CodexView(found, installed)
+
+
+def hook_approval_digest(home: pathlib.Path, ident: str) -> str | None:
+    """Read only this plugin's hooks.state entry: a digest, 'absent', or None when unreadable."""
+    try:
+        data = tomllib.loads((home / "config.toml").read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    hooks = data.get("hooks", {})
+    state = hooks.get("state", {}) if isinstance(hooks, dict) else None
+    if not isinstance(state, dict):
+        return None
+    key = f"{ident}:hooks"
+    if key not in state:
+        return "absent"
+    raw = json.dumps(state[key], sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _is_link(entry: os.DirEntry) -> bool:
