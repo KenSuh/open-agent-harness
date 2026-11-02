@@ -193,7 +193,10 @@ class Admission:
 
 
 class _CorrectionCatalog(models.Catalog):
-    """Resolve against captured bytes; start publication compares them before writing the plan."""
+    """Resolve against captured bytes; start publication compares them before writing the plan.
+
+    A stored score file is captured when the choice first reads it, so with `[models] fetch_scores = false` it is
+    no input. `oah.benchmarks` checks the bytes as on any read, and a correction never fetches."""
 
     def __init__(self, state_dir):
         super().__init__(state_dir)
@@ -201,6 +204,7 @@ class _CorrectionCatalog(models.Catalog):
         self.original = {}
         self.values = {}
         self.writes = {}
+        self.scores = {}
         for path in (self.catalog_path, self.resolved_path, self.changes_path):
             raw, data = runs._captured_state(path, jsonl=path == self.changes_path, default={})
             text = raw.decode("utf-8")
@@ -212,6 +216,22 @@ class _CorrectionCatalog(models.Catalog):
     def load(self, engine):
         data = self.values[self.catalog_path]
         return models.Entry.from_json(engine, data.get(engine)) if isinstance(data, dict) else None
+
+    def score_bytes(self, name):
+        path = self.dir / name
+        if path not in self.scores:
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                raw = None
+            except OSError as exc:
+                from oah.atomic import StorageError
+
+                raise StorageError(path, exc) from exc
+            self.scores[path] = raw
+            if (capture := runs._CORRECTION_CAPTURE.get()) is not None:
+                capture[path] = raw  # compared at start publication, like the catalog
+        return self.scores[path]
 
     def _save(self, entry):
         data = json.loads(json.dumps(self.values[self.catalog_path]))
@@ -1123,7 +1143,7 @@ class _CorrectionInputs:
         self.budget_check()
         receipts._log_round_unlocked(self.state, self.run.task, json.loads(plan.dispatch_record))
         # Only start publication depends on model inputs, including when a later write fails.
-        for path in self.catalog.original:
+        for path in (*self.catalog.original, *self.catalog.scores):
             runs._CORRECTION_CAPTURE.get().pop(path, None)
         for path, text in plan.model_writes:
             write_text_atomic(path, text)
