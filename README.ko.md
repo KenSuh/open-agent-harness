@@ -265,7 +265,7 @@ CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스
 
 ## 작업 흐름
 
-위 영어 절의 [The loop](README.md#the-loop) 도표가 전체 흐름을 보여 준다.
+영어 README의 [The loop](README.md#the-loop) 도표가 전체 흐름을 보여 준다.
 
 | 단계 | 명령 | 보장하는 것 |
 |---|---|---|
@@ -351,7 +351,7 @@ CI 시작 워크플로, 동반 앱 Orca와 Aside, TypeSafe Jev 재정렬기, 스
 
 테스트는 Python 3.11로 돌리고, 가진 것 가운데 가장 새 Python으로 한 번 더 돌린다. 테스트가 쓰는 파일이 모두
 체크아웃 안에 남도록 `TMPDIR`을 git이 무시하는 `.tmp/` 폴더로 지정한다. Python은 없는 `TMPDIR`을 무시하므로 폴더를
-먼저 만든다. 명령은 위 영어 절의 [Development](README.md#development)에 있다.
+먼저 만든다. 명령은 영어 README의 [Development](README.md#development)에 있다.
 
 - **CI**는 `main`으로 가는 pull request마다 macOS와 Windows에서 테스트를 돌린다. 문서만 바꾸는 pull request는
   테스트를 건너뛴다.
