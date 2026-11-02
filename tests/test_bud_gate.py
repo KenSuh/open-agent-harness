@@ -408,7 +408,7 @@ class BudgetGateTest(unittest.TestCase):
             with self.subTest(interrupted=interrupted):
                 project = FixProject(self, config="[review]\nmax_rounds = 1\n")
                 if interrupted:
-                    with mock.patch.object(call, "advise" if interrupted == "prepare" else "execute",
+                    with mock.patch.object(call, "_brief_skills" if interrupted == "prepare" else "execute",
                                            side_effect=KeyboardInterrupt):
                         with self.assertRaises(KeyboardInterrupt):
                             project.review(tier=None if interrupted == "prepare" else "high")
@@ -460,7 +460,7 @@ class BudgetGateTest(unittest.TestCase):
         self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
 
     def test_paid_preparation_holds_the_task_lock_against_another_process(self):
-        for name in ("advise", "_brief_skills", "judge_engine"):
+        for name in ("judge_difficulty", "_brief_skills", "judge_engine"):
             with self.subTest(preparation=name):
                 project = CallProject(self, config="[review]\nmax_rounds = 1\n")
                 project.bind()
@@ -506,13 +506,24 @@ class BudgetGateTest(unittest.TestCase):
 
     def test_interrupted_paid_preparation_keeps_its_reservation_on_restart(self):
         project = CallProject(self, config="[review]\nmax_rounds = 1\n")
-        with mock.patch.object(call, "advise", side_effect=KeyboardInterrupt):
+        with mock.patch.object(call, "_brief_skills", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 project.prepare()
         done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertIn("OAH_REVIEW_ROUNDS_EXHAUSTED", done.stderr)
         self.assertFalse(project.record.exists())
+
+    def test_an_interrupted_difficulty_judgement_spends_nothing(self):
+        project = CallProject(self, config="[review]\nmax_rounds = 1\n")
+        with mock.patch.object(call, "judge_difficulty", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                project.prepare()
+        s = rounds.series(receipts.load(project.state, "t1"), receipts.read_round_log(project.state, "t1"), "", head="",
+                          is_ancestor=lambda a, b: True)
+        self.assertEqual(s.counted_rounds, 0, "Jev is asked before any reservation")
+        done = oah(project, "call", "codex", "--stage", "review", "--task", "t1", "--tier", "medium")
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_uncounted_retry_interruption_at_the_round_limit_survives_restart(self):
         project = FixProject(self, config="[review]\nmax_rounds = 2\nround_attempts = 2\n")
@@ -529,7 +540,7 @@ class BudgetGateTest(unittest.TestCase):
                           if line["event"] == "start"], [(1, 1)])
         self.assertIs(first.log[-1]["counted"], False)
 
-        with mock.patch.object(call, "advise", side_effect=KeyboardInterrupt):
+        with mock.patch.object(call, "_brief_skills", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 project.review(tier=None)
         before = read_series()
