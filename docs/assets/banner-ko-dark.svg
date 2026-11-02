@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc" xml:lang="ko">
+<title id="title">open-agent-harness</title>
+<desc id="desc">open-agent-harness. Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일한다. Claude Code가 1차 구현을 하고, Codex CLI가 리뷰가 수렴할 때까지 리뷰하고 고치며, 작업은 사용자가 확인한 뒤 반영된다. 켜서 쓰는 판정기 TypeSafe Jev가 난이도, 모델 선택, 순서를 판정한다. 리스, 게이트, 영향 지도, 위키가 작업을 받친다.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1117"/><stop offset="1" stop-color="#161b22"/></linearGradient>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+</defs>
+<style>
+text { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Segoe UI", sans-serif; text-anchor: middle; }
+.title { font-size: 72px; font-weight: 700; fill: #f0f6fc; }
+.pitch { font-size: 34px; fill: #d1d9e0; }
+.jev { font-size: 26px; font-weight: 700; fill: #f0f6fc; }
+.jevhint { font-size: 22px; fill: #d1d9e0; }
+.name { font-size: 30px; font-weight: 700; fill: #f0f6fc; }
+.hint { font-size: 24px; fill: #d1d9e0; }
+.note { font-size: 22px; fill: #9198a1; }
+.rail { font-size: 24px; font-weight: 600; fill: #d1d9e0; }
+</style>
+<rect x="1" y="1" width="1198" height="598" rx="20" fill="url(#bg)" stroke="#30363d" stroke-width="2"/>
+<text class="title" x="600" y="104">open-agent-harness</text>
+<text class="pitch" x="600" y="156">Claude Code와 Codex CLI가 내 저장소에서</text>
+<text class="pitch" x="600" y="198">한 팀처럼 일한다</text>
+<rect x="370" y="226" width="460" height="80" rx="16" fill="#271c3f" stroke="#a371f7" stroke-width="2.5"/>
+<text class="jev" x="600" y="260">TypeSafe Jev · 켜서 쓰는 판정기</text>
+<text class="jevhint" x="600" y="290">난이도, 모델 선택, 순서를 판정한다</text>
+<path d="M420,306 C420,326 220,320 220,336" fill="none" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<line x1="600" y1="306" x2="600" y2="336" stroke="#a371f7" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+<rect x="60" y="340" width="320" height="116" rx="16" fill="#2e2410" stroke="#d29922" stroke-width="2.5"/>
+<text class="name" x="220" y="390">Claude Code</text>
+<text class="hint" x="220" y="424">1차 구현</text>
+<rect x="440" y="340" width="320" height="116" rx="16" fill="#0f2e1b" stroke="#3fb950" stroke-width="2.5"/>
+<text class="name" x="600" y="384">Codex CLI</text>
+<text class="hint" x="600" y="416">수렴할 때까지</text>
+<text class="hint" x="600" y="442">리뷰하고 고친다</text>
+<rect x="820" y="340" width="320" height="116" rx="16" fill="#0c2a47" stroke="#58a6ff" stroke-width="2.5"/>
+<text class="name" x="980" y="384">반영</text>
+<text class="hint" x="980" y="416">사용자가 확인한 뒤</text>
+<text class="hint" x="980" y="442">리뷰한 head 그대로</text>
+<line x1="382" y1="398" x2="436" y2="398" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
+<line x1="762" y1="398" x2="816" y2="398" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M630,458 C630,486 570,486 570,462" fill="none" stroke="#3fb950" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text class="note" x="600" y="514">리뷰는 수렴하면 끝나고, 결정이 필요하면 멈춰서 묻는다. 라운드 상한은 선택이다.</text>
+<line x1="80" y1="558" x2="1120" y2="558" stroke="#8b949e" stroke-width="2"/>
+<rect x="125" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="225" y="566">리스</text>
+<rect x="375" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="475" y="566">게이트</text>
+<rect x="625" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="725" y="566">영향 지도</text>
+<rect x="875" y="538" width="200" height="40" rx="20" fill="#0d1117" stroke="#6e7681" stroke-width="2"/>
+<text class="rail" x="975" y="566">위키</text>
+</svg>
