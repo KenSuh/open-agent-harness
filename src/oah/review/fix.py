@@ -179,7 +179,8 @@ _ERROR_DIAGNOSTICS = {
     "OAH_STATE_CORRUPT": "state storage is invalid; restore the original state records before retrying.",
     "OAH_STATE_PENDING": "a state transaction is pending; recover the state transaction before retrying.",
     "OAH_STATE_LOCK_TIMEOUT": "state storage is busy; wait for the other operation to finish before retrying.",
-    "OAH_MODEL_UNRESOLVED": "the Codex model cannot be resolved; refresh the model catalog before retrying.",
+    "OAH_MODEL_UNRESOLVED": "no allowed Codex model can run this work; run oah models, then fix tier_pools or "
+                            "allowed_models in .oah/config.toml.",
     "OAH_MODEL_NO_SCORES": "no benchmark scores can choose a model; reinstall oah, or pin a model in .oah/config.toml.",
     "OAH_MODEL_CATALOG_UNAVAILABLE": "oah has no list of Codex models; run oah models --refresh, or pin a model in "
                                      ".oah/config.toml.",

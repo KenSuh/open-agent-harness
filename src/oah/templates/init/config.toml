@@ -26,6 +26,7 @@ allowed_models = []
 # The highest effort any call may use for a model, one line each, such as "<model>" = "high".
 # Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.
 # A cap below the task kind's floor effort refuses with OAH_CONFIG_INVALID; raise or remove that cap.
+# The efficient profile passes over such a model instead.
 [engines.claude.effort_caps]
 
 # The models you have checked for a tier, one line per tier, such as high = ["<model>", "<model>"]. That
@@ -55,6 +56,7 @@ allowed_models = []
 # The highest effort any call may use for a model, one line each, such as "<model>" = "high".
 # Empty: no cap. Clamps to a supported effort are recorded, including for model pins and without Jev.
 # A cap below the task kind's floor effort refuses with OAH_CONFIG_INVALID; raise or remove that cap.
+# The efficient profile passes over such a model instead.
 [engines.codex.effort_caps]
 
 # The models you have checked for a tier, one line per tier, such as high = ["<model>", "<model>"]. That

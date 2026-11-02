@@ -202,6 +202,21 @@ class ScoredCallTest(unittest.TestCase):
         data = project.run(stage="correction", tier="high", axes={"kind": "quick"})
         self.assertEqual((data["resolved_model"], data["launch_effort"]), ("gpt-6.1-terra", "medium"))
 
+    def test_the_effort_rules_are_what_a_launch_would_refuse(self):
+        entry = models.Entry("codex", "1", "x", (models.ModelInfo("gpt-a", ("medium", "high")),), "test")
+
+        def passes(tier: str, floor: str, cap: str | None = None) -> bool:
+            settings = call.Settings.defaults()
+            settings.engines["codex"]["effort_caps"].update({"gpt-a": cap} if cap else {})
+            return call._passes_effort_rules("codex", tier, floor, "gpt-a", settings, entry)
+
+        self.assertTrue(passes("high", "low"), "a low floor asks nothing of a model that lists no low effort")
+        self.assertFalse(passes("low", "low"), "the tier's own effort must be listed")
+        self.assertTrue(passes("high", "medium"))
+        self.assertFalse(passes("high", "medium", "low"), "the cap keeps it below the floor")
+        self.assertTrue(passes("high", "medium", "medium"), "a cap that reaches the floor only clamps")
+        self.assertFalse(passes("medium", "high", "max"), "with a cap, the launch effort must reach the floor too")
+
     def test_every_kind_of_call_is_chosen_by_difficulty(self):
         project = scored_project(self)
         easy = project.run(stage="correction", axes={"kind": "docs", "intensity": "low", "reasoning": "low", "risk": "low"})

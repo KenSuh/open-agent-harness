@@ -338,14 +338,16 @@ def _tier_effort(engine: str, tier: str, model: str, settings: Settings, entry: 
 
 def _passes_effort_rules(engine: str, tier: str, floor_tier: str, model: str, settings: Settings,
                          entry: models.Entry | None) -> bool:
-    """Whether a launch at this tier would accept the model's effort: the tier and the floor resolve for it, and its
-    cap, which clamps, leaves the floor's effort. The same test `resolve_engine` and `_resolve_floor` make."""
+    """Whether a launch at this tier would accept the model's effort: the tier's effort resolves for it, a floor above
+    low does too, and its cap, which clamps, leaves that floor. The test `resolve_engine` and `_resolve_floor` make."""
+    cap = settings.engines[engine]["effort_caps"].get(model)
     try:
         launch = rank(_tier_effort(engine, tier, model, settings, entry).launch)
+        if cap is None and floor_tier == "low":
+            return True
         floor = rank(_tier_effort(engine, floor_tier, model, settings, entry).launch)
     except EngineError:
         return False
-    cap = settings.engines[engine]["effort_caps"].get(model)
     return cap is None or (None not in (launch, floor) and min(launch, rank(cap)) >= floor)
 
 
