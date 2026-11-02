@@ -81,8 +81,8 @@ class ScoringTableTest(unittest.TestCase):
     def test_every_axis_value_scores(self):
         self.assertEqual(KIND_SCORES, {
             "quick": 1, "docs": 1, "research": 1,
-            "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "design": 2, "packet": 2,
-            "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3})
+            "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "packet": 2,
+            "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3, "design": 3})
         self.assertEqual(INTENSITY_SCORES, {"low": 0, "medium": 1, "high": 2, "max": 3})
         self.assertEqual(REASONING_SCORES, {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4})
         self.assertEqual(RISK_SCORES, {"low": 0, "normal": 0, "high": 2, "critical": 4})
@@ -268,12 +268,12 @@ class RecommendModelTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["model"]["engine"], "codex")
 
     def test_a_new_kind_gets_a_model_too(self):
-        for kind in ("design", "packet"):
+        for kind, floor in (("design", "high"), ("packet", "medium")):
             with self.subTest(kind=kind):
                 code, out, err = recommend_in(self.project(), "--kind", kind, "--intensity", "low", "--reasoning", "low",
                                               "--risk", "low", "--engine", "codex", "--json")
                 self.assertEqual(code, 0, err)
-                self.assertEqual(json.loads(out)["model"]["floor_tier"], "medium")
+                self.assertEqual(json.loads(out)["model"]["floor_tier"], floor)
 
     def test_it_refuses_exactly_what_a_call_would_refuse(self):
         project = self.project('[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
@@ -378,12 +378,17 @@ class ReviewFloorTest(unittest.TestCase):
         self.assertEqual(review_floor(("src/app.py",), "security"), "high")
         self.assertEqual(review_floor(("src/app.py",), "high-risk-review"), "high")
 
-    def test_design_and_packet_kinds_score_like_implementation(self):
-        for kind in ("design", "packet"):
-            with self.subTest(kind=kind):
-                self.assertEqual(KIND_SCORES[kind], KIND_SCORES["implementation"])
-                self.assertEqual(floor_tier(kind), "medium")
-                self.assertEqual(recommend(Axes(kind, "low", "low", "normal")).tier, "medium")
+    def test_a_packet_scores_like_implementation(self):
+        self.assertEqual(KIND_SCORES["packet"], KIND_SCORES["implementation"])
+        self.assertEqual(floor_tier("packet"), "medium")
+        self.assertEqual(recommend(Axes("packet", "low", "low", "normal")).tier, "medium")
+
+    def test_a_design_is_high_leverage(self):
+        self.assertEqual(KIND_SCORES["design"], KIND_SCORES["migration"])
+        self.assertEqual(floor_tier("design"), "high")
+        result = recommend(Axes("design", "low", "low", "normal"))
+        self.assertEqual((result.tier, result.base), ("high", "medium"))
+        self.assertIn("floor high: kind design", result.reasons)
 
 
 if __name__ == "__main__":

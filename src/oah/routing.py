@@ -21,15 +21,15 @@ ENGINES = ("claude", "codex")
 
 KIND_SCORES = {
     "quick": 1, "docs": 1, "research": 1,
-    "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "design": 2, "packet": 2,
-    "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3,
+    "review": 2, "implementation": 2, "refactor": 2, "broad-audit": 2, "packet": 2,
+    "adversarial-review": 3, "migration": 3, "security": 3, "high-risk-review": 3, "design": 3,
 }
 INTENSITY_SCORES = {"low": 0, "medium": 1, "high": 2, "max": 3}
 REASONING_SCORES = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4}
 RISK_SCORES = {"low": 0, "normal": 0, "high": 2, "critical": 4}
 
-FLOOR_HIGH = ("broad-audit", "migration", "security", "high-risk-review")
-FLOOR_MEDIUM = ("research", "review", "implementation", "refactor", "adversarial-review", "design", "packet")
+FLOOR_HIGH = ("broad-audit", "migration", "security", "high-risk-review", "design")
+FLOOR_MEDIUM = ("research", "review", "implementation", "refactor", "adversarial-review", "packet")
 
 STAGE_KINDS = {"initial": "implementation", "review": "review", "correction": "implementation"}
 DOC_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc")
