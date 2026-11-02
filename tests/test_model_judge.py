@@ -396,6 +396,7 @@ class JudgeCallTest(unittest.TestCase):
                 self.assertEqual(provider.calls, [])
                 self.assertFalse(project.record.exists())
                 self.assertEqual(project.runs(), [])
+                self.assertEqual(calls.spent(project), [])
 
     def test_clamp_uses_a_supported_effort_below_the_cap(self):
         project = judged_project(self, extra='[engines.codex.effort_caps]\n"m-strong" = "xhigh"\n', jev=False)

@@ -420,6 +420,30 @@ class AdmissionTest(unittest.TestCase):
                                  models=(*SCORED_MODELS, "gpt-5.6-luna"), scores=OLD_SCORES)
         self.refused(project, tier="medium")
 
+    def test_a_hidden_superseded_pin_is_still_measured(self):
+        for model, refuses in (("gpt-5.6-luna", True), ("gpt-6-sol", False)):
+            with self.subTest(model=model):
+                project = scored_project(self, f'[engines.codex.tiers.medium]\nmodel = "{model}"\n',
+                                         hidden=(model,), scores=OLD_SCORES)
+                if refuses:
+                    self.refused(project, tier="medium")
+                else:
+                    self.assertTrue(project.run(tier="medium")["admission"]["floor_checked"])
+
+    def test_a_superseded_pin_is_still_measured_without_a_catalog(self):
+        project = scored_project(self, '[engines.codex.tiers.medium]\nmodel = "gpt-5.6-luna"\n', scores=OLD_SCORES)
+        (project.home / "models_cache.json").unlink()
+        self.refused(project, tier="medium")
+
+    def test_a_full_claude_generation_pin_with_data_is_still_measured(self):
+        scores = {**SCORES, "scores": {**SCORES["scores"],
+                  "claude-haiku-4-5": dict.fromkeys(FOUR, 0.1),
+                  "claude-haiku-5-5": dict.fromkeys(FOUR, 0.2),
+                  "claude-sonnet-5-5": dict.fromkeys(FOUR, 0.8),
+                  "claude-opus-5-5": dict.fromkeys(FOUR, 1.0)}}
+        project = scored_project(self, '[engines.claude.tiers.medium]\nmodel = "claude-haiku-4-5"\n', scores=scores)
+        self.refused(project, tier="medium", engine="claude", override_stage=True)
+
     def test_a_pin_outside_allowed_models_is_no_way_under_the_floor(self):
         project = scored_project(self, 'allowed_models = ["gpt-6.1-terra", "gpt-6-astra"]\n'
                                        '[engines.codex.tiers.medium]\nmodel = "gpt-6-luna"\n')
@@ -519,6 +543,29 @@ class AdmissionTest(unittest.TestCase):
                 self.assertIn(".oah/config.toml", self.refused(project, "OAH_MODEL_NO_SCORES", stage="correction",
                                                                tier="high"))
 
+    def test_damaged_numbers_refuse_automatic_calls_but_do_not_block_pins(self):
+        packaged = scoring._packaged
+        for name in ("benchmarks.json", "families.json"):
+            for value in (10 ** 400, True, float("inf")):
+                with self.subTest(name=name, value=value):
+                    damaged = json.loads(packaged(name))
+                    if name == "benchmarks.json":
+                        damaged["scores"]["gpt-6.1-sol"] = {"task-a": value}
+                    else:
+                        damaged["engines"]["codex"]["families"]["sol"][0] = value
+                    raw = json.dumps(damaged).encode()
+                    with mock.patch.object(scoring, "_packaged", side_effect=lambda path: raw if path == name
+                                           else packaged(path)):
+                        project = Project(self, "quality_order = []\n")
+                        write_models(project.home)
+                        self.refused(project, "OAH_MODEL_NO_SCORES", tier="medium")
+                        project = Project(self, 'quality_order = []\n[engines.codex.tiers.medium]\n'
+                                                'model = "gpt-6.1-sol"\n')
+                        write_models(project.home)
+                        result = project.run(tier="medium")
+                        self.assertEqual(result["status"], "finished")
+                        self.assertFalse(result["admission"]["floor_checked"])
+
     def test_a_catalog_of_unknown_families_refuses_and_never_guesses(self):
         project = scored_project(self, models=("gpt-7-nova", "codex-auto-review"))
         self.refused(project, "OAH_MODEL_NO_SCORES", stage="correction", tier="high")
@@ -546,6 +593,18 @@ class AdmissionTest(unittest.TestCase):
 class AdmissionPathTest(unittest.TestCase):
     """`admit` runs on the final pair of every launch path, and one launch reads the data once."""
 
+    def test_expected_validation_errors_at_the_read_become_named_score_failures(self):
+        settings = Project(self).settings()
+        for reader in ("families", "bundled", "score_set"):
+            for error in (ValueError, TypeError, OverflowError, RecursionError):
+                with self.subTest(reader=reader, error=error), mock.patch.object(scoring, reader, side_effect=error):
+                    scores, previous = call.read_scores("codex", None, settings)
+                    self.assertIsNone(previous)
+                    with self.assertRaises(EngineError) as caught:
+                        scoring.choose(scores, "medium", "low", "balanced")
+                    self.assertEqual(caught.exception.code, "OAH_MODEL_NO_SCORES")
+                    self.assertIn(".oah/config.toml", str(caught.exception))
+
     def test_foreground_and_background_calls(self):
         for extra in ((), ("--background",)):
             with self.subTest(extra=extra):
@@ -554,15 +613,15 @@ class AdmissionPathTest(unittest.TestCase):
                 with mock.patch.object(call, "admit", wraps=call.admit) as spy:
                     code, out, err = run_cli(project, *argv)
                 self.assertEqual(code, 0, err)
-                self.assertEqual(spy.call_count, 1)
+                self.assertEqual(spy.call_count, 2)
                 self.assertEqual(spy.call_args.args[0].model, "gpt-6.1-terra")
 
-    def test_each_prepared_call_passes_it_once(self):
+    def test_each_prepared_call_passes_it_before_and_after_the_judge(self):
         project = scored_project(self)
         with mock.patch.object(call, "admit", wraps=call.admit) as spy:
             project.prepare(stage="review", tier="medium")
             project.prepare(stage="correction", tier="medium")
-        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_count, 4)
 
     def test_admit_sees_the_judged_pair_not_the_rule_choice(self):
         project = scored_project(self, '[rerank]\nenabled = true\nprovider = "fake"\n')
@@ -581,8 +640,58 @@ class AdmissionPathTest(unittest.TestCase):
                 mock.patch.object(call, "admit", wraps=call.admit) as spy:
             data = project.run(stage="review", tier="high")
         self.assertEqual(data["model_judge"], "used")
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_args_list[0].args[0].model, "gpt-6.1-terra")
         self.assertEqual((spy.call_args.args[0].model, spy.call_args.args[0].model_source), ("gpt-6.1-sol", "judge"))
         self.assertEqual(data["admission"]["family"], "sol")
+
+    def test_refusal_precedes_the_judge_and_reservation(self):
+        project = scored_project(self)
+        with mock.patch.object(call, "judge_engine") as judge, self.assertRaises(EngineError) as caught:
+            project.prepare(tier="low")
+        self.assertEqual(caught.exception.code, FLOOR)
+        judge.assert_not_called()
+        self.assertEqual(spent(project), [])
+
+    def test_an_interrupted_judge_keeps_its_reservation_on_retry(self):
+        project = scored_project(self, '[rerank]\nenabled = true\nprovider = "fake"\n'
+                                       '[review]\nmax_rounds = 1\n')
+        project.env["FAKE_JUDGE_KEY"] = "fake-key"
+
+        class Judge:
+            name = "fake"
+
+            def key_name(self, config):
+                return "FAKE_JUDGE_KEY"
+
+            def choose_model(self, request, candidates, *, key, config):
+                raise KeyboardInterrupt
+
+        with contextlib.chdir(project.repo), mock.patch.dict(rerank.PROVIDERS, {"fake": Judge()}):
+            with self.assertRaises(KeyboardInterrupt):
+                project.prepare(tier="medium")
+        self.assertEqual([line["event"] for line in spent(project)], ["reservation"])
+        with mock.patch.object(call, "judge_engine") as judge, self.assertRaises(EngineError) as caught:
+            project.prepare(tier="medium")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_ROUNDS_EXHAUSTED")
+        judge.assert_not_called()
+        self.assertEqual([line["event"] for line in spent(project)], ["reservation"])
+
+    def test_an_unexpected_final_refusal_keeps_the_judges_spend(self):
+        project = scored_project(self, '[review]\nmax_rounds = 1\n')
+        admitted = call.admit
+        checks = []
+
+        def check(*args, **kwargs):
+            checks.append(True)
+            if len(checks) == 2:
+                raise EngineError(FLOOR, "unexpected final refusal")
+            return admitted(*args, **kwargs)
+
+        with mock.patch.object(call, "admit", side_effect=check), self.assertRaises(EngineError) as caught:
+            project.prepare(tier="medium")
+        self.assertEqual(caught.exception.code, FLOOR)
+        self.assertEqual([line["event"] for line in spent(project)], ["reservation"])
 
     def test_a_refused_foreground_or_background_call_spends_nothing(self):
         for extra in ((), ("--background",)):

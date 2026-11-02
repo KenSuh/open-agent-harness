@@ -471,9 +471,42 @@ class FixedScaleTest(unittest.TestCase):
         self.assertEqual(self.requires(hidden), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
         self.assertEqual(names_of(hidden), {"gpt-6-luna", "gpt-6.1-sol"})
 
+    def test_every_scored_generation_keeps_its_floor_score_without_becoming_eligible(self):
+        older = {**self.CODEX, "gpt-5.6-luna": flat(0.1), "gpt-6-sol": flat(0.55),
+                 "gpt-5-sol": flat(0.5, TASKS[:2]), "gpt-7-nova": flat(1.0)}
+        baseline = codex_set(tuple(self.CODEX), self.CODEX)
+        for catalog in (entry("codex", *self.CODEX, hidden=("gpt-5.6-luna", "gpt-6-sol")),
+                        entry("codex", *self.CODEX), None):
+            with self.subTest(catalog=catalog):
+                scores = scoring.score_set("codex", catalog, allowed=(), data=data(older), known=KNOWN)
+                self.assertEqual(self.requires(scores), self.requires(baseline))
+                self.assertEqual(scoring.score_of(scores, "gpt-5.6-luna"), 0.0)
+                self.assertAlmostEqual(scoring.score_of(scores, "gpt-6-sol"), 50.0)
+                self.assertFalse(scoring.clears(scores, "gpt-5.6-luna", 1))
+                self.assertTrue(scoring.clears(scores, "gpt-6-sol", 1))
+                self.assertIsNone(scoring.score_of(scores, "gpt-5-sol"))
+                self.assertIsNone(scoring.score_of(scores, "gpt-7-nova"))
+                self.assertEqual(names_of(scores), set(self.CODEX) if catalog is not None else set())
+
     def test_an_unknown_family_never_moves_the_scale(self):
         wide = codex_set(tuple(self.CODEX), {**self.CODEX, "gpt-7-nova": flat(0.0), "codex-auto-review": flat(1.0)})
         self.assertEqual(self.requires(wide), self.requires(codex_set(tuple(self.CODEX), self.CODEX)))
+
+    def test_full_claude_generations_are_floor_evidence_without_changing_alias_eligibility(self):
+        aliases = ("haiku", "sonnet", "opus", "fable")
+        generations = {**self.CLAUDE, "claude-haiku-4-5": flat(0.1),
+                       "claude-sonnet-4-5": flat(0.1, TASKS[:2]), "claude-nova-6": flat(1.0)}
+        baseline = claude_set(aliases, self.CLAUDE)
+        for catalog in (entry("claude", *aliases), None):
+            with self.subTest(catalog=catalog):
+                scores = scoring.score_set("claude", catalog, allowed=(), data=data(generations), known=KNOWN)
+                self.assertEqual(self.requires(scores), self.requires(baseline))
+                self.assertEqual(scoring.score_of(scores, "claude-haiku-4-5"), 0.0)
+                self.assertFalse(scoring.clears(scores, "claude-haiku-4-5", 1))
+                self.assertEqual(scoring.score_of(scores, "claude-opus-5-5"), scoring.score_of(baseline, "opus"))
+                self.assertIsNone(scoring.score_of(scores, "claude-sonnet-4-5"))
+                self.assertIsNone(scoring.score_of(scores, "claude-nova-6"))
+                self.assertEqual(names_of(scores), set(aliases) if catalog is not None else set())
 
     def test_only_the_newest_generation_in_the_data_sets_the_scale(self):
         older = {**self.CODEX, "gpt-6-sol": flat(0.0), "gpt-5.6-terra": flat(0.05)}
@@ -663,6 +696,16 @@ def fails_with_no_scores(test: unittest.TestCase, reader, content) -> None:
 
 
 class PackagedDataTest(unittest.TestCase):
+    def test_invalid_numbers_are_named_failures_in_scores_and_prices(self):
+        for value in (10 ** 400, -(10 ** 400), True, False, math.inf, -math.inf, math.nan):
+            with self.subTest(value=value):
+                self.assertIs(scoring._number(value), False)
+                benchmark = data({"gpt-6-sol": {"task-a": value}})
+                fails_with_no_scores(self, scoring.bundled, json.dumps(benchmark).encode())
+                known = json.loads(json.dumps(KNOWN))
+                known["engines"]["codex"]["families"]["sol"][0] = value
+                fails_with_no_scores(self, scoring.families, json.dumps(known).encode())
+
     def test_the_shipped_files_are_valid_and_carry_their_credit(self):
         known, bundled = scoring.families(), scoring.bundled()
         self.assertEqual(set(known["engines"]), {"codex", "claude"})

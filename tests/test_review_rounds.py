@@ -908,12 +908,34 @@ class AdmissionRoundTest(unittest.TestCase):
         project.refused("OAH_REVIEW_ROUNDS_EXHAUSTED", tier="medium")
         self.assertEqual(project.review(tier="medium", extra_round=True).code, "OAH_REVIEW_CONVERGED")
 
-    def test_admit_runs_once_on_a_review(self):
+    def test_admit_runs_before_and_after_the_judge_on_a_review(self):
         project = self.scored()
         with mock.patch.object(call, "admit", wraps=call.admit) as spy:
             project.review(tier="medium")
-        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_count, 2)
         self.assertEqual(spy.call_args.kwargs["stage"], "review")
+
+    def test_refusal_precedes_the_judge_and_start(self):
+        project = self.scored()
+        with mock.patch.object(call, "judge_engine") as judge, self.assertRaises(EngineError):
+            project.review(tier="low")
+        judge.assert_not_called()
+        self.assertEqual([line for line in project.round_log() if line["event"] != "limit"], [])
+
+    def test_an_interrupted_judge_keeps_its_round_and_attempt_on_retry(self):
+        project = self.scored('[review]\nmax_rounds = 1\nround_attempts = 1\n')
+        with mock.patch("oah.rerank.judge_model", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                project.review(tier="medium")
+        events = [line for line in project.round_log() if line["event"] != "limit"]
+        self.assertEqual([line["event"] for line in events], ["start", "finish"])
+        self.assertEqual([(line["round"], line["attempt"]) for line in events], [(1, 1), (1, 1)])
+        with mock.patch.object(call, "judge_engine") as judge:
+            project.refused("OAH_REVIEW_ROUNDS_EXHAUSTED", tier="medium")
+            project.refused("OAH_REVIEW_ATTEMPTS_EXHAUSTED", tier="medium", extra_round=True)
+        judge.assert_not_called()
+        self.assertEqual(project.calls(), [])
+        self.assertEqual(list(project.temp_root.iterdir()), [])
 
     def test_the_receipt_shows_what_was_chosen_and_from_which_scores(self):
         project = self.scored()

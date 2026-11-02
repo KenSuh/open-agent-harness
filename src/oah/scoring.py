@@ -145,7 +145,10 @@ def _load(name: str) -> dict:
 
 
 def _number(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:  # a valid JSON integer may be too large to convert to a float
+        return False
 
 
 def _prices_valid(prices: object) -> bool:
@@ -259,7 +262,8 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     known = families() if known is None else known
     data = bundled() if data is None else data
     spec = known["engines"][engine]
-    leaders = _leaders(_in_data(engine, spec, data["scores"]))
+    in_data = _in_data(engine, spec, data["scores"])
+    leaders = _leaders(in_data)
     none_listed = (f"no model the {engine} CLI lists has a usable score, so scores cannot choose one; run `oah models` "
                    f"to see why each was left out, or {_PIN.format(engine=engine)}")
     if not leaders:
@@ -306,7 +310,14 @@ def score_set(engine: str, entry, *, allowed: Sequence[str], data: Mapping | Non
     picks = [item for item in ranked if not allowed or item.model in allowed]
     left_out.update((item.model, "not-allowed") for item in ranked if item not in picks)
     names = {item.model for item in picks}
-    retired = {item.model: record(item) for item in (*leaders, *candidates) if item.model not in names and has_tasks(item)}
+    # Full Claude generation names are floor evidence too; eligibility still uses only the aliases above.
+    if engine == "claude":
+        for name, tasks in data["scores"].items():
+            match = _CLAUDE_ID.fullmatch(name)
+            if match is not None and match["family"] in spec["aliases"]:
+                in_data.append(_Candidate(name, match["family"], (int(match["major"]), int(match["minor"] or 0)),
+                                          sum(spec["aliases"][match["family"]]), tasks))
+    retired = {item.model: record(item) for item in (*in_data, *candidates) if item.model not in names and has_tasks(item)}
     values = [record(item).score for item in leaders]
     nothing_allowed = (f"no model in [engines.{engine}] allowed_models has a usable score, so scores cannot choose one; "
                        f"run `oah models` to see why each was left out, or {_PIN.format(engine=engine)}")

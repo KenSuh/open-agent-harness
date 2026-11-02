@@ -489,13 +489,13 @@ class RefusalTest(unittest.TestCase):
         self.assertIn("oah models", str(error))
         self.assertEqual(receipts.read_round_log(project.state, "t1"), before)
 
-    def test_admit_runs_once_on_a_correction(self):
+    def test_admit_runs_before_and_after_the_judge_on_a_correction(self):
         project = FixProject(self)
         project.changes_requested()
         project.queue_fix({"write": {"src/app.py": "print('fixed')\n"}})
         with mock.patch.object(call, "admit", wraps=call.admit) as spy:
             project.fix()
-        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_count, 2)
         self.assertEqual(spy.call_args.kwargs["stage"], "correction")
 
     def test_every_model_code_has_a_fixed_diagnostic_with_a_next_step(self):

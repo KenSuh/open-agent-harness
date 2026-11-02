@@ -22,8 +22,8 @@ variables never pass through (in any letter case); sign in through `codex login`
 `codex login --with-api-key`. Structured output is redacted once, after JSON decoding and before retention
 or validation. The snapshot is removed as soon as the reviewer exits. A validated round publishes
 `R<n>.json` and its index line; every other call has no validated receipt in `rounds.jsonl`.
-A round starts once `oah.call` has admitted its final model and effort, before any further paid preparation or
-the reviewer. A refused admission logs nothing, so it spends no round and no attempt; from the start line on,
+A round starts once `oah.call` has admitted the rule's model and effort, before the paid judge or
+the reviewer. A refusal before that start logs nothing, so it spends no round and no attempt; from the start line on,
 failed and interrupted calls retain that spend.
 """
 from __future__ import annotations

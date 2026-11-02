@@ -264,16 +264,22 @@ def read_scores(engine: str, entry: models.Entry | None, settings: Settings, *,
 
     A failure is kept in the set, not raised: a pin still runs and only a choice fails."""
     allowed = settings.engines[engine]["allowed_models"]
+
+    def failed(error: Exception) -> scoring.ScoreSet:
+        if not isinstance(error, EngineError):
+            error = scoring._unusable("benchmarks.json or families.json", "has invalid data")
+        return scoring.failed(engine, error)
+
     try:
         known, data = scoring.families(), scoring.bundled()
-    except EngineError as exc:
-        return scoring.failed(engine, exc), None
+    except (EngineError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        return failed(exc), None
 
     def one(item: models.Entry | None) -> scoring.ScoreSet:
         try:
             return scoring.score_set(engine, item, allowed=allowed, data=data, known=known)
-        except EngineError as exc:
-            return scoring.failed(engine, exc)
+        except (EngineError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return failed(exc)
 
     return one(entry), one(previous) if previous is not None else None
 
@@ -570,7 +576,8 @@ def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier
           freshness: models.Freshness) -> Admission:
     """The one check on the final model and effort; it reads nothing, on the entry and scores of this call.
 
-    A refusal raises before the call has spent anything. A selection that cannot start at all has
+    The rule's pair is checked before any spend, and the final pair again after the paid judge.
+    A selection that cannot start at all has
     already raised its named failure in `models.map_tier` (no catalog, no scores, an empty pool, a floor no
     allowed model reaches). A floor is checked on the model's own score on the fixed scale, so a pin of a superseded,
     not-allowed or unlisted model cannot get under it."""
@@ -583,6 +590,8 @@ def admit(resolution: Resolution, settings: Settings, *, stage: str | None, tier
         raise EngineError(NOT_LISTED, f"the codex CLI no longer lists {_shown(model)}, the model pinned for this tier, "
                           "so nothing was launched or spent. Run `oah models` to see the listed models, then change "
                           "the pin in .oah/config.toml")
+    if settings.engines[engine]["effort_caps"].get(model) is not None:
+        _resolve_floor(resolution, settings, floor_tier=floor_tier, freshness=freshness)
     if scores.left_out.get(model) == "superseded":
         old = scoring.scored(scores, model)
         family = next((item for item in scores.models if old is not None and item.family == old.family), None)
@@ -1305,20 +1314,15 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
             tier = floor_tier
             reasons.append(f"floor {floor_tier}: this review's scope")
-    # Selection, the judge and the admission check come first: a refusal has spent no reservation or round.
+    # Admit the rule's pair before reserving any spend, then account durably before the paid judge.
     checked = check_catalog(request.engine, settings, state_dir=state_dir, env=env, refresh=request.refresh_models,
                             now=now)
     resolution = resolve_engine(request.engine, tier, settings, state_dir=state_dir, env=env, now=now,
                                 checked=checked, floor_tier=floor_tier, stage=request.stage)
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
+    admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     check_budget()
-    resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
-                                     freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
-                                     brief_disabled=disabled, keychain=keychain)
-    admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
-    warnings.extend(admitted.warnings)
-    judge = {**judge, "admission": admitted.to_json()}
     if inputs is None:
         if start_round is not None:
             start_round()
@@ -1327,6 +1331,12 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
             _check_dispatch_lease(live, root, stage=request.stage)
             _task_dispatch_gate(state_dir, request.task, pathlib.Path(live.worktree), stage=request.stage,
                                 reserve=True, run_id=planned_run[0].id)
+    resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
+                                     freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
+                                     brief_disabled=disabled, keychain=keychain)
+    admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
+    warnings.extend(admitted.warnings)
+    judge = {**judge, "admission": admitted.to_json()}
     if rule_scored:
         check_budget()
         advisory = advise(axes, request.task, root=root, brief_disabled=disabled, env=env, keychain=keychain)
