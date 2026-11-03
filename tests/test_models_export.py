@@ -19,6 +19,7 @@ from oah.rerank import typesafe
 from tests.helpers import directory_alias, make_tmp_dir
 from tests.test_models_report import MDR3, NEW, V010, V020, ages_state, choice, run_id, run_models, tree, write_run
 
+REPO = pathlib.Path(__file__).resolve().parent.parent
 TOP_KEYS = {"format", "run_id", "axes", "stage", "engine", "tier", "tier_source", "rule_tier", "jev_tier",
             "jev_confidence", "jev_status", "tier_floor_raised", "model_judge", "model_judge_confidence",
             "model_choice", "outcome", "unreadable", "not_recorded", "hashed"}
@@ -557,6 +558,23 @@ class CliTest(unittest.TestCase):
         after = self.export(state, action="report"), self.export(state, "--json", action="report")
         self.assertEqual(before, after)
         self.assertEqual(before[0][1].splitlines(), REPORT_TEXT)
+
+
+class DocsTest(unittest.TestCase):
+    """AC6: both languages say what a line holds and leaves out, what it cannot show, and what older runs lack."""
+
+    def test_docs_describe_the_export(self):
+        for page in ("docs/concepts.md", "docs/upgrade.md", "docs/ko/concepts.md", "docs/ko/upgrade.md"):
+            with self.subTest(page=page):
+                text = (REPO / page).read_text(encoding="utf-8")
+                self.assertIn("oah models export", text)
+        concepts = (REPO / "docs/concepts.md").read_text(encoding="utf-8")
+        for phrase in ("not_recorded", "unreadable", "hashed", "not whether Jev helped", "no prompt",
+                       "older runs"):
+            self.assertIn(phrase, concepts)
+        korean = (REPO / "docs/ko/concepts.md").read_text(encoding="utf-8")
+        for phrase in ("not_recorded", "unreadable", "hashed", "Jev가 도움이 됐는지", "프롬프트"):
+            self.assertIn(phrase, korean)
 
 
 if __name__ == "__main__":

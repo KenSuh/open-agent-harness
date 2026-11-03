@@ -183,6 +183,11 @@ two more fields: `model_judge_confidence`, the judge's confidence in the pair it
 none), and `tier_floor_raised`, true when the tier that ran was raised to the floor tier. Runs written before this
 update keep working and count as not recorded. The counts show how choices were made, not whether Jev helped.
 
+`oah models export` prints one JSON line per run folder with only its tier and model decision data and its outcome, to
+compare the deterministic choice with Jev's run by run. Prompts, paths, commands and the task name are left out, and a
+field an older run did not record is null and named in `not_recorded`. It reads the run records and changes nothing;
+redirect stdout to keep the lines. Like the report, it does not show whether Jev helped.
+
 ### Claude Code, Codex and Claude Code plugins
 
 `oah` can now keep the tools themselves current, so newer models reach you without you remembering to update. This

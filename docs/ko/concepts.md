@@ -340,6 +340,23 @@ tier보다 높았는지·같았는지·낮았는지, 0.1 단위로 나눈 Jev의
 결과나 품질은 비교하지 않는다. 판정의 확신도(`model_judge_confidence`, 답에 없으면 null)와 최저 기준이 tier를 올렸는지
 (`tier_floor_raised`)는 이 버전부터 기록하므로, 그 전 실행은 기록되지 않은 것으로 세고 보고서가 그 수를 알려 준다.
 
+**선택 내보내기.** `oah models export`는 `oah models report`가 세는 실행 폴더마다 JSON 한 줄을 작업 폴더, 실행 ID 순으로
+출력한다. 결정적 선택과 Jev의 선택을 실행마다 비교하거나, 나중에 규칙을 조정할 자료로 남길 수 있다. 각 줄에는 `format` 번호와
+`run_id`, 그리고 판정 자료만 들어 있다. 요청 축(`axes`의 kind, intensity, reasoning, risk), `stage`, `engine`, `tier`,
+`tier_source`, `rule_tier`, `jev_tier`, `jev_confidence`, `jev_status`, `tier_floor_raised`, `model_judge`,
+`model_judge_confidence`, `model_choice`의 `mode`, `floor`, `candidates`, `excluded`와 `deterministic`·`proposal`·`requested`
+쌍, 그리고 결과(`status`, `exit_code`, `timed_out`, `duration_s`)다. 값은 보고서가 읽는 방식 그대로 정해진 값 목록이나 형식과
+맞춰 보고, 후보와 제외 항목은 모델·effort·규칙만 남기며 그 밖의 필드는 버린다. 프롬프트, 브리프, 작업 이름, 경로, 명령, 작업
+폴더, CLI 경로, 경고, 오류, 메모, 제공자 이름, 워커 출력, 환경 값은 들어가지 않는다. 기록 자체의 null이 아닌 null에는 모두
+이유가 붙는다. `unreadable`은 읽지 못한 필드와 사유를 적는다. 형식이 틀렸거나 모르는 값이면 그렇게 적고, 상태와 맞지 않는 값이나
+기록에 일부만 있는 기능의 필드는 `inconsistent`로 적는다. 실행 폴더 전체를 읽지 못하면 `{"record": "<사유>"}`로 적고 그 폴더도
+줄을 받는다. `not_recorded`는 그 필드를 기록하기 전에 쓴 실행 기록이라 없는 필드를 적는다. 오래된 실행에는 새 필드가
+없다(v0.1.0에는 모델 판정이, v0.2.0에는 Jev 난이도가 없고, 판정의 확신도와 최저 기준 표시는 이 버전부터 기록한다). 수정 기록에서
+해시된 값은 해시 그대로 두고 `hashed`에 적으며, 되돌리거나 이름과 맞춰 보지 않는다. `jev_status`는 숫자 없이 `below-threshold`
+같은 낱말만 남긴다. 보고서처럼 제공자를 부르지 않고, 네트워크에 닿지 않고, 저장소를 찾은 뒤에는 프로세스를 시작하지 않으며,
+아무것도 쓰지 않는다. 줄을 남기려면 표준 출력을 파일로 돌린다. 이 줄은 무엇이 골라졌고 실행이 어떻게 끝났는지를 보여 줄 뿐 Jev가
+도움이 됐는지는 보여 주지 않는다. 실행이 끝났다고 그 선택이 옳았다는 뜻은 아니다.
+
 `oah`와 함께 배포된 사본의 출처는 아래와 같고, 받은 사본에도 같은 출처 표시에 받은 날짜를 붙인다.
 
 Epoch AI, 'Capabilities & benchmarking'. Published online at epoch.ai. Retrieved from
