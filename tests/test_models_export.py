@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib
 import io
 import json
@@ -35,6 +36,13 @@ EMPTY = {"axes": None, "stage": None, "engine": None, "tier": None, "tier_source
 AXES = {"kind": "implementation", "intensity": "medium", "reasoning": "high", "risk": "normal"}
 NO_OUTCOME = {"status": "finished", "exit_code": None, "timed_out": None, "duration_s": None}
 JEV = ["jev_confidence", "jev_status", "jev_tier", "rule_tier"]
+
+# Report fixtures use synthetic names; export fixtures use packaged identifiers.
+def known_models(record):
+    data = json.dumps(record).replace("m-mid", "gpt-6.1-sol").replace("m-strong", "gpt-6-luna")
+    return json.loads(data)
+
+V010, V020, MDR3, NEW = map(known_models, (V010, V020, MDR3, NEW))
 
 # The report text for the four-age folder at main 5c0bad1, before the export shared its reading code.
 REPORT_TEXT = [
@@ -116,10 +124,10 @@ def keys_of(value: dict) -> None:
     if isinstance(choice_value, dict):
         assert set(choice_value) == CHOICE_KEYS, sorted(choice_value)
         for name in ("deterministic", "proposal", "requested"):
-            assert choice_value[name] is None or set(choice_value[name]) == PAIR_KEYS, choice_value[name]
-        assert choice_value["floor"] is None or set(choice_value["floor"]) == FLOOR_KEYS, choice_value["floor"]
+            assert choice_value[name] is None or isinstance(choice_value[name], str) or set(choice_value[name]) == PAIR_KEYS
+        assert choice_value["floor"] is None or isinstance(choice_value["floor"], str) or set(choice_value["floor"]) == FLOOR_KEYS
         for entry in choice_value["candidates"] or ():
-            assert entry is None or set(entry) == PAIR_KEYS, entry
+            assert entry is None or isinstance(entry, str) or set(entry) == PAIR_KEYS, entry
         for entry in choice_value["excluded"] or ():
             assert entry is None or set(entry) == EXCLUDED_KEYS, entry
 
@@ -128,21 +136,24 @@ class AgesTest(unittest.TestCase):
     """AC1, AC3: the four-age folder the report tests use, and the line each age yields."""
 
     def test_each_age_yields_its_line(self):
-        lines = exported(ages_state(self))
+        state = make_tmp_dir(self)
+        for n, record in enumerate((V010, V020, MDR3, NEW), 1):
+            write_run(state, n, record)
+        lines = exported(state)
         self.assertEqual(lines, [
             line(1, stage="initial", engine="claude", tier="high", tier_source="rules",
                  not_recorded=sorted([*JEV, "model_choice", "model_judge", "model_judge_confidence",
                                       "tier_floor_raised"])),
             line(2, stage="review", engine="codex", tier="medium", tier_source="rules", model_judge="used",
-                 model_choice=exported_choice(("m-mid", "medium"), ("m-strong", "high")),
+                 model_choice=exported_choice(("gpt-6.1-sol", "medium"), ("gpt-6-luna", "high")),
                  not_recorded=sorted([*JEV, "model_judge_confidence", "tier_floor_raised"])),
             line(3, stage="review", engine="codex", tier="high", tier_source="jev", rule_tier="medium",
                  jev_tier="high", jev_confidence=0.8, jev_status="used", model_judge="rejected(below-floor)",
-                 model_choice=exported_choice(("m-mid", "high"), ("m-mid", "high")),
+                 model_choice=exported_choice(("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "high")),
                  not_recorded=["model_judge_confidence", "tier_floor_raised"]),
             line(4, stage="review", engine="codex", tier="medium", tier_source="rules", rule_tier="medium",
                  jev_tier="max", jev_confidence=0.5, jev_status="below-threshold", model_judge="used",
-                 model_choice=exported_choice(("m-mid", "medium"), ("m-mid", "high")), model_judge_confidence=0.72,
+                 model_choice=exported_choice(("gpt-6.1-sol", "medium"), ("gpt-6.1-sol", "high")), model_judge_confidence=0.72,
                  tier_floor_raised=False),
         ])
         for value in lines:
@@ -150,27 +161,47 @@ class AgesTest(unittest.TestCase):
 
     def test_a_full_record_exports_axes_outcome_and_candidates(self):
         record = dict(NEW, axes=AXES, exit_code=0, timed_out=False, duration_s=12.5,
-                      model_choice=choice(("m-mid", "medium"), ("m-strong", "high"),
-                                          floor={"tier": "medium", "model": "m-mid", "effort": "medium"},
-                                          candidates=[["m-strong", "high"], ["m-mid", "medium"]],
-                                          excluded={"m-old": "not-in-tier-pool"},
-                                          proposal={"model": "m-strong", "effort": "high"}))
+                      model_choice=choice(("gpt-6.1-sol", "medium"), ("gpt-6-luna", "high"),
+                                          floor={"tier": "medium", "model": "gpt-6.1-sol", "effort": "medium"},
+                                          candidates=[["gpt-6-luna", "high"], ["gpt-6.1-sol", "medium"]],
+                                          excluded={"gpt-6-sol": "not-in-tier-pool"},
+                                          proposal={"model": "gpt-6-luna", "effort": "high"}))
         value = one(self, record)
         self.assertEqual(value["axes"], AXES)
         self.assertEqual(value["outcome"], {"status": "finished", "exit_code": 0, "timed_out": False,
                                             "duration_s": 12.5})
         self.assertEqual(value["model_choice"], {
-            "mode": "ranked", "floor": {"tier": "medium", "model": "m-mid", "effort": "medium"},
-            "candidates": [pair("m-strong", "high"), pair("m-mid", "medium")],
-            "excluded": [{"model": "m-old", "rule": "not-in-tier-pool"}],
-            "deterministic": pair("m-mid", "medium"), "proposal": pair("m-strong", "high"),
-            "requested": pair("m-strong", "high")})
+            "mode": "ranked", "floor": {"tier": "medium", "model": "gpt-6.1-sol", "effort": "medium"},
+            "candidates": [pair("gpt-6-luna", "high"), pair("gpt-6.1-sol", "medium")],
+            "excluded": [{"model": "gpt-6-sol", "rule": "not-in-tier-pool"}],
+            "deterministic": pair("gpt-6.1-sol", "medium"), "proposal": pair("gpt-6-luna", "high"),
+            "requested": pair("gpt-6-luna", "high")})
         self.assertEqual((value["unreadable"], value["not_recorded"], value["hashed"]), ({}, [], []))
         keys_of(value)
 
 
 class FieldsTest(unittest.TestCase):
     """AC2: only the decision fields and the outcome; nothing a person wrote or a machine path."""
+
+    def test_rejected_proposal_identifiers_are_closed(self):
+        selected = choice(("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "high"),
+                          proposal=pair("secret-project", "private-plan"))
+        value = one(self, dict(NEW, model_judge="rejected(outside-candidates)", model_choice=selected))
+        for field, original in (("model", "secret-project"), ("effort", "private-plan")):
+            self.assertEqual(value["model_choice"]["proposal"][field],
+                             "sha256:" + hashlib.sha256(original.encode()).hexdigest())
+            self.assertIn("model_choice.proposal." + field, value["hashed"])
+            self.assertNotIn(original, json.dumps(value))
+        self.assertEqual(value["model_choice"]["deterministic"], pair("gpt-6.1-sol", "high"))
+        keys_of(value)
+
+    def test_error_codes_keep_only_known_codes(self):
+        for status, expected in (("unused(error:timeout)", "unused(error:timeout)"),
+                                 ("unused(error:bad-gateway)", "unused(error)"),
+                                 ("unused(error: SomeError)", "unused(error)")):
+            value = one(self, dict(NEW, model_judge=status, model_judge_confidence=None))
+            self.assertEqual(value["model_judge"], expected)
+            keys_of(value)
 
     def test_status_vocabulary_and_canaries(self):
         reasons = ("not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
@@ -189,24 +220,26 @@ class FieldsTest(unittest.TestCase):
             for code in ("key-name", "bad-response", "internal", "provider", "timeout", "network", "invalid-header",
                          "unauthorized", "rate-limited", "overloaded"):
                 with self.subTest(field=field, code=code):
-                    self.assertEqual(one(self, dict(NEW, **{field: f"unused(error:{code})"}))[field], "unused(error)")
-            for status, expected in (("unused(secret project)", None),
+                    self.assertEqual(one(self, dict(NEW, **{field: f"unused(error:{code})"}))[field], f"unused(error:{code})")
+            for status, expected in (("unused(secret project)", "hash"),
                                      ("unused(error: SecretProjectError)", "unused(error)"),
-                                     ("rejected(made-up)", None), ("unused(error:bad-response)", "unused(error)"),
-                                     ("unused(error:secret-project)", None)):
+                                     ("rejected(made-up)", "hash"),
+                                     ("unused(error:secret-project)", "unused(error)")):
                 with self.subTest(field=field, status=status):
                     value = one(self, dict(NEW, **{field: status}))
-                    self.assertEqual(value[field], expected)
-                    if expected is None:
+                    if expected == "hash":
+                        expected = "sha256:" + hashlib.sha256(status.encode()).hexdigest()
                         self.assertEqual(value["unreadable"][field], "unknown-value")
+                        self.assertIn(field, value["hashed"])
+                    self.assertEqual(value[field], expected)
                     self.assertNotIn(status, json.dumps(value))
 
     def test_model_change_reader_failures_are_named(self):
         digest = "sha256:" + "a" * 64
-        for requested, reason in ((None, "wrong-type"), ({"model": "m-mid"}, "wrong-type"),
+        for requested, reason in ((None, "wrong-type"), ({"model": "gpt-6.1-sol"}, "wrong-type"),
                                   ({"model": digest, "effort": "high"}, "hashed")):
             with self.subTest(requested=requested):
-                selected = choice(("m-mid", "high"), ("m-mid", "high"))
+                selected = choice(("gpt-6.1-sol", "high"), ("gpt-6.1-sol", "high"))
                 selected["requested"] = requested
                 value = one(self, dict(NEW, model_choice=selected))
                 self.assertEqual(value["unreadable"]["model_choice"], reason)
@@ -229,14 +262,14 @@ class FieldsTest(unittest.TestCase):
                       error=canaries["error"], worker_output=canaries["output"], advisory=canaries["note"],
                       tier_reasons=[canaries["prompt"]], launcher={"env": canaries["env"]},
                       environment={"CANARY_HOME": canaries["env"]}, brief=canaries["prompt"],
-                      model_choice=choice(("m-mid", "medium"), ("m-mid", "high"), note=canaries["note"],
+                      model_choice=choice(("gpt-6.1-sol", "medium"), ("gpt-6.1-sol", "high"), note=canaries["note"],
                                           provider=canaries["path"],
-                                          floor={"tier": "medium", "model": "m-mid", "effort": "medium",
+                                          floor={"tier": "medium", "model": "gpt-6.1-sol", "effort": "medium",
                                                  "why": canaries["note"]},
-                                          candidates=[["m-mid", "high"], {"model": "m-mid", "effort": "medium",
+                                          candidates=[["gpt-6.1-sol", "high"], {"model": "gpt-6.1-sol", "effort": "medium",
                                                                           "note": canaries["prompt"]}],
-                                          proposal={"model": "m-mid", "effort": "high", "why": canaries["prompt"]},
-                                          excluded={"m-old": "not-allowed"}),
+                                          proposal={"model": "gpt-6.1-sol", "effort": "high", "why": canaries["prompt"]},
+                                          excluded={"gpt-6-sol": "not-allowed"}),
                       exit_code=1, duration_s=3, timed_out=False)
         record["model_choice"]["deterministic"]["source"] = canaries["path"]
         state = make_tmp_dir(self)
@@ -250,17 +283,17 @@ class FieldsTest(unittest.TestCase):
             self.assertNotIn(fragment, out)
         value = json.loads(out)
         keys_of(value)
-        self.assertEqual(value["model_choice"]["candidates"], [pair("m-mid", "high"), pair("m-mid", "medium")])
+        self.assertEqual(value["model_choice"]["candidates"], [pair("gpt-6.1-sol", "high"), pair("gpt-6.1-sol", "medium")])
         self.assertEqual(value["unreadable"], {})
 
-    def test_a_value_outside_its_closed_set_is_null_and_named_never_echoed(self):
+    def test_a_value_outside_its_closed_set_is_named_and_never_echoed(self):
         record = dict(NEW, tier="ultra-secret", tier_source="my own words", rule_tier="/tmp/x", jev_tier=3,
                       axes=dict(AXES, kind="a prompt in disguise", risk=["x"]), status="done with notes",
                       exit_code="0", timed_out="no", duration_s=-1,
                       model_judge="something the provider said",
-                      model_choice=choice(("m mid with spaces", "medium"), ("m-mid", "HIGH effort"),
-                                          mode="free text", candidates=[["m-mid"], "x", ["/etc/passwd", "high"]],
-                                          excluded={"m-old": "my reason", "/a/path": "not-allowed"}))
+                      model_choice=choice(("m mid with spaces", "medium"), ("gpt-6.1-sol", "HIGH effort"),
+                                          mode="free text", candidates=[["gpt-6.1-sol"], "x", ["/etc/passwd", "high"]],
+                                          excluded={"gpt-6-sol": "my reason", "/a/path": "not-allowed"}))
         value = one(self, record)
         self.assertEqual(value["unreadable"], {
             "tier": "unknown-value", "tier_source": "unknown-value", "rule_tier": "unknown-value",
@@ -275,10 +308,12 @@ class FieldsTest(unittest.TestCase):
         for text in ("ultra-secret", "my own words", "/tmp/x", "disguise", "done with", "provider said", "m mid",
                      "HIGH", "free text", "/etc/passwd", "my reason", "/a/path"):
             self.assertNotIn(text, shown)
-        self.assertEqual(value["model_choice"]["candidates"], [None, None, {"model": None, "effort": "high"}])
-        self.assertEqual(value["model_choice"]["excluded"], [{"model": "m-old", "rule": None},
-                                                             {"model": None, "rule": "not-allowed"}])
-        self.assertIsNone(value["tier"])
+        digest = lambda text: "sha256:" + hashlib.sha256(text.encode()).hexdigest()
+        self.assertEqual(value["model_choice"]["candidates"],
+                         [None, digest("x"), {"model": digest("/etc/passwd"), "effort": "high"}])
+        self.assertEqual(value["model_choice"]["excluded"], [{"model": "gpt-6-sol", "rule": digest("my reason")},
+                                                             {"model": digest("/a/path"), "rule": "not-allowed"}])
+        self.assertEqual(value["tier"], digest("ultra-secret"))
         keys_of(value)
 
     def test_odd_numbers_never_stop_the_export(self):
@@ -446,7 +481,7 @@ class HashedTest(unittest.TestCase):
         digest = "sha256:" + "c" * 64
         value = one(self, dict(NEW, model_choice=digest))
         self.assertEqual((value["model_choice"], value["hashed"], value["unreadable"]),
-                         (digest, ["model_choice"], {}))
+                         (digest, ["model_choice"], {"model_choice": "hashed"}))
 
 
 class Forbidden(BaseException):

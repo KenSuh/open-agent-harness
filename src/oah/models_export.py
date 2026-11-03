@@ -18,27 +18,34 @@ The lines show what was chosen and how the run ended, not whether Jev's choices 
 from __future__ import annotations
 
 import math
+import hashlib
 import pathlib
 
-from oah import models, routing
+from oah import routing
 from oah.engines import effort as effort_rules
 from oah.models_report import (HASHED, JUDGE_RULES, TIER_SOURCES, UNUSED, _confidence, _dimension_readers, _features,
                                _flag, _jev_status, _judge_status, _pair as _report_pair, _plain, _Unreadable,
                                read_run, run_folders)
-from oah.runs import TERMINAL, _PROGRESS
+from oah.runs import RUN_ID_RE, TERMINAL, _PROGRESS
 
 FORMAT = 1
 STATUSES = (*_PROGRESS, *TERMINAL)
 MODES = ("ranked", "pools", "scored", "deterministic")
-# call.py writes tier-given, no status, pinned, floor-unresolved and no-pool-for-tier;
-# rerank/__init__.py writes the other reasons and key-name/bad-response; rerank/base.py
-# and rerank/typesafe.py write the remaining fixed error codes.
+# call.py and rerank/__init__.py write these non-error reasons.
 UNUSED_REASONS = {"not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
                   "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
-                  "no-text", "no-candidates", "one-candidate", "too-many-candidates",
-                  "error:key-name", "error:bad-response", "error:internal", "error:provider", "error:timeout",
-                  "error:network", "error:invalid-header", "error:unauthorized", "error:rate-limited",
-                  "error:overloaded"}
+                  "no-text", "no-candidates", "one-candidate", "too-many-candidates"}
+# rerank/__init__.py: key-name, bad-response; rerank/base.py: internal, provider;
+# rerank/typesafe.py: bad-response, timeout, network, invalid-header and HTTP status codes.
+ERROR_CODES = {"key-name", "bad-response", "internal", "provider", "timeout", "network", "invalid-header",
+               "unauthorized", "rate-limited", "overloaded"}
+# Snapshot of packaged engines/benchmarks.json, families.json and normalization.json.
+# Kept in code so export never reads packaged files, configuration, or a model catalog.
+MODEL_NAMES = frozenset("""claude-fable-5 claude-fable-5-1 claude-haiku-5-5 claude-opus-4-6 claude-opus-4-7
+claude-opus-4-8 claude-opus-5 claude-opus-5-5 claude-sonnet-4-6 claude-sonnet-5 claude-sonnet-5-5
+gpt-5.6-luna gpt-5.6-sol gpt-5.6-terra gpt-6-astra gpt-6-luna gpt-6-sol gpt-6.1-sol gpt-6.1-terra
+haiku sonnet opus fable luna terra sol astra""".split())
+EFFORTS = frozenset((*effort_rules.ORDINARY, *effort_rules.BEHAVIOUR_CHANGING, effort_rules.HIGHEST))
 AXES = {"kind": routing.KIND_SCORES, "intensity": routing.INTENSITY_SCORES,
         "reasoning": routing.REASONING_SCORES, "risk": routing.RISK_SCORES}
 FIELDS = ("axes", "stage", "engine", "tier", "tier_source", "rule_tier", "jev_tier", "jev_confidence", "jev_status",
@@ -57,8 +64,9 @@ class _Line:
     """One line being built: every value goes through `read` or `value`, which name each null they make."""
 
     def __init__(self, run_id: str) -> None:
-        self.out = {"format": FORMAT, "run_id": run_id, **dict.fromkeys(FIELDS), "unreadable": {},
+        self.out = {"format": FORMAT, "run_id": None, **dict.fromkeys(FIELDS), "unreadable": {},
                     "not_recorded": [], "hashed": []}
+        self.out["run_id"] = self.value("run_id", run_id, _form(RUN_ID_RE))
 
     def read(self, path: str, record: dict, key: str, reader):
         """A key of the record itself: one an older oah did not write is not recorded."""
@@ -77,6 +85,11 @@ class _Line:
         try:
             return reader(value)
         except _Unreadable as exc:
+            if isinstance(value, str):
+                self.out["unreadable"][path] = exc.reason
+                self.out["hashed"].append(path)
+                # JSON can contain unpaired surrogate escapes; preserve them deterministically rather than aborting.
+                return "sha256:" + hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
             self.out["unreadable"][path] = exc.reason
             return None
 
@@ -102,9 +115,9 @@ def _export_status(value, report_reader):
     if status.startswith("unused("):
         reason = status[7:-1]
         if reason in UNUSED_REASONS:
-            return "unused(error)" if reason.startswith("error:") else status
-        if reason.startswith("error: ") and UNUSED.fullmatch(status):
-            return "unused(error)"
+            return status
+        if reason.startswith("error:") and UNUSED.fullmatch(status):
+            return status if reason[6:] in ERROR_CODES else "unused(error)"
         raise _Unreadable("unknown-value")
     return status
 
@@ -119,8 +132,8 @@ def _form(pattern):
     return read
 
 
-_model = _form(models.PLAIN_MODEL)
-_effort = _form(effort_rules.LABEL_RE)
+_model = _closed(MODEL_NAMES)
+_effort = _closed(EFFORTS)
 
 
 def _exit_code(value) -> int:
@@ -214,7 +227,8 @@ def _model_choice(line: _Line):
 def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
     line = _Line(run_id)
     out = line.out
-    out["stage"], out["engine"] = stage, engine
+    out["stage"] = line.value("stage", stage, _closed(routing.STAGES))
+    out["engine"] = line.value("engine", engine, _closed(routing.ENGINES))
     out["axes"] = line.read("axes", record, "axes",
                             _fields(line, "axes", {name: _closed(words) for name, words in AXES.items()}))
     out["outcome"] = {"status": line.read("outcome.status", record, "status", _closed(STATUSES)),
@@ -237,13 +251,13 @@ def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
             else:
                 out[name] = line.value(name, record[name], readers[name])
     dimensions = _dimension_readers(record, features)
-    if features["model_judge"] == "complete" and isinstance(record["model_choice"], dict):
+    if features["model_judge"] == "complete":
         try:
             dimensions["model_change"]()
         except _Unreadable as exc:
             # The comparison can fail even when individual values (including hashes) are readable.
             out["unreadable"]["model_choice"] = exc.reason
-            if exc.reason == "wrong-type":
+            if exc.reason == "wrong-type" and isinstance(record["model_choice"], dict):
                 for name in ("deterministic", "requested"):
                     try:
                         _report_pair(record["model_choice"].get(name))
