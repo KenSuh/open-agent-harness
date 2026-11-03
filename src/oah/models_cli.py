@@ -1,4 +1,4 @@
-# models 명령 모듈 — 엔진별 모델 카탈로그를 확인·새로 읽고, 단마다 고른 모델·effort 와 그 출처, 판정 후보·상한을 출력한다.
+# models 명령 모듈 — 엔진별 모델 카탈로그를 확인·새로 읽고, 단마다 고른 모델·effort 와 그 출처, 판정 후보·상한을 출력하며, report 로 실행 기록의 선택 계수를 보인다.
 """models"""
 from __future__ import annotations
 
@@ -8,20 +8,49 @@ import os
 import pathlib
 import sys
 
-from oah import benchmarks, call, models, routing, scoring
+from oah import benchmarks, call, models, models_report, routing, scoring
 from oah.atomic import StateCorrupt, StorageError
 from oah.engines.effort import EngineError
 from oah.lockfile import LockTimeout
 from oah.paths import GitMissing, NotARepo, repo_info, state_dir
+from oah.runs import RunError
 
-EXIT_OK, EXIT_ENVIRONMENT = 0, 69
+EXIT_OK, EXIT_USAGE, EXIT_ENVIRONMENT = 0, 2, 69
 COMMANDS = ("models",)
 
 
 def register(commands: argparse._SubParsersAction) -> None:
     parser = commands.add_parser("models", help="show (and refresh) the model each tier uses for each engine")
+    # Not required, so bare `oah models` keeps showing each tier's model.
+    actions = parser.add_subparsers(dest="models_action", metavar="{report}")
+    report = actions.add_parser("report", help="count how this repository's runs chose their tier and model "
+                                               "(reads run records only)")
+    report.add_argument("--json", action="store_true", help="print the counts as one JSON object")
     parser.add_argument("--refresh", action="store_true", help="read the CLIs' model lists again now")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+
+def _report(args: argparse.Namespace) -> int:
+    """`oah models report`: counts from this repository's run records; no provider, network or write."""
+    if args.refresh:
+        print("OAH_USAGE: oah models report reads run records only; drop --refresh, or run oah models --refresh",
+              file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        state = state_dir(repo_info(pathlib.Path.cwd()), os.environ)
+        report = models_report.collect(state)
+    except (NotARepo, GitMissing, RunError) as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    except OSError as exc:
+        print(f"the run records cannot be listed ({type(exc).__name__}); check that the state folder can be read",
+              file=sys.stderr)
+        return EXIT_ENVIRONMENT
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+    else:
+        print("\n".join(models_report.text(report)))
+    return EXIT_OK
 
 
 def _engine_report(engine: str, settings: call.Settings, root: pathlib.Path, state: pathlib.Path,
@@ -100,6 +129,8 @@ def _candidates_text(pairs: list) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "models_action", None) == "report":
+        return _report(args)
     from oah.call_cli import load_settings
     from oah.config import ConfigError
 

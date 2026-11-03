@@ -9,13 +9,15 @@
   `oah packet new` recorded beside it), Jev then judges the accepted Intent and the Scope paths (`judge_difficulty`,
   after the budget gate): at or above `[rerank] difficulty_min_confidence` its tier runs (`jev`), raised to the
   call's floor tier when lower; otherwise the rule tier runs. A review's floor stays scored from its scope alone.
-  The record keeps `rule_tier` and the `jev_*` fields beside `tier`, and a correction asks Jev once;
+  The record keeps `rule_tier` and the `jev_*` fields beside `tier`, and `tier_floor_raised` says whether a
+  floor (the review floor on the rules path, or the floor under Jev's tier) raised it; a correction asks Jev once;
 - the model through the catalog and the scores read once (`check_catalog`, `models.map_tier`), and the launch
   effort through the adapter;
 - the judged model and effort (`judge_engine`, amendment 6): unless a tier model is explicitly pinned,
   an enabled re-ranker with a key picks one pair from
   `models.build_candidates`; the pair is used only when `CandidateSet.reject_reason` accepts it, and
-  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`) and `model_choice`
+  the record keeps `model_judge` (`used`, `rejected(<rule>)` or `unused(<reason>)`), the judge's
+  `model_judge_confidence` (null when its answer carried none) and `model_choice`
   (with the candidate `mode`, the pool or allowed models left out and why, and why the model is not judged);
 - the one admission check (`admit`) on the final model and effort. Every launch path passes it here: foreground,
   background, Orca, review and fix all prepare through this function, and a queued run replays the admitted
@@ -522,12 +524,13 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
               "mode": None, "note": None, "candidates": [], "excluded": {}, "proposal": None, "provider": None,
               "requested": deterministic.to_json()}
 
-    def record(status: str, chosen: Resolution = resolution) -> tuple[Resolution, dict]:
+    def record(status: str, chosen: Resolution = resolution,
+               confidence: float | None = None) -> tuple[Resolution, dict]:
         choice["requested"] = {"model": chosen.model, "effort": chosen.launch_effort}
         check = _CORRECTION_INPUT_CHECK.get()
         if check is not None:
             check(choice)
-        return chosen, {"model_judge": status, "model_choice": choice}
+        return chosen, {"model_judge": status, "model_judge_confidence": confidence, "model_choice": choice}
 
     section = settings.engines[engine]
     if pinned:
@@ -578,8 +581,9 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
     choice["proposal"] = {"model": model, "effort": effort}
     rule = candidates.reject_reason(model, effort)
     if rule is not None:
-        return record(f"rejected({rule})")
-    return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort))
+        return record(f"rejected({rule})", confidence=judged.confidence)
+    return record("used", dataclasses.replace(resolution, model=model, model_source="judge", launch_effort=effort),
+                  confidence=judged.confidence)
 
 
 def _shown(model: str) -> str:
@@ -1471,6 +1475,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         check_budget()
     reasons = None
     rule_tier = None
+    floor_raised = False  # the tier that runs was raised to the floor tier (`tier_floor_raised`)
     if request.tier:
         tier, tier_source = request.tier, "flag"
     elif packet and request.stage in packet.plan:
@@ -1490,7 +1495,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         reasons = list(scored.reasons) + list(recommendation.reasons)
         warnings.extend(scored.warnings)
         if request.stage == "review" and routing.TIERS.index(tier) < routing.TIERS.index(floor_tier):
-            tier = floor_tier
+            tier, floor_raised = floor_tier, True
             reasons.append(f"floor {floor_tier}: this review's scope")
         rule_tier = tier
     if rule_tier is not None and rule_tier == tier:
@@ -1502,7 +1507,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
         if difficulty.status == "unused(not-enabled)":  # a disabled re-ranker reads as before at this seam
             difficulty = dataclasses.replace(difficulty, status="unused(not-configured)")
         if difficulty.used:
-            tier, tier_source = difficulty.tier, "jev"
+            tier, tier_source, floor_raised = difficulty.tier, "jev", difficulty.raised
             reasons = [*(reasons or ()), *difficulty.reasons(floor_tier)]
         if difficulty.status == "unused(secret)":
             warnings.append(secret_warning(difficulty.note, f"the packet {packet.source}"))
@@ -1533,7 +1538,7 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                      brief_disabled=disabled, keychain=keychain)
     admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     warnings.extend(admitted.warnings)
-    judge = {**judge, "admission": admitted.to_json(), **difficulty.record()}
+    judge = {**judge, "admission": admitted.to_json(), **difficulty.record(), "tier_floor_raised": floor_raised}
     advisory = difficulty.advisory
     skill_axes = scored.axes
     check_budget()
