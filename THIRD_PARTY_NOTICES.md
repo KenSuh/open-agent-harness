@@ -1,7 +1,7 @@
 # Third-party notices
 
 open-agent-harness vendors the skills listed under "Vendored skills" below, unchanged under `skills/`,
-and adapts diagram-design templates and styles for documentation as credited below.
+and adapts diagram-design templates, styles and selected icons for documentation as credited below.
 This repository contains none of the files of the projects in the next table.
 You install them yourself, and `oah` runs or links to them.
 
@@ -27,14 +27,49 @@ If code from any project is ever copied verbatim, its license text is added here
 
 The editable HTML sources under `docs/assets/diagrams/` and their exported SVGs under `docs/assets/`
 adapt templates and styles from [Cathryn Lavery's diagram-design](https://github.com/cathrynlavery/diagram-design/tree/3eb03b8),
-pinned at commit **3eb03b8**, under the **MIT License**. Changes apply oah's Primer palette, system fonts,
-English and Korean text, static layouts and accessible descriptions. The skill itself is not vendored;
-none of its bundled third-party icon sets is used. Existing badge SVGs are not derived from this skill.
+pinned at commit **3eb03b8**, under the **MIT License**. The non-banner figures use the skill's default
+gallery look: warm dotted paper, one focal accent, tag chips, mono technical labels, zones and legends.
+The adaptations use installed system fonts, English and Korean text, static layouts and accessible
+descriptions, with no external resources loaded. The banner is maintained separately. The skill itself
+is not vendored, and the existing badge SVGs are not derived from it.
+
+The figures use **Tabler Icons**, licensed under **MIT**, from the skill's `references/primitive-icons.md`.
+These are the selected monochrome user/agent, file, log, search and shield glyphs, adapted for inline SVG
+grouping and inherited color. The set and license are recorded in the pinned skill's
+[THIRD_PARTY_LICENSES.md](https://github.com/cathrynlavery/diagram-design/blob/3eb03b8/THIRD_PARTY_LICENSES.md#tabler-icons).
+Source: [Tabler Icons](https://github.com/tabler/tabler-icons). No other icon set from the skill is used here;
+no font files or the skill's logo are bundled.
 
 ```text
 MIT License
 
 Copyright (c) 2025 Cathryn Lavery
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### Tabler Icons
+
+```text
+MIT License
+
+Copyright (c) 2020 Paweł Kuna
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

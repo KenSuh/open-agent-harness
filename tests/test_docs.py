@@ -242,8 +242,8 @@ CONCEPT_DIAGRAMS = (
 DIAGRAMS = ("banner", "features", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
             *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
-    "README.md": ("banner", "how-it-works"),
-    "README.ko.md": ("banner-ko", "how-it-works-ko"),
+    "README.md": ("banner", "features", "how-it-works"),
+    "README.ko.md": ("banner-ko", "features-ko", "how-it-works-ko"),
     "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
     "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
     "docs/concepts.md": CONCEPT_DIAGRAMS,

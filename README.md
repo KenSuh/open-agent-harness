@@ -22,6 +22,11 @@
 It is a working reference and a guide you can adapt. A **harness** is the set of tools, rules and records
 around an AI coding assistant.
 
+Your AI takes care of the whole job of building and fixing a program like an expert: checking what a change
+might affect, keeping the project wiki, proving the result and running the review cycle. With the recommended,
+optional TypeSafe Jev judge on, it also judges difficulty and picks the model automatically through that difficulty
+level (on main, awaiting release). **You ask, answer when the AI stops for a decision, and confirm before anything lands.**
+
 Take the parts that help, or start with the whole setup and make it yours. Older rules and skills
 (instructions an AI can load) can hold a newer model back or make its results worse. Keep what helps,
 remove what no longer does, and change the rules as your tools change. `oah` keeps evolving too.
@@ -38,23 +43,44 @@ and correcting work within a fixed scope. So Claude writes first; Codex reviews,
 The `oah` command drives **Claude Code** and **Codex CLI** today. The ideas work with **one AI or several**,
 including other tools and harnesses. Take the parts you need and give each stage to the AI that suits you.
 
+## What oah does for you
+
+You describe the result you want. Your AI uses these parts together to carry the work through.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-dark.svg">
+  <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and the recommended, optional TypeSafe Jev judge support the Claude Code build and Codex CLI review loop, gates and the wiki keep evidence and decisions, overlapping leases are refused, and you ask, answer decisions and confirm before landing, with Jev difficulty-based model choice on unreleased main." width="100%">
+</picture>
+
+- **[Impact map](docs/concepts.md#the-impact-map).** Before changing a file, your AI finds the related code,
+  documents and checks. It can see which checks must run again, so a small edit is easier to follow through.
+- **[Project wiki](docs/concepts.md#the-project-wiki).** Your AI keeps the task history, decisions and reasons
+  beside the code. The next session has a record to read instead of making you explain everything again.
+- **[Leases](docs/concepts.md#leases).** A lease reserves the paths a task changes, and an overlapping lease
+  is refused. Each task has a clear scope, and its changes are checked against that scope when it finishes.
+- **[Gates](docs/concepts.md#gates).** Your AI turns “done” into checks with recorded results.
+  You can ask what passed and see the evidence.
+- **[Build and review](docs/concepts.md#the-review-loop-and-corrections).** Claude Code builds; Codex CLI
+  reviews, corrects and reviews again. A repeated problem or a design choice stops the loop for your answer.
+- **[TypeSafe Jev](docs/how-it-works.md#jev-the-optional-judge).** The recommended, optional judge re-orders
+  chosen skills and, on unreleased main, judges difficulty so its tier picks the model automatically, subject
+  to confidence and minimum-level rules. Without a key, the rules decide.
+
 ## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, a lease, the impact map and optional Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you ask, inspect and confirm before checked landing, with a guided design conversation planned for v0.4.0." width="100%">
+  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
-Write down what you want and how you will check it. Claude builds the first version. Codex reviews and
-corrects it until no blocking findings remain (the review converges); a repeated problem or a design decision stops the loop for your
-input. Checks and your confirmation come before the change lands in your project's main branch.
-A round limit is optional.
+Talk to your AI in plain words. The rules installed by `oah init` guide it through recording your goal and
+scope, reserving the paths, checking the impact map and choosing the model and skills, with Jev when enabled.
+Claude Code builds; the gates record check results and the wiki keeps the reasons. Codex CLI reviews and corrects
+until no blocking findings remain, or stops for your answer when a problem repeats or a design choice is needed.
 
-**Leases** reserve files for a task, **gates** record checks, the **impact map** shows what a change affects,
-and the **wiki** keeps decisions. `oah` keeps these records together. [How it works](docs/how-it-works.md)
-explains these parts and the full loop. **TypeSafe Jev**, an optional AI judge, helps with difficulty,
-model choice and ranking the skills for a task; the [Jev section](docs/how-it-works.md#jev-the-optional-judge) distinguishes
-what is in v0.2.0 from what is on main awaiting release.
+Ask “Is the review done?” or “Did all the gates pass?” Inspect the result and confirm before it lands in your
+project's main branch. The [full walkthrough](docs/how-it-works.md) shows the commands your AI runs underneath.
+The guided design conversation shown separately in the figure is **planned for v0.4.0**.
 
 > [!NOTE]
 > **v0.2.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
@@ -97,16 +123,25 @@ oah 0.2.0
 
 ## First run
 
-Open a terminal inside your project, which needs to be a git repository with a remote, and run:
+Run the installer once, then run `oah init` once in each project. Open a terminal in your project,
+which needs to be a git repository with a remote:
 
 ```sh
 oah init
 ```
 
 The guided setup asks about optional tools, shows the complete plan, and changes files only after you
-confirm. Commit the files it writes, then follow [your first task](examples/hello-oah/README.md): a small,
-worked example with real commands that takes about 20 minutes. [Setup details](docs/how-it-works.md#first-run)
-explain every option and generated file.
+confirm. Commit the files it writes. From then on, open your AI in that project and talk to it; the installed
+rules tell it how to run the harness.
+
+- “Build login with oah.”
+- “Is the review done? Did all the gates pass?”
+- “Land this version.” Say this after inspecting the result and the checks.
+
+When the AI stops for a repeated problem or a design choice, answer so it can continue. The commands run
+underneath this conversation. [Your first task](examples/hello-oah/README.md) takes about 20 minutes and shows
+what you say, what the AI does and what you check, followed by the complete command walkthrough.
+[Setup details](docs/how-it-works.md#first-run) explain every option and generated file.
 
 ## Roadmap
 
@@ -133,6 +168,11 @@ Planned, after v0.2.0:
   not prove Jev helped.
 
 Your pinned models, tier pools, effort caps and task floors stay in force throughout.
+
+### v0.4.0: design together, one question at a time
+
+**Planned, not available yet.** You say what you want to build, and oah asks one design question at a time
+with a recommendation. You take part in the design decisions before implementation begins.
 
 ## Documentation
 
