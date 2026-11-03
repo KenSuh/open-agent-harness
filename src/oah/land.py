@@ -78,8 +78,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import tempfile
 import urllib.parse
+import weakref
 from contextlib import contextmanager
 from typing import Mapping, Sequence
 
@@ -192,8 +194,10 @@ class _GitContext:
                               timeout=GH_TIMEOUT, env=self.original)
         if objects.returncode != 0 or objects.timed_out or git_dir.returncode != 0 or git_dir.timed_out:
             raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect objects; check the repository and retry")
-        self._temporary = tempfile.TemporaryDirectory(prefix="oah-land-", ignore_cleanup_errors=True)
-        self.source = pathlib.Path(self._temporary.name)
+        self.source = pathlib.Path(tempfile.mkdtemp(prefix="oah-land-"))
+        # The finalizer holds only the path (never self), so a context inside a reference cycle is still removed
+        # without TemporaryDirectory's own finalizer warning at an arbitrary moment.
+        self._cleanup = weakref.finalize(self, shutil.rmtree, str(self.source), ignore_errors=True)
         (self.source / "objects").mkdir()
         alternates = json.dumps(objects.stdout.strip(), ensure_ascii=False)
         if self.original.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"):
@@ -202,10 +206,6 @@ class _GitContext:
                     "GIT_ALTERNATE_OBJECT_DIRECTORIES": alternates,
                     "GIT_DIR": git_dir.stdout.strip(), "GIT_WORK_TREE": str(root)}
         self.transport = _transport(root, self.env)
-
-    def __del__(self):
-        if hasattr(self, "_temporary"):
-            self._temporary.cleanup()
 
     def run(self, *args, timeout=GH_TIMEOUT):
         return run_command([*git_argv(), "-C", str(self.root), *args], timeout=timeout, env=self.env)
