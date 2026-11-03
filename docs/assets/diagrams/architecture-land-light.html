@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>From review to landing</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 840px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 840px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
+<div class="frame">
+<p class="eyebrow">Architecture · oah</p>
+<h1>From review to landing</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 840 800" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-land-light-title architecture-land-light-desc">
+<title id="architecture-land-light-title">From review to landing</title>
+<desc id="architecture-land-light-desc">Evidence gates feed the Codex review loop, which connects to git hooks, pull requests and CI, while landing checks the converged review, CI and reassessed impact before a confirmed fast-forward push.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#6e7781"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="840" height="800" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">From review to landing</text>
+<rect x="40" y="96" width="480" height="632" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="116" class="node" text-anchor="start" fill="#424a53">oah</text>
+<rect x="568" y="224" width="232" height="136" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="244" class="node" text-anchor="start" fill="#424a53">Installed, signed-in engine</text>
+<rect x="568" y="464" width="232" height="264" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="484" class="node" text-anchor="start" fill="#424a53">git / GitHub</text>
+<line x1="160" y1="200" x2="160" y2="280" data-from="gates" data-to="rloop" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="304" y1="304" x2="584" y2="304" data-from="rloop" data-to="codex" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 304,368 H 676 Q 684,368 684,376 V 504" data-from="rloop" data-to="hooks" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 240,400 V 464 Q 240,472 248,472 H 320 Q 328,472 328,480 V 560" data-from="rloop" data-to="land" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 400,200 V 296 a 8,8 0 0,0 0,16 V 360 a 8,8 0 0,0 0,16 V 560" data-from="impact" data-to="land" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="684" y1="560" x2="684" y2="632" data-from="hooks" data-to="remote" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="584" y1="644" x2="496" y2="644" data-from="remote" data-to="land" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="496" y1="696" x2="584" y2="696" data-from="land" data-to="remote" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="440" y="276" width="104" height="20" rx="2" fill="#ffffff"/>
+<text x="492" y="291" class="arrow-label" text-anchor="middle" fill="#424a53">REVIEW / FIX</text>
+<rect x="434" y="340" width="116" height="20" rx="2" fill="#ffffff"/>
+<text x="492" y="355" class="arrow-label" text-anchor="middle" fill="#424a53">FINISH + PUSH</text>
+<rect x="204" y="512" width="116" height="20" rx="2" fill="#ffffff"/>
+<text x="262" y="527" class="arrow-label" text-anchor="middle" fill="#424a53">REVIEW OF HEAD</text>
+<rect x="504" y="616" width="72" height="20" rx="2" fill="#ffffff"/>
+<text x="540" y="631" class="arrow-label" text-anchor="middle" fill="#424a53">CI / gh</text>
+<rect x="508" y="668" width="64" height="20" rx="2" fill="#ffffff"/>
+<text x="540" y="683" class="arrow-label" text-anchor="middle" fill="#424a53">PUSH</text>
+<g data-node-id="gates">
+<rect x="64" y="144" width="192" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="160" y="168" class="node" text-anchor="middle" fill="#1f2328">Evidence gates</text>
+<text x="160" y="188" class="label" text-anchor="middle" fill="#424a53">From the figure above</text>
+</g>
+<g data-node-id="impact">
+<rect x="304" y="144" width="192" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="400" y="168" class="node" text-anchor="middle" fill="#1f2328">Impact map</text>
+<text x="400" y="188" class="label" text-anchor="middle" fill="#424a53">Recheck default branch</text>
+</g>
+<g data-node-id="rloop">
+<rect x="64" y="280" width="240" height="120" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="184" y="304" class="node" text-anchor="middle" fill="#1f2328">Review loop</text>
+<text x="184" y="328" class="label" text-anchor="middle" fill="#424a53">Read-only snapshot</text>
+<text x="184" y="348" class="label" text-anchor="middle" fill="#424a53">Canary and receipt</text>
+<text x="184" y="376" class="label" text-anchor="middle" fill="#424a53">Until review converges</text>
+</g>
+<g data-node-id="codex">
+<rect x="584" y="264" width="200" height="80" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="684" y="288" class="node" text-anchor="middle" fill="#1a7f37">Codex CLI</text>
+<text x="684" y="312" class="label" text-anchor="middle" fill="#424a53">Review and correction</text>
+<text x="684" y="332" class="label" text-anchor="middle" fill="#424a53">oah review / oah fix</text>
+</g>
+<g data-node-id="land">
+<rect x="280" y="560" width="216" height="152" rx="6" fill="#f6f8fa" stroke="#0969da" stroke-width="1"/>
+<text x="388" y="584" class="node" text-anchor="middle" fill="#0969da">oah land</text>
+<text x="388" y="608" class="label" text-anchor="middle" fill="#424a53">--check → --merge</text>
+<text x="388" y="632" class="label" text-anchor="middle" fill="#424a53">Exact reviewed HEAD</text>
+<text x="388" y="660" class="label" text-anchor="middle" fill="#424a53">Merge after you confirm</text>
+<text x="388" y="688" class="label" text-anchor="middle" fill="#424a53">Fast-forward push</text>
+</g>
+<g data-node-id="hooks">
+<rect x="584" y="504" width="200" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="684" y="528" class="node" text-anchor="middle" fill="#1f2328">Local git hooks</text>
+<text x="684" y="548" class="label" text-anchor="middle" fill="#424a53">Opt-in; oah finish</text>
+</g>
+<g data-node-id="remote">
+<rect x="584" y="632" width="200" height="80" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="684" y="656" class="node" text-anchor="middle" fill="#1f2328">Pull request and CI</text>
+<text x="684" y="680" class="label" text-anchor="middle" fill="#424a53">CI results for HEAD</text>
+<text x="684" y="700" class="label" text-anchor="middle" fill="#424a53">git / GitHub</text>
+</g>
+<line x1="40" y1="740" x2="800" y2="740" stroke="#d0d7de" stroke-width="1"/>
+<text x="40" y="764" class="label" text-anchor="start" fill="#424a53">Same gates and impact map as above. Only the reviewed HEAD lands, after confirmation.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

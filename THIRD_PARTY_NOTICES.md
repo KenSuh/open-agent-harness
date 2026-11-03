@@ -1,7 +1,8 @@
 # Third-party notices
 
-open-agent-harness vendors third-party code only as the skills listed under "Vendored skills" below,
-unchanged under `skills/`. This repository contains none of the files of the projects in the next table.
+open-agent-harness vendors the skills listed under "Vendored skills" below, unchanged under `skills/`,
+and adapts diagram-design templates and styles for documentation as credited below.
+This repository contains none of the files of the projects in the next table.
 You install them yourself, and `oah` runs or links to them.
 
 | Project | License | How open-agent-harness uses it |
@@ -21,6 +22,38 @@ Ideas only, credited. No text or code is copied from these:
 | [netwaif/knot](https://github.com/netwaif/knot) | No license published | Markdown wiki hygiene checks |
 
 If code from any project is ever copied verbatim, its license text is added here first.
+
+## diagram-design
+
+The editable HTML sources under `docs/assets/diagrams/` and their exported SVGs under `docs/assets/`
+adapt templates and styles from [Cathryn Lavery's diagram-design](https://github.com/cathrynlavery/diagram-design/tree/3eb03b8),
+pinned at commit **3eb03b8**, under the **MIT License**. Changes apply oah's Primer palette, system fonts,
+English and Korean text, static layouts and accessible descriptions. The skill itself is not vendored;
+none of its bundled third-party icon sets is used. Existing badge SVGs are not derived from this skill.
+
+```text
+MIT License
+
+Copyright (c) 2025 Cathryn Lavery
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## Benchmark data
 
