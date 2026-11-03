@@ -21,11 +21,12 @@ import math
 import hashlib
 import pathlib
 
-from oah import routing
+from oah import routing, scoring
 from oah.engines import effort as effort_rules
 from oah.models_report import (HASHED, JUDGE_RULES, TIER_SOURCES, UNUSED, _confidence, _dimension_readers, _features,
                                _flag, _jev_status, _judge_status, _pair as _report_pair, _plain, _Unreadable,
                                read_run, run_folders)
+from oah.rerank.base import ERROR_CODES, HTTP_ERROR_RE
 from oah.runs import RUN_ID_RE, TERMINAL, _PROGRESS
 
 FORMAT = 1
@@ -35,16 +36,11 @@ MODES = ("ranked", "pools", "scored", "deterministic")
 UNUSED_REASONS = {"not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
                   "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
                   "no-text", "no-candidates", "one-candidate", "too-many-candidates"}
-# rerank/__init__.py: key-name, bad-response; rerank/base.py: internal, provider;
-# rerank/typesafe.py: bad-response, timeout, network, invalid-header and HTTP status codes.
-ERROR_CODES = {"key-name", "bad-response", "internal", "provider", "timeout", "network", "invalid-header",
-               "unauthorized", "rate-limited", "overloaded"}
-# Snapshot of packaged engines/benchmarks.json, families.json and normalization.json.
-# Kept in code so export never reads packaged files, configuration, or a model catalog.
-MODEL_NAMES = frozenset("""claude-fable-5 claude-fable-5-1 claude-haiku-5-5 claude-opus-4-6 claude-opus-4-7
-claude-opus-4-8 claude-opus-5 claude-opus-5-5 claude-sonnet-4-6 claude-sonnet-5 claude-sonnet-5-5
-gpt-5.6-luna gpt-5.6-sol gpt-5.6-terra gpt-6-astra gpt-6-luna gpt-6-sol gpt-6.1-sol gpt-6.1-terra
-haiku sonnet opus fable luna terra sol astra""".split())
+# Names come from the same packaged data used by model scoring and effort normalization.
+_families = scoring.families()["engines"]
+MODEL_NAMES = frozenset((*_families["codex"]["families"], *_families["claude"]["aliases"],
+                         *scoring.bundled()["scores"],
+                         *(model for rule in effort_rules.load_rules() for model in rule["models"])))
 EFFORTS = frozenset((*effort_rules.ORDINARY, *effort_rules.BEHAVIOUR_CHANGING, effort_rules.HIGHEST))
 AXES = {"kind": routing.KIND_SCORES, "intensity": routing.INTENSITY_SCORES,
         "reasoning": routing.REASONING_SCORES, "risk": routing.RISK_SCORES}
@@ -117,7 +113,7 @@ def _export_status(value, report_reader):
         if reason in UNUSED_REASONS:
             return status
         if reason.startswith("error:") and UNUSED.fullmatch(status):
-            return status if reason[6:] in ERROR_CODES else "unused(error)"
+            return status if (reason[6:] in ERROR_CODES or HTTP_ERROR_RE.fullmatch(reason[6:])) else "unused(error)"
         raise _Unreadable("unknown-value")
     return status
 

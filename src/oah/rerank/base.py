@@ -8,6 +8,22 @@ from typing import Mapping, Protocol, Sequence
 
 from oah.secrets import Secret
 
+INTERNAL = 'internal'
+PROVIDER = 'provider'
+BAD_REQUEST = 'bad-request'
+BAD_RESPONSE = 'bad-response'
+KEY_NAME = 'key-name'
+TIMEOUT = 'timeout'
+NETWORK = 'network'
+INVALID_HEADER = 'invalid-header'
+INSECURE_URL = 'insecure-url'
+UNAUTHORIZED = 'unauthorized'
+RATE_LIMITED = 'rate-limited'
+OVERLOADED = 'overloaded'
+ERROR_CODES = frozenset((INTERNAL, PROVIDER, BAD_REQUEST, BAD_RESPONSE, KEY_NAME, TIMEOUT, NETWORK, INVALID_HEADER, INSECURE_URL, UNAUTHORIZED, RATE_LIMITED, OVERLOADED))
+HTTP_ERROR_PREFIX = "http-"
+HTTP_ERROR_RE = re.compile(re.escape(HTTP_ERROR_PREFIX) + r"[0-9]{3}")
+
 TIERS = ("low", "medium", "high", "max")
 _CODE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 _INTERRUPTIONS = (KeyboardInterrupt, SystemExit, GeneratorExit)
@@ -26,7 +42,7 @@ class ProviderError(Exception):
 
     def __init__(self, code: str) -> None:
         try:
-            self.code = code if isinstance(code, str) and _CODE_RE.fullmatch(code) else "provider"
+            self.code = code if isinstance(code, str) and _CODE_RE.fullmatch(code) else PROVIDER
             super().__init__(f"OAH_RERANK_PROVIDER_ERROR: {self.code}")
         finally:
             del self, code
@@ -59,7 +75,7 @@ def _interruption_fallback(exception_type: type[BaseException]) -> BaseException
     for base in _INTERRUPTIONS:
         if issubclass(exception_type, base):
             return base()
-    return ProviderError("internal")
+    return ProviderError(INTERNAL)
 
 
 def _sanitize_interruption(error: BaseException) -> BaseException:
@@ -68,7 +84,7 @@ def _sanitize_interruption(error: BaseException) -> BaseException:
     try:
         exception_type = _interruption_type(error)
         if exception_type is None:
-            return ProviderError("internal")
+            return ProviderError(INTERNAL)
         fallback = _interruption_fallback(exception_type)
         try:
             # Bypass subclass constructors and copy no arguments, notes or attributes.
@@ -83,7 +99,7 @@ def _sanitize_interruption(error: BaseException) -> BaseException:
 
 def _classify_failure(error: BaseException) -> str | BaseException:
     """Return only a validated code or a fresh interruption, never provider state or user attributes."""
-    failure = "internal"
+    failure = INTERNAL
     attributes = name = code = None
     try:
         try:
@@ -101,13 +117,13 @@ def _classify_failure(error: BaseException) -> str | BaseException:
                         break
         except BaseException as exc:
             failure = (_sanitize_interruption(exc) if _interruption_type(exc) is not None
-                       else "internal")
+                       else INTERNAL)
         try:
             traceback.clear_frames(BaseException.__traceback__.__get__(error))
         except BaseException as exc:
             if not issubclass(type(failure), _INTERRUPTIONS):
                 failure = (_sanitize_interruption(exc) if _interruption_type(exc) is not None
-                           else "internal")
+                           else INTERNAL)
         return failure
     finally:
         del error, failure, attributes, name, code

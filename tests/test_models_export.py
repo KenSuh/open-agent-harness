@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib
+from importlib import resources
 import io
 import json
 import os
@@ -197,11 +198,32 @@ class FieldsTest(unittest.TestCase):
 
     def test_error_codes_keep_only_known_codes(self):
         for status, expected in (("unused(error:timeout)", "unused(error:timeout)"),
+                                 ("unused(error:http-500)", "unused(error:http-500)"),
+                                 ("unused(error:bad-request)", "unused(error:bad-request)"),
+                                 ("unused(error:http-5000)", "unused(error)"),
                                  ("unused(error:bad-gateway)", "unused(error)"),
                                  ("unused(error: SomeError)", "unused(error)")):
             value = one(self, dict(NEW, model_judge=status, model_judge_confidence=None))
             self.assertEqual(value["model_judge"], expected)
             keys_of(value)
+
+    def test_packaged_model_names_and_unknown(self):
+        root = resources.files("oah").joinpath("templates/engines")
+        families, benchmarks, normalization = (json.loads(root.joinpath(name).read_text(encoding="utf-8"))
+                                                for name in ("families.json", "benchmarks.json", "normalization.json"))
+        groups = (set(families["engines"]["codex"]["families"]) | set(families["engines"]["claude"]["aliases"]),
+                  set(benchmarks["scores"]),
+                  {model for rule in normalization["rules"] for model in rule["models"]})
+        self.assertEqual(models_export.MODEL_NAMES, frozenset().union(*groups))
+        for model in (next(iter(group)) for group in groups):
+            with self.subTest(model=model):
+                selected = choice((model, "high"), (model, "high"))
+                self.assertEqual(one(self, dict(NEW, model_choice=selected))["model_choice"]["requested"]["model"], model)
+        model = "unknown-private-model"
+        selected = choice((model, "high"), (model, "high"))
+        result = one(self, dict(NEW, model_choice=selected))
+        self.assertEqual(result["model_choice"]["requested"]["model"],
+                         "sha256:" + hashlib.sha256(model.encode()).hexdigest())
 
     def test_status_vocabulary_and_canaries(self):
         reasons = ("not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
