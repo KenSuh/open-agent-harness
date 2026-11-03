@@ -25,17 +25,10 @@ command refuses, see [Troubleshooting](troubleshooting.md).
 
 ## The loop
 
-```mermaid
-flowchart LR
-    P["Packet<br/>intent and scope"] --> L["Lease<br/>preflight, start"]
-    L --> C["Claude<br/>initial implementation"]
-    C --> G["Gates and wiki<br/>evidence"]
-    G --> R["Codex<br/>review"]
-    R -->|"changes requested"| F["Codex<br/>oah fix"]
-    F --> G
-    R -->|"converged"| N["oah finish"]
-    N --> D["oah land<br/>after you confirm"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-loop-dark.svg">
+  <img src="assets/concepts-loop-light.svg" alt="A packet passes through a lease, Claude implementation, gates and wiki evidence, and Codex review, with requested fixes returning to evidence before convergence, finish and landing after your confirmation." width="100%">
+</picture>
 
 Every task goes the same way. You describe it in a **packet**, take a **lease** on the paths it may change,
 let **Claude Code** implement it, prove it with **gates**, and let **Codex** review, correct and review again
@@ -77,37 +70,15 @@ Lease state lives in `oah/` inside the repository's git folder, shared by every 
 renews, releases or finishes a lease (`OAH_WORKER_LEASE_REFUSED`). Implementation and correction workers run
 in your leased worktree; a read-only review may run anywhere.
 
-```mermaid
-stateDiagram-v2
-    state "Active" as Active
-    state "STALE (expired)" as Stale
-    state "Finished" as Finished
-    state "Released" as Released
-    state finish_check <<choice>>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-leases-lifecycle-dark.svg">
+  <img src="assets/concepts-leases-lifecycle-light.svg" alt="Starting creates an active lease, renewal and logging keep it active, TTL expiry makes it stale, either state can be released, and the next start prunes stale leases, subject to the stated refusal rules." width="100%">
+</picture>
 
-    [*] --> Active : oah start, or oah start --packet
-    Active --> finish_check : oah finish
-    Stale --> finish_check : oah finish
-    finish_check --> Finished : return, wiki, gates and scope pass, or allow flags (recorded)
-    finish_check --> Active : refused, lease still active
-    finish_check --> Stale : refused, lease expired
-    Active --> Released : oah release --reason
-    Stale --> Released : oah release --reason
-    Active --> Stale : TTL passes, 4 hours by default
-    Stale --> [*] : pruned by the next oah start
-    Finished --> [*]
-    Released --> [*]
-    Active --> Active : oah renew, oah start --packet (raised Revision), oah log
-
-    note left of Active
-        oah status only reads. It shows each lease as active or STALE.
-        start is refused with OAH_LEASE_CONFLICT on overlap, OAH_LEASE_EXISTS for your own task.
-        renew on a STALE lease is refused with OAH_LEASE_EXPIRED.
-        release needs --force for another agent's lease (else OAH_LEASE_NOT_YOURS).
-        finish refusals: OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING,
-        OAH_GATES_UNMET, OAH_SCOPE_EXCEEDED.
-    end note
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-leases-finish-dark.svg">
+  <img src="assets/concepts-leases-finish-light.svg" alt="Active and stale leases can finish when return, wiki, gates and scope pass or recorded allow flags apply, while a refusal preserves the active or expired state and reports the corresponding finish code." width="100%">
+</picture>
 
 ## Packets and intent
 
@@ -165,39 +136,15 @@ each engine.
 The optional TypeSafe Jev re-ranker re-orders skills, and it judges how hard each task is. Its tier counts only at or
 above a confidence you can set, and never below the floor.
 
-```mermaid
-flowchart TD
-    task["Task: stage, kind and Scope paths<br/>axes you give explicitly win"]
-    score["Fixed rules score four axes<br/>kind, intensity, reasoning, risk"]
-    tier["Tier: low, medium, high or max<br/>risk critical = max, migration, security = at least high"]
-    pick["Packet stage tier, or oah call --tier<br/>source recorded: rules, packet, flag or jev"]
-    model["Model and effort the CLI supports<br/>an effort that cannot be observed is recorded as unverified<br/>a lower launch effort fails: OAH_EFFORT_DOWNGRADED"]
-    skills["Deterministic skill list<br/>with a reason for each skill"]
-    ask{"Not --no-rerank, enabled by you,<br/>provider set AND key present?"}
-    jev["TypeSafe Jev provider<br/>re-orders only, never adds or drops<br/>judges difficulty from the Intent and Scope paths"]
-    used["rerank=used"]
-    unused["rerank=unused(reason)<br/>disabled-by-brief, not-enabled, not-configured,<br/>unknown-provider, no key, no-candidates, error:CODE"]
-    brief["Packet plan, brief and run record"]
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-routing-rules-dark.svg">
+  <img src="assets/concepts-routing-rules-light.svg" alt="Explicit task axes feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record." width="100%">
+</picture>
 
-    task --> score --> tier --> pick --> model --> brief
-    task --> skills
-    skills --> ask
-    ask -->|"yes, candidates present"| jev
-    ask -->|"yes, no candidates"| unused
-    ask -->|"no"| unused
-    jev -->|"scoring succeeds"| used
-    jev -->|"error, original order kept"| unused
-    used --> brief
-    unused --> brief
-    jev -.->|"its tier at or above difficulty_min_confidence, never below the floor"| pick
-
-    classDef rule fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
-    classDef ai fill:#f3e8ff,stroke:#8250df,color:#2e1065
-    classDef note fill:#fff1c2,stroke:#9a6700,color:#3d2a00
-    class score,tier,pick,model,skills rule
-    class jev,used ai
-    class unused note
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-routing-skills-dark.svg">
+  <img src="assets/concepts-routing-skills-light.svg" alt="The task yields a reasoned deterministic skill list, configured and enabled reranking uses Jev only with candidates, success records used, and no candidates, disabling or errors record unused with the original order kept on error." width="100%">
+</picture>
 
 ### Jev judges difficulty
 
@@ -412,39 +359,15 @@ oah impact --changed-since origin/main
   read-only, and keeps a second map for it. The output labels both with their commit SHAs. `--offline`, or a
   failed fetch, uses the last fetched commit and labels it stale.
 
-```mermaid
-flowchart LR
-    change["You change a file<br/>for example a SQL migration"]
-    fresh{"Worktree map fresh?<br/>HEAD, index, dirty files, ledgers, config, tool"}
-    refresh["Refresh incrementally when possible<br/>rebuild otherwise"]
-    stale["OAH_IMPACT_STALE<br/>never used silently"]
-    dflt["Default-branch map<br/>fetched read-only, --offline or a failed fetch is labelled stale"]
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-impact-freshness-dark.svg">
+  <img src="assets/concepts-impact-freshness-light.svg" alt="A file change checks map freshness, refreshes incrementally or rebuilds when needed, reports stale instead of silently using it when refresh is disabled or inputs move, and combines the default-branch map at pin results." width="100%">
+</picture>
 
-    subgraph ranked["Ranked results"]
-        pinR["pin: a gate EXPECT names it, or a gate CHECK<br/>or workflow, manifest or config command hashes or greps it"]
-        execR["exec: a gate CHECK or such a command runs it"]
-        linkR["link: its full path is named in code, tests, workflows,<br/>wiki or a gate CHECK, migrations that define a SQL object"]
-        mentionR["mention: file name or stem match, co-change,<br/>graph neighbour"]
-    end
-
-    rerun["Exact gates and commands to re-run<br/>re-run lines with --changed-since"]
-
-    change --> fresh
-    fresh -->|"yes"| pinR
-    fresh -->|"no"| refresh --> pinR
-    fresh -.->|"--no-refresh, or inputs keep moving"| stale
-    dflt --> pinR
-    pinR --> execR --> linkR --> mentionR
-    pinR --> rerun
-    execR --> rerun
-
-    classDef strong fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
-    classDef weak fill:#dbe9ff,stroke:#0969da,color:#0a2a5c
-    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
-    class pinR,execR,rerun strong
-    class linkR,mentionR weak
-    class stale stop
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-impact-ranked-dark.svg">
+  <img src="assets/concepts-impact-ranked-light.svg" alt="Ranked impact results run from pin through exec and link to mention, with pin and exec identifying the exact gates and commands to rerun and the rerun lines shown with changed-since." width="100%">
+</picture>
 
 ## The project wiki
 
@@ -504,14 +427,10 @@ command and the output it must produce:
 
 ## The review loop and corrections
 
-```mermaid
-flowchart TD
-    R["oah review<br/>Codex, read-only snapshot"] -->|"approve, or only P2/P3"| V["converged"]
-    R -->|"P0/P1 findings"| F["oah fix<br/>Codex corrects"]
-    F --> B["you inspect and commit,<br/>then oah fix --bind"]
-    B --> R
-    R -->|"repeats a corrected kind,<br/>or needs a design change"| D["stops and asks you<br/>OAH_REVIEW_NEEDS_DECISION"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-review-dark.svg">
+  <img src="assets/concepts-review-light.svg" alt="Codex reviews a read-only snapshot, converges on approval or only P2/P3 findings, corrects P0/P1 findings before your inspection, commit and bind, and stops for your decision if a corrected kind repeats or the design must change." width="100%">
+</picture>
 
 - **A round** (`oah review --task T`) reviews the committed work, from the merge-base with the default branch
   to HEAD. Codex reads a fresh clone of that head with the agent instruction files (`AGENTS.md`, `CLAUDE.md`,
@@ -586,45 +505,15 @@ The fetched target branch’s committed `.oah/config.toml` supplies `[land]` pol
 names or status contexts to require them. Loosening this policy in the task head refuses with
 `OAH_LAND_POLICY_LOOSENED`; land that policy change separately on the default branch first.
 
-```mermaid
-flowchart LR
-    subgraph local["On your machine, all hooks opt-in"]
-        gcommit["git commit"]
-        pc["pre-commit<br/>wiki commit check"]
-        post["post-commit, post-merge<br/>refresh the impact map"]
-        gpush["git push"]
-        pp["pre-push<br/>lease open, active or stale?<br/>gitleaks installed: scan pushed commits<br/>otherwise warn and allow unscanned push"]
-        cc["Claude Code Stop and SessionStart hooks"]
-    end
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-landing-local-dark.svg">
+  <img src="assets/concepts-landing-local-light.svg" alt="Opt-in local hooks check wiki commits, refresh the impact map, check for open leases and scan pushed commits when gitleaks is installed, while pushes feed secrets checks and pull requests and Claude has Stop and SessionStart hooks." width="100%">
+</picture>
 
-    pr["Pull request to main"]
-
-    subgraph actions["GitHub Actions in this repository"]
-        tests["ci: tests, install, oah --version, privacy scan<br/>macOS and Windows, PRs to main except docs/** and *.md, manual run"]
-        secrets["secrets: gitleaks and privacy scan, full history<br/>every pull request and push, manual run"]
-    end
-
-    land{"oah land --check, exact HEAD<br/>lease, intent, review, gates, impact,<br/>required-checks, fast-forward, scan, ci"}
-    exc["Unverified CI blocks: OAH_LAND_CI_UNVERIFIED<br/>unless --accept-unverified-ci reason, recorded for that head"]
-    landed["oah land --merge<br/>checks again, you confirm,<br/>fast-forward push of HEAD"]
-
-    gcommit --> pc
-    gcommit --> post
-    gpush --> pp
-    pp -->|"push"| secrets
-    pp --> pr
-    pr --> tests
-    pr --> secrets
-    tests -->|"gh reads HEAD's check runs"| land
-    secrets -->|"gh reads HEAD's check runs"| land
-    land -.-> exc
-    land --> landed
-
-    classDef avail fill:#d1f2dc,stroke:#1a7f37,color:#0f3d1e
-    classDef stop fill:#ffe1e1,stroke:#cf222e,color:#4c0a0f
-    class tests,secrets,post,pp,pc,cc,land,landed avail
-    class exc stop
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-landing-checks-dark.svg">
+  <img src="assets/concepts-landing-checks-light.svg" alt="Pull requests run the repository’s CI and secrets workflows, gh reads the exact HEAD checks for land, unverified CI needs a recorded head-specific exception, and merging rechecks and asks you before a fast-forward push of HEAD." width="100%">
+</picture>
 
 ## Model and skill updates
 

@@ -29,7 +29,7 @@ oah는 함께 지킬 규칙을 준다. 아래 두 구조 그림은 모든 부분
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/architecture-build-ko-dark.svg">
-  <img src="../assets/architecture-build-ko-light.svg" alt="사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 선택형 TypeSafe Jev가 스킬 순서를 판정하고 증거 게이트는 영향 지도와 위키에 연결된다." width="100%">
+  <img src="../assets/architecture-build-ko-light.svg" alt="사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 권장 선택형 TypeSafe Jev가 스킬 순서와 작업 난이도를 판정해 최저 기준 안에서 tier를 바꿀 수 있고 증거 게이트는 영향 지도와 위키에 연결된다." width="100%">
 </picture>
 
 <picture>

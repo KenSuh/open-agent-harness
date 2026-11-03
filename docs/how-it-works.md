@@ -32,7 +32,7 @@ to connect preparation with review and landing. Dashed arrows mark optional conn
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-build-dark.svg">
-  <img src="assets/architecture-build-light.svg" alt="You send a packet through leases, preflight and routing to Claude Code, with optional TypeSafe Jev skill judging and evidence gates linked to the impact map and wiki." width="100%">
+  <img src="assets/architecture-build-light.svg" alt="You send a packet through leases, preflight and routing to Claude Code, with recommended optional TypeSafe Jev reordering skills and judging task difficulty so the tier can change within its floor, and evidence gates linked to the impact map and wiki." width="100%">
 </picture>
 
 <picture>
