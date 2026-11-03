@@ -158,6 +158,9 @@ Options:
 FAKE_TOOL = r'''
 import json, os, pathlib, sys, time
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 
 def main():
     tool, args = sys.argv[1], sys.argv[2:]
@@ -832,7 +835,7 @@ class PassTest(FakeToolsCase):
         self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
 
     def test_everything_current(self):
-        self.assertEqual(self.run_pass(), "complete")
+        self.assertEqual(self.run_pass(env=dict(self.fake.env, PYTHONIOENCODING="cp437")), "complete", self.lines)
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
                          {"claude": "current", "codex": "current", "claude-marketplaces": "current",
