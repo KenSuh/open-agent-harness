@@ -484,7 +484,10 @@ command and the output it must produce:
 - CHECK lines must run the same in `cmd.exe` and `sh`: call `python`, `node` or `oah check`, not `grep` or
   pipes. `oah check` offers portable assertions such as `oah check contains FILE TEXT`.
 - The opt-in Claude Code Stop hook (`oah hooks install stop`) keeps a session from ending while its gates are
-  unmet.
+  unmet. Listing lease agent names in `[gates] stop_agents` (default `[]`: every lease) limits the hook to leases
+  held under exactly those names. The list is opt-in and has a cost: a lease held under a name left off the list
+  no longer stops the session. `oah finish` still refuses unmet gates, so the check moves to the end of the task
+  and is not lost.
 
 ## The review loop and corrections
 
