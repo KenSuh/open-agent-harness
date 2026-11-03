@@ -50,7 +50,7 @@ class _Unreadable(Exception):
 
 def band(value: float) -> int:
     """The tenth a confidence from 0 to 1 falls in; 1.0 is in the last."""
-    return min(9, math.floor(value * 10 + 1e-9))
+    return next((k - 1 for k in range(1, 10) if value < k / 10), 9)
 
 
 def _plain(value, words) -> str:
@@ -67,7 +67,7 @@ def _plain(value, words) -> str:
 def _confidence(value) -> float | None:
     if value is None:
         return None
-    if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+    if type(value) not in (int, float) or not 0 <= value <= 1 or not math.isfinite(value):
         raise _Unreadable("hashed" if isinstance(value, str) and HASHED.fullmatch(value) else "wrong-type")
     return float(value)
 
@@ -170,13 +170,25 @@ def _record_counts(counts: dict, record: dict) -> bool:
 
     def jev_vs_rule():
         if "jev_status" not in record:
+            if "jev_tier" in record:
+                raise _Unreadable("inconsistent")
             return _ABSENT
         if get("jev_status") is None:
+            if "jev_tier" not in record or get("jev_tier") is not None:
+                raise _Unreadable("inconsistent")
             return None
         status = _jev_status(get("jev_status"))
-        if get("jev_tier") is None:
+        if "jev_tier" not in record:
+            raise _Unreadable("inconsistent")
+        tier = get("jev_tier")
+        answered = status in ("used", BELOW_THRESHOLD)
+        if tier is None:
+            if answered:
+                raise _Unreadable("inconsistent")
             return "no-jev-tier"
-        jev, rule = _plain(get("jev_tier"), routing.TIERS), get("rule_tier")
+        if not answered:
+            raise _Unreadable("inconsistent")
+        jev, rule = _plain(tier, routing.TIERS), get("rule_tier")
         if rule is None:
             raise _Unreadable("inconsistent")
         rule = _plain(rule, routing.TIERS)
@@ -186,7 +198,11 @@ def _record_counts(counts: dict, record: dict) -> bool:
     def confidence(status_key: str, value_key: str, answered: dict):
         def reader():
             if value_key not in record:
+                if status_key == "jev_status" and status_key in record:
+                    raise _Unreadable("inconsistent")
                 return _ABSENT
+            if status_key not in record:
+                raise _Unreadable("inconsistent")
             status = get(status_key)
             if status is None:
                 kind = None
@@ -199,6 +215,13 @@ def _record_counts(counts: dict, record: dict) -> bool:
                 if number is not None:
                     raise _Unreadable("inconsistent")
                 return "not_answered"
+            if status_key == "jev_status":
+                if status == "used" and number is None:
+                    raise _Unreadable("inconsistent")
+                if status == BELOW_THRESHOLD:
+                    shown = "none" if number is None else format(number, ".3g")
+                    if get(status_key) != f"{BELOW_THRESHOLD} {shown}":
+                        raise _Unreadable("inconsistent")
             return "no_confidence" if number is None else (kind, band(number))
         return reader
 
@@ -219,9 +242,6 @@ def _record_counts(counts: dict, record: dict) -> bool:
                                              {"used": "used", "rejected(": "rejected"}),
         "tier_floor_raised": value("tier_floor_raised", floor),
     }
-    # `jev_confidence` exists only where `jev_status` does: an older record has neither.
-    if "jev_status" not in record:
-        readers["jev_confidence"] = lambda: _ABSENT
     return all([_count(counts, name, readers[name]) for name in DIMENSIONS])
 
 

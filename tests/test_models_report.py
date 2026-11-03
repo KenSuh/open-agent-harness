@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import pathlib
 import socket
@@ -170,6 +171,59 @@ class AgesTest(unittest.TestCase):
         for value, band in ((0.0, 0), (0.0999, 0), (0.1, 1), (0.3, 3), (0.7, 7), (0.95, 9), (1.0, 9), (1, 9)):
             with self.subTest(value=value):
                 self.assertEqual(models_report.band(value), band)
+
+
+class PartialValidationTest(unittest.TestCase):
+    def test_inconsistent_companions_are_partial_and_counts_add_up(self):
+        state = make_tmp_dir(self)
+        missing_tier = dict(NEW, jev_status="used")
+        del missing_tier["jev_tier"]
+        no_jev_status = dict(NEW, jev_confidence=None)
+        del no_jev_status["jev_status"]
+        no_judge_status = dict(NEW, model_judge_confidence=None)
+        del no_judge_status["model_judge"]
+        records = (missing_tier, dict(NEW, jev_status="used", jev_tier=None), no_jev_status,
+                   no_judge_status, dict(NEW, jev_status="unused(pinned)", jev_tier="high"),
+                   dict(NEW, jev_status="used", jev_confidence=None))
+        for n, record in enumerate(records, 1):
+            write_run(state, n, record)
+        report = models_report.collect(state)
+        self.assertEqual(report["records"]["partial"], 6)
+        totals = report["totals"]
+        self.assertEqual(totals["jev_vs_rule"]["unreadable"], {"inconsistent": 4})
+        self.assertEqual(totals["jev_confidence"]["unreadable"], {"inconsistent": 3})
+        self.assertEqual(totals["model_judge_confidence"]["unreadable"], {"inconsistent": 1})
+        for name in models_report.DIMENSIONS:
+            self.assertEqual(tally_sum(totals[name]), len(records), name)
+        self.assertIn("total: 6 runs", "\n".join(models_report.text(report)))
+
+    def test_below_threshold_status_matches_its_confidence(self):
+        state = make_tmp_dir(self)
+        write_run(state, 1, dict(NEW, jev_status="below-threshold none", jev_confidence=0.5))
+        write_run(state, 2, dict(NEW, jev_status="below-threshold 0.5", jev_confidence=None))
+        report = models_report.collect(state)
+        self.assertEqual(report["records"]["partial"], 2)
+        self.assertEqual(report["totals"]["jev_confidence"]["unreadable"], {"inconsistent": 2})
+
+    def test_oversized_confidences_are_unreadable(self):
+        state = make_tmp_dir(self)
+        write_run(state, 1, dict(NEW, jev_confidence=10**400))
+        write_run(state, 2, dict(NEW, model_judge_confidence=10**400))
+        report = models_report.collect(state)
+        self.assertEqual(report["records"]["partial"], 2)
+        for name in ("jev_confidence", "model_judge_confidence"):
+            self.assertEqual(report["totals"][name]["unreadable"], {"wrong-type": 1})
+            self.assertEqual(tally_sum(report["totals"][name]), 2)
+        self.assertIn("total: 2 runs", "\n".join(models_report.text(report)))
+
+    def test_tenth_boundaries(self):
+        for k in range(1, 10):
+            boundary = k / 10
+            for value, expected in ((math.nextafter(boundary, 0), k - 1), (boundary, k),
+                                    (math.nextafter(boundary, 1), k)):
+                with self.subTest(value=value):
+                    self.assertEqual(models_report.band(value), expected)
+        self.assertEqual(models_report.band(1.0), 9)
 
 
 class CorrectionTest(unittest.TestCase):
