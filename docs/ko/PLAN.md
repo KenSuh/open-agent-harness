@@ -5,7 +5,7 @@
 상태는 **2026-10-23 소유자 승인**이다. 소유자 결정은 13절, 개정 1–5(2026-10-23)는 15절, 의도 개정 3은 1절에 있다.
 
 이 계획은 한 소유자가 혼자 쓰던 비공개 다중 에이전트 하네스(아래에서 "원본"이라 한다)를
-누구나 macOS나 Windows에 설치해 자기 저장소에서 쓸 수 있는 범용 키트로 바꾼다.
+한 사람이 macOS나 Windows에 설치해 자기 저장소에서 쓸 수 있는 범용 키트로 바꾼다.
 4절은 원본의 모든 구성 요소와 처리 방식을 나열한다. 5–11절은 무엇을 만들지 설명한다.
 13절은 소유자가 결정한 것과 구현자가 결정한 것을 구분한다.
 
@@ -14,11 +14,11 @@
 ## 1. 의도
 
 <!-- OAH_INTENT:BEGIN -->
-## 의도
+## Intent
 Intent-ID: open-agent-harness
 Revision: 4
 Status: accepted
-### 문제
+### Problem
 AI로 실무 수준의 작업을 하는 개발자에게는 Claude Code와 Codex CLI라는 강력한 도구 두 개가 있다. 하지만 둘을 함께 믿고 쓰게 해 주는 작업 환경은 주어지지 않는다.
 - 공유 리스
 - 단계별 라우팅
@@ -29,7 +29,7 @@ AI로 실무 수준의 작업을 하는 개발자에게는 Claude Code와 Codex 
 - 최신 상태를 유지하는 스킬과 모델
 
 소유자는 이 환경을 한 컴퓨터에 직접 만들었다. 다른 사람은 이를 스스로 다시 만들어야 한다.
-### 원하는 결과
+### Desired outcome
 macOS나 Windows에서 설치 명령 하나와 `oah init`으로 새 프로젝트나 기존 프로젝트에 이 환경을 자동으로 만들고, 소유자의 하네스처럼 실행한다.
 - Claude Code가 1차 구현을 한다.
 - Codex가 리뷰, 수정, 재리뷰를 한다.
@@ -39,9 +39,9 @@ macOS나 Windows에서 설치 명령 하나와 `oah init`으로 새 프로젝트
 그 결과 기업 수준의 리뷰 절차(검증 가능한 리뷰, 정확한 head에 결속한 증거, 점검한 반영)를 서버 없이 로컬에서 지킨다.
 
 유료이거나 되돌릴 수 없는 일은 사용자가 명시적으로 확인해야만 일어난다.
-### 성공 조건
+### Success conditions
 - AC1: 새 macOS 13+ 또는 Windows 11 컴퓨터에서 README의 명령 하나로 `oah`를 설치하고, 새 터미널에서 `oah --version`이 버전을 출력한다.
-- AC2: 새 프로젝트나 기존 프로젝트에서 `oah init`이 빠진 도구를 공식 설치 명령과 함께 모두 나열하고 사용자가 확인한 도구만 설치한다. 각 도구 자체 로그인 명령으로 Claude Code와 Codex에 로그인하도록 안내하며, `oah`는 비밀번호, 키, 토큰을 보지 않는다.
+- AC2: 새 프로젝트나 기존 프로젝트에서 `oah init`이 빠진 도구를 공식 설치 명령과 함께 모두 나열하고 사용자가 확인한 도구만 설치한다. 각 도구 자체 로그인 명령으로 사용자가 Claude Code와 Codex에 로그인하게 하며, `oah`는 비밀번호, 키, 토큰을 보지 않는다.
 - AC3: `oah init` 뒤 프로젝트에 규칙 블록, tier 에이전트, Obsidian 호환 위키, 최신 영향 지도, 게이트 템플릿, 사용자가 수락한 훅이 있다.
   - 기본값은 소유자의 작업 흐름과 같다. Claude가 1차 구현을 하고 Codex가 리뷰, 수정, 재리뷰를 한다.
   - 작업을 계속하는 동안 영향 지도와 위키는 자동으로 최신 상태를 유지한다. 커밋, 병합, 작업 단계마다 갱신하고 로그, 색인, 정리 상태를 관리한다.
@@ -49,16 +49,16 @@ macOS나 Windows에서 설치 명령 하나와 `oah init`으로 새 프로젝트
 - AC5: 새 모델이나 검증된 스킬 업데이트가 있으면 oah의 업데이트 확인 뒤 다음 작업에서 수동 절차 없이 사용하며, 무엇이 언제 왜 바뀌었는지 보여 준다. 모델은 매 실행 전에 확인하고, 스킬은 기본적으로 적어도 하루 한 번 확인한다. 사용자가 고정한 모델이나 스킬은 알리지 않고 바꾸지 않는다.
 - AC6: 결정을 묻는 모든 메시지는 무엇이 일어나고 비용이 얼마인지 밝힌다. 구매, 계정 변경, push, 병합, 전역 파일 편집처럼 유료이거나 되돌릴 수 없는 일은 사용자가 명시적으로 확인해야만 일어난다.
 - AC7: 저장소에는 소유자 하네스의 비공개 데이터나 어떤 종류의 자격 증명(API 키, 토큰, 비밀번호)도 없으며 A17의 스캔으로 이를 강제한다. 함께 배포하는 모든 외부 항목에 출처, 버전, 라이선스를 표시한다.
-### 제약
+### Constraints
 - macOS 13+와 Windows 11에서 네이티브로 실행한다(Windows 10 22H2는 최선 노력 지원). Python 3.11+와 표준 라이브러리만 쓴다(3절).
 - 소유자의 비공개 하네스에 런타임으로 의존하지 않는다. `oah`는 새로 작성하는 이식으로 이를 따라간다(A16).
-- 외부 구성 요소는 라이선스가 허락하는 범위에서만 연결하거나 의존하거나 원본을 포함한다(A13).
-### 비목표
+- 외부 구성 요소는 라이선스가 허락하는 범위에서만 연결하거나 의존하거나 저장소에 그대로 번들한다(A13).
+### Non-goals
 - 팀 서버, 웹 UI, 원격 사용 기록 전송. 작은 팀은 개발자별·저장소별로 `oah`를 쓴다.
 - 기업 관리 기능. 싱글 사인온, 중앙 감사 로그, 조직 정책 관리는 제공하지 않는다.
 - 프로그래밍이나 git 교육. `oah`는 사용자가 git, 브랜치, pull request를 안다고 전제한다.
 - Linux를 지원 OS로 삼는 것. 동작할 수는 있지만 테스트하지 않는다.
-### 열린 질문
+### Open questions
 - 없다.
 <!-- OAH_INTENT:END -->
 
@@ -71,9 +71,9 @@ AC3과 AC7에는 승인할 때 권고한 두 가지 추가 사항을 담았다. 
 안맞지 않아?». 권고한 표현을 받아들여, 실무 수준의 작업을 하는 개발자와 작은 팀이
 기업 수준의 리뷰 절차를 로컬에서 지킨다고 설명한다. `oah`는 기업 관리 제품도,
 첫 프로그래밍 도구도 아니다. 뒤에서 여전히 "초보자"라고 하는 절(6.5, 개정 이력,
-OB)은 이력을 보존한다. P9 작업 갈래에서 이 대상을 위한 사용자 문서와 README를 다시 쓴다.
+OB)은 이력을 보존한다. P9 레인에서 이 대상을 위한 사용자 문서와 README를 다시 쓴다.
 
-**GitHub는 선택 사항이다.** 예제는 새 `git init` 저장소에서 완전히 로컬로 실행된다. push와
+**GitHub는 선택 사항이다.** 따라 하기 예제는 새 `git init` 저장소에서 완전히 로컬로 실행된다. push와
 PR은 선택하는 마지막 단계다. `gh`와 원격 저장소가 있으면 `oah`가 `gh pr create` 명령을 출력하고,
 `oah review summary`가 PR 본문을 출력한다.
 
@@ -114,8 +114,8 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 - 키트가 묻지 않고 셸 프로필, 전역 에이전트 설정, 훅 같은 전역 항목을
   설치하거나 바꾸거나 삭제한다.
 - 원본의 비공개 데이터가 이 저장소로 샌다.
-- 라이선스가 허락하지 않는데 외부 코드를 포함하거나, LICENSE, 고정한 업스트림
-  커밋, 고지 없이 포함한다(A13).
+- 라이선스가 허락하지 않는데 외부 코드를 번들하거나, LICENSE, 고정한 업스트림
+  커밋, 고지 없이 번들한다(A13).
 - 어떤 종류든 자격 증명이 저장소, 이력, 릴리스, 이슈, CI 로그에 들어간다(A17).
 - bash에서는 동작하지만 PowerShell에서는 깨지거나, 작성자의 Mac에서만 동작한다.
 - 신뢰를 꾸며 낸다. 표시나 영수증이 그 장치가 증명하는 것보다 더 많은 것을 주장한다.
@@ -132,7 +132,7 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 - **개인정보.** 저장소에는 개인 경로, 이름, 이메일, 제품 이름, 키, 볼트 자료가 없다
   (10절).
 - **라이선스.** 키트는 MIT이며 저작권자는 "open-agent-harness contributors"다.
-  외부 구성 요소는 연결하거나 의존한다. 스킬은 라이선스가 재배포를 허락할 때만 원본 그대로 포함하고,
+  외부 구성 요소는 연결하거나 의존한다. 스킬은 라이선스가 재배포를 허락할 때만 원본 그대로 번들하고,
   LICENSE, 고정한 업스트림 커밋, 고지를 함께 둔다(9절, A13).
 - **비밀값.** 자격 증명을 저장소에 넣지 않는다. 키는 실행할 때만 환경 변수나
   OS 키체인에서 읽는다(A17).
@@ -154,7 +154,7 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 
 **2026-10-23에 재판정했다(개정 3).** 모든 행에 한 가지 기준을 적용했다. 초보자가 소유자의
 작업 환경을 자동으로 얻는가? 비공개·소유자 전용 내용(이름, 경로, 제품, 계정, 볼트 자료)과
-다른 사람이 쓸 수 없는 것만 제외한다. 무겁다는 이유만으로 빼지 않고 좋은 기본값을 갖춰
+다른 사람이 쓸 수 없는 것만 제외한다. 무겁다는 이유만으로는 더 이상 행을 빼지 않고 좋은 기본값을 갖춰
 제공한다. 아래에서 2, 3, 7, 8, 9, 11, 17, 18, 21, 27–35, 37행을 바꾸거나 이유를 추가했다.
 
 | # | 원본 구성 요소 | 원본에서 하는 일 | 판정 | 키트에서 하는 일 |
@@ -165,8 +165,8 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 | 4 | 두 리스 역할(구현자와 반영 세션), 단일 병합/push 절차(`READY_FOR_*` 상태) | 한 세션만 반영함 | **간소화** | 규칙은 하나다. 워커는 push하지 않는다. 사용자(리드)가 `oah finish` 뒤 push한다. PR + CI가 결정한다 |
 | 5 | 안내문을 주입하는 워커 호출 `mah call`(Claude 또는 Codex) | 프로토콜을 붙여 다른 엔진을 비대화형으로 실행 | **유지** | `oah call <engine> --stage <s>`. 프롬프트는 stdin으로 전달하고 OS별로 실행 파일을 찾으며 시간 초과 때 프로세스 트리를 종료한다(5.5) |
 | 6 | 단계 라우팅(`initial→claude`, `review/correction→codex`)과 kind/intensity/reasoning/risk 점수 → 프로필 → 모델/추론 강도 | 단계로 엔진, 난이도로 모델과 추론 강도를 정함 | **유지, 축소** | `.oah/config.toml`의 `[stages]`, `[engines.*.tiers]`, 그리고 `call`과 `packet new`가 자동 적용하는 `oah recommend`(A10). 모델 ID를 코드에 고정하지 않는다(5.5) |
-| 7 | TTL 갱신 모델 카탈로그(오래되면 실행 거절) | 모델 목록을 최신으로 유지 | **유지(A14)** | 실행 전마다 읽고 CLI 버전이 바뀌거나 TTL이 지나면 갱신하는 엔진별 모델 카탈로그. tier는 설정한 품질 순서와 CLI 기본값 규칙을 따른다. 변경은 기록하며 명시적으로 고정한 tier가 우선한다(A14) |
-| 8 | Orca 배정. 배정기의 실행 부분, 실행 매트릭스, 하트비트, 오케스트레이션 게이트, 반영 큐(모듈 12개) | Orca 앱 안에서 감독하는 워커 | **선택** | Orca가 설치돼 있으면 `oah call`에 선택형 Orca 어댑터를 쓴다(작업 갈래 P3o). 기본값은 일반 CLI다 |
+| 7 | TTL 갱신 모델 카탈로그(오래되면 실행 거절) | 모델 목록을 최신으로 유지 | **유지(A14)** | 실행 전마다 읽고 CLI 버전이 바뀌거나 TTL이 지나면 갱신하는 엔진별 모델 카탈로그. tier는 설정한 품질 순서와 CLI 기본값 규칙을 따른다. 변경은 기록하며 명시적 tier 핀이 우선한다(A14) |
+| 8 | Orca 배정. 배정기의 실행 부분, 실행 매트릭스, 하트비트, 오케스트레이션 게이트, 반영 큐(모듈 12개) | Orca 앱 안에서 감독하는 워커 | **선택** | Orca가 설치돼 있으면 `oah call`에 선택형 Orca 어댑터를 쓴다(레인 P3o). 기본값은 일반 CLI다 |
 | 9 | tier 서브에이전트(Claude 에이전트 파일 5개, tier 표, tier 동기화, PreToolUse tier 가드) | 난이도에 따라 서브에이전트별 모델 + 추론 강도 설정 | **유지, tier 가드는 나중에** | `oah init`이 `.claude/agents/oah-{low,medium,high,max}.md`를 쓴다. `oah tiers sync/check`를 제공한다. 선택형 tier 가드는 v0.1.0 이후로 미룬다 |
 | 10 | 규칙 블록 동기화(공유 규칙 원본, CLAUDE.md/AGENTS.md의 마커 블록, AGENTS.md 바이트 제한) | 모든 엔진 지침 파일에 같은 규칙 유지 | **유지** | `oah rules sync/check`. `AGENTS.md`에 블록 하나를 두고 `CLAUDE.md`가 `@AGENTS.md`로 가져온다. 전역 파일은 건드리지 않는다(5.11) |
 | 11 | 세션 연속성(진입 프롬프트 생성기, SessionStart 훅) | 새 세션이 이전 세션이 멈춘 곳에서 재개 | **유지** | `oah handoff`와 선택형 SessionStart 훅. 활성 리스, 최근 로그 항목, 최신 인계문을 출력하며 `OAH_WORKER=1`이면 아무것도 출력하지 않는다(P7) |
@@ -186,14 +186,14 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 | 25 | 정제한 리뷰 스냅샷(정확한 head의 새 클론, 에이전트 지침 파일 제거, 리뷰어 설정·규칙 무시, 최소 환경) | 저장소 파일의 자동 지침 로딩을 줄임 | **유지** | `CLAUDE.md`와 `.claude/`도 제거하는 이식 가능한 Python 버전(5.9) |
 | 26 | "같은 엔진은 독립적이지 않다" 규칙 | 정직한 신뢰 표시 | **유지, 표시로 제공** | 영수증 필드 `independent: true/false`와 눈에 보이는 경고 |
 | 27 | 리뷰어 실행 파일 고정(해시 + macOS 코드 서명 + 로그인 방식 요구) | 리뷰어 실행 파일 신뢰 | **간소화** | CLI 경로, 버전, sha256을 기록하고 고정은 선택 사항으로 둔다. 재판정 이유는 코드 서명 검사가 macOS에만 있고 로그인 방식은 계정 선택의 문제이기 때문이다 |
-| 28 | 다섯 축 협력 검사(목표, QA, 품질, 보안, 문맥) | 최종 head에서 자체 점검할 축 | **간소화** | 다섯 축(목표, 테스트, 품질, 보안, 문맥)을 리뷰 기준과 `oah review summary`의 체크리스트로 둔다 |
+| 28 | 다섯 레인 협력 검사(목표, QA, 품질, 보안, 문맥) | 최종 head에서 자체 점검할 축 | **간소화** | 다섯 축(목표, 테스트, 품질, 보안, 문맥)을 리뷰 기준과 `oah review summary`의 체크리스트로 둔다 |
 | 29 | 반영 감사. CI check-run에 결속한 리뷰 묶음, 간소 감사와 중요 감사, 반영 종료 영수증, `verify-landing` | 병합 전 최종 감사 | **유지, 축소** | `oah land --check`가 수렴한 리뷰 영수증, CI check-run(`gh`가 있으면 이를 사용), 스캔, 게이트가 모두 정확한 head에 결속했는지 검증한다. 이어 기본 브랜치 영향을 갱신하고 새로 영향받는 검사를 push나 병합 전에 요구한다(5.9). `--merge`는 사용자 확인 뒤에만 반영한다(P6) |
-| 30 | 스킬 장치. suggest/pack/route/audit/telemetry/lock, 자동 유지 관리, 로컬 패치를 더한 외부 스킬 포함 | 스킬 관리·주입 | **유지, 범용화(A9, A13, A15)** | 브리프별 스킬 선택, 라이선스가 허락하는 범위에서 출처와 함께 스킬 포함, 자동 업데이트. 원본 장치는 복사하지 않고 선택기는 새 코드로 만든다 |
+| 30 | 스킬 장치. suggest/pack/route/audit/telemetry/lock, 자동 유지 관리, 로컬 패치를 더한 외부 스킬 번들 | 스킬 관리·주입 | **유지, 범용화(A9, A13, A15)** | 브리프별 스킬 선택, 라이선스가 허락하는 범위에서 출처와 함께 스킬 번들, 자동 업데이트. 원본 장치는 복사하지 않고 선택기는 새 코드로 만든다 |
 | 31 | 외부 AI 재정렬 서비스 계층(난이도 보조 판정, 모델 업그레이드 보조 판정, 푸터) | 선택형 AI 재정렬 | **선택(A9, A10)** | 재정렬기 플러그인 인터페이스. 첫 제공자인 TypeSafe Jev는 명시적으로 켜고 키가 있을 때만 실행한다. 난이도 판정은 참고용이다(A9) |
 | 32 | 실험용 제3 엔진과 무료 모델 변형(OpenCode, Spark, 보조 실행) | 실험 | **나중에, 선택** | v0.1.0 이후 선택형 OpenCode 엔진 어댑터. 소유자의 기본 라우팅에는 속하지 않는다. 제공자별 무료 모델 변형은 제외한다 |
 | 33 | 사용 종료 엔진(Antigravity, Grok, Kimi) | 과거 라우팅 대상 | **제외** | — (원본에서도 사용 종료) |
 | 34 | 웹 정책. 모든 웹 작업을 Aside로 보내고 내장 웹 도구 차단 | 소유자의 도구 선택 | **선택** | Aside가 설치돼 있으면 `oah init`이 웹 규칙(웹 작업을 Aside로 보냄)을 제안한다. 없으면 엔진 내장 웹 도구를 유지한다 |
-| 35 | 소유자 운영 스크립트(고정 경로 pre-push 검사, CI·작업 갈래 감시기, 과거 감사 갈래 두 개, 세션 문맥) | 일상 운영 | **간소화** | pre-push 비밀값 스캔을 선택형 훅으로 제공한다(A17). 나머지는 소유자의 고정 경로와 작업 갈래를 쓴다 |
+| 35 | 소유자 운영 스크립트(고정 경로 pre-push 검사, CI·레인 감시기, 과거 감사 레인 두 개, 세션 문맥) | 일상 운영 | **간소화** | pre-push 비밀값 스캔을 선택형 훅으로 제공한다(A17). 나머지는 소유자의 고정 경로와 레인을 쓴다 |
 | 36 | 계약 테스트 69개 | 원본 보호 | **제외** | 테스트를 처음부터 새로 쓴다(8절) |
 | 37 | 긴 규칙 문서(공유 규칙 약 94 KB, 라우팅 정책 약 47 KB, 리뷰 절차, 규칙 조각) | 운영 설명서 | **유지, 다시 작성** | 영어와 한국어 초보자 문서로 다시 쓴다(P9) |
 
@@ -203,7 +203,7 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 매 push 전에 10절의 스캔을 실행한다.
 
 **원본에서 찾은 불일치**는 이식하지 않는다.
-- 문서에는 엄밀성 tier가 3개 축이라고 돼 있지만 검증기는 5개 축을 요구한다.
+- 문서에는 엄밀성 tier가 3개 레인이라고 돼 있지만 검증기는 5개 레인을 요구한다.
 - 한 곳에는 "R4는 사용자 승인이 필요하다"고 하고 다른 곳에는 "라운드별 승인은 없다"고 한다.
 - 문서에는 `finish`가 unlazy CLI를 쓴다고 하지만 코드는 라이브러리 파서를 호출한다.
 - 스냅샷 정제에서 `AGENTS.md`는 제거하지만 `CLAUDE.md`는 제거하지 않는다.
@@ -220,7 +220,7 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
     `fix`, `finish`를 실행한다. 추적 파일의 유지 관리는 최종 커밋, 게이트, 리뷰 전에 한다(5.10).
   - 사용자는 요청받은 실행을 승인한다.
 - **Codex는 워커로 실행한다.** `oah review`와 `oah fix`가 띄운다(`codex exec`, 비대화형).
-- **`oah call claude`**(헤드리스 `claude -p`)는 두 번째 작업 갈래나 Codex가 이끄는 세션에 쓴다.
+- **`oah call claude`**(헤드리스 `claude -p`)는 두 번째 레인이나 Codex가 이끄는 세션에 쓴다.
   기본값은 `--permission-mode acceptEdits`이며 설정의 `[engines.claude]`에 있는 도구 허용 목록을 쓴다.
   `bypassPermissions`를 기본값으로 쓰지 않는다.
 - **긴 실행.** `oah review|fix|call --background`는 곧바로 실행 ID를 반환한다. `oah wait <run-id>`는
@@ -232,23 +232,23 @@ git과 pull request에 익숙하다고 전제한다. 설치 프로그램과 안�
 
 ```text
 your-project/
-  AGENTS.md              # 관리 블록 하나 추가: <!-- OAH:RULES:BEGIN v1 --> … <!-- OAH:RULES:END -->
-  CLAUDE.md              # 관리 줄 하나 추가: @AGENTS.md (Claude Code가 가져옴)
+  AGENTS.md              # gets one managed block: <!-- OAH:RULES:BEGIN v1 --> … <!-- OAH:RULES:END -->
+  CLAUDE.md              # gets one managed line: @AGENTS.md (Claude Code imports it)
   .oah/
-    config.toml          # 단계, 엔진 tier, 리스 TTL, 리뷰와 사전 점검 설정
-    tasks/<task>/        # 작업별 폴더 하나, 작업과 함께 커밋
-      PACKET.md          #   의도 + 범위 + 계획 + 승인 조건 + 보고 형식
-      GATES.md           #   unlazy 형식 게이트 원장(기본으로 git 무시, 5.8 참조)
-      GATES.summary.md   #   커밋과 리뷰 전 `oah gates check`가 쓰는 경로 없는 요약
-    templates/           # 명령이 복사해 쓰는 패킷, 게이트, 위키 노트 템플릿
+    config.toml          # stages, engine tiers, lease TTL, review and preflight settings
+    tasks/<task>/        # one folder per task, committed with the work
+      PACKET.md          #   intent + scope + plan + acceptance + return format
+      GATES.md           #   unlazy-format gate ledger (git-ignored by default, see 5.8)
+      GATES.summary.md   #   path-free summary written by `oah gates check` before commit and review
+    templates/           # packet, gates and wiki-note templates the commands copy from
   docs/wiki/
-    index.md             # 분류별 목록
-    log.md               # <!-- OAH:LOG_INSERT_BELOW --> 아래 최신순 기록
-    log_archive_NN.md    # `oah wiki rollover`가 통째로 옮긴 오래된 로그 항목, 편집 금지
-    decisions/           # 결정 기록(ADR 형식)
-    raw/                 # 선택 사항: 가져온 원본 문서, 추가만 허용
-  .claude/agents/        # 선택 사항: oah-low/medium/high/max.md (tier별 모델 + 추론 강도)
-  .graphifyignore        # 선택 사항: graphify를 쓸 때의 합리적인 기본값
+    index.md             # catalog by category
+    log.md               # newest first, under <!-- OAH:LOG_INSERT_BELOW -->
+    log_archive_NN.md    # older whole log entries, moved by `oah wiki rollover`, never edited
+    decisions/           # decision records (ADR style)
+    raw/                 # optional: imported source documents, append-only
+  .claude/agents/        # optional: oah-low/medium/high/max.md (model + effort per tier)
+  .graphifyignore        # optional: sensible defaults when graphify is used
 ```
 
 런타임 상태(리스, 이벤트, 실행 로그, 리뷰 영수증)는 **작업 트리 밖**인
@@ -259,27 +259,27 @@ your-project/
 
 ```text
 open-agent-harness/
-  README.md, README.ko.md          # 빠른 시작(영어, 한국어)
+  README.md, README.ko.md          # quick start (English, Korean)
   LICENSE, THIRD_PARTY_NOTICES.md
-  pyproject.toml                   # 배포 이름 "open-agent-harness", 콘솔 스크립트 "oah"
+  pyproject.toml                   # distribution "open-agent-harness", console script "oah"
   src/oah/
-    cli.py                         # argparse 진입점, 그룹별 도움말
+    cli.py                         # argparse entry, grouped help
     paths.py  lockfile.py  atomic.py  state.py  lease.py  events.py
     config.py  routing.py  engines/{claude.py,codex.py,proc.py}  call.py
     packet.py  intent.py  preflight.py  gates.py  hooks.py
     review/{snapshot.py,canary.py,schema.py,receipts.py,rounds.py}
     wiki.py  graph.py  impact.py  rules.py  tiers.py  init.py  doctor.py
-    models.py  secrets.py  skillsel.py  rerank/  setup/  handoff.py  land.py   # 개정 3
-    templates/                     # 규칙 블록(en, ko), 패킷, 게이트, 위키, 에이전트, 설정
+    models.py  secrets.py  skillsel.py  rerank/  setup/  handoff.py  land.py   # amendment 3
+    templates/                     # rules block (en, ko), packet, gates, wiki, agents, config
   install/install.sh  install/install.ps1
   docs/  PLAN.md  install-macos.md  install-windows.md  concepts.md  example.md  (+ ko/)
-  examples/hello-oah/              # 따라 하기 예제용 작은 Python 프로젝트
-  skills/                          # 원본 그대로 포함한 스킬, 각각 LICENSE와 업스트림 고정 정보 포함(A13)
-  mcp/                             # Claude와 Codex용 MCP 실행 템플릿, ${ENV_VAR} 자리표시자만 사용(A13)
-  docs/UPSTREAM_SYNC.md            # 소유자 하네스에서의 이식, 커밋별로 검토(A16)
-  tests/                           # 표준 라이브러리 unittest, 가짜 엔진, 임시 저장소
-  tools/privacy_scan.py            # 이 저장소 자체의 pre-push 스캔
-  .github/workflows/ci.yml         # 소유자가 CI를 승인한 뒤에만 추가(8절)
+  examples/hello-oah/              # tiny Python project for the worked example
+  skills/                          # vendored skills, unchanged, each with its LICENSE and upstream pin (A13)
+  mcp/                             # MCP launch templates for Claude and Codex, ${ENV_VAR} placeholders only (A13)
+  docs/UPSTREAM_SYNC.md            # ports from the owner's harness, reviewed commit by commit (A16)
+  tests/                           # stdlib unittest; fake engines; temp repos
+  tools/privacy_scan.py            # this repository's own pre-push scan
+  .github/workflows/ci.yml         # added only after the owner approves CI (section 8)
 ```
 
 ### 5.3 런타임과 패키징
@@ -320,9 +320,9 @@ open-agent-harness/
 - **겹침.** `repo`는 모든 범위와 겹친다. 경로 범위는 정규화하고 대소문자를 접은 저장소 상대 경로
   하나가 다른 경로의 접두사면 겹친다. 원본은 문자열 완전 일치만 비교해서 `src`와
   `src/a.py`가 충돌하지 않았다.
-- **범위는 작업 중에는 지침이며 게이트에서 검사한다.** 편집기의 쓰기를 모두 가로챌 수는 없다.
-  따라서 `oah`는 `finish`, `review`, `fix` 뒤에 실제 변경(base..head와 작업 트리)을 리스 범위와
-  비교하고 범위 밖 파일을 나열한다. 범위를 넓히거나(`oah renew --scope …`)
+- **범위는 작업 중에는 지침이며 게이트에서 검사한다.** 편집기의 쓰기는 아무것도 가로챌 수 없다.
+  따라서 `oah`는 `finish`와 `review` 때, 그리고 `fix` 뒤에 실제 변경(base..head와 작업 트리)을
+  리스 범위와 비교하고 범위 밖 파일을 나열한다. 범위를 넓히거나(`oah renew --scope …`)
   `--allow-out-of-scope`를 주기 전까지 `finish`는 거절한다. 두 경우 모두 기록한다.
   `oah wiki maintain`의 위키 유지 관리 출력 가운데 `docs/wiki/log.md`, `docs/wiki/index.md`,
   새로 만든 `docs/wiki/log_archive_NN.md`만 범위 검사에서 제외한다.
@@ -338,15 +338,15 @@ open-agent-harness/
 ### 5.5 엔진과 라우팅
 
 ```toml
-# .oah/config.toml (발췌. `oah init`이 만들며 자유롭게 편집 가능)
+# .oah/config.toml (excerpt; created by `oah init`, edit freely)
 [stages]
-initial    = "claude"   # 1차 구현
-review     = "codex"    # 모든 리뷰 라운드
-correction = "codex"    # 리뷰 지적 수정
+initial    = "claude"   # first implementation
+review     = "codex"    # every review round
+correction = "codex"    # fixes for review findings
 
 [engines.claude]
 command = ["claude"]
-quality_order = ["opus", "sonnet", "haiku"]  # 강한 순서, CLI 별칭, 편집 가능
+quality_order = ["opus", "sonnet", "haiku"]  # strongest first; CLI aliases, editable
 [engines.claude.tiers]
 low    = { model = "", effort = "low",    timeout_min = 15 }
 medium = { model = "", effort = "medium", timeout_min = 30 }
@@ -355,12 +355,12 @@ max    = { model = "", effort = "max",    timeout_min = 90 }
 
 [engines.codex]
 command = ["codex"]
-quality_order = []  # 기본값: 실제 설정 모델. 사용자가 순서 있는 목록을 지정할 수 있음
-[engines.codex.tiers]   # model = ""는 A14를 쓰고, 다음으로 아래 실제 설정 대체 경로를 사용
+quality_order = []  # default: effective configured model; user may name an ordered list
+[engines.codex.tiers]   # model = "" uses A14, then the effective-config fallback below
 low    = { model = "", effort = "low",    timeout_min = 15 }
 medium = { model = "", effort = "medium", timeout_min = 30 }
 high   = { model = "", effort = "high",   timeout_min = 60 }
-max    = { model = "", effort = "highest", timeout_min = 90 }  # 모델이 지원하는 가장 높은 강도
+max    = { model = "", effort = "highest", timeout_min = 90 }  # the highest effort the model supports
 ```
 
 - **난이도를 tier로 바꾼다.** `oah recommend --kind <k> --intensity <i> --reasoning <r> --risk <r>`를
@@ -394,7 +394,7 @@ max    = { model = "", effort = "highest", timeout_min = 90 }  # 모델이 지�
   - Codex: `codex exec -C <dir> -s read-only|workspace-write [-m M] [-c model_reasoning_effort="E"] [--output-schema F] -o <out> [--ephemeral] -`. 프롬프트는 stdin으로 보낸다.
   - Claude: `claude -p --output-format json [--model M] [--effort E] --permission-mode <mode> [--tools …]`. 프롬프트는 stdin으로 보낸다. `--tools`는 사용할 수 있는 도구 자체를 제한하고 `--allowedTools`는 사전 승인만 한다.
 - **추론 강도는 모델이 지원하는 값에서 정하며 고정 상한이 없다.**
-  - tier의 model이 비어 있지 않으면 명시적 고정이며 항상 우선한다. 아니면 A14의 자동
+  - tier의 model이 비어 있지 않으면 명시적 핀이며 항상 우선한다. 아니면 A14의 자동
     카탈로그 매핑을 쓰고, 그다음으로 선택한 프로필을 포함해 실행 디렉터리에 적용되는 엔진의
     실제 설정을 쓴다. Codex 어댑터는 구체적으로 정한 모델을 `-m`으로 전달하고 기록한다.
     새 설치를 포함해 구체적인 기본 모델을 정할 수 없으면 실행 전에 `OAH_MODEL_UNRESOLVED`로
@@ -453,7 +453,7 @@ max    = { model = "", effort = "highest", timeout_min = 90 }  # 모델이 지�
 ## Intent
 Intent-ID: <task>
 Revision: 1
-Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
+Status: draft            # becomes "accepted" when you approve it
 ### Problem
 ### Desired outcome
 ### Success conditions
@@ -462,11 +462,11 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
 ### Non-goals
 ### Open questions
 <!-- OAH_INTENT:END -->
-## Scope        (이 작업이 쓸 수 있는 경로)
+## Scope        (paths this task may write)
 ## Plan         (stage → engine → tier)
-## Acceptance   (이 폴더의 GATES.md)
-## Return       (INTENT <id>@r<n> <digest> + 조건마다 "AC<n>: met|unmet|deferred — evidence" 한 줄;
-                영향을 사용했으면 rerank=used|unused(<reason>), DB 변경이면 DB 영향 줄)
+## Acceptance   (GATES.md in this folder)
+## Return       (INTENT <id>@r<n> <digest> + one "AC<n>: met|unmet|deferred — evidence" line each;
+                rerank=used|unused(<reason>) when impact was used; the DB-impact line for DB changes)
 ```
 
 - `oah packet check`는 필수 절, 고유 AC ID, `start --packet` 전의 `Status: accepted`,
@@ -476,7 +476,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
 - **결속.** 리스는 `{source, id, revision, digest}`를 기록한다. 리뷰 프롬프트에 의도를
   그대로 담고 영수증에 다이제스트를 기록한다. 불일치는 보고한다.
 - **의도 계보(A7).** 하나의 절이 모든 단계에 목표를 전달한다.
-  - **원본은 하나다.** 패킷의 `OAH_INTENT` 절만이 패킷 작성, 구현, 리뷰, 수정의 모든 단계에서
+  - **의도 원본은 하나다.** 패킷의 `OAH_INTENT` 절만이 패킷 작성, 구현, 리뷰, 수정의 모든 단계에서
     목표를 서술한다. 리드, 워커, 서브에이전트 모두에 적용한다.
     - 리뷰와 수정 브리프는 같은 절을 바이트 그대로 담는다.
     - 라운드 지시는 그 절 밖에 둔다.
@@ -492,7 +492,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
       배정자가 실행하며 배정받은 워커는 실행하지 않는다(C1).
     - `oah status`와 `oah intent show`는 아래에서 처음 맞는 조건을 쓴다.
       - `unbound`: 리스에 의도 결속이 없다.
-      - `missing`: 결속은 있지만 그 원본이 없다.
+      - `missing`: 결속은 있지만 그 의도 원본이 없다.
       - `current`: 원본을 읽을 수 있고, 올바른 `OAH_INTENT` 마커 쌍과 절이 정확히 하나 있으며,
         `Status: accepted`, 결속한 ID와 개정, 위 정규화를 적용한 다이제스트가
         모두 결속과 같다.
@@ -559,7 +559,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
 - unlazy가 설치돼 있으면 `oah gates status|check|lint`는 unlazy의 `gate-check.mjs` /
   `gate-lint.mjs`에 위임한다. `OAH_UNLAZY_DIR`, 프로젝트 스킬 디렉터리, 사용자 스킬 디렉터리
   순서로 찾는다. 게이트 명령을 실행하기 전에 찾은 사본의 커밋과 스크립트 다이제스트를
-  P5가 계약 테스트한 고정값과 대조한다. 다르면 그 사본을 실행하거나 다음 사본으로 넘어가지 않고
+  P5가 계약 테스트한 핀과 대조한다. 다르면 그 사본을 실행하거나 다음 사본으로 넘어가지 않고
   거절한다. 메시지에 불일치 내용을 밝히고, 고정한 프로젝트 사본을 설치하는
   `oah init --with-unlazy --force`를 제시하며, 호환되지 않는 `OAH_UNLAZY_DIR` 재정의가
   있으면 지우라고 안내한다. CHECK의 **실행**은 항상 unlazy 자체 승인 절차를 거친다.
@@ -595,11 +595,11 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
   두 식별 정보를 모두 검증한다. 버전이 정해지지 않은 업스트림 사본은 설치하지 않는다.
   unlazy는 A15 업데이트에서 제외하는 운영 의존성이다. 새 커밋은 그 후보 커밋에 대해
   어댑터 계약과 게이트 무효화 테스트를 통과하는 명시적 변경으로만 채택한다.
-  스텁 테스트만으로는 새 고정을 허용하지 않는다.
+  스텁 테스트만으로는 새 핀을 허용하지 않는다.
 - **Stop 훅(선택).** `oah hooks install`은 `oah hook stop`을 실행하는 Claude Code Stop 훅을 추가한다.
   활성 리스가 세션의 워크트리를 관할하면 해당 작업의 원장이 미충족인 동안 훅이 차단한다.
   진행 없는 차단이 N번이면 진행 가드가 풀어 영원히 막히지 않게 한다. 관할하는 리스가 없으면
-  같은 고정값 검증 뒤에만 unlazy 자체 Stop 훅으로 넘긴다. 기본적으로 훅은
+  같은 핀 검증 뒤에만 unlazy 자체 Stop 훅으로 넘긴다. 기본적으로 훅은
   `.claude/settings.local.json`(미추적)에 쓴다. 명령이 `oah hook stop`뿐이므로
   공유 설치에도 절대 경로가 들어가지 않는다.
 
@@ -613,7 +613,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
    읽고 증거는 고정한 HEAD에 둔다(A23).
 2. **라운드.** 시리즈 키는 (task, base SHA)다. 완료한 라운드만 센다. 고정 상한은 없다(A22).
    매 라운드의 지적이 새롭고 범위 안에 있으면 계속한다. 리뷰어는 아래의 이전 영수증과
-   수정 시도 기록을 보고, 앞선 라운드에서 이미 수정하려 한 유형을 되풀이하는 지적에 표시한다.
+   수정 시도 기록을 보고, 시리즈의 앞선 라운드에서 이미 수정하려 한 유형을 되풀이하는 지적에 표시한다.
    재발 증거가 없거나 모호해도 `OAH_REVIEW_NEEDS_DECISION`으로 멈춘다. 지적 이름만 바꿔도
    유형이 새로워지는 것은 아니다. 이런 지적이나 설계·저장 형식 변경이 필요한 지적은
    `OAH_REVIEW_NEEDS_DECISION`으로 시리즈를 멈추고 사용자에게 묻는다.
@@ -749,7 +749,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
         목표 이내가 되도록 가장 오래된 쪽의 최소 연속 묶음을 옮긴다. 최신 항목 하나가 목표보다
         크면 통째로 남기고 크기 초과로 보고한다. 오래된 초과 항목은 통째로 옮긴다.
         옮길 수 있는 항목이 없으면 보관 파일을 만들지 않고 초과로 보고한다. 그렇지 않으면
-        한 번 실행할 때 보관 파일 하나를 만들며 목표 크기를 넘어도 그대로 둔다.
+        목표 크기를 넘더라도 한 번 실행에 보관 파일 하나만 만든다.
       - 보관 번호는 01부터 시작해 기존 최댓값보다 하나씩 높아지며, 최소 두 자리이고 재사용하지 않는다.
         보존 스트림은 `log.md`의 항목 바이트, 그다음 번호 내림차순의 보관 파일 항목 바이트를
         연결하며 각 파일 안에서는 최신순이다. 줄바꿈 정규화 없이 분할 전후 바이트가 같아야 한다.
@@ -790,18 +790,18 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
       설정을 상태 폴더에 원자적으로 저장한다. 첫 실행이나 설정 변경 때는 모든 계수에
       `delta=n/a`를 출력하고 기준값을 만든다. 그 밖에는 현재 개수에서 이전 성공 실행의 개수를
       뺀 부호 있는 차이를 표시한다. 스캔이 실패하면 기준값을 바꾸지 않는다.
-    - **선택형 커밋 검사 `oah hook pre-commit`**은 다음 커밋을 차단한다.
-      - 보관 파일을 추가하지 않고 `log.md`를 줄인다.
-      - 기존 보관 파일을 편집하거나 삭제한다.
-      - `raw/` 아래 파일을 편집하거나 삭제한다.
-      - 위키 파일에 UTF-8이 아닌 바이트나 서로게이트 바이트를 추가한다.
+    - **선택형 커밋 검사 `oah hook pre-commit`**은 다음과 같은 커밋을 차단한다.
+      - 보관 파일을 추가하지 않고 `log.md`를 줄이는 커밋.
+      - 기존 보관 파일을 편집하거나 삭제하는 커밋.
+      - `raw/` 아래 파일을 편집하거나 삭제하는 커밋.
+      - 위키 파일에 UTF-8이 아닌 바이트나 서로게이트 바이트를 추가하는 커밋.
 
       새로 깨진 링크를 추가하는 커밋에는 먼저 경고하며,
       `[wiki] new_broken_links = "block"`을 설정하면 차단한다.
     - **`oah init`**은 그래프 확대 수준 같은 편집기 UI 상태를 git에서 무시하도록 한다.
       예를 들면 `.obsidian/workspace*.json`이다.
 - **스킬 유지 관리(A15).** 자동 검사는 작업 트리 밖의 상태 폴더에 있는 키트 캐시만 갱신한다.
-  추적하는 프로젝트 스킬 폴더는 고정값이다. 바꾸려면 위키 유지 관리 예외 없이 자체 범위와
+  추적하는 프로젝트 스킬 폴더는 핀이다. 바꾸려면 위키 유지 관리 예외 없이 자체 범위와
   리스를 가진 별도 작업에서 `oah skills update --project`를 명시적으로 실행해야 한다.
   선택 우선순위는 프로젝트 사본, 키트 캐시, 사용자·플러그인 사본 순이다.
 - **그래프(선택).** `oah graph update|query|path|explain|report`는 graphify에 얇게 전달하는
@@ -814,7 +814,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
   모든 원장 바이트(무시된 원장 포함), 설정 바이트, 도구 버전이 명세에 들어간다. 신원이나 명세가
   바뀌면 지도는 오래된 상태가 된다. 결과 다이제스트도 기록한다. 빌드 전후 명세를 비교하며
   입력이 바뀌면 재시도하거나 오래된 상태로 거절해야 한다.
-  **최신 기본 브랜치(A23).** 작업은 한 갈래씩 기본 브랜치에 반영되므로 최신 기본 브랜치를 기준으로
+  **최신 기본 브랜치(A23).** 작업은 한 레인씩 기본 브랜치에 반영되므로 최신 기본 브랜치를 기준으로
   영향을 평가한다. 5.9의 반영 계약은 반영 직전에 다시 fetch하고 영향을 재평가하며 새로 영향받는
   검사를 요구한다. 리뷰한 정확한 head의 fast-forward push에서 원격이 평가한 SHA를 강제한다.
   질의 전에 `oah impact`는 사용자의 git 설정으로 원격의 기본 브랜치를 읽기 전용으로 fetch하고
@@ -859,14 +859,14 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
     두 엔진이 중복 없이 같은 텍스트를 읽는다.
   - 블록 템플릿은 영어와 한국어(`--lang`)로 제공한다. 프로젝트별 규칙으로 `.oah/rules.local.md`를 덧붙인다.
   - 규칙·tier 동기화는 전역 파일을 쓰지 않는다. 자동 스킬 업데이트는 상태 폴더의 키트 캐시만 쓴다.
-    추적하는 프로젝트 스킬 고정을 바꾸려면 자체 범위를 가진 별도 리스 작업에서
+    추적하는 프로젝트 스킬 핀을 바꾸려면 자체 범위를 가진 별도 리스 작업에서
     `oah skills update --project`가 필요하다. 전역 스킬 업데이트는 확인을 받는
     `oah skills update --global`이 필요하다(A15).
 - **블록 자체는 6 KB 미만이다.** 단계 순서, 리스, 패킷과 의도, 사전 점검, 게이트와 바뀐 만큼만
   검증하는 규칙, 리뷰 루프와 정직한 표시, "워커는 push하지 않는다", 위키 최신 상태 유지,
   "배정받은 워커(`OAH_WORKER=1`)는 모든 세션 진입 절차를 건너뛰고 프롬프트의 작업만 한다"를
-  담는다. A15의 캐시 전용 자동 업데이트, 프로젝트 스킬 고정, 별도 리스의 프로젝트 업데이트,
-  5.8의 unlazy 고정값 검증도 적는다.
+  담는다. A15의 캐시 전용 자동 업데이트, 프로젝트 스킬 핀, 별도 리스의 프로젝트 업데이트,
+  5.8의 unlazy 핀 검증도 적는다.
 - `oah init --with-agents`는 `.claude/agents/oah-{low,medium,high,max}.md`를 쓴다.
   frontmatter에는 `name`, `description`과 설정에서 가져온 `model`, `effort`를 둔다.
   본문에는 범위 준수, 증거 인용, 파괴적 git 금지, 막혔을 때 정직하게 보고하라는 규칙을 적는다.
@@ -924,7 +924,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
 | Node.js LTS(현재 24, 26은 2026-10-28에 LTS가 됨) | unlazy 게이트 검사기(Node 16+) | `brew install node@24` 또는 nodejs.org 설치 프로그램 | `winget install OpenJS.NodeJS.LTS` | https://nodejs.org/en/download |
 | Claude Code | 1차 구현 단계 | `curl -fsSL https://claude.ai/install.sh \| bash` | PowerShell: `irm https://claude.ai/install.ps1 \| iex`(WinGet: `Anthropic.ClaudeCode`) | https://code.claude.com/docs/en/setup |
 | Codex CLI | 리뷰와 수정 단계 | `brew install --cask codex` 또는 `npm install -g @openai/codex` | `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 \| iex"` | https://github.com/openai/codex · https://developers.openai.com/codex/windows/windows-sandbox |
-| unlazy(게이트에 필수) | 게이트 검사 실행, Stop 훅 | `oah init --with-unlazy`(P5 고정값, 커밋과 스크립트 다이제스트 검증) | 동일 | https://github.com/Leonxlnx/unlazy |
+| unlazy(게이트에 필수) | 게이트 검사 실행, Stop 훅 | `oah init --with-unlazy`(P5 핀, 커밋과 스크립트 다이제스트 검증) | 동일 | https://github.com/Leonxlnx/unlazy |
 | graphify(선택) | 지식 그래프 | `uv tool install graphifyy` | 동일 | https://docs.graphify.com/installation |
 | GitHub CLI(선택) | 터미널에서 PR 작업 | `brew install gh` | `winget install --id GitHub.cli --source winget` | https://cli.github.com |
 | gitleaks(선택) | push 전 비밀값 스캔 | `brew install gitleaks` | `scoop install gitleaks` | https://github.com/gitleaks/gitleaks |
@@ -1040,7 +1040,7 @@ Status: draft            # 사용자가 승인하면 "accepted"로 바뀜
 4. **쉬운 말.** 문서와 메시지는 영어와 한국어로 제공하며(P9), 모든 오류에 다음에 실행할 명령을 적는다.
 
 작업은 P8(설치 프로그램과 도구 카탈로그), P8c(동반 앱, A20), P7c(CI 스타터, A21),
-P7b(`oah init`), P9(예제와 문서) 갈래로 나눈다.
+P7b(`oah init`), P9(예제와 문서) 레인으로 나눈다.
 
 ## 7. `oah init`
 
@@ -1070,7 +1070,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
     버전 없는 설치 명령은 쓰지 않는다.
   - `--with-hooks`: diff를 보여 준 뒤 Stop 훅 설치.
 - **스킬 업데이트.** 안내형 설정은 기본적으로 `update_interval_days = 1`인 캐시 전용 자동
-  업데이트를 켠다(A15). 추적하는 프로젝트 스킬은 고정하며 자체 범위·리스를 가진 작업의
+  업데이트를 켠다(A15). 추적하는 프로젝트 스킬은 핀으로 유지하며 자체 범위·리스를 가진 작업의
   `oah skills update --project`로만 바꾼다. 전역 업데이트에는 확인을 받는 `--global`이 필요하다.
 - **멱등성.** 두 번째 실행은 같은 실패 처리 방식으로 오래되거나 사용할 수 없는 지도를 갱신한다.
   지도가 최신이고 입력이 같으면 아무것도 바꾸지 않고 그 사실을 알린다.
@@ -1099,7 +1099,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - 규칙 블록 동기화. 멱등성, 손상 마커 거절, 줄바꿈 보존, 32 KiB 제한
 - `init`의 멱등성, 덮어쓰기 방지, 모의 실행
 - **가짜 codex**로 검사하는 리뷰. 스냅샷 제거, 카나리, 스키마 검증, 수렴, 판단 중단, 선택형 라운드 예산.
-  토큰 파일만 읽는 가짜 리뷰어도 카나리 검증을 통과할 수 있어야 한다. 이를 소스 검토 범위나
+  토큰 파일만 읽는 가짜 리뷰어도 카나리 검증을 통과할 수 있다. 이 통과를 소스 검토 범위나
   트리 신원 검증으로 표시해서는 안 된다.
 - 임시 bare 원격 저장소에서의 사전 점검 판정
 - Stop 훅 판단 JSON
@@ -1129,7 +1129,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - 비공개 저장소의 정가는 macOS 분당 $0.062, Windows 분당 $0.010, Linux 분당 $0.006이다.
   GitHub Pro에는 월 3,000분의 표준 러너 사용 시간이 포함된다
   (https://docs.github.com/en/billing/reference/actions-runner-pricing).
-- macOS 약 3분과 Windows 4분으로 예상하는 실행 한 번은 포함 시간을 다 쓴 뒤 정가로 약 $0.23다.
+- macOS 약 3분과 Windows 4분으로 예상하는 실행 한 번은 포함 시간을 다 쓴 뒤 정가로 약 $0.23이다.
 - 포함 시간을 macOS와 Windows 러너에 어떻게 차감하는지는 검증하지 않았다.
 - 공개 저장소의 표준 러너는 무료다.
 
@@ -1141,21 +1141,21 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 | 구성 요소 | 라이선스 | 키트의 사용 방식 |
 |---|---|---|
 | 이 키트 | **MIT**, "Copyright (c) 2026 open-agent-harness contributors" | — |
-| unlazy(Leonxlnx/unlazy) | MIT | `oah init`이 P5 계약 테스트 고정값으로 설치하는 운영 의존성. 커밋·스크립트 다이제스트 검증(5.8). 원본 포함 대신 연결한다. 업스트림 저장소 파일 하나가 그대로는 이 저장소 개인정보 스캔을 통과하지 못하기 때문이다(A13) |
-| graphify(Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0(NOTICE에 따르면 이전 기여는 MIT) | CLI로 실행하는 선택 의존성. 원본 포함 대신 연결한다. 업스트림에는 스킬 폴더가 없고 CLI가 템플릿에서 스킬을 쓰기 때문이다(A13) |
+| unlazy(Leonxlnx/unlazy) | MIT | `oah init`이 P5 계약 테스트 핀으로 설치하는 운영 의존성. 커밋·스크립트 다이제스트 검증(5.8). 번들 대신 연결한다. 업스트림 저장소 파일 하나가 그대로는 이 저장소 개인정보 스캔을 통과하지 못하기 때문이다(A13) |
+| graphify(Graphify-Labs/graphify, PyPI `graphifyy`) | Apache-2.0(NOTICE에 따르면 이전 기여는 MIT) | CLI로 실행하는 선택 의존성. 번들 대신 연결한다. 업스트림에는 스킬 폴더가 없고 CLI가 템플릿에서 스킬을 쓰기 때문이다(A13) |
 | Claude Code | Anthropic 약관 | 사용자가 설치하는 외부 도구 |
 | Codex CLI(openai/codex) | Apache-2.0 | 사용자가 설치하는 외부 도구 |
 | uv | Astral(이중 MIT / Apache-2.0, 미검증) | 사용자가 설치하는 외부 도구 |
-| superpowers(obra/superpowers) | MIT | 선택형 권장 항목. 원본 포함 대신 연결한다. 두 파일이 그대로는 이 저장소 개인정보 스캔을 통과하지 못하기 때문이다(A13) |
-| mattpocock 스킬(mattpocock/skills) | MIT | 고정 커밋의 원본을 `skills/mattpocock-skills/` 아래 그대로 포함하고 LICENSE와 `THIRD_PARTY_NOTICES.md` 항목을 함께 둔다(A13) |
+| superpowers(obra/superpowers) | MIT | 선택형 권장 항목. 번들 대신 연결한다. 두 파일이 그대로는 이 저장소 개인정보 스캔을 통과하지 못하기 때문이다(A13) |
+| mattpocock 스킬(mattpocock/skills) | MIT | 고정 커밋의 원본을 `skills/mattpocock-skills/` 아래 그대로 번들하고 LICENSE와 `THIRD_PARTY_NOTICES.md` 항목을 함께 둔다(A13) |
 | netwaif/multi-agent-starter | MIT | 아이디어만 사용(파일을 기억으로 사용, 백엔드 레지스트리, 재진입), 출처 표시 |
 | netwaif/knot | **라이선스 없음** | 아이디어만 사용하고 출처 표시. 텍스트나 코드는 복사하지 않음 |
 
 `THIRD_PARTY_NOTICES.md`에 이를 나열하고, "Vendored skills" 표에 `skills/` 아래 모든 폴더를 적는다.
 무엇이든 원문 그대로 복사할 때는 라이선스 텍스트를 먼저 넣는다.
 
-**개정 3(A13).** 검증한 업스트림 라이선스가 허락할 때만 스킬을 원본 포함한다. 15절에 모든 항목과
-판정을 나열한다. 포함하는 스킬은 `skills/<name>/` 아래 원본 그대로 두고 LICENSE, 업스트림 URL,
+**개정 3(A13).** 검증한 업스트림 라이선스가 허락할 때만 스킬을 번들한다. 15절에 모든 항목과
+판정을 나열한다. 번들 스킬은 `skills/<name>/` 아래 원본 그대로 두고 LICENSE, 업스트림 URL,
 고정한 커밋을 함께 제공한다. `THIRD_PARTY_NOTICES.md` 항목은 같은 PR에서 추가한다.
 
 ## 10. 이 저장소의 개인정보 보호 장치
@@ -1197,9 +1197,9 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 | P8 | 설치 프로그램. `install.sh`, `install.ps1`, 모의 실행, 설치 안내, 도구 카탈로그와 안내형 설치(6.5), `doctor` 도구 검사(A13) | highest = `max`(원격 설치 프로그램 실행) |
 | P9 | 문서. 영어/한국어 README, 개념, 따라 하기 예제(`examples/hello-oah`), 문제 해결, 툴킷 페이지, 업그레이드 경로(A16), 사용자 키 보관 위치(A17) | medium |
 
-**작업 갈래(개정 3).** 빨리 끝내도록 단계를 병렬 작업 갈래로 만든다. 각 갈래는 브랜치 하나,
+**레인(개정 3).** 빨리 끝내도록 단계를 병렬 레인으로 만든다. 각 레인은 브랜치 하나,
 워크트리 하나, Claude 구현자 하나, Codex 리뷰 시리즈 하나이며 의존 순서에 따라 PR 하나로
-반영한다(갈래 표는 15절). 필요한 것이 반영된 뒤에만 그 갈래를 `main` 위로 rebase한다.
+반영한다(레인 표는 15절). 필요한 것이 반영된 뒤에만 그 레인을 `main` 위로 rebase한다.
 
 **PR별 절차**는 소유자가 정한 엔진 순서를 따른다.
 
@@ -1233,8 +1233,8 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
   - 게이트는 별도의 개발 워크트리에서 실행하며 `--root` / `--cwd`를 주면 그곳을 가리키게 한다.
     `UNLAZY_APPROVAL_DIR`은 주 체크아웃의 `.git/oah-dev/unlazy-approved`를 가리킨다.
     이는 정규 경로로 해석한 뒤에도 해당 워크트리 루트 밖이면서 이 저장소 체크아웃 안에 쓰기를
-    유지하는 위치다. 주 체크아웃 자체에서 이 게이트를 실행하지 않는다. 저장소가 그 루트
-    안에 있으므로 unlazy가 거절하기 때문이다.
+    유지하는 위치다. 주 체크아웃 자체에서 이 게이트를 실행하지 않는다. 승인 저장소가 그 루트
+    안에 있게 되어 unlazy가 그 저장소를 거절하기 때문이다.
   - 구현자의 2026-10-23 unlazy 2.1.0 시험은 그 승인 저장소를 사용해 개발 워크트리의
     시험용 원장에 `gate-check.mjs --approve --cwd .`를 실행했다. 승인 파일이 쓰였고
     게이트는 `ALL MET (1 met)`, 종료 코드 0을 반환했다. P5는 고정한 unlazy 커밋에서 이 시험을
@@ -1270,7 +1270,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 6. **의도 개정 2**(2026-10-23). 1절의 초보자 우선 제품 구상이다. AC3과 AC7의 추가 사항과 함께 승인했다.
 7. **개정 3**(2026-10-23). 소유자 메모에서 가져온 A9–A17과 온보딩 흐름이다(15절).
 8. **수정 라운드.** 11절의 상시 규칙을 모든 단계에 적용한다.
-9. **병렬 작업 갈래.** 독립된 단계는 각각 Claude 세션과 Codex 리뷰를 두고 나란히 진행하며
+9. **병렬 레인.** 독립된 단계는 각각 Claude 세션과 Codex 리뷰를 두고 나란히 진행하며
    의존 순서에 따라 반영한다.
 10. **릴리스.** v0.1.0 체크리스트로 구현을 마친다(15절). 저장소를 공개하거나 사람을
     초대하는 일은 소유자가 결정한다.
@@ -1285,7 +1285,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - 상태는 git 공통 디렉터리에 저장.
 - 작업별 폴더 `.oah/tasks/<task>/`.
 - 위키는 `docs/wiki/`.
-- Orca는 선택형 어댑터만 제공(8행).
+- Orca는 선택형 어댑터로만 쓴다(8행).
 
 *작업 흐름*
 - 사용자의 대화형 Claude Code 세션이 리드이며 1차 구현을 한다.
@@ -1314,7 +1314,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 - A13 판정은 검증한 업스트림 라이선스를 따른다(15절). MCP 서버에서 "template"은
   `${ENV_VAR}` 자리표시자가 있는 실행 템플릿을 뜻한다. 서버 자체는 실행할 때 레지스트리에서 설치한다.
 - 비밀값 스캔은 macOS·Windows 테스트 작업과 별도의 Linux 작업 하나로 실행한다.
-- 독립된 부분을 먼저 반영할 수 있도록 P3, P4, P7을 작업 갈래로 나눈다(15절).
+- 독립된 부분을 먼저 반영할 수 있도록 P3, P4, P7을 레인으로 나눈다(15절).
 
 ## 14. 이 계획의 수치 근거
 
@@ -1344,7 +1344,7 @@ oah init [--lang en|ko] [--with-agents] [--with-hooks] [--with-unlazy] [--with-g
 | A3 | DB 테이블, 루틴, GRANT를 건드리는 작업이나 리뷰는 DB 백엔드 플러그인을 질의하고 질의와 그래프 신원(커밋 SHA, 다이제스트)을 반환한다. 플러그인이 없으면 없다고 밝힌다. | 5.6, 5.10 | P4, P6, P7 |
 | A4 | 빈 `## Scope`는 뚜렷이 경고한다(`OAH_SCOPE_EMPTY`). Scope의 파일 종류에 의존하는 선택은 조용히 빈 결과를 선택하지 않는다. | 5.6 | P4, P7 |
 | A5 | `oah tiers sync`는 관리 규칙 블록이 없을 때뿐 아니라 매번 정본 텍스트로 교체한다. | 5.11 | P7 |
-| A6 | 배정받은 워커에는 `OAH_WORKER=1`을 넣는다. 생성한 훅과 규칙 블록은 모든 세션 진입 절차를 건너뛰라고 지시한다. | 5.5, 5.11, 5.12 | P3, P7(작업 갈래 P7b의 session-start 훅) |
+| A6 | 배정받은 워커에는 `OAH_WORKER=1`을 넣는다. 생성한 훅과 규칙 블록은 모든 세션 진입 절차를 건너뛰라고 지시한다. | 5.5, 5.11, 5.12 | P3, P7(레인 P7b의 session-start 훅) |
 | A7 | 의도 계보. 모든 단계, 워커, 서브에이전트에 하나의 의도 절을 쓴다. 목표가 바뀌면 새 ID 대신 개정을 올린다. 조건은 결과다. 리스는 같은 start 명령에서 절에 결속하고 상태는 `current`가 된다. 보고에는 `INTENT`와 AC별 줄을 담는다. 공유 푸터 하나를 모든 브리프와 tier 에이전트 파일에 넣는다. 초안은 결속할 수 없다. | 5.6, 5.11 | P3, P4, P6, P7 |
 | A8 | 위키 자동 정리는 후보만 제시한다. 린트는 실제 문제만 센다. 크기 기반 로그 분할 보관, 선택형 커밋 검사, 편집기 UI 상태 추적 제외, 위키 밖에 쓰는 색인 린트, 정리 상태 변화량 한 줄을 제공한다. | 5.1, 5.10, 5.12 | P7 |
 
@@ -1358,7 +1358,7 @@ P3b는 호출 어댑터와 브리프 구성을 담당한다. P4b는 아래 호�
 `start`, `status`, `finish`, `call`의 모든 의도 연결을 담당한다.
 
 - [ ] Codex tier 강도는 `supported_reasoning_levels`에서 정한다. `highest`는 동작을 바꾸는 모드를 건너뛴다. 쓸 수 있는 메타데이터가 있는데 직접 적은 강도가 목록에 없으면 `OAH_EFFORT_UNSUPPORTED`로 실패한다. (A1)
-- [ ] tier 모델 고정이 먼저이고, 다음은 A14의 자동 카탈로그 매핑, 다음은 실제 Codex 설정(선택한 프로필 포함)이다. 구체적인 모델을 `-m`으로 전달하고 기록한다. 새 설치에서 기본 모델을 정할 수 없으면 `OAH_MODEL_UNRESOLVED`로 거절하고 tier 모델을 설정하라고 안내한다. (A1, A14)
+- [ ] tier 모델 핀이 먼저이고, 다음은 A14의 자동 카탈로그 매핑, 다음은 실제 Codex 설정(선택한 프로필 포함)이다. 구체적인 모델을 `-m`으로 전달하고 기록한다. 새 설치에서 기본 모델을 정할 수 없으면 `OAH_MODEL_UNRESOLVED`로 거절하고 tier 모델을 설정하라고 안내한다. (A1, A14)
 - [ ] 캐시가 없거나 모델 항목이 없거나 쓸 수 있는 일반 추론 단계가 없을 때 `highest`는 `OAH_EFFORT_METADATA_MISSING`과 실행 가능한 안내로 거절한다. 메타데이터가 없고 강도를 직접 적었으면 그대로 전달한다. (A1)
 - [ ] 가짜 엔진 테스트는 일치, 더 낮음, 그 밖의 불일치, 읽을 수 없는 헤더를 다룬다. 낮으면 `OAH_EFFORT_DOWNGRADED`, 그 밖의 불일치는 `OAH_EFFORT_MISMATCH`, 읽을 수 없으면 `unverified`다. 헤더는 설정만 검증한다. (A1)
 - [ ] 버전/모델별 정규화 테스트에 `ultra` 같은 동작 변경 별칭과 알 수 없는 매핑을 포함한다. 실행 기록은 요청, 실행, 헤더 보고, 해석된 추론 강도를 따로 보관하고 헤더 검사 상태와 정규화 근거도 둔다. 알 수 없는 추론 강도는 `unverified`로 남긴다. (A1)
@@ -1401,7 +1401,7 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 - [ ] `oah wiki lint --index`는 5.10의 배너 패턴과 설정 가능한 120 코드 포인트 줄 제한을 쓰며, 일반 린트 규칙으로 미색인 노트를 찾고 위키 밖에 후보를 쓴다. 패턴 일치, 펜스 코드 제외, 줄 제한 경계를 테스트한다. (A8e)
 - [ ] `oah wiki hygiene`는 5.10의 이름 있는 계수 아홉 개를 출력하고 개수/설정을 원자적으로 저장한다. 첫 실행과 설정 변경의 `delta=n/a`, 이후 부호 있는 변화량, 실패한 스캔의 기준값 보존을 테스트한다. (A8f)
 - [ ] 어떤 위키 명령도 스스로 노트를 삭제·병합·이동하지 않는다. 후보만 만든다. (A8)
-- [ ] `oah hook session-start`는 `OAH_WORKER=1`이면 아무것도 출력하지 않는다. P7b 갈래에서
+- [ ] `oah hook session-start`는 `OAH_WORKER=1`이면 아무것도 출력하지 않는다. P7b 레인에서
   안내형 `oah init`의 훅 연결과 함께 만든다. (A6)
 
 ### 소유자의 후속 수정에서 나온 후보(2026-10-23)
@@ -1411,7 +1411,7 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 
 | # | 후보 | 단계 |
 |---|---|---|
-| C1 | **2026-10-24에 P4b 갈래(PR #31)로 반영한 소유자 결정으로 대체했다.** `oah call`로 배정한 워커는 배정자의 기존 리스를 쓰며 시작·갱신·해제·완료하지 않는다. 모든 브리프에는 리스 명령 대신 리스 범위와 의도 결속을 담는다. 쓰기 워커(1차 구현·수정 단계)는 배정자가 리스를 잡은 워크트리에서만 실행한다. Orca 실행기도 그 워크트리를 재사용하며, `--worktree`가 다른 트리를 가리키면 `OAH_WORKTREE_LEASE_MISMATCH`로 거절한다. 읽기 전용 리뷰는 어느 트리에서든 실행할 수 있다. 리스 저장소가 이를 강제한다. `oah call`이 모든 실행기에 설정하는 `OAH_WORKER=1`이면 모든 리스 쓰기를 `OAH_WORKER_LEASE_REFUSED`로 거절한다. 재사용 명세가 여전히 리스 명령을 언급하면 `OAH_WORKER_LEASE_COMMAND` 경고만 받는다. 테스트는 배정자의 `oah start --packet`을 실행하고 `oah intent show`가 `current`를 보고하는지 확인한다. *대체된 이전 규칙은 다음과 같다.* 구현·수정 브리프에만 정확한 리스 명령(`oah start --packet <source>`)을 담고 리뷰 브리프에는 넣지 않으며 테스트는 전달된 명령을 따른다. | P3, P4, P6 |
+| C1 | **2026-10-24에 P4b 레인(PR #31)으로 반영한 소유자 결정으로 대체했다.** `oah call`로 배정한 워커는 배정자의 기존 리스를 쓰며 시작·갱신·해제·완료하지 않는다. 모든 브리프에는 리스 명령 대신 리스 범위와 의도 결속을 담는다. 쓰기 워커(1차 구현·수정 단계)는 배정자가 리스를 잡은 워크트리에서만 실행한다. Orca 실행기도 그 워크트리를 재사용하며, `--worktree`가 다른 트리를 가리키면 `OAH_WORKTREE_LEASE_MISMATCH`로 거절한다. 읽기 전용 리뷰는 어느 트리에서든 실행할 수 있다. 리스 저장소가 이를 강제한다. `oah call`이 모든 실행기에 설정하는 `OAH_WORKER=1`이면 모든 리스 쓰기를 `OAH_WORKER_LEASE_REFUSED`로 거절한다. 재사용 명세가 여전히 리스 명령을 언급하면 `OAH_WORKER_LEASE_COMMAND` 경고만 받는다. 테스트는 배정자의 `oah start --packet`을 실행하고 `oah intent show`가 `current`를 보고하는지 확인한다. *대체된 이전 규칙은 다음과 같다.* 구현·수정 브리프에만 정확한 리스 명령(`oah start --packet <source>`)을 담고 리뷰 브리프에는 넣지 않으며 테스트는 전달된 명령을 따른다. | P3, P4, P6 |
 | C2 | 브리프 배치는 고정한다. 워커 줄, 사전 안내문, 의도 절 원문, 라운드 지시, 검증 푸터(바뀐 만큼만 검증, 5.11), 의도 푸터 순이다. 이전 기준본과 비교하는 테스트는 그 위치에서 의도 푸터를 정확히 하나 제거하며 푸터가 없거나 중복이면 실패한다. | P3, P6 |
 | C3 | 저장한 브리프나 명세를 재사용하는 배정도 정본 의도 푸터를 담은 전달용 브리프를 구성한다. 전달할 수 없으면 `OAH_FOOTER_NOT_APPENDED`로 배정을 거절한다. | P3 |
 | C4 | 푸터 시작 마커가 줄 시작에서 줄 전체를 차지할 때만 푸터가 있는 것으로 센다. 마커를 언급만 하는 브리프에도 푸터를 붙인다. tier 동기화는 관리 블록에 같은 규칙을 쓴다. | P3, P7 |
@@ -1439,7 +1439,7 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 ### 개정 3(2026-10-23)
 
 소유자의 2026-10-23 메모에서 가져온 항목이다. 각각 바꾸는 절과 담당 단계를 명시한다.
-1절(의도 개정 3), 4절(재판정한 행), 6.5(온보딩), 11절(작업 갈래와 수정 라운드 규칙),
+1절(의도 개정 3), 4절(재판정한 행), 6.5(온보딩), 11절(레인과 수정 라운드 규칙),
 13절(결정)을 이 내용으로 갱신했다.
 
 | # | 규칙 | 절 | 단계 |
@@ -1448,44 +1448,44 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 | A10 | **난이도별 모델·추론 강도를 자동 적용한다.** `oah packet new`와 `oah call`은 난이도 축(kind, intensity, reasoning, risk)을 규칙으로 채점하고 수동 플래그 없이 `oah recommend`를 적용한다. `--tier`로 재정의할 수 있고 기록한다. 재정렬기 플러그인은 참고용 AI 판정을 더할 수 있으며 규칙 결과 옆에 기록하고 tier를 낮추지는 않는다. 실행 기록에는 축, tier 출처, 요청한 모델·강도와 실제 모델·강도를 보관한다. | 4(6, 31행), 5.5, 5.6 | P3, P4 |
 | A11 | **영향 지도를 생성하고 최신으로 유지한다.** `oah init`이 상태 폴더에 워크트리별 지도를 만들어 저장한다. 실패하면 경고와 `impact=unavailable`을 기록하고 나머지 init은 실패시키지 않는다(7). 선택형 `post-commit`, `post-merge` 훅으로 증분 갱신하며 `preflight`, `packet new`, `review`, `finish`는 먼저 지도를 갱신한다. 최신 여부는 워크트리 신원과 실제 입력 명세에 결속한다. HEAD SHA, 추적 인덱스 상태 다이제스트, 지도가 읽은 변경·미추적 입력 다이제스트, 무시된 원장을 포함한 원장 바이트, 설정 바이트, 도구 버전이다. 무엇이든 바뀌면 오래된 상태가 되며 결과 다이제스트도 기록한다. 오래된 지도는 갱신하거나 `OAH_IMPACT_STALE`로 거절하며 알리지 않고 쓰지 않는다. 기본 DB 플러그인은 SQL 마이그레이션에서 테이블, 뷰, 루틴, 트리거, 인덱스, GRANT를 추출해 코드 참조와 연결하므로 SQL 프로젝트는 맞춤 코드 없이 DB 영향 그래프를 얻는다. 재정렬기는 선택 사항으로 유지한다. 편집 시점 영향 힌트는 선택형 훅이 된다. | 4(16–18행), 5.10, 5.12, 7 | P4, P5, P6, P7 |
 | A12 | **Obsidian 위키를 자동 생성·관리한다.** `oah init`은 Obsidian 호환 `docs/wiki/`를 만든다. 색인, 삽입 마커가 있는 최신순 로그, 노트 템플릿, workspace 파일을 git에서 무시하는 최소 `.obsidian/` 설정이다. 리드나 안내형 기본 절차는 수정 뒤를 포함해 최종 커밋, 게이트, 리뷰 전에 추적 로그·색인·분할 보관을 위해 `oah wiki maintain --task T`를 실행한다. 5.4의 출력은 범위 예외이며 이벤트에 기록한다. 유지 관리는 위키 잠금, 제한된 재시도, 작업별 멱등 삽입, 명시적 저널 복구를 쓴다(5.10). `finish`는 추적 파일을 쓰지 않는다. 작업 유지 관리를 검증하며, 기록되는 `--allow-missing-wiki-maintenance` 재정의 없이는 거절한다. `finish`와 pre-commit의 린트·정리 상태 검사는 추적 파일을 바꾸지 않는다. graphify는 선택 사항(`oah graph`)이고 그래프를 자동 재구축하는 동작은 없다. | 4(21행), 5.1, 5.4, 5.10, 5.12 | P7 |
-| A13 | **출처가 있는 툴킷.** 키트는 소유자가 쓰는 스킬, MCP 서버 템플릿, CLI 검사를 각각 출처와 함께 묶는다. 30행의 "원본을 포함하지 않는다"를 라이선스가 허락하는 곳에서만 뒤집는다. 스킬은 업스트림 라이선스가 재배포를 허락할 때만 원본 그대로 포함하고 LICENSE, 고정 업스트림 커밋, `THIRD_PARTY_NOTICES.md` 항목을 둔다. 공개 항목이어도 재배포 라이선스가 없으면 설치 명령과 URL만 연결한다. 소유자 전용·비공개 스킬, 계정 결속 커넥터, 제품 전용 도구는 제외한다. 키트는 `skills/`, `oah skills list/install/update`, `${ENV_VAR}` 자리표시자만 있는 `mcp/` 템플릿, 권장 CLI와 공식 설치 명령을 보여 주는 `oah doctor` 검사, 영어·한국어 툴킷 페이지를 제공한다. unlazy는 P5 계약 테스트 고정값으로만 설치하고 게이트 명령 전에 커밋·스크립트 다이제스트를 검증한다(5.8). 자동 업데이트는 상태 폴더 키트 캐시만 갱신하며 추적 프로젝트 스킬 사본은 고정한다(A15). 목록은 아래에 있다. | 2, 3, 4(30행), 5.2, 5.8, 9 | P7, P8, P9 |
-| A14 | **모델은 업데이트를 따라간다.** `oah`는 설정 기본값에 편집 가능한 엔진별 강한 순서의 `quality_order`를 제공한다. Claude 기본값은 `["opus", "sonnet", "haiku"]`로 Claude Code가 최신 모델로 해석하는 CLI 별칭을 쓴다. low는 마지막 가용 항목, medium은 두 번째(하나뿐이면 첫 번째), high와 max는 첫 번째를 쓴다. Codex는 모든 tier에서 실제 설정 모델로 시작하고 A1로 강도만 바꾼다. 사용자 품질 목록이 없으면 해석 가능한 CLI 보고 기본값이 자동 매핑을 대체하고, 그렇지 않으면 실제 설정 모델을 유지한다. 사용자 품질 목록은 Claude와 같은 tier 매핑을 쓴다. 새 Codex 모델은 CLI 모델 목록이 기본값으로 표시하거나 사용자 품질 목록에 이름이 있을 때만 채택한다. CLI 보고는 가용성과 지원 추론 단계를 제공하며 품질 순위를 추정하지 않는다. 우선순위는 명시적 tier 모델 고정, 자동 카탈로그 매핑, 5.5의 실제 설정 해석기 순이다. 새 설치에서 모델을 정할 수 없으면 여전히 `OAH_MODEL_UNRESOLVED`로 거절한다. 모델 업데이트는 실행 전마다 카탈로그를 읽고 최신 여부를 검사하며 CLI 버전 변경, TTL 만료, `oah models --refresh` 때 갱신한다. 검사 성공 뒤 다음 실행은 자격을 갖춘 매핑을 쓰며 A1이 선택 모델의 강도를 다시 정한다. 정한 모델이나 강도가 바뀔 때마다 이전 값, 새 값, 시점, 이유를 기록한다. 갱신이 실패하면 실패를 알리고 낮추지 않은 채 마지막 정상 매핑을 유지한다. 명시적 고정은 항상 우선한다. | 4(7행), 5.5 | P3 |
-| A15 | **스킬을 자동 업데이트하고 자동 사용한다.** 업데이트 가능한 포함·연결 스킬은 허용 목록에 있는 업스트림과 설치 커밋을 기록하며 사용자가 명시적으로 고정한 것은 자동으로 올리지 않는다. unlazy는 운영 의존성이라 A15가 업데이트하지 않는다. 후보 커밋을 대상으로 P5 계약·게이트 무효화 테스트를 통과하는 변경으로만 채택한다(5.8). 자동 업데이트는 작업 트리 밖 `oah` 상태 폴더의 키트 캐시만 갱신하며 프로젝트가 직접 포함하지 않은 스킬을 제공한다. `.claude/skills/`나 `.agents/skills/`의 추적 프로젝트 사본은 고정값이다. 자체 범위·리스를 가진 별도 작업에서 명시적인 `oah skills update --project`로만 바꾼다. 같은 스킬 ID의 선택 순서는 프로젝트 사본, 키트 캐시, 사용자·플러그인 사본이며 선택은 모든 사본을 읽기만 한다. 안내형 설정은 기본적으로 키트 캐시 자동 업데이트를 켜고 사용자가 끌 수 있다. `update_interval_days` 기본값은 1일이다. 쓰기를 하는 `oah` 명령은 저장소에 활성 리스가 없을 때 다음 작업 전에 주기당 최대 한 번 기한 검사를 하므로 작업을 계속하면 기본적으로 적어도 하루 한 번 검사한다. 유휴 검사부터 업데이트 게시까지 상태 잠금을 유지해 리스 획득과 경합하지 않게 한다. 활성 리스가 있으면 검사를 미룬다. 선택형 launchd(macOS)나 Task Scheduler(Windows) 항목은 동의를 받아야 설치·제거하며 같은 잠금 검사를 호출한다. 전역 스킬 폴더는 확인을 받는 명시적 `oah skills update --global`로만 갱신하고 예약 실행하지 않는다. 설치 커밋을 올리기 전에 라이선스를 확인하고 이전/새 커밋·시점·이유를 담은 diff 요약을 기록하며 스킬 로딩 검사와 개인정보 스캔을 실행한 뒤 원자적으로 게시한다. 실패하거나 의심스러운 업데이트는 마지막 정상 커밋으로 되돌리고 보고하며 조용히 넘기지 않는다. A9는 선택한 설치 버전을 쓰므로 업데이트 확인 뒤 다음 작업은 수동 절차 없이 자격을 갖춘 검증 업데이트를 쓴다. 프로젝트 고정과 명시적 사용자 고정은 바뀌지 않는다. | 4(30행), 5.10, 5.11, 6.5, 7 | P4, P7 |
+| A13 | **출처가 있는 툴킷.** 키트는 소유자가 쓰는 스킬, MCP 서버 템플릿, CLI 검사를 각각 출처와 함께 묶는다. 30행의 "번들하지 않는다"를 라이선스가 허락하는 곳에서만 뒤집는다. 스킬은 업스트림 라이선스가 재배포를 허락할 때만 원본 그대로 번들하고 LICENSE, 고정 업스트림 커밋, `THIRD_PARTY_NOTICES.md` 항목을 둔다. 공개 항목이어도 재배포 라이선스가 없으면 설치 명령과 URL만 연결한다. 소유자 전용·비공개 스킬, 계정 결속 커넥터, 제품 전용 도구는 제외한다. 키트는 `skills/`, `oah skills list/install/update`, `${ENV_VAR}` 자리표시자만 있는 `mcp/` 템플릿, 권장 CLI와 공식 설치 명령을 보여 주는 `oah doctor` 검사, 영어·한국어 툴킷 페이지를 제공한다. unlazy는 P5 계약 테스트 핀으로만 설치하고 게이트 명령 전에 커밋·스크립트 다이제스트를 검증한다(5.8). 자동 업데이트는 상태 폴더 키트 캐시만 갱신하며 추적 프로젝트 스킬 사본은 고정한다(A15). 목록은 아래에 있다. | 2, 3, 4(30행), 5.2, 5.8, 9 | P7, P8, P9 |
+| A14 | **모델은 업데이트를 따라간다.** `oah`는 설정 기본값에 편집 가능한 엔진별 강한 순서의 `quality_order`를 제공한다. Claude 기본값은 `["opus", "sonnet", "haiku"]`로 Claude Code가 최신 모델로 해석하는 CLI 별칭을 쓴다. low는 마지막 가용 항목, medium은 두 번째(하나뿐이면 첫 번째), high와 max는 첫 번째를 쓴다. Codex는 모든 tier에서 실제 설정 모델로 시작하고 A1로 강도만 바꾼다. 사용자 품질 목록이 없으면 해석 가능한 CLI 보고 기본값이 자동 매핑을 대체하고, 그렇지 않으면 실제 설정 모델을 유지한다. 사용자 품질 목록은 Claude와 같은 tier 매핑을 쓴다. 새 Codex 모델은 CLI 모델 목록이 기본값으로 표시하거나 사용자 품질 목록에 이름이 있을 때만 채택한다. CLI 보고는 가용성과 지원 추론 단계를 제공하며 품질 순위를 추정하지 않는다. 우선순위는 명시적 tier 모델 핀, 자동 카탈로그 매핑, 5.5의 실제 설정 해석기 순이다. 새 설치에서 모델을 정할 수 없으면 여전히 `OAH_MODEL_UNRESOLVED`로 거절한다. 모델 업데이트는 실행 전마다 카탈로그를 읽고 최신 여부를 검사하며 CLI 버전 변경, TTL 만료, `oah models --refresh` 때 갱신한다. 검사 성공 뒤 다음 실행은 자격을 갖춘 매핑을 쓰며 A1이 선택 모델의 강도를 다시 정한다. 정한 모델이나 강도가 바뀔 때마다 이전 값, 새 값, 시점, 이유를 기록한다. 갱신이 실패하면 실패를 알리고 낮추지 않은 채 마지막 정상 매핑을 유지한다. 명시적 핀은 항상 우선한다. | 4(7행), 5.5 | P3 |
+| A15 | **스킬을 자동 업데이트하고 자동 사용한다.** 업데이트 가능한 번들·연결 스킬은 허용 목록에 있는 업스트림과 설치 커밋을 기록하며 사용자가 명시적으로 고정한 것은 자동으로 올리지 않는다. unlazy는 운영 의존성이라 A15가 업데이트하지 않는다. 후보 커밋을 대상으로 P5 계약·게이트 무효화 테스트를 통과하는 변경으로만 채택한다(5.8). 자동 업데이트는 작업 트리 밖 `oah` 상태 폴더의 키트 캐시만 갱신하며 프로젝트가 직접 번들하지 않은 스킬을 제공한다. `.claude/skills/`나 `.agents/skills/`의 추적 프로젝트 사본은 핀이다. 자체 범위·리스를 가진 별도 작업에서 명시적인 `oah skills update --project`로만 바꾼다. 같은 스킬 ID의 선택 순서는 프로젝트 사본, 키트 캐시, 사용자·플러그인 사본이며 선택은 모든 사본을 읽기만 한다. 안내형 설정은 기본적으로 키트 캐시 자동 업데이트를 켜고 사용자가 끌 수 있다. `update_interval_days` 기본값은 1일이다. 쓰기를 하는 `oah` 명령은 저장소에 활성 리스가 없을 때 다음 작업 전에 주기당 최대 한 번 기한 검사를 하므로 작업을 계속하면 기본적으로 적어도 하루 한 번 검사한다. 유휴 검사부터 업데이트 게시까지 상태 잠금을 유지해 리스 획득과 경합하지 않게 한다. 활성 리스가 있으면 검사를 미룬다. 선택형 launchd(macOS)나 Task Scheduler(Windows) 항목은 동의를 받아야 설치·제거하며 같은 잠금 검사를 호출한다. 전역 스킬 폴더는 확인을 받는 명시적 `oah skills update --global`로만 갱신하고 예약 실행하지 않는다. 설치 커밋을 올리기 전에 라이선스를 확인하고 이전/새 커밋·시점·이유를 담은 diff 요약을 기록하며 스킬 로딩 검사와 개인정보 스캔을 실행한 뒤 원자적으로 게시한다. 실패하거나 의심스러운 업데이트는 마지막 정상 커밋으로 되돌리고 보고하며 조용히 넘기지 않는다. A9는 선택한 설치 버전을 쓰므로 업데이트 확인 뒤 다음 작업은 수동 절차 없이 자격을 갖춘 검증 업데이트를 쓴다. 프로젝트 핀과 명시적 사용자 핀은 바뀌지 않는다. | 4(30행), 5.10, 5.11, 6.5, 7 | P4, P7 |
 | A16 | **소유자 하네스와 업스트림 동기화.** `docs/UPSTREAM_SYNC.md`는 원본 하네스에서 마지막으로 검토한 커밋과 검토한 모든 변경 표를 기록한다. 각 행은 커밋, 요약, 판정(범용 기능으로 이식, 비공개·소유자 전용이라 제외, 보류)을 담는다. 이식은 계획 항목과 PR을 명시한다. 단계 시작마다, 작업 중에는 적어도 하루 한 번 구현자가 새 커밋을 읽기 전용으로 읽고 모든 이식을 새로 작성하며, 이식 판정을 상시 수정 라운드 규칙에 따라 개정과 구현으로 옮긴다. 원본 하네스는 런타임 의존성이 되지 않는다. `oah` 사용자는 일반 릴리스로 업데이트를 받는다. | 1, 13 | 모든 단계, P9 문서 |
 | A17 | **어디에도 자격 증명을 넣지 않는다**(엄격한 규칙). API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저장소, 이력, 릴리스, 이슈, CI 로그 어디에도 넣지 않는다.<br>• 키는 문서화한 조회 경로 하나(`oah.secrets`)로 실행할 때만 환경 변수나 OS 키체인에서 읽는다. 키가 없으면 기능을 끈 채 `unused(no key)`를 보고하며 `oah`는 프로젝트 파일에 키를 붙여 넣으라고 요구하지 않는다.<br>• 템플릿은 `${ENV_VAR}` 자리표시자만 쓰고 문서도 자리표시자 이름만 보여 준다.<br>• 테스트는 실행 중 가짜 키를 생성하고 커밋한 픽스처에는 넣지 않는다.<br>• gitleaks와 `tools/privacy_scan.py`는 모든 pull request·push의 CI와 릴리스 태그 전 전체 이력에서 실행한다. 발견 항목이 있으면 빌드를 실패시키고 실제 자격 증명처럼 보이는 값은 허용 목록으로 제외하지 않는다.<br>• `oah init`은 사용자 프로젝트의 로컬 비밀값 파일을 git에서 무시하게 하고 문서에 키 보관 위치를 적는다.<br>• 소유자 컴퓨터에서 가져오는 것은 이름과 출처만 남긴다. | 2, 3, 8, 10 | 모든 단계, CI는 지금 적용 |
 | OB | **초보자 온보딩**(6.5). OS별 한 줄 설치 프로그램이 안내형 `oah init`으로 넘긴다. 동의를 받아 공식 출처의 도구를 확인·설치하고 비밀값을 다루지 않으며 로그인을 안내하고 소유자 기본값으로 환경을 만든다. 이어 첫 안내형 작업(`examples/hello-oah`)을 실행하며 한국어·영어의 쉬운 메시지와 문서를 제공한다. | 6.5, 7 | P7, P8, P9 |
 
 #### 개정 3 체크리스트
 
-**P3**(P3b와 P3o 갈래)
+**P3**(P3b와 P3o 레인)
 - [ ] 패킷에 tier가 없으면 `oah call`이 규칙으로 난이도 축을 채점하고 플래그 없이 `oah recommend`를 적용한다. `--tier`는 재정의하며 기록한다. (A10)
 - [ ] 실행 기록에 축, tier와 출처(`rules`, `packet`, `flag`), 참고 판정(값과 함께 `used` 또는 `unused(<reason>)`), 요청·실제 모델과 강도를 보관한다. 참고 판정은 tier를 낮추지 않는다. 플러그인 부재, 키 부재, 플러그인 오류, 상향·하향 권고를 테스트한다. (A10)
 - [ ] 스킬 선택기는 A15 우선순위에 따라 설치된 Claude·Codex 스킬 디렉터리(사용자, 프로젝트, 플러그인 스킬)와 키트 캐시를 읽기 전용으로 읽는다. 종류, 단계, 위험, Scope 파일 종류로 선택하며 스킬마다 이유를 붙이고 빈 Scope는 경고한다(A4). 브리프는 이름과 경로로 선택 스킬을 참조하거나 `[skills] mode = "attach"`이면 텍스트를 첨부한다. (A9)
 - [ ] 재정렬기 플러그인 인터페이스는 순서만 바꾸며 `rerank=used` 또는 `rerank=unused(<reason>)`을 기록한다. TypeSafe Jev 제공자는 명시적 활성화와 `oah.secrets`를 통한 키가 모두 필요하다. 키는 있으나 동의하지 않은 경우(`unused(not-enabled)`), 켰으나 키가 없는 경우(`unused(no key)`), 브리프에서 끈 경우, 가짜 제공자와 네트워크 없이 동의받아 켠 호출을 테스트한다. (A9)
 - [ ] 스킬 선택 사용 기록은 상태 폴더의 로컬 JSON-lines 파일이며 전송하지 않는다. 동의받아 켠 제공자만 A9에서 밝힌 데이터를 보낸다. 선택 문구는 종류, 단계, 위험, 가용성에 따른 선택을 설명하고 선택형 스킬을 하나도 쓰지 않는다고 약속하지 않는다. (A9, C6)
-- [ ] `oah models [--refresh]`는 편집 가능한 엔진별 품질 목록과 A14의 정확한 tier 매핑을 쓴다. Claude 별칭, Codex 실제 기본값, CLI 보고 기본값 채택과 사용자 목록 모델, 카탈로그 매핑보다 우선하는 명시적 tier 고정, 실제 설정 대체 경로, `OAH_MODEL_UNRESOLVED`를 테스트한다. 실행 전마다 모델 업데이트를 확인하고 카탈로그 최신 여부를 검사하며 CLI 버전 변경, TTL 만료, `oah models --refresh` 때 갱신한다. 검사 성공 뒤 다음 실행은 자격을 갖춘 매핑을 쓴다. A1이 지원 강도를 다시 정한다. 변경마다 이전 값, 새 값, 시점, 이유를 기록한다. 갱신 실패는 경고하고 낮추지 않은 채 마지막 정상 매핑을 유지한다. (A14)
+- [ ] `oah models [--refresh]`는 편집 가능한 엔진별 품질 목록과 A14의 정확한 tier 매핑을 쓴다. Claude 별칭, Codex 실제 기본값, CLI 보고 기본값 채택과 사용자 목록 모델, 카탈로그 매핑보다 우선하는 명시적 tier 핀, 실제 설정 대체 경로, `OAH_MODEL_UNRESOLVED`를 테스트한다. 실행 전마다 모델 업데이트를 확인하고 카탈로그 최신 여부를 검사하며 CLI 버전 변경, TTL 만료, `oah models --refresh` 때 갱신한다. 검사 성공 뒤 다음 실행은 자격을 갖춘 매핑을 쓴다. A1이 지원 강도를 다시 정한다. 변경마다 이전 값, 새 값, 시점, 이유를 기록한다. 갱신 실패는 경고하고 낮추지 않은 채 마지막 정상 매핑을 유지한다. (A14)
 - [ ] `oah.secrets.get(name)`을 유일한 키 조회 경로로 쓴다. 환경 변수 우선, 다음은 OS 키체인(macOS `security`, Windows Credential Manager)이다. 키가 없으면 `unused(no key)`를 보고한다. 키는 로그, 실행 기록, 브리프에 들어가지 않는다. (A17)
-- [ ] Orca가 설치돼 있으면 선택형 Orca 어댑터가 `oah call` 워커를 Orca로 배정한다. (8행, P3o 갈래)
+- [ ] Orca가 설치돼 있으면 선택형 Orca 어댑터가 `oah call` 워커를 Orca로 배정한다. (8행, P3o 레인)
 
-**P4**(P4b 갈래)
+**P4**(P4b 레인)
 - [ ] `oah packet new`가 규칙으로 축을 채점하고 축, 권장 tier, 선택 스킬과 이유를 `## Plan`에 기록한다. (A9, A10)
 - [ ] `oah preflight`와 `oah packet new`는 먼저 영향 지도를 갱신하거나 `OAH_IMPACT_STALE`로 거절한다. (A11)
-- [ ] 브리프와 패킷은 A15 선택 우선순위를 써서 업데이트 확인 뒤 다음 작업이 자격을 갖춘 검증 캐시 업데이트를 사용하게 한다. 프로젝트 고정과 명시적 사용자 고정은 바뀌지 않는다. (A15)
+- [ ] 브리프와 패킷은 A15 선택 우선순위를 써서 업데이트 확인 뒤 다음 작업이 자격을 갖춘 검증 캐시 업데이트를 사용하게 한다. 프로젝트 핀과 명시적 사용자 핀은 바뀌지 않는다. (A15)
 
 **P5**
 - [ ] `oah hooks install`이 선택형 `post-commit`, `post-merge` git 훅을 제안하며 Stop 훅과 같은 diff 표시, 백업, 제거 규칙을 쓴다. (A11)
 - [ ] `oah hook pre-push`는 이 워크트리에 끝나지 않은 리스가 있으면 거절하고, gitleaks가 설치돼 있으면 push할 커밋에서 실행한다. (3행, A17)
-- [ ] `oah init --with-unlazy`는 P5 계약 테스트를 거친 커밋과 스크립트 다이제스트로 설치한다. 모든 게이트 명령은 환경/프로젝트/사용자 위치에서 찾은 사본을 실행 전에 두 식별 정보와 대조한다. 불일치 테스트는 거절, 정확한 고정 설치 명령, 재정의 제거 안내를 확인한다(5.8). 고정값은 A15에서 제외한다. 후보 커밋을 채택하려면 그 커밋에서 CLI 인자, 상태, 증거 동작을 다루는 어댑터 계약·게이트 무효화 테스트가 필요하다. `gates check`는 커밋과 리뷰 전에 경로 없는 요약을 쓰고 `finish`는 추적 파일을 쓰지 않고 검증한다. (A15, 5.8)
+- [ ] `oah init --with-unlazy`는 P5 계약 테스트를 거친 커밋과 스크립트 다이제스트로 설치한다. 모든 게이트 명령은 환경/프로젝트/사용자 위치에서 찾은 사본을 실행 전에 두 식별 정보와 대조한다. 불일치 테스트는 거절, 정확한 고정 설치 명령, 재정의 제거 안내를 확인한다(5.8). 핀은 A15에서 제외한다. 후보 커밋을 채택하려면 그 커밋에서 CLI 인자, 상태, 증거 동작을 다루는 어댑터 계약·게이트 무효화 테스트가 필요하다. `gates check`는 커밋과 리뷰 전에 경로 없는 요약을 쓰고 `finish`는 추적 파일을 쓰지 않고 검증한다. (A15, 5.8)
 
 **P6**
 - [ ] `oah review`는 먼저 영향 지도를 갱신하거나 `OAH_IMPACT_STALE`로 거절한다. (A11)
 - [ ] `oah land --check`는 수렴한 리뷰 영수증, CI check-run(`gh`가 있으면 사용), 스캔, 게이트가 정확한 head에 결속했는지 검증한다. `--merge`는 사용자 확인 뒤에만 반영한다. (29행)
 
-**P7**(P7a, P7i, P7t, P7b 갈래)
+**P7**(P7a, P7i, P7t, P7b 레인)
 - [ ] `oah impact build/refresh`는 A11의 실제 입력 명세로 워크트리별 지도를 저장한다. HEAD, 추적 인덱스, 변경/미추적 입력, 무시된 원장, 설정, 도구 버전 변경으로 무효화되는지, HEAD를 공유하는 워크트리를 분리하는지 테스트한다. 오래된 지도는 갱신하거나 거절한다. 기본 SQL 플러그인은 코드 참조에 연결된 `db_table`, `db_routine`, `db_grant` 개체를 만든다. `oah init`은 첫 지도를 만든다. 실패하면 `impact=unavailable`로 경고하고 나머지 init은 성공으로 남긴다. dry-run은 빌드를 나열만 하고 두 번째 실행은 오래된 지도를 갱신하거나 아무것도 바꾸지 않는다. 편집 시점 영향 힌트는 선택형이다. (A11)
 - [ ] `oah init`은 Obsidian 호환 위키를 만든다. 색인, 마커가 있는 로그, 템플릿, workspace 파일을 무시하는 최소 `.obsidian/`다. 리드나 안내형 기본 절차가 최종 커밋, 게이트, 리뷰 전에 로그/색인/분할 보관용 `wiki maintain --task T`를 실행한다. 범위 예외 출력 이벤트, 잠금 경합, 분할 보관/복구를 포함한 멱등 재시도, 재정의 기록 없이는 누락·오래된 유지 관리를 finish가 거절하는지 테스트한다. `finish`와 pre-commit의 린트·정리 상태 검사는 추적 파일을 쓰지 않는다. 그래프를 자동 재구축하지 않는다. (A12)
-- [ ] `skills/`에는 검증한 라이선스가 재배포를 허락하는 스킬만 두며 각각 원본 그대로 LICENSE, 업스트림 URL, 고정 커밋, `THIRD_PARTY_NOTICES.md` 항목을 갖춘다. 연결 스킬은 `oah skills install`로 설치한다. unlazy는 P5 계약 테스트 고정값으로 설치하고 커밋·스크립트 다이제스트를 검증한다(5.8). 추적 프로젝트 사본은 A15에 따라 고정한다. `mcp/` 템플릿은 `${ENV_VAR}` 자리표시자만 쓴다. (A13)
-- [ ] 안내형 설정은 기본적으로 키트 캐시 스킬 자동 업데이트를 켜며 사용자가 끌 수 있다. 자동으로 쓸 수 있는 곳은 작업 트리 밖 상태 폴더의 키트 캐시뿐이며 프로젝트가 포함하지 않은 스킬을 제공한다. 선택 순서는 프로젝트 사본, 키트 캐시, 사용자·플러그인 사본이다. 추적하는 `.claude/skills/`, `.agents/skills/` 사본은 고정값이며 자체 범위·리스를 가진 별도 작업의 명시적 `oah skills update --project`로만 바꾼다. 자동 검사가 추적 프로젝트 폴더를 바꾸지 않고 프로젝트 업데이트가 별도 리스·범위를 강제하는지 테스트한다. 기본값 `update_interval_days = 1`, 유휴 중 쓰기 명령을 통한 다음 작업 전 주기당 최대 한 번 기한 검사, 업데이트 중 리스가 시작되지 않도록 게시까지 상태 잠금 유지도 테스트한다. 선택형 launchd/Task Scheduler 항목의 설치·제거는 동의가 필요하다. 전역 업데이트는 확인을 받는 `skills update --global`이 필요하며 예약 실행하지 않는다. 업데이트는 사용자 고정을 지키고 unlazy를 제외하며 라이선스/로딩/개인정보를 검증한다. 이전/새 커밋·시점·이유와 diff를 기록하고 원자적으로 게시하거나 되돌린 뒤 실패를 보고한다. (A15)
+- [ ] `skills/`에는 검증한 라이선스가 재배포를 허락하는 스킬만 두며 각각 원본 그대로 LICENSE, 업스트림 URL, 고정 커밋, `THIRD_PARTY_NOTICES.md` 항목을 갖춘다. 연결 스킬은 `oah skills install`로 설치한다. unlazy는 P5 계약 테스트 핀으로 설치하고 커밋·스크립트 다이제스트를 검증한다(5.8). 추적 프로젝트 사본은 A15에 따라 고정한다. `mcp/` 템플릿은 `${ENV_VAR}` 자리표시자만 쓴다. (A13)
+- [ ] 안내형 설정은 기본적으로 키트 캐시 스킬 자동 업데이트를 켜며 사용자가 끌 수 있다. 자동으로 쓸 수 있는 곳은 작업 트리 밖 상태 폴더의 키트 캐시뿐이며 프로젝트가 번들하지 않은 스킬을 제공한다. 선택 순서는 프로젝트 사본, 키트 캐시, 사용자·플러그인 사본이다. 추적하는 `.claude/skills/`, `.agents/skills/` 사본은 핀이며 자체 범위·리스를 가진 별도 작업의 명시적 `oah skills update --project`로만 바꾼다. 자동 검사가 추적 프로젝트 폴더를 바꾸지 않고 프로젝트 업데이트가 별도 리스·범위를 강제하는지 테스트한다. 기본값 `update_interval_days = 1`, 유휴 중 쓰기 명령을 통한 다음 작업 전 주기당 최대 한 번 기한 검사, 업데이트 중 리스가 시작되지 않도록 게시까지 상태 잠금 유지도 테스트한다. 선택형 launchd/Task Scheduler 항목의 설치·제거는 동의가 필요하다. 전역 업데이트는 확인을 받는 `skills update --global`이 필요하며 예약 실행하지 않는다. 업데이트는 사용자 핀을 지키고 unlazy를 제외하며 라이선스/로딩/개인정보를 검증한다. 이전/새 커밋·시점·이유와 diff를 기록하고 원자적으로 게시하거나 되돌린 뒤 실패를 보고한다. (A15)
 - [ ] `oah init`은 안내형 설정이다. 카탈로그로 도구를 검사하고 사용자가 확인한 것만 설치하며 비밀값을 다루지 않고 Claude·Codex 로그인을 안내한다. 소유자 작업 흐름과 같은 기본값으로 규칙 블록, tier 에이전트, 위키, 영향 지도, 게이트 템플릿, 수락한 훅을 쓴다. (OB)
 - [ ] 안내형 `oah init`은 제공자 활성화를 한 번 묻고 발생할 수 있는 비용과 전송할 후보/증거 데이터를 밝히며 답을 기록한다. 키만 있거나 도구 설치용 `--yes`에 동의했다고 제공자를 켜지 않는다. 설정을 통한 활성화도 지원한다. (A9, AC6)
 - [ ] `oah handoff`와 선택형 SessionStart 훅을 제공한다. 훅은 `OAH_WORKER=1`이면 출력하지 않는다. (11행)
@@ -1506,20 +1506,20 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 - [ ] 릴리스 노트가 있는 `v0.1.0` 태그를 만들었다.
 - [ ] 저장소 공개나 사람 초대를 준비하고 결정은 소유자에게 남겼다.
 
-#### 작업 갈래와 의존성
+#### 레인과 의존성
 
-| 갈래 | 내용 | 필요한 선행 작업 |
+| 레인 | 내용 | 필요한 선행 작업 |
 |---|---|---|
 | P3a | 설정 로더, 명령 탐색, 패키지 데이터 | P2 |
 | P3b | 라우팅, 엔진, `call`, 실행, 브리프. A9, A10, A14, A17 조회 | P3a, P4a |
 | P3o | 선택형 Orca 어댑터 | P3b |
 | P4a | 패킷, 의도(공유 푸터 포함), 사전 점검 핵심 | P2 |
 | P4b | 호출 거절/푸터 통합을 포함한 `start`, `status`, `finish`, `call`의 모든 의도 연결. `packet new`의 A9·A10, A11 갱신 | P3b, P4a, P5, P7i |
-| P5 | 게이트, 검증한 unlazy 커밋/스크립트 고정과 계약, `check` 도우미, `finish` 가드, Stop·git 훅 | P2 |
+| P5 | 게이트, 검증한 unlazy 커밋/스크립트 핀과 계약, `check` 도우미, `finish` 가드, Stop·git 훅 | P2 |
 | P6 | 리뷰 루프, 반영 검사, A11 갱신. P4b의 최신 의도 결속 사용 | P3b, P4b, P5, P7i |
 | P7a | 위키(A8, A12), 규칙 블록, 그래프 | P2 |
 | P7i | 영향 지도(A11), SQL 플러그인 | P2, 이후 게이트 결속에 P5 |
-| P7t | 툴킷(A13), 캐시 전용 스킬 자동 업데이트와 별도 리스의 `--project` 업데이트(A15), 고정 unlazy 설치 | P3a, unlazy 고정·계약에 P5 |
+| P7t | 툴킷(A13), 캐시 전용 스킬 자동 업데이트와 별도 리스의 `--project` 업데이트(A15), 고정 unlazy 설치 | P3a, unlazy 핀·계약에 P5 |
 | P7b | 안내형 `oah init`(OB), tier, 훅 연결, `handoff`, SessionStart | P3b, P4b, P5, P7a, P7i, P7t, P8, P7c, P8c |
 | P7c | 사용자 프로젝트 CI 스타터(A21). `oah ci init`과 템플릿 | P3a |
 | P8 | 설치 프로그램, 도구 카탈로그, `doctor` 도구 검사 | P3a |
@@ -1527,18 +1527,18 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 | P7j | 기본 브랜치 영향 갱신(A23) | P7i |
 | P9 | 문서, 예제, 문제 해결, 툴킷 페이지 | 모두 |
 
-모든 갈래는 P3a의 탐색으로 명령을 등록하고 `oah.config`로 설정을 읽는다. P3a 반영 전에
-시작한 갈래는 리뷰 전에 그 위로 rebase한다.
+모든 레인은 P3a의 탐색으로 명령을 등록하고 `oah.config`로 설정을 읽는다. P3a 반영 전에
+시작한 레인은 리뷰 전에 그 위로 rebase한다.
 
 #### A13 툴킷 목록(2026-10-23)
 
 이 목록은 소유자 컴퓨터에서 읽기 전용으로 수집했다. 업스트림 LICENSE 파일에서 라이선스를 검증했다.
-고정 커밋의 로컬 업스트림 사본으로 확인한 경우처럼 검증이 약한 곳은 원본을 포함하는 갈래가
+고정 커밋의 로컬 업스트림 사본으로 확인한 경우처럼 검증이 약한 곳은 번들하는 레인이
 먼저 고정 커밋의 LICENSE를 다시 읽는다.
 
 각 행은 네 가지 판정 가운데 하나다.
-- **vendor**는 LICENSE, 고정 커밋, 고지와 함께 원본 그대로 제공한다. 자동 업데이트는 프로젝트가
-  원본을 포함하지 않은 스킬의 상태 폴더 키트 캐시만 갱신한다. 추적 프로젝트 사본은 자체 범위·리스를
+- **vendor**는 LICENSE, 고정 커밋, 고지와 함께 원본 그대로 번들한다. 자동 업데이트는 프로젝트가
+  번들하지 않은 스킬의 상태 폴더 키트 캐시만 갱신한다. 추적 프로젝트 사본은 자체 범위·리스를
   가진 작업에서 `oah skills update --project`를 실행할 때까지 고정한다(A15).
 - **template**(MCP 서버)은 `${ENV_VAR}` 자리표시자만 있는 실행 템플릿을 제공한다.
 - **link**는 공식 설치 명령과 URL만 제공한다.
@@ -1546,11 +1546,11 @@ P4a는 패킷, 의도, 사전 점검 핵심을 담당한다. P4b는 `start`, `st
 
 비공개 용어와 일치하는 이름은 가렸다. 값(환경 변수, 헤더, 토큰)은 기록하지 않았다.
 
-**실제 배포 판정(2026-10-24).** P7t 갈래(PR #19)는 처음에 `vendor`로 표시했던 세 행을
+**실제 배포 판정(2026-10-24).** P7t 레인(PR #19)은 처음에 `vendor`로 표시했던 세 행을
 최종적으로 `link`로 정했다. unlazy와 superpowers는 업스트림 파일이 그대로는 이 저장소의
-개인정보 스캔을 통과하지 못하며 포함한 파일을 편집하지 않으므로 원본 포함 대신 연결한다.
+개인정보 스캔을 통과하지 못하며 번들 파일을 편집하지 않으므로 번들 대신 연결한다.
 graphify는 업스트림에 스킬 폴더가 없고 CLI가 템플릿에서 스킬을 쓰므로 연결한다.
-`skills/`에는 `THIRD_PARTY_NOTICES.md`에 적힌 포함 항목 아홉 개가 있다.
+`skills/`에는 `THIRD_PARTY_NOTICES.md`에 적힌 번들 항목 아홉 개가 있다.
 아래 `vendor` 여덟 행(mattpocock-skills 포함)에 P7t가 추가한 선택형 `humanize-korean`을 더한 것이다.
 `docs/toolkit.md`에 연결 항목마다 설치 명령과 이유를 적는다.
 
@@ -1562,7 +1562,7 @@ graphify는 업스트림에 스킬 폴더가 없고 CLI가 템플릿에서 스�
 | skill | orca-cli | orca CLI로 Orca 워크트리, 터미널, 저장소, 내장 브라우저, 인계 조작. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orca-cli> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | orchestration | 감독받는 Orca 워커 에이전트 조율. 메시지, 작업 배정, DAG, 결정 게이트. | <https://github.com/stablyai/orca/tree/a0cd1644f320f1327f7495650a816111b495f3cd/skills/orchestration> | a0cd1644f320f1327f7495650a816111b495f3cd | MIT | vendor |
 | skill | typesafe-ai | TypeSafe 타입 기반 AI 판정 기본 요소로 기능을 만드는 지침(라우팅, 순위, 검증). | <https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai> | lock에 커밋 기록 없음(폴더 해시 678c375b883794bf4292715a43acbba5c84681aa). 확인 시 업스트림 main HEAD는 65a39f393687675ce170e6094757de20370365b9 | MIT | vendor |
-| skill | unlazy | 완료 규율과 운영 게이트 검사기. P5 계약 테스트 고정값으로 설치하고 게이트 명령 전에 커밋·스크립트 다이제스트 검증(5.8). A15 업데이트 제외. | <https://github.com/Leonxlnx/unlazy> | 2.1.0(package.json). lock 해시 16671491f6679ad9378f52604d3bc2415b4120c7은 확인 시 업스트림 main HEAD와 같음 | MIT | link |
+| skill | unlazy | 완료 규율과 운영 게이트 검사기. P5 계약 테스트 핀으로 설치하고 게이트 명령 전에 커밋·스크립트 다이제스트 검증(5.8). A15 업데이트 제외. | <https://github.com/Leonxlnx/unlazy> | 2.1.0(package.json). lock 해시 16671491f6679ad9378f52604d3bc2415b4120c7은 확인 시 업스트림 main HEAD와 같음 | MIT | link |
 | skill | vercel-react-best-practices | Vercel Engineering의 React·Next.js 성능 규칙. | <https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices> | 스킬 메타데이터 1.0.0. lock에 커밋 기록 없음. 확인 시 업스트림 main HEAD는 063bee94c3f4df8453406c830b0a7df0f2860278 | NOASSERTION | link |
 | skill | graphify | 코드와 문서를 query, path, explain 도구가 있는 영속 지식 그래프로 변환. | <https://github.com/Graphify-Labs/graphify> | graphifyy 0.9.93(PyPI), 업스트림 커밋 미기록 | Apache-2.0 | link |
 | skill | [private-term skill A] | 제외. 비공개 용어와 일치 | - | - | - | exclude |
@@ -1634,17 +1634,17 @@ graphify는 업스트림에 스킬 폴더가 없고 CLI가 템플릿에서 스�
 | cli | rg | ripgrep 빠른 검색. | <https://github.com/BurntSushi/ripgrep> | 15.2.0 | Unlicense OR MIT | link |
 
 목록에 있는 unlazy 커밋은 원본에서 관측한 정보이며 테스트하지 않은 검사기를 설치해도 된다는 뜻이 아니다.
-P5가 운영 커밋과 스크립트 다이제스트를 계약 테스트하고 기록한다. init은 그 고정값을 설치하고,
+P5가 운영 커밋과 스크립트 다이제스트를 계약 테스트하고 기록한다. init은 그 핀을 설치하고,
 탐색은 불일치를 거절하며 5.8의 복구 명령을 제시한다. 새 커밋에는 P5 계약 변경이 필요하다.
 
-목록에서 남은 열린 질문이다. 해당 항목은 모두 원본 포함이 아닌 연결이므로 어느 것도 진행을 막지 않는다.
+목록에서 남은 열린 질문이다. 해당 항목은 모두 번들이 아닌 연결이므로 어느 것도 진행을 막지 않는다.
 - `vercel-react-best-practices`의 README는 MIT라고 하지만 업스트림 저장소에 LICENSE 파일이 없다.
   업스트림에 파일이 추가될 때까지 연결만 한다.
 - LazyCodex 플러그인의 로컬 메타데이터는 MIT라고 하지만 업스트림 LICENSE는 Sustainable Use License
   1.0이므로 연결만 한다.
-- graphify는 Apache-2.0과 MIT 라이선스 파일을 모두 제공하며 어느 쪽도 스킬 원본 포함을 허락한다.
-  담당 갈래는 포함하는 릴리스의 업스트림 커밋을 고정한다.
-- `typesafe-ai`의 로컬 lock에는 커밋이 없으므로 담당 갈래가 포함할 업스트림 커밋을 고정한다.
+- graphify는 Apache-2.0과 MIT 라이선스 파일을 모두 제공하며 어느 쪽도 스킬 번들을 허락한다.
+  담당 레인은 번들하는 릴리스의 업스트림 커밋을 고정한다.
+- `typesafe-ai`의 로컬 lock에는 커밋이 없으므로 담당 레인이 번들할 업스트림 커밋을 고정한다.
 - Aside는 비공개 소스다. 선택 사항으로 연결하고 엔진의 내장 웹 도구를 기본값으로 유지한다(34행).
 
 ### 개정 4(2026-10-23)
@@ -1655,16 +1655,16 @@ P5가 운영 커밋과 스크립트 다이제스트를 계약 테스트하고 �
 
 | # | 규칙 | 절 | 단계 |
 |---|---|---|---|
-| A18 | **더 안전한 로그 분할 보관.** `oah wiki rollover`는 계획을 출력하는 모의 실행이다. 쓰기는 `--apply`로 하며 로그와 새 보관 파일을 범위에 담는 리스가 필요하다. `oah wiki maintain`은 리스 없이 위키 잠금 아래에서 분할 보관을 적용한다. 저널을 제거하기 전에 두 파일이 정확히 게시한 바이트여야 한다. 아니면 위키 파일을 그대로 두고 현재 바이트를 `changed-after-publication` 사유로 저널에 기록한다. 명령은 `OAH_WIKI_RECOVERY_PENDING`, 복구는 `OAH_WIKI_RECOVERY_CONFLICT`로 거절하며 다른 파일과 저널을 명시한다. 모든 복구 충돌에서 사용자는 파일을 수동 조정한 뒤 `oah wiki recover --resolved`를 실행한다. 로그와 모든 보관 파일이 중복 항목 없이 파싱되는지 검사하고, 저널의 원래 스냅샷이나 수집한 현재 바이트에 있지만 조정한 파일에 없는 항목을 정확한 바이트 비교로 모두 나열한다. 누락 항목은 해결 처리를 막지 않는다. 저널을 바이트 그대로 상태 폴더의 `resolved-records/`에 타임스탬프가 있는 해결 기록으로 옮기고 해결 시각·기록 경로를 이벤트에 기록한다. `--resolved`는 저널 바이트를 삭제하지 않는다. 검사 실패는 `OAH_WIKI_RECOVERY_CONFLICT`로 거절하고 아무것도 바꾸지 않는다. 모든 `OAH_WIKI_LOG_INVALID` 거절은 해당 경우를 명시하며 쓰기 전에 일어난다. 실행 기준과 목표만 `[wiki]` 설정값이다. 범위 예외, 린트, 복구를 위해 보관 이름은 `log_archive_NN.md`로 유지한다. | 5.10 | P7(P7a 갈래) |
-| A19 | **결속한 의도는 바꿔 끼울 수 없다.** 후속 라운드는 첫 배정 때 결속한 의도 원본을 다시 쓰며 원본이 다른 브리프는 `OAH_INTENT_SOURCE_MISMATCH`로 거절한다. 의도 검사 전에 워크트리 선택자는 정확히 한 저장소로 해석돼야 한다. 모호하거나 해석할 수 없으면 실행 전에 `OAH_WORKTREE_UNRESOLVED`와 실행 가능한 재시도 명령으로 거절한다. | 5.6 | P3(P3b 갈래) |
+| A18 | **더 안전한 로그 분할 보관.** `oah wiki rollover`는 계획을 출력하는 모의 실행이다. 쓰기는 `--apply`로 하며 로그와 새 보관 파일을 범위에 담는 리스가 필요하다. `oah wiki maintain`은 리스 없이 위키 잠금 아래에서 분할 보관을 적용한다. 저널을 제거하기 전에 두 파일이 정확히 게시한 바이트여야 한다. 아니면 위키 파일을 그대로 두고 현재 바이트를 `changed-after-publication` 사유로 저널에 기록한다. 명령은 `OAH_WIKI_RECOVERY_PENDING`, 복구는 `OAH_WIKI_RECOVERY_CONFLICT`로 거절하며 다른 파일과 저널을 명시한다. 모든 복구 충돌에서 사용자는 파일을 수동 조정한 뒤 `oah wiki recover --resolved`를 실행한다. 로그와 모든 보관 파일이 중복 항목 없이 파싱되는지 검사하고, 저널의 원래 스냅샷이나 수집한 현재 바이트에 있지만 조정한 파일에 없는 항목을 정확한 바이트 비교로 모두 나열한다. 누락 항목은 해결 처리를 막지 않는다. 저널을 바이트 그대로 상태 폴더의 `resolved-records/`에 타임스탬프가 있는 해결 기록으로 옮기고 해결 시각·기록 경로를 이벤트에 기록한다. `--resolved`는 저널 바이트를 삭제하지 않는다. 검사 실패는 `OAH_WIKI_RECOVERY_CONFLICT`로 거절하고 아무것도 바꾸지 않는다. 모든 `OAH_WIKI_LOG_INVALID` 거절은 해당 경우를 명시하며 쓰기 전에 일어난다. 실행 기준과 목표만 `[wiki]` 설정값이다. 범위 예외, 린트, 복구를 위해 보관 이름은 `log_archive_NN.md`로 유지한다. | 5.10 | P7(P7a 레인) |
+| A19 | **결속한 의도는 바꿔 끼울 수 없다.** 후속 라운드는 첫 배정 때 결속한 의도 원본을 다시 쓰며 원본이 다른 브리프는 `OAH_INTENT_SOURCE_MISMATCH`로 거절한다. 의도 검사 전에 워크트리 선택자는 정확히 한 저장소로 해석돼야 한다. 모호하거나 해석할 수 없으면 실행 전에 `OAH_WORKTREE_UNRESOLVED`와 실행 가능한 재시도 명령으로 거절한다. | 5.6 | P3(P3b 레인) |
 
 #### 개정 4 체크리스트
 
-**P3**(P3b 갈래)
+**P3**(P3b 레인)
 - [ ] 후속 라운드는 결속한 의도 원본을 다시 쓰며 원본이 다른 브리프는 `OAH_INTENT_SOURCE_MISMATCH`로 거절한다. (A19)
 - [ ] 모호하거나 해석할 수 없는 워크트리 선택자는 실행 전에 `OAH_WORKTREE_UNRESOLVED`와 실행 가능한 재시도 명령으로 거절한다. (A19)
 
-**P7**(P7a 갈래)
+**P7**(P7a 레인)
 - [ ] `oah wiki rollover`는 `--apply` 없이는 쓰지 않으며, 범위를 포함하는 리스 없이 `--apply`를 주면 `OAH_WIKI_LEASE_REQUIRED`로 거절한다. (A18)
 - [ ] 게시 후 검사는 두 파일이 정확히 게시한 바이트일 때만 저널을 제거한다. (A18)
 - [ ] 늦은 추가를 포함한 게시 후 차이가 있으면 위키 파일을 그대로 두고 현재 바이트를 `changed-after-publication` 사유로 저널에 기록하며 명령을 `OAH_WIKI_RECOVERY_PENDING`으로 거절한다. (A18)
@@ -1681,16 +1681,16 @@ P5가 운영 커밋과 스크립트 다이제스트를 계약 테스트하고 �
 개정 4 뒤 소유자의 요청 세 가지와 소유자 하네스에서 이식한 규칙 수정 하나(A23)다.
 초보자는 push할 때 CI와 안전한 기본값을 놓치기 쉽고, 소유자의 작업 흐름은 동반 앱 둘에
 의존하며, 소유자는 그 작업 흐름에서 고정 리뷰 라운드 상한을 없앴다.
-4절(22행), 5.6, 5.9, 5.10, 6.5, 14절과 작업 갈래 표를 갱신했다.
+4절(22행), 5.6, 5.9, 5.10, 6.5, 14절과 레인 표를 갱신했다.
 
 | # | 규칙 | 절 | 단계 |
 |---|---|---|---|
-| A20 | **선택형 동반 앱 Orca와 Aside.** 안내형 설정은 선택 앱 둘을 각각 추가 기능 한 줄과 함께 제안한다. 사용자가 확인한 것만 제공자의 공식 출처에서 설치한다.<br>• **Orca**(Stably AI)는 격리된 git 워크트리에서 코딩 에이전트를 나란히 실행한다. macOS는 `brew install --cask stablyai/orca/orca` 또는 공식 DMG이며 관련 없는 `orca` cask를 쓰지 않는다. Windows는 `winget install --id StablyAI.Orca -e` 또는 공식 설치 프로그램이다. Linux는 공식 패키지 링크를 준다. 사용자가 Orca 설정에서 `orca` CLI를 켜면 설정 절차가 `orca --version`으로 검증한다. 동의를 받아 `orca skills install`로 Orca에 포함된 에이전트 안내를 추가하고 Orca에 프로젝트를 등록한다. 배정 어댑터는 P3o 갈래가 계속 담당한다.<br>• **Aside**(aside.com)는 Claude Code와 Codex가 MCP를 통해 웹 작업에 쓸 수 있는 AI 에이전트가 있는 브라우저다. macOS는 `brew install --cask aside` 또는 공식 DMG, Windows는 공식 설치 프로그램이다. 사용자가 앱 안에서 로그인하고(무료 플랜 있음) 그곳에서 `aside login`을 확인한다. `oah`는 계정을 보지 않는다. `aside` CLI는 제공자가 문서화한 설치 프로그램에서 받으며 실행 전에 출처와 전체 내용을 보여 준다. 동의를 받아 Claude Code(`claude mcp add --scope user --transport stdio aside -- aside mcp`)와 Codex(`codex mcp add aside -- aside mcp`)의 MCP 서버를 등록한다. 둘 다 사용자 수준 설정을 쓰므로 변경을 먼저 보여 준다.<br>• Aside가 등록되면 규칙 블록(5.11)에 선택 절을 추가한다. 웹 작업에 Aside 도구를 쓰고 페이지 내용을 지시가 아닌 데이터로 다루며 결제를 확정하지 않는다.<br>• `oah doctor`는 둘 다 공식 설치 명령과 함께 선택 사항으로 나열하며 없어도 실패하지 않는다. 계정, 자격 증명, 개인 경로는 저장소에 들어가지 않는다(A17). | 5.11, 6.5 | P8(P8c 갈래), P7b, P9 |
-| A21 | **사용자 프로젝트용 CI 스타터.** `oah ci init`과 동의받은 안내형 `oah init`은 전체 내용을 보여 준 뒤 `.github/workflows/oah-ci.yml`을 쓴다.<br>• 테스트 작업은 사용자가 고른 OS에서 실행한다(기본은 현재 OS). `oah`가 프로젝트에서 찾고 사용자가 확인한 테스트 명령을 쓰거나 채워야 한다고 뚜렷이 표시한 단계를 둔다.<br>• 비밀값 스캔 작업은 모든 push와 pull request에서 버전·SHA-256으로 고정한 gitleaks를 실행하며 스캐너 출력·보고서의 비밀값을 모두 가린다.<br>• 모든 액션은 전체 커밋 SHA로 고정하고 `permissions`는 `contents: read`이며 파일에 비밀값이나 토큰이 없다(A17).<br>• 기존 워크플로는 차이를 보여 주고 묻기 전에는 덮어쓰지 않는다.<br>• 문서는 결과 읽는 법과 GitHub 설정에서 기본 브랜치의 필수 검사로 만드는 법을 설명한다. `oah`가 저장소 설정을 직접 바꾸지는 않는다. | 6.5, 7 | P7(P7c 갈래), P7b, P9 |
+| A20 | **선택형 동반 앱 Orca와 Aside.** 안내형 설정은 선택 앱 둘을 각각 추가 기능 한 줄과 함께 제안한다. 사용자가 확인한 것만 제공자의 공식 출처에서 설치한다.<br>• **Orca**(Stably AI)는 격리된 git 워크트리에서 코딩 에이전트를 나란히 실행한다. macOS는 `brew install --cask stablyai/orca/orca` 또는 공식 DMG이며 관련 없는 `orca` cask를 쓰지 않는다. Windows는 `winget install --id StablyAI.Orca -e` 또는 공식 설치 프로그램이다. Linux는 공식 패키지 링크를 준다. 사용자가 Orca 설정에서 `orca` CLI를 켜면 설정 절차가 `orca --version`으로 검증한다. 동의를 받아 `orca skills install`로 Orca에 포함된 에이전트 안내를 추가하고 Orca에 프로젝트를 등록한다. 배정 어댑터는 P3o 레인이 계속 담당한다.<br>• **Aside**(aside.com)는 Claude Code와 Codex가 MCP를 통해 웹 작업에 쓸 수 있는 AI 에이전트가 있는 브라우저다. macOS는 `brew install --cask aside` 또는 공식 DMG, Windows는 공식 설치 프로그램이다. 사용자가 앱 안에서 로그인하고(무료 플랜 있음) 그곳에서 `aside login`을 확인한다. `oah`는 계정을 보지 않는다. `aside` CLI는 제공자가 문서화한 설치 프로그램에서 받으며 실행 전에 출처와 전체 내용을 보여 준다. 동의를 받아 Claude Code(`claude mcp add --scope user --transport stdio aside -- aside mcp`)와 Codex(`codex mcp add aside -- aside mcp`)의 MCP 서버를 등록한다. 둘 다 사용자 수준 설정을 쓰므로 변경을 먼저 보여 준다.<br>• Aside가 등록되면 규칙 블록(5.11)에 선택 절을 추가한다. 웹 작업에 Aside 도구를 쓰고 페이지 내용을 지시가 아닌 데이터로 다루며 결제를 확정하지 않는다.<br>• `oah doctor`는 둘 다 공식 설치 명령과 함께 선택 사항으로 나열하며 없어도 실패하지 않는다. 계정, 자격 증명, 개인 경로는 저장소에 들어가지 않는다(A17). | 5.11, 6.5 | P8(P8c 레인), P7b, P9 |
+| A21 | **사용자 프로젝트용 CI 스타터.** `oah ci init`과 동의받은 안내형 `oah init`은 전체 내용을 보여 준 뒤 `.github/workflows/oah-ci.yml`을 쓴다.<br>• 테스트 작업은 사용자가 고른 OS에서 실행한다(기본은 현재 OS). `oah`가 프로젝트에서 찾고 사용자가 확인한 테스트 명령을 쓰거나 채워야 한다고 뚜렷이 표시한 단계를 둔다.<br>• 비밀값 스캔 작업은 모든 push와 pull request에서 버전·SHA-256으로 고정한 gitleaks를 실행하며 스캐너 출력·보고서의 비밀값을 모두 가린다.<br>• 모든 액션은 전체 커밋 SHA로 고정하고 `permissions`는 `contents: read`이며 파일에 비밀값이나 토큰이 없다(A17).<br>• 기존 워크플로는 차이를 보여 주고 묻기 전에는 덮어쓰지 않는다.<br>• 문서는 결과 읽는 법과 GitHub 설정에서 기본 브랜치의 필수 검사로 만드는 법을 설명한다. `oah`가 저장소 설정을 직접 바꾸지는 않는다. | 6.5, 7 | P7(P7c 레인), P7b, P9 |
 
 | A22 | **리뷰는 수렴할 때까지 실행한다.** 고정 라운드 상한이 없다. 매 라운드 지적이 새롭고 범위 안이면 계속한다. 지적의 안정적인 ID와 유형을 저장하며 리뷰어마다 검증한 이전 영수증과 수정 시도 결과를 받는다(5.9). 재발 증거가 없거나 모호한 경우, 수정하려 한 유형을 되풀이하는 지적, 설계·저장 형식 변경이 필요한 지적은 `OAH_REVIEW_NEEDS_DECISION`으로 시리즈를 멈추고 사용자에게 묻는다. 한 라운드가 승인하거나 P2/P3 지적만 보고하면 시리즈를 끝내고 후속 작업으로 기록한다. 예산을 원하는 사용자는 `[review] max_rounds`를 설정한다(기본 미설정). 상한에 닿으면 `OAH_REVIEW_ROUNDS_EXHAUSTED`로 멈추며 `--extra-round`로 계속하고 기록한다. | 4(22행), 5.9 | P6 |
 
-| A23 | **영향은 최신 기본 브랜치를 읽고 증거는 고정한다.** 영향은 최신 기본 브랜치에서 평가한다. 작업은 한 갈래씩 그곳에 반영되며 반영 검사는 push나 병합 직전에 fetch한 SHA로 영향을 다시 평가하고 새로 영향받는 검사를 요구한다(5.9). 반영은 리뷰한 정확한 head의 fast-forward push이며 원격 기본 브랜치가 여전히 평가한 SHA와 같다는 조건을 원격이 원자적으로 강제한다. 움직였으면 아무것도 반영하지 않는다. 새 SHA를 fetch하고 영향을 다시 평가하며 영향받는 검사를 다시 요구한 뒤 재시도한다. 반영 영향이 오래됐으면 `OAH_LAND_IMPACT_STALE`, 새로 영향받는 검사가 보류·실패면 `OAH_LAND_CHECKS_REQUIRED`로 거절한다. 질의 전에 `oah impact`는 사용자의 git 설정으로 원격 기본 브랜치를 읽기 전용으로 fetch하고(자격 증명을 읽거나 저장하지 않음, A17) 워크트리 지도 옆에 그 ref의 두 번째 지도를 갱신한다. 출력은 두 지도에 커밋 SHA를 표시한다. 기본적으로 갱신을 켠다(`[impact] refresh_default_branch = true`). 브리프에는 "재정렬기와 `oah impact`의 기본 브랜치 자동 갱신을 제외한 네트워크 금지"라고 적으며 워커가 갱신을 끄게 만드는 표현을 쓰지 않는다. `--offline`이거나 fetch가 실패하면 마지막으로 가져온 ref를 쓰고 `default-branch=stale(<reason>)`으로 표시한다. 리뷰 증거 명령은 리뷰한 커밋과 그 작업 트리에 고정한다. | 5.6, 5.9, 5.10 | P7(P7i 뒤 P7j 갈래), P4, P6 |
+| A23 | **영향은 최신 기본 브랜치를 읽고 증거는 고정한다.** 영향은 최신 기본 브랜치에서 평가한다. 작업은 한 레인씩 그곳에 반영되며 반영 검사는 push나 병합 직전에 fetch한 SHA로 영향을 다시 평가하고 새로 영향받는 검사를 요구한다(5.9). 반영은 리뷰한 정확한 head의 fast-forward push이며 원격 기본 브랜치가 여전히 평가한 SHA와 같다는 조건을 원격이 원자적으로 강제한다. 움직였으면 아무것도 반영하지 않는다. 새 SHA를 fetch하고 영향을 다시 평가하며 영향받는 검사를 다시 요구한 뒤 재시도한다. 반영 영향이 오래됐으면 `OAH_LAND_IMPACT_STALE`, 새로 영향받는 검사가 보류·실패면 `OAH_LAND_CHECKS_REQUIRED`로 거절한다. 질의 전에 `oah impact`는 사용자의 git 설정으로 원격 기본 브랜치를 읽기 전용으로 fetch하고(자격 증명을 읽거나 저장하지 않음, A17) 워크트리 지도 옆에 그 ref의 두 번째 지도를 갱신한다. 출력은 두 지도에 커밋 SHA를 표시한다. 기본적으로 갱신을 켠다(`[impact] refresh_default_branch = true`). 브리프에는 "재정렬기와 `oah impact`의 기본 브랜치 자동 갱신을 제외한 네트워크 금지"라고 적으며 워커가 갱신을 끄게 만드는 표현을 쓰지 않는다. `--offline`이거나 fetch가 실패하면 마지막으로 가져온 ref를 쓰고 `default-branch=stale(<reason>)`으로 표시한다. 리뷰 증거 명령은 리뷰한 커밋과 그 작업 트리에 고정한다. | 5.6, 5.9, 5.10 | P7(P7i 뒤 P7j 레인), P4, P6 |
 
 #### 개정 5 체크리스트
 
@@ -1698,7 +1698,7 @@ P5가 운영 커밋과 스크립트 다이제스트를 계약 테스트하고 �
 - [ ] 안내형 설정은 Orca와 Aside를 OS별 공식 설치 명령과 함께 선택 사항으로 제안하며 동의 없이는 설치하지 않는다. 관련 없는 `orca` cask가 나타나지 않는지 테스트로 증명한다. (A20)
 - [ ] CLI 검사, `orca skills install`, 프로젝트 등록, 두 MCP 등록은 각각 먼저 보여 주고 동의받아야 실행한다. 전역 쓰기는 전역이라고 표시한다. 테스트는 가짜 명령을 쓴다. (A20)
 - [ ] Claude MCP 등록 명령에는 `--scope user`가 들어간다. 가짜 명령 테스트로 정확한 인자를 검사한다. (A20)
-- [ ] 선택 규칙 절은 Aside가 등록됐을 때만 나타나며 깨끗하게 제거할 수 있다. (A20)
+- [ ] 선택 규칙 절은 Aside가 등록됐을 때만 나타나며 깨끗하게 제거된다. (A20)
 - [ ] `oah doctor`는 둘 다 선택 사항으로 보고한다. 없어도 실패하지 않고 계정 데이터를 읽거나 저장하지 않는다. (A20, A17)
 
 **P7c**
