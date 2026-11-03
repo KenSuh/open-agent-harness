@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
 import hashlib
 import json
 import os
 import pathlib
 import secrets
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import unittest
+import warnings
 from unittest.mock import patch
 
 from oah import intent, land, unlazy
@@ -1328,6 +1332,56 @@ class PushTest(unittest.TestCase):
                     git(repo, "config", "include.path", str(other))
                     self.assertFalse(context.unchanged(env))
                     git(repo, "config", "--unset", "include.path")
+
+    def test_private_object_folder_is_removed_after_a_normal_drop(self):
+        repo = make_git_repo(self)
+        context = land._GitContext(repo, git_env())
+        folder = context.source
+        self.assertTrue(folder.is_dir())
+        del context
+        gc.collect()
+        self.assertFalse(folder.exists())
+
+    def test_private_object_folder_removes_read_only_files_and_directories(self):
+        repo = make_git_repo(self)
+        context = land._GitContext(repo, git_env())
+        folder = context.source
+        directory = folder / "read-only"
+        directory.mkdir()
+        object_file = directory / "object"
+        object_file.write_text("object", encoding="utf-8")
+
+        def cleanup():
+            if directory.exists():
+                directory.chmod(stat.S_IRWXU)
+            if object_file.exists():
+                object_file.chmod(stat.S_IRWXU)
+            shutil.rmtree(folder, ignore_errors=True)
+
+        self.addCleanup(cleanup)
+        object_file.chmod(stat.S_IREAD)
+        directory.chmod(stat.S_IREAD | stat.S_IEXEC)
+        del context
+        gc.collect()
+        self.assertFalse(folder.exists())
+
+    def test_private_object_folder_is_removed_without_a_warning_inside_a_reference_cycle(self):
+        repo = make_git_repo(self)
+
+        def build():
+            context = land._GitContext(repo, git_env())
+            holder = [context]
+            holder.append(holder)  # a cycle keeps the context for the cyclic collector
+            return context.source
+
+        gc.collect()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            folder = build()
+            self.assertTrue(folder.is_dir())
+            gc.collect()
+        self.assertEqual([str(item.message) for item in caught], [])
+        self.assertFalse(folder.exists())
 
     def test_all_git_and_case_variant_proxy_environment_values_are_pinned(self):
         repo = make_git_repo(self)
