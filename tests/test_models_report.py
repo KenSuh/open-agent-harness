@@ -189,13 +189,55 @@ class PartialValidationTest(unittest.TestCase):
             write_run(state, n, record)
         report = models_report.collect(state)
         self.assertEqual(report["records"]["partial"], 6)
+        self.assertEqual(report["written_before"], dict.fromkeys(
+            ("model_judge", "jev_difficulty", "model_judge_confidence", "tier_floor_raised"), 0))
         totals = report["totals"]
         self.assertEqual(totals["jev_vs_rule"]["unreadable"], {"inconsistent": 4})
-        self.assertEqual(totals["jev_confidence"]["unreadable"], {"inconsistent": 3})
+        self.assertEqual(totals["jev_confidence"]["unreadable"], {"inconsistent": 4})
         self.assertEqual(totals["model_judge_confidence"]["unreadable"], {"inconsistent": 1})
         for name in models_report.DIMENSIONS:
             self.assertEqual(tally_sum(totals[name]), len(records), name)
         self.assertIn("total: 6 runs", "\n".join(models_report.text(report)))
+
+    def test_feature_presence_is_atomic(self):
+        features = {
+            "jev_difficulty": (("rule_tier", "jev_tier", "jev_confidence", "jev_status", "jev_truncated"),
+                               ("jev_status", "jev_vs_rule", "jev_confidence")),
+            "model_judge": (("model_judge", "model_choice"), ("model_judge", "model_change")),
+            "model_judge_confidence": (("model_judge_confidence",), ("model_judge_confidence",)),
+            "tier_floor_raised": (("tier_floor_raised",), ("tier_floor_raised",)),
+        }
+        for feature, (keys, dimensions) in features.items():
+            with self.subTest(feature=feature, case="absent"):
+                record = {k: v for k, v in NEW.items() if k not in keys}
+                if feature == "model_judge":
+                    record.pop("model_judge_confidence")
+                state = make_tmp_dir(self)
+                write_run(state, 1, record)
+                report = models_report.collect(state)
+                self.assertEqual(report["written_before"][feature], 1)
+                for dimension in dimensions:
+                    self.assertEqual(report["totals"][dimension]["not_recorded"], 1)
+            if len(keys) > 1:
+                for key in keys:
+                    with self.subTest(feature=feature, missing=key):
+                        record = dict(NEW)
+                        del record[key]
+                        state = make_tmp_dir(self)
+                        write_run(state, 1, record)
+                        report = models_report.collect(state)
+                        self.assertEqual(report["written_before"][feature], 0)
+                        self.assertEqual(report["records"]["partial"], 1)
+                        for dimension in dimensions:
+                            self.assertEqual(report["totals"][dimension]["unreadable"], {"inconsistent": 1})
+        record = dict(NEW)
+        del record["model_judge"], record["model_choice"]
+        state = make_tmp_dir(self)
+        write_run(state, 1, record)
+        report = models_report.collect(state)
+        self.assertEqual(report["written_before"]["model_judge"], 0)
+        for dimension in ("model_judge", "model_change", "model_judge_confidence"):
+            self.assertEqual(report["totals"][dimension]["unreadable"], {"inconsistent": 1})
 
     def test_below_threshold_status_matches_its_confidence(self):
         state = make_tmp_dir(self)

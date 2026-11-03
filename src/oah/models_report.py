@@ -156,30 +156,39 @@ def _count(counts: dict, name: str, read) -> bool:
     return True
 
 
-def _record_counts(counts: dict, record: dict) -> bool:
+def _features(record: dict) -> dict:
+    """Classify each group of fields together, including the confidence dependency."""
+    groups = {"jev_difficulty": ("rule_tier", "jev_tier", "jev_confidence", "jev_status", "jev_truncated"),
+              "model_judge": ("model_judge", "model_choice"),
+              "model_judge_confidence": ("model_judge_confidence",),
+              "tier_floor_raised": ("tier_floor_raised",)}
+    result = {}
+    for feature, keys in groups.items():
+        present = sum(key in record for key in keys)
+        result[feature] = "absent" if not present else "complete" if present == len(keys) else "partial"
+    if result["model_judge_confidence"] == "complete" and result["model_judge"] != "complete":
+        result["model_judge"] = result["model_judge_confidence"] = "partial"
+    return result
+
+
+def _record_counts(counts: dict, record: dict, features: dict) -> bool:
     """Add one readable record to `counts`; False when any count could not read its value."""
     get = record.get
     counts["runs"] += 1
 
     def value(name: str, read):
         def reader():
-            if name not in record:
+            if name == "tier_source" and name not in record:
                 return _ABSENT
             return None if record[name] is None else read(record[name])
         return reader
 
     def jev_vs_rule():
-        if "jev_status" not in record:
-            if "jev_tier" in record:
-                raise _Unreadable("inconsistent")
-            return _ABSENT
         if get("jev_status") is None:
-            if "jev_tier" not in record or get("jev_tier") is not None:
+            if get("jev_tier") is not None:
                 raise _Unreadable("inconsistent")
             return None
         status = _jev_status(get("jev_status"))
-        if "jev_tier" not in record:
-            raise _Unreadable("inconsistent")
         tier = get("jev_tier")
         answered = status in ("used", BELOW_THRESHOLD)
         if tier is None:
@@ -197,12 +206,6 @@ def _record_counts(counts: dict, record: dict) -> bool:
 
     def confidence(status_key: str, value_key: str, answered: dict):
         def reader():
-            if value_key not in record:
-                if status_key == "jev_status" and status_key in record:
-                    raise _Unreadable("inconsistent")
-                return _ABSENT
-            if status_key not in record:
-                raise _Unreadable("inconsistent")
             status = get(status_key)
             if status is None:
                 kind = None
@@ -242,7 +245,23 @@ def _record_counts(counts: dict, record: dict) -> bool:
                                              {"used": "used", "rejected(": "rejected"}),
         "tier_floor_raised": value("tier_floor_raised", floor),
     }
-    return all([_count(counts, name, readers[name]) for name in DIMENSIONS])
+    feature_for = {"jev_status": "jev_difficulty", "jev_vs_rule": "jev_difficulty",
+                   "jev_confidence": "jev_difficulty", "model_judge": "model_judge",
+                   "model_change": "model_judge", "model_judge_confidence": "model_judge_confidence",
+                   "tier_floor_raised": "tier_floor_raised"}
+
+    def feature_reader(name):
+        def reader():
+            state = features[feature_for[name]]
+            if state == "absent":
+                return _ABSENT
+            if state == "partial":
+                raise _Unreadable("inconsistent")
+            return readers[name]()
+        return reader
+
+    return all([_count(counts, name, feature_reader(name) if name in feature_for else readers[name])
+                for name in DIMENSIONS])
 
 
 def _identity(record: dict, name: str, words) -> str:
@@ -320,14 +339,13 @@ def collect(state: pathlib.Path) -> dict:
                 _bump(records["unreadable"], exc.reason)
                 continue
             records["read"] += 1
-            for name, keys in (("model_judge", ("model_judge",)), ("jev_difficulty", ("jev_status",)),
-                               ("model_judge_confidence", ("model_judge_confidence",)),
-                               ("tier_floor_raised", ("tier_floor_raised",))):
-                if any(key not in record for key in keys):
+            features = _features(record)
+            for name, presence in features.items():
+                if presence == "absent":
                     written_before[name] += 1
             group = groups.setdefault((stage, engine), _counts())
-            whole = _record_counts(group, record)
-            _record_counts(totals, record)
+            whole = _record_counts(group, record, features)
+            _record_counts(totals, record, features)
             if not whole:
                 records["partial"] += 1
     order = {stage: n for n, stage in enumerate(routing.STAGES)}
