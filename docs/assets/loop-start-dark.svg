@@ -10,7 +10,7 @@
       #loop-start-dark-root .node { font-size: 12px; font-weight: 600; }
       #loop-start-dark-root .label { font-size: 12px; font-weight: 400; }
       #loop-start-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
-      #loop-start-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 400; }
+      #loop-start-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
       @media print {
 #loop-start-dark-root .diagram-container { overflow-x: visible; }
 }</style>
@@ -30,22 +30,22 @@
 <line x1="300" y1="144" x2="300" y2="420" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
 <line x1="620" y1="144" x2="620" y2="420" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
 <line x1="100" y1="200" x2="300" y2="200" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="174.0" y="172" width="52" height="20" rx="2" fill="#0d1117"/>
+<rect x="164" y="172" width="72" height="20" rx="2" fill="#0d1117"/>
 <text x="200.0" y="187" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. TASK</text>
 <line x1="300" y1="240" x2="100" y2="240" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="172.0" y="212" width="56" height="20" rx="2" fill="#0d1117"/>
+<rect x="162" y="212" width="76" height="20" rx="2" fill="#0d1117"/>
 <text x="200.0" y="227" class="arrow-label" text-anchor="middle" fill="#c9d1d9">2. ROUTE</text>
 <line x1="100" y1="280" x2="300" y2="280" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="172.0" y="252" width="56" height="20" rx="2" fill="#0d1117"/>
+<rect x="162" y="252" width="76" height="20" rx="2" fill="#0d1117"/>
 <text x="200.0" y="267" class="arrow-label" text-anchor="middle" fill="#c9d1d9">3. START</text>
 <line x1="300" y1="320" x2="620" y2="320" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="432.0" y="292" width="56" height="20" rx="2" fill="#0d1117"/>
+<rect x="422" y="292" width="76" height="20" rx="2" fill="#0d1117"/>
 <text x="460.0" y="307" class="arrow-label" text-anchor="middle" fill="#c9d1d9">4. BUILD</text>
 <line x1="620" y1="360" x2="100" y2="360" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="334.0" y="332" width="52" height="20" rx="2" fill="#0d1117"/>
+<rect x="324" y="332" width="72" height="20" rx="2" fill="#0d1117"/>
 <text x="360.0" y="347" class="arrow-label" text-anchor="middle" fill="#c9d1d9">5. CODE</text>
 <line x1="100" y1="400" x2="300" y2="400" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-start-dark-arrow)"/>
-<rect x="164.0" y="372" width="72" height="20" rx="2" fill="#0d1117"/>
+<rect x="150" y="372" width="100" height="20" rx="2" fill="#0d1117"/>
 <text x="200.0" y="387" class="arrow-label" text-anchor="middle" fill="#c9d1d9">6. EVIDENCE</text>
 <rect x="40" y="96" width="120" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
 <text x="100.0" y="124.0" class="node" text-anchor="middle" fill="#f0f6fc">You</text>

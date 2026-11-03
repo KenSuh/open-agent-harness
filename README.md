@@ -42,7 +42,7 @@ including other tools and harnesses. Take the parts you need and give each stage
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img src="docs/assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks." width="100%">
+  <img src="docs/assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order." width="100%">
 </picture>
 
 Write down what you want and how you will check it. Claude builds the first version. Codex reviews and
@@ -53,7 +53,7 @@ A round limit is optional.
 **Leases** reserve files for a task, **gates** record checks, the **impact map** shows what a change affects,
 and the **wiki** keeps decisions. `oah` keeps these records together. [How it works](docs/how-it-works.md)
 explains these parts and the full loop. **TypeSafe Jev**, an optional AI judge, helps with difficulty,
-model choice and ranking; the [Jev section](docs/how-it-works.md#jev-the-optional-judge) distinguishes
+model choice and ranking the skills for a task; the [Jev section](docs/how-it-works.md#jev-the-optional-judge) distinguishes
 what is in v0.2.0 from what is on main awaiting release.
 
 > [!NOTE]
@@ -159,7 +159,8 @@ Every page has a Korean version under [`docs/ko/`](docs/ko/).
 
 ## Security
 
-Keep keys and personal account details out of the repository and its history.
+No API key, token, password, cookie, OAuth secret or account identifier may appear in the repository,
+its history, releases, issues or CI logs.
 [Security rules](docs/how-it-works.md#security) explains key storage, scans and the full policy.
 
 ## License and third-party notices

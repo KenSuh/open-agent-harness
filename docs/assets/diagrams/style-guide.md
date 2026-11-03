@@ -27,8 +27,8 @@ Korean sources put `"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Not
 first. Technical labels use `ui-monospace, "SFMono-Regular", Consolas, monospace`.
 There is no downloaded or embedded font. Platform fonts may have different metrics.
 
-The `fit` preset uses the standard type ramp: 28px title, 14px group heading, 12px node name,
-and 8px technical arrow label. Plain explanatory labels use 12px sans. Korean arrow labels use
+The `fit` preset uses 28px titles, 14px group headings and 12px node names. Sequence and architecture
+arrow labels use 12px monospace in English, with masks widened to fit. Plain explanatory labels use 12px sans. Korean arrow labels use
 12px sans at weight 500, without tracking. Keep generous padding; budget a full em per wide glyph
 and 0.62em per other glyph before checking a rendered preview.
 

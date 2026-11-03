@@ -43,7 +43,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-ko-dark.svg">
-  <img src="docs/assets/how-it-works-ko-light.svg" alt="사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인한다." width="100%">
+  <img src="docs/assets/how-it-works-ko-light.svg" alt="사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인하고, 선택형 TypeSafe Jev는 난이도와 모델 선택, 스킬 순서 판정을 돕는다." width="100%">
 </picture>
 
 원하는 결과와 확인 방법을 적으면 Claude가 첫 버전을 만든다. Codex는 반영을 막는 지적이 남지 않을 때까지,
@@ -53,7 +53,7 @@
 
 **리스**는 작업할 파일을 잠시 맡는 표시이고 **게이트**는 증거를 남기는 검사다. **영향 지도**는 변경의 영향을
 알려 주고 **위키**는 결정을 남긴다. `oah`는 이 기록을 함께 관리한다. [동작 방식](docs/ko/how-it-works.md)에서
-각 부분과 전체 흐름을 설명한다. **TypeSafe Jev**는 난이도, 모델 선택, 순서 판정을 돕는 선택형 AI 판정기다.
+각 부분과 전체 흐름을 설명한다. **TypeSafe Jev**는 난이도, 모델 선택, 작업에 쓸 스킬의 순서 판정을 돕는 선택형 AI 판정기다.
 [Jev 설명](docs/ko/how-it-works.md#선택형-판정기-jev)은 v0.2.0의 기능과 아직 릴리스하지 않은 main의 기능을 구분한다.
 
 > [!NOTE]
@@ -154,7 +154,8 @@ oah init
 
 ## 보안
 
-키와 개인 계정 정보는 저장소와 그 이력에 넣지 않는다.
+API 키, 토큰, 비밀번호, 쿠키, OAuth 시크릿, 계정 식별자는 저장소와 그 이력, 릴리스, 이슈, CI 로그
+어디에도 넣지 않는다.
 [보안 규칙](docs/ko/how-it-works.md#보안)에서 키 보관, 스캔과 전체 정책을 설명한다.
 
 ## 라이선스

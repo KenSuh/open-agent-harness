@@ -234,12 +234,12 @@ class ReadmeLanguageTest(unittest.TestCase):
 
 
 ASSETS = REPO / "docs" / "assets"
-DIAGRAMS = ("banner", "how-it-works", "loop-start", "loop-review")
+DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review")
 DIAGRAM_PAGES = {
     "README.md": ("banner", "how-it-works"),
     "README.ko.md": ("banner-ko", "how-it-works-ko"),
-    "docs/how-it-works.md": ("how-it-works", "loop-start", "loop-review"),
-    "docs/ko/how-it-works.md": ("how-it-works-ko", "loop-start-ko", "loop-review-ko"),
+    "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
+    "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
 }
 
 

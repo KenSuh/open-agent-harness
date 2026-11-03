@@ -35,7 +35,8 @@ Every command takes `--help`. Exit codes are `0` done, `1` refused, `2` usage or
 `oah preflight`, `69` environment and `75` when `oah wait` reaches its timeout with the run still active
 (run `oah wait <run-id>` again). Every refusal starts with an `OAH_*` code and says what to run next.
 
-On main, optional TypeSafe Jev judging can also inform difficulty and model choice. See
+Optional TypeSafe Jev can also choose a model and effort among the allowed candidates in v0.2.0;
+on main it can also judge difficulty. See
 [Jev](how-it-works.md#jev-the-optional-judge) for the distinction between released and unreleased behavior.
 [The loop](how-it-works.md#the-loop) explains what each stage guarantees, and
 [Troubleshooting](troubleshooting.md) explains refusals.

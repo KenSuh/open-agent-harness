@@ -12,7 +12,9 @@ The matching SVGs live one directory above. Edit HTML first; SVGs are exports, n
 | Stem | Skill type and size (`fit`) | Used by |
 |---|---|---|
 | `banner` | Flowchart, 640 × 352 | English and Korean README banners |
-| `how-it-works` | Flowchart, 640 × 480 | Both READMEs and both how-it-works pages, sharing assets |
+| `how-it-works` | Flowchart, 640 × 544 | Both READMEs and both how-it-works pages, sharing assets |
+| `architecture-build` | Architecture, 840 × 848 | How-it-works pages, task preparation and the four rails |
+| `architecture-land` | Architecture, 840 × 800 | How-it-works pages, review and landing |
 | `loop-start` | Sequence, 720 × 504 | How-it-works pages, exchanges 1–6 |
 | `loop-review` | Sequence, 840 × 712 | How-it-works pages, exchanges 7–15 |
 
@@ -47,12 +49,14 @@ themes and languages for clipping, overlap and legibility. Keep all previews in 
 ## Redraw fidelity
 
 The old README architecture Mermaid diagram had 14 components, four containers and 16 arrows.
-The mixed-audience overview now groups them into four steps: describe, build, review/correct, confirm/land.
-This intentionally uses Flowchart instead of Architecture: the entry page teaches the work order.
-Leases/preflight/routing are grouped into preparation; gates/wiki/impact into evidence;
-git hooks/GitHub/CI into landing. Jev stays in the adjacent explanation. The complete component
-relationships, optional paths, commands and limitations remain in the how-it-works tables and prose.
-The original per-tool boxes and container styling are not carried over.
+Two Architecture figures redraw all 14 components and all 16 directed connections for a mixed audience.
+`architecture-build` has nine nodes and eight arrows, including optional TypeSafe Jev and the four rails
+(leases, gates, impact map and wiki). `architecture-land` has seven nodes and eight arrows. Gates and
+the impact map repeat across the figures to join them; no component or connection is dropped or merged.
+The four original groups (oah, installed AI engines, optional judge, git/GitHub) keep their membership,
+with at most three zones in either figure. Detailed edge labels are kept as short connector labels and
+node explanations; dashed arrows retain the optional paths. The parts table keeps the full wording.
+The separate four-step Flowchart remains the entry-page overview, with a small optional Jev annotation.
 
 The old English sequence Mermaid diagram had five actors and 15 messages. Two Sequence figures now
 carry all 15 numbered exchanges, with three actors in the first and four in the second (You and oah

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 640 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-dark-title how-it-works-dark-desc" id="how-it-works-dark-root">
+<svg viewBox="0 0 640 544" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-dark-title how-it-works-dark-desc" id="how-it-works-dark-root">
 <title id="how-it-works-dark-title">How oah works</title>
-<desc id="how-it-works-dark-desc">You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks.</desc>
+<desc id="how-it-works-dark-desc">You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order.</desc>
 <defs>
       <style>#how-it-works-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
       #how-it-works-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -24,7 +24,7 @@
 <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
 </marker>
 </defs>
-<rect x="0" y="0" width="640" height="480" rx="0" fill="#0d1117"/>
+<rect x="0" y="0" width="640" height="544" rx="0" fill="#0d1117"/>
 <text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">How oah works</text>
 <line x1="162" y1="152" x2="162" y2="184" stroke="#8b949e" stroke-width="1" marker-end="url(#how-it-works-dark-arrow)"/>
 <line x1="162" y1="232" x2="162" y2="264" stroke="#8b949e" stroke-width="1" marker-end="url(#how-it-works-dark-arrow)"/>
@@ -43,6 +43,8 @@
 <text x="324" y="284" class="label" text-anchor="start" fill="#c9d1d9">Repeat until review converges.</text>
 <text x="324" y="308" class="label" text-anchor="start" fill="#c9d1d9">Pause when a decision is needed.</text>
 <text x="324" y="388" class="label" text-anchor="start" fill="#c9d1d9">Checks first; then you confirm.</text>
-<line x1="40" y1="440" x2="600" y2="440" stroke="#30363d" stroke-width="1"/>
-<text x="40" y="464" class="label" text-anchor="start" fill="#c9d1d9">Default roles. Adapt the parts to your own AI setup.</text>
+<text x="40" y="452" class="label" text-anchor="start" fill="#a371f7">TypeSafe Jev (optional) helps judge difficulty,</text>
+<text x="40" y="472" class="label" text-anchor="start" fill="#a371f7">model choice and the order of skills.</text>
+<line x1="40" y1="496" x2="600" y2="496" stroke="#30363d" stroke-width="1"/>
+<text x="40" y="520" class="label" text-anchor="start" fill="#c9d1d9">Default roles. Adapt the parts to your own AI setup.</text>
 </svg>

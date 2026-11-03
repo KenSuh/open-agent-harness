@@ -4,8 +4,8 @@
 
 `oah` is a small command-line tool that makes Claude Code and Codex CLI work as one team on your own
 repository, with TypeSafe Jev as an optional AI judge. It is for developers and small teams who already
-use git and pull requests and want production-grade review discipline on their own machine. It also aims
-to help people dissatisfied with AI coding results or building their first AI workflow. The released
+use git and pull requests and want production-grade review discipline on their own machine. It was made
+first of all for people dissatisfied with AI coding results or setting up their first harness. The released
 version still expects familiarity with git and pull requests.
 
 It runs on Python 3.11+ with the standard library only, natively on macOS and Windows, without WSL.
@@ -22,12 +22,23 @@ are instructions loaded by the AI. **CI** is the automated testing attached to a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
-  <img src="assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks." width="100%">
+  <img src="assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order." width="100%">
 </picture>
 
 Two AI sessions can edit the same files, call work done without evidence, or keep reviewing without an
-ending rule. oah gives them a shared rulebook. The overview groups the work into four steps; this table
-keeps the full connections between the parts.
+ending rule. oah gives them a shared rulebook. The two architecture figures below show all the parts
+and their connections; the table explains them. Evidence gates and the impact map appear in both figures
+to connect preparation with review and landing. Dashed arrows mark optional connections.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-build-dark.svg">
+  <img src="assets/architecture-build-light.svg" alt="You send a packet through leases, preflight and routing to Claude Code, with optional TypeSafe Jev skill judging and evidence gates linked to the impact map and wiki." width="100%">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-land-dark.svg">
+  <img src="assets/architecture-land-light.svg" alt="Evidence gates feed the Codex review loop, which connects to git hooks, pull requests and CI, while landing checks the converged review, CI and reassessed impact before a confirmed fast-forward push." width="100%">
+</picture>
 
 | Part | How it connects to the work |
 |---|---|

@@ -32,7 +32,7 @@
 <line x1="500" y1="152" x2="500" y2="448" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
 <line x1="740" y1="152" x2="740" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
 <rect x="60" y="164" width="48" height="20" rx="2" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
-<text x="84" y="178" class="mono" text-anchor="middle" fill="#c9d1d9">LOOP</text>
+<text x="84" y="178" class="arrow-label" text-anchor="middle" fill="#c9d1d9">반복</text>
 <rect x="76" y="188" width="472" height="24" rx="2" fill="#161b22"/>
 <text x="80" y="204" class="label" text-anchor="start" fill="#c9d1d9">수렴할 때까지 반복한다. 판단이 필요하면 멈춘다.</text>
 <line x1="260" y1="240" x2="500" y2="240" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 640 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-ko-dark-title how-it-works-ko-dark-desc" id="how-it-works-ko-dark-root">
+<svg viewBox="0 0 640 544" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-ko-dark-title how-it-works-ko-dark-desc" id="how-it-works-ko-dark-root">
 <title id="how-it-works-ko-dark-title">oah의 작업 흐름</title>
-<desc id="how-it-works-ko-dark-desc">사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인한다.</desc>
+<desc id="how-it-works-ko-dark-desc">사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인하고, 선택형 TypeSafe Jev는 난이도와 모델 선택, 스킬 순서 판정을 돕는다.</desc>
 <defs>
       <style>#how-it-works-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
       #how-it-works-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -24,7 +24,7 @@
 <polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
 </marker>
 </defs>
-<rect x="0" y="0" width="640" height="480" rx="0" fill="#0d1117"/>
+<rect x="0" y="0" width="640" height="544" rx="0" fill="#0d1117"/>
 <text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">oah의 작업 흐름</text>
 <line x1="162" y1="152" x2="162" y2="184" stroke="#8b949e" stroke-width="1" marker-end="url(#how-it-works-ko-dark-arrow)"/>
 <line x1="162" y1="232" x2="162" y2="264" stroke="#8b949e" stroke-width="1" marker-end="url(#how-it-works-ko-dark-arrow)"/>
@@ -43,6 +43,8 @@
 <text x="324" y="284" class="label" text-anchor="start" fill="#c9d1d9">검토가 수렴할 때까지 반복한다</text>
 <text x="324" y="308" class="label" text-anchor="start" fill="#c9d1d9">판단이 필요하면 멈추고 묻는다</text>
 <text x="324" y="388" class="label" text-anchor="start" fill="#c9d1d9">검사를 거친 뒤 사용자가 확인한다</text>
-<line x1="40" y1="440" x2="600" y2="440" stroke="#30363d" stroke-width="1"/>
-<text x="40" y="464" class="label" text-anchor="start" fill="#c9d1d9">기본 역할 분담이다. 필요한 부분을 내 환경에 맞춘다.</text>
+<text x="40" y="452" class="label" text-anchor="start" fill="#a371f7">TypeSafe Jev(선택)가 난이도와 모델 선택,</text>
+<text x="40" y="472" class="label" text-anchor="start" fill="#a371f7">작업에 쓸 스킬의 순서 판정을 돕는다.</text>
+<line x1="40" y1="496" x2="600" y2="496" stroke="#30363d" stroke-width="1"/>
+<text x="40" y="520" class="label" text-anchor="start" fill="#c9d1d9">기본 역할 분담이다. 필요한 부분을 내 환경에 맞춘다.</text>
 </svg>

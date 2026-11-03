@@ -4,8 +4,8 @@
 
 `oah`는 Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일하게 하는 작은 명령줄 도구다.
 TypeSafe Jev를 선택형 AI 판정기로 함께 쓸 수 있다. git과 pull request를 이미 쓰는 개발자와 작은 팀이
-자기 컴퓨터에서 실무 수준의 검토 절차를 지키도록 돕는다. AI 코딩 결과가 아쉽거나 처음 AI 작업 환경을
-꾸리는 사람에게도 도움이 되고자 한다. 현재 릴리스는 여전히 git과 pull request에 익숙한 사용자를 전제로 한다.
+자기 컴퓨터에서 실무 수준의 검토 절차를 지키도록 돕는다. AI 코딩 결과가 아쉽거나 처음 하네스를
+꾸리는 사람을 가장 먼저 생각하고 만들었다. 현재 릴리스는 여전히 git과 pull request에 익숙한 사용자를 전제로 한다.
 
 Python 3.11 이상과 표준 라이브러리만 쓰며 macOS와 Windows에서 WSL 없이 바로 돈다.
 사용자가 직접 설치하고 로그인한 Claude Code와 Codex를 움직이고 작업 기록을 남긴다.
@@ -20,11 +20,22 @@ Python 3.11 이상과 표준 라이브러리만 쓰며 macOS와 Windows에서 WS
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/how-it-works-ko-dark.svg">
-  <img src="../assets/how-it-works-ko-light.svg" alt="사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인한다." width="100%">
+  <img src="../assets/how-it-works-ko-light.svg" alt="사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인하고, 선택형 TypeSafe Jev는 난이도와 모델 선택, 스킬 순서 판정을 돕는다." width="100%">
 </picture>
 
 AI 세션 둘은 같은 파일을 고치거나 증거 없이 끝났다고 하거나 끝낼 기준 없이 검토를 반복할 수 있다.
-oah는 함께 지킬 규칙을 준다. 그림은 네 단계로 묶었고, 각 부분 사이의 연결은 다음 표에 모두 남겼다.
+oah는 함께 지킬 규칙을 준다. 아래 두 구조 그림은 모든 부분과 연결을 보여 주고 표는 이를 설명한다.
+증거 게이트와 영향 지도는 두 그림에 함께 나와 준비와 검토·반영을 잇는다. 점선 화살표는 선택 연결을 뜻한다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/architecture-build-ko-dark.svg">
+  <img src="../assets/architecture-build-ko-light.svg" alt="사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 선택형 TypeSafe Jev가 스킬 순서를 판정하고 증거 게이트는 영향 지도와 위키에 연결된다." width="100%">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/architecture-land-ko-dark.svg">
+  <img src="../assets/architecture-land-ko-light.svg" alt="증거 게이트가 Codex 검토 반복으로 이어지고 검토 반복은 git 훅, pull request, CI와 연결되며, 반영은 수렴한 검토와 CI, 다시 평가한 영향을 확인한 뒤 사용자 확인을 거쳐 fast-forward push한다." width="100%">
+</picture>
 
 | 부분 | 작업과 연결되는 방식 |
 |---|---|
