@@ -129,7 +129,7 @@ AI 세션 둘이 한 저장소를 함께 쓰면 같은 파일을 쉽게 동시�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/concepts-routing-rules-ko-dark.svg">
-  <img src="../assets/concepts-routing-rules-ko-light.svg" alt="직접 준 작업 축으로 고정 규칙과 tier를 정하고 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다." width="100%">
+  <img src="../assets/concepts-routing-rules-ko-light.svg" alt="작업의 단계, 종류와 Scope 경로가 고정 규칙과 tier의 입력이 되고 직접 준 축이 우선하며 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다." width="100%">
 </picture>
 
 <picture>

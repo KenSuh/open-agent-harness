@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 840 1056" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-ko-light-title concepts-routing-rules-ko-light-desc" data-source-diagram="2" id="concepts-routing-rules-ko-light-root">
 <title id="concepts-routing-rules-ko-light-title">라우팅 · tier, 모델과 추론 강도</title>
-<desc id="concepts-routing-rules-ko-light-desc">직접 준 작업 축으로 고정 규칙과 tier를 정하고 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다.</desc>
+<desc id="concepts-routing-rules-ko-light-desc">작업의 단계, 종류와 Scope 경로가 고정 규칙과 tier의 입력이 되고 직접 준 축이 우선하며 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다.</desc>
 <defs>
       <style>#concepts-routing-rules-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
       #concepts-routing-rules-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }

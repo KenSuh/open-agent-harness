@@ -143,10 +143,3 @@ The rdp follow-up also updates all four `architecture-build` sources: Jev reorde
 task difficulty; routing says that judgement may adjust the tier within its floor. The group reads
 “Recommended, optional AI judge” / “권장 선택형 AI 판정기”. The descriptions and only their matching
 how-it-works alt text are updated. Both English `loop-review` sources use the 12px `label` class for LOOP.
-
-For this redraw, Quick Look could not initialize inside the sandbox. Local sharp/libvips rendered all
-40 new and six corrected SVGs for inspection, without downloads or `export_png.py`. Preview files are
-ignored scratch artifacts under `.tmp/rdq-previews/<svg-filename>.png`; bilingual inspection sheets use
-`check-<stem>-<theme>.png`. These previews are checks, not documentation assets. Windows and Linux browser
-rendering is not directly exercised here; offline SVG safety, conservative text-width budgets, and
-Korean-first system font stacks are checked separately.

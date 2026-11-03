@@ -23,7 +23,7 @@
 <rect x="40" y="184" width="488" height="576" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="56" y="204" class="node" text-anchor="start" fill="#424a53">oah</text>
 <rect x="568" y="264" width="232" height="160" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
-<text x="584" y="304" class="node" text-anchor="start" fill="#424a53">권장 선택형 AI 판정기</text>
+<text x="584" y="284" class="node" text-anchor="start" fill="#424a53">권장 선택형 AI 판정기</text>
 <rect x="568" y="472" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="584" y="492" class="node" text-anchor="start" fill="#424a53">직접 설치·로그인한 엔진</text>
 <line x1="300" y1="152" x2="300" y2="224" data-from="you" data-to="intent" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>

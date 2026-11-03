@@ -138,7 +138,7 @@ above a confidence you can set, and never below the floor.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/concepts-routing-rules-dark.svg">
-  <img src="assets/concepts-routing-rules-light.svg" alt="Explicit task axes feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record." width="100%">
+  <img src="assets/concepts-routing-rules-light.svg" alt="The task's stage, kind and Scope paths, with explicit axes winning, feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record." width="100%">
 </picture>
 
 <picture>
