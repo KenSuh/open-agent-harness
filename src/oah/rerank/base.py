@@ -139,4 +139,5 @@ class Provider(Protocol):
                config: Mapping) -> tuple[str, float | None]: ...
 
     def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
-                     config: Mapping) -> tuple[str, str]: ...
+                     config: Mapping) -> tuple[str, str] | tuple[str, str, float | None]:
+        """(model, effort), optionally followed by the judge's confidence from 0 to 1 (or None)."""

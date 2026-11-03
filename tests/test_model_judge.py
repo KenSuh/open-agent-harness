@@ -66,6 +66,19 @@ class JudgeGateTest(unittest.TestCase):
             "kind": "review", "intensity": "low", "reasoning": "high", "risk": "normal"}})
         self.assertEqual(candidates, PAIRS)
 
+    def test_the_answer_carries_its_confidence(self):
+        for answer, confidence in ((("m-strong", "max", 0.72), 0.72), (("m-strong", "max", 1), 1.0),
+                                   (("m-strong", "max", 0), 0.0), (("m-strong", "max", None), None),
+                                   (("m-strong", "max"), None)):
+            with self.subTest(answer=answer):
+                judged = self.judge(FakeJudge(answer))
+                self.assertEqual((judged.status, judged.proposal, judged.confidence),
+                                 ("used", ("m-strong", "max"), confidence))
+                self.assertIs(type(judged.confidence), type(confidence))
+        for reason, options in (("no key", {"env": {}}), ("one-candidate", {"pairs": PAIRS[:1]})):
+            with self.subTest(reason=reason):
+                self.assertIsNone(self.judge(FakeJudge(("m-strong", "max", 0.9)), **options).confidence)
+
     def test_gate_and_candidate_count_statuses(self):
         rows = [
             ("disabled-by-brief", {"disabled": True}),
@@ -92,6 +105,14 @@ class JudgeGateTest(unittest.TestCase):
             (FakeJudge(answer=("m-strong", 3)), "unused(error:bad-response)"),
             (FakeJudge(answer="m-strong max"), "unused(error:bad-response)"),
             (FakeJudge(answer=("m-strong", "max", "extra")), "unused(error:bad-response)"),
+            # A confidence may follow the pair; anything but a number from 0 to 1, or None, is a bad response.
+            (FakeJudge(answer=("m-strong", "max", True)), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", "max", 1.5)), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", "max", -0.1)), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", "max", float("nan"))), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", "max", 10**400)), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", "max", 0.5, None)), "unused(error:bad-response)"),
+            (FakeJudge(answer=("m-strong", 3, 0.5)), "unused(error:bad-response)"),
             (object(), "unused(error:internal)"),
         ]
         for provider, status in rows:
@@ -150,6 +171,45 @@ class ModelResponseTest(unittest.TestCase):
                                      "probabilities": {"c0": 0.33, "c1": 0.33, "c2": 0.33}}}}
         self.assertEqual(typesafe.parse_model_response(body, 3), 2)
 
+    def test_the_parsed_answer_keeps_its_confidence(self):
+        for fields, expected in (({}, (0, None)), ({"confidence": 0.7}, (0, 0.7)), ({"confidence": 1}, (0, 1.0)),
+                                 ({"confidence": 0}, (0, 0.0))):
+            with self.subTest(fields=fields):
+                body = {"answers": {"pair": {"type": "choice", "choice": "c0",
+                                             "probabilities": {"c0": 0.6, "c1": 0.4}, **fields}}}
+                self.assertEqual(typesafe.parse_model_answer(body, 2), expected)
+                self.assertEqual(typesafe.parse_model_response(body, 2), 0)
+        for confidence in (True, None, "0.5", -0.1, 1.1, float("nan")):
+            with self.subTest(confidence=confidence), self.assertRaises(rerank.ProviderError):
+                typesafe.parse_model_answer({"answers": {"pair": {
+                    "type": "choice", "choice": "c0", "probabilities": {"c0": 1, "c1": 0},
+                    "confidence": confidence}}}, 2)
+
+    def test_a_typesafe_confidence_reaches_the_run_record(self):
+        def answer(confidence):
+            def post(request, key, config):
+                pairs = [(item["model"], item["effort"]) for item in request["state"]["candidates"]]
+                pick = pairs.index(("m-strong", "high"))
+                pair = {"type": "choice", "choice": f"c{pick}",
+                        "probabilities": {f"c{n}": 1.0 if n == pick else 0.0 for n in range(len(pairs))}}
+                if confidence is not None:
+                    pair["confidence"] = confidence
+                return {"answers": {"pair": pair}}, None
+            return post
+
+        for confidence in (0.7, None):
+            with self.subTest(confidence=confidence):
+                project = judged_project(self)
+                project.env["TYPESAFE_API_KEY"] = fake_key()
+                provider = typesafe.TypeSafeProvider()
+                with mock.patch.object(provider, "_post_result", side_effect=answer(confidence)), \
+                        judge(project, provider):
+                    data = project.run(stage="review")
+                self.assertEqual((data["status"], data["model_judge"]), ("finished", "used"))
+                self.assertEqual(launched(project), ("m-strong", "high"))
+                self.assertIn("model_judge_confidence", data)
+                self.assertEqual(data["model_judge_confidence"], confidence)
+
     def test_malformed_choice_keeps_the_deterministic_launch(self):
         project = judged_project(self)
         project.env["TYPESAFE_API_KEY"] = fake_key()
@@ -161,6 +221,7 @@ class ModelResponseTest(unittest.TestCase):
         self.assertEqual(data["model_judge"], "unused(error:bad-response)")
         self.assertIsNone(data["model_choice"]["proposal"])
         self.assertEqual(launched(project), ("m-mid", "medium"))
+        self.assertIsNone(data["model_judge_confidence"])
 
 
 class ConfigTest(unittest.TestCase):
@@ -279,6 +340,26 @@ class JudgeCallTest(unittest.TestCase):
         request, candidates = provider.calls[0]
         self.assertEqual(sorted(request), ["axes", "stage", "tier"])
         self.assertEqual(request["axes"]["kind"], "review")
+
+    def test_the_judge_confidence_is_recorded_for_used_and_rejected_answers(self):
+        rows = [
+            (("m-strong", "high", 0.72), "used", 0.72),
+            (("m-strong", "high"), "used", None),
+            (("m-light", "medium", 0.4), "rejected(below-floor)", 0.4),
+            (("m-strong",), "unused(error:bad-response)", None),
+        ]
+        for answer, status, confidence in rows:
+            with self.subTest(answer=answer):
+                project = judged_project(self)
+                with judge(project, FakeJudge(answer)):
+                    data = project.run(stage="review")
+                self.assertEqual((data["status"], data["model_judge"]), ("finished", status))
+                self.assertIn("model_judge_confidence", data)
+                self.assertEqual(data["model_judge_confidence"], confidence)
+        project = judged_project(self, extra='[engines.codex.tiers.medium]\nmodel = "m-light"\n')
+        with judge(project, FakeJudge(("m-strong", "max", 0.9))):
+            data = project.run(stage="review")
+        self.assertEqual((data["model_judge"], data["model_judge_confidence"]), ("unused(pinned)", None))
 
     def test_rejected_answers_keep_the_deterministic_choice(self):
         rows = [

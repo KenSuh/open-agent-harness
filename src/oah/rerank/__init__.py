@@ -261,6 +261,7 @@ class ModelJudgement:
     status: str
     proposal: tuple[str, str] | None = None
     provider: str | None = None
+    confidence: float | None = None  # the judge's confidence in its proposal, when its answer carried one
 
 
 AXES = ("kind", "intensity", "reasoning", "risk")
@@ -352,13 +353,20 @@ def _valid_advice(answer: object) -> tuple[str, float | None]:
     return tier, confidence
 
 
-def _valid_pair(answer: object) -> tuple[str, str]:
+def _valid_pair(answer: object) -> tuple[str, str, float | None]:
+    """A (model, effort) proposal, optionally followed by a confidence from 0 to 1 or None."""
+    confidence = None
     try:
-        if type(answer) is not tuple or len(answer) != 2 or any(type(item) is not str for item in answer):
+        if (type(answer) is not tuple or len(answer) not in (2, 3)
+                or any(type(item) is not str for item in answer[:2])):
             raise ProviderError("bad-response")
-        return answer
+        if len(answer) == 3 and answer[2] is not None:
+            confidence = _valid_scores([answer[2]], 1)[0]
+            if not 0.0 <= confidence <= 1.0:
+                raise ProviderError("bad-response")
+        return answer[0], answer[1], confidence
     finally:
-        del answer
+        del answer, confidence
 
 
 def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query: str = "",
@@ -489,7 +497,7 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
         answer, status = _call(lambda: _valid_pair(provider.choose_model(sent, pairs, key=key, config=config)))
         if status != USED:
             return ModelJudgement(status, None, provider_name)
-        return ModelJudgement(USED, answer, provider_name)
+        return ModelJudgement(USED, answer[:2], provider_name, answer[2])
     except _INTERRUPTIONS + (BaseExceptionGroup,) as exc:
         failure = _classify_failure(exc)
     finally:
