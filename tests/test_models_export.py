@@ -236,8 +236,6 @@ class FieldsTest(unittest.TestCase):
                 return json.dumps(document).encode()
             return data
 
-        models_export._model_names.cache_clear()
-        self.addCleanup(models_export._model_names.cache_clear)
         with mock.patch.object(models_export.scoring, "_packaged", side_effect=packaged):
             selected = choice(("new-packaged-model", "high"), ("new-packaged-model", "high"))
             result = one(self, dict(NEW, model_choice=selected))
@@ -626,8 +624,6 @@ class CliTest(unittest.TestCase):
 
     def test_unreadable_package_data_hashes_models_and_report_still_works(self):
         state = ages_state(self)
-        models_export._model_names.cache_clear()
-        self.addCleanup(models_export._model_names.cache_clear)
         with mock.patch.object(models_export.scoring, "_packaged", side_effect=OSError("unreadable")):
             code, out, err = self.export(state)
             report_code, report_out, report_err = self.export(state, action="report")
@@ -639,6 +635,43 @@ class CliTest(unittest.TestCase):
         self.assertIn("model_choice.requested.model", values[1]["hashed"])
         self.assertEqual((report_code, report_err), (0, ""))
         self.assertIn("4 run folders: 4 read", report_out)
+
+    def test_vocabulary_failures_and_recovery_are_per_export(self):
+        state = make_tmp_dir(self)
+        for n in (1, 2):
+            write_run(state, n, NEW)
+        oversized = '{"version": ' + '9' * 5000 + '}'
+        failures = (lambda: models_export.effort_rules.parse_rules(oversized),
+                    lambda: (_ for _ in ()).throw(TypeError("unexpected")))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                with mock.patch.object(models_export.effort_rules, "load_rules", side_effect=failure) as loader:
+                    code, out, err = self.export(state)
+                values = [json.loads(text) for text in out.splitlines()]
+                self.assertEqual((code, len(values), loader.call_count), (0, 2, 1))
+                self.assertEqual(err, "Note: the model list could not be read; model names will be hashed.\n")
+                for value in values:
+                    model = value["model_choice"]["requested"]["model"]
+                    self.assertEqual(model, "sha256:" + hashlib.sha256(b"gpt-6.1-sol").hexdigest())
+                    self.assertIn("model_choice.requested.model", value["hashed"])
+                code, out, err = self.export(state)
+                self.assertEqual((code, err), (0, ""))
+                self.assertTrue(all(json.loads(text)["model_choice"]["requested"]["model"] == "gpt-6.1-sol"
+                                    for text in out.splitlines()))
+
+    def test_changed_successful_vocabulary_is_reloaded(self):
+        state = make_tmp_dir(self)
+        write_run(state, 1, NEW)
+        with mock.patch.object(models_export, "_model_names", side_effect=[frozenset(), frozenset({"gpt-6.1-sol"})]):
+            first = json.loads(self.export(state)[1])
+            second = json.loads(self.export(state)[1])
+        self.assertTrue(first["model_choice"]["requested"]["model"].startswith("sha256:"))
+        self.assertEqual(second["model_choice"]["requested"]["model"], "gpt-6.1-sol")
+
+    def test_vocabulary_does_not_catch_base_exceptions(self):
+        with mock.patch.object(models_export.scoring, "families", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                models_export.lines(make_tmp_dir(self))
 
     def test_no_run_records_prints_nothing(self):
         self.assertEqual(self.export(make_tmp_dir(self)), (0, "", ""))

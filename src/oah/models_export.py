@@ -21,7 +21,6 @@ import math
 import hashlib
 import pathlib
 import sys
-from functools import lru_cache
 
 from oah import routing, scoring
 from oah.engines import effort as effort_rules
@@ -56,7 +55,8 @@ CONSISTENCY = {"jev_vs_rule": ("jev_tier", "rule_tier"), "jev_confidence": ("jev
 class _Line:
     """One line being built: every value goes through `read` or `value`, which name each null they make."""
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, model_names=frozenset()) -> None:
+        self.model = _closed(model_names or frozenset())
         self.out = {"format": FORMAT, "run_id": None, **dict.fromkeys(FIELDS), "unreadable": {},
                     "not_recorded": [], "hashed": []}
         self.out["run_id"] = self.value("run_id", run_id, _form(RUN_ID_RE))
@@ -125,20 +125,15 @@ def _form(pattern):
     return read
 
 
-@lru_cache(maxsize=1)
 def _model_names():
-    """Read the validated packaged vocabulary only when export first needs it."""
+    """Read the validated packaged vocabulary for one export."""
     try:
         families = scoring.families()["engines"]
         return frozenset((*families["codex"]["families"], *families["claude"]["aliases"],
                           *scoring.bundled()["scores"],
                           *(model for rule in effort_rules.load_rules() for model in rule["models"])))
-    except (OSError, ValueError, RecursionError, effort_rules.EngineError):
+    except Exception:
         return None
-
-
-def _model(value):
-    return _plain(value, _model_names() or frozenset())
 
 
 _effort = _closed(EFFORTS)
@@ -173,12 +168,8 @@ def _fields(line: _Line, path: str, fields: dict):
     return read
 
 
-PAIR = {"model": _model, "effort": _effort}
-FLOOR = {"tier": _closed(routing.TIERS), "model": _model, "effort": _effort}
-
-
 def _pair(line: _Line, path: str, value) -> dict | None:
-    return line.value(path, value, _fields(line, path, PAIR))
+    return line.value(path, value, _fields(line, path, {"model": line.model, "effort": _effort}))
 
 
 def _candidates(line: _Line, path: str, value) -> list | None:
@@ -204,14 +195,15 @@ def _excluded(line: _Line, path: str, value) -> list | None:
         if not isinstance(items, dict):
             raise _Unreadable("wrong-type")
         # The model name is the key here; the entries keep the record's order.
-        return [{"model": line.value(f"{path}[{n}].model", model, _model),
+        return [{"model": line.value(f"{path}[{n}].model", model, line.model),
                  "rule": line.value(f"{path}[{n}].rule", rule, _closed(JUDGE_RULES))}
                 for n, (model, rule) in enumerate(items.items())]
     return line.value(path, value, read)
 
 
 CHOICE = {"mode": lambda line, path, value: line.value(path, value, _closed(MODES)),
-          "floor": lambda line, path, value: line.value(path, value, _fields(line, path, FLOOR)),
+          "floor": lambda line, path, value: line.value(
+              path, value, _fields(line, path, {"tier": _closed(routing.TIERS), "model": line.model, "effort": _effort})),
           "candidates": _candidates, "excluded": _excluded,
           "deterministic": _pair, "proposal": _pair, "requested": _pair}
 
@@ -232,8 +224,8 @@ def _model_choice(line: _Line):
     return read
 
 
-def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
-    line = _Line(run_id)
+def _line(run_id: str, record: dict, stage: str, engine: str, model_names) -> dict:
+    line = _Line(run_id, model_names)
     out = line.out
     out["stage"] = line.value("stage", stage, _closed(routing.STAGES))
     out["engine"] = line.value("engine", engine, _closed(routing.ENGINES))
@@ -287,7 +279,8 @@ def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
 
 def lines(state: pathlib.Path) -> list[dict]:
     """One line per run folder of one state folder, read or unreadable with its reason."""
-    if _model_names() is None:
+    model_names = _model_names()
+    if model_names is None:
         print("Note: the model list could not be read; model names will be hashed.", file=sys.stderr)
     result = []
     for entry in run_folders(pathlib.Path(state), {}):
@@ -298,5 +291,5 @@ def lines(state: pathlib.Path) -> list[dict]:
             line.out["unreadable"]["record"] = exc.reason
             result.append(line.done())
             continue
-        result.append(_line(entry.name, record, stage, engine))
+        result.append(_line(entry.name, record, stage, engine, model_names))
     return result
