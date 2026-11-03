@@ -175,6 +175,14 @@ With TypeSafe Jev on (`[rerank] enabled = true`), this update changes what Jev r
 - With the session-start hook installed, the subagent files `oah init` wrote follow the current model choice, so git
   may show a change in `.claude/agents/oah-<tier>.md`. A file you edited is left alone, and `oah doctor` names it.
 
+### Counting how models were chosen
+
+`oah models report` counts, from this repository's run records, how each run's tier and model were chosen, and
+`oah models report --json` prints the same counts as one JSON object. Bare `oah models` is unchanged. New runs record
+two more fields: `model_judge_confidence`, the judge's confidence in the pair it proposed (null when its answer carried
+none), and `tier_floor_raised`, true when the tier that ran was raised to the floor tier. Runs written before this
+update keep working and count as not recorded. The counts show how choices were made, not whether Jev helped.
+
 ### Claude Code, Codex and Claude Code plugins
 
 `oah` can now keep the tools themselves current, so newer models reach you without you remembering to update. This

@@ -2561,5 +2561,43 @@ class JevDifficultyTest(unittest.TestCase):
                 self.assertNotIn("OAH_RERANK_SCOPE_WIDENED", err)
 
 
+class FloorFlagTest(unittest.TestCase):
+    """`tier_floor_raised`: true only when the tier that ran was raised to the floor tier."""
+
+    LOW = {"kind": "quick", "intensity": "low", "reasoning": "low", "risk": "low"}
+
+    def flag(self, project: Project, judge: Judge | None = None, **fields) -> tuple[bool, str, str]:
+        if judge is None:
+            data = project.run(**fields)
+        else:
+            with judged(project, judge):
+                data = project.run(**fields)
+        self.assertEqual(data["status"], "finished")
+        self.assertIn("tier_floor_raised", data)
+        return data["tier_floor_raised"], data["tier"], data["tier_source"]
+
+    def test_the_review_floor_on_the_rules_path(self):
+        self.assertEqual(self.flag(scored_project(self), stage="review", axes=self.LOW), (True, "medium", "flag"))
+        project = scored_project(self)
+        project.packet("## Scope\n- src/app.py\n## Plan\n- review: kind=quick intensity=low reasoning=low risk=low\n")
+        self.assertEqual(self.flag(project, stage="review"), (True, "medium", "rules"))
+        self.assertEqual(self.flag(scored_project(self), stage="review"), (False, "medium", "rules"))
+
+    def test_jev_tier_below_the_floor(self):
+        self.assertEqual(self.flag(jev_project(self), Judge(("low", 0.9)), stage="correction"), (True, "medium", "jev"))
+        self.assertEqual(self.flag(jev_project(self), Judge(("high", 0.8)), stage="review"), (False, "high", "jev"))
+
+    def test_a_used_jev_tier_replaces_a_rules_raise_and_an_unused_one_keeps_it(self):
+        self.assertEqual(self.flag(jev_project(self), Judge(("high", 0.9)), stage="review", axes=self.LOW),
+                         (False, "high", "jev"))
+        self.assertEqual(self.flag(jev_project(self), Judge(("max", 0.5)), stage="review", axes=self.LOW),
+                         (True, "medium", "flag"))
+
+    def test_a_given_tier_is_never_raised(self):
+        self.assertEqual(self.flag(scored_project(self), stage="review", tier="high"), (False, "high", "flag"))
+        self.assertEqual(self.flag(scored_project(self), stage="correction", tier="low", axes={"kind": "security"}),
+                         (False, "low", "flag"))
+
+
 if __name__ == "__main__":
     unittest.main()

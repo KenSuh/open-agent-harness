@@ -169,6 +169,14 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
 - 세션 시작 훅을 설치했다면 `oah init`이 쓴 하위 에이전트 파일이 지금의 모델 선택을 따라가므로, git에
   `.claude/agents/oah-<tier>.md` 변경이 보일 수 있다. 직접 고친 파일은 그대로 두고 `oah doctor`가 알려 준다.
 
+### 모델 선택 세어 보기
+
+`oah models report`는 이 저장소의 실행 기록에서 실행마다 tier와 모델이 어떻게 골라졌는지 세고,
+`oah models report --json`은 같은 수를 JSON 객체 하나로 출력한다. 그냥 `oah models`는 그대로다. 새 실행은 필드 두 개를 더
+기록한다. `model_judge_confidence`는 판정이 제안한 쌍에 대한 확신도이고(답에 없으면 null), `tier_floor_raised`는 실행한
+tier가 최저 기준으로 올라갔으면 true다. 이 업데이트 전에 쓴 실행 기록도 그대로 읽히며 기록되지 않은 것으로 센다. 이 수는
+선택이 어떻게 이루어졌는지를 보여 줄 뿐 Jev가 도움이 됐는지는 보여 주지 않는다.
+
 ### Claude Code, Codex와 Claude Code 플러그인
 
 이제 `oah`가 도구 자체도 최신으로 맞출 수 있어서, 업데이트를 기억하지 않아도 새 모델이 들어온다. 이 내용은 `main`
