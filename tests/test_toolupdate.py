@@ -158,8 +158,8 @@ Options:
 FAKE_TOOL = r'''
 import json, os, pathlib, sys, time
 
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stderr.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+sys.stderr.reconfigure(encoding="utf-8", newline="\n")
 
 
 def main():
@@ -835,6 +835,11 @@ class PassTest(FakeToolsCase):
         self.assertEqual((entry["status"], entry["settled_version"]), ("unverified", None))
 
     def test_everything_current(self):
+        # Simulate Windows text streams even when this test runs on Unix.
+        self.fake.script.write_text(FAKE_TOOL.replace(
+            'import json, os, pathlib, sys, time',
+            'import json, os, pathlib, sys, time\nsys.stdout.reconfigure(newline="\\r\\n")\nsys.stderr.reconfigure(newline="\\r\\n")'),
+            encoding="utf-8")
         self.assertEqual(self.run_pass(env=dict(self.fake.env, PYTHONIOENCODING="cp437")), "complete", self.lines)
         components = self.components()
         self.assertEqual({name: entry["status"] for name, entry in components.items()},
