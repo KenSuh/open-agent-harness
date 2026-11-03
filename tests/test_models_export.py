@@ -172,6 +172,51 @@ class AgesTest(unittest.TestCase):
 class FieldsTest(unittest.TestCase):
     """AC2: only the decision fields and the outcome; nothing a person wrote or a machine path."""
 
+    def test_status_vocabulary_and_canaries(self):
+        reasons = ("not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
+                   "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
+                   "no-text", "no-candidates", "one-candidate", "too-many-candidates")
+        for field in ("model_judge", "jev_status"):
+            for reason in reasons:
+                with self.subTest(field=field, reason=reason):
+                    status = f"unused({reason})"
+                    record = dict(NEW, **{field: status})
+                    if field == "jev_status":
+                        record.update(jev_tier=None, jev_confidence=None)
+                    else:
+                        record["model_judge_confidence"] = None
+                    self.assertEqual(one(self, record)[field], status)
+            for code in ("key-name", "bad-response", "internal", "provider", "timeout", "network", "invalid-header",
+                         "unauthorized", "rate-limited", "overloaded"):
+                with self.subTest(field=field, code=code):
+                    self.assertEqual(one(self, dict(NEW, **{field: f"unused(error:{code})"}))[field], "unused(error)")
+            for status, expected in (("unused(secret project)", None),
+                                     ("unused(error: SecretProjectError)", "unused(error)"),
+                                     ("rejected(made-up)", None), ("unused(error:bad-response)", "unused(error)"),
+                                     ("unused(error:secret-project)", None)):
+                with self.subTest(field=field, status=status):
+                    value = one(self, dict(NEW, **{field: status}))
+                    self.assertEqual(value[field], expected)
+                    if expected is None:
+                        self.assertEqual(value["unreadable"][field], "unknown-value")
+                    self.assertNotIn(status, json.dumps(value))
+
+    def test_model_change_reader_failures_are_named(self):
+        digest = "sha256:" + "a" * 64
+        for requested, reason in ((None, "wrong-type"), ({"model": "m-mid"}, "wrong-type"),
+                                  ({"model": digest, "effort": "high"}, "hashed")):
+            with self.subTest(requested=requested):
+                selected = choice(("m-mid", "high"), ("m-mid", "high"))
+                selected["requested"] = requested
+                value = one(self, dict(NEW, model_choice=selected))
+                self.assertEqual(value["unreadable"]["model_choice"], reason)
+                if reason == "hashed":
+                    self.assertIn("model_choice.requested.model", value["hashed"])
+                    self.assertEqual(value["model_choice"]["requested"]["model"], digest)
+                else:
+                    self.assertIsNone(value["model_choice"]["requested"])
+                    self.assertEqual(value["unreadable"]["model_choice.requested"], reason)
+
     def test_canaries_never_reach_the_output(self):
         canaries = {
             "prompt": "CANARY-PROMPT write the secret plan", "path": "/srv/canary-user/private/project",

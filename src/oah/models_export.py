@@ -22,13 +22,23 @@ import pathlib
 
 from oah import models, routing
 from oah.engines import effort as effort_rules
-from oah.models_report import (HASHED, JUDGE_RULES, TIER_SOURCES, _confidence, _dimension_readers, _features,
-                               _flag, _jev_status, _judge_status, _plain, _Unreadable, read_run, run_folders)
+from oah.models_report import (HASHED, JUDGE_RULES, TIER_SOURCES, UNUSED, _confidence, _dimension_readers, _features,
+                               _flag, _jev_status, _judge_status, _pair as _report_pair, _plain, _Unreadable,
+                               read_run, run_folders)
 from oah.runs import TERMINAL, _PROGRESS
 
 FORMAT = 1
 STATUSES = (*_PROGRESS, *TERMINAL)
 MODES = ("ranked", "pools", "scored", "deterministic")
+# call.py writes tier-given, no status, pinned, floor-unresolved and no-pool-for-tier;
+# rerank/__init__.py writes the other reasons and key-name/bad-response; rerank/base.py
+# and rerank/typesafe.py write the remaining fixed error codes.
+UNUSED_REASONS = {"not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
+                  "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
+                  "no-text", "no-candidates", "one-candidate", "too-many-candidates",
+                  "error:key-name", "error:bad-response", "error:internal", "error:provider", "error:timeout",
+                  "error:network", "error:invalid-header", "error:unauthorized", "error:rate-limited",
+                  "error:overloaded"}
 AXES = {"kind": routing.KIND_SCORES, "intensity": routing.INTENSITY_SCORES,
         "reasoning": routing.REASONING_SCORES, "risk": routing.RISK_SCORES}
 FIELDS = ("axes", "stage", "engine", "tier", "tier_source", "rule_tier", "jev_tier", "jev_confidence", "jev_status",
@@ -85,6 +95,18 @@ class _Line:
 
 def _closed(words):
     return lambda value: _plain(value, words)
+
+
+def _export_status(value, report_reader):
+    status = report_reader(value)
+    if status.startswith("unused("):
+        reason = status[7:-1]
+        if reason in UNUSED_REASONS:
+            return "unused(error)" if reason.startswith("error:") else status
+        if reason.startswith("error: ") and UNUSED.fullmatch(status):
+            return "unused(error)"
+        raise _Unreadable("unknown-value")
+    return status
 
 
 def _form(pattern):
@@ -202,7 +224,8 @@ def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
     out["tier"] = line.read("tier", record, "tier", _closed(routing.TIERS))
     out["tier_source"] = line.read("tier_source", record, "tier_source", _closed(TIER_SOURCES))
     readers = {"rule_tier": _closed(routing.TIERS), "jev_tier": _closed(routing.TIERS), "jev_confidence": _confidence,
-               "jev_status": _jev_status, "tier_floor_raised": _flag, "model_judge": _judge_status,
+               "jev_status": lambda v: _export_status(v, _jev_status), "tier_floor_raised": _flag,
+               "model_judge": lambda v: _export_status(v, _judge_status),
                "model_judge_confidence": _confidence, "model_choice": _model_choice(line)}
     features = _features(record)  # the report's decision: each feature absent, complete or partial
     for feature, names in FEATURE_FIELDS.items():
@@ -214,6 +237,21 @@ def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
             else:
                 out[name] = line.value(name, record[name], readers[name])
     dimensions = _dimension_readers(record, features)
+    if features["model_judge"] == "complete" and isinstance(record["model_choice"], dict):
+        try:
+            dimensions["model_change"]()
+        except _Unreadable as exc:
+            # The comparison can fail even when individual values (including hashes) are readable.
+            out["unreadable"]["model_choice"] = exc.reason
+            if exc.reason == "wrong-type":
+                for name in ("deterministic", "requested"):
+                    try:
+                        _report_pair(record["model_choice"].get(name))
+                    except _Unreadable as pair_error:
+                        path = f"model_choice.{name}"
+                        out["model_choice"][name] = None
+                        out["unreadable"][path] = pair_error.reason
+                        out["hashed"][:] = [item for item in out["hashed"] if not item.startswith(path + ".")]
     for dimension, names in CONSISTENCY.items():
         try:
             dimensions[dimension]()
