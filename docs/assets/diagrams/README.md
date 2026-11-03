@@ -14,7 +14,7 @@ The banner is maintained separately and is not part of this redraw.
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
 | `how-it-works` | Swimlane, 1080 × 1484 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
-| `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; ready for the README text run |
+| `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; both READMEs |
 | `architecture-build` | Architecture, 1040 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
 | `architecture-land` | Architecture, 1040 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
 | `loop-start` | Sequence, 960 × 916 | 3 / 6 | Numbered exchanges 1–6 |
@@ -36,9 +36,14 @@ type ramp, chips, ghost numbers, zones, icons and connector rules. There is one 
 not a color for each engine. All four variants have the same structural geometry; Korean keeps
 the same meaning, with 12px-or-larger Hangul and Korean system fallbacks.
 
-The new `features` assets are ready for the README text run. They are not inserted into either README
-in this figure-only run, whose page edits are restricted to existing alt text. Use each language's
-SVG description verbatim as its image alt text when inserting the new picture.
+Both READMEs now embed `features` after the purpose, before the whole-harness overview. Each picture uses
+its language's SVG description verbatim as the image alt text in both themes.
+
+The overview and features wording follows the same contract as the pages: you ask, answer when a repeated
+problem or design choice stops the AI, and confirm before landing. A lease reserves the paths a task changes;
+an overlapping lease is refused. TypeSafe Jev is the recommended, optional judge. It re-orders chosen skills;
+on unreleased main it judges difficulty, and its tier picks the model subject to confidence and minimum-level
+rules. Without a key, rules decide. The guided design conversation stays planned for v0.4.0.
 
 ## Regenerate
 
@@ -80,14 +85,14 @@ The loop still contains review, findings, correction, diff and bind, excludes th
 and retains return directions and dashed replies. Numbers still refer to the unchanged page tables.
 
 The whole-harness overview is a new **Swimlane** composition, replacing the old four-step summary.
-It shows a plain-language request; installed rules preparing intent, scope, lease, impact and optional
+It shows a plain-language request; installed rules preparing intent, scope, lease, impact and recommended, optional
 Jev judgement; Claude Code building; gates and wiki evidence; Codex review and correction returning
-to evidence; the user's question, inspection and confirmation; and checked landing.
+to evidence; the user's question, answer to a decision, inspection and confirmation; and checked landing.
 A separate unconnected note marks the guided design conversation **planned for v0.4.0, not yet available**.
 It does not turn that future feature into a current workflow step.
 
 The new **Architecture** features figure has six nodes and six supporting/evidence connections.
-It brings leases, impact, optional Jev, the Claude/Codex loop, gates and wiki together with plain benefits.
+It brings path-reserving leases, impact, recommended optional Jev, the Claude/Codex loop, gates and wiki together with plain benefits.
 This is an overview of the existing parts, not a new product behavior or a replacement for the detailed graphs.
 
 ### Concepts pages
