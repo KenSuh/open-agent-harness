@@ -1,98 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="736" viewBox="0 0 1200 736" role="img" aria-labelledby="title desc" xml:lang="ko">
-<title id="title">open-agent-harness</title>
-<desc id="desc">open-agent-harness. Claude Code와 Codex CLI가 내 저장소에서 한 팀처럼 일한다. Claude Code가 1차 구현을 하고, Codex CLI가 리뷰가 수렴할 때까지 리뷰하고 고치며, 작업은 사용자가 확인한 뒤 반영된다. 켜서 쓰는 판정기 TypeSafe Jev가 난이도, 모델 선택, 순서를 판정한다. 리뷰는 수렴하면 끝나고, 결정이 필요하면 멈춰서 묻는다. 라운드 상한은 선택이다. 리스, 게이트, 영향 지도, 위키가 작업을 받친다.</desc>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 640 352" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="banner-ko-dark-title banner-ko-dark-desc" id="banner-ko-dark-root">
+<title id="banner-ko-dark-title">open-agent-harness</title>
+<desc id="banner-ko-dark-desc">Claude Code가 만들고 Codex CLI가 검토하고 고치며 사용자가 확인한 뒤 반영하는, 필요에 맞게 바꾸는 AI 작업 흐름이다.</desc>
 <defs>
-<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d1117"/><stop offset="1" stop-color="#111722"/></linearGradient>
-<linearGradient id="ink" gradientUnits="userSpaceOnUse" x1="200" y1="0" x2="1000" y2="0"><stop offset="0" stop-color="#bc8cff"/><stop offset="0.5" stop-color="#a371f7"/><stop offset="1" stop-color="#58a6ff"/></linearGradient>
-<pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="12" cy="12" r="1.2" fill="#21262d"/></pattern>
-<filter id="shadow" x="-10%" y="-10%" width="120%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000000" flood-opacity="0.45"/></filter>
-<filter id="soft" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="4"/></filter>
-<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+      <style>#banner-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      #banner-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #banner-ko-dark-root .title { font-size: 28px; font-weight: 600; }
+      #banner-ko-dark-root .group { font-size: 14px; font-weight: 600; }
+      #banner-ko-dark-root .node { font-size: 12px; font-weight: 600; }
+      #banner-ko-dark-root .label { font-size: 12px; font-weight: 400; }
+      #banner-ko-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+      #banner-ko-dark-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#banner-ko-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="banner-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
+</marker>
+<marker id="banner-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+</marker>
+<marker id="banner-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+</marker>
 </defs>
-<style>
-text { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Segoe UI", sans-serif; text-anchor: middle; }
-.title { font-size: 76px; font-weight: 800; fill: url(#ink); letter-spacing: -1px; }
-.pitch { font-size: 34px; fill: #c9d1d9; }
-.jev { font-size: 34px; font-weight: 700; fill: #f0f6fc; }
-.jevhint { font-size: 34px; fill: #c9d1d9; }
-.name { font-size: 34px; font-weight: 700; fill: #f0f6fc; }
-.hint { font-size: 34px; fill: #c9d1d9; }
-.done { font-size: 34px; font-weight: 700; fill: #56d364; }
-.rail { font-size: 34px; font-weight: 600; fill: #c9d1d9; }
-.dot { animation: travel 8s ease-in-out infinite both; }
-.halo-claude { animation: glow-claude 8s ease-in-out infinite both; }
-.halo-codex { animation: glow-codex 8s ease-in-out infinite both; }
-.halo-land { animation: glow-land 8s ease-in-out infinite both; }
-.ring { transform-box: fill-box; transform-origin: center; animation: spin 8s ease-in-out infinite both; }
-.settle { animation: settle 8s ease-in-out infinite both; }
-.judge-link { animation: drift 6s linear infinite both; }
-@keyframes travel {
-  0% { transform: translate(314px, 460px); opacity: 0; }
-  3% { transform: translate(314px, 460px); opacity: 1; }
-  12% { transform: translate(362px, 460px); opacity: 1; }
-  15% { transform: translate(362px, 460px); opacity: 0; }
-  60% { transform: translate(726px, 460px); opacity: 0; }
-  63% { transform: translate(726px, 460px); opacity: 1; }
-  72% { transform: translate(774px, 460px); opacity: 1; }
-  75%, 100% { transform: translate(774px, 460px); opacity: 0; }
-}
-@keyframes glow-claude { 0%, 100% { opacity: 0; } 5% { opacity: 0.5; } 14% { opacity: 0; } }
-@keyframes glow-codex { 0%, 16%, 60%, 100% { opacity: 0; } 22%, 52% { opacity: 0.5; } }
-@keyframes glow-land { 0%, 72%, 92%, 100% { opacity: 0; } 78% { opacity: 0.5; } }
-@keyframes spin { 0%, 16% { transform: rotate(0deg); } 56%, 100% { transform: rotate(720deg); } }
-@keyframes settle { 0%, 8%, 62%, 100% { opacity: 1; } 14%, 56% { opacity: 0; } }
-@keyframes drift { to { stroke-dashoffset: -22; } }
-@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
-</style>
-<rect x="1" y="1" width="1198" height="734" rx="24" fill="url(#bg)" stroke="#30363d" stroke-width="2"/>
-<path d="M25,2 H1175 Q1198,2 1198,25 V711 Q1198,734 1175,734 H25 Q2,734 2,711 V25 Q2,2 25,2 Z" fill="url(#grid)" opacity="0.7"/>
-<text class="title" x="600" y="92">open-agent-harness</text>
-<text class="pitch" x="600" y="140">Claude Code와 Codex CLI가 내 저장소에서</text>
-<text class="pitch" x="600" y="182">한 팀처럼 일한다</text>
-<rect x="32" y="212" width="1136" height="104" rx="20" fill="#1b1530" stroke="#a371f7" stroke-width="2.5" filter="url(#shadow)"/>
-<circle cx="96" cy="264" r="28" fill="#a371f7"/>
-<g transform="translate(96 264)" fill="none" stroke="#0d1117" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M0,-11 L0,10 M-7,11 L7,11 M-12,-7 L12,-7 M-12,-7 L-16,3 M-12,-7 L-8,3 M12,-7 L8,3 M12,-7 L16,3"/><path d="M-17,3 Q-12,9 -7,3 Z M7,3 Q12,9 17,3 Z"/></g>
-<text class="jev" x="640" y="254">TypeSafe Jev · 켜서 쓰는 판정기</text>
-<text class="jevhint" x="640" y="296">난이도, 모델 선택, 순서를 판정한다</text>
-<line class="judge-link" x1="172" y1="318" x2="172" y2="342" stroke="#a371f7" stroke-width="2.5" stroke-dasharray="6 5" stroke-linecap="round"/>
-<line class="judge-link" x1="544" y1="318" x2="544" y2="342" stroke="#a371f7" stroke-width="2.5" stroke-dasharray="6 5" stroke-linecap="round"/>
-<rect x="32" y="372" width="280" height="176" rx="20" fill="#161b22" stroke="#d29922" stroke-width="2.5" filter="url(#shadow)"/>
-<text class="name" x="172" y="467">Claude Code</text>
-<text class="hint" x="172" y="509">1차 구현</text>
-<circle class="halo halo-claude" cx="172" cy="372" r="36" fill="none" stroke="#d29922" stroke-width="3" opacity="0"/>
-<circle cx="172" cy="372" r="28" fill="#d29922"/>
-<g transform="translate(172 372)" fill="none" stroke="#0d1117" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M-11,11 L-9,3 L5,-11 L11,-5 L-3,9 Z M1,-7 L7,-1 M-9,3 L-3,9"/></g>
-<rect x="364" y="372" width="360" height="176" rx="20" fill="#161b22" stroke="#3fb950" stroke-width="2.5" filter="url(#shadow)"/>
-<text class="name" x="544" y="446">Codex CLI</text>
-<text class="hint" x="544" y="488">수렴할 때까지</text>
-<text class="hint" x="544" y="530">리뷰하고 고친다</text>
-<circle class="halo halo-codex" cx="544" cy="372" r="36" fill="none" stroke="#3fb950" stroke-width="3" opacity="0"/>
-<circle cx="544" cy="372" r="28" fill="#3fb950"/>
-<g transform="translate(544 372)" fill="none" stroke="#0d1117" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="-3" cy="-3" r="8"/><path d="M3,3 L11,11"/></g>
-<rect x="776" y="372" width="392" height="176" rx="20" fill="#161b22" stroke="#58a6ff" stroke-width="2.5" filter="url(#shadow)"/>
-<text class="name" x="972" y="467">반영</text>
-<text class="hint" x="972" y="509">사용자가 확인한 뒤</text>
-<circle class="halo halo-land" cx="972" cy="372" r="36" fill="none" stroke="#58a6ff" stroke-width="3" opacity="0"/>
-<circle cx="972" cy="372" r="28" fill="#58a6ff"/>
-<g transform="translate(972 372)" fill="none" stroke="#0d1117" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M-8,12 L-8,-12 M-8,-11 L9,-11 L5,-5 L9,1 L-8,1"/></g>
-<line x1="320" y1="460" x2="354" y2="460" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
-<line x1="732" y1="460" x2="766" y2="460" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"/>
-<rect x="463" y="568" width="162" height="56" rx="28" fill="#0f2e1b" stroke="#3fb950" stroke-width="2"/>
-<g transform="translate(503 596)" fill="none" stroke="#3fb950" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-<path class="ring" d="M13,0 A13,13 0 1 1 9.2,-9.2 M9.2,-9.2 L9.6,-15 M9.2,-9.2 L3.6,-8.4"/>
-<path class="settle" d="M-5,0 L-1.5,4 L5.5,-4.5"/>
-</g>
-<g class="settle"><text class="done" x="567" y="608">수렴</text></g>
-<line x1="32" y1="668" x2="1168" y2="668" stroke="#30363d" stroke-width="3"/>
-<line x1="32" y1="684" x2="1168" y2="684" stroke="#30363d" stroke-width="3"/>
-<path d="M44,662 V690 M68,662 V690 M92,662 V690 M116,662 V690 M140,662 V690 M164,662 V690 M188,662 V690 M212,662 V690 M236,662 V690 M260,662 V690 M284,662 V690 M308,662 V690 M332,662 V690 M356,662 V690 M380,662 V690 M404,662 V690 M428,662 V690 M452,662 V690 M476,662 V690 M500,662 V690 M524,662 V690 M548,662 V690 M572,662 V690 M596,662 V690 M620,662 V690 M644,662 V690 M668,662 V690 M692,662 V690 M716,662 V690 M740,662 V690 M764,662 V690 M788,662 V690 M812,662 V690 M836,662 V690 M860,662 V690 M884,662 V690 M908,662 V690 M932,662 V690 M956,662 V690 M980,662 V690 M1004,662 V690 M1028,662 V690 M1052,662 V690 M1076,662 V690 M1100,662 V690 M1124,662 V690 M1148,662 V690" stroke="#30363d" stroke-width="3" stroke-linecap="round"/>
-<rect x="84" y="648" width="180" height="56" rx="28" fill="#161b22" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="174" y="688">리스</text>
-<rect x="368" y="648" width="180" height="56" rx="28" fill="#161b22" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="458" y="688">게이트</text>
-<rect x="632" y="648" width="221" height="56" rx="28" fill="#161b22" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="742" y="688">영향 지도</text>
-<rect x="936" y="648" width="180" height="56" rx="28" fill="#161b22" stroke="#6e7681" stroke-width="2"/>
-<text class="rail" x="1026" y="688">위키</text>
-<g class="dot" opacity="0"><circle r="12" fill="#58a6ff" opacity="0.45" filter="url(#soft)"/><circle r="6" fill="#58a6ff"/><circle r="2.5" fill="#ffffff"/></g>
+<rect x="0" y="0" width="640" height="352" rx="0" fill="#0d1117"/>
+<line x1="484" y1="116" x2="484" y2="140" stroke="#8b949e" stroke-width="1" marker-end="url(#banner-ko-dark-arrow)"/>
+<line x1="484" y1="188" x2="484" y2="212" stroke="#8b949e" stroke-width="1" marker-end="url(#banner-ko-dark-arrow)"/>
+<text x="40" y="68" class="title" text-anchor="start" fill="#f0f6fc">oah</text>
+<text x="40" y="96" class="group" text-anchor="start" fill="#c9d1d9">open-agent-harness</text>
+<text x="40" y="152" class="title" text-anchor="start" fill="#f0f6fc">내 프로젝트에 맞는</text>
+<text x="40" y="188" class="title" text-anchor="start" fill="#f0f6fc">나만의 AI 작업 방식</text>
+<text x="40" y="228" class="label" text-anchor="start" fill="#c9d1d9">AI가 바뀌면 작업 방식도 바꾼다.</text>
+<rect x="368" y="68" width="232" height="48" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+<text x="484.0" y="88" class="node" text-anchor="middle" fill="#d29922">Claude Code</text>
+<text x="484.0" y="104" class="label" text-anchor="middle" fill="#c9d1d9">첫 버전 구현</text>
+<rect x="368" y="140" width="232" height="48" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="484.0" y="160" class="node" text-anchor="middle" fill="#3fb950">Codex CLI</text>
+<text x="484.0" y="176" class="label" text-anchor="middle" fill="#c9d1d9">검토 · 수정 · 재검토</text>
+<rect x="368" y="212" width="232" height="48" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="484.0" y="232" class="node" text-anchor="middle" fill="#f0f6fc">사용자</text>
+<text x="484.0" y="248" class="label" text-anchor="middle" fill="#c9d1d9">확인한 뒤 반영</text>
+<line x1="40" y1="292" x2="600" y2="292" stroke="#30363d" stroke-width="1"/>
+<text x="40" y="316" class="label" text-anchor="start" fill="#c9d1d9">Claude 구현 · Codex 검토 · 사용자 확인</text>
 </svg>

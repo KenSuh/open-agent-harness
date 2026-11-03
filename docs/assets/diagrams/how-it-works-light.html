@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How oah works</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 640px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 640px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>How oah works</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 640 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-light-title how-it-works-light-desc">
+<title id="how-it-works-light-title">How oah works</title>
+<desc id="how-it-works-light-desc">You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#6e7781"/>
+</marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/>
+</marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#0969da"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="640" height="480" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">How oah works</text>
+<line x1="162" y1="152" x2="162" y2="184" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="162" y1="232" x2="162" y2="264" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="162" y1="328" x2="162" y2="368" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="40" y="104" width="244" height="48" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="162.0" y="132.0" class="node" text-anchor="middle" fill="#1f2328">1. Describe the task</text>
+<rect x="40" y="184" width="244" height="48" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>
+<text x="162.0" y="212.0" class="node" text-anchor="middle" fill="#9a6700">2. Claude Code builds</text>
+<rect x="40" y="264" width="244" height="64" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="162.0" y="284" class="node" text-anchor="middle" fill="#1a7f37">3. Codex CLI reviews</text>
+<text x="162.0" y="300" class="label" text-anchor="middle" fill="#424a53">Correct, then review again</text>
+<rect x="40" y="368" width="244" height="48" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="162.0" y="396.0" class="node" text-anchor="middle" fill="#1f2328">4. Confirm and land</text>
+<text x="324" y="124" class="label" text-anchor="start" fill="#424a53">Goal, files and success checks</text>
+<text x="324" y="204" class="label" text-anchor="start" fill="#424a53">A working first version</text>
+<text x="324" y="284" class="label" text-anchor="start" fill="#424a53">Repeat until review converges.</text>
+<text x="324" y="308" class="label" text-anchor="start" fill="#424a53">Pause when a decision is needed.</text>
+<text x="324" y="388" class="label" text-anchor="start" fill="#424a53">Checks first; then you confirm.</text>
+<line x1="40" y1="440" x2="600" y2="440" stroke="#d0d7de" stroke-width="1"/>
+<text x="40" y="464" class="label" text-anchor="start" fill="#424a53">Default roles. Adapt the parts to your own AI setup.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

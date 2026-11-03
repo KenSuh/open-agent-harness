@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 840 712" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="loop-review-ko-dark-title loop-review-ko-dark-desc" id="loop-review-ko-dark-root">
+<title id="loop-review-ko-dark-title">검토, 수정과 반영</title>
+<desc id="loop-review-ko-dark-desc">Codex CLI가 검토와 수정을 반복하고 사용자가 수정 기록을 묶어 작업을 끝내면 oah가 검사와 사용자 확인을 거쳐 검토한 커밋을 반영한다.</desc>
+<defs>
+      <style>#loop-review-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      #loop-review-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #loop-review-ko-dark-root .title { font-size: 28px; font-weight: 600; }
+      #loop-review-ko-dark-root .group { font-size: 14px; font-weight: 600; }
+      #loop-review-ko-dark-root .node { font-size: 12px; font-weight: 600; }
+      #loop-review-ko-dark-root .label { font-size: 12px; font-weight: 400; }
+      #loop-review-ko-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+      #loop-review-ko-dark-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#loop-review-ko-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="loop-review-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
+</marker>
+<marker id="loop-review-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+</marker>
+<marker id="loop-review-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="840" height="712" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">검토, 수정과 반영</text>
+<rect x="60" y="164" width="500" height="284" rx="4" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<line x1="100" y1="152" x2="100" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="260" y1="152" x2="260" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="500" y1="152" x2="500" y2="448" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="740" y1="152" x2="740" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<rect x="60" y="164" width="48" height="20" rx="2" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="84" y="178" class="mono" text-anchor="middle" fill="#c9d1d9">LOOP</text>
+<rect x="76" y="188" width="472" height="24" rx="2" fill="#161b22"/>
+<text x="80" y="204" class="label" text-anchor="start" fill="#c9d1d9">수렴할 때까지 반복한다. 판단이 필요하면 멈춘다.</text>
+<line x1="260" y1="240" x2="500" y2="240" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="348.0" y="212" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="380.0" y="227" class="arrow-label" text-anchor="middle" fill="#c9d1d9">7. 검토</text>
+<line x1="500" y1="284" x2="260" y2="284" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="348.0" y="256" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="380.0" y="271" class="arrow-label" text-anchor="middle" fill="#c9d1d9">8. 지적</text>
+<line x1="260" y1="328" x2="500" y2="328" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="348.0" y="300" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="380.0" y="315" class="arrow-label" text-anchor="middle" fill="#c9d1d9">9. 수정</text>
+<line x1="500" y1="372" x2="100" y2="372" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="264.0" y="344" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="300.0" y="359" class="arrow-label" text-anchor="middle" fill="#c9d1d9">10. 변경</text>
+<line x1="100" y1="416" x2="260" y2="416" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="144.0" y="388" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="180.0" y="403" class="arrow-label" text-anchor="middle" fill="#c9d1d9">11. 결속</text>
+<line x1="100" y1="492" x2="260" y2="492" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="144.0" y="464" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="180.0" y="479" class="arrow-label" text-anchor="middle" fill="#c9d1d9">12. 완료</text>
+<line x1="100" y1="536" x2="740" y2="536" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="384.0" y="508" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="420.0" y="523" class="arrow-label" text-anchor="middle" fill="#c9d1d9">13. 푸시</text>
+<line x1="100" y1="580" x2="260" y2="580" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="144.0" y="552" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="180.0" y="567" class="arrow-label" text-anchor="middle" fill="#c9d1d9">14. 확인</text>
+<line x1="260" y1="624" x2="740" y2="624" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-ko-dark-arrow)"/>
+<rect x="464.0" y="596" width="72" height="20" rx="2" fill="#0d1117"/>
+<text x="500.0" y="611" class="arrow-label" text-anchor="middle" fill="#c9d1d9">15. 반영</text>
+<rect x="60" y="104" width="80" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="100.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">사용자</text>
+<rect x="220" y="104" width="80" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">oah</text>
+<rect x="440" y="104" width="120" height="48" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="500.0" y="132.0" class="node" text-anchor="middle" fill="#3fb950">Codex CLI</text>
+<rect x="680" y="104" width="120" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="740.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">git / GitHub</text>
+<line x1="40" y1="652" x2="800" y2="652" stroke="#30363d" stroke-width="1"/>
+<text x="40" y="676" class="label" text-anchor="start" fill="#c9d1d9">실선은 요청, 점선은 응답이다. 수정한 뒤에는 다시 검토한다.</text>
+</svg>
