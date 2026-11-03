@@ -78,7 +78,6 @@ import json
 import os
 import pathlib
 import re
-import shutil
 import tempfile
 import urllib.parse
 import weakref
@@ -194,10 +193,11 @@ class _GitContext:
                               timeout=GH_TIMEOUT, env=self.original)
         if objects.returncode != 0 or objects.timed_out or git_dir.returncode != 0 or git_dir.timed_out:
             raise LandError("OAH_REVIEW_GIT_FAILED", "git could not inspect objects; check the repository and retry")
-        self.source = pathlib.Path(tempfile.mkdtemp(prefix="oah-land-"))
-        # The finalizer holds only the path (never self), so a context inside a reference cycle is still removed
-        # without TemporaryDirectory's own finalizer warning at an arbitrary moment.
-        self._cleanup = weakref.finalize(self, shutil.rmtree, str(self.source), ignore_errors=True)
+        temporary = tempfile.TemporaryDirectory(prefix="oah-land-", ignore_cleanup_errors=True)
+        self.source = pathlib.Path(temporary.name)
+        # The bound cleanup holds the TemporaryDirectory, not this context, so cycles can be collected and
+        # cleanup detaches the directory's own warning finalizer (also when finalizers run at interpreter exit).
+        self._cleanup = weakref.finalize(self, temporary.cleanup)
         (self.source / "objects").mkdir()
         alternates = json.dumps(objects.stdout.strip(), ensure_ascii=False)
         if self.original.get("GIT_ALTERNATE_OBJECT_DIRECTORIES"):
