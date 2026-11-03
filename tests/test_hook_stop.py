@@ -217,6 +217,101 @@ class StopHookTest(unittest.TestCase):
         self.write_ledger(RUNNABLE)
         self.assertIsNone(self.decide(unlazy=False))
 
+    def lease_as(self, agent, task="t1", scope=("src",)):
+        Store(self.state).start(task=task, agent=agent, scope=scope, note="", ttl_hours=1, info=repo_info(self.repo))
+
+    def ledger_for(self, task, text=RUNNABLE):
+        path = self.repo / ".oah" / "tasks" / task / "GATES.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def stop_agents(self, value):
+        git_commit(self.repo, {".oah/config.toml": f"[gates]\nstop_agents = {value}\n"})
+
+    def test_empty_stop_agents_still_blocks_for_any_agent(self):
+        self.lease_as("codex")
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        before = self.decide(session="without-key")
+        self.stop_agents("[]")
+        after = self.decide(session="with-empty-key")
+        self.assertEqual(after["decision"], "block")
+        self.assertEqual(after, before)
+
+    def test_stop_agents_skips_other_agents_and_hands_over(self):
+        self.stop_agents('["claude"]')
+        self.lease_as("codex")
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        self.stub.reply("stop-hook.mjs", {"stdout": "", "code": 0})
+        decision = self.decide()
+        self.assertEqual(set(decision), {"systemMessage"})
+        self.assertIn("task t1 held by codex", decision["systemMessage"])
+        self.assertIn("stop_agents", decision["systemMessage"])
+        self.assertNotIn(str(self.repo), decision["systemMessage"])
+        self.assertNotIn("GATES.md", decision["systemMessage"])
+        self.assertEqual(self.stub.calls("gate-check.mjs"), [])
+        self.assertEqual(len(self.stub.calls("stop-hook.mjs")), 1)
+
+    def test_stop_agents_returns_the_handover_decision_unchanged(self):
+        self.stop_agents('["claude"]')
+        self.lease_as("codex")
+        self.write_ledger(RUNNABLE)
+        block = {"decision": "block", "reason": "unlazy: 1 gate/ledger/dispatch item(s) need work"}
+        self.stub.reply("stop-hook.mjs", {"stdout": json.dumps(block) + "\n", "code": 0})
+        self.assertEqual(self.decide(), block)
+
+    def test_stop_agents_blocks_for_a_listed_agent_only(self):
+        self.stop_agents('["claude"]')
+        self.lease_as("claude")
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        self.assertEqual(self.decide(session="alone")["decision"], "block")
+        self.lease_as("codex", task="t2", scope=("docs",))
+        self.ledger_for("t2")
+        decision = self.decide(session="both")
+        self.assertEqual(decision["decision"], "block")
+        self.assertIn("task t1:", decision["reason"])
+        self.assertNotIn("t2", decision["reason"])
+        self.assertNotIn("codex", decision["reason"])
+        self.assertFalse([call for call in self.stub.calls("gate-check.mjs") if "t2" in json.dumps(call["args"])])
+
+    def test_stop_agents_match_is_exact(self):
+        self.stop_agents('["Claude", "claud"]')
+        self.lease_as("claude")
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        decision = self.decide(unlazy=False)
+        self.assertNotIn("decision", decision)
+        self.assertIn("task t1 held by claude", decision["systemMessage"])
+
+    def test_stop_agents_that_is_not_a_list_of_strings_allows_with_a_note(self):
+        self.lease_as("claude")
+        self.write_ledger(RUNNABLE)
+        self.stub.reply("gate-check.mjs", UNMET)
+        for value in ('"claude"', '"codexclaude"', '["claude", 1]', '[["claude"]]'):
+            with self.subTest(value=value):
+                self.stop_agents(value)
+                decision = self.decide()
+                self.assertEqual(set(decision), {"systemMessage"})
+                self.assertIn("could not check the gates", decision["systemMessage"])
+                self.assertIn("OAH_CONFIG_INVALID", decision["systemMessage"])
+                self.assertIn("gates.stop_agents", decision["systemMessage"])
+        self.assertEqual(self.stub.calls("gate-check.mjs"), [])
+        self.assertEqual(self.stub.calls("stop-hook.mjs"), [])
+
+    def test_progress_guard_releases_with_stop_agents(self):
+        self.stop_agents('["claude"]')
+        self.lease_as("claude")
+        self.lease_as("codex", task="t2", scope=("docs",))
+        self.write_ledger(RUNNABLE)
+        self.ledger_for("t2")
+        self.stub.reply("gate-check.mjs", UNMET)
+        decisions = [self.decide(max_blocks=3) for _ in range(4)]
+        self.assertEqual([d.get("decision") for d in decisions], ["block"] * 3 + [None])
+        self.assertIn("releasing after 3 blocks without progress", decisions[-1]["systemMessage"])
+        self.assertNotIn("t2", decisions[-1]["systemMessage"])
+
     def test_outside_a_repository_allows(self):
         payload = {"session_id": "s1", "cwd": str(self.tmp), "hook_event_name": "Stop"}
         self.assertIsNone(hook_stop.decide(payload, env=self.env(unlazy=False), home=self.home))

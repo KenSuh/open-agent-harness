@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>준비와 구현</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #0d1117; color: #f0f6fc; padding: 2rem; }
+.frame { max-width: 720px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #c9d1d9; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 720px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
+<div class="frame">
+<p class="eyebrow">Sequence · oah</p>
+<h1>준비와 구현</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 720 504" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="loop-start-ko-dark-title loop-start-ko-dark-desc">
+<title id="loop-start-ko-dark-title">준비와 구현</title>
+<desc id="loop-start-ko-dark-desc">사용자가 작업을 적고 경로를 확보하면 oah가 Claude Code에 구현을 맡기고 사용자가 검토 전에 구현의 증거를 남긴다.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
+</marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
+</marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="720" height="504" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">준비와 구현</text>
+<line x1="100" y1="144" x2="100" y2="420" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="300" y1="144" x2="300" y2="420" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="620" y1="144" x2="620" y2="420" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="100" y1="200" x2="300" y2="200" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="168.0" y="172" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="200.0" y="187" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. 작업</text>
+<line x1="300" y1="240" x2="100" y2="240" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="168.0" y="212" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="200.0" y="227" class="arrow-label" text-anchor="middle" fill="#c9d1d9">2. 배정</text>
+<line x1="100" y1="280" x2="300" y2="280" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="168.0" y="252" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="200.0" y="267" class="arrow-label" text-anchor="middle" fill="#c9d1d9">3. 시작</text>
+<line x1="300" y1="320" x2="620" y2="320" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="428.0" y="292" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="460.0" y="307" class="arrow-label" text-anchor="middle" fill="#c9d1d9">4. 구현</text>
+<line x1="620" y1="360" x2="100" y2="360" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="328.0" y="332" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="360.0" y="347" class="arrow-label" text-anchor="middle" fill="#c9d1d9">5. 코드</text>
+<line x1="100" y1="400" x2="300" y2="400" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="168.0" y="372" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="200.0" y="387" class="arrow-label" text-anchor="middle" fill="#c9d1d9">6. 증거</text>
+<rect x="40" y="96" width="120" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="100.0" y="124.0" class="node" text-anchor="middle" fill="#f0f6fc">사용자</text>
+<rect x="240" y="96" width="120" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="300.0" y="124.0" class="node" text-anchor="middle" fill="#f0f6fc">oah</text>
+<rect x="560" y="96" width="120" height="48" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+<text x="620.0" y="124.0" class="node" text-anchor="middle" fill="#d29922">Claude Code</text>
+<line x1="40" y1="444" x2="680" y2="444" stroke="#30363d" stroke-width="1"/>
+<text x="40" y="468" class="label" text-anchor="start" fill="#c9d1d9">실선은 요청, 점선은 응답이다. 번호별 명령은 아래 표에 있다.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

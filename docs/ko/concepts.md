@@ -487,6 +487,9 @@ docs/wiki/
 - CHECK 줄은 `cmd.exe`와 `sh`에서 똑같이 돌아야 한다. `grep`이나 파이프 대신 `python`, `node`, `oah check`를
   쓴다. `oah check`는 `oah check contains FILE TEXT` 같은 운영체제 공통 검사를 제공한다.
 - 선택형 Claude Code Stop 훅(`oah hooks install stop`)은 게이트를 충족하지 못한 세션이 끝나지 못하게 한다.
+  `[gates] stop_agents`(기본값 `[]`, 모든 리스)에 리스 에이전트 이름을 적으면 훅은 그 이름과 정확히 같은 이름으로
+  잡힌 리스만 본다. 이 목록은 선택이며 대가가 있다. 목록에 없는 이름으로 잡힌 리스는 더 이상 세션을 멈추지 않는다.
+  `oah finish`는 여전히 충족하지 못한 게이트를 거절하므로 검사는 작업 끝으로 옮겨질 뿐 사라지지 않는다.
 
 ## 리뷰 루프와 수정
 

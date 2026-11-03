@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 720 504" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="loop-start-light-title loop-start-light-desc" id="loop-start-light-root">
+<title id="loop-start-light-title">Prepare and implement</title>
+<desc id="loop-start-light-desc">You describe and claim the task, oah routes it to Claude Code, and you record the implementation evidence before review.</desc>
+<defs>
+      <style>#loop-start-light-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      #loop-start-light-root .diagram-container { width: 100%; overflow-x: auto; }
+      #loop-start-light-root .title { font-size: 28px; font-weight: 600; }
+      #loop-start-light-root .group { font-size: 14px; font-weight: 600; }
+      #loop-start-light-root .node { font-size: 12px; font-weight: 600; }
+      #loop-start-light-root .label { font-size: 12px; font-weight: 400; }
+      #loop-start-light-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+      #loop-start-light-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      @media print {
+#loop-start-light-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="loop-start-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#6e7781"/>
+</marker>
+<marker id="loop-start-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/>
+</marker>
+<marker id="loop-start-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#0969da"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="720" height="504" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">Prepare and implement</text>
+<line x1="100" y1="144" x2="100" y2="420" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="300" y1="144" x2="300" y2="420" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="620" y1="144" x2="620" y2="420" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4"/>
+<line x1="100" y1="200" x2="300" y2="200" stroke="#6e7781" stroke-width="1" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="164" y="172" width="72" height="20" rx="2" fill="#ffffff"/>
+<text x="200.0" y="187" class="arrow-label" text-anchor="middle" fill="#424a53">1. TASK</text>
+<line x1="300" y1="240" x2="100" y2="240" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="162" y="212" width="76" height="20" rx="2" fill="#ffffff"/>
+<text x="200.0" y="227" class="arrow-label" text-anchor="middle" fill="#424a53">2. ROUTE</text>
+<line x1="100" y1="280" x2="300" y2="280" stroke="#6e7781" stroke-width="1" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="162" y="252" width="76" height="20" rx="2" fill="#ffffff"/>
+<text x="200.0" y="267" class="arrow-label" text-anchor="middle" fill="#424a53">3. START</text>
+<line x1="300" y1="320" x2="620" y2="320" stroke="#6e7781" stroke-width="1" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="422" y="292" width="76" height="20" rx="2" fill="#ffffff"/>
+<text x="460.0" y="307" class="arrow-label" text-anchor="middle" fill="#424a53">4. BUILD</text>
+<line x1="620" y1="360" x2="100" y2="360" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="324" y="332" width="72" height="20" rx="2" fill="#ffffff"/>
+<text x="360.0" y="347" class="arrow-label" text-anchor="middle" fill="#424a53">5. CODE</text>
+<line x1="100" y1="400" x2="300" y2="400" stroke="#6e7781" stroke-width="1" marker-end="url(#loop-start-light-arrow)"/>
+<rect x="150" y="372" width="100" height="20" rx="2" fill="#ffffff"/>
+<text x="200.0" y="387" class="arrow-label" text-anchor="middle" fill="#424a53">6. EVIDENCE</text>
+<rect x="40" y="96" width="120" height="48" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="100.0" y="124.0" class="node" text-anchor="middle" fill="#1f2328">You</text>
+<rect x="240" y="96" width="120" height="48" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300.0" y="124.0" class="node" text-anchor="middle" fill="#1f2328">oah</text>
+<rect x="560" y="96" width="120" height="48" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>
+<text x="620.0" y="124.0" class="node" text-anchor="middle" fill="#9a6700">Claude Code</text>
+<line x1="40" y1="444" x2="680" y2="444" stroke="#d0d7de" stroke-width="1"/>
+<text x="40" y="468" class="label" text-anchor="start" fill="#424a53">Solid: request. Dashed: return. The table below gives each command.</text>
+</svg>

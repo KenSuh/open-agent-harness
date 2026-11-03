@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>open-agent-harness</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 640px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 640px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>open-agent-harness</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 640 352" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="banner-light-title banner-light-desc">
+<title id="banner-light-title">open-agent-harness</title>
+<desc id="banner-light-desc">An adaptable AI workflow where Claude Code builds, Codex CLI reviews and corrects, and you confirm before changes land.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#6e7781"/>
+</marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/>
+</marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#0969da"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="640" height="352" rx="0" fill="#ffffff"/>
+<line x1="484" y1="116" x2="484" y2="140" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="484" y1="188" x2="484" y2="212" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<text x="40" y="68" class="title" text-anchor="start" fill="#1f2328">oah</text>
+<text x="40" y="96" class="group" text-anchor="start" fill="#424a53">open-agent-harness</text>
+<text x="40" y="152" class="title" text-anchor="start" fill="#1f2328">Your project.</text>
+<text x="40" y="188" class="title" text-anchor="start" fill="#1f2328">Your workflow.</text>
+<text x="40" y="228" class="label" text-anchor="start" fill="#424a53">Adapt it as AI changes.</text>
+<rect x="368" y="68" width="232" height="48" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>
+<text x="484.0" y="88" class="node" text-anchor="middle" fill="#9a6700">Claude Code</text>
+<text x="484.0" y="104" class="label" text-anchor="middle" fill="#424a53">Build the first version</text>
+<rect x="368" y="140" width="232" height="48" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="484.0" y="160" class="node" text-anchor="middle" fill="#1a7f37">Codex CLI</text>
+<text x="484.0" y="176" class="label" text-anchor="middle" fill="#424a53">Review, correct, review</text>
+<rect x="368" y="212" width="232" height="48" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="484.0" y="232" class="node" text-anchor="middle" fill="#1f2328">You</text>
+<text x="484.0" y="248" class="label" text-anchor="middle" fill="#424a53">Confirm before landing</text>
+<line x1="40" y1="292" x2="600" y2="292" stroke="#d0d7de" stroke-width="1"/>
+<text x="40" y="316" class="label" text-anchor="start" fill="#424a53">Claude builds · Codex reviews · You decide</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

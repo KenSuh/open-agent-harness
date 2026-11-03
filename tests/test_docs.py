@@ -14,7 +14,7 @@ from oah.toolkit import update
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "oah"
-PAGES = ("concepts", "troubleshooting", "upgrade", "keys")
+PAGES = ("concepts", "troubleshooting", "upgrade", "keys", "how-it-works", "commands")
 EXAMPLE = REPO / "examples" / "hello-oah"
 CODE = re.compile(r"\bOAH_[A-Z0-9]+(?:_[A-Z0-9]+)*\b")
 # Environment variables and code prefixes that docs may name; they are not diagnostics.
@@ -233,222 +233,213 @@ class ReadmeLanguageTest(unittest.TestCase):
                          {"v030-models", "oah-로드맵", "개발", "개발-1"})
 
 
-def css_blocks(css: str) -> list[tuple[str, str]]:
-    """Top-level CSS blocks as (prelude, body), with nested braces kept inside the body."""
-    blocks, depth, start, prelude = [], 0, 0, ""
-    for index, char in enumerate(css):
-        if char == "{":
-            if depth == 0:
-                prelude, start = css[start:index].strip(), index + 1
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                blocks.append((prelude, css[start:index]))
-                start = index + 1
-    return blocks
+ASSETS = REPO / "docs" / "assets"
+DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review")
+DIAGRAM_PAGES = {
+    "README.md": ("banner", "how-it-works"),
+    "README.ko.md": ("banner-ko", "how-it-works-ko"),
+    "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
+    "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
+}
 
 
-def keyframe_stops(body: str) -> dict[float, dict[str, str]]:
-    """The declarations at each keyframe offset, from 0.0 to 100.0."""
-    stops: dict[float, dict[str, str]] = {}
-    for selector, declarations in css_blocks(body):
-        values = dict((key.strip(), value.strip()) for key, _, value in
-                      (item.partition(":") for item in declarations.split(";") if item.strip()))
-        for offset in selector.split(","):
-            offset = offset.strip()
-            number = {"from": 0.0, "to": 100.0}.get(offset)
-            stops.setdefault(float(offset.rstrip("%")) if number is None else number, {}).update(values)
-    return stops
+def svg_resource_errors(text: str) -> list[str]:
+    """SVGs must be static, offline figures; fragment references to their own defs are allowed."""
+    root = ET.fromstring(text)
+    errors = []
+    if re.search(r"@import|@font-face", text, re.IGNORECASE):
+        errors.append("remote font or stylesheet directive")
+    for value in re.findall(r"url\(\s*([^)]*?)\s*\)", text, re.IGNORECASE):
+        value = value.strip().strip("\"'").strip()
+        if not value.startswith("#") or len(value) == 1:
+            errors.append(f"non-fragment CSS reference: {value}")
+    for node in root.iter():
+        tag = node.tag.rsplit("}", 1)[-1].lower()
+        if tag in {"script", "foreignobject", "image", "a"}:
+            errors.append(f"active or embedded content: {tag}")
+        for key, value in node.attrib.items():
+            name = key.rsplit("}", 1)[-1].lower()
+            if name.startswith("on") or name == "base":
+                errors.append(f"executable attribute or changed base: {key}")
+            if name in {"href", "src"} and (not value.startswith("#") or len(value) == 1):
+                errors.append(f"non-fragment reference: {value}")
+    return errors
+
+
+class PictureParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.pictures = []
+        self.current = None
+        self.outside_images = []
+        self.badge_seen = False
+        self.banner_before_badges = False
+        self.nested = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "picture":
+            if self.current is not None:
+                self.nested = True
+            else:
+                self.current = []
+                if not self.pictures:
+                    self.banner_before_badges = not self.badge_seen
+        elif self.current is not None:
+            self.current.append((tag, attrs))
+        elif tag == "img":
+            self.outside_images.append(attrs)
+        if "badge-license.svg" in attrs.get("src", ""):
+            self.badge_seen = True
+
+    def handle_endtag(self, tag):
+        if tag == "picture" and self.current is not None:
+            self.pictures.append(self.current)
+            self.current = None
 
 
 class BannerTest(unittest.TestCase):
-    def banner_files(self) -> list[pathlib.Path]:
-        return [REPO / "docs" / "assets" / f"{prefix}{theme}.svg"
-                for prefix in BANNERS.values() for theme in ("light", "dark")]
+    """The public image contract, independent of any particular banner layout or animation."""
 
-    def test_banner_files_are_self_contained(self):
-        forbidden = re.compile(r"<script|<foreignObject|<image|@import|@font-face|url\((?!#)|href=[\"'](?!#)",
-                               re.IGNORECASE)
-        for path in self.banner_files():
-            with self.subTest(banner=path.name):
-                raw = path.read_bytes()
-                self.assertLess(len(raw), 24 * 1024)
-                text = raw.decode("utf-8")
-                self.assertIsNone(forbidden.search(text))
-                self.assertNotIn("bounded", text.lower())
-                root = ET.fromstring(text)
-                self.assertTrue(root.findtext(f"{SVG}title"))
-                self.assertTrue(root.findtext(f"{SVG}desc"))
-                self.assertGreaterEqual(len(root.findall(f".//{SVG}text")), 10)
+    def diagram_files(self) -> list[pathlib.Path]:
+        return sorted(path for path in ASSETS.glob("*.svg") if not path.name.startswith("badge-"))
 
-    def test_banner_motion_is_gentle_and_can_be_turned_off(self):
-        for path in self.banner_files():
-            with self.subTest(banner=path.name):
+    def test_all_diagrams_have_both_themes_and_languages_and_sources(self):
+        files = self.diagram_files()
+        self.assertTrue(files)
+        families = set()
+        for path in files:
+            match = re.fullmatch(r"(.+?)(?:-ko)?-(light|dark)\.svg", path.name)
+            self.assertIsNotNone(match, path.name)
+            families.add(match.group(1))
+        self.assertTrue(set(DIAGRAMS) <= families)
+        for family in families:
+            for language in ("", "-ko"):
+                for theme in ("light", "dark"):
+                    stem = f"{family}{language}-{theme}"
+                    with self.subTest(asset=stem):
+                        self.assertTrue((ASSETS / f"{stem}.svg").is_file())
+                        self.assertTrue((ASSETS / "diagrams" / f"{stem}.html").is_file())
+
+    def test_all_diagrams_are_static_and_self_contained(self):
+        for path in self.diagram_files():
+            with self.subTest(asset=path.name):
+                self.assertEqual(svg_resource_errors(read(path)), [])
                 root = ET.parse(path).getroot()
-                css = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
-                self.assertRegex(css, r"@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\*\s*\{\s*"
-                                      r"animation:\s*none\s*!important;?\s*\}\s*\}")
-                self.assertNotRegex(css, r"steps\(|step-start|step-end")
-                defined = {prelude.split()[1]: keyframe_stops(body)
-                           for prelude, body in css_blocks(css) if prelude.startswith("@keyframes")}
-                uses = {}
-                for prelude, body in css_blocks(css):
-                    if prelude.startswith("@"):
-                        continue
-                    for value in re.findall(r"animation\s*:\s*([^;]+)", body):
-                        name = value.split()[0]
-                        self.assertIn(name, defined, value)
-                        times = re.findall(r"(?<![\w.])(\d*\.?\d+)(ms|s)\b", value)
-                        self.assertTrue(times, value)
-                        number, unit = times[0]
-                        self.assertGreaterEqual(float(number) / (1000 if unit == "ms" else 1), 1.0, value)
-                        self.assertRegex(prelude, r"^\.[\w-]+$")
-                        uses[prelude[1:]] = name
-                    self.assertNotIn("animation-duration", body)
-                self.assertTrue(uses)
-                self.assertEqual(set(uses.values()), set(defined))
-                # A still renderer shows the markup; the first frame and the end of each cycle must match it.
-                for cls, name in uses.items():
-                    stops = defined[name]
-                    start, end = stops.get(0.0, {}), stops.get(100.0, {})
-                    if "opacity" in start or "opacity" in end:
-                        self.assertEqual(start.get("opacity"), end.get("opacity"), name)
-                    elements = [node for node in root.iter() if cls in node.get("class", "").split()]
-                    self.assertTrue(elements, cls)
-                    for node in elements:
-                        if "opacity" in start:
-                            self.assertEqual(float(node.get("opacity", "1")), float(start["opacity"]), (cls, name))
+                ids = {node.get("id") for node in root.iter() if node.get("id")}
+                for reference in re.findall(r"url\(#([^)]+)\)", read(path)):
+                    self.assertIn(reference, ids, "fragment must resolve within this SVG")
 
-    def test_korean_banners_name_korean_fonts_first(self):
-        for path in self.banner_files():
+    def test_resource_check_rejects_remote_or_active_content(self):
+        for fragment in (
+            '<script>alert(1)</script>',
+            '<style>@import "https://example.invalid/font.css";</style>',
+            '<style>@font-face { font-family: remote; }</style>',
+            '<style>.node { fill: url("https://example.invalid/a.svg"); }</style>',
+            '<use href="https://example.invalid/a.svg#shape"/>',
+            '<use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="a.svg#shape"/>',
+            '<image href="data:image/png;base64,abc"/>',
+            '<svg onload="alert(1)"/>',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertTrue(svg_resource_errors(f'<svg xmlns="http://www.w3.org/2000/svg">{fragment}</svg>'))
+        self.assertEqual(svg_resource_errors(
+            '<svg xmlns="http://www.w3.org/2000/svg"><use href="#shape"/>'
+            '<style>.node { fill: url( "#shape" ); }</style></svg>'), [])
+
+    def test_diagrams_have_accessible_titles_and_descriptions(self):
+        for path in self.diagram_files():
+            with self.subTest(asset=path.name):
+                root = ET.parse(path).getroot()
+                self.assertEqual(root.tag, f"{SVG}svg")
+                self.assertEqual(root.get("role"), "img")
+                self.assertEqual(list(root)[0].tag, f"{SVG}title")
+                title, desc = root.find(f"{SVG}title"), root.find(f"{SVG}desc")
+                self.assertIsNotNone(title)
+                self.assertIsNotNone(desc)
+                self.assertTrue(title.text and title.text.strip())
+                self.assertTrue(desc.text and desc.text.strip())
+                self.assertEqual(title.get("id"), f"{path.stem}-title")
+                self.assertEqual(desc.get("id"), f"{path.stem}-desc")
+                self.assertEqual(root.get("aria-labelledby", "").split(), [title.get("id"), desc.get("id")])
+                ids = [node.get("id") for node in root.iter() if node.get("id")]
+                self.assertEqual(len(ids), len(set(ids)))
+                viewbox = [float(number) for number in root.get("viewBox", "").split()]
+                self.assertEqual(len(viewbox), 4)
+                self.assertGreater(viewbox[2], 0)
+                self.assertGreater(viewbox[3], 0)
+
+    def test_themes_have_identical_text_and_layout(self):
+        for light in self.diagram_files():
+            if not light.name.endswith("-light.svg"):
+                continue
+            with self.subTest(asset=light.name):
+                dark = light.with_name(light.name.replace("-light.svg", "-dark.svg"))
+                roots = [ET.parse(path).getroot() for path in (light, dark)]
+                self.assertEqual(roots[0].get("viewBox"), roots[1].get("viewBox"))
+                def content(root):
+                    return [(node.tag, "".join(node.itertext()), node.get("x"), node.get("y"))
+                            for node in root.iter() if node.tag in {f"{SVG}title", f"{SVG}desc", f"{SVG}text"}]
+                self.assertEqual(content(roots[0]), content(roots[1]))
+                def geometry(root):
+                    return [(node.tag, {k: v for k, v in node.attrib.items()
+                                        if k in {"x", "y", "x1", "y1", "x2", "y2", "width", "height", "rx", "d", "points"}})
+                            for node in root.iter() if node.tag in {f"{SVG}rect", f"{SVG}line", f"{SVG}path", f"{SVG}polygon"}]
+                self.assertEqual(geometry(roots[0]), geometry(roots[1]))
+
+    def test_korean_diagrams_name_korean_system_fonts_first(self):
+        for path in self.diagram_files():
             if "-ko-" not in path.name:
                 continue
-            with self.subTest(banner=path.name):
-                family = re.search(r"font-family: ([^;]+);", read(path)).group(1)
-                positions = [family.find(font) for font in KOREAN_FONTS]
-                self.assertTrue(all(0 <= p < family.rindex("sans-serif") for p in positions), family)
-
-    def test_banner_text_is_legible_at_phone_width(self):
-        for path in self.banner_files():
-            with self.subTest(banner=path.name):
+            with self.subTest(asset=path.name):
                 root = ET.parse(path).getroot()
-                width = float(root.attrib["viewBox"].split()[2])
-                styles = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
-                classes = {}
-                for selector, declarations in re.findall(r"([^{}]+)\{([^{}]+)\}", styles):
-                    size = re.search(r"font-size\s*:\s*([\d.]+)px\s*(?:;|$)", declarations)
-                    if size:
-                        self.assertRegex(selector.strip(), r"^\.[\w-]+$")
-                        classes[selector.strip()[1:]] = float(size.group(1))
-                for node in root.findall(f".//{SVG}text"):
-                    sizes = [classes[c] for c in node.get("class", "").split() if c in classes]
-                    if "font-size" in node.attrib:
-                        sizes.append(float(node.attrib["font-size"].removesuffix("px")))
-                    inline = node.get("style", "")
-                    if "font-size" in inline:
-                        match = re.search(r"font-size\s*:\s*([\d.]+)px", inline)
-                        self.assertIsNotNone(match)
-                        sizes.append(float(match.group(1)))
-                    self.assertTrue(sizes, ET.tostring(node, encoding="unicode"))
-                    for size in sizes:
-                        self.assertGreaterEqual(size, 10 * width / 360)
+                css = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
+                family = re.search(r"font-family:\s*([^;]+);", css)
+                self.assertIsNotNone(family)
+                stack = family.group(1)
+                self.assertTrue(stack.startswith(KOREAN_FONTS[0]), stack)
+                positions = [stack.find(font) for font in KOREAN_FONTS]
+                self.assertTrue(all(0 <= pos < stack.index("system-ui") for pos in positions), stack)
 
-    def test_banner_text_fits_its_rectangles(self):
-        for path in self.banner_files():
-            with self.subTest(banner=path.name):
-                root = ET.parse(path).getroot()
-                styles = "\n".join(node.text or "" for node in root.findall(f".//{SVG}style"))
-                self.assertRegex(styles, r"text-anchor\s*:\s*middle\s*;")
-                sizes = {selector.strip()[1:]: float(size)
-                         for selector, size in re.findall(
-                             r"(\.[\w-]+)\s*\{[^{}]*font-size\s*:\s*([\d.]+)px", styles)}
-                rectangles = []
-                for rect in root.findall(f".//{SVG}rect"):
-                    x, y, width, height = (float(rect.get(key, "0"))
-                                           for key in ("x", "y", "width", "height"))
-                    rectangles.append((x, y, width, height))
-                groups = {}
-                for node in root.findall(f".//{SVG}text"):
-                    x, y = float(node.attrib["x"]), float(node.attrib["y"])
-                    size = sizes[node.attrib["class"]]
-                    containing = [rect for rect in rectangles
-                                  if rect[0] <= x <= rect[0] + rect[2]
-                                  and rect[1] <= y <= rect[1] + rect[3]]
-                    self.assertTrue(containing, ET.tostring(node, encoding="unicode"))
-                    rect = min(containing, key=lambda r: r[2] * r[3])
-                    rx, ry, width, height = rect
-                    label = "".join(node.itertext())
-                    estimated = size * sum(1.0 if "가" <= char <= "힣" else 0.62
-                                           for char in label)
-                    self.assertGreaterEqual(x - estimated / 2, rx + 16, label)
-                    self.assertLessEqual(x + estimated / 2, rx + width - 16, label)
-                    self.assertGreaterEqual(y - ry, 0.9 * size, label)
-                    self.assertGreaterEqual(ry + height - y, 0.35 * size, label)
-                    groups.setdefault(rect, []).append((y, size, label))
-                    if node.get("class") == "rail":
-                        self.assertGreaterEqual(height, 1.5 * size, label)
-                canvas = max(rectangles, key=lambda r: r[2] * r[3])
-                for rect, labels in groups.items():
-                    if rect == canvas:  # The background is not a text box.
-                        continue
-                    labels.sort()
-                    for previous, current in zip(labels, labels[1:]):
-                        self.assertGreaterEqual(current[0] - previous[0],
-                                                1.2 * max(previous[1], current[1]),
-                                                (previous[2], current[2]))
-
-    def test_readmes_pick_banner_by_theme_with_alt_matching_desc(self):
-        class PictureParser(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.pictures = []
-                self.current = None
-                self.badge_seen = False
-                self.picture_before_badges = False
-
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == "picture":
-                    if self.current is not None:
-                        self.current.append(("nested-picture", {}))
-                    else:
-                        self.current = []
-                        self.picture_before_badges = not self.badge_seen
-                elif self.current is not None:
-                    self.current.append((tag, attrs))
-                if "badge-license.svg" in attrs.get("src", ""):
-                    self.badge_seen = True
-
-            def handle_endtag(self, tag):
-                if tag == "picture" and self.current is not None:
-                    self.pictures.append(self.current)
-                    self.current = None
-                elif self.current is not None:
-                    self.current.append((f"/{tag}", {}))
-
-        for name, prefix in BANNERS.items():
+    def test_pages_pick_every_diagram_by_theme_with_alt_matching_desc(self):
+        for name, stems in DIAGRAM_PAGES.items():
+            page = REPO / name
             with self.subTest(page=name):
                 parser = PictureParser()
-                parser.feed(read(REPO / name))
+                parser.feed(read(page))
                 self.assertIsNone(parser.current, "unclosed picture")
-                self.assertEqual(len(parser.pictures), 1)
-                self.assertTrue(parser.picture_before_badges)
-                picture = parser.pictures[0]
-                self.assertEqual(len(picture), 2)
-                self.assertEqual(picture[0], ("source", {
-                    "media": "(prefers-color-scheme: dark)",
-                    "srcset": f"docs/assets/{prefix}dark.svg"}))
-                tag, attrs = picture[1]
-                self.assertEqual(tag, "img")
-                self.assertEqual(set(attrs), {"src", "alt", "width"})
-                self.assertEqual(attrs["src"], f"docs/assets/{prefix}light.svg")
-                self.assertEqual(attrs["width"], "100%")
-                self.assertTrue(attrs["alt"])
-                for theme in ("light", "dark"):
-                    root = ET.parse(REPO / "docs" / "assets" / f"{prefix}{theme}.svg").getroot()
-                    self.assertEqual(root.findtext(f"{SVG}title"), "open-agent-harness")
-                    self.assertEqual(root.findtext(f"{SVG}desc"), attrs["alt"])
+                self.assertFalse(parser.nested)
+                self.assertEqual(len(parser.pictures), len(stems))
+                if name in READMES:
+                    self.assertTrue(parser.badge_seen)
+                    self.assertTrue(parser.banner_before_badges)
+                for attrs in parser.outside_images:
+                    self.assertIn("badge", attrs.get("src", ""), "a diagram bypasses theme selection")
+                for picture, stem in zip(parser.pictures, stems):
+                    self.assertEqual([tag for tag, _ in picture], ["source", "img"])
+                    source, fallback = (attrs for _, attrs in picture)
+                    self.assertEqual(source.get("media"), "(prefers-color-scheme: dark)")
+                    self.assertEqual((page.parent / source["srcset"]).resolve(), ASSETS / f"{stem}-dark.svg")
+                    self.assertEqual((page.parent / fallback["src"]).resolve(), ASSETS / f"{stem}-light.svg")
+                    self.assertTrue(fallback.get("alt"))
+                    for theme in ("light", "dark"):
+                        root = ET.parse(ASSETS / f"{stem}-{theme}.svg").getroot()
+                        self.assertEqual(root.findtext(f"{SVG}desc"), fallback["alt"])
+
+    def test_readmes_and_new_pages_have_no_mermaid_and_all_anchors_resolve(self):
+        names = [*DIAGRAM_PAGES, "docs/commands.md", "docs/ko/commands.md"]
+        for name in names:
+            page = REPO / name
+            self.assertNotRegex(read(page), r"```\s*mermaid")
+            for _, line in prose_lines(read(page)):
+                for target in LINK.findall(line):
+                    path, _, anchor = target.partition("#")
+                    if not anchor or re.match(r"[a-z]+:", target):
+                        continue
+                    other = page.parent / path if path else page
+                    with self.subTest(page=name, target=target):
+                        self.assertTrue(other.is_file())
+                        self.assertIn(anchor, heading_anchors(read(other)))
 
 
 if __name__ == "__main__":

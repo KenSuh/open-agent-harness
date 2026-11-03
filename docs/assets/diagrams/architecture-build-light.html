@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>From task to evidence</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 840px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 840px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
+<div class="frame">
+<p class="eyebrow">Architecture · oah</p>
+<h1>From task to evidence</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 840 848" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-build-light-title architecture-build-light-desc">
+<title id="architecture-build-light-title">From task to evidence</title>
+<desc id="architecture-build-light-desc">You send a packet through leases, preflight and routing to Claude Code, with optional TypeSafe Jev skill judging and evidence gates linked to the impact map and wiki.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+<polygon points="0 0, 8 3, 0 6" fill="#6e7781"/>
+</marker>
+</defs>
+<rect x="0" y="0" width="840" height="848" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">From task to evidence</text>
+<rect x="40" y="184" width="488" height="576" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="204" class="node" text-anchor="start" fill="#424a53">oah</text>
+<rect x="568" y="296" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="316" class="node" text-anchor="start" fill="#424a53">Optional AI judge</text>
+<rect x="568" y="472" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="492" class="node" text-anchor="start" fill="#424a53">Installed, signed-in engine</text>
+<line x1="300" y1="152" x2="300" y2="224" data-from="you" data-to="intent" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="300" y1="280" x2="300" y2="320" data-from="intent" data-to="lease" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="300" y1="376" x2="300" y2="408" data-from="lease" data-to="route" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 416,432 H 676 Q 684,432 684,424 V 392" data-from="route" data-to="jev" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+<path d="M 416,472 H 552 Q 560,472 560,480 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 684,568 V 620 Q 684,628 676,628 H 416" data-from="claude" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="160" y1="628" x2="184" y2="628" data-from="impact" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="300" y1="656" x2="300" y2="696" data-from="gates" data-to="wiki" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+<rect x="452" y="404" width="96" height="20" rx="2" fill="#ffffff"/>
+<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#424a53">SKILL ORDER</text>
+<rect x="440" y="444" width="120" height="20" rx="2" fill="#ffffff"/>
+<text x="500" y="459" class="arrow-label" text-anchor="middle" fill="#424a53">BRIEF + SKILLS</text>
+<g data-node-id="you">
+<rect x="184" y="96" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="120" class="node" text-anchor="middle" fill="#1f2328">You or Claude Code as lead</text>
+<text x="300" y="140" class="label" text-anchor="middle" fill="#424a53">Describe the task</text>
+</g>
+<g data-node-id="intent">
+<rect x="184" y="224" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="248" class="node" text-anchor="middle" fill="#1f2328">Packets and intent</text>
+<text x="300" y="268" class="label" text-anchor="middle" fill="#424a53">Goal and success conditions</text>
+</g>
+<g data-node-id="lease">
+<rect x="184" y="320" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="344" class="node" text-anchor="middle" fill="#1f2328">Leases and preflight</text>
+<text x="300" y="364" class="label" text-anchor="middle" fill="#424a53">Claim paths; check the base</text>
+</g>
+<g data-node-id="route">
+<rect x="184" y="408" width="232" height="88" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="432" class="node" text-anchor="middle" fill="#1f2328">Difficulty, models, skills</text>
+<text x="300" y="456" class="label" text-anchor="middle" fill="#424a53">Rules set tier and effort</text>
+<text x="300" y="476" class="label" text-anchor="middle" fill="#424a53">Tier travels with the brief</text>
+</g>
+<g data-node-id="jev">
+<rect x="584" y="336" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="684" y="360" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev (optional)</text>
+<text x="684" y="380" class="label" text-anchor="middle" fill="#424a53">Re-orders chosen skills</text>
+</g>
+<g data-node-id="claude">
+<rect x="584" y="512" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>
+<text x="684" y="536" class="node" text-anchor="middle" fill="#9a6700">Claude Code</text>
+<text x="684" y="556" class="label" text-anchor="middle" fill="#424a53">First implementation</text>
+</g>
+<g data-node-id="impact">
+<rect x="56" y="600" width="104" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="108" y="624" class="node" text-anchor="middle" fill="#1f2328">Impact map</text>
+<text x="108" y="644" class="label" text-anchor="middle" fill="#424a53">pin / exec</text>
+</g>
+<g data-node-id="gates">
+<rect x="184" y="600" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="624" class="node" text-anchor="middle" fill="#1f2328">Evidence gates</text>
+<text x="300" y="644" class="label" text-anchor="middle" fill="#424a53">Commands; recorded results</text>
+</g>
+<g data-node-id="wiki">
+<rect x="184" y="696" width="232" height="48" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="300" y="716" class="node" text-anchor="middle" fill="#1f2328">Project wiki</text>
+<text x="300" y="732" class="label" text-anchor="middle" fill="#424a53">Decisions and reasons</text>
+</g>
+<line x1="40" y1="788" x2="800" y2="788" stroke="#d0d7de" stroke-width="1"/>
+<text x="40" y="812" class="label" text-anchor="start" fill="#424a53">Solid: work and evidence. Dashed: optional. Gates and impact continue below.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

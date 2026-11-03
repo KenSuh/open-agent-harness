@@ -13,6 +13,7 @@ DEFAULTS = {
     "stop_max_blocks": 6,  # the Stop hook releases after this many blocks without progress
     "input_env": [],  # environment variable names whose values are gate inputs (only hashes are kept)
     "check_timeout": 120,  # seconds per CHECK, passed to unlazy as --timeout
+    "stop_agents": [],  # exact lease agent names the Stop hook judges; empty judges every lease
 }
 LEDGER_NAME = "GATES.md"
 SUMMARY_NAME = "GATES.summary.md"
