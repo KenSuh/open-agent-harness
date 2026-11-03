@@ -420,6 +420,9 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     open_acs = [f"{ac}={state}" for ac, state in (intent_report or {}).get("acs", {}).items() if state != "met"]
     if open_acs:
         print(f"OAH_INTENT_ACS_OPEN {','.join(open_acs)}: name these conditions in your report; they are not met")
+    from oah import toolupdate  # loaded only here; it never raises, waits or changes this exit code
+
+    toolupdate.start_after_finish(root, store.dir, os.environ)
     return EXIT_OK
 
 

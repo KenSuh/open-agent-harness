@@ -148,6 +148,22 @@ Jev receives and when its tier counts.
 | `OAH_LAND_IMPACT_STALE` | The default branch could not be fetched or reassessed, for example with `--offline` or a remote that is a relative path. | Use a remote with a URL or an absolute path, run `oah impact refresh`, then `oah land --check` again. |
 | `OAH_LAND_CHECKS_REQUIRED` | The latest default branch binds checks to files you changed, and they have no passing evidence for your head. | Add a gate with the same CHECK and EXPECT to your ledger, run `oah gates check <task>`, commit, then check again. |
 
+## Tool updates
+
+These appear on `main`, which is not in a release yet.
+[Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) explains the pass.
+
+| Code | What it means | What to do next |
+|---|---|---|
+| `OAH_UPDATE_STARTED` | `oah finish` started the tool-update pass in the background and did not wait for it. | `oah update status` shows the result once the pass finishes. |
+| `OAH_UPDATE_SKIPPED` | The pass did not run: `after_finish` under `[updates]` is off or unreadable, a pass started less than `interval_hours` ago, the caller is a dispatched worker, or the background start failed. | Read the reason on the line. Set `after_finish = true` under `[updates]` in `.oah/config.toml` to turn it on, or run `oah update` to run a pass now. |
+| `OAH_UPDATE_BUSY` | Another pass on this machine holds `~/.oah/updates/pass.lock`. | Wait, then run `oah update status`. `oah update` exits 1 with this code. |
+| `OAH_UPDATE_DEFERRED` | A lease is active or a run is in flight (or run storage is linked, malformed or unreadable), so nothing was updated or recorded. | Finish the work: the next `oah finish` that leaves nothing in flight starts the pass, or run `oah update` then. A run stuck at `running` keeps deferring it; check it with `oah wait <run-id>`. |
+| `OAH_UPDATE_STATE_UNAVAILABLE` | An existing `~/.oah/updates/state.json` is unreadable or invalid, so every tool is checked again. Missing state also makes the pass due with every component unknown. `runs.jsonl` is display-only history: bad lines are skipped and status reports their count; missing or damaged history changes no interval or settled result. Records naming the removed kit-skills component are invalid. | Delete the damaged file and run `oah update`; the pass writes a fresh record. |
+| `OAH_UPDATE_FINISHED` | The pass ended. `complete` means every fixed component, including Claude marketplaces, has an updated, current or unsupported result; missing results count as unverified and mean `needs-attention`. Unsupported commands require clean help; failed or undecodable help is unverified. An update timeout is `failed` with "timed out; the tool may be partly updated"; a help timeout is `failed` with "help timed out", since no update ran. oah's skills keep their own daily check (`oah skills update`). | Follow the step on each `oah:` line above it; for a timeout, run the tool's own command printed there to check it. `oah update status` shows the steps again. |
+| `OAH_UPDATE_OFF` | `oah doctor`: `.oah/config.toml` has no `after_finish` under `[updates]`, so tool updates are off. | Set `after_finish = true` to turn them on (then `oah update` runs a pass now), or `false` to keep them off and stop the notice. |
+| `OAH_UPDATE_UNSETTLED` | `oah doctor`: the last pass left a result that is not `updated` or `current`. | Follow the next step on that line, then run `oah update`. |
+
 ## Still stuck
 
 - `oah status` shows every lease and whether it is active or stale.

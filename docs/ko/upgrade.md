@@ -169,6 +169,40 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`) 이번 업데이트로 Jev�
 - 세션 시작 훅을 설치했다면 `oah init`이 쓴 하위 에이전트 파일이 지금의 모델 선택을 따라가므로, git에
   `.claude/agents/oah-<tier>.md` 변경이 보일 수 있다. 직접 고친 파일은 그대로 두고 `oah doctor`가 알려 준다.
 
+### Claude Code, Codex와 Claude Code 플러그인
+
+이제 `oah`가 도구 자체도 최신으로 맞출 수 있어서, 업데이트를 기억하지 않아도 새 모델이 들어온다. 이 내용은 `main`
+기준이고 아직 릴리스하지 않았다.
+
+- 기존 프로젝트는 그대로다. `[updates]`에 `after_finish`가 없는 `.oah/config.toml`은 꺼진 것으로 보고, `oah init`은
+  그 파일을 다시 쓰지 않으며, `oah doctor`가 이 설정을 한 번 알린다. 켜려면 다음을 더한다.
+
+  ```toml
+  [updates]
+  after_finish = true
+  ```
+
+  새로 실행하는 `oah init`은 한 번 묻고(Yes 권장) 답을 거기에 적는다. `false`로 두면 계속 꺼지고 안내도 사라진다.
+- 패스는 Claude Code, Codex와 Claude Code 플러그인 및 그 마켓플레이스를 갱신한다. oah 스킬은 이 패스와 별도로
+  기존 일일 점검을 유지한다(`oah skills update`). 요약과 status가 이 사실을 한 줄로 알린다.
+- 켜 두면 리스와 진행 중인 run을 남기지 않는 `oah finish`가 백그라운드로 패스를 시작하며, `interval_hours`(기본
+  24)마다 많아야 한 번이다. 지금 돌리려면 `oah update`를 실행한다. `oah update status`는 아무것도 실행하지 않고
+  마지막 패스를 보여 준다.
+- MCP 서버는 바꾸지 않는다. 마켓플레이스가 선언한 명령에 확인이 필요한 Claude Code 플러그인은 직접 처리하도록
+  알려 준다. Codex 플러그인은 자동 갱신하지 않는다. `codex plugin marketplace upgrade`로 직접 갱신한 뒤 `/hooks`에서
+  훅을 다시 승인한다. 설치된 플러그인이 있거나 설정을 읽을 수 없으면 요약과 status가 이 안내를 되풀이하며, 전체
+  결과에는 영향을 주지 않는다. 훅 상태나 승인을 기록하지 않는다. 이미 실행 중인 세션은 다시 시작할 때까지 원래 버전과
+  플러그인을 쓴다.
+- Claude 마켓플레이스 갱신을 포함한 고정 구성요소마다 검증된 결과나 `unsupported` 결과가 있어야만 `complete`다.
+  근거가 없으면 `needs-attention`이며 `oah update status`가 다음 명령을 보여 준다.
+  명령 미지원은 도움말을 제대로 읽어야 확인할 수 있다. 도움말을 읽지 못하면 unverified, 시간 초과면 failed다.
+- 간격과 확인된 버전은 유효한 `state.json`만으로 결정한다. 상태 파일이 없거나 잘못되면 패스를 실행할 때가 된 것으로
+  보고, 존재하는 파일이 잘못됐으면 `OAH_UPDATE_STATE_UNAVAILABLE`로 알린다. `runs.jsonl`은 표시용 이력이며 판단을
+  바꾸지 않는다.
+
+자세한 내용은 [작업이 끝난 뒤 도구 업데이트](concepts.md#작업이-끝난-뒤-도구-업데이트)에 있고, 코드는
+[문제 해결](troubleshooting.md#도구-업데이트)에 있다.
+
 ## 7. docs/UPSTREAM_SYNC.md가 기록하는 것
 
 `oah`는 소유자의 하네스가 나아지는 것을 따라간다. [`docs/UPSTREAM_SYNC.md`](../UPSTREAM_SYNC.md)는 그 하네스에서

@@ -222,6 +222,20 @@ _ERROR_DIAGNOSTICS = {
                              "init --with-agents to hand it back.",
     "OAH_AGENT_FILE_STALE": "a generated subagent file names an older model and no hook updates it; run oah hooks "
                             "install session-start, or delete it and run oah init --with-agents.",
+    "OAH_UPDATE_STARTED": "oah finish started the tool-update pass in the background; oah update status shows the "
+                          "result.",
+    "OAH_UPDATE_SKIPPED": "the tool-update pass did not run (off, unreadable settings, not due, or a failed start); "
+                          "set after_finish = true under [updates] in .oah/config.toml, or run oah update.",
+    "OAH_UPDATE_BUSY": "another tool-update pass is running on this machine; run oah update status when it finishes.",
+    "OAH_UPDATE_DEFERRED": "a lease or run is still in flight, so no tool was updated; run oah update once the work "
+                           "is finished.",
+    "OAH_UPDATE_STATE_UNAVAILABLE": "the tool-update record cannot be read; only valid state.json drives decisions, "
+                                    "and runs.jsonl is display-only history; delete the damaged file and run oah update.",
+    "OAH_UPDATE_FINISHED": "the tool-update pass finished; oah update status shows each result and its next step.",
+    "OAH_UPDATE_OFF": "tool updates are off because .oah/config.toml has no after_finish under [updates]; set it to "
+                      "true or false.",
+    "OAH_UPDATE_UNSETTLED": "the last tool-update pass left a result unsettled; follow its next step, then run oah "
+                            "update.",
     "OAH_EFFORT_INVALID": "the configured effort is invalid; correct the Codex tier effort before retrying.",
     "OAH_EFFORT_UNSUPPORTED": "the model does not support the configured effort; select a supported effort before retrying.",
     "OAH_EFFORT_METADATA_MISSING": "model effort metadata is missing; refresh the model catalog before retrying.",

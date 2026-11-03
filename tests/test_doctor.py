@@ -18,7 +18,18 @@ from oah.engines.effort import EngineError
 from oah.engines.proc import Resolved, RunResult, UnsupportedBatchShim, run_command
 from oah.models import Catalog, Entry, ModelInfo
 from oah.setup import catalog, display
-from tests.helpers import make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
+from tests.helpers import ToolUpdateTestCase, make_git_repo, make_tmp_dir, make_unlazy, shipped_defaults
+
+
+def setUpModule():
+    """No doctor test reads the real ~/.oah/updates: the tool-update records live in a temporary home."""
+    from oah.toolupdate import records
+
+    home = pathlib.Path(__import__("tempfile").mkdtemp(prefix="oah-doctor-home-")).resolve()
+    patcher = mock.patch.object(records, "home", return_value=home)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    unittest.addModuleCleanup(shutil.rmtree, home, True)
 
 OK_VERSIONS = {
     "git": "git version 2.50.1",
@@ -637,7 +648,9 @@ class ModelNoticeDoctorTest(unittest.TestCase):
         self.assertIn(".oah/config.toml", out)
         _, raw = self.doctor(json_output=True)
         data = json.loads(raw)
-        self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices", "model_choices"])
+        # This config has no [updates] after_finish, so the off-by-absence notice joins the report.
+        self.assertEqual(list(data), ["ok", "platform", "tools", "mcp_notices", "model_notices", "model_choices",
+                                      "update_notices"])
         notice = data["model_notices"][0]
         self.assertEqual((notice["code"], notice["engine"], notice["model"], notice["date"]),
                          ("OAH_MODEL_NEW_UNPOOLED", "codex", "m-new", "2026-10-27"))
@@ -786,6 +799,78 @@ class ModelNoticeDoctorTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class ToolUpdateDoctorTest(ToolUpdateTestCase):
+    """AC1: doctor names the off-by-absence switch once and the last pass's unsettled results, offline."""
+
+    def setUp(self):
+        from oah.toolupdate import records
+
+        super().setUp()
+        self.records = records
+        self.repo = make_git_repo(self)
+        self.config = self.repo / ".oah" / "config.toml"
+        self.config.parent.mkdir()
+
+    def doctor(self, *, json_output=False):
+        import oah.doctor as doctor
+
+        out = io.StringIO()
+        spawned = mock.Mock(side_effect=AssertionError("oah doctor starts no program for tool updates"))
+        with mock.patch.object(doctor, "check_tools", return_value=[python_status((3, 12, 0))]), \
+                mock.patch.object(doctor, "project_root", return_value=self.repo), \
+                mock.patch.object(doctor, "model_notices", return_value=[]), \
+                mock.patch.object(doctor, "model_choices", return_value=[]), \
+                mock.patch.object(doctor, "agent_notices", return_value=[]), \
+                mock.patch.object(doctor, "mcp_notices", return_value=[]), \
+                mock.patch("subprocess.Popen", spawned), contextlib.redirect_stdout(out):
+            code = doctor.doctor_main(json_output=json_output)
+        return code, out.getvalue()
+
+    def test_off_by_absence_is_mentioned_once(self):
+        self.config.write_text("[skills]\nauto_update = true\n", encoding="utf-8")
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("tool updates are off"), 1)
+        self.assertIn("oah update", out)
+        self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
+        _code, raw = self.doctor(json_output=True)
+        self.assertEqual([notice["code"] for notice in json.loads(raw)["update_notices"]], ["OAH_UPDATE_OFF"])
+
+    def test_explicit_switch_and_no_project_config_are_quiet(self):
+        self.config.write_text("[updates]\nafter_finish = false\n", encoding="utf-8")
+        code, out = self.doctor()
+        self.assertNotIn("Tool updates", out)
+        self.config.unlink()
+        _code, raw = self.doctor(json_output=True)
+        self.assertNotIn("update_notices", json.loads(raw))
+
+    def test_unsettled_results_one_line_each(self):
+        self.config.write_text("[updates]\nafter_finish = true\n", encoding="utf-8")
+        component = self.records.component
+        stamp = "2026-11-03T00:00:00Z"
+        record = {"version": 1, "last_started": stamp, "trigger": "manual", "last_finished": stamp,
+                  "outcome": "needs-attention", "models_refresh": [], "components": {
+                      "claude": component("current", "2.1.316", "2.1.316", "", stamp),
+                      "codex": component("unverified", "0.166.0", "0.166.0", "run codex update yourself", stamp),
+                      "claude-marketplaces": component("current", "abc", "abc", "", stamp),
+                      "claude-plugins": component("current", "abc", "abc", "", stamp)}}
+        self.records.updates_dir().mkdir(parents=True)
+        self.records.state_path().write_text(json.dumps(record), encoding="utf-8")
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn("  Codex 0.166.0 (unverified); run codex update yourself", out)
+        self.assertNotIn("Claude Code 2.1.316 (current)", out)
+
+    def test_unreadable_record_is_named_and_the_report_goes_on(self):
+        self.config.write_text("[updates]\nafter_finish = true\n", encoding="utf-8")
+        self.records.updates_dir().mkdir(parents=True)
+        self.records.state_path().write_text("{torn", encoding="utf-8")
+        code, out = self.doctor()
+        self.assertEqual(code, 0, out)
+        self.assertIn("OAH_UPDATE_STATE_UNAVAILABLE", out)
+        self.assertTrue(out.rstrip().endswith("DOCTOR_OK"), out)
 
 class DoctorPinTest(unittest.TestCase):
     def test_a_pin_its_model_cannot_run_is_the_same_error_in_doctor_and_a_call(self):

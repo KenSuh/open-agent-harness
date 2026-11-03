@@ -25,6 +25,7 @@ from oah.impact import defaults as impact_defaults
 from oah.impact import mapstore
 from oah.paths import repo_info, state_dir
 from oah.setup import companions
+from oah.toolupdate import records as toolupdate_records
 from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.notes import parse_frontmatter
 from oah.wiki.store import Wiki
@@ -57,6 +58,7 @@ def sections(text: str) -> dict:
         "skills": config.section("skills", skillsel.config_defaults()),
         "rerank": config.section("rerank", rerank.DEFAULTS),
         "impact": impact_defaults.effective(config.section("impact", impact_defaults.DEFAULTS)),
+        "updates": config.section(toolupdate_records.SECTION, toolupdate_records.DEFAULTS),
     }
 
 
@@ -143,6 +145,35 @@ class ConfigTest(unittest.TestCase):
                                keychain=NoKeychain())
         self.assertEqual(result.status, "unused(no key)")
 
+
+
+class ToolUpdatesQuestionTest(unittest.TestCase):
+    """AC1: init asks once (Yes on Enter), records [updates] after_finish, and an older config counts as off."""
+
+    def test_question_says_what_runs_and_that_mcp_servers_never_change(self):
+        question = next(item for item in init.QUESTIONS if item.key == "tool_updates")
+        self.assertEqual((question.default, question.recorded), (True, True))
+        self.assertEqual(question.prompt, "Keep Claude Code, Codex and Claude Code plugins up to date after "
+                                          "your work finishes?")
+        self.assertTrue(question.what.startswith("Runs each tool's own update command when no task is active; MCP "
+                                                 "servers are never changed."))
+        self.assertIn("oah's skills keep their own daily check (oah skills update)", question.what)
+        self.assertIn(".oah/config.toml", question.what)
+
+    def test_answer_is_recorded_in_the_updates_section(self):
+        for answer in (True, False):
+            with self.subTest(answer=answer):
+                text = init.render_config(branch="main", how="", jev=False, skill_updates=True, today=TODAY,
+                                          tool_updates=answer)
+                updates = sections(text)["updates"]
+                self.assertIs(updates["after_finish"], answer)
+                self.assertEqual(updates["interval_hours"], 24.0)
+                self.assertIn("MCP servers are never changed", text)
+                self.assertIs(init.recorded_answers(parse_config(text.encode("utf-8")))["tool_updates"], answer)
+
+    def test_config_without_the_key_counts_as_off(self):
+        older = parse_config(b"[skills]\nauto_update = true\n")
+        self.assertIs(init.recorded_answers(older)["tool_updates"], False)
 
 class DefaultBranchTest(unittest.TestCase):
     def test_remote_head_symref(self):
@@ -3172,7 +3203,7 @@ class Replies:
         return self.replies.pop(0) if self.replies else None
 
 
-ALL_KEYS = ("agents", "hooks", "unlazy", "graph", "ci", "orca", "aside", "jev", "skill_updates")
+ALL_KEYS = ("agents", "hooks", "unlazy", "graph", "ci", "orca", "aside", "jev", "skill_updates", "tool_updates")
 
 
 class AnswersTest(unittest.TestCase):
@@ -3188,6 +3219,7 @@ class AnswersTest(unittest.TestCase):
         flags = {question.key: (question.flag_yes, question.flag_no) for question in init.QUESTIONS}
         self.assertEqual(flags["agents"], ("--with-agents", "--without-agents"))
         self.assertEqual(flags["skill_updates"], ("--with-skill-updates", "--without-skill-updates"))
+        self.assertEqual(flags["tool_updates"], ("--with-tool-updates", "--without-tool-updates"))
 
     def test_flags_answer_without_asking(self):
         given = {key: key in ("agents", "jev") for key in ALL_KEYS}
@@ -3197,11 +3229,11 @@ class AnswersTest(unittest.TestCase):
                          {key: (key in ("agents", "jev"), "flag") for key in ALL_KEYS})
 
     def test_enter_takes_the_default(self):
-        answers, ask, _ = self.resolve({}, ask=Replies("", "", "", "", "", "", "", "n", ""))
-        self.assertEqual(len(ask.prompts), 9)
+        answers, ask, _ = self.resolve({}, ask=Replies("", "", "", "", "", "", "", "n", "", ""))
+        self.assertEqual(len(ask.prompts), 10)
         self.assertEqual({key: answer.value for key, answer in answers.items()},
                          {"agents": True, "hooks": True, "unlazy": True, "graph": False, "ci": False, "orca": False,
-                          "aside": False, "jev": False, "skill_updates": True})
+                          "aside": False, "jev": False, "skill_updates": True, "tool_updates": True})
         self.assertEqual({answer.source for answer in answers.values()}, {"asked"})
 
     def test_invalid_answer_asks_again(self):
@@ -3221,11 +3253,12 @@ class AnswersTest(unittest.TestCase):
             self.assertIn(words, lowered)
 
     def test_recorded_answers_come_from_existing_config(self):
-        given = {key: True for key in ALL_KEYS if key not in ("jev", "skill_updates")}
-        answers, ask, _ = self.resolve(given, recorded={"jev": False, "skill_updates": True}, interactive=False)
+        given = {key: True for key in ALL_KEYS if key not in ("jev", "skill_updates", "tool_updates")}
+        answers, ask, _ = self.resolve(given, recorded={"jev": False, "skill_updates": True, "tool_updates": False},
+                                       interactive=False)
         self.assertEqual(ask.prompts, [])
-        self.assertEqual((answers["jev"], answers["skill_updates"]),
-                         (init.Answer(False, "config"), init.Answer(True, "config")))
+        self.assertEqual((answers["jev"], answers["skill_updates"], answers["tool_updates"]),
+                         (init.Answer(False, "config"), init.Answer(True, "config"), init.Answer(False, "config")))
 
     def test_noninteractive_refusal_lists_missing_flags(self):
         ask = Replies("y")

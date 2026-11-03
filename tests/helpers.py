@@ -1,6 +1,7 @@
 # 테스트 공용 도우미 — 임시 폴더, POSIX 가짜 도구, npm 설치 배치(layout), 점수 받기용 가짜 연결과 네트워크 차단을 만든다.
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -91,6 +92,128 @@ def git_env() -> dict[str, str]:
     """An environment that gives commits a fixed, allowlisted identity."""
     return dict(os.environ, GIT_AUTHOR_NAME="Someone", GIT_AUTHOR_EMAIL=NOREPLY_EMAIL,
                 GIT_COMMITTER_NAME="Someone", GIT_COMMITTER_EMAIL=NOREPLY_EMAIL)
+
+
+def isolate_git_home(test: unittest.TestCase, home: pathlib.Path) -> dict[str, str]:
+    """Opt in to a temporary home and Git configuration, including empty templates and disabled hooks."""
+    home.mkdir(parents=True, exist_ok=True)
+    folders = {name: home / name for name in ("xdg", "git-templates", "git-hooks")}
+    for folder in folders.values():
+        folder.mkdir(exist_ok=True)
+    config = home / "gitconfig-empty"
+    config.write_text("", encoding="utf-8")
+    isolated = {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(folders["xdg"]),
+                "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TEMPLATE_DIR": str(folders["git-templates"]), "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(folders["git-hooks"])}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(isolated)
+    test.enterContext(mock.patch.dict(os.environ, env, clear=True))
+    return isolated
+
+
+_TOOLUPDATE_ALLOWLISTS = []
+
+
+def guard_subprocesses(test: unittest.TestCase, allowed) -> list[list[str]]:
+    """Guard setup as well as the operation; a swallowed refusal still fails at cleanup."""
+    import subprocess
+
+    launched, violations = [], []
+    real_popen = subprocess.Popen
+
+    def guarded(args, *rest, **options):
+        argv = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+        launched.append(argv)
+        if not allowed(argv):
+            violations.append(argv)
+            raise AssertionError(f"a test tried to start a program outside its allowlist: {argv[:1]}")
+        return real_popen(args, *rest, **options)
+
+    test.enterContext(mock.patch("subprocess.Popen", guarded))
+    _TOOLUPDATE_ALLOWLISTS.append(allowed)
+    test.addCleanup(_TOOLUPDATE_ALLOWLISTS.remove, allowed)
+    test.addCleanup(lambda: test.assertEqual(violations, []))
+    return launched
+
+
+@contextlib.contextmanager
+def toolupdate_module_isolation():
+    """A baseline guard before any class setup, including a setup that forgets its base class."""
+    import subprocess
+
+    from oah import paths
+    from oah.toolupdate import records
+    from oah.toolupdate import run as passes
+
+    baseline = unittest.TestCase()
+    try:
+        baseline.home = make_tmp_dir(baseline) / "home"
+        isolate_git_home(baseline, baseline.home)
+        baseline.enterContext(mock.patch.object(records, "home", return_value=baseline.home))
+        baseline.enterContext(mock.patch.object(pathlib.Path, "home", return_value=baseline.home))
+        baseline.enterContext(mock.patch.dict(os.environ, {
+            "CODEX_HOME": str(baseline.home / ".codex"), "CLAUDE_CONFIG_DIR": str(baseline.home / ".claude")}))
+        for name in ("OAH_WORKER", "OAH_STATE_DIR", "OAH_KIT_DIR"):
+            os.environ.pop(name, None)
+        git = paths.git_argv()[0]
+        real_popen = subprocess.Popen
+
+        def guarded(args, *rest, **options):
+            argv = [str(part) for part in args] if isinstance(args, (list, tuple)) else [str(args)]
+            allowed = bool(argv) and (argv[0] in ("git", git) or
+                                      any(check(argv) for check in _TOOLUPDATE_ALLOWLISTS))
+            if not allowed or options.get("shell"):
+                raise AssertionError(f"a test tried to start a program outside its allowlist: {argv[:1]}")
+            return real_popen(args, *rest, **options)
+
+        baseline.enterContext(mock.patch("subprocess.Popen", guarded))
+        baseline.enterContext(mock.patch.object(passes, "_popen", guarded))
+        yield baseline
+    finally:
+        baseline.doCleanups()
+
+
+class ToolUpdateTestCase(unittest.TestCase):
+    """Install update-test isolation before a subclass creates any repository or other fixture."""
+
+    toolupdate_isolation = True
+
+    def setUp(self):
+        import subprocess
+
+        from oah import paths
+        from oah.toolupdate import records
+        from oah.toolupdate import run as passes
+
+        self.home = make_tmp_dir(self) / "home"
+        self.isolated_env = isolate_git_home(self, self.home)
+        self.git = paths.git_argv()[0]
+        self.launched = guard_subprocesses(self, self.allowed)
+        self._toolupdate_guard = subprocess.Popen
+        self.enterContext(mock.patch.object(passes, "_popen", subprocess.Popen))
+        self.enterContext(mock.patch.object(records, "home", return_value=self.home))
+        self.enterContext(mock.patch.object(pathlib.Path, "home", return_value=self.home))
+        self.enterContext(mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home / ".codex"),
+                                                      "CLAUDE_CONFIG_DIR": str(self.home / ".claude")}))
+        for name in ("OAH_WORKER", "OAH_STATE_DIR", "OAH_KIT_DIR"):
+            os.environ.pop(name, None)
+        self._toolupdate_isolated_home = self.home
+        self.addCleanup(self.assert_update_isolation)
+
+    def allowed(self, argv: list[str]) -> bool:
+        return bool(argv) and argv[0] in ("git", self.git)
+
+    def assert_update_isolation(self):
+        import subprocess
+
+        self.assertTrue(hasattr(self, "_toolupdate_isolated_home"), "setUp did not install tool-update isolation")
+        self.assertEqual(pathlib.Path(os.environ["HOME"]), self._toolupdate_isolated_home)
+        self.assertTrue(self._toolupdate_isolated_home.is_relative_to(pathlib.Path(tempfile.gettempdir()).resolve()))
+        self.assertEqual(os.environ["USERPROFILE"], os.environ["HOME"])
+        self.assertEqual(os.environ["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertTrue(hasattr(self, "launched"), "subprocess guard was not installed")
+        self.assertIs(subprocess.Popen, self._toolupdate_guard, "subprocess guard was replaced")
 
 
 def make_git_repo(test: unittest.TestCase) -> pathlib.Path:

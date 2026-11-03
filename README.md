@@ -118,8 +118,9 @@ Planned, after v0.2.0:
 - TypeSafe Jev judges difficulty from the task's Intent and Scope paths. When Jev is off or has low confidence, the rule-based
   difficulty runs. A call is never blocked.
 - A review never runs below the floor for its risk, whatever a flag, packet, profile or judge says.
-- After the last lease finishes, `oah` can update Claude Code, Codex, plugins, MCP servers and skills, then re-read the model lists.
-  `oah init` asks once, and you can turn it off.
+- After the last lease finishes, `oah` can bring Claude Code, Codex and Claude Code plugins up to date with each tool's own update
+  command, and the model lists refresh at the next call. Codex plugins and MCP servers are not updated; oah's skills keep their
+  own daily check (`oah skills update`). `oah init` asks once, and you can turn it off.
 - `oah models report` counts how model choices were made, and an export saves them as cases you can compare later. Counts alone do
   not prove Jev helped.
 
