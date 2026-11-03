@@ -951,7 +951,7 @@ class PassTest(FakeToolsCase):
         self.assertNotIn("codex-marketplaces", self.components())
 
     def test_timeout_is_failed_and_the_pass_continues(self):
-        self.configure("after_finish = true\ntimeout_seconds = 1\n")
+        self.configure("after_finish = true\ntimeout_seconds = 5\n")
         self.fake.set("claude", update={"sleep": 30})
         self.assertEqual(self.run_pass(), "needs-attention")
         entry = self.components()["claude"]
@@ -1049,7 +1049,7 @@ class PassTest(FakeToolsCase):
                  ("claude", "plugin marketplace", ("claude-marketplaces",)),
                  ("claude", "plugin list", ("claude-plugins",)),
                  ("claude", "plugin update", ("claude-plugins",)))
-        self.configure("after_finish = true\ntimeout_seconds = 1\n")
+        self.configure("after_finish = true\ntimeout_seconds = 5\n")
         for tool, path, names in paths:
             for spec, status, reason in cases:
                 with self.subTest(tool=tool, path=path, spec=spec):
@@ -1157,7 +1157,7 @@ class SessionsTest(FakeToolsCase):
         status = passes.status_lines()
         self.assertIn(f"oah: {steps.RESTART_NOTE}", status)
         self.assertTrue(any(line.endswith(steps.RESTART_NOTE) and "(updated)" in line for line in status))
-        self.configure("after_finish = true\ntimeout_seconds = 1\n")
+        self.configure("after_finish = true\ntimeout_seconds = 5\n")
         self.fake.set("claude", update={"sleep": 30})
         self.assertEqual(self.run_pass(), "needs-attention")
         self.assertEqual(len(owned), 1)
