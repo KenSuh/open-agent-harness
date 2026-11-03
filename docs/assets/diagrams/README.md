@@ -9,7 +9,8 @@ The skill is not installed or vendored here. Selected monochrome icons come from
 
 Each stem has `-light.html`, `-dark.html`, `-ko-light.html` and `-ko-dark.html` sources.
 Matching SVGs live one directory above. Edit HTML first; SVGs are exports, not independent sources.
-The banner is maintained separately and is not part of this redraw.
+The banner is a hand-authored 1280 × 560 chat scene with its own neo-brutalist style.
+Its palette, outlines, hard shadows and role colors are recorded in the style guide's [Banner section](style-guide.md#banner).
 
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
@@ -29,11 +30,11 @@ The banner is maintained separately and is not part of this redraw.
 | `concepts-review` | Flowchart, 880 × 980 | 5 / 5 | All review outcomes and correction/bind return |
 | `concepts-landing-local` | Flowchart, 1000 × 1204 | 8 / 5 | Opt-in local hooks and push paths |
 | `concepts-landing-checks` | Flowchart, 1000 × 1420 | 6 / 6 | CI, exact HEAD, exception and confirmation |
-| `banner` | Separately maintained | — | README banner; unchanged by this redraw |
+| `banner` | Hand-authored chat scene, 1280 × 560 | — | README banner in its own neo-brutalist style |
 
 [The style guide](style-guide.md) records the shipped gallery tokens, dotted paper, system font stacks,
-type ramp, chips, ghost numbers, zones, icons and connector rules. There is one focal accent hue,
-not a color for each engine. All four variants have the same structural geometry; Korean keeps
+type ramp, chips, ghost numbers, zones, icons and connector rules for the other figures. These use
+one focal accent hue. All four variants of each gallery figure have the same structural geometry; Korean keeps
 the same meaning, with 12px-or-larger Hangul and Korean system fallbacks.
 
 Both READMEs now embed `features` after the purpose, before the whole-harness overview. Each picture uses

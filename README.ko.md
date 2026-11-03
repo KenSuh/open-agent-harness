@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-ko-dark.svg">
-    <img src="docs/assets/banner-ko-light.svg" alt="Claude Code가 만들고 Codex CLI가 검토하고 고치며 사용자가 확인한 뒤 반영하는, 필요에 맞게 바꾸는 AI 작업 흐름이다." width="100%">
+    <img src="docs/assets/banner-ko-light.svg" alt="open-agent-harness 배너는 “그냥 묻고, 확인만 하면 돼.”라는 제목과 AI가 난이도·모델 선택·위키·영향 지도·리뷰 사이클 등을 챙기며 전문가처럼 프로그램을 만들고 고치고 사용자는 묻고 판단이 필요할 때 답하고 확인한다는 설명을 보여 주며, 주황빛 사각형 캐릭터는 “Claude Code — 만든다”, 초록 원형 캐릭터는 “Codex CLI — 검토하고 고친다”, 보라 육각형 캐릭터는 “TypeSafe Jev — 권장 선택형 판정”으로 표시되고, “작업 완료 · 확인 기다리는 중”인 oah 채팅은 “로그인 기능 다 됐어?”에 완료를 알리며 영향 지도로 변경이 닿는 곳 확인, 리스로 바꿀 파일 예약, Jev의 난이도 판정과 모델 자동 선택, Claude Code의 구현, Codex CLI의 검토·수정 수렴, 게이트 4개 통과와 증거 보관, 위키에 이유 기록을 체크한 뒤 “반영할까?”라고 묻고 “반영해 줘”와 “게이트 보여 줘” 선택 칩을 보여 준다." width="100%">
   </picture>
 </p>
 
@@ -188,7 +188,7 @@ oah init
 | [CI 스타터](docs/ko/ci-starter.md) | `oah ci init`, CI 결과 읽기, 검사를 필수로 만들기. |
 | [동반 앱](docs/ko/companions.md) | Orca와 Aside가 더해 주는 것과 설정 방법. |
 | [툴킷](docs/ko/toolkit.md) | 함께 싣거나 연결한 스킬, MCP 템플릿, 명령줄 도구와 각각의 출처, 라이선스. |
-| [계획](docs/PLAN.md) | 전체 설계와 규칙마다의 이유(영어). |
+| [계획](docs/ko/PLAN.md) | 전체 설계와 규칙마다의 이유. |
 
 ## 개발
 

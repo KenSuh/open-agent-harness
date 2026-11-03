@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1280 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="banner-light-title banner-light-desc" id="banner-light-root">
 <title id="banner-light-title">open-agent-harness</title>
-<desc id="banner-light-desc">An adaptable AI workflow where Claude Code builds, Codex CLI reviews and corrects, and you confirm before changes land.</desc>
+<desc id="banner-light-desc">The open-agent-harness banner says “Just ask, then confirm.” and explains that your AI builds and fixes like an expert, coordinating difficulty, model choice, wiki, impact map, review cycle and more while you ask, answer when a decision is needed, and confirm; its three characters are an amber square labelled “Claude Code — builds”, a green circle labelled “Codex CLI — reviews, corrects”, and a purple hexagon labelled “TypeSafe Jev — recommended, optional judge”; the oah chat, marked “All done · waiting for you”, answers “Is the login feature done?” with a completed checklist showing the impact map checked what the change touches, a lease reserved the files it changes, Jev judged difficulty and a model was picked automatically, Claude Code built it, Codex CLI reviewed and corrected until convergence, all four gates passed with evidence kept, and the wiki recorded why, then asks “Shall I land it?” above “Land it” and “Show the gates” chips.</desc>
 <defs>
       <style>#banner-light-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #141414; }
       #banner-light-root .diagram-container { width: 100%; overflow-x: auto; }

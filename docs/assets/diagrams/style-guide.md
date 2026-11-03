@@ -3,7 +3,8 @@
 The owner selected **keep the default** for
 [diagram-design](https://github.com/cathrynlavery/diagram-design/tree/3eb03b8), commit **3eb03b8**.
 Use its editorial gallery skin, with the dotted-paper option and **Font source: system**.
-The upstream skill stays read-only. The banner has a separate owner; this guide covers the other figures.
+The upstream skill stays read-only. The gallery rules below cover the diagrams; the banner's
+separate neo-brutalist style is recorded under [Banner](#banner).
 
 ## Tokens
 
@@ -100,6 +101,38 @@ Keep the architecture's 14 unique components and 16 connections across its two f
 15 numbered sequence messages. The overview may summarize these details, but must show the whole
 harness and both user touchpoints. The guided design conversation is **planned for v0.4.0**, never
 shown as available. The features figure explains the six supporting parts together.
+
+## Banner
+
+The banner is a hand-authored **1280 × 560** chat scene with three role characters.
+It uses its own neo-brutalist style, with bold outlines and hard shadows.
+
+| Token | Light | Dark |
+|---|---|---|
+| Paper | Cream `#fff4e0` | `#17140f` |
+| Ink / main outlines | Dark ink `#141414` | `#f5ecdc`; `#141414` on bright fills and faces |
+| Secondary text | `#4a3f33` | `#d9cdb8` |
+| Dot grid | `#e6d3b0` | `#3d352a` |
+| Chat panel / reply | `#fffdf8` / `#fff4e0` | `#241f18` / `#312920` |
+| Hard shadow | `#141414` | `#7a6a52` |
+
+Dots have radius **1.6px** at `(3, 3)` in a **22 × 22px** tile. Outlines are **3px** for
+characters and the chat frame, **2.5px** for bubbles, chips and eyes, and **2px** for small
+details and checkbox borders. Hard shadows are solid duplicate shapes shifted right and down:
+**5px** for characters and ornaments, **6px** for the headline sticker, **8px** for the chat
+frame, and **4px** for bubbles and chips. Jev's outline uses a `9 6` dash pattern.
+Role fills are amber `#ffb547` for Claude Code, green `#5fd38a` for Codex CLI, and purple
+`#b9a3ff` for Jev in both themes; supporting fills are blue `#9fd8ff`, pink `#ffc2d1`,
+and mint `#c6f3d3`.
+
+Use installed system fonts only. English prose uses
+`system-ui, -apple-system, "Segoe UI", sans-serif`; headline and brand prepend
+`"Arial Black", "Segoe UI Black"`. Korean prepends
+`"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR"` to both stacks,
+before every Latin font. The Latin wordmark's mono stack is
+`ui-monospace, "SFMono-Regular", Consolas, monospace` in both languages.
+The headline is **60px / 800**, brand **24px / 800**, tagline **19px / 600**, and role labels
+**15px / 500**. Names and chat text use **17px**, checklist rows and chips **16px**.
 
 ## Files and checks
 
