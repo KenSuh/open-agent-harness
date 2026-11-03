@@ -214,7 +214,7 @@ class FieldsTest(unittest.TestCase):
         groups = (set(families["engines"]["codex"]["families"]) | set(families["engines"]["claude"]["aliases"]),
                   set(benchmarks["scores"]),
                   {model for rule in normalization["rules"] for model in rule["models"]})
-        self.assertEqual(models_export.MODEL_NAMES, frozenset().union(*groups))
+        self.assertEqual(models_export._model_names(), frozenset().union(*groups))
         for model in (next(iter(group)) for group in groups):
             with self.subTest(model=model):
                 selected = choice((model, "high"), (model, "high"))
@@ -224,6 +224,24 @@ class FieldsTest(unittest.TestCase):
         result = one(self, dict(NEW, model_choice=selected))
         self.assertEqual(result["model_choice"]["requested"]["model"],
                          "sha256:" + hashlib.sha256(model.encode()).hexdigest())
+
+    def test_new_packaged_model_is_exported(self):
+        original = models_export.scoring._packaged
+
+        def packaged(name):
+            data = original(name)
+            if name == "benchmarks.json":
+                document = json.loads(data)
+                document["scores"]["new-packaged-model"] = {"coding": 0.5}
+                return json.dumps(document).encode()
+            return data
+
+        models_export._model_names.cache_clear()
+        self.addCleanup(models_export._model_names.cache_clear)
+        with mock.patch.object(models_export.scoring, "_packaged", side_effect=packaged):
+            selected = choice(("new-packaged-model", "high"), ("new-packaged-model", "high"))
+            result = one(self, dict(NEW, model_choice=selected))
+        self.assertEqual(result["model_choice"]["requested"]["model"], "new-packaged-model")
 
     def test_status_vocabulary_and_canaries(self):
         reasons = ("not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
@@ -605,6 +623,22 @@ class CliTest(unittest.TestCase):
             parsed = json.loads(text)
             self.assertEqual((parsed["format"], parsed["run_id"]), (models_export.FORMAT, value["run_id"]))
         self.assertEqual(json.loads(texts[-1])["unreadable"], {"record": "not-object"})
+
+    def test_unreadable_package_data_hashes_models_and_report_still_works(self):
+        state = ages_state(self)
+        models_export._model_names.cache_clear()
+        self.addCleanup(models_export._model_names.cache_clear)
+        with mock.patch.object(models_export.scoring, "_packaged", side_effect=OSError("unreadable")):
+            code, out, err = self.export(state)
+            report_code, report_out, report_err = self.export(state, action="report")
+        values = [json.loads(text) for text in out.splitlines()]
+        self.assertEqual((code, len(values)), (0, 4))
+        self.assertEqual(err, "Note: the model list could not be read; model names will be hashed.\n")
+        self.assertEqual(values[1]["model_choice"]["requested"]["model"],
+                         "sha256:" + hashlib.sha256(b"m-strong").hexdigest())
+        self.assertIn("model_choice.requested.model", values[1]["hashed"])
+        self.assertEqual((report_code, report_err), (0, ""))
+        self.assertIn("4 run folders: 4 read", report_out)
 
     def test_no_run_records_prints_nothing(self):
         self.assertEqual(self.export(make_tmp_dir(self)), (0, "", ""))

@@ -20,6 +20,8 @@ from __future__ import annotations
 import math
 import hashlib
 import pathlib
+import sys
+from functools import lru_cache
 
 from oah import routing, scoring
 from oah.engines import effort as effort_rules
@@ -36,11 +38,6 @@ MODES = ("ranked", "pools", "scored", "deterministic")
 UNUSED_REASONS = {"not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
                   "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
                   "no-text", "no-candidates", "one-candidate", "too-many-candidates"}
-# Names come from the same packaged data used by model scoring and effort normalization.
-_families = scoring.families()["engines"]
-MODEL_NAMES = frozenset((*_families["codex"]["families"], *_families["claude"]["aliases"],
-                         *scoring.bundled()["scores"],
-                         *(model for rule in effort_rules.load_rules() for model in rule["models"])))
 EFFORTS = frozenset((*effort_rules.ORDINARY, *effort_rules.BEHAVIOUR_CHANGING, effort_rules.HIGHEST))
 AXES = {"kind": routing.KIND_SCORES, "intensity": routing.INTENSITY_SCORES,
         "reasoning": routing.REASONING_SCORES, "risk": routing.RISK_SCORES}
@@ -128,7 +125,22 @@ def _form(pattern):
     return read
 
 
-_model = _closed(MODEL_NAMES)
+@lru_cache(maxsize=1)
+def _model_names():
+    """Read the validated packaged vocabulary only when export first needs it."""
+    try:
+        families = scoring.families()["engines"]
+        return frozenset((*families["codex"]["families"], *families["claude"]["aliases"],
+                          *scoring.bundled()["scores"],
+                          *(model for rule in effort_rules.load_rules() for model in rule["models"])))
+    except (OSError, ValueError, RecursionError, effort_rules.EngineError):
+        return None
+
+
+def _model(value):
+    return _plain(value, _model_names() or frozenset())
+
+
 _effort = _closed(EFFORTS)
 
 
@@ -275,6 +287,8 @@ def _line(run_id: str, record: dict, stage: str, engine: str) -> dict:
 
 def lines(state: pathlib.Path) -> list[dict]:
     """One line per run folder of one state folder, read or unreadable with its reason."""
+    if _model_names() is None:
+        print("Note: the model list could not be read; model names will be hashed.", file=sys.stderr)
     result = []
     for entry in run_folders(pathlib.Path(state), {}):
         try:
