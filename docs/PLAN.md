@@ -7,6 +7,8 @@ general-purpose kit that one person can install on macOS or Windows and use on t
 Section 4 lists every source component and what happens to it. Sections 5–11 describe what gets built.
 Section 13 separates what the owner decided from what the builder decided.
 
+[한국어](ko/PLAN.md)
+
 ---
 
 ## 1. Intent
