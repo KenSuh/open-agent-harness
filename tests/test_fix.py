@@ -2063,6 +2063,18 @@ class EndToEndTest(unittest.TestCase):
 
 
 class SecretTest(unittest.TestCase):
+    def test_correction_records_keep_the_judge_confidence_and_floor_flag(self):
+        for fields in ({"model_judge_confidence": 0.72, "tier_floor_raised": True},
+                       {"model_judge_confidence": None, "tier_floor_raised": False},
+                       {"model_judge_confidence": 1, "tier_floor_raised": None}):
+            with self.subTest(fields=fields):
+                closed = runs._correction_record(fields, runs.RESULT_FIELDS)
+                self.assertEqual(closed, fields)
+                run = runs.new_run(make_tmp_dir(self), "t1", "codex", "correction")
+                run.result(**closed)
+                saved = json.loads(run.result_path.read_bytes())
+                self.assertEqual({key: saved[key] for key in fields}, fields)
+
     def test_no_pool_status_survives_correction_record_writes(self):
         status = "unused(no-pool-for-tier)"
         closed = runs._correction_record({"model_judge": status}, runs.RESULT_FIELDS)

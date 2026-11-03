@@ -219,6 +219,11 @@ def build_model_request(model: str, request: Mapping[str, object], candidates: S
 
 
 def parse_model_response(body: object, count: int) -> int:
+    return parse_model_answer(body, count)[0]
+
+
+def parse_model_answer(body: object, count: int) -> tuple[int, float | None]:
+    """The chosen candidate's index and the answer's confidence (None when the answer carries none)."""
     result = code = None
     try:
         try:
@@ -230,8 +235,8 @@ def parse_model_response(body: object, count: int) -> int:
         del result, code
 
 
-def _parse_model_response(body: object, count: int) -> tuple[int | None, str | None]:
-    answers = answer = probabilities = None
+def _parse_model_response(body: object, count: int) -> tuple[tuple[int, float | None] | None, str | None]:
+    answers = answer = probabilities = confidence = None
     try:
         answers = _answers(body)
         answer = answers.get("pair") if answers is not None else None
@@ -255,9 +260,9 @@ def _parse_model_response(body: object, count: int) -> tuple[int | None, str | N
             confidence = _number(answer["confidence"])
             if confidence is None or not 0.0 <= confidence <= 1.0:
                 return None, "bad-response"
-        return keys.index(answer["choice"]), None
+        return (keys.index(answer["choice"]), confidence), None
     finally:
-        del body, count, answers, answer, probabilities
+        del body, count, answers, answer, probabilities, confidence
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -465,7 +470,7 @@ class TypeSafeProvider:
             del self, axes, work, key, config, model, body
 
     def choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
-                     config: Mapping) -> tuple[str, str]:
+                     config: Mapping) -> tuple[str, str, float | None]:
         result = code = None
         try:
             try:
@@ -477,20 +482,21 @@ class TypeSafeProvider:
             del result, code
 
     def _choose_model(self, request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, key: Secret,
-                      config: Mapping) -> tuple[tuple[str, str] | None, str | None]:
-        model = body = index = None
+                      config: Mapping) -> tuple[tuple[str, str, float | None] | None, str | None]:
+        model = body = index = answer = None
         try:
             pairs = tuple(candidates)
             model = str(self._settings(config).get("model") or DEFAULT_MODEL)
             body, code = self._post_result(build_model_request(model, request, pairs), key, config)
             if code is not None:
                 return None, code
-            index, code = _parse_model_response(body, len(pairs))
+            answer, code = _parse_model_response(body, len(pairs))
             if code is not None:
                 return None, code
-            return tuple(pairs[index]), None
+            index = answer[0]
+            return (*pairs[index], answer[1]), None
         finally:
-            del self, request, candidates, key, config, model, body, index
+            del self, request, candidates, key, config, model, body, index, answer
 
     def __repr__(self) -> str:
         return "TypeSafeProvider()"

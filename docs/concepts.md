@@ -348,6 +348,19 @@ review receipt records the family, floor, profile, source of the model and the s
 changes a choice, `OAH_MODEL_CHANGED` says so once, with the reason, such as a newer generation or new scores, and
 `changes.jsonl` keeps it.
 
+**Counting the choices.** `oah models report` reads the run records of this repository
+(`<state>/runs/<task>/<run-id>/result.json`) and counts, by stage and engine and in total, how each run's tier and
+model were chosen: the tier source, Jev's difficulty status, whether Jev's tier was above, equal to or below the rule
+tier, Jev's confidence in tenths, the model judge's status (used, rejected with its rule, or why it was unused), whether
+the pair that ran differed from the deterministic pair in model, effort or both, the judge's confidence in tenths, and
+how often a floor raised the tier. `--json` prints the same counts as one object with a `format` number. It calls no
+provider, starts no engine, reaches no network and writes nothing. Each run folder counts once, as read or as
+unreadable with its reason, such as a missing or invalid `result.json`, and a value it cannot read counts as
+unreadable, never as zero. In a correction record, where model names are hashed, it compares them only for same or
+different. The counts show how choices were made, not whether Jev helped: no outcome or quality is compared. Runs
+record the judge's confidence (`model_judge_confidence`, null when the answer carried none) and whether a floor raised
+the tier (`tier_floor_raised`) from this version on, so older runs count as not recorded, and the report says how many.
+
 The snapshot shipped with `oah` comes from this source, and a fetched copy carries the same credit with the day it was
 read:
 
@@ -484,7 +497,10 @@ command and the output it must produce:
 - CHECK lines must run the same in `cmd.exe` and `sh`: call `python`, `node` or `oah check`, not `grep` or
   pipes. `oah check` offers portable assertions such as `oah check contains FILE TEXT`.
 - The opt-in Claude Code Stop hook (`oah hooks install stop`) keeps a session from ending while its gates are
-  unmet.
+  unmet. Listing lease agent names in `[gates] stop_agents` (default `[]`: every lease) limits the hook to leases
+  held under exactly those names. The list is opt-in and has a cost: a lease held under a name left off the list
+  no longer stops the session. `oah finish` still refuses unmet gates, so the check moves to the end of the task
+  and is not lost.
 
 ## The review loop and corrections
 

@@ -7,6 +7,10 @@ note) or `{"decision": "block", "reason": ...}`; it always exits 0.
 - When an active lease governs the session's worktree, it blocks while that task's ledgers are unmet,
   invalid or stale against the current files (the same checks as `oah finish`). Abandoned gates do
   not block; they are named as a required handoff.
+- `[gates] stop_agents` (default empty: every lease governs) names the exact lease agents whose leases
+  govern. When it leaves no lease, the hook hands over as below; if the hand-over says nothing, a note
+  names each skipped task and its holder. A value that is not an array of strings checks nothing and
+  allows the stop with a note.
 - A progress guard releases the stop after `max_blocks` blocks in a row with no change in gate state,
   so the hook can never wedge a session. Any internal error also allows the stop, with a note.
 - When no lease governs, it hands over to unlazy's own Stop hook (if unlazy is installed and its hook
@@ -24,7 +28,7 @@ from typing import Mapping
 
 from oah import unlazy as unlazy_mod
 from oah.atomic import read_json, write_json_atomic
-from oah.config import load_config
+from oah.config import ConfigError, load_config
 from oah.gates import guard
 from oah.gates.check import GateRefused
 from oah.gates.context import DEFAULTS, find_tools
@@ -103,12 +107,25 @@ def decide(payload: Mapping, *, env: Mapping[str, str] | None = None, home: path
         except NotARepo:
             return None
         state = state_dir(info, env)
-        settings = load_config(info.root).section("gates", DEFAULTS)
+        config = load_config(info.root)
+        settings = config.section("gates", DEFAULTS)
+        agents = settings["stop_agents"]
+        if not all(isinstance(name, str) for name in agents):
+            raise ConfigError("OAH_CONFIG_INVALID",
+                              f"{config.where}: gates.stop_agents must be an array of agent names (strings); "
+                              "quote every entry or remove the key to use the default")
         max_blocks = settings["stop_max_blocks"] if max_blocks is None else max_blocks
         governing = [lease for lease, stale in Store(state).snapshot()
                      if not stale and same_worktree(lease.worktree, info.root)]
+        skipped = [lease for lease in governing if agents and lease.agent not in agents]
+        governing = [lease for lease in governing if not agents or lease.agent in agents]
         if not governing:
-            return _hand_over(payload, info.root, env, home)
+            decision = _hand_over(payload, info.root, env, home)
+            if decision is None and skipped:
+                held = [f"task {lease.task} held by {lease.agent}" for lease in skipped]
+                return {"systemMessage": f"oah: not checking the gates of {_shown(held)}: [gates] stop_agents "
+                                         "does not name that agent; oah finish still checks them."}
+            return decision
         tools = None
         problems, handoffs, notes, progress = [], [], [], []
         for lease in governing:

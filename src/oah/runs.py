@@ -47,6 +47,7 @@ RESULT_FIELDS = (
     "resolved_inference_effort", "normalization_basis", "effort_verified", "effort_observable",
     "axes", "tier", "tier_source", "tier_reasons", "advisory", "override_stage", "warnings", "error", "detached",
     "launcher", "worker_output", "rule_tier", "jev_tier", "jev_confidence", "jev_status", "jev_truncated",
+    "model_judge_confidence", "tier_floor_raised",
 )
 
 # Correction records have a closed vocabulary; shared helpers never supply retained prose.
