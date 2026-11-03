@@ -42,7 +42,7 @@ including other tools and harnesses. Take the parts you need and give each stage
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img src="docs/assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order." width="100%">
+  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, a lease, the impact map and optional Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you ask, inspect and confirm before checked landing, with a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
 Write down what you want and how you will check it. Claude builds the first version. Codex reviews and

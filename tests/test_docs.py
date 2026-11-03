@@ -239,7 +239,7 @@ CONCEPT_DIAGRAMS = (
     "concepts-routing-rules", "concepts-routing-skills", "concepts-impact-freshness",
     "concepts-impact-ranked", "concepts-review", "concepts-landing-local", "concepts-landing-checks",
 )
-DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
+DIAGRAMS = ("banner", "features", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
             *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
     "README.md": ("banner", "how-it-works"),
@@ -629,7 +629,7 @@ class BannerTest(unittest.TestCase):
                             for node in root.iter() if node.tag in {f"{SVG}rect", f"{SVG}line", f"{SVG}path", f"{SVG}polygon"}]
                 self.assertEqual(geometry(roots[0]), geometry(roots[1]))
 
-    def test_korean_diagrams_name_korean_system_fonts_first(self):
+    def test_korean_diagrams_keep_system_fallbacks_before_generic_fonts(self):
         for path in self.diagram_files():
             if "-ko-" not in path.name:
                 continue
@@ -639,9 +639,44 @@ class BannerTest(unittest.TestCase):
                 family = re.search(r"font-family:\s*([^;]+);", css)
                 self.assertIsNotNone(family)
                 stack = family.group(1)
-                self.assertTrue(stack.startswith(KOREAN_FONTS[0]), stack)
+                # The banner retains its separate style. The gallery skin keeps Geist
+                # for Latin and extends that stack for Hangul, without downloading fonts.
+                first = KOREAN_FONTS[0] if path.name.startswith("banner-") else '"Geist"'
+                self.assertTrue(stack.startswith(first), stack)
                 positions = [stack.find(font) for font in KOREAN_FONTS]
                 self.assertTrue(all(0 <= pos < stack.index("system-ui") for pos in positions), stack)
+
+    def test_redrawn_languages_share_geometry(self):
+        geometry_keys = {"x", "y", "x1", "y1", "x2", "y2", "width", "height", "rx",
+                         "cx", "cy", "r", "d", "points", "transform"}
+        shapes = {f"{SVG}{tag}" for tag in ("rect", "line", "path", "polygon", "circle", "g")}
+        for stem in DIAGRAMS:
+            if stem == "banner":
+                continue
+            for theme in ("light", "dark"):
+                with self.subTest(stem=stem, theme=theme):
+                    roots = [ET.parse(ASSETS / f"{stem}{lang}-{theme}.svg").getroot()
+                             for lang in ("", "-ko")]
+                    self.assertEqual(roots[0].get("viewBox"), roots[1].get("viewBox"))
+                    geometry = [[(n.tag, {k: v for k, v in n.attrib.items() if k in geometry_keys})
+                                 for n in root.iter() if n.tag in shapes] for root in roots]
+                    self.assertEqual(*geometry)
+
+    def test_whole_harness_and_features_keep_their_content(self):
+        for language in ("", "-ko"):
+            for theme in ("light", "dark"):
+                with self.subTest(language=language, theme=theme):
+                    features = ET.parse(ASSETS / f"features{language}-{theme}.svg").getroot()
+                    self.assertEqual({n.get("data-node-id") for n in features.iter() if n.get("data-node-id")},
+                                     {"lease", "impact", "jev", "loop", "gates", "wiki"})
+                    overview = ET.parse(ASSETS / f"how-it-works{language}-{theme}.svg").getroot()
+                    self.assertEqual({n.get("data-node-id") for n in overview.iter() if n.get("data-node-id")},
+                                     {"request", "prepare", "build", "evidence", "review", "fix", "confirm", "land"})
+                    visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
+                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init", "v0.4.0"):
+                        self.assertIn(phrase, visible)
+                    self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
+                                  else "Planned, not available yet.", visible)
 
     def test_concepts_preserve_the_source_graph_and_visible_labels(self):
         for stems, expected_nodes, expected_edges in CONCEPT_GRAPHS:

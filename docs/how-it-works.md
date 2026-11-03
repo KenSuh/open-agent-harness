@@ -22,7 +22,7 @@ are instructions loaded by the AI. **CI** is the automated testing attached to a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
-  <img src="assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order." width="100%">
+  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, a lease, the impact map and optional Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you ask, inspect and confirm before checked landing, with a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
 Two AI sessions can edit the same files, call work done without evidence, or keep reviewing without an

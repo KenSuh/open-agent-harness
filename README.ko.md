@@ -43,7 +43,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-ko-dark.svg">
-  <img src="docs/assets/how-it-works-ko-light.svg" alt="사용자가 목표를 정하면 Claude Code가 구현하고 Codex CLI가 검토가 수렴할 때까지 검토와 수정을 반복하며 검사 뒤 사용자가 반영을 확인하고, 선택형 TypeSafe Jev는 난이도와 모델 선택, 스킬 순서 판정을 돕는다." width="100%">
+  <img src="docs/assets/how-it-works-ko-light.svg" alt="사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·리스·영향 지도와 선택형 Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정한 뒤 사용자가 질문·검토·확인하면 검사 후 반영하며, 안내형 설계 대화는 v0.4.0에 계획돼 있다." width="100%">
 </picture>
 
 원하는 결과와 확인 방법을 적으면 Claude가 첫 버전을 만든다. Codex는 반영을 막는 지적이 남지 않을 때까지,
