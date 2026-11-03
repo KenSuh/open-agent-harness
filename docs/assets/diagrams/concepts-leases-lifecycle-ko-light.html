@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>리스 · 활성, 만료, 해제</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 880px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 880px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">State machine · oah</p>
+<h1>리스 · 활성, 만료, 해제</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 880 1120" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-lifecycle-ko-light-title concepts-leases-lifecycle-ko-light-desc" data-source-diagram="1">
+<title id="concepts-leases-lifecycle-ko-light-title">리스 · 활성, 만료, 해제</title>
+<desc id="concepts-leases-lifecycle-ko-light-desc">start로 활성 리스가 생기고 갱신과 로그는 활성 상태를 유지하며 TTL이 지나면 만료되고 두 상태 모두 해제할 수 있으며 다음 start가 만료 리스를 정리하되 명시된 거절 규칙이 적용된다.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="1120" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">리스 · 활성, 만료, 해제</text>
+<line x1="128" y1="144" x2="320" y2="144" data-edge-id="e1" data-from="__start_1" data-to="Active" data-label="oah start, 또는 oah start --packet" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 384,112 L 384,96 Q 384,88 392,88 L 616,88 Q 624,88 624,96 L 624,136 Q 624,144 616,144 L 576,144" data-edge-id="e13" data-from="Active" data-to="Active" data-label="oah renew, oah start --packet(올린 Revision), oah log" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="448" y1="176" x2="448" y2="320" data-edge-id="e9" data-from="Active" data-to="Stale" data-label="TTL 경과, 기본 4시간" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 320,156 L 256,156 Q 248,156 248,164 L 248,544 Q 248,552 256,552 L 320,552" data-edge-id="e7" data-from="Active" data-to="Released" data-label="oah release --reason" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="448" y1="384" x2="448" y2="520" data-edge-id="e8" data-from="Stale" data-to="Released" data-label="oah release --reason" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="576" y1="352" x2="736" y2="352" data-edge-id="e10" data-from="Stale" data-to="__end_1" data-label="다음 oah start가 정리" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="448" y1="584" x2="448" y2="640" data-edge-id="e12" data-from="Released" data-to="__end_3" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="168" y="116" width="96" height="20" rx="2" fill="#ffffff"/>
+<text x="216.0" y="130" class="arrow-label" text-anchor="middle" fill="#424a53">1. 시작</text>
+<rect x="632" y="100" width="120" height="20" rx="2" fill="#ffffff"/>
+<text x="692.0" y="114" class="arrow-label" text-anchor="middle" fill="#424a53">2. 활성 유지</text>
+<rect x="456" y="236" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="500.0" y="250" class="arrow-label" text-anchor="middle" fill="#424a53">3. 만료</text>
+<rect x="256" y="432" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="300.0" y="446" class="arrow-label" text-anchor="middle" fill="#424a53">4. 해제</text>
+<rect x="456" y="440" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="500.0" y="454" class="arrow-label" text-anchor="middle" fill="#424a53">4. 해제</text>
+<rect x="608" y="324" width="96" height="20" rx="2" fill="#ffffff"/>
+<text x="656.0" y="338" class="arrow-label" text-anchor="middle" fill="#424a53">5. 정리</text>
+<g data-node-id="__start_1" data-source-label="[start]">
+<circle cx="128" cy="144" r="6" fill="#1f2328"/>
+</g>
+<g data-node-id="Active" data-source-label="활성">
+<rect x="320" y="112" width="256" height="64" rx="8" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="448.0" y="148.0" class="node" text-anchor="middle" fill="#1f2328">활성</text>
+</g>
+<g data-node-id="Stale" data-source-label="STALE (만료)">
+<rect x="320" y="320" width="256" height="64" rx="8" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="448.0" y="356.0" class="node" text-anchor="middle" fill="#1f2328">STALE (만료)</text>
+</g>
+<g data-node-id="Released" data-source-label="해제됨">
+<rect x="320" y="520" width="256" height="64" rx="8" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="448.0" y="556.0" class="node" text-anchor="middle" fill="#1a7f37">해제됨</text>
+</g>
+<g data-node-id="__end_1" data-source-label="[end]">
+<circle cx="744" cy="352" r="8" fill="#ffffff" stroke="#1f2328" stroke-width="1"/>
+<circle cx="744" cy="352" r="5" fill="#1f2328"/>
+</g>
+<g data-node-id="__end_3" data-source-label="[end]">
+<circle cx="448" cy="648" r="8" fill="#ffffff" stroke="#1f2328" stroke-width="1"/>
+<circle cx="448" cy="648" r="5" fill="#1f2328"/>
+</g>
+<text x="40" y="700" class="group" text-anchor="start" fill="#424a53">전이 조건</text>
+<text x="40" y="728" class="label" text-anchor="start" fill="#424a53">1 · oah start, 또는 oah start --packet</text>
+<text x="40" y="756" class="label" text-anchor="start" fill="#424a53">2 · oah renew, oah start --packet(올린 Revision), oah log</text>
+<text x="40" y="784" class="label" text-anchor="start" fill="#424a53">3 · TTL 경과, 기본 4시간</text>
+<text x="40" y="812" class="label" text-anchor="start" fill="#424a53">4 · oah release --reason</text>
+<text x="40" y="840" class="label" text-anchor="start" fill="#424a53">5 · 다음 oah start가 정리</text>
+<rect x="40" y="876" width="800" height="112" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="904" class="label" text-anchor="start" fill="#424a53">oah status는 읽기만 한다. 각 리스를 active 또는 STALE로 보여 준다.</text>
+<text x="56" y="924" class="label" text-anchor="start" fill="#424a53">start는 겹치면 OAH_LEASE_CONFLICT, 내 작업이면 OAH_LEASE_EXISTS로 거절된다.</text>
+<text x="56" y="944" class="label" text-anchor="start" fill="#424a53">STALE 리스의 renew는 OAH_LEASE_EXPIRED로 거절된다.</text>
+<text x="56" y="964" class="label" text-anchor="start" fill="#424a53">다른 에이전트의 리스 release에는 --force가 필요하다(없으면 OAH_LEASE_NOT_YOURS).</text>
+<line x1="40" y1="1060" x2="840" y2="1060" stroke="#d0d7de"/>
+<text x="40" y="1088" class="label" text-anchor="start" fill="#424a53">활성과 STALE은 다음 finish 그림에도 나온다. 점은 시작과 끝을 나타낸다.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

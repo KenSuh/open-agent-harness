@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 840 848" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-build-ko-light-title architecture-build-ko-light-desc" id="architecture-build-ko-light-root">
 <title id="architecture-build-ko-light-title">작업에서 증거까지</title>
-<desc id="architecture-build-ko-light-desc">사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 선택형 TypeSafe Jev가 스킬 순서를 판정하고 증거 게이트는 영향 지도와 위키에 연결된다.</desc>
+<desc id="architecture-build-ko-light-desc">사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 권장 선택형 TypeSafe Jev가 스킬 순서와 작업 난이도를 판정해 최저 기준 안에서 tier를 바꿀 수 있고 증거 게이트는 영향 지도와 위키에 연결된다.</desc>
 <defs>
       <style>#architecture-build-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
       #architecture-build-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -22,22 +22,22 @@
 <text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">작업에서 증거까지</text>
 <rect x="40" y="184" width="488" height="576" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="56" y="204" class="node" text-anchor="start" fill="#424a53">oah</text>
-<rect x="568" y="296" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
-<text x="584" y="316" class="node" text-anchor="start" fill="#424a53">선택형 AI 판정기</text>
+<rect x="568" y="264" width="232" height="160" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="304" class="node" text-anchor="start" fill="#424a53">권장 선택형 AI 판정기</text>
 <rect x="568" y="472" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="584" y="492" class="node" text-anchor="start" fill="#424a53">직접 설치·로그인한 엔진</text>
 <line x1="300" y1="152" x2="300" y2="224" data-from="you" data-to="intent" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <line x1="300" y1="280" x2="300" y2="320" data-from="intent" data-to="lease" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <line x1="300" y1="376" x2="300" y2="408" data-from="lease" data-to="route" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
-<path d="M 416,432 H 676 Q 684,432 684,424 V 392" data-from="route" data-to="jev" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-ko-light-arrow)"/>
-<path d="M 416,472 H 552 Q 560,472 560,480 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
+<path d="M 416,432 H 676 Q 684,432 684,424 V 408" data-from="route" data-to="jev" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-ko-light-arrow)"/>
+<path d="M 416,520 H 552 Q 560,520 560,528 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 684,568 V 620 Q 684,628 676,628 H 416" data-from="claude" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <line x1="160" y1="628" x2="184" y2="628" data-from="impact" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <line x1="300" y1="656" x2="300" y2="696" data-from="gates" data-to="wiki" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <rect x="452" y="404" width="96" height="20" rx="2" fill="#ffffff"/>
-<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#424a53">스킬 순서</text>
-<rect x="440" y="444" width="120" height="20" rx="2" fill="#ffffff"/>
-<text x="500" y="459" class="arrow-label" text-anchor="middle" fill="#424a53">지시문·스킬</text>
+<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#424a53">판정</text>
+<rect x="440" y="492" width="120" height="20" rx="2" fill="#ffffff"/>
+<text x="500" y="507" class="arrow-label" text-anchor="middle" fill="#424a53">지시문·스킬</text>
 <g data-node-id="you">
 <rect x="184" y="96" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
 <text x="300" y="120" class="node" text-anchor="middle" fill="#1f2328">사용자 또는 리드 Claude Code</text>
@@ -54,15 +54,18 @@
 <text x="300" y="364" class="label" text-anchor="middle" fill="#424a53">경로를 맡고 기준점을 확인한다</text>
 </g>
 <g data-node-id="route">
-<rect x="184" y="408" width="232" height="88" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<rect x="184" y="408" width="232" height="136" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
 <text x="300" y="432" class="node" text-anchor="middle" fill="#1f2328">난이도·모델·스킬</text>
 <text x="300" y="456" class="label" text-anchor="middle" fill="#424a53">규칙이 tier와 추론 강도를 정한다</text>
-<text x="300" y="476" class="label" text-anchor="middle" fill="#424a53">tier도 지시문에 담는다</text>
+<text x="300" y="476" class="label" text-anchor="middle" fill="#424a53">Jev가 최저 기준 안에서</text>
+<text x="300" y="496" class="label" text-anchor="middle" fill="#424a53">tier를 바꿀 수 있다</text>
+<text x="300" y="520" class="label" text-anchor="middle" fill="#424a53">tier도 지시문에 담는다</text>
 </g>
 <g data-node-id="jev">
-<rect x="584" y="336" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="684" y="360" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev(선택)</text>
-<text x="684" y="380" class="label" text-anchor="middle" fill="#424a53">선택한 스킬의 순서를 바꾼다</text>
+<rect x="584" y="328" width="200" height="80" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="684" y="352" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev(선택)</text>
+<text x="684" y="372" class="label" text-anchor="middle" fill="#424a53">선택한 스킬의 순서를 바꾼다</text>
+<text x="684" y="392" class="label" text-anchor="middle" fill="#424a53">작업의 난이도를 판정한다</text>
 </g>
 <g data-node-id="claude">
 <rect x="584" y="512" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>

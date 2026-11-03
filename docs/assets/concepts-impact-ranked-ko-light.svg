@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 852" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-ranked-ko-light-title concepts-impact-ranked-ko-light-desc" data-source-diagram="3" id="concepts-impact-ranked-ko-light-root">
+<title id="concepts-impact-ranked-ko-light-title">영향 지도 · 순위 결과</title>
+<desc id="concepts-impact-ranked-ko-light-desc">영향 결과는 pin, exec, link, mention 순으로 이어지며 pin과 exec가 다시 돌릴 정확한 게이트와 명령을 가리키고 changed-since를 주면 re-run 줄을 보여 준다.</desc>
+<defs>
+      <style>#concepts-impact-ranked-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      #concepts-impact-ranked-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-impact-ranked-ko-light-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-impact-ranked-ko-light-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-impact-ranked-ko-light-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-impact-ranked-ko-light-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-impact-ranked-ko-light-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#concepts-impact-ranked-ko-light-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-impact-ranked-ko-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="concepts-impact-ranked-ko-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="concepts-impact-ranked-ko-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="852" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">영향 지도 · 순위 결과</text>
+<g data-container-id="ranked">
+<rect x="40" y="104" width="464" height="664" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="128" class="group" text-anchor="start" fill="#424a53">순위가 매겨진 결과</text>
+</g>
+<line x1="272" y1="272" x2="272" y2="328" data-edge-id="e7" data-from="pinR" data-to="execR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-ko-light-arrow)"/>
+<line x1="272" y1="412" x2="272" y2="468" data-edge-id="e8" data-from="execR" data-to="linkR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-ko-light-arrow)"/>
+<line x1="272" y1="580" x2="272" y2="648" data-edge-id="e9" data-from="linkR" data-to="mentionR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-ko-light-arrow)"/>
+<path d="M 488,208 L 696,208 Q 704,208 704,216 L 704,328" data-edge-id="e10" data-from="pinR" data-to="rerun" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-ko-light-arrow)"/>
+<line x1="488" y1="368" x2="568" y2="368" data-edge-id="e11" data-from="execR" data-to="rerun" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-ko-light-arrow)"/>
+<g data-node-id="pinR" data-parent="ranked" data-source-label="pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK
+또는 workflow, manifest, config 명령이 해시하거나 grep함">
+<rect x="56" y="144" width="432" height="128" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="272.0" y="202.0" class="node" text-anchor="middle" fill="#1a7f37">pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK</text>
+<text x="272.0" y="222.0" class="label" text-anchor="middle" fill="#424a53">또는 workflow, manifest, config 명령이 해시하거나 grep함</text>
+</g>
+<g data-node-id="execR" data-parent="ranked" data-source-label="exec: 게이트 CHECK나 그런 명령이 실행함">
+<rect x="56" y="328" width="432" height="84" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="272.0" y="374.0" class="node" text-anchor="middle" fill="#1a7f37">exec: 게이트 CHECK나 그런 명령이 실행함</text>
+</g>
+<g data-node-id="linkR" data-parent="ranked" data-source-label="link: 코드, 테스트, workflow, 위키, 게이트 CHECK에
+전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션">
+<rect x="56" y="468" width="432" height="112" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="272.0" y="518.0" class="node" text-anchor="middle" fill="#1f2328">link: 코드, 테스트, workflow, 위키, 게이트 CHECK에</text>
+<text x="272.0" y="538.0" class="label" text-anchor="middle" fill="#424a53">전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션</text>
+</g>
+<g data-node-id="mentionR" data-parent="ranked" data-source-label="mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,
+그래프 이웃">
+<rect x="56" y="648" width="432" height="80" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="272.0" y="682.0" class="node" text-anchor="middle" fill="#1f2328">mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,</text>
+<text x="272.0" y="702.0" class="label" text-anchor="middle" fill="#424a53">그래프 이웃</text>
+</g>
+<g data-node-id="rerun" data-source-label="다시 돌릴 정확한 게이트와 명령
+--changed-since일 때 re-run 줄">
+<rect x="568" y="328" width="272" height="128" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="704.0" y="386.0" class="node" text-anchor="middle" fill="#1f2328">다시 돌릴 정확한 게이트와 명령</text>
+<text x="704.0" y="406.0" class="label" text-anchor="middle" fill="#424a53">--changed-since일 때 re-run 줄</text>
+</g>
+<line x1="40" y1="792" x2="840" y2="792" stroke="#d0d7de"/>
+<text x="40" y="820" class="label" text-anchor="start" fill="#424a53">pin은 최신 여부와 기본 브랜치 경로가 도달하는 같은 결과다.</text>
+</svg>

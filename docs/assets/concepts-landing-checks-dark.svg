@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 1136" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-landing-checks-dark-title concepts-landing-checks-dark-desc" data-source-diagram="5" id="concepts-landing-checks-dark-root">
+<title id="concepts-landing-checks-dark-title">Landing · CI and confirmation</title>
+<desc id="concepts-landing-checks-dark-desc">Pull requests run the repository’s CI and secrets workflows, gh reads the exact HEAD checks for land, unverified CI needs a recorded head-specific exception, and merging rechecks and asks you before a fast-forward push of HEAD.</desc>
+<defs>
+      <style>#concepts-landing-checks-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      #concepts-landing-checks-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-landing-checks-dark-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-landing-checks-dark-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-landing-checks-dark-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-landing-checks-dark-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-landing-checks-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      @media print {
+#concepts-landing-checks-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-landing-checks-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="concepts-landing-checks-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="concepts-landing-checks-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="1136" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">Landing · CI and confirmation</text>
+<g data-container-id="actions">
+<rect x="40" y="216" width="800" height="228" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="440.0" y="240" class="group" text-anchor="middle" fill="#c9d1d9">GitHub Actions in this repository</text>
+</g>
+<path d="M 360,160 L 360,192 Q 360,200 352,200 L 248,200 Q 240,200 240,208 L 240,264" data-edge-id="e6" data-from="pr" data-to="tests" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<path d="M 520,160 L 520,192 Q 520,200 528,200 L 632,200 Q 640,200 640,208 L 640,264" data-edge-id="e7" data-from="pr" data-to="secrets" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<path d="M 240,420 L 240,464 Q 240,472 248,472 L 392,472 Q 400,472 400,480 L 400,510" data-edge-id="e8" data-from="tests" data-to="land" data-label="gh reads HEAD&#x27;s check runs" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<path d="M 640,392 L 640,464 Q 640,472 632,472 L 488,472 Q 480,472 480,480 L 480,510" data-edge-id="e9" data-from="secrets" data-to="land" data-label="gh reads HEAD&#x27;s check runs" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<path d="M 120,608 L 80,608 Q 72,608 72,616 L 72,816" data-edge-id="e10" data-from="land" data-to="exc" data-label="" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<path d="M 760,608 L 800,608 Q 808,608 808,616 L 808,816" data-edge-id="e11" data-from="land" data-to="landed" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-landing-checks-dark-arrow)"/>
+<rect x="256" y="444" width="128" height="20" rx="2" fill="#0d1117"/>
+<text x="320.0" y="458" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. CHECK RUNS</text>
+<rect x="496" y="444" width="128" height="20" rx="2" fill="#0d1117"/>
+<text x="560.0" y="458" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. CHECK RUNS</text>
+<rect x="80" y="716" width="112" height="20" rx="2" fill="#0d1117"/>
+<text x="136.0" y="730" class="arrow-label" text-anchor="middle" fill="#c9d1d9">CI EXCEPTION</text>
+<rect x="736" y="716" width="64" height="20" rx="2" fill="#0d1117"/>
+<text x="768.0" y="730" class="arrow-label" text-anchor="middle" fill="#c9d1d9">MERGE</text>
+<g data-node-id="pr" data-source-label="Pull request to main">
+<rect x="240" y="104" width="400" height="56" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="440.0" y="136.0" class="node" text-anchor="middle" fill="#f0f6fc">Pull request to main</text>
+</g>
+<g data-node-id="tests" data-parent="actions" data-source-label="ci: tests, install, oah --version, privacy scan
+macOS and Windows, PRs to main except docs/** and *.md, manual run">
+<rect x="56" y="264" width="368" height="156" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="240.0" y="316.0" class="node" text-anchor="middle" fill="#f0f6fc">ci: tests, install, oah --version, privacy</text>
+<text x="240.0" y="336.0" class="node" text-anchor="middle" fill="#f0f6fc">scan</text>
+<text x="240.0" y="356.0" class="label" text-anchor="middle" fill="#c9d1d9">macOS and Windows, PRs to main except docs/**</text>
+<text x="240.0" y="376.0" class="label" text-anchor="middle" fill="#c9d1d9">and *.md, manual run</text>
+</g>
+<g data-node-id="secrets" data-parent="actions" data-source-label="secrets: gitleaks and privacy scan, full history
+every pull request and push, manual run">
+<rect x="456" y="264" width="368" height="128" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="640.0" y="312.0" class="node" text-anchor="middle" fill="#f0f6fc">secrets: gitleaks and privacy scan, full</text>
+<text x="640.0" y="332.0" class="node" text-anchor="middle" fill="#f0f6fc">history</text>
+<text x="640.0" y="352.0" class="label" text-anchor="middle" fill="#c9d1d9">every pull request and push, manual run</text>
+</g>
+<g data-node-id="land" data-source-label="oah land --check, exact HEAD
+lease, intent, review, gates, impact,
+required-checks, fast-forward, scan, ci">
+<polygon points="440.0,496 760,608.0 440.0,720 120,608.0" fill="#161b22" stroke="#58a6ff" stroke-width="1"/>
+<text x="440.0" y="592.0" class="node" text-anchor="middle" fill="#58a6ff">oah land --check, exact HEAD</text>
+<text x="440.0" y="612.0" class="label" text-anchor="middle" fill="#c9d1d9">lease, intent, review, gates, impact,</text>
+<text x="440.0" y="632.0" class="label" text-anchor="middle" fill="#c9d1d9">required-checks, fast-forward, scan, ci</text>
+</g>
+<g data-node-id="exc" data-source-label="Unverified CI blocks: OAH_LAND_CI_UNVERIFIED
+unless --accept-unverified-ci reason, recorded for that head">
+<rect x="40" y="816" width="384" height="144" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="232.0" y="872.0" class="node" text-anchor="middle" fill="#f0f6fc">Unverified CI blocks: OAH_LAND_CI_UNVERIFIED</text>
+<text x="232.0" y="892.0" class="label" text-anchor="middle" fill="#c9d1d9">unless --accept-unverified-ci reason, recorded</text>
+<text x="232.0" y="912.0" class="label" text-anchor="middle" fill="#c9d1d9">for that head</text>
+</g>
+<g data-node-id="landed" data-source-label="oah land --merge
+checks again, you confirm,
+fast-forward push of HEAD">
+<rect x="488" y="816" width="352" height="144" rx="20" fill="#161b22" stroke="#58a6ff" stroke-width="1"/>
+<text x="664.0" y="872.0" class="node" text-anchor="middle" fill="#58a6ff">oah land --merge</text>
+<text x="664.0" y="892.0" class="label" text-anchor="middle" fill="#c9d1d9">checks again, you confirm,</text>
+<text x="664.0" y="912.0" class="label" text-anchor="middle" fill="#c9d1d9">fast-forward push of HEAD</text>
+</g>
+<text x="40" y="1012" class="group" text-anchor="start" fill="#c9d1d9">Transition keys</text>
+<text x="40" y="1040" class="label" text-anchor="start" fill="#c9d1d9">1 · gh reads HEAD&#x27;s check runs</text>
+<line x1="40" y1="1076" x2="840" y2="1076" stroke="#30363d"/>
+<text x="40" y="1104" class="label" text-anchor="start" fill="#c9d1d9">Dashed: recorded CI exception. Merge checks again and waits for your confirmation.</text>
+</svg>

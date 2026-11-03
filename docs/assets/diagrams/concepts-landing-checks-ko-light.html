@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>반영 · CI와 사용자 확인</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 880px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 880px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>반영 · CI와 사용자 확인</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 880 1136" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-landing-checks-ko-light-title concepts-landing-checks-ko-light-desc" data-source-diagram="5">
+<title id="concepts-landing-checks-ko-light-title">반영 · CI와 사용자 확인</title>
+<desc id="concepts-landing-checks-ko-light-desc">풀 리퀘스트로 저장소의 CI와 secrets 워크플로가 실행되고 gh가 정확한 HEAD 검사를 읽으며 미검증 CI는 그 head에 기록된 예외가 필요하고 반영 때 다시 검사와 사용자 확인을 거쳐 HEAD를 fast-forward push한다.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="1136" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">반영 · CI와 사용자 확인</text>
+<g data-container-id="actions">
+<rect x="40" y="216" width="800" height="228" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="440.0" y="240" class="group" text-anchor="middle" fill="#424a53">이 저장소의 GitHub Actions</text>
+</g>
+<path d="M 360,160 L 360,192 Q 360,200 352,200 L 248,200 Q 240,200 240,208 L 240,264" data-edge-id="e6" data-from="pr" data-to="tests" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 520,160 L 520,192 Q 520,200 528,200 L 632,200 Q 640,200 640,208 L 640,264" data-edge-id="e7" data-from="pr" data-to="secrets" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 240,420 L 240,464 Q 240,472 248,472 L 392,472 Q 400,472 400,480 L 400,510" data-edge-id="e8" data-from="tests" data-to="land" data-label="gh가 HEAD의 check run을 읽음" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 640,392 L 640,464 Q 640,472 632,472 L 488,472 Q 480,472 480,480 L 480,510" data-edge-id="e9" data-from="secrets" data-to="land" data-label="gh가 HEAD의 check run을 읽음" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 120,608 L 80,608 Q 72,608 72,616 L 72,816" data-edge-id="e10" data-from="land" data-to="exc" data-label="" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 760,608 L 800,608 Q 808,608 808,616 L 808,816" data-edge-id="e11" data-from="land" data-to="landed" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="256" y="444" width="128" height="20" rx="2" fill="#ffffff"/>
+<text x="320.0" y="458" class="arrow-label" text-anchor="middle" fill="#424a53">1. 검사 기록</text>
+<rect x="496" y="444" width="128" height="20" rx="2" fill="#ffffff"/>
+<text x="560.0" y="458" class="arrow-label" text-anchor="middle" fill="#424a53">1. 검사 기록</text>
+<rect x="80" y="716" width="112" height="20" rx="2" fill="#ffffff"/>
+<text x="136.0" y="730" class="arrow-label" text-anchor="middle" fill="#424a53">CI 예외</text>
+<rect x="736" y="716" width="64" height="20" rx="2" fill="#ffffff"/>
+<text x="768.0" y="730" class="arrow-label" text-anchor="middle" fill="#424a53">반영</text>
+<g data-node-id="pr" data-source-label="main으로 가는 풀 리퀘스트">
+<rect x="240" y="104" width="400" height="56" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="440.0" y="136.0" class="node" text-anchor="middle" fill="#1f2328">main으로 가는 풀 리퀘스트</text>
+</g>
+<g data-node-id="tests" data-parent="actions" data-source-label="ci: 테스트, 설치, oah --version, 개인정보 검사
+macOS, Windows, docs/**와 *.md만 바뀐 PR은 제외, 수동 실행">
+<rect x="56" y="264" width="368" height="156" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="240.0" y="326.0" class="node" text-anchor="middle" fill="#1f2328">ci: 테스트, 설치, oah --version, 개인정보 검사</text>
+<text x="240.0" y="346.0" class="label" text-anchor="middle" fill="#424a53">macOS, Windows, docs/**와 *.md만 바뀐 PR은</text>
+<text x="240.0" y="366.0" class="label" text-anchor="middle" fill="#424a53">제외, 수동 실행</text>
+</g>
+<g data-node-id="secrets" data-parent="actions" data-source-label="secrets: gitleaks와 개인정보 검사, 전체 기록
+모든 풀 리퀘스트와 푸시, 수동 실행">
+<rect x="456" y="264" width="368" height="128" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="640.0" y="322.0" class="node" text-anchor="middle" fill="#1f2328">secrets: gitleaks와 개인정보 검사, 전체 기록</text>
+<text x="640.0" y="342.0" class="label" text-anchor="middle" fill="#424a53">모든 풀 리퀘스트와 푸시, 수동 실행</text>
+</g>
+<g data-node-id="land" data-source-label="oah land --check, 정확한 HEAD
+리스, 의도, 리뷰, 게이트, 영향,
+필수 검사, fast-forward, 검사, CI">
+<polygon points="440.0,496 760,608.0 440.0,720 120,608.0" fill="#f6f8fa" stroke="#0969da" stroke-width="1"/>
+<text x="440.0" y="592.0" class="node" text-anchor="middle" fill="#0969da">oah land --check, 정확한 HEAD</text>
+<text x="440.0" y="612.0" class="label" text-anchor="middle" fill="#424a53">리스, 의도, 리뷰, 게이트, 영향,</text>
+<text x="440.0" y="632.0" class="label" text-anchor="middle" fill="#424a53">필수 검사, fast-forward, 검사, CI</text>
+</g>
+<g data-node-id="exc" data-source-label="검증 안 된 CI는 막힘: OAH_LAND_CI_UNVERIFIED
+--accept-unverified-ci 이유로 그 head에 예외를 기록할 때만 통과">
+<rect x="40" y="816" width="384" height="144" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="232.0" y="872.0" class="node" text-anchor="middle" fill="#1f2328">검증 안 된 CI는 막힘: OAH_LAND_CI_UNVERIFIED</text>
+<text x="232.0" y="892.0" class="label" text-anchor="middle" fill="#424a53">--accept-unverified-ci 이유로 그 head에 예외를</text>
+<text x="232.0" y="912.0" class="label" text-anchor="middle" fill="#424a53">기록할 때만 통과</text>
+</g>
+<g data-node-id="landed" data-source-label="oah land --merge
+다시 확인하고, 사용자가 확인하면
+HEAD를 fast-forward push">
+<rect x="488" y="816" width="352" height="144" rx="20" fill="#f6f8fa" stroke="#0969da" stroke-width="1"/>
+<text x="664.0" y="872.0" class="node" text-anchor="middle" fill="#0969da">oah land --merge</text>
+<text x="664.0" y="892.0" class="label" text-anchor="middle" fill="#424a53">다시 확인하고, 사용자가 확인하면</text>
+<text x="664.0" y="912.0" class="label" text-anchor="middle" fill="#424a53">HEAD를 fast-forward push</text>
+</g>
+<text x="40" y="1012" class="group" text-anchor="start" fill="#424a53">전이 조건</text>
+<text x="40" y="1040" class="label" text-anchor="start" fill="#424a53">1 · gh가 HEAD의 check run을 읽음</text>
+<line x1="40" y1="1076" x2="840" y2="1076" stroke="#d0d7de"/>
+<text x="40" y="1104" class="label" text-anchor="start" fill="#424a53">점선은 기록되는 CI 예외다. 반영 때 다시 검사하고 사용자 확인을 기다린다.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

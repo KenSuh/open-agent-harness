@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 760 952" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-ko-dark-title concepts-loop-ko-dark-desc" data-source-diagram="0" id="concepts-loop-ko-dark-root">
+<title id="concepts-loop-ko-dark-title">작업의 전체 흐름</title>
+<desc id="concepts-loop-ko-dark-desc">패킷이 리스, Claude 구현, 게이트와 위키 증거, Codex 리뷰를 거치며 수정 요청은 증거 단계로 돌아가고 리뷰가 수렴하면 finish 뒤 사용자 확인을 거쳐 반영된다.</desc>
+<defs>
+      <style>#concepts-loop-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      #concepts-loop-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-loop-ko-dark-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-loop-ko-dark-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-loop-ko-dark-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-loop-ko-dark-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-loop-ko-dark-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#concepts-loop-ko-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-loop-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="concepts-loop-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="concepts-loop-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="952" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">작업의 전체 흐름</text>
+<line x1="208" y1="168" x2="208" y2="216" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="208" y1="280" x2="208" y2="328" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="208" y1="392" x2="208" y2="440" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="208" y1="504" x2="208" y2="552" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="336" y1="584" x2="464" y2="584" data-edge-id="e5" data-from="R" data-to="F" data-label="수정 요청" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<path d="M 580,552 L 580,480 Q 580,472 572,472 L 336,472" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="208" y1="616" x2="208" y2="688" data-edge-id="e7" data-from="R" data-to="N" data-label="수렴" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<line x1="208" y1="736" x2="208" y2="784" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-ko-dark-arrow)"/>
+<rect x="348" y="556" width="104" height="20" rx="2" fill="#0d1117"/>
+<text x="400.0" y="570" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. 수정 요청</text>
+<rect x="216" y="640" width="88" height="20" rx="2" fill="#0d1117"/>
+<text x="260.0" y="654" class="arrow-label" text-anchor="middle" fill="#c9d1d9">수렴</text>
+<g data-node-id="P" data-source-label="패킷
+의도와 범위">
+<rect x="80" y="104" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="130.0" class="node" text-anchor="middle" fill="#f0f6fc">패킷</text>
+<text x="208.0" y="150.0" class="label" text-anchor="middle" fill="#c9d1d9">의도와 범위</text>
+</g>
+<g data-node-id="L" data-source-label="리스
+preflight, start">
+<rect x="80" y="216" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="242.0" class="node" text-anchor="middle" fill="#f0f6fc">리스</text>
+<text x="208.0" y="262.0" class="label" text-anchor="middle" fill="#c9d1d9">preflight, start</text>
+</g>
+<g data-node-id="C" data-source-label="Claude
+1차 구현">
+<rect x="80" y="328" width="256" height="64" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+<text x="208.0" y="354.0" class="node" text-anchor="middle" fill="#d29922">Claude</text>
+<text x="208.0" y="374.0" class="label" text-anchor="middle" fill="#c9d1d9">1차 구현</text>
+</g>
+<g data-node-id="G" data-source-label="게이트와 위키
+증거">
+<rect x="80" y="440" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="466.0" class="node" text-anchor="middle" fill="#f0f6fc">게이트와 위키</text>
+<text x="208.0" y="486.0" class="label" text-anchor="middle" fill="#c9d1d9">증거</text>
+</g>
+<g data-node-id="R" data-source-label="Codex
+리뷰">
+<rect x="80" y="552" width="256" height="64" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="208.0" y="578.0" class="node" text-anchor="middle" fill="#3fb950">Codex</text>
+<text x="208.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">리뷰</text>
+</g>
+<g data-node-id="F" data-source-label="Codex
+oah fix">
+<rect x="464" y="552" width="232" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="580.0" y="578.0" class="node" text-anchor="middle" fill="#f0f6fc">Codex</text>
+<text x="580.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">oah fix</text>
+</g>
+<g data-node-id="N" data-source-label="oah finish">
+<rect x="80" y="688" width="256" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="716.0" class="node" text-anchor="middle" fill="#f0f6fc">oah finish</text>
+</g>
+<g data-node-id="D" data-source-label="oah land
+사용자 확인 뒤">
+<rect x="80" y="784" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="810.0" class="node" text-anchor="middle" fill="#f0f6fc">oah land</text>
+<text x="208.0" y="830.0" class="label" text-anchor="middle" fill="#c9d1d9">사용자 확인 뒤</text>
+</g>
+<text x="40" y="876" class="label" text-anchor="start" fill="#c9d1d9">1 · 수정 요청</text>
+<line x1="40" y1="892" x2="720" y2="892" stroke="#30363d"/>
+<text x="40" y="920" class="label" text-anchor="start" fill="#c9d1d9">화살표는 작업 흐름을 나타낸다. 수정 뒤에는 게이트와 위키로 돌아간다.</text>
+</svg>

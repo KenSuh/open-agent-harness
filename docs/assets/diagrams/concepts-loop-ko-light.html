@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>작업의 전체 흐름</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 760px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 760px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>작업의 전체 흐름</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 760 952" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-ko-light-title concepts-loop-ko-light-desc" data-source-diagram="0">
+<title id="concepts-loop-ko-light-title">작업의 전체 흐름</title>
+<desc id="concepts-loop-ko-light-desc">패킷이 리스, Claude 구현, 게이트와 위키 증거, Codex 리뷰를 거치며 수정 요청은 증거 단계로 돌아가고 리뷰가 수렴하면 finish 뒤 사용자 확인을 거쳐 반영된다.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="952" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">작업의 전체 흐름</text>
+<line x1="208" y1="168" x2="208" y2="216" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="280" x2="208" y2="328" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="392" x2="208" y2="440" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="504" x2="208" y2="552" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="336" y1="584" x2="464" y2="584" data-edge-id="e5" data-from="R" data-to="F" data-label="수정 요청" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 580,552 L 580,480 Q 580,472 572,472 L 336,472" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="616" x2="208" y2="688" data-edge-id="e7" data-from="R" data-to="N" data-label="수렴" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="736" x2="208" y2="784" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="348" y="556" width="104" height="20" rx="2" fill="#ffffff"/>
+<text x="400.0" y="570" class="arrow-label" text-anchor="middle" fill="#424a53">1. 수정 요청</text>
+<rect x="216" y="640" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="260.0" y="654" class="arrow-label" text-anchor="middle" fill="#424a53">수렴</text>
+<g data-node-id="P" data-source-label="패킷
+의도와 범위">
+<rect x="80" y="104" width="256" height="64" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="208.0" y="130.0" class="node" text-anchor="middle" fill="#1f2328">패킷</text>
+<text x="208.0" y="150.0" class="label" text-anchor="middle" fill="#424a53">의도와 범위</text>
+</g>
+<g data-node-id="L" data-source-label="리스
+preflight, start">
+<rect x="80" y="216" width="256" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="208.0" y="242.0" class="node" text-anchor="middle" fill="#1f2328">리스</text>
+<text x="208.0" y="262.0" class="label" text-anchor="middle" fill="#424a53">preflight, start</text>
+</g>
+<g data-node-id="C" data-source-label="Claude
+1차 구현">
+<rect x="80" y="328" width="256" height="64" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>
+<text x="208.0" y="354.0" class="node" text-anchor="middle" fill="#9a6700">Claude</text>
+<text x="208.0" y="374.0" class="label" text-anchor="middle" fill="#424a53">1차 구현</text>
+</g>
+<g data-node-id="G" data-source-label="게이트와 위키
+증거">
+<rect x="80" y="440" width="256" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="208.0" y="466.0" class="node" text-anchor="middle" fill="#1f2328">게이트와 위키</text>
+<text x="208.0" y="486.0" class="label" text-anchor="middle" fill="#424a53">증거</text>
+</g>
+<g data-node-id="R" data-source-label="Codex
+리뷰">
+<rect x="80" y="552" width="256" height="64" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="208.0" y="578.0" class="node" text-anchor="middle" fill="#1a7f37">Codex</text>
+<text x="208.0" y="598.0" class="label" text-anchor="middle" fill="#424a53">리뷰</text>
+</g>
+<g data-node-id="F" data-source-label="Codex
+oah fix">
+<rect x="464" y="552" width="232" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="580.0" y="578.0" class="node" text-anchor="middle" fill="#1f2328">Codex</text>
+<text x="580.0" y="598.0" class="label" text-anchor="middle" fill="#424a53">oah fix</text>
+</g>
+<g data-node-id="N" data-source-label="oah finish">
+<rect x="80" y="688" width="256" height="48" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="208.0" y="716.0" class="node" text-anchor="middle" fill="#1f2328">oah finish</text>
+</g>
+<g data-node-id="D" data-source-label="oah land
+사용자 확인 뒤">
+<rect x="80" y="784" width="256" height="64" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="208.0" y="810.0" class="node" text-anchor="middle" fill="#1f2328">oah land</text>
+<text x="208.0" y="830.0" class="label" text-anchor="middle" fill="#424a53">사용자 확인 뒤</text>
+</g>
+<text x="40" y="876" class="label" text-anchor="start" fill="#424a53">1 · 수정 요청</text>
+<line x1="40" y1="892" x2="720" y2="892" stroke="#d0d7de"/>
+<text x="40" y="920" class="label" text-anchor="start" fill="#424a53">화살표는 작업 흐름을 나타낸다. 수정 뒤에는 게이트와 위키로 돌아간다.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

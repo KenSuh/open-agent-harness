@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leases · finish checks</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #ffffff; color: #1f2328; padding: 2rem; }
+.frame { max-width: 880px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #424a53; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 880px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">State machine · oah</p>
+<h1>Leases · finish checks</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 880 968" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-finish-light-title concepts-leases-finish-light-desc" data-source-diagram="1">
+<title id="concepts-leases-finish-light-title">Leases · finish checks</title>
+<desc id="concepts-leases-finish-light-desc">Active and stale leases can finish when return, wiki, gates and scope pass or recorded allow flags apply, while a refusal preserves the active or expired state and reports the corresponding finish code.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="968" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">Leases · finish checks</text>
+<path d="M 200,184 L 200,224 Q 200,232 208,232 L 432,232 Q 440,232 440,240 L 440,256" data-edge-id="e2" data-from="Active" data-to="finish_check" data-label="oah finish" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 680,184 L 680,320 Q 680,328 672,328 L 540,328" data-edge-id="e3" data-from="Stale" data-to="finish_check" data-label="oah finish" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="440" y1="400" x2="440" y2="504" data-edge-id="e4" data-from="finish_check" data-to="Finished" data-label="return, wiki, gates and scope pass, or allow flags (recorded)" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 340,328 L 48,328 Q 40,328 40,320 L 40,160 Q 40,152 48,152 L 80,152" data-edge-id="e5" data-from="finish_check" data-to="Active" data-label="refused, lease still active" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 490,292 L 490,224 Q 490,216 498,216 L 616,216 Q 624,216 624,208 L 624,184" data-edge-id="e6" data-from="finish_check" data-to="Stale" data-label="refused, lease expired" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="440" y1="568" x2="440" y2="624" data-edge-id="e11" data-from="Finished" data-to="__end_2" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="208" y="192" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="252.0" y="206" class="arrow-label" text-anchor="middle" fill="#424a53">6. FINISH</text>
+<rect x="688" y="244" width="88" height="20" rx="2" fill="#ffffff"/>
+<text x="732.0" y="258" class="arrow-label" text-anchor="middle" fill="#424a53">6. FINISH</text>
+<rect x="448" y="444" width="112" height="20" rx="2" fill="#ffffff"/>
+<text x="504.0" y="458" class="arrow-label" text-anchor="middle" fill="#424a53">7. PASS/ALLOW</text>
+<rect x="132" y="300" width="112" height="20" rx="2" fill="#ffffff"/>
+<text x="188.0" y="314" class="arrow-label" text-anchor="middle" fill="#424a53">8. REFUSED</text>
+<rect x="500" y="244" width="112" height="20" rx="2" fill="#ffffff"/>
+<text x="556.0" y="258" class="arrow-label" text-anchor="middle" fill="#424a53">9. REFUSED</text>
+<g data-node-id="Active" data-source-label="Active">
+<rect x="80" y="120" width="240" height="64" rx="8" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="200.0" y="156.0" class="node" text-anchor="middle" fill="#1f2328">Active</text>
+</g>
+<g data-node-id="Stale" data-source-label="STALE (expired)">
+<rect x="560" y="120" width="240" height="64" rx="8" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="680.0" y="156.0" class="node" text-anchor="middle" fill="#1f2328">STALE (expired)</text>
+</g>
+<g data-node-id="finish_check" data-source-label="finish_check">
+<polygon points="440.0,256 540,328.0 440.0,400 340,328.0" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="440.0" y="332.0" class="node" text-anchor="middle" fill="#1f2328">finish_check</text>
+</g>
+<g data-node-id="Finished" data-source-label="Finished">
+<rect x="320" y="504" width="240" height="64" rx="8" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="440.0" y="540.0" class="node" text-anchor="middle" fill="#1a7f37">Finished</text>
+</g>
+<g data-node-id="__end_2" data-source-label="[end]">
+<circle cx="440" cy="632" r="8" fill="#ffffff" stroke="#1f2328" stroke-width="1"/>
+<circle cx="440" cy="632" r="5" fill="#1f2328"/>
+</g>
+<text x="40" y="684" class="group" text-anchor="start" fill="#424a53">Transition keys</text>
+<text x="40" y="712" class="label" text-anchor="start" fill="#424a53">6 · oah finish</text>
+<text x="40" y="740" class="label" text-anchor="start" fill="#424a53">7 · return, wiki, gates and scope pass, or allow flags (recorded)</text>
+<text x="40" y="768" class="label" text-anchor="start" fill="#424a53">8 · refused, lease still active</text>
+<text x="40" y="796" class="label" text-anchor="start" fill="#424a53">9 · refused, lease expired</text>
+<rect x="40" y="828" width="800" height="72" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="856" class="label" text-anchor="start" fill="#424a53">finish refusals: OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING, OAH_GATES_UNMET,</text>
+<text x="56" y="876" class="label" text-anchor="start" fill="#424a53">OAH_SCOPE_EXCEEDED.</text>
+<line x1="40" y1="908" x2="840" y2="908" stroke="#d0d7de"/>
+<text x="40" y="936" class="label" text-anchor="start" fill="#424a53">The same active and stale states continue here; every refusal returns to its state.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

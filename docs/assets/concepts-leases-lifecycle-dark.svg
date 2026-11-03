@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 1120" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-lifecycle-dark-title concepts-leases-lifecycle-dark-desc" data-source-diagram="1" id="concepts-leases-lifecycle-dark-root">
+<title id="concepts-leases-lifecycle-dark-title">Leases · active, stale, released</title>
+<desc id="concepts-leases-lifecycle-dark-desc">Starting creates an active lease, renewal and logging keep it active, TTL expiry makes it stale, either state can be released, and the next start prunes stale leases, subject to the stated refusal rules.</desc>
+<defs>
+      <style>#concepts-leases-lifecycle-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      #concepts-leases-lifecycle-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-leases-lifecycle-dark-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-leases-lifecycle-dark-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-leases-lifecycle-dark-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-leases-lifecycle-dark-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-leases-lifecycle-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      @media print {
+#concepts-leases-lifecycle-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-leases-lifecycle-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="concepts-leases-lifecycle-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="concepts-leases-lifecycle-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="1120" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">Leases · active, stale, released</text>
+<line x1="128" y1="144" x2="320" y2="144" data-edge-id="e1" data-from="__start_1" data-to="Active" data-label="oah start, or oah start --packet" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<path d="M 384,112 L 384,96 Q 384,88 392,88 L 616,88 Q 624,88 624,96 L 624,136 Q 624,144 616,144 L 576,144" data-edge-id="e13" data-from="Active" data-to="Active" data-label="oah renew, oah start --packet (raised Revision), oah log" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<line x1="448" y1="176" x2="448" y2="320" data-edge-id="e9" data-from="Active" data-to="Stale" data-label="TTL passes, 4 hours by default" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<path d="M 320,156 L 256,156 Q 248,156 248,164 L 248,544 Q 248,552 256,552 L 320,552" data-edge-id="e7" data-from="Active" data-to="Released" data-label="oah release --reason" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<line x1="448" y1="384" x2="448" y2="520" data-edge-id="e8" data-from="Stale" data-to="Released" data-label="oah release --reason" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<line x1="576" y1="352" x2="736" y2="352" data-edge-id="e10" data-from="Stale" data-to="__end_1" data-label="pruned by the next oah start" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<line x1="448" y1="584" x2="448" y2="640" data-edge-id="e12" data-from="Released" data-to="__end_3" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-lifecycle-dark-arrow)"/>
+<rect x="168" y="116" width="96" height="20" rx="2" fill="#0d1117"/>
+<text x="216.0" y="130" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. START</text>
+<rect x="632" y="100" width="120" height="20" rx="2" fill="#0d1117"/>
+<text x="692.0" y="114" class="arrow-label" text-anchor="middle" fill="#c9d1d9">2. KEEP ACTIVE</text>
+<rect x="456" y="236" width="88" height="20" rx="2" fill="#0d1117"/>
+<text x="500.0" y="250" class="arrow-label" text-anchor="middle" fill="#c9d1d9">3. EXPIRE</text>
+<rect x="256" y="432" width="88" height="20" rx="2" fill="#0d1117"/>
+<text x="300.0" y="446" class="arrow-label" text-anchor="middle" fill="#c9d1d9">4. RELEASE</text>
+<rect x="456" y="440" width="88" height="20" rx="2" fill="#0d1117"/>
+<text x="500.0" y="454" class="arrow-label" text-anchor="middle" fill="#c9d1d9">4. RELEASE</text>
+<rect x="608" y="324" width="96" height="20" rx="2" fill="#0d1117"/>
+<text x="656.0" y="338" class="arrow-label" text-anchor="middle" fill="#c9d1d9">5. PRUNE</text>
+<g data-node-id="__start_1" data-source-label="[start]">
+<circle cx="128" cy="144" r="6" fill="#f0f6fc"/>
+</g>
+<g data-node-id="Active" data-source-label="Active">
+<rect x="320" y="112" width="256" height="64" rx="8" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="448.0" y="148.0" class="node" text-anchor="middle" fill="#f0f6fc">Active</text>
+</g>
+<g data-node-id="Stale" data-source-label="STALE (expired)">
+<rect x="320" y="320" width="256" height="64" rx="8" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="448.0" y="356.0" class="node" text-anchor="middle" fill="#f0f6fc">STALE (expired)</text>
+</g>
+<g data-node-id="Released" data-source-label="Released">
+<rect x="320" y="520" width="256" height="64" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="448.0" y="556.0" class="node" text-anchor="middle" fill="#3fb950">Released</text>
+</g>
+<g data-node-id="__end_1" data-source-label="[end]">
+<circle cx="744" cy="352" r="8" fill="#0d1117" stroke="#f0f6fc" stroke-width="1"/>
+<circle cx="744" cy="352" r="5" fill="#f0f6fc"/>
+</g>
+<g data-node-id="__end_3" data-source-label="[end]">
+<circle cx="448" cy="648" r="8" fill="#0d1117" stroke="#f0f6fc" stroke-width="1"/>
+<circle cx="448" cy="648" r="5" fill="#f0f6fc"/>
+</g>
+<text x="40" y="700" class="group" text-anchor="start" fill="#c9d1d9">Transition keys</text>
+<text x="40" y="728" class="label" text-anchor="start" fill="#c9d1d9">1 · oah start, or oah start --packet</text>
+<text x="40" y="756" class="label" text-anchor="start" fill="#c9d1d9">2 · oah renew, oah start --packet (raised Revision), oah log</text>
+<text x="40" y="784" class="label" text-anchor="start" fill="#c9d1d9">3 · TTL passes, 4 hours by default</text>
+<text x="40" y="812" class="label" text-anchor="start" fill="#c9d1d9">4 · oah release --reason</text>
+<text x="40" y="840" class="label" text-anchor="start" fill="#c9d1d9">5 · pruned by the next oah start</text>
+<rect x="40" y="876" width="800" height="112" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="56" y="904" class="label" text-anchor="start" fill="#c9d1d9">oah status only reads. It shows each lease as active or STALE.</text>
+<text x="56" y="924" class="label" text-anchor="start" fill="#c9d1d9">start is refused with OAH_LEASE_CONFLICT on overlap, OAH_LEASE_EXISTS for your own task.</text>
+<text x="56" y="944" class="label" text-anchor="start" fill="#c9d1d9">renew on a STALE lease is refused with OAH_LEASE_EXPIRED.</text>
+<text x="56" y="964" class="label" text-anchor="start" fill="#c9d1d9">release needs --force for another agent&#x27;s lease (else OAH_LEASE_NOT_YOURS).</text>
+<line x1="40" y1="1060" x2="840" y2="1060" stroke="#30363d"/>
+<text x="40" y="1088" class="label" text-anchor="start" fill="#c9d1d9">Active and STALE repeat in the finish figure below. Dots mark start and end.</text>
+</svg>

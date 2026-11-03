@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 956" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-landing-local-ko-light-title concepts-landing-local-ko-light-desc" data-source-diagram="5" id="concepts-landing-local-ko-light-root">
+<title id="concepts-landing-local-ko-light-title">반영 · 내 컴퓨터의 훅</title>
+<desc id="concepts-landing-local-ko-light-desc">선택 설치한 로컬 훅이 위키 커밋 검사, 영향 지도 갱신, 남은 리스 확인과 gitleaks 설치 시 푸시 커밋 검사를 하며 푸시는 secrets 검사와 풀 리퀘스트로 이어지고 Claude에는 Stop과 SessionStart 훅이 있다.</desc>
+<defs>
+      <style>#concepts-landing-local-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      #concepts-landing-local-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-landing-local-ko-light-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-landing-local-ko-light-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-landing-local-ko-light-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-landing-local-ko-light-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-landing-local-ko-light-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#concepts-landing-local-ko-light-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-landing-local-ko-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="concepts-landing-local-ko-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="concepts-landing-local-ko-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="956" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">반영 · 내 컴퓨터의 훅</text>
+<g data-container-id="local">
+<rect x="40" y="104" width="784" height="432" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="128" class="group" text-anchor="start" fill="#424a53">내 컴퓨터, 모든 훅은 선택 설치</text>
+</g>
+<g data-container-id="actions">
+<rect x="40" y="664" width="416" height="192" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
+<text x="56" y="688" class="group" text-anchor="start" fill="#424a53">이 저장소의 GitHub Actions</text>
+</g>
+<line x1="144" y1="208" x2="144" y2="272" data-edge-id="e1" data-from="gcommit" data-to="pc" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-landing-local-ko-light-arrow)"/>
+<path d="M 304,184 L 392,184 Q 400,184 400,192 L 400,424 Q 400,432 392,432 L 376,432" data-edge-id="e2" data-from="gcommit" data-to="post" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-landing-local-ko-light-arrow)"/>
+<line x1="640" y1="208" x2="640" y2="272" data-edge-id="e3" data-from="gpush" data-to="pp" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-landing-local-ko-light-arrow)"/>
+<path d="M 472,344 L 448,344 Q 440,344 440,352 L 440,760 Q 440,768 432,768 L 424,768" data-edge-id="e4" data-from="pp" data-to="secrets" data-label="푸시" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-landing-local-ko-light-arrow)"/>
+<path d="M 808,320 L 832,320 Q 840,320 840,328 L 840,624 Q 840,632 832,632 L 808,632" data-edge-id="e5" data-from="pp" data-to="pr" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-landing-local-ko-light-arrow)"/>
+<rect x="448" y="560" width="64" height="20" rx="2" fill="#ffffff"/>
+<text x="480.0" y="574" class="arrow-label" text-anchor="middle" fill="#424a53">푸시</text>
+<g data-node-id="gcommit" data-parent="local" data-source-label="git commit">
+<rect x="72" y="160" width="232" height="48" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="188.0" y="188.0" class="node" text-anchor="middle" fill="#1f2328">git commit</text>
+</g>
+<g data-node-id="pc" data-parent="local" data-source-label="pre-commit
+위키 커밋 검사">
+<rect x="72" y="272" width="208" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="176.0" y="298.0" class="node" text-anchor="middle" fill="#1f2328">pre-commit</text>
+<text x="176.0" y="318.0" class="label" text-anchor="middle" fill="#424a53">위키 커밋 검사</text>
+</g>
+<g data-node-id="post" data-parent="local" data-source-label="post-commit, post-merge
+영향 지도 갱신">
+<rect x="72" y="400" width="304" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="224.0" y="426.0" class="node" text-anchor="middle" fill="#1f2328">post-commit, post-merge</text>
+<text x="224.0" y="446.0" class="label" text-anchor="middle" fill="#424a53">영향 지도 갱신</text>
+</g>
+<g data-node-id="gpush" data-parent="local" data-source-label="git push">
+<rect x="472" y="160" width="336" height="48" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="640.0" y="188.0" class="node" text-anchor="middle" fill="#1f2328">git push</text>
+</g>
+<g data-node-id="pp" data-parent="local" data-source-label="pre-push
+리스가 남았는가(활성 또는 만료)
+gitleaks가 설치돼 있으면 푸시할 커밋 검사
+없으면 경고 후 검사 없이 푸시 허용">
+<rect x="472" y="272" width="336" height="144" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="640.0" y="318.0" class="node" text-anchor="middle" fill="#1a7f37">pre-push</text>
+<text x="640.0" y="338.0" class="label" text-anchor="middle" fill="#424a53">리스가 남았는가(활성 또는 만료)</text>
+<text x="640.0" y="358.0" class="label" text-anchor="middle" fill="#424a53">gitleaks가 설치돼 있으면 푸시할 커밋 검사</text>
+<text x="640.0" y="378.0" class="label" text-anchor="middle" fill="#424a53">없으면 경고 후 검사 없이 푸시 허용</text>
+</g>
+<g data-node-id="cc" data-parent="local" data-source-label="Claude Code Stop, SessionStart 훅">
+<rect x="472" y="464" width="336" height="48" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="640.0" y="492.0" class="node" text-anchor="middle" fill="#1f2328">Claude Code Stop, SessionStart 훅</text>
+</g>
+<g data-node-id="pr" data-source-label="main으로 가는 풀 리퀘스트">
+<rect x="472" y="600" width="336" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="640.0" y="636.0" class="node" text-anchor="middle" fill="#1f2328">main으로 가는 풀 리퀘스트</text>
+</g>
+<g data-node-id="secrets" data-parent="actions" data-source-label="secrets: gitleaks와 개인정보 검사, 전체 기록
+모든 풀 리퀘스트와 푸시, 수동 실행">
+<rect x="72" y="704" width="352" height="128" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="248.0" y="762.0" class="node" text-anchor="middle" fill="#1f2328">secrets: gitleaks와 개인정보 검사, 전체 기록</text>
+<text x="248.0" y="782.0" class="label" text-anchor="middle" fill="#424a53">모든 풀 리퀘스트와 푸시, 수동 실행</text>
+</g>
+<line x1="40" y1="896" x2="840" y2="896" stroke="#d0d7de"/>
+<text x="40" y="924" class="label" text-anchor="start" fill="#424a53">풀 리퀘스트와 secrets는 다음에도 나온다. Claude 훅은 원본처럼 연결선이 없다.</text>
+</svg>

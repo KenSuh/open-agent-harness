@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 840 848" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-build-light-title architecture-build-light-desc" id="architecture-build-light-root">
 <title id="architecture-build-light-title">From task to evidence</title>
-<desc id="architecture-build-light-desc">You send a packet through leases, preflight and routing to Claude Code, with optional TypeSafe Jev skill judging and evidence gates linked to the impact map and wiki.</desc>
+<desc id="architecture-build-light-desc">You send a packet through leases, preflight and routing to Claude Code, with recommended optional TypeSafe Jev reordering skills and judging task difficulty so the tier can change within its floor, and evidence gates linked to the impact map and wiki.</desc>
 <defs>
       <style>#architecture-build-light-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
       #architecture-build-light-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -22,22 +22,22 @@
 <text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">From task to evidence</text>
 <rect x="40" y="184" width="488" height="576" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="56" y="204" class="node" text-anchor="start" fill="#424a53">oah</text>
-<rect x="568" y="296" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
-<text x="584" y="316" class="node" text-anchor="start" fill="#424a53">Optional AI judge</text>
+<rect x="568" y="264" width="232" height="160" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
+<text x="584" y="288" class="node" text-anchor="start" fill="#424a53">Recommended, optional<tspan x="584" dy="20"> AI judge</tspan></text>
 <rect x="568" y="472" width="232" height="112" rx="8" fill="#1f2328" fill-opacity="0.02" stroke="#d0d7de" stroke-width="1"/>
 <text x="584" y="492" class="node" text-anchor="start" fill="#424a53">Installed, signed-in engine</text>
 <line x1="300" y1="152" x2="300" y2="224" data-from="you" data-to="intent" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
 <line x1="300" y1="280" x2="300" y2="320" data-from="intent" data-to="lease" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
 <line x1="300" y1="376" x2="300" y2="408" data-from="lease" data-to="route" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
-<path d="M 416,432 H 676 Q 684,432 684,424 V 392" data-from="route" data-to="jev" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-light-arrow)"/>
-<path d="M 416,472 H 552 Q 560,472 560,480 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
+<path d="M 416,432 H 676 Q 684,432 684,424 V 408" data-from="route" data-to="jev" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-light-arrow)"/>
+<path d="M 416,520 H 552 Q 560,520 560,528 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
 <path d="M 684,568 V 620 Q 684,628 676,628 H 416" data-from="claude" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
 <line x1="160" y1="628" x2="184" y2="628" data-from="impact" data-to="gates" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#architecture-build-light-arrow)"/>
 <line x1="300" y1="656" x2="300" y2="696" data-from="gates" data-to="wiki" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#architecture-build-light-arrow)"/>
 <rect x="452" y="404" width="96" height="20" rx="2" fill="#ffffff"/>
-<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#424a53">SKILL ORDER</text>
-<rect x="440" y="444" width="120" height="20" rx="2" fill="#ffffff"/>
-<text x="500" y="459" class="arrow-label" text-anchor="middle" fill="#424a53">BRIEF + SKILLS</text>
+<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#424a53">JUDGEMENT</text>
+<rect x="440" y="492" width="120" height="20" rx="2" fill="#ffffff"/>
+<text x="500" y="507" class="arrow-label" text-anchor="middle" fill="#424a53">BRIEF + SKILLS</text>
 <g data-node-id="you">
 <rect x="184" y="96" width="232" height="56" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
 <text x="300" y="120" class="node" text-anchor="middle" fill="#1f2328">You or Claude Code as lead</text>
@@ -54,15 +54,18 @@
 <text x="300" y="364" class="label" text-anchor="middle" fill="#424a53">Claim paths; check the base</text>
 </g>
 <g data-node-id="route">
-<rect x="184" y="408" width="232" height="88" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<rect x="184" y="408" width="232" height="136" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
 <text x="300" y="432" class="node" text-anchor="middle" fill="#1f2328">Difficulty, models, skills</text>
 <text x="300" y="456" class="label" text-anchor="middle" fill="#424a53">Rules set tier and effort</text>
-<text x="300" y="476" class="label" text-anchor="middle" fill="#424a53">Tier travels with the brief</text>
+<text x="300" y="476" class="label" text-anchor="middle" fill="#424a53">Jev can adjust tier</text>
+<text x="300" y="496" class="label" text-anchor="middle" fill="#424a53">within its floor</text>
+<text x="300" y="520" class="label" text-anchor="middle" fill="#424a53">Tier travels with the brief</text>
 </g>
 <g data-node-id="jev">
-<rect x="584" y="336" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="684" y="360" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev (optional)</text>
-<text x="684" y="380" class="label" text-anchor="middle" fill="#424a53">Re-orders chosen skills</text>
+<rect x="584" y="328" width="200" height="80" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="684" y="352" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev (optional)</text>
+<text x="684" y="372" class="label" text-anchor="middle" fill="#424a53">Re-orders chosen skills</text>
+<text x="684" y="392" class="label" text-anchor="middle" fill="#424a53">Judges task difficulty</text>
 </g>
 <g data-node-id="claude">
 <rect x="584" y="512" width="200" height="56" rx="6" fill="#f6f8fa" stroke="#9a6700" stroke-width="1"/>

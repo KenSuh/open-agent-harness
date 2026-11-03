@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>영향 지도 · 순위 결과</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #0d1117; color: #f0f6fc; padding: 2rem; }
+.frame { max-width: 880px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #c9d1d9; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 880px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>영향 지도 · 순위 결과</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 880 852" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-ranked-ko-dark-title concepts-impact-ranked-ko-dark-desc" data-source-diagram="3">
+<title id="concepts-impact-ranked-ko-dark-title">영향 지도 · 순위 결과</title>
+<desc id="concepts-impact-ranked-ko-dark-desc">영향 결과는 pin, exec, link, mention 순으로 이어지며 pin과 exec가 다시 돌릴 정확한 게이트와 명령을 가리키고 changed-since를 주면 re-run 줄을 보여 준다.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="880" height="852" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">영향 지도 · 순위 결과</text>
+<g data-container-id="ranked">
+<rect x="40" y="104" width="464" height="664" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="56" y="128" class="group" text-anchor="start" fill="#c9d1d9">순위가 매겨진 결과</text>
+</g>
+<line x1="272" y1="272" x2="272" y2="328" data-edge-id="e7" data-from="pinR" data-to="execR" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="272" y1="412" x2="272" y2="468" data-edge-id="e8" data-from="execR" data-to="linkR" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="272" y1="580" x2="272" y2="648" data-edge-id="e9" data-from="linkR" data-to="mentionR" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 488,208 L 696,208 Q 704,208 704,216 L 704,328" data-edge-id="e10" data-from="pinR" data-to="rerun" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="488" y1="368" x2="568" y2="368" data-edge-id="e11" data-from="execR" data-to="rerun" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<g data-node-id="pinR" data-parent="ranked" data-source-label="pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK
+또는 workflow, manifest, config 명령이 해시하거나 grep함">
+<rect x="56" y="144" width="432" height="128" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="272.0" y="202.0" class="node" text-anchor="middle" fill="#3fb950">pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK</text>
+<text x="272.0" y="222.0" class="label" text-anchor="middle" fill="#c9d1d9">또는 workflow, manifest, config 명령이 해시하거나 grep함</text>
+</g>
+<g data-node-id="execR" data-parent="ranked" data-source-label="exec: 게이트 CHECK나 그런 명령이 실행함">
+<rect x="56" y="328" width="432" height="84" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="272.0" y="374.0" class="node" text-anchor="middle" fill="#3fb950">exec: 게이트 CHECK나 그런 명령이 실행함</text>
+</g>
+<g data-node-id="linkR" data-parent="ranked" data-source-label="link: 코드, 테스트, workflow, 위키, 게이트 CHECK에
+전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션">
+<rect x="56" y="468" width="432" height="112" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="272.0" y="518.0" class="node" text-anchor="middle" fill="#f0f6fc">link: 코드, 테스트, workflow, 위키, 게이트 CHECK에</text>
+<text x="272.0" y="538.0" class="label" text-anchor="middle" fill="#c9d1d9">전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션</text>
+</g>
+<g data-node-id="mentionR" data-parent="ranked" data-source-label="mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,
+그래프 이웃">
+<rect x="56" y="648" width="432" height="80" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="272.0" y="682.0" class="node" text-anchor="middle" fill="#f0f6fc">mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,</text>
+<text x="272.0" y="702.0" class="label" text-anchor="middle" fill="#c9d1d9">그래프 이웃</text>
+</g>
+<g data-node-id="rerun" data-source-label="다시 돌릴 정확한 게이트와 명령
+--changed-since일 때 re-run 줄">
+<rect x="568" y="328" width="272" height="128" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="704.0" y="386.0" class="node" text-anchor="middle" fill="#f0f6fc">다시 돌릴 정확한 게이트와 명령</text>
+<text x="704.0" y="406.0" class="label" text-anchor="middle" fill="#c9d1d9">--changed-since일 때 re-run 줄</text>
+</g>
+<line x1="40" y1="792" x2="840" y2="792" stroke="#30363d"/>
+<text x="40" y="820" class="label" text-anchor="start" fill="#c9d1d9">pin은 최신 여부와 기본 브랜치 경로가 도달하는 같은 결과다.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

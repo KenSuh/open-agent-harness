@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 840 1056" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-ko-light-title concepts-routing-rules-ko-light-desc" data-source-diagram="2" id="concepts-routing-rules-ko-light-root">
+<title id="concepts-routing-rules-ko-light-title">라우팅 · tier, 모델과 추론 강도</title>
+<desc id="concepts-routing-rules-ko-light-desc">직접 준 작업 축으로 고정 규칙과 tier를 정하고 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다.</desc>
+<defs>
+      <style>#concepts-routing-rules-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      #concepts-routing-rules-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-routing-rules-ko-light-root .title { font-size: 28px; font-weight: 600; }
+      #concepts-routing-rules-ko-light-root .group { font-size: 14px; font-weight: 600; }
+      #concepts-routing-rules-ko-light-root .node { font-size: 12px; font-weight: 600; }
+      #concepts-routing-rules-ko-light-root .label { font-size: 12px; font-weight: 400; }
+      #concepts-routing-rules-ko-light-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      @media print {
+#concepts-routing-rules-ko-light-root .diagram-container { overflow-x: visible; }
+}</style>
+<marker id="concepts-routing-rules-ko-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
+<marker id="concepts-routing-rules-ko-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
+<marker id="concepts-routing-rules-ko-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+</defs>
+<rect x="0" y="0" width="840" height="1056" rx="0" fill="#ffffff"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">라우팅 · tier, 모델과 추론 강도</text>
+<line x1="260" y1="168" x2="260" y2="216" data-edge-id="e1" data-from="task" data-to="score" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<line x1="260" y1="280" x2="260" y2="328" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<line x1="260" y1="428" x2="260" y2="496" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<line x1="260" y1="596" x2="260" y2="640" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<line x1="260" y1="772" x2="260" y2="816" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<path d="M 672,472 L 672,540 Q 672,548 664,548 L 480,548" data-edge-id="e15" data-from="jev" data-to="pick" data-label="difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음" fill="none" stroke="#6e7781" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#concepts-routing-rules-ko-light-arrow)"/>
+<rect x="516" y="520" width="120" height="20" rx="2" fill="#ffffff"/>
+<text x="576.0" y="534" class="arrow-label" text-anchor="middle" fill="#424a53">1. Jev tier</text>
+<g data-node-id="task" data-source-label="작업: 단계, 종류, Scope 경로
+직접 준 축이 우선">
+<rect x="40" y="104" width="440" height="64" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="260.0" y="130.0" class="node" text-anchor="middle" fill="#1f2328">작업: 단계, 종류, Scope 경로</text>
+<text x="260.0" y="150.0" class="label" text-anchor="middle" fill="#424a53">직접 준 축이 우선</text>
+</g>
+<g data-node-id="score" data-source-label="고정 규칙이 네 축에 점수를 매김
+종류, 작업량, 추론, 위험">
+<rect x="40" y="216" width="440" height="64" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="260.0" y="242.0" class="node" text-anchor="middle" fill="#1f2328">고정 규칙이 네 축에 점수를 매김</text>
+<text x="260.0" y="262.0" class="label" text-anchor="middle" fill="#424a53">종류, 작업량, 추론, 위험</text>
+</g>
+<g data-node-id="tier" data-source-label="tier: low, medium, high, max
+위험 critical은 max, 마이그레이션과 보안은 최소 high">
+<rect x="40" y="328" width="440" height="100" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="260.0" y="372.0" class="node" text-anchor="middle" fill="#1f2328">tier: low, medium, high, max</text>
+<text x="260.0" y="392.0" class="label" text-anchor="middle" fill="#424a53">위험 critical은 max, 마이그레이션과 보안은 최소 high</text>
+</g>
+<g data-node-id="pick" data-source-label="패킷의 단계별 tier, 또는 oah call --tier
+출처 기록: rules, packet, flag, jev">
+<rect x="40" y="496" width="440" height="100" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
+<text x="260.0" y="540.0" class="node" text-anchor="middle" fill="#1a7f37">패킷의 단계별 tier, 또는 oah call --tier</text>
+<text x="260.0" y="560.0" class="label" text-anchor="middle" fill="#424a53">출처 기록: rules, packet, flag, jev</text>
+</g>
+<g data-node-id="model" data-source-label="CLI가 지원하는 모델과 추론 강도
+관찰할 수 없는 강도는 미검증으로 기록
+더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED">
+<rect x="40" y="640" width="440" height="132" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="260.0" y="690.0" class="node" text-anchor="middle" fill="#1f2328">CLI가 지원하는 모델과 추론 강도</text>
+<text x="260.0" y="710.0" class="label" text-anchor="middle" fill="#424a53">관찰할 수 없는 강도는 미검증으로 기록</text>
+<text x="260.0" y="730.0" class="label" text-anchor="middle" fill="#424a53">더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED</text>
+</g>
+<g data-node-id="brief" data-source-label="패킷 계획, 브리프, 실행 기록">
+<rect x="40" y="816" width="440" height="64" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
+<text x="260.0" y="852.0" class="node" text-anchor="middle" fill="#1f2328">패킷 계획, 브리프, 실행 기록</text>
+</g>
+<g data-node-id="jev" data-source-label="TypeSafe Jev 제공자
+순서만 바꾸고 더하거나 빼지 않음
+Intent와 Scope 경로로 난이도 판정">
+<rect x="544" y="328" width="256" height="144" rx="6" fill="#f6f8fa" stroke="#8250df" stroke-width="1"/>
+<text x="672.0" y="384.0" class="node" text-anchor="middle" fill="#8250df">TypeSafe Jev 제공자</text>
+<text x="672.0" y="404.0" class="label" text-anchor="middle" fill="#424a53">순서만 바꾸고 더하거나 빼지 않음</text>
+<text x="672.0" y="424.0" class="label" text-anchor="middle" fill="#424a53">Intent와 Scope 경로로 난이도 판정</text>
+</g>
+<text x="40" y="928" class="group" text-anchor="start" fill="#424a53">전이 조건</text>
+<text x="40" y="956" class="label" text-anchor="start" fill="#424a53">1 · difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음</text>
+<line x1="40" y1="996" x2="800" y2="996" stroke="#d0d7de"/>
+<text x="40" y="1024" class="label" text-anchor="start" fill="#424a53">Jev와 작업·기록 노드는 다음 스킬 순서 그림에도 나온다.</text>
+</svg>

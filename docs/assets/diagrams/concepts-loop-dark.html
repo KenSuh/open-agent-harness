@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The task loop</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0d1117; color: #f0f6fc; padding: 2rem; }
+.frame { max-width: 760px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #c9d1d9; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 760px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>The task loop</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 760 952" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-dark-title concepts-loop-dark-desc" data-source-diagram="0">
+<title id="concepts-loop-dark-title">The task loop</title>
+<desc id="concepts-loop-dark-desc">A packet passes through a lease, Claude implementation, gates and wiki evidence, and Codex review, with requested fixes returning to evidence before convergence, finish and landing after your confirmation.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="760" height="952" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">The task loop</text>
+<line x1="208" y1="168" x2="208" y2="216" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="280" x2="208" y2="328" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="392" x2="208" y2="440" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="504" x2="208" y2="552" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="336" y1="584" x2="464" y2="584" data-edge-id="e5" data-from="R" data-to="F" data-label="changes requested" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 580,552 L 580,480 Q 580,472 572,472 L 336,472" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="616" x2="208" y2="688" data-edge-id="e7" data-from="R" data-to="N" data-label="converged" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="208" y1="736" x2="208" y2="784" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="348" y="556" width="104" height="20" rx="2" fill="#0d1117"/>
+<text x="400.0" y="570" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. CHANGES</text>
+<rect x="216" y="640" width="88" height="20" rx="2" fill="#0d1117"/>
+<text x="260.0" y="654" class="arrow-label" text-anchor="middle" fill="#c9d1d9">CONVERGED</text>
+<g data-node-id="P" data-source-label="Packet
+intent and scope">
+<rect x="80" y="104" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="130.0" class="node" text-anchor="middle" fill="#f0f6fc">Packet</text>
+<text x="208.0" y="150.0" class="label" text-anchor="middle" fill="#c9d1d9">intent and scope</text>
+</g>
+<g data-node-id="L" data-source-label="Lease
+preflight, start">
+<rect x="80" y="216" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="242.0" class="node" text-anchor="middle" fill="#f0f6fc">Lease</text>
+<text x="208.0" y="262.0" class="label" text-anchor="middle" fill="#c9d1d9">preflight, start</text>
+</g>
+<g data-node-id="C" data-source-label="Claude
+initial implementation">
+<rect x="80" y="328" width="256" height="64" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
+<text x="208.0" y="354.0" class="node" text-anchor="middle" fill="#d29922">Claude</text>
+<text x="208.0" y="374.0" class="label" text-anchor="middle" fill="#c9d1d9">initial implementation</text>
+</g>
+<g data-node-id="G" data-source-label="Gates and wiki
+evidence">
+<rect x="80" y="440" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="466.0" class="node" text-anchor="middle" fill="#f0f6fc">Gates and wiki</text>
+<text x="208.0" y="486.0" class="label" text-anchor="middle" fill="#c9d1d9">evidence</text>
+</g>
+<g data-node-id="R" data-source-label="Codex
+review">
+<rect x="80" y="552" width="256" height="64" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="208.0" y="578.0" class="node" text-anchor="middle" fill="#3fb950">Codex</text>
+<text x="208.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">review</text>
+</g>
+<g data-node-id="F" data-source-label="Codex
+oah fix">
+<rect x="464" y="552" width="232" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="580.0" y="578.0" class="node" text-anchor="middle" fill="#f0f6fc">Codex</text>
+<text x="580.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">oah fix</text>
+</g>
+<g data-node-id="N" data-source-label="oah finish">
+<rect x="80" y="688" width="256" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="716.0" class="node" text-anchor="middle" fill="#f0f6fc">oah finish</text>
+</g>
+<g data-node-id="D" data-source-label="oah land
+after you confirm">
+<rect x="80" y="784" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="208.0" y="810.0" class="node" text-anchor="middle" fill="#f0f6fc">oah land</text>
+<text x="208.0" y="830.0" class="label" text-anchor="middle" fill="#c9d1d9">after you confirm</text>
+</g>
+<text x="40" y="876" class="label" text-anchor="start" fill="#c9d1d9">1 · changes requested</text>
+<line x1="40" y1="892" x2="720" y2="892" stroke="#30363d"/>
+<text x="40" y="920" class="label" text-anchor="start" fill="#c9d1d9">Arrows follow work; corrections return to the gates and wiki.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>

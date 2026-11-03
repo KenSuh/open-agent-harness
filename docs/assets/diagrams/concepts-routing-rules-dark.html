@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Routing · tier, model and effort</title>
+  <style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0d1117; color: #f0f6fc; padding: 2rem; }
+.frame { max-width: 840px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
+.eyebrow { font-size: 12px; color: #c9d1d9; margin-bottom: .5rem; }
+svg { width: 100%; min-width: 840px; display: block; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.title { font-size: 28px; font-weight: 600; }
+.group { font-size: 14px; font-weight: 600; }
+.node { font-size: 12px; font-weight: 600; }
+.label { font-size: 12px; font-weight: 400; }
+.arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset.
+     Faithful Mermaid redraw; source IDs join split figures. See README.md for fidelity. -->
+<div class="frame">
+<p class="eyebrow">Flowchart · oah</p>
+<h1>Routing · tier, model and effort</h1>
+<div class="diagram-container">
+<svg viewBox="0 0 840 1056" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-dark-title concepts-routing-rules-dark-desc" data-source-diagram="2">
+<title id="concepts-routing-rules-dark-title">Routing · tier, model and effort</title>
+<desc id="concepts-routing-rules-dark-desc">Explicit task axes feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record.</desc>
+<defs>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+</defs>
+<rect x="0" y="0" width="840" height="1056" rx="0" fill="#0d1117"/>
+<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">Routing · tier, model and effort</text>
+<line x1="260" y1="168" x2="260" y2="216" data-edge-id="e1" data-from="task" data-to="score" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="260" y1="280" x2="260" y2="328" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="260" y1="428" x2="260" y2="496" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="260" y1="596" x2="260" y2="640" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="260" y1="772" x2="260" y2="816" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
+<path d="M 672,472 L 672,540 Q 672,548 664,548 L 480,548" data-edge-id="e15" data-from="jev" data-to="pick" data-label="its tier at or above difficulty_min_confidence, never below the floor" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="516" y="520" width="120" height="20" rx="2" fill="#0d1117"/>
+<text x="576.0" y="534" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. JEV TIER</text>
+<g data-node-id="task" data-source-label="Task: stage, kind and Scope paths
+axes you give explicitly win">
+<rect x="40" y="104" width="440" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="130.0" class="node" text-anchor="middle" fill="#f0f6fc">Task: stage, kind and Scope paths</text>
+<text x="260.0" y="150.0" class="label" text-anchor="middle" fill="#c9d1d9">axes you give explicitly win</text>
+</g>
+<g data-node-id="score" data-source-label="Fixed rules score four axes
+kind, intensity, reasoning, risk">
+<rect x="40" y="216" width="440" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="242.0" class="node" text-anchor="middle" fill="#f0f6fc">Fixed rules score four axes</text>
+<text x="260.0" y="262.0" class="label" text-anchor="middle" fill="#c9d1d9">kind, intensity, reasoning, risk</text>
+</g>
+<g data-node-id="tier" data-source-label="Tier: low, medium, high or max
+risk critical = max, migration, security = at least high">
+<rect x="40" y="328" width="440" height="100" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="362.0" class="node" text-anchor="middle" fill="#f0f6fc">Tier: low, medium, high or max</text>
+<text x="260.0" y="382.0" class="label" text-anchor="middle" fill="#c9d1d9">risk critical = max, migration, security = at least</text>
+<text x="260.0" y="402.0" class="label" text-anchor="middle" fill="#c9d1d9">high</text>
+</g>
+<g data-node-id="pick" data-source-label="Packet stage tier, or oah call --tier
+source recorded: rules, packet, flag or jev">
+<rect x="40" y="496" width="440" height="100" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+<text x="260.0" y="540.0" class="node" text-anchor="middle" fill="#3fb950">Packet stage tier, or oah call --tier</text>
+<text x="260.0" y="560.0" class="label" text-anchor="middle" fill="#c9d1d9">source recorded: rules, packet, flag or jev</text>
+</g>
+<g data-node-id="model" data-source-label="Model and effort the CLI supports
+an effort that cannot be observed is recorded as unverified
+a lower launch effort fails: OAH_EFFORT_DOWNGRADED">
+<rect x="40" y="640" width="440" height="132" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="680.0" class="node" text-anchor="middle" fill="#f0f6fc">Model and effort the CLI supports</text>
+<text x="260.0" y="700.0" class="label" text-anchor="middle" fill="#c9d1d9">an effort that cannot be observed is recorded as</text>
+<text x="260.0" y="720.0" class="label" text-anchor="middle" fill="#c9d1d9">unverified</text>
+<text x="260.0" y="740.0" class="label" text-anchor="middle" fill="#c9d1d9">a lower launch effort fails: OAH_EFFORT_DOWNGRADED</text>
+</g>
+<g data-node-id="brief" data-source-label="Packet plan, brief and run record">
+<rect x="40" y="816" width="440" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
+<text x="260.0" y="852.0" class="node" text-anchor="middle" fill="#f0f6fc">Packet plan, brief and run record</text>
+</g>
+<g data-node-id="jev" data-source-label="TypeSafe Jev provider
+re-orders only, never adds or drops
+judges difficulty from the Intent and Scope paths">
+<rect x="544" y="328" width="256" height="144" rx="6" fill="#161b22" stroke="#a371f7" stroke-width="1"/>
+<text x="672.0" y="364.0" class="node" text-anchor="middle" fill="#a371f7">TypeSafe Jev provider</text>
+<text x="672.0" y="384.0" class="label" text-anchor="middle" fill="#c9d1d9">re-orders only, never adds or</text>
+<text x="672.0" y="404.0" class="label" text-anchor="middle" fill="#c9d1d9">drops</text>
+<text x="672.0" y="424.0" class="label" text-anchor="middle" fill="#c9d1d9">judges difficulty from the</text>
+<text x="672.0" y="444.0" class="label" text-anchor="middle" fill="#c9d1d9">Intent and Scope paths</text>
+</g>
+<text x="40" y="928" class="group" text-anchor="start" fill="#c9d1d9">Transition keys</text>
+<text x="40" y="956" class="label" text-anchor="start" fill="#c9d1d9">1 · its tier at or above difficulty_min_confidence, never below the floor</text>
+<line x1="40" y1="996" x2="800" y2="996" stroke="#30363d"/>
+<text x="40" y="1024" class="label" text-anchor="start" fill="#c9d1d9">Jev and the task / record nodes repeat in the skill-order figure.</text>
+</svg>
+</div>
+</div>
+</body>
+</html>
