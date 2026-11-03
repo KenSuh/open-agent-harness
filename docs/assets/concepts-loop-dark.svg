@@ -1,83 +1,144 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 760 952" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-dark-title concepts-loop-dark-desc" data-source-diagram="0" id="concepts-loop-dark-root">
+<svg viewBox="0 0 840 1372" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-dark-title concepts-loop-dark-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-loop-dark-root">
 <title id="concepts-loop-dark-title">The task loop</title>
 <desc id="concepts-loop-dark-desc">A packet passes through a lease, Claude implementation, gates and wiki evidence, and Codex review, with requested fixes returning to evidence before convergence, finish and landing after your confirmation.</desc>
 <defs>
-      <style>#concepts-loop-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      <style>#concepts-loop-dark-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5f5f5; }
       #concepts-loop-dark-root .diagram-container { width: 100%; overflow-x: auto; }
-      #concepts-loop-dark-root .title { font-size: 28px; font-weight: 600; }
-      #concepts-loop-dark-root .group { font-size: 14px; font-weight: 600; }
-      #concepts-loop-dark-root .node { font-size: 12px; font-weight: 600; }
-      #concepts-loop-dark-root .label { font-size: 12px; font-weight: 400; }
-      #concepts-loop-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      #concepts-loop-dark-root text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+      #concepts-loop-dark-root .title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+      #concepts-loop-dark-root .node { font-size: 16px; font-weight: 600; }
+      #concepts-loop-dark-root .sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-loop-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #concepts-loop-dark-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #concepts-loop-dark-root .prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-loop-dark-root .zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+      #concepts-loop-dark-root .arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #concepts-loop-dark-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+      #concepts-loop-dark-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
       @media print {
 #concepts-loop-dark-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="concepts-loop-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
-<marker id="concepts-loop-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
-<marker id="concepts-loop-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+<pattern id="concepts-loop-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="concepts-loop-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="concepts-loop-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="concepts-loop-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect x="0" y="0" width="760" height="952" rx="0" fill="#0d1117"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">The task loop</text>
-<line x1="208" y1="168" x2="208" y2="216" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="208" y1="280" x2="208" y2="328" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="208" y1="392" x2="208" y2="440" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="208" y1="504" x2="208" y2="552" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="336" y1="584" x2="464" y2="584" data-edge-id="e5" data-from="R" data-to="F" data-label="changes requested" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<path d="M 580,552 L 580,480 Q 580,472 572,472 L 336,472" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="208" y1="616" x2="208" y2="688" data-edge-id="e7" data-from="R" data-to="N" data-label="converged" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<line x1="208" y1="736" x2="208" y2="784" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-loop-dark-arrow)"/>
-<rect x="348" y="556" width="104" height="20" rx="2" fill="#0d1117"/>
-<text x="400.0" y="570" class="arrow-label" text-anchor="middle" fill="#c9d1d9">1. CHANGES</text>
-<rect x="216" y="640" width="88" height="20" rx="2" fill="#0d1117"/>
-<text x="260.0" y="654" class="arrow-label" text-anchor="middle" fill="#c9d1d9">CONVERGED</text>
-<g data-node-id="P" data-source-label="Packet
-intent and scope">
-<rect x="80" y="104" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="208.0" y="130.0" class="node" text-anchor="middle" fill="#f0f6fc">Packet</text>
-<text x="208.0" y="150.0" class="label" text-anchor="middle" fill="#c9d1d9">intent and scope</text>
+<rect width="840" height="1372" fill="#2d3142"/>
+<rect width="840" height="1372" fill="url(#concepts-loop-dark-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">The task loop</text>
+<path d="M 232,248 L 232,288" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 232,392 L 232,432" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 232,536 L 232,576" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 232,680 L 232,720" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 232,824 L 232,864" data-edge-id="e7" data-from="R" data-to="N" data-label="converged" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 232,968 L 232,1008" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 384,772 L 552,772" data-edge-id="e5" data-from="R" data-to="F" data-label="changes requested" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<path d="M 676,720 L 676,636 Q 676,628 668,628 L 384,628" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<rect x="240" y="833" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="256" y="848" class="arrow-label" text-anchor="middle">01</text>
+<rect x="452" y="744" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="468" y="759" class="arrow-label" text-anchor="middle">02</text>
+<g data-node-id="P" data-source-label="Packet intent and scope">
+<rect x="80" y="144" width="304" height="104" rx="20" fill="#2d3142"/>
+<rect x="80" y="144" width="304" height="104" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="160" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="120" y="171" class="tag" text-anchor="middle">INTENT</text>
+<text x="368" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<g data-node-id="L" data-source-label="Lease
-preflight, start">
-<rect x="80" y="216" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="208.0" y="242.0" class="node" text-anchor="middle" fill="#f0f6fc">Lease</text>
-<text x="208.0" y="262.0" class="label" text-anchor="middle" fill="#c9d1d9">preflight, start</text>
+<text x="96" y="202" class="node" text-anchor="start">Packet</text>
+<text x="96" y="222" class="sub" text-anchor="start">intent and scope</text>
 </g>
-<g data-node-id="C" data-source-label="Claude
-initial implementation">
-<rect x="80" y="328" width="256" height="64" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
-<text x="208.0" y="354.0" class="node" text-anchor="middle" fill="#d29922">Claude</text>
-<text x="208.0" y="374.0" class="label" text-anchor="middle" fill="#c9d1d9">initial implementation</text>
+<g data-node-id="L" data-source-label="Lease preflight, start">
+<rect x="80" y="288" width="304" height="104" rx="6" fill="#2d3142"/>
+<rect x="80" y="288" width="304" height="104" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="304" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="315" class="tag" text-anchor="middle">LEASE</text>
+<text x="368" y="326" class="ghost" text-anchor="end">02</text>
 </g>
-<g data-node-id="G" data-source-label="Gates and wiki
-evidence">
-<rect x="80" y="440" width="256" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="208.0" y="466.0" class="node" text-anchor="middle" fill="#f0f6fc">Gates and wiki</text>
-<text x="208.0" y="486.0" class="label" text-anchor="middle" fill="#c9d1d9">evidence</text>
+<text x="96" y="346" class="node" text-anchor="start">Lease</text>
+<text x="96" y="366" class="sub technical" text-anchor="start">preflight, start</text>
 </g>
-<g data-node-id="R" data-source-label="Codex
-review">
-<rect x="80" y="552" width="256" height="64" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
-<text x="208.0" y="578.0" class="node" text-anchor="middle" fill="#3fb950">Codex</text>
-<text x="208.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">review</text>
+<g data-node-id="C" data-source-label="Claude initial implementation">
+<rect x="80" y="432" width="304" height="104" rx="6" fill="#2d3142"/>
+<rect x="80" y="432" width="304" height="104" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="448" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="120" y="459" class="tag" text-anchor="middle">CLAUDE</text>
+<text x="368" y="470" class="ghost" text-anchor="end">03</text>
 </g>
-<g data-node-id="F" data-source-label="Codex
-oah fix">
-<rect x="464" y="552" width="232" height="64" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="580.0" y="578.0" class="node" text-anchor="middle" fill="#f0f6fc">Codex</text>
-<text x="580.0" y="598.0" class="label" text-anchor="middle" fill="#c9d1d9">oah fix</text>
+<text x="96" y="490" class="node" text-anchor="start">Claude</text>
+<text x="96" y="510" class="sub" text-anchor="start">initial implementation</text>
+</g>
+<g data-node-id="G" data-source-label="Gates and wiki evidence">
+<rect x="80" y="576" width="304" height="104" rx="6" fill="#2d3142"/>
+<rect x="80" y="576" width="304" height="104" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="96" y="592" width="56" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="124" y="603" class="tag" text-anchor="middle">EVIDENCE</text>
+<text x="368" y="614" class="ghost" text-anchor="end">04</text>
+</g>
+<text x="96" y="634" class="node" text-anchor="start">Gates and wiki</text>
+<text x="96" y="654" class="sub" text-anchor="start">evidence</text>
+</g>
+<g data-node-id="R" data-source-label="Codex review">
+<rect x="80" y="720" width="304" height="104" rx="6" fill="#2d3142"/>
+<rect x="80" y="720" width="304" height="104" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="736" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="747" class="tag" text-anchor="middle">CODEX</text>
+<text x="368" y="758" class="ghost" text-anchor="end">05</text>
+</g>
+<text x="96" y="778" class="node" text-anchor="start">Codex</text>
+<text x="96" y="798" class="sub" text-anchor="start">review</text>
 </g>
 <g data-node-id="N" data-source-label="oah finish">
-<rect x="80" y="688" width="256" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="208.0" y="716.0" class="node" text-anchor="middle" fill="#f0f6fc">oah finish</text>
+<rect x="80" y="864" width="304" height="104" rx="6" fill="#2d3142"/>
+<rect x="80" y="864" width="304" height="104" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="880" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="120" y="891" class="tag" text-anchor="middle">FINISH</text>
+<text x="368" y="902" class="ghost" text-anchor="end">06</text>
 </g>
-<g data-node-id="D" data-source-label="oah land
-after you confirm">
-<rect x="80" y="784" width="256" height="64" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="208.0" y="810.0" class="node" text-anchor="middle" fill="#f0f6fc">oah land</text>
-<text x="208.0" y="830.0" class="label" text-anchor="middle" fill="#c9d1d9">after you confirm</text>
+<text x="96" y="922" class="node" text-anchor="start">oah finish</text>
 </g>
-<text x="40" y="876" class="label" text-anchor="start" fill="#c9d1d9">1 · changes requested</text>
-<line x1="40" y1="892" x2="720" y2="892" stroke="#30363d"/>
-<text x="40" y="920" class="label" text-anchor="start" fill="#c9d1d9">Arrows follow work; corrections return to the gates and wiki.</text>
+<g data-node-id="D" data-source-label="oah land after you confirm">
+<rect x="80" y="1008" width="304" height="104" rx="20" fill="#2d3142"/>
+<rect x="80" y="1008" width="304" height="104" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="1024" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="114" y="1035" class="tag" text-anchor="middle">LAND</text>
+<text x="368" y="1046" class="ghost" text-anchor="end">07</text>
+</g>
+<text x="96" y="1066" class="node" text-anchor="start">oah land</text>
+<text x="96" y="1086" class="sub" text-anchor="start">after you confirm</text>
+</g>
+<g data-node-id="F" data-source-label="Codex oah fix">
+<rect x="552" y="720" width="248" height="104" rx="6" fill="#2d3142"/>
+<rect x="552" y="720" width="248" height="104" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="568" y="736" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="590" y="747" class="tag" text-anchor="middle">CODEX</text>
+<text x="784" y="758" class="ghost" text-anchor="end">05b</text>
+</g>
+<text x="568" y="778" class="node" text-anchor="start">Codex</text>
+<text x="568" y="798" class="sub technical" text-anchor="start">oah fix</text>
+</g>
+<text x="40" y="1164" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="1183" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1197" class="label" text-anchor="middle">01</text>
+<text x="80" y="1197" class="prose" text-anchor="start">converged</text>
+<rect x="40" y="1215" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1229" class="label" text-anchor="middle">02</text>
+<text x="80" y="1229" class="prose" text-anchor="start">changes requested</text>
+<line x1="40" y1="1292" x2="800" y2="1292" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1320" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1310" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1320" class="prose" text-anchor="start">Focus</text>
+<path d="M 236,1316 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-loop-dark-arrow)"/>
+<text x="272" y="1320" class="prose" text-anchor="start">Work / evidence</text>
 </svg>

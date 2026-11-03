@@ -1,66 +1,102 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 880 852" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-ranked-light-title concepts-impact-ranked-light-desc" data-source-diagram="3" id="concepts-impact-ranked-light-root">
+<svg viewBox="0 0 920 1064" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-ranked-light-title concepts-impact-ranked-light-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-impact-ranked-light-root">
 <title id="concepts-impact-ranked-light-title">Impact · ranked results</title>
 <desc id="concepts-impact-ranked-light-desc">Ranked impact results run from pin through exec and link to mention, with pin and exec identifying the exact gates and commands to rerun and the rerun lines shown with changed-since.</desc>
 <defs>
-      <style>#concepts-impact-ranked-light-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      <style>#concepts-impact-ranked-light-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #2d3142; }
       #concepts-impact-ranked-light-root .diagram-container { width: 100%; overflow-x: auto; }
-      #concepts-impact-ranked-light-root .title { font-size: 28px; font-weight: 600; }
-      #concepts-impact-ranked-light-root .group { font-size: 14px; font-weight: 600; }
-      #concepts-impact-ranked-light-root .node { font-size: 12px; font-weight: 600; }
-      #concepts-impact-ranked-light-root .label { font-size: 12px; font-weight: 400; }
-      #concepts-impact-ranked-light-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      #concepts-impact-ranked-light-root text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #2d3142; }
+      #concepts-impact-ranked-light-root .title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+      #concepts-impact-ranked-light-root .node { font-size: 16px; font-weight: 600; }
+      #concepts-impact-ranked-light-root .sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #concepts-impact-ranked-light-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .prose { font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #4f5d75; }
+      #concepts-impact-ranked-light-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #2d3142; opacity: .06; }
       @media print {
 #concepts-impact-ranked-light-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="concepts-impact-ranked-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
-<marker id="concepts-impact-ranked-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
-<marker id="concepts-impact-ranked-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+<pattern id="concepts-impact-ranked-light-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity=".10"/></pattern>
+<marker id="concepts-impact-ranked-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="concepts-impact-ranked-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="concepts-impact-ranked-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
 </defs>
-<rect x="0" y="0" width="880" height="852" rx="0" fill="#ffffff"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">Impact · ranked results</text>
-<g data-container-id="ranked">
-<rect x="40" y="104" width="464" height="664" rx="8" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1"/>
-<text x="56" y="128" class="group" text-anchor="start" fill="#424a53">Ranked results</text>
+<rect width="920" height="1064" fill="#f5f5f5"/>
+<rect width="920" height="1064" fill="url(#concepts-impact-ranked-light-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">Impact · ranked results</text>
+<rect x="40" y="144" width="456" height="768" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="1" data-group-id="ranked" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="168" class="zone-label" text-anchor="start">Ranked results</text>
+<path d="M 264,336 L 264,384" data-edge-id="e7" data-from="pinR" data-to="execR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<path d="M 264,496 L 264,544" data-edge-id="e8" data-from="execR" data-to="linkR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<path d="M 264,704 L 264,752" data-edge-id="e9" data-from="linkR" data-to="mentionR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<path d="M 464,264 L 724,264 Q 732,264 732,272 L 732,384" data-edge-id="e10" data-from="pinR" data-to="rerun" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<path d="M 464,440 L 584,440" data-edge-id="e11" data-from="execR" data-to="rerun" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<g data-node-id="pinR" data-source-label="pin: a gate EXPECT names it, or a gate CHECK or workflow, manifest or config command hashes or greps it" data-parent="ranked">
+<rect x="64" y="192" width="400" height="144" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="192" width="400" height="144" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<g aria-hidden="true">
+<rect x="80" y="208" width="52" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="219" class="tag" text-anchor="middle">BINDING</text>
 </g>
-<line x1="272" y1="272" x2="272" y2="328" data-edge-id="e7" data-from="pinR" data-to="execR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
-<line x1="272" y1="412" x2="272" y2="468" data-edge-id="e8" data-from="execR" data-to="linkR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
-<line x1="272" y1="580" x2="272" y2="648" data-edge-id="e9" data-from="linkR" data-to="mentionR" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
-<path d="M 488,208 L 696,208 Q 704,208 704,216 L 704,328" data-edge-id="e10" data-from="pinR" data-to="rerun" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
-<line x1="488" y1="368" x2="568" y2="368" data-edge-id="e11" data-from="execR" data-to="rerun" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
-<g data-node-id="pinR" data-parent="ranked" data-source-label="pin: a gate EXPECT names it, or a gate CHECK
-or workflow, manifest or config command hashes or greps it">
-<rect x="56" y="144" width="432" height="128" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
-<text x="272.0" y="192.0" class="node" text-anchor="middle" fill="#1a7f37">pin: a gate EXPECT names it, or a gate CHECK</text>
-<text x="272.0" y="212.0" class="label" text-anchor="middle" fill="#424a53">or workflow, manifest or config command hashes or</text>
-<text x="272.0" y="232.0" class="label" text-anchor="middle" fill="#424a53">greps it</text>
+<text x="80" y="250" class="node" text-anchor="start">pin:</text>
+<text x="80" y="270" class="sub" text-anchor="start">a gate EXPECT names it, or a gate CHECK</text>
+<text x="80" y="288" class="sub" text-anchor="start">or workflow, manifest or config command hashes or</text>
+<text x="80" y="306" class="sub" text-anchor="start">greps it</text>
 </g>
-<g data-node-id="execR" data-parent="ranked" data-source-label="exec: a gate CHECK or such a command runs it">
-<rect x="56" y="328" width="432" height="84" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
-<text x="272.0" y="374.0" class="node" text-anchor="middle" fill="#1a7f37">exec: a gate CHECK or such a command runs it</text>
+<g data-node-id="execR" data-source-label="exec: a gate CHECK or such a command runs it" data-parent="ranked">
+<rect x="64" y="384" width="400" height="112" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="384" width="400" height="112" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<g aria-hidden="true">
+<rect x="80" y="400" width="52" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="411" class="tag" text-anchor="middle">BINDING</text>
 </g>
-<g data-node-id="linkR" data-parent="ranked" data-source-label="link: its full path is named in code, tests, workflows,
-wiki or a gate CHECK, migrations that define a SQL object">
-<rect x="56" y="468" width="432" height="112" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="272.0" y="498.0" class="node" text-anchor="middle" fill="#1f2328">link: its full path is named in code, tests,</text>
-<text x="272.0" y="518.0" class="node" text-anchor="middle" fill="#1f2328">workflows,</text>
-<text x="272.0" y="538.0" class="label" text-anchor="middle" fill="#424a53">wiki or a gate CHECK, migrations that define a SQL</text>
-<text x="272.0" y="558.0" class="label" text-anchor="middle" fill="#424a53">object</text>
+<text x="80" y="442" class="node" text-anchor="start">exec:</text>
+<text x="80" y="462" class="sub" text-anchor="start">a gate CHECK or such a command runs it</text>
 </g>
-<g data-node-id="mentionR" data-parent="ranked" data-source-label="mention: file name or stem match, co-change,
-graph neighbour">
-<rect x="56" y="648" width="432" height="80" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="272.0" y="682.0" class="node" text-anchor="middle" fill="#1f2328">mention: file name or stem match, co-change,</text>
-<text x="272.0" y="702.0" class="label" text-anchor="middle" fill="#424a53">graph neighbour</text>
+<g data-node-id="linkR" data-source-label="link: its full path is named in code, tests, workflows, wiki or a gate CHECK, migrations that define a SQL object" data-parent="ranked">
+<rect x="64" y="544" width="400" height="160" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="544" width="400" height="160" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="80" y="560" width="52" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="571" class="tag" text-anchor="middle">CONTEXT</text>
 </g>
-<g data-node-id="rerun" data-source-label="Exact gates and commands to re-run
-re-run lines with --changed-since">
-<rect x="568" y="328" width="272" height="128" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="704.0" y="366.0" class="node" text-anchor="middle" fill="#1f2328">Exact gates and commands to</text>
-<text x="704.0" y="386.0" class="node" text-anchor="middle" fill="#1f2328">re-run</text>
-<text x="704.0" y="406.0" class="label" text-anchor="middle" fill="#424a53">re-run lines with</text>
-<text x="704.0" y="426.0" class="label" text-anchor="middle" fill="#424a53">--changed-since</text>
+<text x="80" y="602" class="node" text-anchor="start">link:</text>
+<text x="80" y="622" class="sub" text-anchor="start">its full path is named in code, tests, workflows,</text>
+<text x="80" y="640" class="sub" text-anchor="start">wiki or a gate CHECK, migrations that define a</text>
+<text x="80" y="658" class="sub" text-anchor="start">SQL object</text>
 </g>
-<line x1="40" y1="792" x2="840" y2="792" stroke="#d0d7de"/>
-<text x="40" y="820" class="label" text-anchor="start" fill="#424a53">pin is the same result reached by the freshness and default-branch paths.</text>
+<g data-node-id="mentionR" data-source-label="mention: file name or stem match, co-change, graph neighbour" data-parent="ranked">
+<rect x="64" y="752" width="400" height="128" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="752" width="400" height="128" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="80" y="768" width="52" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="779" class="tag" text-anchor="middle">CONTEXT</text>
+</g>
+<text x="80" y="810" class="node" text-anchor="start">mention:</text>
+<text x="80" y="830" class="sub" text-anchor="start">file name or stem match, co-change,</text>
+<text x="80" y="848" class="sub" text-anchor="start">graph neighbour</text>
+</g>
+<g data-node-id="rerun" data-source-label="Exact gates and commands to re-run re-run lines with --changed-since">
+<rect x="584" y="384" width="296" height="176" rx="6" fill="#f5f5f5"/>
+<rect x="584" y="384" width="296" height="176" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="600" y="400" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="622" y="411" class="tag" text-anchor="middle">RERUN</text>
+<g transform="translate(800,396)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4" /> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2" /></g></g>
+</g>
+<text x="600" y="442" class="node" text-anchor="start">Exact gates and commands</text>
+<text x="600" y="462" class="sub" text-anchor="start">to re-run</text>
+<text x="600" y="480" class="sub" text-anchor="start">re-run lines with --changed-since</text>
+</g>
+<line x1="40" y1="984" x2="880" y2="984" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="1012" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1002" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="1012" class="prose" text-anchor="start">Binding evidence</text>
+<path d="M 296,1008 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-ranked-light-arrow)"/>
+<text x="332" y="1012" class="prose" text-anchor="start">Rank / rerun</text>
 </svg>

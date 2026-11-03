@@ -1,97 +1,107 @@
 # Editable diagrams
 
-These HTML sources adapt the minimal light/dark templates and styles from
+These standalone HTML sources adapt the minimal templates, default palette and components from
 [diagram-design](https://github.com/cathrynlavery/diagram-design/tree/3eb03b8), **MIT, commit 3eb03b8**.
-Copyright (c) 2025 Cathryn Lavery. The full license is in
+Copyright (c) 2025 Cathryn Lavery. Its full license is in
 [THIRD_PARTY_NOTICES.md](../../../THIRD_PARTY_NOTICES.md#diagram-design).
-No bundled icon set is used and the skill itself is not vendored here.
+The skill is not installed or vendored here. Selected monochrome icons come from its
+`primitive-icons.md` reference; their license is included [below](#icon-license).
 
-Each stem below has `-light.html`, `-dark.html`, `-ko-light.html` and `-ko-dark.html` sources.
-The matching SVGs live one directory above. Edit HTML first; SVGs are exports, not separate sources.
+Each stem has `-light.html`, `-dark.html`, `-ko-light.html` and `-ko-dark.html` sources.
+Matching SVGs live one directory above. Edit HTML first; SVGs are exports, not independent sources.
+The banner is maintained separately and is not part of this redraw.
 
-| Stem | Skill type and size (`fit`) | Used by |
-|---|---|---|
-| `banner` | Flowchart, 640 × 352 | English and Korean README banners |
-| `how-it-works` | Flowchart, 640 × 544 | Both READMEs and both how-it-works pages, sharing assets |
-| `architecture-build` | Architecture, 840 × 848 | How-it-works pages, task preparation and the four rails |
-| `architecture-land` | Architecture, 840 × 800 | How-it-works pages, review and landing |
-| `loop-start` | Sequence, 720 × 504 | How-it-works pages, exchanges 1–6 |
-| `loop-review` | Sequence, 840 × 712 | How-it-works pages, exchanges 7–15 |
-| `concepts-loop` | Flowchart, 760 × 952 | Both concepts pages, The loop / 전체 흐름 |
-| `concepts-leases-lifecycle` | State machine, 880 × 1120 | Both concepts pages, Leases / 리스, part 1 |
-| `concepts-leases-finish` | State machine, 880 × 968 | Both concepts pages, Leases / 리스, part 2 |
-| `concepts-routing-rules` | Flowchart, 840 × 1056 | Both concepts pages, Routing and difficulty / 라우팅과 난이도, part 1 |
-| `concepts-routing-skills` | Flowchart, 880 × 1252 | Both concepts pages, Routing and difficulty / 라우팅과 난이도, part 2 |
-| `concepts-impact-freshness` | Flowchart, 880 × 1104 | Both concepts pages, The impact map / 영향 지도, part 1 |
-| `concepts-impact-ranked` | Flowchart, 880 × 852 | Both concepts pages, The impact map / 영향 지도, part 2 |
-| `concepts-review` | Flowchart, 880 × 824 | Both concepts pages, The review loop and corrections / 리뷰 루프와 수정 |
-| `concepts-landing-local` | Flowchart, 880 × 956 | Both concepts pages, Landing / 반영, part 1 |
-| `concepts-landing-checks` | Flowchart, 880 × 1136 | Both concepts pages, Landing / 반영, part 2 |
+| Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
+|---|---|---|---|
+| `how-it-works` | Swimlane, 1080 × 1484 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
+| `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; ready for the README text run |
+| `architecture-build` | Architecture, 1040 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
+| `architecture-land` | Architecture, 1040 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
+| `loop-start` | Sequence, 960 × 916 | 3 / 6 | Numbered exchanges 1–6 |
+| `loop-review` | Sequence, 1008 × 1212 | 4 / 9 | Numbered exchanges 7–15 and the correction loop |
+| `concepts-loop` | Flowchart, 840 × 1372 | 8 / 8 | Packet to confirmed landing |
+| `concepts-leases-lifecycle` | State machine, 880 × 1308 | 6 / 7 | Start, renew, expiry and release |
+| `concepts-leases-finish` | State machine, 880 × 1164 | 5 / 6 | Finish checks and refusals |
+| `concepts-routing-rules` | Flowchart, 960 × 1428 | 7 / 6 | Difficulty rules, tier, model and effort |
+| `concepts-routing-skills` | Flowchart, 960 × 1644 | 7 / 9 | Deterministic skills, reranking and fallbacks |
+| `concepts-impact-freshness` | Flowchart, 880 × 1268 | 6 / 6 | Freshness, refresh, stale input and default branch |
+| `concepts-impact-ranked` | Flowchart, 920 × 1064 | 5 / 5 | pin, exec, link, mention and exact reruns |
+| `concepts-review` | Flowchart, 880 × 980 | 5 / 5 | All review outcomes and correction/bind return |
+| `concepts-landing-local` | Flowchart, 1000 × 1204 | 8 / 5 | Opt-in local hooks and push paths |
+| `concepts-landing-checks` | Flowchart, 1000 × 1420 | 6 / 6 | CI, exact HEAD, exception and confirmation |
+| `banner` | Separately maintained | — | README banner; unchanged by this redraw |
 
-[The style guide](style-guide.md) records the oah Primer palette, role colors, system font stacks,
-type ramp, spacing and connector rules for later diagrams. Each source applies those tokens directly,
-so its HTML and SVG work offline without a shared stylesheet. Light/dark twins carry identical content
-and geometry; Korean twins carry the same meaning with Korean system fonts first.
+[The style guide](style-guide.md) records the shipped gallery tokens, dotted paper, system font stacks,
+type ramp, chips, ghost numbers, zones, icons and connector rules. There is one focal accent hue,
+not a color for each engine. All four variants have the same structural geometry; Korean keeps
+the same meaning, with 12px-or-larger Hangul and Korean system fallbacks.
+
+The new `features` assets are ready for the README text run. They are not inserted into either README
+in this figure-only run, whose page edits are restricted to existing alt text. Use each language's
+SVG description verbatim as its image alt text when inserting the new picture.
 
 ## Regenerate
 
-Use a local read-only copy of the skill at the pinned commit. Set `DIAGRAM_DESIGN` to its
-`skills/diagram-design` directory, then run from the repository root. The scripts use only the Python
-standard library. No installation or download is part of regeneration.
+Use a local read-only copy of the pinned skill. Set `DIAGRAM_DESIGN` to its `skills/diagram-design`
+directory. No installation or download is needed; its check and export helpers use Python's standard library.
 
 ```sh
-python3 -I "$DIAGRAM_DESIGN/scripts/self_check.py" --offline docs/assets/diagrams/*.html
 for source in docs/assets/diagrams/*.html; do
+  case "$source" in */banner-*) continue ;; esac
+  python3 -I "$DIAGRAM_DESIGN/scripts/self_check.py" --offline "$source" || break
   python3 -I "$DIAGRAM_DESIGN/scripts/export_svg.py" "$source" \
     "docs/assets/$(basename "$source" .html).svg" --system-fonts || break
 done
 ```
 
-Keep each page's image alt text identical to both exported `<desc>` elements. Every SVG needs a
-first-child `<title>`, a `<desc>` and prefixed accessibility IDs. Use `<picture>` with a dark source
-and a light fallback. Do not add scripts, external images, fonts, links or CSS imports.
+Keep page alt text identical to both exported descriptions. Every SVG needs a first-child title,
+a description and prefixed accessibility IDs. Use a picture element with a dark source and light fallback.
+No scripts, external images, remote fonts, font faces or CSS imports belong in a source or export.
 
-The self-check checks document completeness, accessibility, offline safety and canvas bounds. It does
-not replace visual review of text. On macOS, where the sandbox permits it, render each SVG with
-`qlmanage -t -s 1600 -o .tmp/rdp-previews <svg>` after creating that preview directory. Inspect both
-themes and languages for clipping, overlap and legibility. Keep all previews in that ignored directory.
+Self-check covers completeness, accessibility, offline safety and canvas bounds. It does not establish
+text fit or connector clarity. Render each SVG where available with
+`qlmanage -t -s 1600 -o .tmp/rdr-previews <svg>`, then inspect both themes and languages.
+When Quick Look is sandbox-blocked, an already-installed offline libvips/librsvg renderer can produce
+the same per-file PNG previews. Keep previews under `.tmp/`. Native macOS, Windows and Linux browser
+rendering still depends on the fonts installed on the viewer's system.
 
 ## Redraw fidelity
 
-The old README architecture Mermaid diagram had 14 components, four containers and 16 arrows.
-Two Architecture figures redraw all 14 components and all 16 directed connections for a mixed audience.
-`architecture-build` has nine nodes and eight arrows, including optional TypeSafe Jev and the four rails
-(leases, gates, impact map and wiki). `architecture-land` has seven nodes and eight arrows. Gates and
-the impact map repeat across the figures to join them; no component or connection is dropped or merged.
-The four original groups (oah, installed AI engines, optional judge, git/GitHub) keep their membership,
-with at most three zones in either figure. Detailed edge labels are kept as short connector labels and
-node explanations; dashed arrows retain the optional paths. The parts table keeps the full wording.
-The separate four-step Flowchart remains the entry-page overview, with a small optional Jev annotation.
+The architecture keeps **14 unique components, four original groups and all 16 directed connections**.
+The build figure has 9 nodes / 8 arrows; landing has 7 / 8. Gates and impact repeat to join the pair.
+Each original node remains separate, including the optional Jev judge and the four rails.
+All original node wording is retained as a short title plus logically separated detail.
+Group membership, optional paths, edge directions and the exact reviewed-HEAD landing path remain.
+Ports and routes are redrawn without crossings; no component or edge is dropped or merged.
 
-The old English sequence Mermaid diagram had five actors and 15 messages. Two Sequence figures now
-carry all 15 numbered exchanges, with three actors in the first and four in the second (You and oah
-appear in both). Full message text moved into the adjacent numbered tables. The loop fragment and
-return directions remain; no exchange was dropped. Korean now has the same figures and tables.
+The two sequence figures keep **five unique actors and all 15 numbered messages**.
+The first contains messages 1–6 and three actors; the second contains 7–15 and four actors.
+The loop still contains review, findings, correction, diff and bind, excludes the git actor,
+and retains return directions and dashed replies. Numbers still refer to the unchanged page tables.
 
-The banners keep the default build/review/confirmation story. Their former dense supporting labels
-(Jev, leases, gates, impact map, wiki and optional review limit) now live in the page text.
+The whole-harness overview is a new **Swimlane** composition, replacing the old four-step summary.
+It shows a plain-language request; installed rules preparing intent, scope, lease, impact and optional
+Jev judgement; Claude Code building; gates and wiki evidence; Codex review and correction returning
+to evidence; the user's question, inspection and confirmation; and checked landing.
+A separate unconnected note marks the guided design conversation **planned for v0.4.0, not yet available**.
+It does not turn that future feature into a current workflow step.
+
+The new **Architecture** features figure has six nodes and six supporting/evidence connections.
+It brings leases, impact, optional Jev, the Claude/Codex loop, gates and wiki together with plain benefits.
+This is an overview of the existing parts, not a new product behavior or a replacement for the detailed graphs.
 
 ### Concepts pages
 
-The six Mermaid blocks on each concepts page are faithful imports: editable HTML plus exported SVG,
-`fit` size, full source detail, mixed audience with CLI commands and diagnostics spelled exactly as in
-the source. Flowcharts use the top-to-bottom convention; leases use ordinary State Machine for dense
-transition guards, rather than the simplified lifecycle-phase pattern. The skill's import, semantic
-patterns, Flowchart, State Machine, output, layout, primitives and export references guide the redraw.
-No source node, edge, condition, note or container membership is removed or merged. Colors and renderer
-layout are replaced by the project style. Long edge labels use short numbered tags and full transition
-keys inside the figure. Node labels retain all words, with line wrapping for the available space.
+The ten concepts figures remain faithful imports of the six original Mermaid blocks.
+Flowchart and ordinary State Machine are retained for their branching and dense transition semantics.
+No semantic-pattern overlay is added: the skill's narrower lifecycle-phase pattern would omit guards.
+The import, semantic-patterns, type, output, layout, core primitives and export references guide the redraw.
 
-The counts below apply separately to English and Korean. Nodes exclude group frames and include the
-lease start dot and three separate end dots. Counts are the same in both themes. Repeated nodes join
-split figures; every original edge is drawn exactly once across the pair. Every figure stays below
-nine nodes and twelve arrows. The three original groups remain: ranked results, local opt-in hooks,
-and this repository's GitHub Actions. The local hooks node for Claude remains unconnected.
+Every source node ID, source-label value, visible word, edge ID, direction, condition and group membership
+is retained. Short bold headings and separate detail lines replace the former long centered labels.
+Long conditions use numbered transition keys. The lease note is retained in full across its two figures.
+There are **no merges, collapses or drops**. Counts apply separately to English and Korean and to both themes.
+Repeated nodes join split figures; each original edge appears exactly once across its pair.
 
 | Source heading (English / Korean) | Source nodes / edges | Figures: nodes / edges | Repeated nodes; fidelity |
 |---|---|---|---|
@@ -136,10 +146,33 @@ Connection ledger (the IDs are those of the original Mermaid and the HTML's `dat
   filters (including literal `docs/**` and `*.md`), manual runs, exact-HEAD checks, head-specific recorded
   CI exception, recheck, user confirmation and fast-forward push remain.
 
-No existing rdp asset shows any of these exact graphs: the entry-page overview merges steps, and its
-architecture and sequence figures show different relationships. Reusing those would lose source detail.
+## Icon license
 
-The rdp follow-up also updates all four `architecture-build` sources: Jev reorders skills and judges
-task difficulty; routing says that judgement may adjust the tier within its floor. The group reads
-“Recommended, optional AI judge” / “권장 선택형 AI 판정기”. The descriptions and only their matching
-how-it-works alt text are updated. Both English `loop-review` sources use the 12px `label` class for LOOP.
+The small user/agent, file, log, search and shield glyphs are selected Tabler Icons from the skill's
+`references/primitive-icons.md`, adapted only for inline SVG grouping and inherited color.
+Source: [Tabler Icons](https://github.com/tabler/tabler-icons), MIT.
+This notice applies to those glyphs in the HTML sources and exported SVGs.
+
+```text
+MIT License
+
+Copyright (c) 2020 Paweł Kuna
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

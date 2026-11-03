@@ -1,69 +1,113 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 880 824" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-review-ko-light-title concepts-review-ko-light-desc" data-source-diagram="4" id="concepts-review-ko-light-root">
+<svg viewBox="0 0 880 980" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-review-ko-light-title concepts-review-ko-light-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-review-ko-light-root">
 <title id="concepts-review-ko-light-title">리뷰, 수정, 다시 리뷰</title>
 <desc id="concepts-review-ko-light-desc">Codex가 읽기 전용 스냅샷을 리뷰하고 승인이나 P2/P3만 남으면 수렴하며 P0/P1을 고친 뒤 사용자의 확인·커밋·bind를 거쳐 다시 리뷰하되 고친 종류가 반복되거나 설계 변경이 필요하면 멈추고 사용자 결정을 구한다.</desc>
 <defs>
-      <style>#concepts-review-ko-light-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2328; }
+      <style>#concepts-review-ko-light-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #2d3142; }
       #concepts-review-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
-      #concepts-review-ko-light-root .title { font-size: 28px; font-weight: 600; }
-      #concepts-review-ko-light-root .group { font-size: 14px; font-weight: 600; }
-      #concepts-review-ko-light-root .node { font-size: 12px; font-weight: 600; }
-      #concepts-review-ko-light-root .label { font-size: 12px; font-weight: 400; }
-      #concepts-review-ko-light-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      #concepts-review-ko-light-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #2d3142; }
+      #concepts-review-ko-light-root .title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+      #concepts-review-ko-light-root .node { font-size: 16px; font-weight: 600; }
+      #concepts-review-ko-light-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #concepts-review-ko-light-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #concepts-review-ko-light-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+      #concepts-review-ko-light-root .prose { font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #concepts-review-ko-light-root .zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #4f5d75; }
+      #concepts-review-ko-light-root .arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #4f5d75; }
+      #concepts-review-ko-light-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #4f5d75; }
+      #concepts-review-ko-light-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #2d3142; opacity: .06; }
       @media print {
 #concepts-review-ko-light-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="concepts-review-ko-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#6e7781"/></marker>
-<marker id="concepts-review-ko-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#1a7f37"/></marker>
-<marker id="concepts-review-ko-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0969da"/></marker>
+<pattern id="concepts-review-ko-light-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity=".10"/></pattern>
+<marker id="concepts-review-ko-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="concepts-review-ko-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="concepts-review-ko-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
 </defs>
-<rect x="0" y="0" width="880" height="824" rx="0" fill="#ffffff"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#1f2328">리뷰, 수정, 다시 리뷰</text>
-<line x1="400" y1="144" x2="560" y2="144" data-edge-id="e1" data-from="R" data-to="V" data-label="승인, 또는 P2/P3만" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-review-ko-light-arrow)"/>
-<line x1="240" y1="184" x2="240" y2="336" data-edge-id="e2" data-from="R" data-to="F" data-label="P0/P1 지적" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-review-ko-light-arrow)"/>
-<line x1="240" y1="400" x2="240" y2="496" data-edge-id="e3" data-from="F" data-to="B" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-review-ko-light-arrow)"/>
-<path d="M 80,536 L 48,536 Q 40,536 40,528 L 40,160 Q 40,152 48,152 L 80,152" data-edge-id="e4" data-from="B" data-to="R" data-label="" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-review-ko-light-arrow)"/>
-<path d="M 400,168 L 440,168 Q 448,168 448,176 L 448,376 Q 448,384 456,384 L 488,384" data-edge-id="e5" data-from="R" data-to="D" data-label="이미 고친 종류가 다시 나오거나
-설계 변경이 필요" fill="none" stroke="#6e7781" stroke-width="1" marker-end="url(#concepts-review-ko-light-arrow)"/>
-<rect x="420" y="116" width="120" height="20" rx="2" fill="#ffffff"/>
-<text x="480.0" y="130" class="arrow-label" text-anchor="middle" fill="#424a53">1. 승인</text>
-<rect x="248" y="248" width="96" height="20" rx="2" fill="#ffffff"/>
-<text x="296.0" y="262" class="arrow-label" text-anchor="middle" fill="#424a53">2. P0/P1</text>
-<rect x="456" y="248" width="112" height="20" rx="2" fill="#ffffff"/>
-<text x="512.0" y="262" class="arrow-label" text-anchor="middle" fill="#424a53">3. 결정 필요</text>
-<g data-node-id="R" data-source-label="oah review
-Codex, 읽기 전용 스냅샷">
-<rect x="80" y="120" width="320" height="64" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
-<text x="240.0" y="146.0" class="node" text-anchor="middle" fill="#1a7f37">oah review</text>
-<text x="240.0" y="166.0" class="label" text-anchor="middle" fill="#424a53">Codex, 읽기 전용 스냅샷</text>
+<rect width="880" height="980" fill="#f5f5f5"/>
+<rect width="880" height="980" fill="url(#concepts-review-ko-light-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">리뷰, 수정, 다시 리뷰</text>
+<path d="M 432,192 L 608,192" data-edge-id="e1" data-from="R" data-to="V" data-label="승인, 또는 P2/P3만" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<path d="M 256,272 L 256,352" data-edge-id="e2" data-from="R" data-to="F" data-label="P0/P1 지적" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<path d="M 256,464 L 256,544" data-edge-id="e3" data-from="F" data-to="B" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<path d="M 80,616 L 48,616 Q 40,616 40,608 L 40,216 Q 40,208 48,208 L 80,208" data-edge-id="e4" data-from="B" data-to="R" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<path d="M 432,232 L 480,232 Q 488,232 488,240 L 488,416 Q 488,424 496,424 L 544,424" data-edge-id="e5" data-from="R" data-to="D" data-label="이미 고친 종류가 다시 나오거나 설계 변경이 필요" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<rect x="504" y="164" width="32" height="20" rx="2" fill="#f5f5f5"/>
+<text x="520" y="179" class="arrow-label" text-anchor="middle">01</text>
+<rect x="264" y="301" width="32" height="20" rx="2" fill="#f5f5f5"/>
+<text x="280" y="316" class="arrow-label" text-anchor="middle">02</text>
+<rect x="496" y="289" width="32" height="20" rx="2" fill="#f5f5f5"/>
+<text x="512" y="304" class="arrow-label" text-anchor="middle">03</text>
+<g data-node-id="R" data-source-label="oah review Codex, 읽기 전용 스냅샷">
+<rect x="80" y="144" width="352" height="128" rx="6" fill="#f5f5f5"/>
+<rect x="80" y="144" width="352" height="128" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<g aria-hidden="true">
+<rect x="96" y="160" width="44" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="171" class="tag" text-anchor="middle">CODEX</text>
+<text x="416" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<g data-node-id="F" data-source-label="oah fix
-Codex가 고친다">
-<rect x="80" y="336" width="320" height="64" rx="6" fill="#f6f8fa" stroke="#1a7f37" stroke-width="1"/>
-<text x="240.0" y="362.0" class="node" text-anchor="middle" fill="#1a7f37">oah fix</text>
-<text x="240.0" y="382.0" class="label" text-anchor="middle" fill="#424a53">Codex가 고친다</text>
+<text x="96" y="202" class="node" text-anchor="start">oah review</text>
+<text x="96" y="222" class="sub" text-anchor="start">Codex, 읽기 전용 스냅샷</text>
 </g>
-<g data-node-id="B" data-source-label="사용자가 확인하고 커밋한 뒤
-oah fix --bind">
-<rect x="80" y="496" width="320" height="80" rx="6" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="240.0" y="530.0" class="node" text-anchor="middle" fill="#1f2328">사용자가 확인하고 커밋한 뒤</text>
-<text x="240.0" y="550.0" class="label" text-anchor="middle" fill="#424a53">oah fix --bind</text>
+<g data-node-id="F" data-source-label="oah fix Codex가 고친다">
+<rect x="80" y="352" width="352" height="112" rx="6" fill="#f5f5f5"/>
+<rect x="80" y="352" width="352" height="112" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="368" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="379" class="tag" text-anchor="middle">CODEX</text>
+<text x="416" y="390" class="ghost" text-anchor="end">02</text>
+</g>
+<text x="96" y="410" class="node" text-anchor="start">oah fix</text>
+<text x="96" y="430" class="sub" text-anchor="start">Codex가 고친다</text>
+</g>
+<g data-node-id="B" data-source-label="사용자가 확인하고 커밋한 뒤 oah fix --bind">
+<rect x="80" y="544" width="352" height="144" rx="6" fill="#f5f5f5"/>
+<rect x="80" y="544" width="352" height="144" rx="6" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="96" y="560" width="36" height="16" rx="2" fill="none" stroke="#5a6580" stroke-width="1" stroke-opacity=".4"/>
+<text x="114" y="571" class="tag" text-anchor="middle">BIND</text>
+<text x="416" y="582" class="ghost" text-anchor="end">03</text>
+</g>
+<text x="96" y="602" class="node" text-anchor="start">사용자가 확인하고</text>
+<text x="96" y="622" class="sub" text-anchor="start">커밋한 뒤</text>
+<text x="96" y="640" class="sub technical" text-anchor="start">oah fix --bind</text>
 </g>
 <g data-node-id="V" data-source-label="수렴">
-<rect x="560" y="120" width="240" height="64" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="680.0" y="156.0" class="node" text-anchor="middle" fill="#1f2328">수렴</text>
+<rect x="608" y="144" width="232" height="96" rx="20" fill="#f5f5f5"/>
+<rect x="608" y="144" width="232" height="96" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="624" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="648" y="171" class="tag" text-anchor="middle">RESULT</text>
 </g>
-<g data-node-id="D" data-source-label="멈추고 사용자에게 묻는다
-OAH_REVIEW_NEEDS_DECISION">
-<rect x="488" y="336" width="352" height="96" rx="20" fill="#ffffff" stroke="#6e7781" stroke-width="1"/>
-<text x="664.0" y="378.0" class="node" text-anchor="middle" fill="#1f2328">멈추고 사용자에게 묻는다</text>
-<text x="664.0" y="398.0" class="label" text-anchor="middle" fill="#424a53">OAH_REVIEW_NEEDS_DECISION</text>
+<text x="624" y="202" class="node" text-anchor="start">수렴</text>
 </g>
-<text x="40" y="640" class="group" text-anchor="start" fill="#424a53">전이 조건</text>
-<text x="40" y="668" class="label" text-anchor="start" fill="#424a53">1 · 승인, 또는 P2/P3만</text>
-<text x="40" y="696" class="label" text-anchor="start" fill="#424a53">2 · P0/P1 지적</text>
-<text x="40" y="724" class="label" text-anchor="start" fill="#424a53">3 · 이미 고친 종류가 다시 나오거나</text>
-<text x="64" y="744" class="label" text-anchor="start" fill="#424a53">설계 변경이 필요</text>
-<line x1="40" y1="764" x2="840" y2="764" stroke="#d0d7de"/>
-<text x="40" y="792" class="label" text-anchor="start" fill="#424a53">수정본은 사용자가 확인·커밋·bind한 뒤 다시 리뷰로 돌아간다.</text>
+<g data-node-id="D" data-source-label="멈추고 사용자에게 묻는다 OAH_REVIEW_NEEDS_DECISION">
+<rect x="544" y="352" width="296" height="144" rx="6" fill="#f5f5f5"/>
+<rect x="544" y="352" width="296" height="144" rx="6" fill="#4f5d75" stroke="#5a6580" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="560" y="368" width="56" height="16" rx="2" fill="none" stroke="#5a6580" stroke-width="1" stroke-opacity=".4"/>
+<text x="588" y="379" class="tag" text-anchor="middle">DECISION</text>
+</g>
+<text x="560" y="410" class="node" text-anchor="start">멈추고</text>
+<text x="560" y="430" class="sub" text-anchor="start">사용자에게 묻는다</text>
+<text x="560" y="448" class="sub technical" text-anchor="start">OAH_REVIEW_NEEDS_DECISION</text>
+</g>
+<text x="40" y="740" class="zone-label" text-anchor="start">전이 조건</text>
+<rect x="40" y="759" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="773" class="label" text-anchor="middle">01</text>
+<text x="80" y="773" class="prose" text-anchor="start">승인, 또는 P2/P3만</text>
+<rect x="40" y="791" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="805" class="label" text-anchor="middle">02</text>
+<text x="80" y="805" class="prose" text-anchor="start">P0/P1 지적</text>
+<rect x="40" y="823" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="837" class="label" text-anchor="middle">03</text>
+<text x="80" y="837" class="prose" text-anchor="start">이미 고친 종류가 다시 나오거나 설계 변경이 필요</text>
+<line x1="40" y1="900" x2="840" y2="900" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="928" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="918" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="928" class="prose" text-anchor="start">주요 단계</text>
+<path d="M 236,924 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-review-ko-light-arrow)"/>
+<text x="272" y="928" class="prose" text-anchor="start">작업·증거</text>
 </svg>

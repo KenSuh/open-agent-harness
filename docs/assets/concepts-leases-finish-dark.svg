@@ -1,68 +1,114 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 880 968" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-finish-dark-title concepts-leases-finish-dark-desc" data-source-diagram="1" id="concepts-leases-finish-dark-root">
+<svg viewBox="0 0 880 1164" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-finish-dark-title concepts-leases-finish-dark-desc" data-diagram-type="State machine" data-size="fit" id="concepts-leases-finish-dark-root">
 <title id="concepts-leases-finish-dark-title">Leases · finish checks</title>
 <desc id="concepts-leases-finish-dark-desc">Active and stale leases can finish when return, wiki, gates and scope pass or recorded allow flags apply, while a refusal preserves the active or expired state and reports the corresponding finish code.</desc>
 <defs>
-      <style>#concepts-leases-finish-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      <style>#concepts-leases-finish-dark-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5f5f5; }
       #concepts-leases-finish-dark-root .diagram-container { width: 100%; overflow-x: auto; }
-      #concepts-leases-finish-dark-root .title { font-size: 28px; font-weight: 600; }
-      #concepts-leases-finish-dark-root .group { font-size: 14px; font-weight: 600; }
-      #concepts-leases-finish-dark-root .node { font-size: 12px; font-weight: 600; }
-      #concepts-leases-finish-dark-root .label { font-size: 12px; font-weight: 400; }
-      #concepts-leases-finish-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      #concepts-leases-finish-dark-root text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+      #concepts-leases-finish-dark-root .title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+      #concepts-leases-finish-dark-root .node { font-size: 16px; font-weight: 600; }
+      #concepts-leases-finish-dark-root .sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #concepts-leases-finish-dark-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+      #concepts-leases-finish-dark-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
       @media print {
 #concepts-leases-finish-dark-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="concepts-leases-finish-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#8b949e"/></marker>
-<marker id="concepts-leases-finish-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
-<marker id="concepts-leases-finish-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+<pattern id="concepts-leases-finish-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="concepts-leases-finish-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="concepts-leases-finish-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="concepts-leases-finish-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect x="0" y="0" width="880" height="968" rx="0" fill="#0d1117"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">Leases · finish checks</text>
-<path d="M 200,184 L 200,224 Q 200,232 208,232 L 432,232 Q 440,232 440,240 L 440,256" data-edge-id="e2" data-from="Active" data-to="finish_check" data-label="oah finish" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<path d="M 680,184 L 680,320 Q 680,328 672,328 L 540,328" data-edge-id="e3" data-from="Stale" data-to="finish_check" data-label="oah finish" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<line x1="440" y1="400" x2="440" y2="504" data-edge-id="e4" data-from="finish_check" data-to="Finished" data-label="return, wiki, gates and scope pass, or allow flags (recorded)" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<path d="M 340,328 L 48,328 Q 40,328 40,320 L 40,160 Q 40,152 48,152 L 80,152" data-edge-id="e5" data-from="finish_check" data-to="Active" data-label="refused, lease still active" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<path d="M 490,292 L 490,224 Q 490,216 498,216 L 616,216 Q 624,216 624,208 L 624,184" data-edge-id="e6" data-from="finish_check" data-to="Stale" data-label="refused, lease expired" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<line x1="440" y1="568" x2="440" y2="624" data-edge-id="e11" data-from="Finished" data-to="__end_2" data-label="" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
-<rect x="208" y="192" width="88" height="20" rx="2" fill="#0d1117"/>
-<text x="252.0" y="206" class="arrow-label" text-anchor="middle" fill="#c9d1d9">6. FINISH</text>
-<rect x="688" y="244" width="88" height="20" rx="2" fill="#0d1117"/>
-<text x="732.0" y="258" class="arrow-label" text-anchor="middle" fill="#c9d1d9">6. FINISH</text>
-<rect x="448" y="444" width="112" height="20" rx="2" fill="#0d1117"/>
-<text x="504.0" y="458" class="arrow-label" text-anchor="middle" fill="#c9d1d9">7. PASS/ALLOW</text>
-<rect x="132" y="300" width="112" height="20" rx="2" fill="#0d1117"/>
-<text x="188.0" y="314" class="arrow-label" text-anchor="middle" fill="#c9d1d9">8. REFUSED</text>
-<rect x="500" y="244" width="112" height="20" rx="2" fill="#0d1117"/>
-<text x="556.0" y="258" class="arrow-label" text-anchor="middle" fill="#c9d1d9">9. REFUSED</text>
+<rect width="880" height="1164" fill="#2d3142"/>
+<rect width="880" height="1164" fill="url(#concepts-leases-finish-dark-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / STATE MACHINE</text>
+<text x="40" y="88" class="title" text-anchor="start">Leases · finish checks</text>
+<path d="M 208,240 L 208,288 Q 208,296 216,296 L 360,296 Q 368,296 368,304 L 368,352" data-edge-id="e2" data-from="Active" data-to="finish_check" data-label="oah finish" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<path d="M 672,240 L 672,312 Q 672,320 664,320 L 520,320 Q 512,320 512,328 L 512,352" data-edge-id="e3" data-from="Stale" data-to="finish_check" data-label="oah finish" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<path d="M 440,448 L 440,576" data-edge-id="e4" data-from="finish_check" data-to="Finished" data-label="return, wiki, gates and scope pass, or allow flags (recorded)" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<path d="M 288,400 L 56,400 Q 48,400 48,392 L 48,200 Q 48,192 56,192 L 80,192" data-edge-id="e5" data-from="finish_check" data-to="Active" data-label="refused, lease still active" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<path d="M 592,400 L 824,400 Q 832,400 832,392 L 832,200 Q 832,192 824,192 L 800,192" data-edge-id="e6" data-from="finish_check" data-to="Stale" data-label="refused, lease expired" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<path d="M 440,672 L 440,720" data-edge-id="e11" data-from="Finished" data-to="__end_2" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<rect x="272" y="268" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="288" y="283" class="arrow-label" text-anchor="middle">01</text>
+<rect x="576" y="292" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="592" y="307" class="arrow-label" text-anchor="middle">02</text>
+<rect x="448" y="501" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="464" y="516" class="arrow-label" text-anchor="middle">03</text>
+<rect x="160" y="372" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="176" y="387" class="arrow-label" text-anchor="middle">04</text>
+<rect x="688" y="372" width="32" height="20" rx="2" fill="#2d3142"/>
+<text x="704" y="387" class="arrow-label" text-anchor="middle">05</text>
 <g data-node-id="Active" data-source-label="Active">
-<rect x="80" y="120" width="240" height="64" rx="8" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="200.0" y="156.0" class="node" text-anchor="middle" fill="#f0f6fc">Active</text>
+<rect x="80" y="144" width="256" height="96" rx="8" fill="#2d3142"/>
+<rect x="80" y="144" width="256" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="160" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="171" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="96" y="202" class="node" text-anchor="start">Active</text>
 </g>
 <g data-node-id="Stale" data-source-label="STALE (expired)">
-<rect x="560" y="120" width="240" height="64" rx="8" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="680.0" y="156.0" class="node" text-anchor="middle" fill="#f0f6fc">STALE (expired)</text>
+<rect x="544" y="144" width="256" height="96" rx="8" fill="#2d3142"/>
+<rect x="544" y="144" width="256" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="560" y="160" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="582" y="171" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="560" y="202" class="node" text-anchor="start">STALE (expired)</text>
 </g>
 <g data-node-id="finish_check" data-source-label="finish_check">
-<polygon points="440.0,256 540,328.0 440.0,400 340,328.0" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="440.0" y="332.0" class="node" text-anchor="middle" fill="#f0f6fc">finish_check</text>
+<rect x="288" y="352" width="304" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="352" width="304" height="96" rx="8" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="304" y="368" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="379" class="tag" text-anchor="middle">CHECK</text>
+</g>
+<text x="304" y="410" class="node" text-anchor="start">finish_check</text>
 </g>
 <g data-node-id="Finished" data-source-label="Finished">
-<rect x="320" y="504" width="240" height="64" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
-<text x="440.0" y="540.0" class="node" text-anchor="middle" fill="#3fb950">Finished</text>
+<rect x="288" y="576" width="304" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="576" width="304" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="304" y="592" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="603" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="634" class="node" text-anchor="start">Finished</text>
 </g>
 <g data-node-id="__end_2" data-source-label="[end]">
-<circle cx="440" cy="632" r="8" fill="#0d1117" stroke="#f0f6fc" stroke-width="1"/>
-<circle cx="440" cy="632" r="5" fill="#f0f6fc"/>
+<circle cx="440.0" cy="728.0" r="8" fill="#2d3142" stroke="#f5f5f5" stroke-width="1.2"/>
+<circle cx="440.0" cy="728.0" r="5" fill="#f5f5f5"/>
 </g>
-<text x="40" y="684" class="group" text-anchor="start" fill="#c9d1d9">Transition keys</text>
-<text x="40" y="712" class="label" text-anchor="start" fill="#c9d1d9">6 · oah finish</text>
-<text x="40" y="740" class="label" text-anchor="start" fill="#c9d1d9">7 · return, wiki, gates and scope pass, or allow flags (recorded)</text>
-<text x="40" y="768" class="label" text-anchor="start" fill="#c9d1d9">8 · refused, lease still active</text>
-<text x="40" y="796" class="label" text-anchor="start" fill="#c9d1d9">9 · refused, lease expired</text>
-<rect x="40" y="828" width="800" height="72" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<text x="56" y="856" class="label" text-anchor="start" fill="#c9d1d9">finish refusals: OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING, OAH_GATES_UNMET,</text>
-<text x="56" y="876" class="label" text-anchor="start" fill="#c9d1d9">OAH_SCOPE_EXCEEDED.</text>
-<line x1="40" y1="908" x2="840" y2="908" stroke="#30363d"/>
-<text x="40" y="936" class="label" text-anchor="start" fill="#c9d1d9">The same active and stale states continue here; every refusal returns to its state.</text>
+<text x="40" y="796" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="815" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="829" class="label" text-anchor="middle">01</text>
+<text x="80" y="829" class="prose" text-anchor="start">oah finish</text>
+<rect x="40" y="847" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="861" class="label" text-anchor="middle">02</text>
+<text x="80" y="861" class="prose" text-anchor="start">oah finish</text>
+<rect x="40" y="879" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="893" class="label" text-anchor="middle">03</text>
+<text x="80" y="893" class="prose" text-anchor="start">return, wiki, gates and scope pass, or allow flags (recorded)</text>
+<rect x="40" y="911" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="925" class="label" text-anchor="middle">04</text>
+<text x="80" y="925" class="prose" text-anchor="start">refused, lease still active</text>
+<rect x="40" y="943" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="957" class="label" text-anchor="middle">05</text>
+<text x="80" y="957" class="prose" text-anchor="start">refused, lease expired</text>
+<text x="56" y="1000" class="prose" text-anchor="start">finish refusals: OAH_INTENT_RETURN_INVALID, OAH_WIKI_MAINTENANCE_MISSING, OAH_GATES_UNMET,</text>
+<text x="56" y="1020" class="prose" text-anchor="start">OAH_SCOPE_EXCEEDED.</text>
+<line x1="40" y1="1084" x2="840" y2="1084" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1112" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1102" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1112" class="prose" text-anchor="start">Finish checks</text>
+<path d="M 276,1108 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-finish-dark-arrow)"/>
+<text x="312" y="1112" class="prose" text-anchor="start">Transition</text>
+<circle cx="428" cy="1108" r="5" fill="#f5f5f5"/>
+<text x="452" y="1112" class="prose" text-anchor="start">End</text>
 </svg>

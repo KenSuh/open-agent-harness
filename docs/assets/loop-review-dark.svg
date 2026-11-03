@@ -1,75 +1,112 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 840 712" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="loop-review-dark-title loop-review-dark-desc" id="loop-review-dark-root">
+<svg viewBox="0 0 1008 1212" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="loop-review-dark-title loop-review-dark-desc" data-diagram-type="Sequence" data-size="fit" id="loop-review-dark-root">
 <title id="loop-review-dark-title">Review, correct and land</title>
 <desc id="loop-review-dark-desc">Codex CLI reviews and corrects in a loop, you bind each correction and finish the task, and oah lands the reviewed commit after checks and your confirmation.</desc>
 <defs>
-      <style>#loop-review-dark-root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      <style>#loop-review-dark-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5f5f5; }
       #loop-review-dark-root .diagram-container { width: 100%; overflow-x: auto; }
-      #loop-review-dark-root .title { font-size: 28px; font-weight: 600; }
-      #loop-review-dark-root .group { font-size: 14px; font-weight: 600; }
-      #loop-review-dark-root .node { font-size: 12px; font-weight: 600; }
-      #loop-review-dark-root .label { font-size: 12px; font-weight: 400; }
-      #loop-review-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
-      #loop-review-dark-root .arrow-label { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 400; }
+      #loop-review-dark-root text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+      #loop-review-dark-root .title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+      #loop-review-dark-root .node { font-size: 16px; font-weight: 600; }
+      #loop-review-dark-root .sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #loop-review-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #loop-review-dark-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #loop-review-dark-root .prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #loop-review-dark-root .zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+      #loop-review-dark-root .arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #loop-review-dark-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+      #loop-review-dark-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
       @media print {
 #loop-review-dark-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="loop-review-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
-</marker>
-<marker id="loop-review-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
-</marker>
-<marker id="loop-review-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
-</marker>
+<pattern id="loop-review-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="loop-review-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="loop-review-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="loop-review-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect x="0" y="0" width="840" height="712" rx="0" fill="#0d1117"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">Review, correct and land</text>
-<rect x="60" y="164" width="500" height="284" rx="4" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-<line x1="100" y1="152" x2="100" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
-<line x1="260" y1="152" x2="260" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
-<line x1="500" y1="152" x2="500" y2="448" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
-<line x1="740" y1="152" x2="740" y2="636" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4"/>
-<rect x="60" y="164" width="48" height="20" rx="2" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
-<text x="84" y="178" class="label" text-anchor="middle" fill="#c9d1d9">LOOP</text>
-<rect x="76" y="188" width="472" height="24" rx="2" fill="#161b22"/>
-<text x="80" y="204" class="label" text-anchor="start" fill="#c9d1d9">Until review converges; pause when a decision is needed.</text>
-<line x1="260" y1="240" x2="500" y2="240" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="338" y="212" width="84" height="20" rx="2" fill="#0d1117"/>
-<text x="380.0" y="227" class="arrow-label" text-anchor="middle" fill="#c9d1d9">7. REVIEW</text>
-<line x1="500" y1="284" x2="260" y2="284" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="330" y="256" width="100" height="20" rx="2" fill="#0d1117"/>
-<text x="380.0" y="271" class="arrow-label" text-anchor="middle" fill="#c9d1d9">8. FINDINGS</text>
-<line x1="260" y1="328" x2="500" y2="328" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="348" y="300" width="64" height="20" rx="2" fill="#0d1117"/>
-<text x="380.0" y="315" class="arrow-label" text-anchor="middle" fill="#c9d1d9">9. FIX</text>
-<line x1="500" y1="372" x2="100" y2="372" stroke="#8b949e" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="262" y="344" width="76" height="20" rx="2" fill="#0d1117"/>
-<text x="300.0" y="359" class="arrow-label" text-anchor="middle" fill="#c9d1d9">10. DIFF</text>
-<line x1="100" y1="416" x2="260" y2="416" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="142" y="388" width="76" height="20" rx="2" fill="#0d1117"/>
-<text x="180.0" y="403" class="arrow-label" text-anchor="middle" fill="#c9d1d9">11. BIND</text>
-<line x1="100" y1="492" x2="260" y2="492" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="134" y="464" width="92" height="20" rx="2" fill="#0d1117"/>
-<text x="180.0" y="479" class="arrow-label" text-anchor="middle" fill="#c9d1d9">12. FINISH</text>
-<line x1="100" y1="536" x2="740" y2="536" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="382" y="508" width="76" height="20" rx="2" fill="#0d1117"/>
-<text x="420.0" y="523" class="arrow-label" text-anchor="middle" fill="#c9d1d9">13. PUSH</text>
-<line x1="100" y1="580" x2="260" y2="580" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="130" y="552" width="100" height="20" rx="2" fill="#0d1117"/>
-<text x="180.0" y="567" class="arrow-label" text-anchor="middle" fill="#c9d1d9">14. CONFIRM</text>
-<line x1="260" y1="624" x2="740" y2="624" stroke="#8b949e" stroke-width="1" marker-end="url(#loop-review-dark-arrow)"/>
-<rect x="462" y="596" width="76" height="20" rx="2" fill="#0d1117"/>
-<text x="500.0" y="611" class="arrow-label" text-anchor="middle" fill="#c9d1d9">15. LAND</text>
-<rect x="60" y="104" width="80" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="100.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">You</text>
-<rect x="220" y="104" width="80" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="260.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">oah</text>
-<rect x="440" y="104" width="120" height="48" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
-<text x="500.0" y="132.0" class="node" text-anchor="middle" fill="#3fb950">Codex CLI</text>
-<rect x="680" y="104" width="120" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="740.0" y="132.0" class="node" text-anchor="middle" fill="#f0f6fc">git / GitHub</text>
-<line x1="40" y1="652" x2="800" y2="652" stroke="#30363d" stroke-width="1"/>
-<text x="40" y="676" class="label" text-anchor="start" fill="#c9d1d9">Solid: request. Dashed: return. Every correction goes back through review.</text>
+<rect width="1008" height="1212" fill="#2d3142"/>
+<rect width="1008" height="1212" fill="url(#loop-review-dark-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / SEQUENCE</text>
+<text x="40" y="88" class="title" text-anchor="start">Review, correct and land</text>
+<rect x="64" y="280" width="624" height="424" rx="4" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-opacity=".25"/>
+<rect x="64" y="280" width="72" height="28" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="100" y="299" class="label" text-anchor="middle">LOOP</text>
+<text x="80" y="332" class="prose" text-anchor="start">Until review converges; pause when a decision is needed.</text>
+<line x1="128" y1="240" x2="128" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
+<line x1="336" y1="240" x2="336" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
+<line x1="608" y1="240" x2="608" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
+<line x1="880" y1="240" x2="880" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
+<path d="M 336,368 L 608,368" data-edge-id="7" data-from="oah" data-to="codex" data-label="7. REVIEW" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 608,432 L 336,432" data-edge-id="8" data-from="codex" data-to="oah" data-label="8. FINDINGS" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 336,496 L 608,496" data-edge-id="9" data-from="oah" data-to="codex" data-label="9. FIX" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 608,560 L 128,560" data-edge-id="10" data-from="codex" data-to="you" data-label="10. DIFF" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 128,624 L 336,624" data-edge-id="11" data-from="you" data-to="oah" data-label="11. BIND" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 128,784 L 336,784" data-edge-id="12" data-from="you" data-to="oah" data-label="12. FINISH" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 128,848 L 880,848" data-edge-id="13" data-from="you" data-to="git" data-label="13. PUSH" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 128,912 L 336,912" data-edge-id="14" data-from="you" data-to="oah" data-label="14. CONFIRM" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<path d="M 336,976 L 880,976" data-edge-id="15" data-from="oah" data-to="git" data-label="15. LAND" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<rect x="430" y="340" width="84" height="20" rx="2" fill="#2d3142"/>
+<text x="472" y="355" class="arrow-label" text-anchor="middle">7. REVIEW</text>
+<rect x="422" y="404" width="100" height="20" rx="2" fill="#2d3142"/>
+<text x="472" y="419" class="arrow-label" text-anchor="middle">8. FINDINGS</text>
+<rect x="440" y="468" width="64" height="20" rx="2" fill="#2d3142"/>
+<text x="472" y="483" class="arrow-label" text-anchor="middle">9. FIX</text>
+<rect x="186" y="532" width="76" height="20" rx="2" fill="#2d3142"/>
+<text x="224" y="547" class="arrow-label" text-anchor="middle">10. DIFF</text>
+<rect x="194" y="596" width="76" height="20" rx="2" fill="#2d3142"/>
+<text x="232" y="611" class="arrow-label" text-anchor="middle">11. BIND</text>
+<rect x="186" y="756" width="92" height="20" rx="2" fill="#2d3142"/>
+<text x="232" y="771" class="arrow-label" text-anchor="middle">12. FINISH</text>
+<rect x="698" y="820" width="76" height="20" rx="2" fill="#2d3142"/>
+<text x="736" y="835" class="arrow-label" text-anchor="middle">13. PUSH</text>
+<rect x="182" y="884" width="100" height="20" rx="2" fill="#2d3142"/>
+<text x="232" y="899" class="arrow-label" text-anchor="middle">14. CONFIRM</text>
+<rect x="698" y="948" width="76" height="20" rx="2" fill="#2d3142"/>
+<text x="736" y="963" class="arrow-label" text-anchor="middle">15. LAND</text>
+<g data-node-id="you" data-source-label="You">
+<rect x="40" y="144" width="176" height="96" rx="6" fill="#2d3142"/>
+<rect x="40" y="144" width="176" height="96" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="56" y="160" width="32" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
+<text x="72" y="171" class="tag" text-anchor="middle">YOU</text>
+</g>
+<text x="56" y="202" class="node" text-anchor="start">You</text>
+</g>
+<g data-node-id="oah" data-source-label="oah">
+<rect x="248" y="144" width="176" height="96" rx="6" fill="#2d3142"/>
+<rect x="248" y="144" width="176" height="96" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="264" y="160" width="32" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="280" y="171" class="tag" text-anchor="middle">OAH</text>
+</g>
+<text x="264" y="202" class="node" text-anchor="start">oah</text>
+</g>
+<g data-node-id="codex" data-source-label="Codex CLI">
+<rect x="520" y="144" width="176" height="96" rx="6" fill="#2d3142"/>
+<rect x="520" y="144" width="176" height="96" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="536" y="160" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="558" y="171" class="tag" text-anchor="middle">CODEX</text>
+</g>
+<text x="536" y="202" class="node" text-anchor="start">Codex CLI</text>
+</g>
+<g data-node-id="git" data-source-label="git / GitHub">
+<rect x="792" y="144" width="176" height="96" rx="6" fill="#2d3142"/>
+<rect x="792" y="144" width="176" height="96" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="808" y="160" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="824" y="171" class="tag" text-anchor="middle">GIT</text>
+</g>
+<text x="808" y="202" class="node" text-anchor="start">git / GitHub</text>
+</g>
+<text x="56" y="1068" class="prose" text-anchor="start">Numbers match the full command walkthrough in the adjacent table.</text>
+<line x1="40" y1="1132" x2="968" y2="1132" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1160" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1150" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1160" class="prose" text-anchor="start">oah coordinates</text>
+<path d="M 288,1156 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#loop-review-dark-arrow)"/>
+<text x="324" y="1160" class="prose" text-anchor="start">Request</text>
+<path d="M 408,1156 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#loop-review-dark-arrow)"/>
+<text x="444" y="1160" class="prose" text-anchor="start">Return</text>
 </svg>
