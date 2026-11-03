@@ -8,12 +8,14 @@ import json
 import os
 import pathlib
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
+from oah.engines import proc
 from oah.lockfile import StateLock
 from oah.toolupdate import probes, records, steps
 from oah.toolupdate import run as passes
@@ -240,10 +242,22 @@ sys.exit(main())
 '''
 # Windows runs npm-installed CLIs through node.exe and the package's bin script (oah never runs a .cmd file).
 NODE_FORWARDER = """const {spawnSync} = require("child_process");
-const result = spawnSync(process.env.FAKE_TOOLS_PYTHON,
-                         [process.env.FAKE_TOOLS_SCRIPT, "TOOL", ...process.argv.slice(2)], {stdio: "inherit"});
-process.exit(result.status === null ? 1 : result.status);
+try {
+    const result = spawnSync(process.env.FAKE_TOOLS_PYTHON,
+                             [process.env.FAKE_TOOLS_SCRIPT, "TOOL", ...process.argv.slice(2)], {stdio: "inherit"});
+    if (result.error) throw result.error;
+    process.exit(result.status === null ? 1 : result.status);
+} catch (error) {
+    console.error(error);
+    process.exit(97);
+}
 """
+
+def node_forwarder(name: str) -> str:
+    assert NODE_FORWARDER.count('"TOOL"') == 1
+    return NODE_FORWARDER.replace('"TOOL"', json.dumps(name))
+
+
 CLAUDE_CURRENT = "Current version: 2.1.316\nChecking for updates to latest version...\nClaude is up to date!\n"
 CODEX_CURRENT = ("Updating Codex via `brew upgrade --cask codex`...\n"
                  "Warning: Not upgrading codex, the latest version is already installed\n")
@@ -314,7 +328,7 @@ class FakeTools:
         package.mkdir(parents=True)
         (package / "package.json").write_text(json.dumps({"name": f"fake-{name}", "version": "1.0.0",
                                                           "bin": {name: "cli.js"}}), encoding="utf-8")
-        (package / "cli.js").write_text(NODE_FORWARDER.replace("TOOL", name), encoding="utf-8")
+        (package / "cli.js").write_text(node_forwarder(name), encoding="utf-8")
         (self.bin / f"{name}.cmd").write_text("@echo off\r\nexit /b 9\r\n", encoding="utf-8", newline="")
 
     def save(self) -> None:
@@ -389,6 +403,30 @@ class SwitchTest(FakeToolsCase):
         self.assertEqual(self.launched, [])
         self.assertEqual(self.fake.argv(), [])
         self.assertFalse((self.fake.home / ".oah").exists())
+
+    def test_node_forwarder_runs_fake_and_reports_errors(self):
+        node = require_node(self)
+        script = self.fake.bin / "forwarder.js"
+        script.write_text(node_forwarder("claude"), encoding="utf-8")
+        if os.name == "nt":
+            command = [str(self.fake.bin / "node.exe"), str(script)]
+        else:
+            wrapper = self.fake.bin / "node-wrapper"
+            wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(node)} {shlex.quote(str(script))} "$@"\n',
+                               encoding="utf-8")
+            wrapper.chmod(0o755)
+            command = [str(wrapper)]
+        result = proc.run_command([*command, "--version"], timeout=30, cwd=str(self.root), env=self.fake.env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "2.1.316 (Claude Code)\n")
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(self.fake.ran("claude", "--version"))
+
+        env = dict(self.fake.env)
+        del env["FAKE_TOOLS_PYTHON"]
+        result = proc.run_command([*command, "--version"], timeout=30, cwd=str(self.root), env=env)
+        self.assertEqual(result.returncode, 97)
+        self.assertIn("error", result.stderr.lower())
 
     def test_off_by_default_without_a_config(self):
         shutil.rmtree(self.root / ".oah")
