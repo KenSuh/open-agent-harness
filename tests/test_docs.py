@@ -234,13 +234,46 @@ class ReadmeLanguageTest(unittest.TestCase):
 
 
 ASSETS = REPO / "docs" / "assets"
-DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review")
+CONCEPT_DIAGRAMS = (
+    "concepts-loop", "concepts-leases-lifecycle", "concepts-leases-finish",
+    "concepts-routing-rules", "concepts-routing-skills", "concepts-impact-freshness",
+    "concepts-impact-ranked", "concepts-review", "concepts-landing-local", "concepts-landing-checks",
+)
+DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
+            *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
     "README.md": ("banner", "how-it-works"),
     "README.ko.md": ("banner-ko", "how-it-works-ko"),
     "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
     "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
+    "docs/concepts.md": CONCEPT_DIAGRAMS,
+    "docs/ko/concepts.md": tuple(f"{stem}-ko" for stem in CONCEPT_DIAGRAMS),
 }
+
+# Original Mermaid graphs, before the faithful redraw. Split figures repeat shared nodes,
+# but every original edge appears exactly once, including differently guarded parallel edges.
+CONCEPT_GRAPHS = (
+    (("concepts-loop",), "P L C G R F N D",
+     "P>L L>C C>G G>R R>F F>G R>N N>D"),
+    (("concepts-leases-lifecycle", "concepts-leases-finish"),
+     "Active Stale Finished Released finish_check __start_1 __end_1 __end_2 __end_3",
+     "__start_1>Active Active>finish_check Stale>finish_check finish_check>Finished "
+     "finish_check>Active finish_check>Stale Active>Released Stale>Released Active>Stale "
+     "Stale>__end_1 Finished>__end_2 Released>__end_3 Active>Active"),
+    (("concepts-routing-rules", "concepts-routing-skills"),
+     "task score tier pick model skills ask jev used unused brief",
+     "task>score score>tier tier>pick pick>model model>brief task>skills skills>ask "
+     "ask>jev ask>unused ask>unused jev>used jev>unused used>brief unused>brief jev>pick"),
+    (("concepts-impact-freshness", "concepts-impact-ranked"),
+     "change fresh refresh stale dflt pinR execR linkR mentionR rerun",
+     "change>fresh fresh>pinR fresh>refresh refresh>pinR fresh>stale dflt>pinR "
+     "pinR>execR execR>linkR linkR>mentionR pinR>rerun execR>rerun"),
+    (("concepts-review",), "R V F B D", "R>V R>F F>B B>R R>D"),
+    (("concepts-landing-local", "concepts-landing-checks"),
+     "gcommit pc post gpush pp cc pr tests secrets land exc landed",
+     "gcommit>pc gcommit>post gpush>pp pp>secrets pp>pr pr>tests pr>secrets "
+     "tests>land secrets>land land>exc land>landed"),
+)
 
 
 def svg_resource_errors(text: str) -> list[str]:
@@ -400,6 +433,55 @@ class BannerTest(unittest.TestCase):
                 self.assertTrue(stack.startswith(KOREAN_FONTS[0]), stack)
                 positions = [stack.find(font) for font in KOREAN_FONTS]
                 self.assertTrue(all(0 <= pos < stack.index("system-ui") for pos in positions), stack)
+
+    def test_concepts_preserve_the_source_graph_and_visible_node_labels(self):
+        for stems, expected_nodes, expected_edges in CONCEPT_GRAPHS:
+            for language in ("", "-ko"):
+                for theme in ("light", "dark"):
+                    nodes, edges = set(), []
+                    for stem in stems:
+                        path = ASSETS / f"{stem}{language}-{theme}.svg"
+                        with self.subTest(asset=path.name):
+                            root = ET.parse(path).getroot()
+                            drawn_nodes = [n for n in root.iter() if n.get("data-node-id")]
+                            drawn_edges = [n for n in root.iter() if n.get("data-edge-id")]
+                            self.assertLessEqual(len(drawn_nodes), 9)
+                            self.assertLessEqual(len(drawn_edges), 12)
+                            self.assertEqual(len({n.get("data-node-id") for n in drawn_nodes}), len(drawn_nodes))
+                            for node in drawn_nodes:
+                                key = node.get("data-node-id")
+                                nodes.add(key)
+                                if key.startswith("__"):
+                                    self.assertIsNotNone(node.find(f"{SVG}circle"))
+                                    continue  # Mermaid's start/end pseudostates are dots.
+                                visible = " ".join("".join(t.itertext()) for t in node.findall(f"{SVG}text"))
+                                self.assertEqual(visible.split(), node.get("data-source-label", "").split())
+                            for edge in drawn_edges:
+                                self.assertIn(edge.tag, {f"{SVG}line", f"{SVG}path"})
+                                self.assertTrue(edge.get("marker-end"))
+                                edges.append(f'{edge.get("data-from")}>{edge.get("data-to")}')
+                    with self.subTest(stems=stems, language=language, theme=theme):
+                        self.assertEqual(nodes, set(expected_nodes.split()))
+                        self.assertEqual(sorted(edges), sorted(expected_edges.split()))
+
+    def test_architecture_judgement_and_english_loop_label(self):
+        for language in ("", "-ko"):
+            for theme in ("light", "dark"):
+                path = ASSETS / f"architecture-build{language}-{theme}.svg"
+                with self.subTest(asset=path.name):
+                    root = ET.parse(path).getroot()
+                    labels = " ".join("".join(t.itertext()) for t in root.findall(f".//{SVG}text"))
+                    self.assertIn("권장 선택형 AI 판정기" if language else "Recommended, optional AI judge", labels)
+                    self.assertIn("작업의 난이도를 판정한다" if language else "Judges task difficulty", labels)
+                    self.assertIn("Jev가 최저 기준 안에서" if language else "Jev can adjust tier within its floor", labels)
+        for theme in ("light", "dark"):
+            path = ASSETS / f"loop-review-{theme}.svg"
+            with self.subTest(asset=path.name):
+                root = ET.parse(path).getroot()
+                loop = [t for t in root.findall(f".//{SVG}text") if t.text == "LOOP"]
+                self.assertEqual(len(loop), 1)
+                self.assertEqual(loop[0].get("class"), "label")
+                self.assertRegex(read(path), r"\.label\s*\{\s*font-size:\s*12px;")
 
     def test_pages_pick_every_diagram_by_theme_with_alt_matching_desc(self):
         for name, stems in DIAGRAM_PAGES.items():
