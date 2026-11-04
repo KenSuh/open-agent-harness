@@ -303,6 +303,38 @@ def _agent_lines(notices: Sequence[Mapping], error: str | None) -> list[str]:
     return lines
 
 
+def reviewer_pin(root: pathlib.Path | None, search_path: str | None = None) -> dict:
+    """The reviewer CLI file `oah review` would run and its sha256, read from disk; the CLI itself never runs.
+
+    The command comes from the project's current `[engines.codex] command` (the review reads the one committed at
+    its base). `error` holds a code when the file cannot be found or read."""
+    from oah import call
+    from oah.engines.effort import EngineError
+    from oah.review import ReviewError, runner
+
+    try:
+        engines = (load_config(root).section("engines", call.ENGINE_DEFAULTS) if root is not None
+                   else call.ENGINE_DEFAULTS)
+        path, digest = runner.reviewer_binary(runner.reviewer_command(engines["codex"]["command"], search_path))
+    except (ConfigError, EngineError, ReviewError, UnsupportedBatchShim, OSError) as exc:
+        return {"path": None, "sha256": None, "error": getattr(exc, "code", None) or type(exc).__name__}
+    return {"path": path, "sha256": digest, "error": None}
+
+
+def _pin_lines(pin: Mapping | None) -> list[str]:
+    if pin is None:
+        return []
+    lines = ["", "Reviewer pin (read from disk; oah doctor never runs the reviewer CLI):"]
+    if pin["error"] is None:
+        lines.append(f"  codex entry: {pin['path']}")
+        lines.append(f"  sha256: {pin['sha256']} (the value for [review] codex_sha256)")
+    else:
+        lines.append(f"  the reviewer CLI file could not be read ({pin['error']}); install Codex or fix [engines.codex] "
+                     "command in .oah/config.toml, then run oah doctor")
+    lines.append("  [review] codex_version takes the first line of `codex --version`, such as codex-cli 0.163.0")
+    return lines
+
+
 def update_notices(root: pathlib.Path | None) -> list[dict]:
     """The tool-update switch when it is off by absence, and the last pass's unsettled results; reads only."""
     from oah.toolupdate import doctor_notices
@@ -346,7 +378,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
                 model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
                 agent_notices_error: str | None = None, *, update_notices: Sequence[Mapping] = (),
-                update_notices_error: str | None = None) -> str:
+                update_notices_error: str | None = None, reviewer_pin: Mapping | None = None) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -368,6 +400,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
     lines += _choice_lines(model_choices)
     lines += _agent_lines(agent_notices, agent_notices_error)
     lines += _update_lines(update_notices, update_notices_error)
+    lines += _pin_lines(reviewer_pin)
     if model_notices_error is not None:
         lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
@@ -452,7 +485,14 @@ def doctor_main(*, json_output: bool) -> int:
         updates = update_notices(root)
     except Exception as exc:  # the same for the tool-update records
         updates, update_error = [], type(exc).__name__
-    render = render_json if json_output else render_text
-    print(render(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
-                 update_notices=updates, update_notices_error=update_error))
+    if json_output:  # the JSON keeps its landed shape; the reviewer pin is a text block
+        print(render_json(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
+                          update_notices=updates, update_notices_error=update_error))
+        return exit_code(statuses)
+    try:
+        pin = reviewer_pin(root)
+    except Exception as exc:  # and for the reviewer pin
+        pin = {"path": None, "sha256": None, "error": type(exc).__name__}
+    print(render_text(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
+                      update_notices=updates, update_notices_error=update_error, reviewer_pin=pin))
     return exit_code(statuses)
