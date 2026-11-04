@@ -29,131 +29,131 @@
 <rect width="1080" height="1420" fill="url(#how-it-works-ko-dark-dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / SWIMLANE</text>
 <text x="40" y="88" class="title" text-anchor="start">질문하고 답하고 확인한다. 하네스가 작업을 이어 간다.</text>
-<rect x="40" y="144" width="248" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<rect x="40" y="144" width="272" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
 <text x="56" y="168" class="zone-label" text-anchor="start">사용자 · 질문·답변·확인</text>
-<rect x="328" y="144" width="360" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
-<text x="344" y="168" class="zone-label" text-anchor="start">AI + oah · 설치된 규칙</text>
-<rect x="728" y="144" width="272" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
-<text x="744" y="168" class="zone-label" text-anchor="start">설치된 AI 엔진</text>
-<rect x="40" y="1096" width="960" height="128" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
+<rect x="352" y="144" width="360" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="368" y="168" class="zone-label" text-anchor="start">AI + oah · 설치된 규칙</text>
+<rect x="752" y="144" width="272" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="768" y="168" class="zone-label" text-anchor="start">설치된 AI 엔진</text>
+<rect x="40" y="1096" width="984" height="128" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
 <text x="64" y="1124" class="label" text-anchor="start">PLANNED · v0.4.0</text>
 <text x="64" y="1160" class="node" text-anchor="start">한 번에 하나씩 질문하며 함께 설계한다</text>
 <text x="64" y="1188" class="prose" text-anchor="start">만들고 싶은 것을 말하면 oah가 추천안과 함께 설계 질문을 하나씩 묻는다.</text>
 <text x="64" y="1208" class="prose" text-anchor="start">예정된 기능이며 아직 제공하지 않는다.</text>
-<path d="M 264,280 L 352,280" data-edge-id="h1" data-from="request" data-to="prepare" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 664,304 L 704,304 Q 712,304 712,312 L 712,472 Q 712,480 720,480 L 752,480" data-edge-id="h2" data-from="prepare" data-to="build" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 864,524 L 864,544 Q 864,552 856,552 L 516,552 Q 508,552 508,560 L 508,584" data-edge-id="h3" data-from="build" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 664,640 L 752,640" data-edge-id="h4" data-from="evidence" data-to="review" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 864,720 L 864,792" data-edge-id="h5" data-from="review" data-to="fix" data-label="수정 요청" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 752,856 L 720,856 Q 712,856 712,848 L 712,704 Q 712,696 704,696 L 664,696" data-edge-id="h6" data-from="fix" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 976,664 L 1024,664 Q 1032,664 1032,672 L 1032,1032 Q 1032,1040 1024,1040 L 568,1040 Q 560,1040 560,1032 L 560,1020" data-edge-id="h7" data-from="review" data-to="land" data-label="수렴" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<path d="M 264,928 L 296,928 Q 304,928 304,936 L 304,960 Q 304,968 312,968 L 352,968" data-edge-id="h8" data-from="confirm" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
-<rect x="872" y="741" width="88" height="20" rx="2" fill="#2d3142"/>
-<text x="916" y="756" class="arrow-label" text-anchor="middle">A 수정 요청</text>
-<rect x="814" y="1012" width="84" height="20" rx="2" fill="#2d3142"/>
-<text x="856" y="1027" class="arrow-label" text-anchor="middle">수렴</text>
+<path d="M 288,280 L 376,280" data-edge-id="h1" data-from="request" data-to="prepare" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 688,304 L 728,304 Q 736,304 736,312 L 736,472 Q 736,480 744,480 L 776,480" data-edge-id="h2" data-from="prepare" data-to="build" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 888,524 L 888,544 Q 888,552 880,552 L 540,552 Q 532,552 532,560 L 532,584" data-edge-id="h3" data-from="build" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 688,640 L 776,640" data-edge-id="h4" data-from="evidence" data-to="review" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 888,720 L 888,792" data-edge-id="h5" data-from="review" data-to="fix" data-label="수정 요청" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 776,856 L 744,856 Q 736,856 736,848 L 736,704 Q 736,696 728,696 L 688,696" data-edge-id="h6" data-from="fix" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 1000,664 L 1024,664 Q 1032,664 1032,672 L 1032,1032 Q 1032,1040 1024,1040 L 592,1040 Q 584,1040 584,1032 L 584,1020" data-edge-id="h7" data-from="review" data-to="land" data-label="수렴" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<path d="M 288,928 L 320,928 Q 328,928 328,936 L 328,960 Q 328,968 336,968 L 376,968" data-edge-id="h8" data-from="confirm" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-ko-dark-arrow)"/>
+<rect x="896" y="741" width="88" height="20" rx="2" fill="#2d3142"/>
+<text x="940" y="756" class="arrow-label" text-anchor="middle">A 수정 요청</text>
+<rect x="838" y="1012" width="84" height="20" rx="2" fill="#2d3142"/>
+<text x="880" y="1027" class="arrow-label" text-anchor="middle">수렴</text>
 <g data-node-id="request" data-source-label="변경을 요청한다 “oah로 만들어 줘.” AI에게 평소 말로 요청한다.">
-<rect x="64" y="200" width="200" height="156" rx="6" fill="#2d3142"/>
-<rect x="64" y="200" width="200" height="156" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<rect x="64" y="200" width="224" height="136" rx="6" fill="#2d3142"/>
+<rect x="64" y="200" width="224" height="136" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
 <rect x="80" y="216" width="32" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
 <text x="96" y="227" class="tag" text-anchor="middle">YOU</text>
-<text x="248" y="238" class="ghost" text-anchor="end">01</text>
+<text x="272" y="238" class="ghost" text-anchor="end">01</text>
 </g>
 <text x="80" y="258" class="node" text-anchor="start">변경을 요청한다</text>
 <text x="80" y="278" class="sub" text-anchor="start">“oah로 만들어 줘.” AI에게</text>
 <text x="80" y="296" class="sub" text-anchor="start">평소 말로 요청한다.</text>
 </g>
 <g data-node-id="prepare" data-source-label="작업을 준비한다 의도와 범위, 영향 지도를 준비한다. 리스는 바꿀 경로를 예약한다. 겹치는 리스는 거절한다. TypeSafe Jev · 권장 선택형 판정기 난이도를 판정하고 그 등급으로 모델을 고른다. 고른 스킬의 순서를 다시 매긴다. 키가 없으면 규칙을 쓴다.">
-<rect x="352" y="200" width="312" height="208" rx="6" fill="#2d3142"/>
-<rect x="352" y="200" width="312" height="208" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="376" y="200" width="312" height="208" rx="6" fill="#2d3142"/>
+<rect x="376" y="200" width="312" height="208" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="368" y="216" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="384" y="227" class="tag" text-anchor="middle">OAH</text>
-<text x="648" y="238" class="ghost" text-anchor="end">02</text>
+<rect x="392" y="216" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="408" y="227" class="tag" text-anchor="middle">OAH</text>
+<text x="672" y="238" class="ghost" text-anchor="end">02</text>
 </g>
-<text x="368" y="258" class="node" text-anchor="start">작업을 준비한다</text>
-<text x="368" y="278" class="sub" text-anchor="start">의도와 범위, 영향 지도를 준비한다.</text>
-<text x="368" y="296" class="sub" text-anchor="start">리스는 바꿀 경로를 예약한다.</text>
-<text x="368" y="314" class="sub" text-anchor="start">겹치는 리스는 거절한다.</text>
-<text x="368" y="332" class="sub" text-anchor="start">TypeSafe Jev · 권장 선택형 판정기</text>
-<text x="368" y="350" class="sub" text-anchor="start">난이도를 판정하고 그 등급으로 모델을 고른다.</text>
-<text x="368" y="368" class="sub" text-anchor="start">고른 스킬의 순서를 다시 매긴다.</text>
-<text x="368" y="386" class="sub" text-anchor="start">키가 없으면 규칙을 쓴다.</text>
+<text x="392" y="258" class="node" text-anchor="start">작업을 준비한다</text>
+<text x="392" y="278" class="sub" text-anchor="start">의도와 범위, 영향 지도를 준비한다.</text>
+<text x="392" y="296" class="sub" text-anchor="start">리스는 바꿀 경로를 예약한다.</text>
+<text x="392" y="314" class="sub" text-anchor="start">겹치는 리스는 거절한다.</text>
+<text x="392" y="332" class="sub" text-anchor="start">TypeSafe Jev · 권장 선택형 판정기</text>
+<text x="392" y="350" class="sub" text-anchor="start">난이도를 판정하고 그 등급으로 모델을 고른다.</text>
+<text x="392" y="368" class="sub" text-anchor="start">고른 스킬의 순서를 다시 매긴다.</text>
+<text x="392" y="386" class="sub" text-anchor="start">키가 없으면 규칙을 쓴다.</text>
 </g>
 <g data-node-id="build" data-source-label="Claude Code 첫 구현을 만든다.">
-<rect x="752" y="424" width="224" height="100" rx="6" fill="#2d3142"/>
-<rect x="752" y="424" width="224" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="776" y="424" width="224" height="100" rx="6" fill="#2d3142"/>
+<rect x="776" y="424" width="224" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="768" y="440" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="792" y="451" class="tag" text-anchor="middle">CLAUDE</text>
-<text x="960" y="462" class="ghost" text-anchor="end">03</text>
+<rect x="792" y="440" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="816" y="451" class="tag" text-anchor="middle">CLAUDE</text>
+<text x="984" y="462" class="ghost" text-anchor="end">03</text>
 </g>
-<text x="768" y="482" class="node" text-anchor="start">Claude Code</text>
-<text x="768" y="502" class="sub" text-anchor="start">첫 구현을 만든다.</text>
+<text x="792" y="482" class="node" text-anchor="start">Claude Code</text>
+<text x="792" y="502" class="sub" text-anchor="start">첫 구현을 만든다.</text>
 </g>
 <g data-node-id="evidence" data-source-label="증거를 남긴다 게이트에 검사 결과를, 위키에 결정과 이유를 남긴다.">
-<rect x="352" y="584" width="312" height="116" rx="6" fill="#2d3142"/>
-<rect x="352" y="584" width="312" height="116" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<rect x="376" y="584" width="312" height="116" rx="6" fill="#2d3142"/>
+<rect x="376" y="584" width="312" height="116" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
-<rect x="368" y="600" width="76" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
-<text x="406" y="611" class="tag" text-anchor="middle">GATES / WIKI</text>
-<text x="648" y="622" class="ghost" text-anchor="end">04</text>
+<rect x="392" y="600" width="76" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="430" y="611" class="tag" text-anchor="middle">GATES / WIKI</text>
+<text x="672" y="622" class="ghost" text-anchor="end">04</text>
 </g>
-<text x="368" y="642" class="node" text-anchor="start">증거를 남긴다</text>
-<text x="368" y="662" class="sub" text-anchor="start">게이트에 검사 결과를, 위키에 결정과 이유를</text>
-<text x="368" y="680" class="sub" text-anchor="start">남긴다.</text>
+<text x="392" y="642" class="node" text-anchor="start">증거를 남긴다</text>
+<text x="392" y="662" class="sub" text-anchor="start">게이트에 검사 결과를,</text>
+<text x="392" y="680" class="sub" text-anchor="start">위키에 결정과 이유를 남긴다.</text>
 </g>
 <g data-node-id="review" data-source-label="Codex CLI 스냅샷을 검토한다. 같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 묻는다.">
-<rect x="752" y="584" width="224" height="136" rx="6" fill="#2d3142"/>
-<rect x="752" y="584" width="224" height="136" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="776" y="584" width="224" height="136" rx="6" fill="#2d3142"/>
+<rect x="776" y="584" width="224" height="136" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="768" y="600" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="790" y="611" class="tag" text-anchor="middle">CODEX</text>
-<text x="960" y="622" class="ghost" text-anchor="end">05</text>
+<rect x="792" y="600" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="814" y="611" class="tag" text-anchor="middle">CODEX</text>
+<text x="984" y="622" class="ghost" text-anchor="end">05</text>
 </g>
-<text x="768" y="642" class="node" text-anchor="start">Codex CLI</text>
-<text x="768" y="662" class="sub" text-anchor="start">스냅샷을 검토한다. 같은 문제가</text>
-<text x="768" y="680" class="sub" text-anchor="start">반복되거나 설계 선택이 필요하면</text>
-<text x="768" y="698" class="sub" text-anchor="start">멈추고 묻는다.</text>
+<text x="792" y="642" class="node" text-anchor="start">Codex CLI</text>
+<text x="792" y="662" class="sub" text-anchor="start">스냅샷을 검토한다. 같은 문제가</text>
+<text x="792" y="680" class="sub" text-anchor="start">반복되거나 설계 선택이 필요하면</text>
+<text x="792" y="698" class="sub" text-anchor="start">멈추고 묻는다.</text>
 </g>
 <g data-node-id="fix" data-source-label="고치고 반복한다 Codex CLI가 고친 뒤 증거를 다시 확인한다.">
-<rect x="752" y="792" width="224" height="116" rx="6" fill="#2d3142"/>
-<rect x="752" y="792" width="224" height="116" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="776" y="792" width="224" height="116" rx="6" fill="#2d3142"/>
+<rect x="776" y="792" width="224" height="116" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="768" y="808" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="790" y="819" class="tag" text-anchor="middle">CODEX</text>
-<text x="960" y="830" class="ghost" text-anchor="end">05b</text>
+<rect x="792" y="808" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="814" y="819" class="tag" text-anchor="middle">CODEX</text>
+<text x="984" y="830" class="ghost" text-anchor="end">05b</text>
 </g>
-<text x="768" y="850" class="node" text-anchor="start">고치고 반복한다</text>
-<text x="768" y="870" class="sub" text-anchor="start">Codex CLI가 고친 뒤 증거를</text>
-<text x="768" y="888" class="sub" text-anchor="start">다시 확인한다.</text>
+<text x="792" y="850" class="node" text-anchor="start">고치고 반복한다</text>
+<text x="792" y="870" class="sub" text-anchor="start">Codex CLI가 고친 뒤 증거를</text>
+<text x="792" y="888" class="sub" text-anchor="start">다시 확인한다.</text>
 </g>
 <g data-node-id="confirm" data-source-label="질문·답변·확인 “리뷰 끝났어?” 판단을 묻고 멈추면 답한다. 결과를 살피고 반영 전에 확인한다.">
-<rect x="64" y="792" width="200" height="192" rx="6" fill="#2d3142"/>
-<rect x="64" y="792" width="200" height="192" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<rect x="64" y="792" width="224" height="172" rx="6" fill="#2d3142"/>
+<rect x="64" y="792" width="224" height="172" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
 <rect x="80" y="808" width="32" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
 <text x="96" y="819" class="tag" text-anchor="middle">YOU</text>
-<text x="248" y="830" class="ghost" text-anchor="end">06</text>
+<text x="272" y="830" class="ghost" text-anchor="end">06</text>
 </g>
 <text x="80" y="850" class="node" text-anchor="start">질문·답변·확인</text>
 <text x="80" y="870" class="sub" text-anchor="start">“리뷰 끝났어?”</text>
 <text x="80" y="888" class="sub" text-anchor="start">판단을 묻고 멈추면 답한다.</text>
-<text x="80" y="906" class="sub" text-anchor="start">결과를 살피고 반영 전에</text>
-<text x="80" y="924" class="sub" text-anchor="start">확인한다.</text>
+<text x="80" y="906" class="sub" text-anchor="start">결과를 살피고</text>
+<text x="80" y="924" class="sub" text-anchor="start">반영 전에 확인한다.</text>
 </g>
 <g data-node-id="land" data-source-label="검사하고 반영한다 정확한 HEAD와 CI를 확인하고 사용자 확인 뒤 fast-forward push한다.">
-<rect x="352" y="904" width="312" height="116" rx="6" fill="#2d3142"/>
-<rect x="352" y="904" width="312" height="116" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="376" y="904" width="312" height="116" rx="6" fill="#2d3142"/>
+<rect x="376" y="904" width="312" height="116" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="368" y="920" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="384" y="931" class="tag" text-anchor="middle">OAH</text>
-<text x="648" y="942" class="ghost" text-anchor="end">07</text>
+<rect x="392" y="920" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="408" y="931" class="tag" text-anchor="middle">OAH</text>
+<text x="672" y="942" class="ghost" text-anchor="end">07</text>
 </g>
-<text x="368" y="962" class="node" text-anchor="start">검사하고 반영한다</text>
-<text x="368" y="982" class="sub" text-anchor="start">정확한 HEAD와 CI를 확인하고 사용자 확인 뒤</text>
-<text x="368" y="1000" class="sub" text-anchor="start">fast-forward push한다.</text>
+<text x="392" y="962" class="node" text-anchor="start">검사하고 반영한다</text>
+<text x="392" y="982" class="sub" text-anchor="start">정확한 HEAD와 CI를 확인하고 사용자 확인 뒤</text>
+<text x="392" y="1000" class="sub" text-anchor="start">fast-forward push한다.</text>
 </g>
 <text x="56" y="1276" class="prose" text-anchor="start">oah init이 설치한 규칙에 따라 AI가 내부 명령으로 하네스를 진행한다.</text>
 <text x="56" y="1300" class="prose" text-anchor="start">Jev 난이도 판정은 v0.3.0 기능이다. 확신도와 최저 기준을 지킨다.</text>
