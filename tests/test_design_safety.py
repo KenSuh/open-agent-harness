@@ -22,6 +22,28 @@ BAD_IDS = ("../x", "a/b", "a\\b", "A", "con", "nul", "com1", "lpt9", "a--b", "-a
 
 
 class IdTest(DesignRepo, unittest.TestCase):
+    def test_c2_missing_pointers_and_invalid_ids_are_not_listed_as_corrupt(self):
+        repo = self.make_repo()
+        store = self.store(repo)
+        self.booking(store)
+        pointer = repo / design_fs.pointer_rel("acme", "booking")
+        original = pointer.read_bytes()
+        pointer.unlink()
+        invalid = repo / ".oah/designs/acme/INVALID"
+        invalid.mkdir()
+        (invalid / "design.json").write_bytes(original)
+        orphan = repo / ".oah/designs/acme/orphan/revisions/r9"
+        orphan.mkdir(parents=True)
+        (orphan / "design.md").write_bytes(b"Orphan.\n")
+        before = self.tree(repo, self.state(repo))
+        self.assertEqual([item.id for item in store.projects()], ["acme"])
+        self.assertEqual(store.designs(), [])
+        self.assertEqual(store.designs("acme"), [])
+        with self.assertRaises(DesignError) as missing:
+            store.context("acme", "booking")
+        self.assertEqual(missing.exception.code, "OAH_DESIGN_NOT_FOUND")
+        self.assertEqual(self.tree(repo, self.state(repo)), before)
+
     def test_malformed_ids_and_numbers_change_nothing(self):
         repo = self.make_repo()
         store = self.store(repo)
@@ -50,6 +72,47 @@ class IdTest(DesignRepo, unittest.TestCase):
 
 
 class LinkTest(DesignRepo, unittest.TestCase):
+    def test_c2_unreadable_pointer_targets_still_refuse_without_writes(self):
+        for damage in ("oversize", "directory", "alias"):
+            with self.subTest(damage=damage):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                assert r1.digest is not None
+                self.damage_booking_pointer(repo, damage)
+                before = self.tree(repo, self.state(repo))
+                calls = (lambda: store.context("acme", "booking"),
+                         lambda: store.snapshot("acme", "booking"),
+                         lambda: store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest,
+                                            reason="Refuse", parts={"design": "Changed.\n"}, today=TODAY),
+                         lambda: store.accept("acme", "booking", revision=1, digest=r1.digest,
+                                              reason="Refuse", today=TODAY),
+                         lambda: store.new("acme", "booking", title="Booking", parts={"design": "New.\n"},
+                                           today=TODAY),
+                         lambda: store.reconcile("acme", "booking"))
+                for call in calls:
+                    with self.assertRaises(DesignError) as invalid:
+                        call()
+                    self.assertEqual(invalid.exception.code, "OAH_DESIGN_PATH_INVALID")
+                    self.assertEqual(self.tree(repo, self.state(repo)), before)
+
+    def test_c2_unreadable_registry_roots_are_not_empty_catalogs(self):
+        for rel in (".oah/designs", ".oah/designs/acme"):
+            with self.subTest(rel=rel):
+                repo = self.make_repo()
+                store = self.store(repo)
+                self.booking(store)
+                folder = repo / rel
+                target = repo / "aliased-records"
+                folder.rename(target)
+                directory_alias(target, folder)
+                before = self.tree(repo, self.state(repo))
+                for call in (store.projects, store.designs, store.diagnostics, store.reconcile):
+                    with self.assertRaises(DesignError) as invalid:
+                        call()
+                    self.assertEqual(invalid.exception.code, "OAH_DESIGN_PATH_INVALID")
+                    self.assertEqual(self.tree(repo, self.state(repo)), before)
+
     def test_c1_committed_nonregular_parts_are_refused_by_both_readers(self):
         repo = self.make_repo()
         store = self.store(repo)

@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import unittest
+from typing import Literal, assert_never
 from unittest import mock
 
 from oah.design import DesignError, explain_binding, open_store
@@ -17,7 +18,7 @@ from oah.design.model import DesignBinding
 from oah.wiki import notes
 from oah.wiki.base import WikiSettings
 from oah.wiki.store import Wiki
-from tests.helpers import git_commit, git_env, make_git_repo
+from tests.helpers import directory_alias, git_commit, git_env, make_git_repo
 
 TODAY = datetime.date(2026, 11, 4)
 UID = "0123456789abcdef0123456789abcdef"
@@ -95,6 +96,24 @@ class DesignRepo:
     def log_entries(self, repo: pathlib.Path, marker_prefix: str = "<!-- oah-design: ") -> list[str]:
         text = (repo / "docs/wiki/log.md").read_text(encoding="utf-8")
         return [line for line in text.splitlines() if line.startswith(marker_prefix)]
+
+    @staticmethod
+    def damage_booking_pointer(repo: pathlib.Path, damage: Literal["oversize", "directory", "alias"]) -> None:
+        pointer = repo / design_fs.pointer_rel("acme", "booking")
+        match damage:
+            case "oversize":
+                pointer.write_bytes(b" " * (design_fs.RECORD_LIMIT + 1))
+            case "directory":
+                pointer.unlink()
+                pointer.mkdir()
+            case "alias":
+                target = repo / "pointer-target"
+                target.mkdir()
+                (target / "design.json").write_bytes(pointer.read_bytes())
+                pointer.unlink()
+                directory_alias(target, pointer)
+            case unreachable:
+                assert_never(unreachable)
 
 
 class RevisionTest(DesignRepo, unittest.TestCase):
@@ -307,6 +326,51 @@ class RevisionTest(DesignRepo, unittest.TestCase):
 class CrashTest(DesignRepo, unittest.TestCase):
     STEPS = ("journal-written", "revision-published", "pointer-written", f"wrote {PAGE}",
              "wrote docs/wiki/designs/acme.md", "wrote docs/wiki/index.md", "log-written")
+
+    def test_c2_healthy_recovery_finishes_once_with_an_unreadable_sibling_pointer(self):
+        for damage in ("oversize", "directory", "alias"):
+            with self.subTest(damage=damage):
+                repo = self.make_repo()
+                store = self.store(repo)
+                self.booking(store)
+                healthy = store.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
+                assert healthy.digest is not None
+                with self.assertRaises(Crash):
+                    store.save("acme", "payments", expect_revision=1, expect_digest=healthy.digest,
+                               reason="Healthy change", parts={"design": "Pay twice.\n"}, event="ev-pay-two",
+                               fault=crash_at("journal-written"), today=TODAY)
+                journal = json.loads(store.journal_path.read_bytes())
+                marker = f"<!-- oah-design: {journal['log']['key']} -->"
+                self.damage_booking_pointer(repo, damage)
+                corrupt_before = self.tree(repo / ".oah/designs/acme/booking")
+                page_before = (repo / PAGE).read_bytes()
+                index_before = (repo / "docs/wiki/index.md").read_bytes()
+                project_page = repo / "docs/wiki/designs/acme.md"
+                row_before = next(line for line in project_page.read_bytes().splitlines(keepends=True)
+                                  if line.startswith(b"- [[acme--booking"))
+                with self.assertRaises(Crash):
+                    store.recover(fault=crash_at("log-written"))
+                self.assertTrue(store.journal_path.exists())
+                current = store.context("acme", "payments")
+                self.assertEqual((current.current.revision, current.current.text()), (2, "Pay twice.\n"))
+                self.assertTrue(current.recovery.this_design)
+                self.assertEqual(self.log_entries(repo).count(marker), 1)
+                recovered = store.recover()
+                self.assertIn("OAH_DESIGN_RECOVERED saved acme/payments", recovered)
+                self.assertIn("OAH_DESIGN_CORRUPT", recovered)
+                self.assertFalse(store.journal_path.exists())
+                self.assertEqual(self.log_entries(repo).count(marker), 1)
+                self.assertEqual(len(self.log_entries(repo)), 4)
+                self.assertEqual(self.tree(repo / ".oah/designs/acme/booking"), corrupt_before)
+                self.assertEqual((repo / PAGE).read_bytes(), page_before)
+                self.assertIn(row_before, project_page.read_bytes().splitlines(keepends=True))
+                self.assertEqual((repo / "docs/wiki/index.md").read_bytes(), index_before)
+                self.assertEqual(store.add_project("other", title="Other", today=TODAY).action, "registered")
+                self.assertEqual(len(self.log_entries(repo)), 5)
+                self.assertEqual(len(set(self.log_entries(repo))), 5)
+                before = self.tree(repo, self.state(repo))
+                self.assertEqual(store.recover(), "OAH_DESIGN_RECOVER_NOTHING nothing to recover")
+                self.assertEqual(self.tree(repo, self.state(repo)), before)
 
     def test_c1_resolved_requires_current_and_accepted_part_bytes(self):
         for damaged_revision in (1, 2):
@@ -713,24 +777,37 @@ class OutputPathsTest(DesignRepo, unittest.TestCase):
 
 class AuthorityTest(DesignRepo, unittest.TestCase):
     def test_c1_worktree_predating_registration_reads_without_local_writes(self):
-        repo = self.make_repo()
-        task = repo.parent / "early-task"
-        git(repo, "worktree", "add", "-q", "-b", "early-task", str(task))
-        main = self.store(repo)
-        r1 = self.booking(main)
-        git_commit(repo, {}, "register after task checkout")
-        before = self.tree(task, self.state(task))
-        store = self.store(task)
-        context = store.context("acme", "booking")
-        self.assertEqual((context.source, context.freshness, context.current.digest),
-                         ("authority", "behind", r1.digest))
-        self.assertEqual(store.snapshot("acme", "booking").text(), "People book a lesson.\n")
-        self.assertEqual(explain_binding(context.binding(), store)[0], "current")
-        self.assertEqual([p.id for p in store.projects()], ["acme"])
-        self.assertEqual([(d.design, d.current, d.freshness) for d in store.designs()],
-                         [("booking", (1, r1.digest), "behind")])
-        self.assertEqual(self.tree(task, self.state(task)), before)
-        self.assertFalse((task / ".oah/designs/acme/project.json").exists())
+        for nonregular_sibling in (False, True):
+            with self.subTest(nonregular_sibling=nonregular_sibling):
+                repo = self.make_repo()
+                task = repo.parent / "early-task"
+                git(repo, "worktree", "add", "-q", "-b", "early-task", str(task))
+                main = self.store(repo)
+                r1 = self.booking(main)
+                if nonregular_sibling:
+                    main.add_project("broken", title="Broken", today=TODAY)
+                    rel = design_fs.project_record_rel("broken")
+                    git(repo, "add", "-A")
+                    blob = git(repo, "hash-object", rel).strip()
+                    git(repo, "update-index", "--cacheinfo", f"120000,{blob},{rel}")
+                    git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "nonregular registration")
+                    with self.assertRaises(DesignError) as invalid:
+                        design_fs.GitRefReader(repo, "refs/heads/main").read(rel)
+                    self.assertEqual(invalid.exception.code, "OAH_DESIGN_PATH_INVALID")
+                else:
+                    git_commit(repo, {}, "register after task checkout")
+                before = self.tree(task, self.state(task))
+                store = self.store(task)
+                context = store.context("acme", "booking")
+                self.assertEqual((context.source, context.freshness, context.current.digest),
+                                 ("authority", "behind", r1.digest))
+                self.assertEqual(store.snapshot("acme", "booking").text(), "People book a lesson.\n")
+                self.assertEqual(explain_binding(context.binding(), store)[0], "current")
+                self.assertEqual([p.id for p in store.projects()], ["acme"])
+                self.assertEqual([(d.design, d.current, d.freshness) for d in store.designs()],
+                                 [("booking", (1, r1.digest), "behind")])
+                self.assertEqual(self.tree(task, self.state(task)), before)
+                self.assertFalse((task / ".oah/designs/acme/project.json").exists())
 
     def test_c1_lists_use_committed_authority_metadata(self):
         r2 = self.main.save("acme", "booking", expect_revision=1, expect_digest=self.r1.digest, reason="Two",

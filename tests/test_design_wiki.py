@@ -47,7 +47,7 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                     self.assertEqual(self.tree(repo, self.state(repo)), before)
 
     def test_c1_corrupt_evidence_preserves_rows_and_never_recreates_them(self):
-        for damage in ("acceptance", "ancestor"):
+        for damage in ("acceptance", "ancestor", "oversize", "directory", "alias"):
             with self.subTest(damage=damage):
                 repo = self.make_repo()
                 store = self.store(repo)
@@ -64,27 +64,43 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                 old_row = next(line for line in project_page.read_text(encoding="utf-8").splitlines()
                                if line.startswith("- [[acme--booking"))
                 old_index = index.read_bytes()
+                page_before = (repo / PAGE).read_bytes()
                 folder = repo / ".oah/designs/acme/booking"
                 if damage == "acceptance":
                     (folder / "acceptances/a1.json").unlink()
-                else:
+                elif damage == "ancestor":
                     manifest = folder / "revisions/r1/revision.json"
                     manifest.write_bytes(manifest.read_bytes().replace(b'"Created"', b'"Altered"'))
+                else:
+                    self.damage_booking_pointer(repo, damage)
+                for project in (None, "acme"):
+                    summaries = {item.design: item for item in store.designs(project)}
+                    self.assertEqual({name: item.status for name, item in summaries.items()},
+                                     {"booking": "corrupt", "payments": "draft"})
+                    corrupt = summaries["booking"]
+                    self.assertEqual((corrupt.title, corrupt.current, corrupt.accepted, corrupt.freshness),
+                                     (None, None, None, "unknown"))
+                    self.assertEqual(summaries["payments"].current, (1, healthy.digest))
+                self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in store.diagnostics()])
                 result = store.save("acme", "payments", expect_revision=1, expect_digest=healthy.digest,
                                     reason="Healthy change", parts={"design": "Pay twice.\n"}, today=TODAY)
                 self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in result.diagnostics])
                 self.assertIn(old_row, project_page.read_text(encoding="utf-8").splitlines())
                 self.assertEqual(index.read_bytes(), old_index)
+                self.assertEqual((repo / PAGE).read_bytes(), page_before)
+                self.assertEqual(store.context("acme", "payments").current.text(), "Pay twice.\n")
                 project_page.unlink()
                 index.write_bytes(b"# My wiki\n")
+                (repo / PAGE).unlink()
                 result = store.reconcile()
                 self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in result.diagnostics])
                 self.assertNotIn("acme--booking", project_page.read_text(encoding="utf-8"))
                 self.assertNotIn(b"acme--booking", index.read_bytes())
                 self.assertIn("acme--payments", project_page.read_text(encoding="utf-8"))
+                self.assertFalse((repo / PAGE).exists())
 
     def test_c1_corrupt_parts_stay_isolated_during_rename_and_recovery(self):
-        for damage in ("changed", "missing"):
+        for damage in ("changed", "missing", "oversize", "directory", "alias"):
             with self.subTest(damage=damage):
                 repo = self.make_repo()
                 store = self.store(repo)
@@ -93,8 +109,10 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                 part = repo / ".oah/designs/acme/booking/revisions/r1/design.md"
                 if damage == "changed":
                     part.write_bytes(b"Corrupt.\n")
-                else:
+                elif damage == "missing":
                     part.unlink()
+                else:
+                    self.damage_booking_pointer(repo, damage)
                 page_before = (repo / PAGE).read_bytes()
                 row_before = next(line for line in (repo / "docs/wiki/designs/acme.md").read_text().splitlines()
                                   if line.startswith("- [[acme--booking"))

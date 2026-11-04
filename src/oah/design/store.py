@@ -397,7 +397,12 @@ def _design_names(reader: fs.Reader, project: str) -> list[str]:
             check_id(name, "design")
         except DesignError:
             continue
-        if reader.read(fs.pointer_rel(project, name)) is not None:
+        try:
+            present = reader.read(fs.pointer_rel(project, name)) is not None
+        except DesignError:
+            # Keep unreadable IDs for per-design diagnostics and preservation of existing rows.
+            present = True
+        if present:
             out.append(name)
     return out
 
@@ -409,7 +414,13 @@ def _project_names(reader: fs.Reader) -> list[str]:
             check_id(name)
         except DesignError:
             continue
-        if reader.read(fs.project_record_rel(name)) is not None:
+        try:
+            present = reader.read(fs.project_record_rel(name)) is not None
+        except DesignError:
+            # Isolate the record, but keep an unreadable project folder a hard refusal.
+            reader.list_dir(f"{fs.REGISTRY_DIR}/{name}")
+            present = True
+        if present:
             out.append(name)
     return out
 
