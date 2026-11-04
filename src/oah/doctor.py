@@ -335,6 +335,60 @@ def _pin_lines(pin: Mapping | None) -> list[str]:
     return lines
 
 
+def rerank_breaker(root: pathlib.Path | None, env: Mapping[str, str]) -> dict | None:
+    """The Jev breaker's state, read from its file and `[rerank]`: no request is sent and nothing is written.
+
+    None outside a project, and when Jev is off and the breaker has no file."""
+    if root is None:
+        return None
+    from oah import rerank
+    from oah.paths import repo_info, state_dir
+    from oah.rerank import circuit
+
+    try:
+        section = load_config(root).section("rerank", rerank.DEFAULTS)
+        limits = circuit.limits(section)
+    except ConfigError as exc:
+        return {"error": exc.code}
+    path = state_dir(repo_info(root), env) / circuit.FILE_NAME
+    if section["enabled"] is not True and not os.path.lexists(path):
+        return None
+    found, sound = circuit.read(path)
+    now = circuit.utc_now()
+    blocked = circuit.refusal(found, limits, now)
+    return {"error": None, "state": {circuit.OPEN: "open", circuit.DAILY_LIMIT: "daily-limit"}.get(blocked, "closed"),
+            "open_until": circuit.stamp(found.open_until) if blocked == circuit.OPEN else None,
+            "failures": found.failures, "last_failure": found.last_failure, "failures_to_open": limits.failures,
+            "requests_today": found.requests if found.day == now.date().isoformat() else 0,
+            "per_day": limits.per_day, "sound": sound}
+
+
+def _breaker_lines(breaker: Mapping | None) -> list[str]:
+    if breaker is None:
+        return []
+    if breaker["error"] is not None:
+        hint = "; fix [rerank] in .oah/config.toml" if str(breaker["error"]).startswith("OAH_CONFIG") else ""
+        return ["", f"Jev breaker: not read ({breaker['error']}){hint}"]
+    if breaker["state"] == "open":
+        last = f" (the last: {breaker['last_failure']})" if breaker["last_failure"] else ""
+        text = (f"open until {breaker['open_until']}, after {breaker['failures']} timeout, network, 429 or 529 "
+                f"failures in a row{last}; until then Jev is not asked")
+    elif breaker["state"] == "daily-limit":
+        text = (f"daily limit reached ({breaker['requests_today']} of {breaker['per_day']} requests this UTC day); "
+                "Jev is asked again from the next UTC day")
+    else:
+        text = "closed"
+        if breaker["failures"] >= breaker["failures_to_open"]:
+            text += " (its open window is over; the next Jev request decides whether it opens again)"
+        elif breaker["failures"]:
+            text += f" ({breaker['failures']} of {breaker['failures_to_open']} failures in a row so far)"
+        if breaker["per_day"]:
+            text += f"; {breaker['requests_today']} of {breaker['per_day']} requests this UTC day"
+        if not breaker["sound"]:
+            text += "; its file could not be read, so it counts as closed and is replaced at the next update"
+    return ["", f"Jev breaker (read from its file; no request): {text}"]
+
+
 def update_notices(root: pathlib.Path | None) -> list[dict]:
     """The tool-update switch when it is off by absence, and the last pass's unsettled results; reads only."""
     from oah.toolupdate import doctor_notices
@@ -378,7 +432,8 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
                 model_notices: Sequence[Mapping] = (), model_notices_error: str | None = None,
                 model_choices: Sequence[Mapping] = (), agent_notices: Sequence[Mapping] = (),
                 agent_notices_error: str | None = None, *, update_notices: Sequence[Mapping] = (),
-                update_notices_error: str | None = None, reviewer_pin: Mapping | None = None) -> str:
+                update_notices_error: str | None = None, reviewer_pin: Mapping | None = None,
+                rerank_breaker: Mapping | None = None) -> str:
     label = PLATFORM_LABELS.get(platform, f"{platform}, not a supported OS")
     rows = [("TOOL", "STATUS", "VERSION", "NOTE")]
     rows += [(s.name, s.status, s.version or "-", s.note) for s in statuses]
@@ -401,6 +456,7 @@ def render_text(statuses: Sequence[ToolStatus], platform: str, mcp_notices: Sequ
     lines += _agent_lines(agent_notices, agent_notices_error)
     lines += _update_lines(update_notices, update_notices_error)
     lines += _pin_lines(reviewer_pin)
+    lines += _breaker_lines(rerank_breaker)
     if model_notices_error is not None:
         lines.append(f"Model notices could not be read ({model_notices_error}); run oah models to see why.")
     missing_required = sum(1 for s in statuses if s.requirement == "required" and s.status != "ok")
@@ -485,7 +541,7 @@ def doctor_main(*, json_output: bool) -> int:
         updates = update_notices(root)
     except Exception as exc:  # the same for the tool-update records
         updates, update_error = [], type(exc).__name__
-    if json_output:  # the JSON keeps its landed shape; the reviewer pin is a text block
+    if json_output:  # the JSON keeps its landed shape; the reviewer pin and the Jev breaker are text blocks
         print(render_json(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
                           update_notices=updates, update_notices_error=update_error))
         return exit_code(statuses)
@@ -493,6 +549,11 @@ def doctor_main(*, json_output: bool) -> int:
         pin = reviewer_pin(root)
     except Exception as exc:  # and for the reviewer pin
         pin = {"path": None, "sha256": None, "error": type(exc).__name__}
+    try:
+        breaker = rerank_breaker(root, os.environ)
+    except Exception as exc:  # and for the Jev breaker
+        breaker = {"error": type(exc).__name__}
     print(render_text(statuses, sys.platform, mcp, models, model_error, choices, agents, agent_error,
-                      update_notices=updates, update_notices_error=update_error, reviewer_pin=pin))
+                      update_notices=updates, update_notices_error=update_error, reviewer_pin=pin,
+                      rerank_breaker=breaker))
     return exit_code(statuses)

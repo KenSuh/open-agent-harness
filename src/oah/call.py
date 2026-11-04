@@ -513,11 +513,13 @@ def _resolve_floor(resolution: Resolution, settings: Settings, *, floor_tier: st
 
 def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes: routing.Axes, pinned: bool,
                  freshness: models.Freshness, root: pathlib.Path, env: Mapping[str, str], floor_tier: str,
-                 brief_disabled: bool = False, keychain=None) -> tuple[Resolution, dict]:
+                 brief_disabled: bool = False, keychain=None,
+                 state_dir: pathlib.Path | None = None) -> tuple[Resolution, dict]:
     """The call's model and effort after the re-ranker's judgement, and the `model_judge`/`model_choice` record.
 
     The deterministic resolution is kept unless the judged pair passes `CandidateSet.reject_reason`.
-    A plugin failure never blocks a launch: it is recorded as `unused(error: <type>)`."""
+    A plugin failure never blocks a launch: it is recorded as `unused(error: <type>)`. With `state_dir`, the
+    re-ranker's breaker there applies; a correction passes none."""
     engine, tier = resolution.engine, resolution.tier
     deterministic = models.Pair(resolution.model, resolution.launch_effort)
     choice = {"deterministic": dict(deterministic.to_json(), source=resolution.model_source), "floor": None,
@@ -571,7 +573,7 @@ def judge_engine(resolution: Resolution, settings: Settings, *, stage: str, axes
         judged = rerank.judge_model({"stage": stage, "tier": tier, "axes": axes.to_json()},
                                     [(pair.model, pair.effort) for pair in candidates.pairs],
                                     config=source.section("rerank", rerank.DEFAULTS), brief_disabled=brief_disabled,
-                                    env=env, keychain=keychain)
+                                    env=env, keychain=keychain, state_dir=state_dir)
     except Exception as exc:  # a plugin failure must never block a launch
         return record(f"unused(error: {type(exc).__name__})")
     choice["provider"] = judged.provider
@@ -1535,7 +1537,8 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                 reserve=True, run_id=planned_run[0].id)
     resolution, judge = judge_engine(resolution, settings, stage=request.stage, axes=scored.axes, pinned=pinned,
                                      freshness=checked[1], root=root, env=env, floor_tier=floor_tier,
-                                     brief_disabled=disabled, keychain=keychain)
+                                     brief_disabled=disabled, keychain=keychain,
+                                     state_dir=state_dir if inputs is None else None)
     admitted = admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
     warnings.extend(admitted.warnings)
     judge = {**judge, "admission": admitted.to_json(), **difficulty.record(), "tier_floor_raised": floor_raised}
