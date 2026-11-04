@@ -1559,7 +1559,12 @@ def open_store(root: os.PathLike | str = ".", *, env: Mapping[str, str] | None =
                settings: WikiSettings | None = None, lock_timeout: float = 10.0,
                now: Callable[[], datetime.datetime] | None = None, reader: fs.Reader | None = None,
                facts: Facts | None = None) -> DesignStore:
-    """The design store of the repository that contains `root`, with the `[wiki]` settings of its config."""
+    """The design store of the repository that contains `root`, with the `[wiki]` settings of its config.
+
+    `facts(project, design)` may add short words to project list lines (for example a source check's result). Writes
+    call it inside the wiki lock, so it must only read records that are already on disk: no network or model call.
+    A provider that fails or returns words that do not validate is left out with a diagnostic; it never blocks a write.
+    """
     from oah.config import load_config
     from oah.paths import repo_info, state_dir
     from oah.wiki.base import DEFAULTS
