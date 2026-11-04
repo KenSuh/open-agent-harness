@@ -9,10 +9,14 @@ The skill is not installed or vendored here. Selected monochrome icons come from
 
 Each stem has `-light.html`, `-dark.html`, `-ko-light.html` and `-ko-dark.html` sources.
 Matching SVGs live one directory above. Edit HTML first; SVGs are exports, not independent sources.
-The banner is a hand-authored 1280 × 560 chat scene with its own neo-brutalist style.
-It shares the gallery paper, 22 × 22 dot grid and neutral tokens, while keeping its
-character shapes, bold outlines, hard shadows and amber, green and purple role colors.
-Its palette, outlines, hard shadows and role colors are recorded in the style guide's [Banner section](style-guide.md#banner).
+The banner is an original 1280 × 560 editorial cover for the GitHub diagram gallery. It uses the
+gallery's paper/ink palette, serif headline, sans supporting text and thin rules on one continuous field.
+The `og-card-en` and `og-card-ko` sources are separate 1200 × 630 link-preview compositions: an offset
+sans headline on the homepage's ink background. They have one fixed ink theme each and export to PNG.
+Both surfaces share a line-drawn OAH monogram with a detached orange H crosspiece, plus short lines
+about AI implementation, review and records, and the user's judgment and confirmation. There are no
+mascots, playful icons, stickers, split panels or radial text fields.
+Their geometry, palette and type are recorded in the style guide's [Banner section](style-guide.md#banner).
 
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
@@ -32,7 +36,8 @@ Its palette, outlines, hard shadows and role colors are recorded in the style gu
 | `concepts-review` | Flowchart, 880 × 864 | 5 / 5 | All review outcomes and correction/bind return |
 | `concepts-landing-local` | Flowchart, 1000 × 1156 | 8 / 5 | Opt-in local hooks and push paths |
 | `concepts-landing-checks` | Flowchart, 1000 × 1332 | 6 / 6 | CI, exact HEAD, exception and confirmation |
-| `banner` | Hand-authored chat scene, 1280 × 560 | — | README banner in its own neo-brutalist style |
+| `banner` | Original editorial cover, 1280 × 560 | — | README banner in the diagram gallery's visual family |
+| `og-card-en`, `og-card-ko` | Hand-authored social card, 1200 × 630 | — | Link preview PNGs, one per language |
 
 [The style guide](style-guide.md) records the shipped gallery tokens, dotted paper, system font stacks,
 type ramp, chips, ghost numbers, zones, icons and connector rules for the other figures. These use
@@ -55,14 +60,26 @@ directory. No installation or download is needed; its check and export helpers u
 
 ```sh
 for source in docs/assets/diagrams/*.html; do
-  case "$source" in */banner-*) continue ;; esac
+  case "$source" in */banner-*|*/og-card-*) continue ;; esac
   python3 -I "$DIAGRAM_DESIGN/scripts/self_check.py" --offline "$source" || break
   python3 -I "$DIAGRAM_DESIGN/scripts/export_svg.py" "$source" \
     "docs/assets/$(basename "$source" .html).svg" --system-fonts || break
 done
 ```
 
-To export a banner, run the same `export_svg.py <banner-*.html> <banner-*.svg> --system-fonts` command for each variant; its hand-authored chat scene retains its own style.
+To export a banner, run the same `self_check.py --offline` and `export_svg.py <banner-*.html> <banner-*.svg> --system-fonts`
+commands for each variant. The four variants share one cover layout and monogram; change all four together.
+English and Korean use the gallery's respective serif stacks for the headline and system sans for prose.
+
+To export a social card, check its HTML with `self_check.py --offline`, then run
+`export_svg.py <og-card-*.html> <scratch>.svg --system-fonts` to a scratch path under `.tmp/`.
+Render it with `qlmanage -t -s 2560 -o .tmp/og <scratch>.svg`. Quick Look adds a centered square
+letterbox: for a square of side S, crop to `(0, (S-H)/2, S, (S+H)/2)` with H = S × 630 / 1200,
+then resample with Lanczos to exactly 1200 × 630 RGB. Save as `docs/assets/og-card-en.png` or
+`og-card-ko.png`. An already-installed Pillow can perform this crop; no font download is needed.
+The SVG is an intermediate, not a shipped file. Rebuild into a separate scratch directory and compare
+the four shipped SVGs and two PNGs byte for byte. Inspect every banner at full size, 600px and 390px
+wide, and both social cards at full size, 600px and 300px wide, including complete Korean glyphs.
 
 Keep page alt text identical to both exported descriptions. Every SVG needs a first-child title,
 a description and prefixed accessibility IDs. Use a picture element with a dark source and light fallback.
