@@ -218,6 +218,19 @@ class Wiki:
         write_text_atomic(path, updated.decode("utf-8"))
         return log_module.parse_log(updated, "log.md").entries[0]
 
+    def add_marked_entry(self, line: str, *, title: str, body: str, today: datetime.date) -> str:
+        """Add a log entry whose body starts with the marker `line`, unless log.md or an archive has one.
+
+        Returns "present" or "added". The caller holds session(); this never takes the lock itself, so a
+        design write and its log entry share one lock span. The marker rule is the task marker's.
+        """
+        self._require("log.md")
+        archives = {name: data for name, data in self._archives(self.dir).values()}
+        if tasks.marked_entries(line, (self.dir / "log.md").read_bytes(), archives):
+            return "present"
+        self._log(title, f"{line}\n{body}", today)
+        return "added"
+
     # ---- rollover and recovery -----------------------------------------------------------------
 
     def _archives(self, folder: pathlib.Path) -> dict[int, tuple[str, bytes]]:

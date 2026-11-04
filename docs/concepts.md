@@ -15,6 +15,7 @@ command refuses, see [Troubleshooting](troubleshooting.md).
 - [Skill selection](#skill-selection)
 - [The impact map](#the-impact-map)
 - [The project wiki](#the-project-wiki)
+- [Designs](#designs)
 - [Gates](#gates)
 - [The review loop and corrections](#the-review-loop-and-corrections)
 - [Landing](#landing)
@@ -432,6 +433,73 @@ docs/wiki/
 - `oah wiki lint` and `oah wiki hygiene` report broken links, unindexed notes, missing sources and other real
   problems. They list candidates only: no wiki command deletes or moves a note on its own.
 - graphify is optional (`oah graph`), and nothing rebuilds the graph automatically.
+
+## Designs
+
+`oah design` keeps the design of each product you build with oah: what it should do, how that changed, and which
+revision was approved. The AI runs these commands; you read the design pages in the wiki and say what to change.
+
+```text
+.oah/designs/<project>/project.json           ID, title, uid and the branch where designs change
+.oah/designs/<project>/<design>/design.json   current and accepted revision, the only record replaced in place
+  revisions/r<N>/                             one revision: revision.json and one <part>.md per part
+  acceptances/a<N>.json                       one acceptance each
+<wiki>/designs/<project>.md                   the project's list of designs
+<wiki>/designs/<project>/<project>--<design>.md   the design page
+```
+
+- **The record and the page.** `.oah/designs` is the record; commit it with the work that changed it. Files under
+  `revisions/` and `acceptances/` never change after oah writes them, and each names the digest of the one before
+  it, so an edited reason, a lost acceptance or a changed byte is found on the next read (`OAH_DESIGN_CORRUPT`).
+  The page in the wiki is the copy people read and edit.
+- **IDs and parts.** Project and design IDs are lowercase ASCII words joined by single hyphens, up to 40 characters,
+  such as `academy-booking`. Titles can be in any language and can change while the IDs stay
+  (`oah design project rename`). A revision holds named parts: `design` (required), `request` (the user's own
+  words; a later revision may only add corrections after them), and `materials` and `coverage` for later design
+  stages.
+- **Revisions.** `oah design save` needs the revision and the digest you read. When someone saved in between, it
+  refuses with `OAH_DESIGN_REVISION_CONFLICT`; when the digest is not that revision's, with
+  `OAH_DESIGN_CONTEXT_STALE`. Retrying a save that went through prints `OAH_DESIGN_APPLIED` and writes nothing
+  twice, and saving the same text again changes nothing. Going back to older text is a new revision.
+- **Acceptance.** `oah design accept` records that a revision is approved, with the reason. It only moves forward,
+  to a higher revision.
+- **One branch changes designs.** `oah design project add` records the branch it runs on. Designs of that project
+  change only there: on another branch or a detached HEAD, `new`, `save`, `accept` and `project rename` refuse with
+  `OAH_DESIGN_NOT_AUTHORITY`. Reading works everywhere. Elsewhere, oah reads that branch's committed copy and says
+  whether this worktree's own copy is `current`, `behind` or `unknown`. The cost: commit design changes on that
+  branch before other worktrees can see them. Worktrees created before registration can discover it from existing
+  branch refs, without merging or writing local records. Lists use the same authority copy. If several branches
+  independently registered that project ID and no local registration selects one, reading refuses with
+  `OAH_DESIGN_FRESHNESS_UNKNOWN`; absent authority evidence is `OAH_DESIGN_NOT_FOUND`.
+- **Editing the page.** A page names the revision it shows. When someone edits it, `oah design status` and
+  `oah design context` report `OAH_DESIGN_UNREGISTERED_EDIT`, and `save` and `accept` refuse until
+  `oah design save --from-wiki` saves the page's text as the next revision. To throw an edit away, delete the page;
+  `oah design reconcile` writes it again. oah rewrites a page only while it holds exactly what oah wrote, so text
+  typed above the markers counts as an edit too, and it never touches a file under `designs/` that lacks its
+  `oah:` mark (`OAH_DESIGN_PAGE_FOREIGN`). Links you write inside a design are checked by `oah wiki lint` and the
+  commit check like any other note.
+- **Lists and the log.** `index.md` gets one block of design links between `<!-- OAH:DESIGN_INDEX:BEGIN -->` and
+  `<!-- OAH:DESIGN_INDEX:END -->`, and each project page a list above its own end marker. Both are rewritten whole
+  from the records; everything outside the markers stays as it was. Each registration, revision, acceptance and
+  rename adds one `log.md` entry, never two, also after a retry, a crash or a rollover.
+  Broken history, acceptance evidence or current parts leave that design's existing rows and page untouched while
+  healthy designs continue. A missing row is not recreated from corrupt evidence. An index ending in an unclosed
+  code fence refuses a new block with `OAH_WIKI_INDEX_INVALID`.
+- **Interrupted writes.** Every change is journalled in the state folder first. After a crash, design writes stop
+  with `OAH_DESIGN_RECOVERY_PENDING` until `oah design recover` finishes the change; reading still shows the last
+  complete revision, and `oah design context` says whether the pending change is this design's
+  (`recovery_pending.this_design`). When recover finds files that changed meanwhile, it refuses with
+  `OAH_DESIGN_RECOVERY_CONFLICT` and keeps the journal: fix the files by hand, then run
+  `oah design recover --resolved`. Recovery verifies the proposed records and part digests together before
+  publication, and checks the current wiki layout again. `--resolved` verifies the named design's current and
+  accepted part bytes before retiring its journal; a missing worktree is recorded explicitly as unchecked.
+- **Costs.** A design change edits `index.md` and `log.md`, so `oah finish` may ask for
+  `oah wiki maintain --task <task>` again, and a task's lease scope covers the design files only when you add them.
+  Save when a group of decisions is settled, not after every answer: each save is a revision and a log entry. After
+  `oah design project add acme`, `oah wiki new "Acme"` needs another title, because the project page uses that file
+  name. Design pages that no commit touched for `[wiki] stale_days` show up as `stale` in `oah wiki lint`. The commit
+  check does not wait for a pending design journal; files an interrupted write left behind are ignored, and their
+  numbers are never reused. `[wiki] dir` cannot put the pages on top of `.oah/designs`.
 
 ## Gates
 

@@ -23,9 +23,8 @@ def marker(task: str) -> str:
     return f"<!-- oah-task: {task} -->"
 
 
-def entry_has_marker(entry: log_module.Entry, task: str) -> bool:
-    """Only a column-zero marker outside structural fences identifies maintenance."""
-    wanted = marker(task)
+def entry_has_line(entry: log_module.Entry, wanted: str) -> bool:
+    """Only a column-zero line outside structural fences counts as a marker."""
     fences = FenceTracker()
     for line in split_lines(entry.data):
         text = line.decode("utf-8")
@@ -34,14 +33,24 @@ def entry_has_marker(entry: log_module.Entry, task: str) -> bool:
     return False
 
 
-def task_entries(task: str, log_data: bytes, archives: dict[str, bytes]) -> list[tuple[str, log_module.Entry]]:
-    """(file name, entry) for every entry of log.md and the archives that carries the task's marker."""
+def entry_has_marker(entry: log_module.Entry, task: str) -> bool:
+    """Only a column-zero marker outside structural fences identifies maintenance."""
+    return entry_has_line(entry, marker(task))
+
+
+def marked_entries(wanted: str, log_data: bytes, archives: dict[str, bytes]) -> list[tuple[str, log_module.Entry]]:
+    """(file name, entry) for every entry of log.md and the archives that carries the marker line `wanted`."""
     found = []
     for name, data in [("log.md", log_data), *sorted(archives.items())]:
         for entry in log_module.parse_log(data, name).entries:
-            if entry_has_marker(entry, task):
+            if entry_has_line(entry, wanted):
                 found.append((name, entry))
     return found
+
+
+def task_entries(task: str, log_data: bytes, archives: dict[str, bytes]) -> list[tuple[str, log_module.Entry]]:
+    """(file name, entry) for every entry of log.md and the archives that carries the task's marker."""
+    return marked_entries(marker(task), log_data, archives)
 
 
 def index_line(task: str, title: str, limit: int) -> str:

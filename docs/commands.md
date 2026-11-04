@@ -20,6 +20,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah gates` | Writes, lints and checks a task's gate ledger. |
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |
+| `oah design` | Keeps each product's design: its revisions, which one is accepted, and its pages in the wiki. |
 | `oah impact` | Lists what to re-check when files or database objects change. |
 | `oah eval` | Replays real cases with hidden expected answers and reports each variant, with its limits. |
 | `oah graph` | Uses the graphify knowledge graph when graphify is installed. |
