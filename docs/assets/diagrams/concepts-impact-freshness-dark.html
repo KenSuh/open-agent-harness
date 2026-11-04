@@ -32,7 +32,7 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
      See README.md and style-guide.md in this directory. -->
 <main class="frame">
 <div class="diagram-container">
-<svg viewBox="0 0 880 1268" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-freshness-dark-title concepts-impact-freshness-dark-desc" data-diagram-type="Flowchart" data-size="fit">
+<svg viewBox="0 0 880 1244" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-freshness-dark-title concepts-impact-freshness-dark-desc" data-diagram-type="Flowchart" data-size="fit">
 <title id="concepts-impact-freshness-dark-title">Impact · fresh inputs</title>
 <desc id="concepts-impact-freshness-dark-desc">A file change checks map freshness, refreshes incrementally or rebuilds when needed, reports stale instead of silently using it when refresh is disabled or inputs move, and combines the default-branch map at pin results.</desc>
 <defs>
@@ -42,27 +42,27 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
 <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect width="880" height="1268" fill="#2d3142"/>
-<rect width="880" height="1268" fill="url(#dots)" opacity=".55"/>
+<rect width="880" height="1244" fill="#2d3142"/>
+<rect width="880" height="1244" fill="url(#dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
 <text x="40" y="88" class="title" text-anchor="start">Impact · fresh inputs</text>
-<rect x="40" y="808" width="464" height="232" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="ranked" fill-opacity=".02" stroke-opacity=".12"/>
-<text x="56" y="832" class="zone-label" text-anchor="start">Ranked results</text>
-<path d="M 440,256 L 440,304" data-edge-id="e1" data-from="change" data-to="fresh" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 440,512 L 440,856" data-edge-id="e2" data-from="fresh" data-to="pinR" data-label="yes" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 168,408 L 128,408 Q 120,408 120,416 L 120,592" data-edge-id="e3" data-from="fresh" data-to="refresh" data-label="no" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 200,720 L 200,856" data-edge-id="e4" data-from="refresh" data-to="pinR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 712,408 L 760,408 Q 768,408 768,416 L 768,592" data-edge-id="e5" data-from="fresh" data-to="stale" data-label="--no-refresh, or inputs keep moving" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-<path d="M 696,904 L 696,968 Q 696,976 688,976 L 488,976" data-edge-id="e6" data-from="dflt" data-to="pinR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<rect x="448" y="745" width="40" height="20" rx="2" fill="#2d3142"/>
-<text x="468" y="760" class="arrow-label" text-anchor="middle">YES</text>
-<rect x="60" y="529" width="52" height="20" rx="2" fill="#2d3142"/>
-<text x="86" y="544" class="arrow-label" text-anchor="middle">NO</text>
-<rect x="688" y="529" width="72" height="20" rx="2" fill="#2d3142"/>
-<text x="724" y="544" class="arrow-label" text-anchor="middle">A STALE</text>
+<rect x="40" y="784" width="464" height="232" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="ranked" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="808" class="zone-label" text-anchor="start">Ranked results</text>
+<path d="M 440,244 L 440,292" data-edge-id="e1" data-from="change" data-to="fresh" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 440,500 L 440,832" data-edge-id="e2" data-from="fresh" data-to="pinR" data-label="yes" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 168,396 L 128,396 Q 120,396 120,404 L 120,580" data-edge-id="e3" data-from="fresh" data-to="refresh" data-label="no" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 200,700 L 200,832" data-edge-id="e4" data-from="refresh" data-to="pinR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 712,396 L 760,396 Q 768,396 768,404 L 768,580" data-edge-id="e5" data-from="fresh" data-to="stale" data-label="--no-refresh, or inputs keep moving" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 696,880 L 696,944 Q 696,952 688,952 L 488,952" data-edge-id="e6" data-from="dflt" data-to="pinR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="448" y="721" width="40" height="20" rx="2" fill="#2d3142"/>
+<text x="468" y="736" class="arrow-label" text-anchor="middle">YES</text>
+<rect x="60" y="517" width="52" height="20" rx="2" fill="#2d3142"/>
+<text x="86" y="532" class="arrow-label" text-anchor="middle">NO</text>
+<rect x="688" y="517" width="72" height="20" rx="2" fill="#2d3142"/>
+<text x="724" y="532" class="arrow-label" text-anchor="middle">A STALE</text>
 <g data-node-id="change" data-source-label="You change a file for example a SQL migration">
-<rect x="280" y="144" width="320" height="112" rx="6" fill="#2d3142"/>
-<rect x="280" y="144" width="320" height="112" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<rect x="280" y="144" width="320" height="100" rx="6" fill="#2d3142"/>
+<rect x="280" y="144" width="320" height="100" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
 <rect x="296" y="160" width="44" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
 <text x="318" y="171" class="tag" text-anchor="middle">INPUT</text>
@@ -72,73 +72,73 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <text x="296" y="222" class="sub" text-anchor="start">for example a SQL migration</text>
 </g>
 <g data-node-id="fresh" data-source-label="Worktree map fresh? HEAD, index, dirty files, ledgers, config, tool">
-<polygon points="440,304 712,408 440,512 168,408" fill="#2d3142"/>
-<polygon points="440,304 712,408 440,512 168,408" fill="#f08a59" fill-opacity=".10" stroke="#f08a59" stroke-width="1.2"/>
+<polygon points="440,292 712,396 440,500 168,396" fill="#2d3142"/>
+<polygon points="440,292 712,396 440,500 168,396" fill="#f08a59" fill-opacity=".10" stroke="#f08a59" stroke-width="1.2"/>
 <g aria-hidden="true">
-<rect x="400" y="340" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
-<text x="422" y="351" class="tag" text-anchor="middle">CHECK</text>
+<rect x="400" y="328" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="422" y="339" class="tag" text-anchor="middle">CHECK</text>
 </g>
-<text x="440" text-anchor="middle" y="384" class="node">Worktree map fresh?</text>
-<text x="440" text-anchor="middle" y="404" class="sub">HEAD, index, dirty files,</text>
-<text x="440" text-anchor="middle" y="422" class="sub">ledgers, config, tool</text>
+<text x="440" text-anchor="middle" y="372" class="node">Worktree map fresh?</text>
+<text x="440" text-anchor="middle" y="392" class="sub">HEAD, index, dirty files,</text>
+<text x="440" text-anchor="middle" y="410" class="sub">ledgers, config, tool</text>
 </g>
 <g data-node-id="refresh" data-source-label="Refresh incrementally when possible rebuild otherwise">
-<rect x="40" y="592" width="320" height="128" rx="6" fill="#2d3142"/>
-<rect x="40" y="592" width="320" height="128" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="40" y="580" width="320" height="120" rx="6" fill="#2d3142"/>
+<rect x="40" y="580" width="320" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="56" y="608" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="82" y="619" class="tag" text-anchor="middle">REFRESH</text>
+<rect x="56" y="596" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="82" y="607" class="tag" text-anchor="middle">REFRESH</text>
 </g>
-<text x="56" y="650" class="node" text-anchor="start">Refresh incrementally</text>
-<text x="56" y="670" class="sub" text-anchor="start">when possible</text>
-<text x="56" y="688" class="sub" text-anchor="start">rebuild otherwise</text>
+<text x="56" y="638" class="node" text-anchor="start">Refresh incrementally</text>
+<text x="56" y="658" class="sub" text-anchor="start">when possible</text>
+<text x="56" y="676" class="sub" text-anchor="start">rebuild otherwise</text>
 </g>
 <g data-node-id="stale" data-source-label="OAH_IMPACT_STALE never used silently">
-<rect x="552" y="592" width="288" height="112" rx="6" fill="#2d3142"/>
-<rect x="552" y="592" width="288" height="112" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="552" y="580" width="288" height="100" rx="6" fill="#2d3142"/>
+<rect x="552" y="580" width="288" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="568" y="608" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="590" y="619" class="tag" text-anchor="middle">STALE</text>
+<rect x="568" y="596" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="590" y="607" class="tag" text-anchor="middle">STALE</text>
 </g>
-<text x="568" y="650" class="node" text-anchor="start">OAH_IMPACT_STALE</text>
-<text x="568" y="670" class="sub" text-anchor="start">never used silently</text>
+<text x="568" y="638" class="node" text-anchor="start">OAH_IMPACT_STALE</text>
+<text x="568" y="658" class="sub" text-anchor="start">never used silently</text>
 </g>
 <g data-node-id="dflt" data-source-label="Default-branch map fetched read-only, --offline or a failed fetch is labelled stale">
-<rect x="552" y="784" width="288" height="120" rx="6" fill="#2d3142"/>
-<rect x="552" y="784" width="288" height="120" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<rect x="552" y="760" width="288" height="120" rx="6" fill="#2d3142"/>
+<rect x="552" y="760" width="288" height="120" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
 <g aria-hidden="true">
-<rect x="568" y="800" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="586" y="811" class="tag" text-anchor="middle">BASE</text>
+<rect x="568" y="776" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="586" y="787" class="tag" text-anchor="middle">BASE</text>
 </g>
-<text x="568" y="842" class="node" text-anchor="start">Default-branch map</text>
-<text x="568" y="862" class="sub" text-anchor="start">fetched read-only, --offline or a</text>
-<text x="568" y="880" class="sub" text-anchor="start">failed fetch is labelled stale</text>
+<text x="568" y="818" class="node" text-anchor="start">Default-branch map</text>
+<text x="568" y="838" class="sub" text-anchor="start">fetched read-only, --offline or a</text>
+<text x="568" y="856" class="sub" text-anchor="start">failed fetch is labelled stale</text>
 </g>
 <g data-node-id="pinR" data-source-label="pin: a gate EXPECT names it, or a gate CHECK or workflow, manifest or config command hashes or greps it" data-parent="ranked">
-<rect x="64" y="856" width="424" height="136" rx="6" fill="#2d3142"/>
-<rect x="64" y="856" width="424" height="136" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<rect x="64" y="832" width="424" height="136" rx="6" fill="#2d3142"/>
+<rect x="64" y="832" width="424" height="136" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
 <g aria-hidden="true">
-<rect x="80" y="872" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="106" y="883" class="tag" text-anchor="middle">BINDING</text>
+<rect x="80" y="848" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="859" class="tag" text-anchor="middle">BINDING</text>
 </g>
-<text x="80" text-anchor="start" y="914" class="node">pin:</text>
-<text x="80" text-anchor="start" y="934" class="sub">a gate EXPECT names it, or a gate CHECK</text>
-<text x="80" text-anchor="start" y="952" class="sub">or workflow, manifest or config command</text>
-<text x="80" text-anchor="start" y="970" class="sub">hashes or greps it</text>
+<text x="80" text-anchor="start" y="890" class="node">pin:</text>
+<text x="80" text-anchor="start" y="910" class="sub">a gate EXPECT names it, or a gate CHECK</text>
+<text x="80" text-anchor="start" y="928" class="sub">or workflow, manifest or config command</text>
+<text x="80" text-anchor="start" y="946" class="sub">hashes or greps it</text>
 </g>
-<text x="40" y="1092" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
-<rect x="40" y="1111" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1125" class="label" text-anchor="middle">A</text>
-<text x="80" y="1125" class="prose" text-anchor="start">--no-refresh, or inputs keep moving</text>
-<text x="56" y="1160" class="prose" text-anchor="start">The pin result continues into the ranked results in the next figure.</text>
-<line x1="40" y1="1188" x2="840" y2="1188" stroke="#f5f5f5" stroke-opacity=".12"/>
-<text x="40" y="1216" class="zone-label" text-anchor="start">KEY</text>
-<rect x="112" y="1206" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
-<text x="148" y="1216" class="prose" text-anchor="start">Focus</text>
-<path d="M 236,1212 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<text x="272" y="1216" class="prose" text-anchor="start">Work / evidence</text>
-<path d="M 412,1212 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-<text x="448" y="1216" class="prose" text-anchor="start">Optional / return</text>
+<text x="40" y="1068" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="1087" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1101" class="label" text-anchor="middle">A</text>
+<text x="80" y="1101" class="prose" text-anchor="start">--no-refresh, or inputs keep moving</text>
+<text x="56" y="1136" class="prose" text-anchor="start">The pin result continues into the ranked results in the next figure.</text>
+<line x1="40" y1="1164" x2="840" y2="1164" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1192" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1182" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1192" class="prose" text-anchor="start">Focus</text>
+<path d="M 236,1188 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="272" y="1192" class="prose" text-anchor="start">Work / evidence</text>
+<path d="M 412,1188 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<text x="448" y="1192" class="prose" text-anchor="start">Optional / return</text>
 </svg>
 </div>
 </main>

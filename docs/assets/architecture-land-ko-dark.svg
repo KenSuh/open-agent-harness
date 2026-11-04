@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 1104 1236" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-land-ko-dark-title architecture-land-ko-dark-desc" data-diagram-type="Architecture" data-size="fit" id="architecture-land-ko-dark-root">
+<svg viewBox="0 0 1104 1204" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-land-ko-dark-title architecture-land-ko-dark-desc" data-diagram-type="Architecture" data-size="fit" id="architecture-land-ko-dark-root">
 <title id="architecture-land-ko-dark-title">검토에서 반영까지</title>
 <desc id="architecture-land-ko-dark-desc">증거 게이트가 Codex 검토 반복으로 이어지고 검토 반복은 git 훅, pull request, CI와 연결되며, 반영은 수렴한 검토와 CI, 다시 평가한 영향을 확인한 뒤 사용자 확인을 거쳐 fast-forward push한다.</desc>
 <defs>
@@ -25,34 +25,34 @@
 <marker id="architecture-land-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
 <marker id="architecture-land-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect width="1104" height="1236" fill="#2d3142"/>
-<rect width="1104" height="1236" fill="url(#architecture-land-ko-dark-dots)" opacity=".55"/>
+<rect width="1104" height="1204" fill="#2d3142"/>
+<rect width="1104" height="1204" fill="url(#architecture-land-ko-dark-dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / ARCHITECTURE</text>
 <text x="40" y="88" class="title" text-anchor="start">검토에서 반영까지</text>
-<rect x="40" y="136" width="552" height="904" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="oah" fill-opacity=".02" stroke-opacity=".12"/>
+<rect x="40" y="136" width="552" height="872" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="oah" fill-opacity=".02" stroke-opacity=".12"/>
 <text x="56" y="160" class="zone-label" text-anchor="start">oah</text>
-<rect x="736" y="280" width="328" height="232" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="engines" fill-opacity=".02" stroke-opacity=".12"/>
+<rect x="736" y="280" width="328" height="224" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="engines" fill-opacity=".02" stroke-opacity=".12"/>
 <text x="752" y="304" class="zone-label" text-anchor="start">설치하고 로그인한 엔진</text>
-<rect x="736" y="584" width="328" height="424" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="git" fill-opacity=".02" stroke-opacity=".12"/>
-<text x="752" y="608" class="zone-label" text-anchor="start">git / GitHub</text>
+<rect x="736" y="576" width="328" height="400" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="git" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="752" y="600" class="zone-label" text-anchor="start">git / GitHub</text>
 <path d="M 296,280 L 296,328" data-edge-id="a1" data-from="gates" data-to="rloop" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
 <path d="M 512,392 L 760,392" data-edge-id="a2" data-from="rloop" data-to="codex" data-label="리뷰·수정" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 512,456 L 616,456 Q 624,456 624,464 L 624,688 Q 624,696 632,696 L 760,696" data-edge-id="a3" data-from="rloop" data-to="hooks" data-label="완료·푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 80,440 L 56,440 Q 48,440 48,448 L 48,892 Q 48,900 56,900 L 80,900" data-edge-id="a4" data-from="rloop" data-to="land" data-label="HEAD 리뷰" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 296,664 L 296,792" data-edge-id="a5" data-from="impact" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 900,752 L 900,832" data-edge-id="a6" data-from="hooks" data-to="remote" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 760,880 L 512,880" data-edge-id="a7" data-from="remote" data-to="land" data-label="CI / gh" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 512,944 L 760,944" data-edge-id="a8" data-from="land" data-to="remote" data-label="푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 512,456 L 616,456 Q 624,456 624,464 L 624,680 Q 624,688 632,688 L 760,688" data-edge-id="a3" data-from="rloop" data-to="hooks" data-label="완료·푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 80,440 L 56,440 Q 48,440 48,448 L 48,872 Q 48,880 56,880 L 80,880" data-edge-id="a4" data-from="rloop" data-to="land" data-label="HEAD 리뷰" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 296,652 L 296,772" data-edge-id="a5" data-from="impact" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 900,732 L 900,812" data-edge-id="a6" data-from="hooks" data-to="remote" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 760,860 L 512,860" data-edge-id="a7" data-from="remote" data-to="land" data-label="CI / gh" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 512,916 L 760,916" data-edge-id="a8" data-from="land" data-to="remote" data-label="푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
 <rect x="610" y="364" width="108" height="20" rx="2" fill="#2d3142"/>
 <text x="664" y="379" class="arrow-label" text-anchor="middle">리뷰·수정</text>
-<rect x="632" y="540" width="116" height="20" rx="2" fill="#2d3142"/>
-<text x="690" y="555" class="arrow-label" text-anchor="middle">완료·푸시</text>
-<rect x="56" y="720" width="124" height="20" rx="2" fill="#2d3142"/>
-<text x="118" y="735" class="arrow-label" text-anchor="middle">HEAD 리뷰</text>
-<rect x="628" y="852" width="72" height="20" rx="2" fill="#2d3142"/>
-<text x="664" y="867" class="arrow-label" text-anchor="middle">CI / gh</text>
-<rect x="640" y="916" width="48" height="20" rx="2" fill="#2d3142"/>
-<text x="664" y="931" class="arrow-label" text-anchor="middle">푸시</text>
+<rect x="632" y="536" width="116" height="20" rx="2" fill="#2d3142"/>
+<text x="690" y="551" class="arrow-label" text-anchor="middle">완료·푸시</text>
+<rect x="56" y="708" width="124" height="20" rx="2" fill="#2d3142"/>
+<text x="118" y="723" class="arrow-label" text-anchor="middle">HEAD 리뷰</text>
+<rect x="628" y="832" width="72" height="20" rx="2" fill="#2d3142"/>
+<text x="664" y="847" class="arrow-label" text-anchor="middle">CI / gh</text>
+<rect x="640" y="888" width="48" height="20" rx="2" fill="#2d3142"/>
+<text x="664" y="903" class="arrow-label" text-anchor="middle">푸시</text>
 <g data-node-id="gates" data-source-label="증거 게이트 앞 그림에서 이어진다">
 <rect x="80" y="184" width="432" height="96" rx="6" fill="#2d3142"/>
 <rect x="80" y="184" width="432" height="96" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
@@ -78,8 +78,8 @@
 <text x="96" y="442" class="sub" text-anchor="start">검토가 수렴할 때까지</text>
 </g>
 <g data-node-id="impact" data-source-label="영향 지도 기본 브랜치를 다시 평가한다">
-<rect x="80" y="552" width="432" height="112" rx="6" fill="#2d3142"/>
-<rect x="80" y="552" width="432" height="112" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<rect x="80" y="552" width="432" height="100" rx="6" fill="#2d3142"/>
+<rect x="80" y="552" width="432" height="100" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
 <g aria-hidden="true">
 <rect x="96" y="568" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="120" y="579" class="tag" text-anchor="middle">IMPACT</text>
@@ -89,22 +89,22 @@
 <text x="96" y="630" class="sub" text-anchor="start">기본 브랜치를 다시 평가한다</text>
 </g>
 <g data-node-id="land" data-source-label="oah land --check → --merge 검토한 정확한 HEAD 사용자가 확인한 뒤 반영한다 fast-forward push">
-<rect x="80" y="792" width="432" height="168" rx="6" fill="#2d3142"/>
-<rect x="80" y="792" width="432" height="168" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<rect x="80" y="772" width="432" height="156" rx="6" fill="#2d3142"/>
+<rect x="80" y="772" width="432" height="156" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
-<rect x="96" y="808" width="36" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
-<text x="114" y="819" class="tag" text-anchor="middle">LAND</text>
-<text x="496" y="830" class="ghost" text-anchor="end">04</text>
+<rect x="96" y="788" width="36" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="114" y="799" class="tag" text-anchor="middle">LAND</text>
+<text x="496" y="810" class="ghost" text-anchor="end">04</text>
 </g>
-<text x="96" y="850" class="node" text-anchor="start">oah land</text>
-<text x="96" y="870" class="sub" text-anchor="start">--check → --merge</text>
-<text x="96" y="888" class="sub" text-anchor="start">검토한 정확한 HEAD</text>
-<text x="96" y="906" class="sub" text-anchor="start">사용자가 확인한 뒤 반영한다</text>
-<text x="96" y="924" class="sub" text-anchor="start">fast-forward push</text>
+<text x="96" y="830" class="node" text-anchor="start">oah land</text>
+<text x="96" y="850" class="sub" text-anchor="start">--check → --merge</text>
+<text x="96" y="868" class="sub" text-anchor="start">검토한 정확한 HEAD</text>
+<text x="96" y="886" class="sub" text-anchor="start">사용자가 확인한 뒤 반영한다</text>
+<text x="96" y="904" class="sub" text-anchor="start">fast-forward push</text>
 </g>
 <g data-node-id="codex" data-source-label="Codex CLI 검토와 수정 oah review / oah fix">
-<rect x="760" y="344" width="280" height="128" rx="6" fill="#2d3142"/>
-<rect x="760" y="344" width="280" height="128" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="760" y="344" width="280" height="120" rx="6" fill="#2d3142"/>
+<rect x="760" y="344" width="280" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
 <rect x="776" y="360" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="798" y="371" class="tag" text-anchor="middle">CODEX</text>
@@ -116,35 +116,35 @@
 <text x="776" y="440" class="sub technical" text-anchor="start">oah review / oah fix</text>
 </g>
 <g data-node-id="hooks" data-source-label="로컬 git 훅 선택 설치 · oah finish 뒤">
-<rect x="760" y="640" width="280" height="112" rx="6" fill="#2d3142"/>
-<rect x="760" y="640" width="280" height="112" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="760" y="632" width="280" height="100" rx="6" fill="#2d3142"/>
+<rect x="760" y="632" width="280" height="100" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
-<rect x="776" y="656" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="798" y="667" class="tag" text-anchor="middle">HOOKS</text>
-<text x="1024" y="678" class="ghost" text-anchor="end">06</text>
+<rect x="776" y="648" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="798" y="659" class="tag" text-anchor="middle">HOOKS</text>
+<text x="1024" y="670" class="ghost" text-anchor="end">06</text>
 </g>
-<text x="776" y="698" class="node" text-anchor="start">로컬 git 훅</text>
-<text x="776" y="718" class="sub" text-anchor="start">선택 설치 · oah finish 뒤</text>
+<text x="776" y="690" class="node" text-anchor="start">로컬 git 훅</text>
+<text x="776" y="710" class="sub" text-anchor="start">선택 설치 · oah finish 뒤</text>
 </g>
 <g data-node-id="remote" data-source-label="Pull request와 CI HEAD의 CI 결과 git / GitHub">
-<rect x="760" y="832" width="280" height="128" rx="6" fill="#2d3142"/>
-<rect x="760" y="832" width="280" height="128" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="760" y="812" width="280" height="120" rx="6" fill="#2d3142"/>
+<rect x="760" y="812" width="280" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="776" y="848" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="790" y="859" class="tag" text-anchor="middle">CI</text>
-<text x="1024" y="870" class="ghost" text-anchor="end">07</text>
+<rect x="776" y="828" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="790" y="839" class="tag" text-anchor="middle">CI</text>
+<text x="1024" y="850" class="ghost" text-anchor="end">07</text>
 </g>
-<text x="776" y="890" class="node" text-anchor="start">Pull request와 CI</text>
-<text x="776" y="910" class="sub" text-anchor="start">HEAD의 CI 결과</text>
-<text x="776" y="928" class="sub" text-anchor="start">git / GitHub</text>
+<text x="776" y="870" class="node" text-anchor="start">Pull request와 CI</text>
+<text x="776" y="890" class="sub" text-anchor="start">HEAD의 CI 결과</text>
+<text x="776" y="908" class="sub" text-anchor="start">git / GitHub</text>
 </g>
-<text x="56" y="1092" class="prose" text-anchor="start">사용자가 확인한 뒤 검토한 정확한 HEAD만 반영한다. 게이트와 영향 지도는 구현 그림에서 이어진다.</text>
-<line x1="40" y1="1156" x2="1064" y2="1156" stroke="#f5f5f5" stroke-opacity=".12"/>
-<text x="40" y="1184" class="zone-label" text-anchor="start">범례</text>
-<rect x="112" y="1174" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
-<text x="148" y="1184" class="prose" text-anchor="start">확인 뒤 반영</text>
-<path d="M 304,1180 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<text x="340" y="1184" class="prose" text-anchor="start">작업·증거</text>
-<rect x="480" y="1174" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="516" y="1184" class="prose" text-anchor="start">선택형 훅</text>
+<text x="56" y="1060" class="prose" text-anchor="start">사용자가 확인한 뒤 검토한 정확한 HEAD만 반영한다. 게이트와 영향 지도는 구현 그림에서 이어진다.</text>
+<line x1="40" y1="1124" x2="1064" y2="1124" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1152" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="1142" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1152" class="prose" text-anchor="start">확인 뒤 반영</text>
+<path d="M 304,1148 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<text x="340" y="1152" class="prose" text-anchor="start">작업·증거</text>
+<rect x="480" y="1142" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="516" y="1152" class="prose" text-anchor="start">선택형 훅</text>
 </svg>
