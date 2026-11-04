@@ -42,7 +42,7 @@
 <path d="M 296,652 L 296,772" data-edge-id="a5" data-from="impact" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
 <path d="M 900,732 L 900,812" data-edge-id="a6" data-from="hooks" data-to="remote" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
 <path d="M 760,860 L 512,860" data-edge-id="a7" data-from="remote" data-to="land" data-label="CI / gh" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
-<path d="M 512,916 L 760,916" data-edge-id="a8" data-from="land" data-to="remote" data-label="푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
+<path d="M 512,908 L 760,908" data-edge-id="a8" data-from="land" data-to="remote" data-label="푸시" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#architecture-land-ko-dark-arrow)"/>
 <rect x="610" y="364" width="108" height="20" rx="2" fill="#2d3142"/>
 <text x="664" y="379" class="arrow-label" text-anchor="middle">리뷰·수정</text>
 <rect x="632" y="536" width="116" height="20" rx="2" fill="#2d3142"/>
@@ -51,8 +51,8 @@
 <text x="118" y="723" class="arrow-label" text-anchor="middle">HEAD 리뷰</text>
 <rect x="628" y="832" width="72" height="20" rx="2" fill="#2d3142"/>
 <text x="664" y="847" class="arrow-label" text-anchor="middle">CI / gh</text>
-<rect x="640" y="888" width="48" height="20" rx="2" fill="#2d3142"/>
-<text x="664" y="903" class="arrow-label" text-anchor="middle">푸시</text>
+<rect x="640" y="880" width="48" height="20" rx="2" fill="#2d3142"/>
+<text x="664" y="895" class="arrow-label" text-anchor="middle">푸시</text>
 <g data-node-id="gates" data-source-label="증거 게이트 앞 그림에서 이어진다">
 <rect x="80" y="184" width="432" height="96" rx="6" fill="#2d3142"/>
 <rect x="80" y="184" width="432" height="96" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
