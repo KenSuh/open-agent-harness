@@ -9,6 +9,12 @@ code points rather than UTF-16 units.
 
 oah adds one optional attribute that unlazy ignores: an indented `OAH-INPUTS: a, b/c` line narrows a
 gate's input set to those repository-relative path prefixes.
+
+One form of ABANDON reason means more to oah: a reason that starts with `ci-check:`, followed by one or more
+check-run names in double quotes and then optional free text, defers the gate to the landing CI
+(`Ledger.deferred`). unlazy reads the row as an ordinary ABANDON, so the gate stays a handoff until `oah land`
+closes it, which happens only when every named check run succeeded at the exact HEAD. A `ci-check:` reason
+without a complete quoted name is an error.
 """
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ INPUTS_RE = re.compile(r"^\s+OAH-INPUTS:\s?(.*)$")
 ABANDON_RE = re.compile(r"^ABANDON:\s*(\S*)\s*(.*)$")
 INDENTED_ABANDON_RE = re.compile(r"^\s+ABANDON:")
 OWNS_RE = re.compile(r"^OWNS:\s*(.*)$")
+CI_CHECK_PREFIX = "ci-check:"
+CI_CHECK_NAME_RE = re.compile(r'\s*"([^"]*)"(?=\s|$)')
 FENCE_OPEN_RE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
 FENCE_CLOSE_RE = re.compile(r"^( {0,3})(`+|~+)[ \t]*$")
 ID_RE = re.compile(r"^(\S+?):(?:\s+|$)")
@@ -71,6 +79,8 @@ class Ledger:
     abandoned: dict[str, str]
     errors: tuple[str, ...]
     owns: tuple[str, ...] = ()
+    # gate id -> the check-run names its `ci-check:` ABANDON row defers it to; each such gate is also abandoned
+    deferred: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
 
     def gate(self, gate_id: str) -> Gate | None:
         return next((gate for gate in self.gates if gate.id == gate_id), None)
@@ -134,6 +144,24 @@ def _normalize_owns(value: str) -> str | None:
     return normalized or None
 
 
+def _ci_checks(reason: str) -> tuple[tuple[str, ...] | None, str]:
+    """The check-run names a `ci-check:` reason defers to, else (None, problem); (None, "") for a plain reason."""
+    if not reason.startswith(CI_CHECK_PREFIX):
+        return None, ""
+    names, position = [], len(CI_CHECK_PREFIX)
+    while found := CI_CHECK_NAME_RE.match(reason, position):
+        names.append(found.group(1))
+        position = found.end()
+    if not names or reason[position:].lstrip(_JS_SPACE).startswith('"'):
+        return None, ("needs one or more check-run names, each in double quotes and followed by a space or the "
+                      'end of the line, such as ci-check: "test (windows-latest, 1/5)"')
+    if not all(name.strip(_JS_SPACE) and name.isprintable() for name in names):
+        return None, "has a blank check-run name or one with control characters"
+    if len(set(names)) != len(names):
+        return None, "names the same check run twice"
+    return tuple(names), ""
+
+
 def _parse_inputs(value: str) -> tuple[tuple[str, ...], list[str]]:
     entries, bad = [], []
     for item in (part.strip() for part in value.split(",")):
@@ -152,6 +180,7 @@ def parse_text(text: str, path: pathlib.Path | None = None) -> Ledger:
     lines = re.split(r"\r?\n", text)
     gates: list[Gate] = []
     abandoned: dict[str, str] = {}
+    deferred: dict[str, tuple[str, ...]] = {}
     owns: list[str] = []
     errors: list[str] = []
     ids: dict[str, int] = {}
@@ -246,6 +275,11 @@ def parse_text(text: str, path: pathlib.Path | None = None) -> Ledger:
                 errors.append(f"line {number}: duplicate ABANDON for {gate_id}")
             else:
                 abandoned[gate_id] = reason
+                names, problem = _ci_checks(reason)
+                if problem:
+                    errors.append(f"line {number}: ABANDON {gate_id} ci-check: {problem}")
+                elif names is not None:
+                    deferred[gate_id] = names
             current = None
             continue
 
@@ -282,7 +316,8 @@ def parse_text(text: str, path: pathlib.Path | None = None) -> Ledger:
             errors.append(f"ABANDON references unknown gate {gate_id}")
     if not gates:
         errors.append("ledger contains zero live gates")
-    return Ledger(path=path, gates=tuple(gates), abandoned=abandoned, errors=tuple(errors), owns=tuple(owns))
+    return Ledger(path=path, gates=tuple(gates), abandoned=abandoned, errors=tuple(errors), owns=tuple(owns),
+                  deferred=deferred)
 
 
 def parse_ledger(path: pathlib.Path) -> Ledger:

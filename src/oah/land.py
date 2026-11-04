@@ -20,7 +20,8 @@ applies to failed or pending CI.
 4. gates: a ledger governs the task, `oah.gates.guard.evaluate` passes with unlazy, and its summary equals
    `GATES.summary.md` committed at HEAD. With `[gates] commit_ledgers`, every ledger is committed at HEAD as it is
    on disk. Codes: `OAH_LAND_GATES_REQUIRED`, `OAH_LAND_GATES_UNMET`, `OAH_LAND_GATES_SUMMARY_MISSING`,
-   `OAH_LAND_GATES_SUMMARY_STALE`.
+   `OAH_LAND_GATES_SUMMARY_STALE`. A gate whose ABANDON reason is `ci-check:` with quoted check-run names is
+   deferred to the ci check (9), not reported as a handoff.
 5. impact: the worktree map is fresh at HEAD. The remote's default branch was fetched in this run into oah's
    private object store; no user ref, object or configuration is written. The changed paths are assessed against both
    maps, and the result digest is recorded. Offline mode, a failed fetch or unavailable impact is
@@ -38,7 +39,11 @@ applies to failed or pending CI.
    latest (highest id) decides. Every result must have completed as success, neutral or skipped (a status as
    `success`); `failure`/`error` statuses and other conclusions are `OAH_LAND_CI_FAILED`, unfinished ones and read
    errors `OAH_LAND_CI_PENDING`. Absent `gh`, zero results, or a required check with no result is `unverified`
-   (`OAH_LAND_CI_UNVERIFIED`), which names the missing items.
+   (`OAH_LAND_CI_UNVERIFIED`), which names the missing items. A deferred gate closes only when every check run
+   its ledger row names exists at HEAD and its latest run completed with conclusion `success`. Otherwise
+   (missing, pending, failed, another conclusion, or CI that could not be read completely) the ci check fails
+   with `OAH_LAND_GATES_DEFERRED`, naming the gate and how many of its named check runs did not succeed; no CI
+   exception applies to it.
 
 Configuration (`[land]` in the fetched landing target's committed `.oah/config.toml`, `DEFAULTS`):
 - `ci_unverified = "block"` (default) refuses unverified CI; `"exception"` lands it under a recorded exception with
@@ -64,7 +69,9 @@ A17: oah never reads a credential. `gh` and git use their own helpers. Remote UR
 and gitleaks findings are never echoed or stored. `gh` uses an explicit destination selector with its
 `{owner}/{repo}` placeholders. `record` appends SHAs, digests, check names, states and codes to
 `<state>/land/<task>/records.jsonl`, and never messages or paths. CI names reported by GitHub are never shown or
-stored; only configured required names are. When a CI exception applies, `record` also appends
+stored; only configured required names are. A deferred gate's check-run names are never shown or stored either:
+the record lists each deferred gate the ci check closed by its id, the number of named check runs and the sha256
+of the names (a JSON array in ledger order). When a CI exception applies, `record` also appends
 `<state>/land/<task>/ci-exceptions.jsonl`: reason, source, the remote URL without credentials, the full head, the
 unverified items, a CI summary, `git config user.name` (or `unknown`), the code and the UTC time. An exception
 push first appends this authorization with the ready code under the state lock; `record` appends its outcome.
@@ -95,6 +102,7 @@ READY = "OAH_LAND_READY"
 READY_WITH_CI_EXCEPTION = "OAH_LAND_READY_WITH_CI_EXCEPTION"
 LANDED_WITH_CI_EXCEPTION = "OAH_LAND_LANDED_WITH_CI_EXCEPTION"
 CI_UNVERIFIED = "OAH_LAND_CI_UNVERIFIED"
+GATES_DEFERRED_CODE = "OAH_LAND_GATES_DEFERRED"
 DEFAULTS = {"ci_unverified": "block", "required_checks": []}
 CI_POLICIES = ("block", "exception")
 CI_PASSING = ("success", "neutral", "skipped")
@@ -281,6 +289,22 @@ def _skipped(name: str, why: str) -> Check:
     return Check(name, SKIPPED, None, f"not checked: {why}")
 
 
+@dataclasses.dataclass(frozen=True)
+class _Deferred:
+    """A gate its ledger defers to named CI check runs (an ABANDON row whose reason is `ci-check:`).
+
+    The names decide whether the gate closes and are never shown or stored; outputs carry their count and digest."""
+    gate: str
+    ledger: int  # the ledger's position among the task's ledgers
+    names: tuple[str, ...] = dataclasses.field(repr=False)
+    label: str = ""  # the gate's handoff label in oah.gates.guard (prefixed by its ledger when there are several)
+
+    def entry(self, position: int) -> dict:
+        names = json.dumps(list(self.names), ensure_ascii=False, separators=(",", ":"))
+        return {**_gate_reference(self.gate, position), "ledger": self.ledger, "checks": len(self.names),
+                "names_sha256": hashlib.sha256(names.encode("utf-8")).hexdigest()}
+
+
 @dataclasses.dataclass
 class Assessment:
     task: str
@@ -304,6 +328,8 @@ class Assessment:
     _authorization: str | None = dataclasses.field(default=None, init=False, repr=False)
     _git: _GitContext | None = dataclasses.field(default=None, init=False, repr=False)
     _push_refusal: Check | None = dataclasses.field(default=None, init=False, repr=False)
+    # Gates the passing gates check deferred to named CI check runs; the ci check closes them or refuses
+    _deferred: tuple[_Deferred, ...] = dataclasses.field(default=(), init=False, repr=False)
 
     def excepted(self, check: Check) -> bool:
         """Unverified CI that a CI exception for exactly this head lets land; never failed or pending CI."""
@@ -382,6 +408,13 @@ def _required_json(items: Sequence[dict]) -> list[dict]:
 def _reference_text(reference: dict) -> str:
     label = f" {reference['label']}" if "label" in reference else ""
     return f"position {reference['position']}{label} digest {reference['digest']}"
+
+
+def _deferred_text(entry: dict, many: bool) -> str:
+    """A deferred gate's reference and how many check runs it names; never the names."""
+    runs = "1 named check run" if entry["checks"] == 1 else f"{entry['checks']} named check runs"
+    where = f" in ledger {entry['ledger']}" if many else ""
+    return f"gate {_reference_text(entry)}{where} ({runs})"
 
 
 def _destination_text(remote: str | None, branch: str | None) -> str:
@@ -504,8 +537,27 @@ def _gate_tools(root: pathlib.Path, env: Mapping[str, str], home: pathlib.Path |
         return None, "gate tools could not be verified; install pinned unlazy and a supported node executable"
 
 
+def _deferred_gates(root: pathlib.Path, task: str, declared: Sequence[str]) -> tuple[_Deferred, ...]:
+    """The task's gates that their ledgers defer to named CI check runs, in ledger and gate order."""
+    from oah.gates import guard, parse_ledger
+    from oah.gates.check import GateRefused, ledger_key
+
+    try:
+        ledgers = guard.resolve_ledgers(root, task, declared)
+    except GateRefused:
+        return ()
+    found = []
+    for position, path in enumerate(ledgers, 1):
+        ledger = parse_ledger(path)
+        prefix = f"{ledger_key(root, path)}:" if len(ledgers) > 1 else ""
+        found += [_Deferred(gate.id, position, ledger.deferred[gate.id], prefix + gate.id)
+                  for gate in ledger.gates if gate.id in ledger.deferred]
+    return tuple(found)
+
+
 def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, lease: evidence.TaskLease | None,
-                 settings: Mapping, tools, tools_error: str, env: Mapping[str, str]) -> Check:
+                 settings: Mapping, tools, tools_error: str, env: Mapping[str, str],
+                 deferred: Sequence[_Deferred] = ()) -> Check:
     from oah.gates import check as check_mod
     from oah.gates import guard
     from oah.gates.check import GateRefused
@@ -533,8 +585,12 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
     except (GateRefused, UnlazyError):
         return _failed("gates", "OAH_LAND_GATES_UNMET", f"the task's gates do not pass at HEAD; inspect the ledgers "
                        f"and run oah gates check <task>; once they pass, {retry}")
+    later = {item.label for item in deferred}
+    plain = [label for label in report.handoff if label not in later]
     detail = {"outcome": report.outcome,
-              "handoff": [_gate_reference(label, position) for position, label in enumerate(report.handoff, 1)]}
+              "handoff": [_gate_reference(label, position) for position, label in enumerate(plain, 1)]}
+    if deferred:
+        detail["deferred"] = [item.entry(position) for position, item in enumerate(deferred, 1)]
     if settings["commit_ledgers"]:
         for position, path in enumerate(ledgers, 1):
             key = check_mod.ledger_key(root, path)
@@ -561,7 +617,10 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
                            f"commit the gate summary, get the head reviewed, {retry}")
         bound = "the gate summary at HEAD matches the gate records"
     handoff = ("; abandoned (a handoff, not met): " + "; ".join(_reference_text(item) for item in detail["handoff"])
-               if report.handoff else "")
+               if plain else "")
+    if deferred:
+        handoff += ("; deferred to CI (the ci check closes each only when every check run it names succeeded at "
+                    "HEAD): " + "; ".join(_deferred_text(entry, len(ledgers) > 1) for entry in detail["deferred"]))
     count = f"{len(ledgers)} ledgers pass" if len(ledgers) != 1 else "1 ledger passes"
     return _passed("gates", f"{count} through unlazy and {bound}{handoff}", detail)
 
@@ -1051,7 +1110,14 @@ def _unverified_ci(head: str, items: list[dict], detail: dict, retry: str) -> Ch
 
 
 def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None = None,
-              required: Sequence[str] = ()) -> Check:
+              required: Sequence[str] = (), deferred: Sequence[_Deferred] = ()) -> Check:
+    check, latest = _ci_reading(root, head, env, destination=destination, required=required)
+    return _deferred_ci(check, latest, head, deferred) if deferred else check
+
+
+def _ci_reading(root: pathlib.Path, head: str, env: Mapping[str, str], *, destination: str | None,
+                required: Sequence[str]) -> tuple[Check, list[dict] | None]:
+    """The ci check, and the latest results of a complete reading of HEAD's CI (None when it was not read in full)."""
     from oah.engines.proc import UnsupportedBatchShim
 
     retry = "then run oah land --check again"
@@ -1065,17 +1131,18 @@ def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destinat
         gh = find_gh(env)
     except UnsupportedBatchShim:
         return _failed("ci", "OAH_LAND_CI_PENDING", f"gh needs a supported executable; fix its installation, {retry}",
-                       detail())
+                       detail()), None
     if gh is None:
         items = [{"kind": "gh-missing"}]
-        return _unverified_ci(head, items, detail(unverified=items), retry)
+        return _unverified_ci(head, items, detail(unverified=items), retry), None
     if destination is None:
         return _failed("ci", "OAH_LAND_CI_PENDING", f"the destination was not assessed; fix the impact check, {retry}",
-                       detail())
+                       detail()), None
     runs, run_problem = _check_runs(gh, root, head, env, destination)
     statuses, status_problem = _check_runs(gh, root, head, env, destination, "status")
     problem = "; ".join(text for text in (run_problem, status_problem) if text) or None
     latest = _latest(runs) + _latest(statuses)
+    complete = latest if problem is None else None
     failed = _ci_counts(latest, FAILED, head, "failed")
     if failed:
         named = [name for name in required
@@ -1084,26 +1151,58 @@ def _ci_check(root: pathlib.Path, head: str, env: Mapping[str, str], *, destinat
         incomplete = "; CI reading is also incomplete" if problem is not None else ""
         return _failed("ci", "OAH_LAND_CI_FAILED",
                        f"{'; '.join(failed)}{required_text}{incomplete}; inspect the runs, fix them, push, wait for "
-                       f"CI, {retry}", detail(runs, statuses))
+                       f"CI, {retry}", detail(runs, statuses)), complete
     if problem is not None:
         return _failed("ci", "OAH_LAND_CI_PENDING", f"CI reading is incomplete ({problem}); inspect all check runs "
                        f"and commit statuses and check gh auth status and that the task branch is pushed, {retry}",
-                       detail(runs, statuses))
+                       detail(runs, statuses)), None
     pending = _ci_counts(latest, "pending", head, "are pending")
     if pending:
         return _failed("ci", "OAH_LAND_CI_PENDING", f"{'; '.join(pending)}; wait for them to finish, {retry}",
-                       detail(runs, statuses))
+                       detail(runs, statuses)), latest
     names = {item["name"] for item in latest}
     items = ([{"kind": "required-missing", "name": name} for name in required if name not in names]
              or ([] if latest else [{"kind": "no-results"}]))
     if items:
-        return _unverified_ci(head, items, detail(runs, statuses, items), retry)
+        return _unverified_ci(head, items, detail(runs, statuses, items), retry), latest
     shown = [f"{count} {noun}{'s' if count != 1 else ''}" if noun == "CI check run"
              else f"{count} {noun}{'es' if count != 1 else ''}"
              for count, noun in ((len(_latest(runs)), "CI check run"), (len(_latest(statuses)), "commit status"))
              if count]
     present = f"; required checks present: {', '.join(required)}" if required else ""
-    return _passed("ci", f"{' and '.join(shown)} passed for HEAD {head[:12]}{present}", detail(runs, statuses))
+    return _passed("ci", f"{' and '.join(shown)} passed for HEAD {head[:12]}{present}", detail(runs, statuses)), latest
+
+
+def _deferred_ci(check: Check, latest: list[dict] | None, head: str, deferred: Sequence[_Deferred]) -> Check:
+    """Close each deferred gate whose named check runs all completed as success at HEAD; otherwise refuse.
+
+    Only check runs count, the latest (highest id) per name decides, and only the conclusion `success` closes a
+    name. A CI reading that is unavailable or incomplete confirms none. The refusal is a failed check, so neither
+    a CI exception nor --accept-unverified-ci lets it land."""
+    succeeded = {item["name"] for item in latest or ()
+                 if item["kind"] == "check-runs" and item.get("conclusion") == "success"}
+    entries = []
+    for position, item in enumerate(deferred, 1):
+        missing = sum(1 for name in item.names if name not in succeeded)
+        entries.append({**item.entry(position), "closed": not missing, "not_succeeded": missing})
+    detail = {**check.detail, "deferred": entries}
+    many = any(item.label != item.gate for item in deferred)
+    still = [entry for entry in entries if not entry["closed"]]
+    if not still:
+        closed = "; ".join(_deferred_text(entry, many) for entry in entries)
+        return dataclasses.replace(check, message=f"{check.message}; deferred gate(s) closed, every check run they "
+                                                  f"name succeeded at HEAD {head[:12]}: {closed}", detail=detail)
+    parts = "; ".join(f"{_deferred_text(entry, many)}: {entry['not_succeeded']} of them did not succeed"
+                      for entry in still)
+    reading = (f"CI could not be read completely for HEAD {head[:12]}, so no named check run is confirmed"
+               if latest is None else f"a named check run that is missing at HEAD {head[:12]}, pending, or completed "
+                                      "with any conclusion other than success does not count")
+    itself = f"; CI itself reports {check.code}" if check.code else ""
+    return _failed("ci", GATES_DEFERRED_CODE,
+                   f"deferred gate(s) not closed: {parts}; {reading}{itself}. A gate deferred to CI closes only when "
+                   "every check run its ledger row names completed as success at this exact HEAD, and neither "
+                   "--accept-unverified-ci nor a CI exception closes it. Let CI finish, fix the failing runs and "
+                   "push, or meet the gate and record its evidence, then run oah land --check again", detail)
 
 
 def land_settings(config) -> dict:
@@ -1199,7 +1298,10 @@ def _assess(root, task, *, env, offline, home, git_context, accept_unverified_ci
     proposed_settings = land_settings(config)
     settings = dict(DEFAULTS)  # No fetched target means impact refuses; HEAD never supplies land policy.
     tools, tools_error = _gate_tools(root, env, home)
-    result.checks.append(_gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env))
+    deferred = _deferred_gates(root, task, lease.gates if lease else ())
+    gates = _gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env, deferred)
+    result.checks.append(gates)
+    result._deferred = deferred if gates.state == PASSED else ()
     with _git_environment_scope(git_context.env):
         reassessed = _reassess(root, head, git_context.env, offline, git_context)
     result.remote, result.branch, result.warnings = reassessed.remote, reassessed.branch, reassessed.warnings
@@ -1238,7 +1340,7 @@ def _assess(root, task, *, env, offline, home, git_context, accept_unverified_ci
         result.checks += [_skipped("required-checks", why), _skipped("fast-forward", why), _skipped("scan", why)]
     result._ci_required = tuple(settings["required_checks"])
     ci = _ci_check(root, head, env, destination=result._destination[1] if result._destination else None,
-                   required=result._ci_required)
+                   required=result._ci_required, deferred=result._deferred)
     result.checks.append(ci)
     if ci.state == UNVERIFIED and (accept_unverified_ci is not None or settings["ci_unverified"] == "exception"):
         source, reason = (("flag", accept_unverified_ci.strip()) if accept_unverified_ci is not None
@@ -1344,7 +1446,8 @@ def _revalidate_ci(root: pathlib.Path, assessment: Assessment, env: Mapping[str,
     """Read CI again after confirmation; any change from the assessed result refuses."""
     before = assessment.check("ci")
     now = _ci_check(root, assessment.head, env, required=assessment._ci_required,
-                    destination=assessment._destination[1] if assessment._destination else None)
+                    destination=assessment._destination[1] if assessment._destination else None,
+                    deferred=assessment._deferred)
     assessment.checks = [now if check.name == "ci" else check for check in assessment.checks]
     changed = (now.state, now.code, now.detail) != (before.state, before.code, before.detail)
     excepted = assessment.excepted(now)
@@ -1472,7 +1575,8 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
            *, now: dt.datetime | None = None) -> None:
     """Append one landing record: SHAs, digests, check names, states and codes; never messages or paths.
 
-    A landing that a CI exception made ready also appends its exception record beside it."""
+    Each deferred gate the ci check closed is listed by its id, the number of check runs it names and the names'
+    sha256, never the names. A landing that a CI exception made ready also appends its exception record beside it."""
     from oah.atomic import append_jsonl
     from oah.lockfile import StateLock
     from oah.runs import RunError, _contained_path
@@ -1489,6 +1593,11 @@ def record(state: pathlib.Path, assessment: Assessment, mode: str, pushed: Pushe
             "checks": [{"name": check.name, "state": check.state, "code": check.code} for check in assessment.checks],
             "ready": assessment.ready, "code": pushed.code if pushed else assessment.code,
             "landed": pushed.landed if pushed else False, "remote_sha": pushed.remote_sha if pushed else None}
+    ci = next((check for check in assessment.checks if check.name == "ci"), None)
+    closed = [{key: value for key, value in entry.items() if key not in ("closed", "not_succeeded")}
+              for entry in (ci.detail.get("deferred", ()) if ci else ()) if entry["closed"]]
+    if closed:
+        line["deferred_gates"] = closed
     try:
         path = _contained_path(state, "land", assessment.task, "records.jsonl")
         with StateLock(_contained_path(state, ".lock")):
