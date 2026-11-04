@@ -10,24 +10,26 @@ The skill is not installed or vendored here. Selected monochrome icons come from
 Each stem has `-light.html`, `-dark.html`, `-ko-light.html` and `-ko-dark.html` sources.
 Matching SVGs live one directory above. Edit HTML first; SVGs are exports, not independent sources.
 The banner is a hand-authored 1280 × 560 chat scene with its own neo-brutalist style.
+It shares the gallery paper, 22 × 22 dot grid and neutral tokens, while keeping its
+character shapes, bold outlines, hard shadows and amber, green and purple role colors.
 Its palette, outlines, hard shadows and role colors are recorded in the style guide's [Banner section](style-guide.md#banner).
 
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
 | `how-it-works` | Swimlane, 1080 × 1420 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
 | `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; both READMEs |
-| `architecture-build` | Architecture, 1160 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
-| `architecture-land` | Architecture, 1104 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
+| `architecture-build` | Architecture, 1160 × 1340 | 9 / 8 | Task preparation, routing, Jev and evidence |
+| `architecture-land` | Architecture, 1104 × 1204 | 7 / 8 | Review, git hooks, CI and confirmed landing |
 | `loop-start` | Sequence, 960 × 916 | 3 / 6 | Numbered exchanges 1–6 |
 | `loop-review` | Sequence, 1008 × 1212 | 4 / 9 | Numbered exchanges 7–15 and the correction loop |
 | `concepts-loop` | Flowchart, 1232 × 724 | 8 / 8 | Packet to confirmed landing |
 | `concepts-leases-lifecycle` | State machine, 880 × 1308 | 6 / 7 | Start, renew, expiry and release |
 | `concepts-leases-finish` | State machine, 880 × 1164 | 5 / 6 | Finish checks and refusals |
-| `concepts-routing-rules` | Flowchart, 960 × 1272 | 7 / 6 | Difficulty rules, tier, model and effort |
-| `concepts-routing-skills` | Flowchart, 960 × 1352 | 7 / 9 | Deterministic skills, reranking and fallbacks |
-| `concepts-impact-freshness` | Flowchart, 880 × 1268 | 6 / 6 | Freshness, refresh, stale input and default branch |
+| `concepts-routing-rules` | Flowchart, 960 × 1244 | 7 / 6 | Difficulty rules, tier, model and effort |
+| `concepts-routing-skills` | Flowchart, 960 × 1332 | 7 / 9 | Deterministic skills, reranking and fallbacks |
+| `concepts-impact-freshness` | Flowchart, 880 × 1244 | 6 / 6 | Freshness, refresh, stale input and default branch |
 | `concepts-impact-ranked` | Flowchart, 920 × 1064 | 5 / 5 | pin, exec, link, mention and exact reruns |
-| `concepts-review` | Flowchart, 880 × 948 | 5 / 5 | All review outcomes and correction/bind return |
+| `concepts-review` | Flowchart, 880 × 864 | 5 / 5 | All review outcomes and correction/bind return |
 | `concepts-landing-local` | Flowchart, 1000 × 1156 | 8 / 5 | Opt-in local hooks and push paths |
 | `concepts-landing-checks` | Flowchart, 1000 × 1332 | 6 / 6 | CI, exact HEAD, exception and confirmation |
 | `banner` | Hand-authored chat scene, 1280 × 560 | — | README banner in its own neo-brutalist style |

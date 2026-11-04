@@ -691,6 +691,32 @@ class BannerTest(unittest.TestCase):
                     self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
                                   else "Planned, not available yet.", visible)
 
+    def assert_concepts_edge_labels(self, root, expected_labels):
+        def normalized(text):
+            text = " ".join(text.split()).casefold()
+            return re.sub(r"^(?:\d+|[a-z])\s*[·.]\s+", "", text)
+
+        # Each inline tag must stand on its own. A key's full condition counts
+        # only when its letter also appears in an inline arrow tag.
+        texts = root.findall(f"{SVG}text")
+        keys = {}
+        for key, description in zip(texts, texts[1:]):
+            letter = "".join(key.itertext()).strip().casefold()
+            if (key.get("class") == "label" and re.fullmatch(r"[a-z]", letter)
+                    and description.get("class") == "prose"
+                    and key.get("y") == description.get("y")):
+                self.assertNotIn(letter, keys)
+                keys[letter] = normalized(" ".join(description.itertext()))
+        visible = []
+        for text in texts:
+            if text.get("class") != "arrow-label":
+                continue
+            value = normalized(" ".join(text.itertext()))
+            letter, separator, _ = value.partition(" ")
+            visible.append(keys[letter] if separator and letter in keys else value)
+        # Count duplicates too: two edges with the same condition need two tags.
+        self.assertCountEqual(visible, [normalized(label) for label in expected_labels if label])
+
     def test_concepts_preserve_the_source_graph_and_visible_labels(self):
         for stems, expected_nodes, expected_edges in CONCEPT_GRAPHS:
             source_edges = {f"e{i}": edge for i, edge in enumerate(expected_edges, 1)}
@@ -716,9 +742,6 @@ class BannerTest(unittest.TestCase):
                                 self.assertEqual(shape, english_shapes[stem, theme])
                             else:
                                 english_shapes[stem, theme] = shape
-                            # Inline arrow labels and transition keys are outside the node groups.
-                            visible_labels = " ".join(" ".join(t.itertext()) for t in root.findall(f"{SVG}text"))
-                            visible_labels = " ".join(visible_labels.split()).casefold()
                             for node in drawn_nodes:
                                 key = node.get("data-node-id")
                                 self.assertIn(key, expected_nodes)
@@ -738,12 +761,32 @@ class BannerTest(unittest.TestCase):
                                 label = labels[language_index].replace("\n", " ")
                                 self.assertEqual(f'{edge.get("data-from")}>{edge.get("data-to")}', pair, key)
                                 self.assertEqual(edge.get("data-label"), label, key)
-                                if label:
-                                    # Wrapping and uppercase arrow typography may differ from Mermaid.
-                                    self.assertRegex(visible_labels, r"(?<!\w)" + re.escape(label.casefold()) + r"(?!\w)", key)
+                            self.assert_concepts_edge_labels(
+                                root, [source_edges[e.get("data-edge-id")][1 + language_index]
+                                       for e in drawn_edges])
                     with self.subTest(stems=stems, language=language, theme=theme):
                         self.assertEqual(nodes, set(expected_nodes))
                         self.assertEqual(sorted(edges), sorted(source_edges))
+
+    def test_concepts_reject_each_missing_inline_edge_tag(self):
+        for stem in CONCEPT_DIAGRAMS:
+            for language in ("", "-ko"):
+                for theme in ("light", "dark"):
+                    path = ASSETS / f"{stem}{language}-{theme}.svg"
+                    root = ET.parse(path).getroot()
+                    expected = [e.get("data-label") for e in root.iter() if e.get("data-edge-id")]
+                    tags = [t for t in root.findall(f"{SVG}text") if t.get("class") == "arrow-label"]
+                    for tag in tags:
+                        with self.subTest(asset=path.name, tag="".join(tag.itertext())):
+                            index = list(root).index(tag)
+                            root.remove(tag)
+                            try:
+                                # In particular, NO cannot borrow "no" from
+                                # "yes, no candidates" or "--no-refresh" in a key.
+                                with self.assertRaises(AssertionError):
+                                    self.assert_concepts_edge_labels(root, expected)
+                            finally:
+                                root.insert(index, tag)
 
     def test_architecture_judgement_and_english_loop_label(self):
         for language in ("", "-ko"):

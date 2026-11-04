@@ -50,8 +50,8 @@
 </g>
 <text x="80" y="250" class="node" text-anchor="start">Leases</text>
 <text x="80" y="270" class="sub" text-anchor="start">Reserve paths this task</text>
-<text x="80" y="288" class="sub" text-anchor="start">changes; refuse overlapping</text>
-<text x="80" y="306" class="sub" text-anchor="start">leases.</text>
+<text x="80" y="288" class="sub" text-anchor="start">changes; refuse</text>
+<text x="80" y="306" class="sub" text-anchor="start">overlapping leases.</text>
 </g>
 <g data-node-id="impact" data-source-label="Impact map See what a change touches and which checks to rerun.">
 <rect x="344" y="192" width="272" height="116" rx="6" fill="#2d3142"/>
@@ -119,8 +119,8 @@
 <g transform="translate(816,740)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/> <path d="M9 9l1 0"/> <path d="M9 13l6 0"/> <path d="M9 17l6 0"/></g></g>
 </g>
 <text x="560" y="786" class="node" text-anchor="start">Project wiki</text>
-<text x="560" y="806" class="sub" text-anchor="start">Keep decisions and reasons for the next</text>
-<text x="560" y="824" class="sub" text-anchor="start">session.</text>
+<text x="560" y="806" class="sub" text-anchor="start">Keep decisions and reasons</text>
+<text x="560" y="824" class="sub" text-anchor="start">for the next session.</text>
 </g>
 <text x="56" y="916" class="prose" text-anchor="start">Jev difficulty is in v0.3.0; confidence and minimum-level rules apply.</text>
 <text x="56" y="938" class="prose" text-anchor="start">You ask, answer when the AI stops for a decision, and confirm before landing.</text>
