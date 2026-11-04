@@ -14,8 +14,8 @@ from oah.design import fs as design_fs
 from oah.design.model import normalize_text, text_digest
 from oah.wiki import log as log_module
 from oah.wiki.base import WikiError
-from tests.helpers import directory_alias, guard_subprocesses, make_tmp_dir
-from tests.test_design_store import PAGE, TODAY, DesignRepo
+from tests.helpers import directory_alias, git_commit, guard_subprocesses, make_tmp_dir
+from tests.test_design_store import PAGE, TODAY, Crash, DesignRepo, crash_at, git
 
 BAD_IDS = ("../x", "a/b", "a\\b", "A", "con", "nul", "com1", "lpt9", "a--b", "-a", "a-", "a.b", "a b", "a:b", ".",
            "", "x" * 41, "학원")
@@ -50,6 +50,28 @@ class IdTest(DesignRepo, unittest.TestCase):
 
 
 class LinkTest(DesignRepo, unittest.TestCase):
+    def test_c1_committed_nonregular_parts_are_refused_by_both_readers(self):
+        repo = self.make_repo()
+        store = self.store(repo)
+        self.booking(store)
+        rel = ".oah/designs/acme/booking/revisions/r1/design.md"
+        part = repo / rel
+        git(repo, "add", "-A")
+        blob = git(repo, "hash-object", rel).strip()
+        git(repo, "update-index", "--cacheinfo", f"120000,{blob},{rel}")
+        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "symlink part mode")
+        committed = design_fs.GitRefReader(repo, "refs/heads/main")
+        with self.assertRaises(DesignError) as remote:
+            self.store(repo, reader=committed).snapshot("acme", "booking")
+        self.assertEqual(remote.exception.code, "OAH_DESIGN_PATH_INVALID")
+        part.unlink()
+        target = repo / "plain-folder"
+        target.mkdir()
+        directory_alias(target, part)
+        with self.assertRaises(DesignError) as local:
+            self.store(repo).snapshot("acme", "booking")
+        self.assertEqual(local.exception.code, "OAH_DESIGN_PATH_INVALID")
+
     def test_linked_folders_are_refused_on_both_sides(self):
         for case in ("records-outside", "pages-inside", "project-folder"):
             with self.subTest(case=case):
@@ -161,6 +183,92 @@ class ContentTest(DesignRepo, unittest.TestCase):
 
 
 class EnvironmentTest(DesignRepo, unittest.TestCase):
+    def test_c1_physical_overlap_is_refused_but_safe_parent_aliases_work(self):
+        for overlap in (True, False):
+            with self.subTest(overlap=overlap):
+                repo = self.make_repo(wiki_dir="state-files" if overlap else "docs/wiki")
+                physical = repo / "state-files"
+                if overlap:
+                    (repo / ".oah/config.toml").rename(physical / "config.toml")
+                    (repo / ".oah").rmdir()
+                else:
+                    if (repo / ".oah").exists():
+                        (repo / ".oah").rename(physical)
+                    else:
+                        physical.mkdir()
+                directory_alias(physical, repo / ".oah")
+                store = self.store(repo)
+                before = self.tree(repo, self.state(repo))
+                if overlap:
+                    with self.assertRaises(WikiError) as invalid:
+                        store.add_project("acme", title="Acme", today=TODAY)
+                    self.assertEqual(invalid.exception.code, "OAH_CONFIG_INVALID")
+                    self.assertEqual(self.tree(repo, self.state(repo)), before)
+                else:
+                    self.booking(store)
+                    self.assertEqual(store.snapshot("acme", "booking").text(), "People book a lesson.\n")
+
+    def test_c1_recovery_refuses_wiki_moved_into_revision_records(self):
+        repo = self.make_repo()
+        store = self.store(repo)
+        r1 = self.booking(store)
+        assert r1.digest is not None
+        with self.assertRaises(Crash):
+            store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                       parts={"design": "Two.\n", "index": "# Index part\n", "log": "# Log part\n"},
+                       fault=crash_at("pointer-written"), today=TODAY)
+        (repo / ".oah/config.toml").write_text(
+            '[wiki]\ndir = ".oah/designs/acme/booking/revisions/r2"\n', encoding="utf-8")
+        moved = self.store(repo)
+        before = self.tree(repo, self.state(repo))
+        with self.assertRaises(WikiError) as invalid:
+            moved.recover()
+        self.assertEqual(invalid.exception.code, "OAH_CONFIG_INVALID")
+        self.assertEqual(self.tree(repo, self.state(repo)), before)
+
+    def test_c1_recovery_checks_the_complete_proposed_change_before_writing(self):
+        for damage in ("part", "pointer", "missing-part", "duplicate-part", "acceptance", "lost-acceptance"):
+            with self.subTest(damage=damage):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                assert r1.digest is not None
+                if damage == "lost-acceptance":
+                    store.accept("acme", "booking", revision=1, digest=r1.digest, reason="Yes", today=TODAY)
+                with self.assertRaises(Crash):
+                    if damage == "acceptance":
+                        store.accept("acme", "booking", revision=1, digest=r1.digest, reason="Yes",
+                                     fault=crash_at("journal-written"), today=TODAY)
+                    else:
+                        store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                                   parts={"design": "Two.\n"}, fault=crash_at("journal-written"), today=TODAY)
+                journal = json.loads(store.journal_path.read_bytes())
+                if damage == "part":
+                    next(item for item in journal["files"] if item["role"] == "part")["data"] = \
+                        base64.b64encode(b"Different valid text.\n").decode("ascii")
+                elif damage in ("pointer", "lost-acceptance"):
+                    pointer = json.loads(base64.b64decode(journal["pointer"]["after"]))
+                    if damage == "pointer":
+                        pointer["current"]["digest"] = r1.digest
+                    else:
+                        pointer["accepted"] = None
+                    journal["pointer"]["after"] = base64.b64encode(json.dumps(pointer).encode()).decode("ascii")
+                elif damage == "missing-part":
+                    journal["files"] = [item for item in journal["files"] if item.get("part") != "design"]
+                elif damage == "duplicate-part":
+                    journal["files"].append(next(item for item in journal["files"] if item["role"] == "part"))
+                else:
+                    item = journal["files"][0]
+                    acceptance = json.loads(base64.b64decode(item["data"]))
+                    acceptance["reason"] = "Different approval"
+                    item["data"] = base64.b64encode(json.dumps(acceptance).encode()).decode("ascii")
+                store.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+                before = self.tree(repo, self.state(repo))
+                with self.assertRaises(DesignError) as corrupt:
+                    store.recover()
+                self.assertEqual(corrupt.exception.code, "OAH_DESIGN_JOURNAL_CORRUPT")
+                self.assertEqual(self.tree(repo, self.state(repo)), before)
+
     def test_pending_rollover_blocks_writes_before_anything(self):
         repo = self.make_repo()
         store = self.store(repo)

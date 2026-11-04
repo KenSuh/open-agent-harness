@@ -10,7 +10,7 @@ from oah.atomic import StateCorrupt, StorageError
 from oah.config import ConfigError
 from oah.design.model import (BINDING_INVALID_CODE, CONTEXT_STALE_CODE, FRESHNESS_UNKNOWN_CODE, INPUT_INVALID_CODE,
                               NOT_FOUND_CODE, UNREGISTERED_EDIT_CODE, DesignBinding, DesignError, check_part)
-from oah.design.store import explain_binding, load_project, open_store
+from oah.design.store import explain_binding, open_store
 from oah.intent import MAX_BYTES, SourceError, read_source
 from oah.journal import PendingTransaction
 from oah.lockfile import LockTimeout
@@ -127,6 +127,9 @@ class _Inputs:
                 raise DesignError(INPUT_INVALID_CODE, "standard input (-) can give only one part")
             self.stdin_used = True
             data = sys.stdin.buffer.read(MAX_BYTES + 1)
+            if len(data) >= MAX_BYTES:
+                raise DesignError(INPUT_INVALID_CODE, f"the {what} text on standard input must be under "
+                                  f"{MAX_BYTES} bytes (1 MiB)")
             try:
                 return data.decode("utf-8")
             except UnicodeDecodeError as exc:
@@ -278,7 +281,7 @@ def _context(args: argparse.Namespace, store) -> int:
 def _check(args: argparse.Namespace, store) -> int:
     from oah.design.model import check_digest, check_id, check_revision
 
-    project = load_project(store.reader, check_id(args.project))
+    project = store.context(check_id(args.project), check_id(args.design, "design")).project
     binding = DesignBinding(project.id, project.uid, check_id(args.design, "design"), check_revision(args.revision),
                             check_digest(args.digest))
     state, reason = explain_binding(binding, store, against="accepted" if args.accepted else "current")

@@ -62,7 +62,7 @@ _DEVICE_NAMES = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)),
 _UID = re.compile(r"[0-9a-f]{32}")
 _HEX = re.compile(r"[0-9a-f]{64}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_BRANCH_REF = re.compile(r"refs/heads/\S+")
+_REF_FORBIDDEN = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 _ISO = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+")
 
 
@@ -139,6 +139,12 @@ def check_fact(value: object) -> str:
 
 def new_uid() -> str:
     return secrets.token_hex(16)
+
+
+def is_branch_ref(value: str) -> bool:
+    return (value.startswith("refs/heads/") and not _REF_FORBIDDEN.search(value)
+            and not any(mark in value for mark in ("..", "@{")) and not value.endswith(".")
+            and all(part and not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")))
 
 
 def utc_now() -> datetime.datetime:
@@ -290,6 +296,7 @@ class ProjectRecord:
     authority: str
     created_at: str
     event: str
+    record_bytes: bytes | None = dataclasses.field(default=None, compare=False, repr=False)
 
     def to_json(self) -> dict:
         return {"version": SCHEMA_VERSION, "kind": "oah-design-project", "id": self.id, "uid": self.uid,
@@ -312,7 +319,7 @@ class ProjectRecord:
             raise corrupt(where, f"id is {record.id!r}, but the folder is {project!r}")
         if not _UID.fullmatch(record.uid):
             raise corrupt(where, "uid is not 32 hex characters")
-        if not _BRANCH_REF.fullmatch(record.authority):
+        if not is_branch_ref(record.authority):
             raise corrupt(where, "authority is not a refs/heads/<branch> ref")
         if not TASK_RE.fullmatch(record.event):
             raise corrupt(where, "event is not an event ID")

@@ -12,11 +12,48 @@ import unittest
 from unittest import mock
 
 from oah.cli import command_modules, main
-from tests.helpers import make_tmp_dir
+from oah.intent import MAX_BYTES
+from tests.helpers import git_commit, make_tmp_dir
 from tests.test_design_store import PAGE, SRC, DesignRepo, git
 
 
 class CliTest(DesignRepo, unittest.TestCase):
+    def test_c1_oversize_stdin_is_refused_before_normalization_or_writes(self):
+        self.created()
+        for name, raw in (("crlf", b"x\r\n" * (MAX_BYTES // 3 + 2) + b"Meaningful tail.\n"),
+                          ("newline", b"Start.\n" + b"\n" * MAX_BYTES + b"Meaningful tail.\n")):
+            code, out, err = self.oah("new", "acme", name, "--title", "Input", "--file",
+                                       self.file(name + ".md", "Original.\n"))
+            self.assertEqual(code, 0, err)
+            digest = out.split()[3]
+            for command in (("new", "acme", name + "-new", "--title", "Other", "--file", "-"),
+                            ("save", "acme", name, "--expect-revision", "1", "--expect-digest", digest,
+                             "--reason", "Two", "--file", "-")):
+                with self.subTest(command=command[0], prefix=raw[:10]):
+                    before = self.tree(self.repo, self.state(self.repo))
+                    code, _, err = self.oah(*command, stdin=raw)
+                    self.assertEqual((code, err.split(":")[0]), (1, "OAH_DESIGN_INPUT_INVALID"))
+                    self.assertEqual(self.tree(self.repo, self.state(self.repo)), before)
+
+    def test_c1_reads_and_check_work_before_local_project_registration(self):
+        early = self.repo.parent / "early"
+        git(self.repo, "worktree", "add", "-q", "-b", "early", str(early))
+        digest = self.created()
+        git_commit(self.repo, {}, "register on main")
+        before = self.tree(early, self.state(early))
+        code, out, err = self.oah("show", "acme", "booking", cwd=early)
+        self.assertEqual((code, out), (0, "People book a lesson.\n"), err)
+        code, out, err = self.oah("context", "acme", "booking", cwd=early)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["freshness"], "behind")
+        code, out, err = self.oah("check", "acme", "booking", "--revision", "1", "--digest", digest, cwd=early)
+        self.assertEqual(code, 0, err)
+        self.assertIn("OAH_DESIGN_CURRENT acme/booking", out)
+        code, out, err = self.oah("status", "acme", "--json", cwd=early)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["projects"][0]["designs"][0]["current"]["digest"], digest)
+        self.assertEqual(self.tree(early, self.state(early)), before)
+
     def setUp(self):
         self.repo = self.make_repo()
         self.enterContext(mock.patch.dict(os.environ, {"OAH_STATE_DIR": str(self.state(self.repo))}))

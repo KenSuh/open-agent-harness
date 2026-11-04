@@ -191,7 +191,7 @@ def _block_rows(lines: list[bytes], begin: int, end: int) -> list[str]:
     return [strip_eol(line.decode("utf-8")) for line in lines[begin + 1:end]]
 
 
-def _markers(lines: list[bytes], begin: str, end: str) -> tuple[list[int], list[int]]:
+def _markers(lines: list[bytes], begin: str, end: str) -> tuple[list[int], list[int], bool]:
     fences = FenceTracker()
     begins, ends = [], []
     for number, line in enumerate(lines):
@@ -203,7 +203,7 @@ def _markers(lines: list[bytes], begin: str, end: str) -> tuple[list[int], list[
             begins.append(number)
         elif body == end:
             ends.append(number)
-    return begins, ends
+    return begins, ends, fences.open
 
 
 def read_project_page(data: bytes | None, project: str) -> ProjectPageView:
@@ -217,7 +217,7 @@ def read_project_page(data: bytes | None, project: str) -> ProjectPageView:
     if not isinstance(meta, dict) or meta.get("oah") != PROJECT_MARK_NAME:
         return ProjectPageView("foreign")
     lines = split_lines(data)
-    begins, ends = _markers(lines, LIST_BEGIN, LIST_END)
+    begins, ends, _ = _markers(lines, LIST_BEGIN, LIST_END)
     if len(begins) != 1 or len(ends) != 1 or not begins[0] < ends[0]:
         return ProjectPageView("unreadable", eol=eol_of(data))
     rows = {}
@@ -254,8 +254,11 @@ def read_index(data: bytes) -> IndexView:
         raise WikiError("OAH_WIKI_INDEX_INVALID", f"index.md is not valid UTF-8 ({exc}); fix its encoding and retry",
                         EXIT_REFUSED) from exc
     lines = split_lines(data)
-    begins, ends = _markers(lines, INDEX_BEGIN, INDEX_END)
+    begins, ends, open_fence = _markers(lines, INDEX_BEGIN, INDEX_END)
     if not begins and not ends:
+        if open_fence:
+            raise WikiError("OAH_WIKI_INDEX_INVALID", "index.md ends inside a code fence; close it before oah "
+                            "appends the design block. Nothing was written.", EXIT_REFUSED)
         return IndexView(lines, None, eol_of(data), {})
     if len(begins) != 1 or len(ends) != 1 or not begins[0] < ends[0]:
         raise WikiError("OAH_WIKI_INDEX_INVALID", f"index.md needs exactly one {INDEX_BEGIN} line followed by one "

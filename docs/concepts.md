@@ -467,7 +467,10 @@ revision was approved. The AI runs these commands; you read the design pages in 
   change only there: on another branch or a detached HEAD, `new`, `save`, `accept` and `project rename` refuse with
   `OAH_DESIGN_NOT_AUTHORITY`. Reading works everywhere. Elsewhere, oah reads that branch's committed copy and says
   whether this worktree's own copy is `current`, `behind` or `unknown`. The cost: commit design changes on that
-  branch before other worktrees can see them.
+  branch before other worktrees can see them. Worktrees created before registration can discover it from existing
+  branch refs, without merging or writing local records. Lists use the same authority copy. If several branches
+  independently registered that project ID and no local registration selects one, reading refuses with
+  `OAH_DESIGN_FRESHNESS_UNKNOWN`; absent authority evidence is `OAH_DESIGN_NOT_FOUND`.
 - **Editing the page.** A page names the revision it shows. When someone edits it, `oah design status` and
   `oah design context` report `OAH_DESIGN_UNREGISTERED_EDIT`, and `save` and `accept` refuse until
   `oah design save --from-wiki` saves the page's text as the next revision. To throw an edit away, delete the page;
@@ -479,12 +482,17 @@ revision was approved. The AI runs these commands; you read the design pages in 
   `<!-- OAH:DESIGN_INDEX:END -->`, and each project page a list above its own end marker. Both are rewritten whole
   from the records; everything outside the markers stays as it was. Each registration, revision, acceptance and
   rename adds one `log.md` entry, never two, also after a retry, a crash or a rollover.
+  Broken history, acceptance evidence or current parts leave that design's existing rows and page untouched while
+  healthy designs continue. A missing row is not recreated from corrupt evidence. An index ending in an unclosed
+  code fence refuses a new block with `OAH_WIKI_INDEX_INVALID`.
 - **Interrupted writes.** Every change is journalled in the state folder first. After a crash, design writes stop
   with `OAH_DESIGN_RECOVERY_PENDING` until `oah design recover` finishes the change; reading still shows the last
   complete revision, and `oah design context` says whether the pending change is this design's
   (`recovery_pending.this_design`). When recover finds files that changed meanwhile, it refuses with
   `OAH_DESIGN_RECOVERY_CONFLICT` and keeps the journal: fix the files by hand, then run
-  `oah design recover --resolved`.
+  `oah design recover --resolved`. Recovery verifies the proposed records and part digests together before
+  publication, and checks the current wiki layout again. `--resolved` verifies the named design's current and
+  accepted part bytes before retiring its journal; a missing worktree is recorded explicitly as unchecked.
 - **Costs.** A design change edits `index.md` and `log.md`, so `oah finish` may ask for
   `oah wiki maintain --task <task>` again, and a task's lease scope covers the design files only when you add them.
   Save when a group of decisions is settled, not after every answer: each save is a revision and a log entry. After

@@ -16,7 +16,7 @@ import stat
 import time
 from typing import Iterable, Protocol
 
-from oah.design.model import PATH_INVALID_CODE, DesignError
+from oah.design.model import PATH_INVALID_CODE, DesignError, is_branch_ref
 
 REGISTRY_DIR = ".oah/designs"
 PAGES_DIR_NAME = "designs"
@@ -317,16 +317,23 @@ class GitRefReader:
 
         self.root = pathlib.Path(root)
         self.ref = ref
+        if not is_branch_ref(ref):
+            raise RefUnavailable(f"{ref} is not an exact full branch ref")
         try:
-            resolved = run_git(self.root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+            resolved = run_git(self.root, "show-ref", "--verify", "--hash", ref)
         except GitMissing as exc:
             raise RefUnavailable(str(exc)) from exc
         commit = resolved.stdout.strip()
         if resolved.returncode != 0 or not commit:
             raise RefUnavailable(f"{ref} does not name a commit here")
         self.commit = commit
-        listed = self._git("ls-tree", "-r", "-z", "--full-tree", "--name-only", commit, "--", prefix)
-        self.files = {item.decode("utf-8", "surrogateescape") for item in listed.split(b"\0") if item}
+        listed = self._git("ls-tree", "-r", "-z", "--full-tree", commit, "--", prefix)
+        self.files: dict[str, tuple[bytes, bytes]] = {}
+        for item in listed.split(b"\0"):
+            if item:
+                metadata, name = item.split(b"\t", 1)
+                mode, kind, _ = metadata.split(b" ")
+                self.files[name.decode("utf-8", "surrogateescape")] = (mode, kind)
         self._cache: dict[str, bytes] = {}
 
     def _git(self, *args: str, stdin: bytes | None = None) -> bytes:
@@ -347,6 +354,9 @@ class GitRefReader:
 
     def read_many(self, rels: Iterable[str]) -> dict[str, bytes | None]:
         rels = list(rels)
+        for rel in rels:
+            if rel in self.files and self.files[rel] not in ((b"100644", b"blob"), (b"100755", b"blob")):
+                raise DesignError(PATH_INVALID_CODE, f"{self.ref}:{rel} is not a regular file")
         wanted = [rel for rel in rels if rel in self.files and rel not in self._cache and "\n" not in rel]
         if wanted:
             out = self._git("cat-file", "--batch",

@@ -434,7 +434,10 @@ docs/wiki/
   그 브랜치에서만 바뀐다. 다른 브랜치나 분리된 HEAD에서는 `new`, `save`, `accept`, `project rename`을
   `OAH_DESIGN_NOT_AUTHORITY`로 거절한다. 읽기는 어디서나 된다. 다른 곳에서는 그 브랜치에 커밋된 사본을 읽고, 이
   작업 트리의 사본이 `current`, `behind`, `unknown` 중 무엇인지 알려 준다. 대가는 다른 작업 트리가 보려면 설계
-  변경을 그 브랜치에 커밋해야 한다는 것이다.
+  변경을 그 브랜치에 커밋해야 한다는 것이다. 등록 전에 만든 작업 트리도 기존 브랜치 ref에서 등록 근거를 찾아 읽으며,
+  병합하거나 로컬 기록을 만들 필요는 없다. 목록도 같은 정본 사본을 쓴다. 여러 브랜치가 같은 프로젝트 ID를 각각
+  등록했고 로컬 등록 기록으로 하나를 고를 수 없으면 `OAH_DESIGN_FRESHNESS_UNKNOWN`으로 거절한다. 정본 근거가
+  없으면 `OAH_DESIGN_NOT_FOUND`다.
 - **페이지 고치기.** 페이지는 자신이 보여 주는 revision을 적어 둔다. 누가 페이지를 고치면 `oah design status`와
   `oah design context`가 `OAH_DESIGN_UNREGISTERED_EDIT`를 알리고, `oah design save --from-wiki`가 페이지의 내용을
   다음 revision으로 저장할 때까지 `save`와 `accept`를 거절한다. 고친 것을 버리려면 페이지를 지운다.
@@ -445,11 +448,16 @@ docs/wiki/
   링크 블록이 하나 생기고, 프로젝트 페이지에는 끝 표지 위에 목록이 생긴다. 둘 다 기록에서 통째로 다시 쓰고, 표지
   밖의 내용은 그대로 둔다. 등록, revision, 수락, 이름 변경마다 `log.md` 항목이 하나씩 생기며, 다시 시도하거나
   중단되거나 rollover가 있어도 두 번 생기지 않는다.
+  이력·수락 근거·현재 본문이 손상된 설계의 기존 행과 페이지는 보존하고 정상 설계의 작업은 계속한다. 손상된 근거로
+  사라진 행을 다시 만들지는 않는다. index가 닫히지 않은 코드 펜스 안에서 끝나면 새 블록을 붙이지 않고
+  `OAH_WIKI_INDEX_INVALID`로 거절한다.
 - **중단된 쓰기.** 모든 변경은 먼저 상태 폴더의 저널에 남긴다. 중간에 멈추면 `oah design recover`가 변경을
   마칠 때까지 설계 쓰기가 `OAH_DESIGN_RECOVERY_PENDING`으로 멈춘다. 읽기는 마지막으로 완성된 revision을 계속
   보여 주고, `oah design context`는 남은 변경이 이 설계의 것인지 알려 준다(`recovery_pending.this_design`).
   recover가 그 사이에 바뀐 파일을 찾으면 `OAH_DESIGN_RECOVERY_CONFLICT`로 거절하고 저널을 남긴다.
-  파일을 손으로 고친 뒤 `oah design recover --resolved`를 실행한다.
+  파일을 손으로 고친 뒤 `oah design recover --resolved`를 실행한다. 복구는 게시 전에 제안된 기록과 본문 다이제스트를
+  함께 검증하고 현재 위키 경로의 겹침도 다시 확인한다. `--resolved`는 현재 본문과 수락한 본문까지 검증해야 저널을
+  보관 처리한다. 작업 트리가 사라졌다면 검증하지 못했다는 사실을 명시적으로 남긴다.
 - **대가.** 설계를 바꾸면 `index.md`와 `log.md`가 바뀌므로 `oah finish`가 `oah wiki maintain --task <task>`를
   다시 요청할 수 있다. 작업의 리스 범위는 설계 파일을 넣었을 때만 그것을 덮는다. 답 하나마다가 아니라 결정 묶음이
   정해졌을 때 저장한다. 저장할 때마다 revision과 로그 항목이 하나씩 생긴다. `oah design project add acme` 뒤에는

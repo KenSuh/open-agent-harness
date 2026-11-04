@@ -12,6 +12,7 @@ from unittest import mock
 
 from oah.design import DesignError, explain_binding, open_store
 from oah.design import fs as design_fs
+from oah.design import store as design_store
 from oah.design.model import DesignBinding
 from oah.wiki import notes
 from oah.wiki.base import WikiSettings
@@ -97,6 +98,92 @@ class DesignRepo:
 
 
 class RevisionTest(DesignRepo, unittest.TestCase):
+    def test_c1_retries_require_the_expected_digest(self):
+        for explicit, expected in ((False, 1), (True, 1), (True, 2)):
+            with self.subTest(explicit=explicit, expected=expected):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                assert r1.digest is not None
+                r2 = store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest,
+                                event="ev-two", reason="Two", parts={"design": "Two.\n"}, today=TODAY)
+                assert r2.digest is not None
+                before = self.tree(repo, self.state(repo))
+                with self.assertRaises(DesignError) as stale:
+                    store.save("acme", "booking", expect_revision=expected,
+                               expect_digest=r1.digest if expected == 2 else r2.digest,
+                               event="ev-two" if explicit else None, reason="Two", parts={"design": "Two.\n"},
+                               today=TODAY)
+                self.assertEqual(stale.exception.code, "OAH_DESIGN_CONTEXT_STALE")
+                self.assertEqual(self.tree(repo, self.state(repo)), before)
+
+    def test_c1_drop_and_ancestor_retries_use_the_original_base(self):
+        repo = self.make_repo()
+        store = self.store(repo)
+        store.add_project("acme", title="Acme", today=TODAY)
+        r1 = store.new("acme", "booking", title="Booking", today=TODAY,
+                       parts={"design": "One.\n", "materials": "A.\n", "coverage": "Original.\n"})
+        assert r1.digest is not None
+        def replay(event):
+            return store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest,
+                              reason="Drop materials", drop=["materials"], event=event, today=TODAY)
+        r2 = replay("ev-drop")
+        before = self.tree(repo, self.state(repo))
+        self.assertEqual(replay("ev-drop").action, "applied")
+        self.assertEqual(self.tree(repo, self.state(repo)), before)
+        assert r2.digest is not None
+        r3 = store.save("acme", "booking", expect_revision=2, expect_digest=r2.digest, reason="Independent edit",
+                        title="Lesson booking", parts={"coverage": "Expanded.\n"}, today=TODAY)
+        before = self.tree(repo, self.state(repo))
+        for event in ("ev-drop", None):
+            result = replay(event)
+            self.assertEqual((result.action, result.revision, result.current), ("applied", 2, 3))
+        self.assertEqual(self.tree(repo, self.state(repo)), before)
+        self.assertEqual(store.context("acme", "booking").current.digest, r3.digest)
+
+    def test_c1_ancestor_retry_survives_later_title_and_part_changes(self):
+        repo = self.make_repo()
+        store = self.store(repo)
+        r1 = self.booking(store)
+        assert r1.digest is not None
+        original_digest = r1.digest
+        r2 = store.save("acme", "booking", expect_revision=1, expect_digest=original_digest, reason="Two",
+                        parts={"design": "Two.\n"}, event="ev-two", today=TODAY)
+        assert r2.digest is not None
+        store.save("acme", "booking", expect_revision=2, expect_digest=r2.digest, reason="Independent change",
+                   title="Lessons", parts={"request": "I want lessons booked.\nCorrection: groups too.\n"}, today=TODAY)
+        before = self.tree(repo, self.state(repo))
+        for event in ("ev-two", None):
+            result = store.save("acme", "booking", expect_revision=1, expect_digest=original_digest, reason="Two",
+                                parts={"design": "Two.\n"}, event=event, today=TODAY)
+            self.assertEqual((result.action, result.revision, result.current), ("applied", 2, 3))
+        self.assertEqual(self.tree(repo, self.state(repo)), before)
+
+    def test_c1_accept_verifies_target_parts_before_any_success(self):
+        for target, damage, already in ((1, "changed", False), (1, "missing", False),
+                                        (2, "missing-page", False), (1, "changed", True)):
+            with self.subTest(target=target, damage=damage, already=already):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                if already:
+                    store.accept("acme", "booking", revision=1, digest=r1.digest, reason="Yes", today=TODAY)
+                r2 = store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                                parts={"design": "Two.\n"}, today=TODAY)
+                part = repo / design_fs.part_rel("acme", "booking", target, "design")
+                if damage == "missing":
+                    part.unlink()
+                else:
+                    part.write_text("Changed.\n", encoding="utf-8")
+                if damage == "missing-page":
+                    (repo / PAGE).unlink()
+                before = self.tree(repo, self.state(repo))
+                with self.assertRaises(DesignError) as corrupt:
+                    store.accept("acme", "booking", revision=target, digest=r1.digest if target == 1 else r2.digest,
+                                 reason="Yes", today=TODAY)
+                self.assertEqual(corrupt.exception.code, "OAH_DESIGN_CORRUPT")
+                self.assertEqual(self.tree(repo, self.state(repo)), before)
+
     def test_create_save_resume_keeps_one_consistent_history(self):
         repo = self.make_repo()
         store = self.store(repo)
@@ -220,6 +307,29 @@ class RevisionTest(DesignRepo, unittest.TestCase):
 class CrashTest(DesignRepo, unittest.TestCase):
     STEPS = ("journal-written", "revision-published", "pointer-written", f"wrote {PAGE}",
              "wrote docs/wiki/designs/acme.md", "wrote docs/wiki/index.md", "log-written")
+
+    def test_c1_resolved_requires_current_and_accepted_part_bytes(self):
+        for damaged_revision in (1, 2):
+            with self.subTest(damaged_revision=damaged_revision):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                store.accept("acme", "booking", revision=1, digest=r1.digest, reason="Yes", today=TODAY)
+                with self.assertRaises(Crash):
+                    store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                               parts={"design": "Two.\n"}, fault=crash_at("pointer-written"), today=TODAY)
+                part = repo / design_fs.part_rel("acme", "booking", damaged_revision, "design")
+                original = part.read_bytes()
+                part.write_bytes(b"Corrupt.\n")
+                before = self.tree(repo, self.state(repo))
+                with self.assertRaises(DesignError) as conflict:
+                    store.recover(resolved=True)
+                self.assertEqual(conflict.exception.code, "OAH_DESIGN_RECOVERY_CONFLICT")
+                self.assertEqual(self.tree(repo, self.state(repo)), before)
+                part.write_bytes(original)
+                self.assertIn("OAH_DESIGN_RECOVERY_RESOLVED", store.recover(resolved=True))
+                self.assertEqual(store.context("acme", "booking").current.text(), "Two.\n")
+
 
     def run_save(self, fault=None):
         repo = self.make_repo()
@@ -346,6 +456,83 @@ class CrashTest(DesignRepo, unittest.TestCase):
 
 
 class ConcurrencyTest(DesignRepo, unittest.TestCase):
+    def test_c1_writes_keep_the_initial_record_baseline(self):
+        for operation in ("save", "accept", "rename"):
+            with self.subTest(operation=operation):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                pointer = repo / design_fs.pointer_rel("acme", "booking")
+                project = repo / design_fs.project_record_rel("acme")
+                target = project if operation == "rename" else pointer
+                initial = target.read_bytes()
+                if operation == "rename":
+                    store.rename_project("acme", title="Intervening title", today=TODAY)
+                else:
+                    r2 = store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                                    parts={"design": "Two.\n"}, today=TODAY)
+                    store.accept("acme", "booking", revision=2, digest=r2.digest, reason="Yes", today=TODAY)
+                intervening = target.read_bytes()
+                target.write_bytes(initial)
+                if operation != "rename":
+                    (repo / PAGE).unlink()
+                loader = "load_project" if operation == "rename" else "load_design"
+                original = getattr(design_store, loader)
+                injected = []
+
+                def advance(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    if not injected:
+                        injected.append(True)
+                        target.write_bytes(intervening)
+                    return result
+
+                with mock.patch.object(design_store, loader, side_effect=advance):
+                    with self.assertRaises(DesignError) as conflict:
+                        if operation == "rename":
+                            store.rename_project("acme", title="My title", today=TODAY)
+                        elif operation == "accept":
+                            store.accept("acme", "booking", revision=1, digest=r1.digest, reason="Mine", today=TODAY)
+                        else:
+                            store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Mine",
+                                       parts={"design": "Mine.\n"}, today=TODAY)
+                self.assertEqual(conflict.exception.code, "OAH_DESIGN_REVISION_CONFLICT")
+                self.assertEqual(target.read_bytes(), intervening)
+                self.assertFalse(store.journal_path.exists())
+
+    def test_c1_reader_retries_when_a_generated_page_advances(self):
+        for surface in ("context", "binding"):
+            with self.subTest(surface=surface):
+                repo = self.make_repo()
+                writer = self.store(repo)
+                r1 = self.booking(writer)
+                reader = self.store(repo)
+                read_page = reader._read_page
+                advanced = []
+
+                def advance(rel):
+                    if not advanced:
+                        advanced.append(writer.save("acme", "booking", expect_revision=1, expect_digest=r1.digest,
+                                                    reason="Two", parts={"design": "Two.\n"}, today=TODAY))
+                    return read_page(rel)
+
+                with mock.patch.object(reader, "_read_page", side_effect=advance):
+                    if surface == "context":
+                        context = reader.context("acme", "booking")
+                        self.assertIn((context.current.revision, context.current.text()),
+                                      ((1, "People book a lesson.\n"), (2, "Two.\n")))
+                        self.assertIn(context.page_state, ("clean", "stale"))
+                        self.assertNotIn("OAH_DESIGN_UNREGISTERED_EDIT", [d.code for d in context.diagnostics])
+                    else:
+                        uid = writer.context("acme", "booking").project.uid
+                        from oah.design.model import content_digest, text_digest
+
+                        digest = content_digest(uid, "acme", "booking", "Booking",
+                                                {"design": text_digest("Two.\n"),
+                                                 "request": text_digest("I want lessons booked.\n")})
+                        self.assertEqual(explain_binding(DesignBinding("acme", uid, "booking", 2, digest), reader)[0],
+                                         "current")
+
     def cli(self, repo: pathlib.Path, *args: str) -> subprocess.Popen:
         env = dict(os.environ, PYTHONPATH=SRC, OAH_STATE_DIR=str(self.state(repo)))
         return subprocess.Popen([sys.executable, "-m", "oah", "design", *args], cwd=repo, env=env,
@@ -525,6 +712,80 @@ class OutputPathsTest(DesignRepo, unittest.TestCase):
 
 
 class AuthorityTest(DesignRepo, unittest.TestCase):
+    def test_c1_worktree_predating_registration_reads_without_local_writes(self):
+        repo = self.make_repo()
+        task = repo.parent / "early-task"
+        git(repo, "worktree", "add", "-q", "-b", "early-task", str(task))
+        main = self.store(repo)
+        r1 = self.booking(main)
+        git_commit(repo, {}, "register after task checkout")
+        before = self.tree(task, self.state(task))
+        store = self.store(task)
+        context = store.context("acme", "booking")
+        self.assertEqual((context.source, context.freshness, context.current.digest),
+                         ("authority", "behind", r1.digest))
+        self.assertEqual(store.snapshot("acme", "booking").text(), "People book a lesson.\n")
+        self.assertEqual(explain_binding(context.binding(), store)[0], "current")
+        self.assertEqual([p.id for p in store.projects()], ["acme"])
+        self.assertEqual([(d.design, d.current, d.freshness) for d in store.designs()],
+                         [("booking", (1, r1.digest), "behind")])
+        self.assertEqual(self.tree(task, self.state(task)), before)
+        self.assertFalse((task / ".oah/designs/acme/project.json").exists())
+
+    def test_c1_lists_use_committed_authority_metadata(self):
+        r2 = self.main.save("acme", "booking", expect_revision=1, expect_digest=self.r1.digest, reason="Two",
+                            title="Lessons", parts={"design": "Two.\n"}, today=TODAY)
+        self.main.accept("acme", "booking", revision=2, digest=r2.digest, reason="Yes", today=TODAY)
+        second = self.main.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
+        self.main.rename_project("acme", title="Acme Web", today=TODAY)
+        git_commit(self.repo, {}, "new authoritative metadata")
+        before = self.tree(self.task, self.state(self.task))
+        store = self.store(self.task)
+        self.assertEqual([(p.id, p.title) for p in store.projects()], [("acme", "Acme Web")])
+        self.assertEqual([(d.design, d.title, d.current, d.accepted, d.status, d.freshness)
+                          for d in store.designs("acme")],
+                         [("booking", "Lessons", (2, r2.digest), (2, r2.digest), "accepted", "behind"),
+                          ("payments", "Payments", (1, second.digest), None, "draft", "behind")])
+        self.assertEqual(self.tree(self.task, self.state(self.task)), before)
+
+    def test_c1_authority_expressions_and_copied_locators_cannot_be_current(self):
+        self.main.save("acme", "booking", expect_revision=1, expect_digest=self.r1.digest, reason="Two",
+                       parts={"design": "Two.\n"}, today=TODAY)
+        git_commit(self.repo, {}, "r2")
+        git(self.repo, "branch", "copied", "main~1")
+        path = self.task / ".oah/designs/acme/project.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for ref in ("refs/heads/main~1", "refs/heads/copied"):
+            with self.subTest(ref=ref):
+                path.write_text(json.dumps(dict(data, authority=ref)), encoding="utf-8")
+                before = self.tree(self.task, self.state(self.task))
+                store = self.store(self.task)
+                binding = DesignBinding("acme", data["uid"], "booking", 1, self.r1.digest)
+                self.assertIn(explain_binding(binding, store)[0], ("invalid", "unknown"))
+                self.assertEqual(self.tree(self.task, self.state(self.task)), before)
+
+    def test_c1_discovery_reports_absent_and_ambiguous_authority(self):
+        repo = self.make_repo()
+        early = repo.parent / "early"
+        other = repo.parent / "other"
+        git(repo, "worktree", "add", "-q", "-b", "early", str(early))
+        git(repo, "worktree", "add", "-q", "-b", "other", str(other))
+        store = self.store(early)
+        with self.assertRaises(DesignError) as missing:
+            store.context("acme", "booking")
+        self.assertEqual(missing.exception.code, "OAH_DESIGN_NOT_FOUND")
+        self.booking(self.store(repo))
+        git_commit(repo, {}, "main project")
+        self.booking(self.store(other))
+        git_commit(other, {}, "other project")
+        before = self.tree(early, self.state(early))
+        with self.assertRaises(DesignError) as ambiguous:
+            store.context("acme", "booking")
+        self.assertEqual(ambiguous.exception.code, "OAH_DESIGN_FRESHNESS_UNKNOWN")
+        self.assertIn("ambiguous", str(ambiguous.exception).lower())
+        self.assertIn("OAH_DESIGN_FRESHNESS_UNKNOWN", [d.code for d in store.diagnostics()])
+        self.assertEqual(self.tree(early, self.state(early)), before)
+
     def setUp(self):
         self.repo = self.make_repo()
         self.main = self.store(self.repo)

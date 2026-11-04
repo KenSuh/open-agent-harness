@@ -82,6 +82,7 @@ class DesignRecord:
     orphans: tuple[str, ...]  # revision folders and acceptance files that no chain names
     numbers: frozenset[int] = frozenset()  # every r<N> folder number present
     sequences: frozenset[int] = frozenset()  # every a<K>.json number present
+    pointer_bytes: bytes | None = dataclasses.field(default=None, compare=False, repr=False)
 
     @property
     def current(self) -> RevisionInfo:
@@ -265,7 +266,7 @@ def load_project(reader: fs.Reader, project: str) -> ProjectRecord:
     if data is None:
         raise DesignError(NOT_FOUND_CODE, f"there is no design project {project}; register it with `oah design "
                           f"project add {project} --title <title>`, or list projects with `oah design status`")
-    return ProjectRecord.from_json(_loads(data, rel), rel, project)
+    return dataclasses.replace(ProjectRecord.from_json(_loads(data, rel), rel, project), record_bytes=data)
 
 
 def load_design(reader: fs.Reader, project: ProjectRecord, design: str) -> DesignRecord:
@@ -333,12 +334,12 @@ def load_design(reader: fs.Reader, project: ProjectRecord, design: str) -> Desig
             raise corrupt(rel, "its accepted revision differs from the latest acceptance")
     named = {item.sequence for item in acceptances}
     orphans += [fs.acceptance_rel(pid, design, n) for n in sorted(sequences - named)]
-    return DesignRecord(project, pointer, tuple(chain), tuple(acceptances), tuple(orphans), numbers, sequences)
+    return DesignRecord(project, pointer, tuple(chain), tuple(acceptances), tuple(orphans), numbers, sequences, data)
 
 
 @dataclasses.dataclass(frozen=True)
 class _Head:
-    """What a list or index line shows: the current revision, checked against the pointer only."""
+    """Verified facts for a list or index line."""
 
     title: str
     revision: int
@@ -354,25 +355,9 @@ def _head_of(record: DesignRecord) -> _Head:
 
 
 def load_head(reader: fs.Reader, project: ProjectRecord, design: str) -> _Head:
-    """The pointer and its current manifest, verified against each other (not the whole chain)."""
-    rel = fs.pointer_rel(project.id, design)
-    data = reader.read(rel)
-    if data is None:
-        raise DesignError(NOT_FOUND_CODE, f"project {project.id} has no design {design}")
-    pointer = Pointer.from_json(_loads(data, rel), rel)
-    if (pointer.project, pointer.design, pointer.uid) != (project.id, design, project.uid):
-        raise corrupt(rel, "it names another project, design or uid")
-    revision, digest, manifest = pointer.current
-    mrel = fs.manifest_rel(project.id, design, revision)
-    raw = reader.read(mrel)
-    if raw is None:
-        raise corrupt(mrel, "is missing, but the pointer names it")
-    info = RevisionInfo.from_json(_loads(raw, mrel), mrel)
-    if (info.revision, info.digest, info.manifest) != (revision, digest, manifest):
-        raise corrupt(mrel, "does not match the pointer")
-    accepted = None if pointer.accepted is None else pointer.accepted[1]
-    status = "accepted" if accepted == revision else "draft"
-    return _Head(info.title, revision, status, accepted, info.at[:10])
+    record = load_design(reader, project, design)
+    _record_texts(reader, record)
+    return _head_of(record)
 
 
 def read_texts(reader: fs.Reader, info: RevisionInfo) -> dict[str, str]:
@@ -389,6 +374,19 @@ def read_texts(reader: fs.Reader, info: RevisionInfo) -> dict[str, str]:
             raise corrupt(rel, "does not match the digest its revision recorded")
         texts[name] = text
     return texts
+
+
+def _record_texts(reader: fs.Reader, record: DesignRecord,
+                  extra: Mapping[int, dict[str, str]] | None = None) -> dict[int, dict[str, str]]:
+    numbers = {record.current.revision}
+    if record.accepted is not None:
+        numbers.add(record.accepted.revision)
+    out = {}
+    for number in numbers:
+        info = record.revision(number)
+        assert info is not None
+        out[number] = extra[number] if extra is not None and number in extra else read_texts(reader, info)
+    return out
 
 
 def _design_names(reader: fs.Reader, project: str) -> list[str]:
@@ -416,19 +414,48 @@ def _project_names(reader: fs.Reader) -> list[str]:
     return out
 
 
+class _OverlayReader:
+    def __init__(self, reader: fs.Reader, files: Mapping[str, bytes]) -> None:
+        self.reader = reader
+        self.files = files
+
+    def read(self, rel: str) -> bytes | None:
+        return self.files[rel] if rel in self.files else self.reader.read(rel)
+
+    def read_many(self, rels: Iterable[str]) -> dict[str, bytes | None]:
+        return {rel: self.read(rel) for rel in rels}
+
+    def list_dir(self, rel: str) -> list[str] | None:
+        prefix = rel.rstrip("/") + "/"
+        names = set(self.reader.list_dir(rel) or [])
+        names.update(name[len(prefix):].split("/", 1)[0] for name in self.files if name.startswith(prefix))
+        return sorted(names) if names else None
+
+
 # The store ----------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _ProjectRead:
+    project: ProjectRecord
+    local_project: ProjectRecord | None
+    reader: fs.Reader
+    source: str
+    freshness: str
+    diagnostics: list[Diagnostic]
 
 
 @dataclasses.dataclass
 class _Resolved:
     project: ProjectRecord
-    local_project: ProjectRecord
+    local_project: ProjectRecord | None
     record: DesignRecord
     local: DesignRecord | None
     reader: fs.Reader
     source: str
     freshness: str
     diagnostics: list[Diagnostic]
+    local_pointer: bytes | None
 
 
 @dataclasses.dataclass
@@ -512,48 +539,119 @@ class DesignStore:
 
     # ---- reads -----------------------------------------------------------------------------------
 
-    def _resolve(self, project: str, design: str) -> _Resolved:
-        local_project = load_project(self.reader, project)
+    def _authority_catalog(self) -> dict[str, list[tuple[ProjectRecord, fs.Reader]]]:
+        from oah.paths import GitMissing, run_git
+
+        found: dict[str, list[tuple[ProjectRecord, fs.Reader]]] = {}
         if self._custom:
-            record = load_design(self.reader, local_project, design)
-            return _Resolved(local_project, local_project, record, record, self.reader, "reader", "unknown", [])
+            return found
+        try:
+            listed = run_git(self.root, "for-each-ref", "--format=%(refname)", "refs/heads/")
+        except GitMissing:
+            return found
+        if listed.returncode != 0:
+            return found
+        for ref in listed.stdout.splitlines():
+            try:
+                reader = fs.GitRefReader(self.root, ref)
+                names = _project_names(reader)
+            except (fs.RefUnavailable, DesignError):
+                continue
+            for name in names:
+                try:
+                    record = load_project(reader, name)
+                except (DesignError, fs.RefUnavailable):
+                    continue
+                if record.authority == ref:
+                    found.setdefault(name, []).append((record, reader))
+        return found
+
+    def _read_project(self, project: str,
+                      catalog: Mapping[str, list[tuple[ProjectRecord, fs.Reader]]] | None = None) -> _ProjectRead:
+        local_project = None
+        try:
+            local_project = load_project(self.reader, project)
+        except DesignError as exc:
+            if exc.code != NOT_FOUND_CODE:
+                raise
+        if self._custom:
+            if local_project is None:
+                return _ProjectRead(load_project(self.reader, project), None, self.reader, "reader", "unknown", [])
+            return _ProjectRead(local_project, local_project, self.reader, "reader", "unknown", [])
         head = self._head_or_none()
-        authority = local_project.authority
-        if head == authority:
-            record = load_design(self.reader, local_project, design)
-            return _Resolved(local_project, local_project, record, record, self.reader, "worktree", "current", [])
+        if local_project is not None and head == local_project.authority:
+            return _ProjectRead(local_project, local_project, self.reader, "worktree", "current", [])
+        remote = None
+        if local_project is None:
+            candidates = (self._authority_catalog() if catalog is None else catalog).get(project, [])
+            if not candidates:
+                raise DesignError(NOT_FOUND_CODE, f"no local registration or committed authority evidence for "
+                                  f"project {project}")
+            if len(candidates) != 1:
+                refs = ", ".join(item.authority for item, _ in candidates)
+                raise DesignError(FRESHNESS_UNKNOWN_CODE, f"ambiguous authority evidence for project {project}: "
+                                  f"{refs}; select the project's existing registration before reading it")
+            locator, remote = candidates[0]
+            if locator.authority == head:
+                raise DesignError(NOT_FOUND_CODE, f"project {project} is missing from its authority worktree")
+        else:
+            locator = local_project
+        authority = locator.authority
         where = f"on {pages.short_ref(head)}" if head else "at a detached HEAD"
         diagnostics = [Diagnostic(NOT_AUTHORITY_CODE, f"this worktree is {where}; designs of {project} change on "
                                   f"{pages.short_ref(authority)}, so oah reads that branch's committed copy",
                                   level="info")]
-        local: DesignRecord | None = None
-        local_error: DesignError | None = None
         try:
-            local = load_design(self.reader, local_project, design)
-        except DesignError as exc:
-            local_error = exc
-        try:
-            remote = fs.GitRefReader(self.root, authority, f"{fs.REGISTRY_DIR}/{project}")
+            remote = remote or fs.GitRefReader(self.root, authority, f"{fs.REGISTRY_DIR}/{project}")
             remote_project = load_project(remote, project)
-            if remote_project.uid != local_project.uid:
-                raise fs.RefUnavailable(f"project {project} on {pages.short_ref(authority)} has another uid")
-            record = load_design(remote, remote_project, design)
+            if remote_project.uid != locator.uid or remote_project.authority != authority:
+                raise fs.RefUnavailable(f"project {project} on {pages.short_ref(authority)} has another uid or "
+                                        "names another authority")
         except (fs.RefUnavailable, DesignError) as exc:
-            if local is None:
-                raise local_error  # type: ignore[misc]
+            if local_project is None:
+                raise DesignError(FRESHNESS_UNKNOWN_CODE, f"cannot read authority evidence for {project}: {exc}") \
+                    from exc
             diagnostics.append(Diagnostic(FRESHNESS_UNKNOWN_CODE, f"cannot read the authority copy on "
                                           f"{pages.short_ref(authority)} ({exc}); showing this worktree's copy, which "
                                           "may be old"))
-            return _Resolved(local_project, local_project, local, local, self.reader, "worktree", "unknown",
-                             diagnostics)
+            return _ProjectRead(local_project, local_project, self.reader, "worktree", "unknown", diagnostics)
+        return _ProjectRead(remote_project, local_project, remote, "authority", "unknown", diagnostics)
+
+    def _resolve(self, project: str, design: str, source: _ProjectRead | None = None) -> _Resolved:
+        source = source or self._read_project(project)
+        local_pointer = self.reader.read(fs.pointer_rel(project, design))
+        local = None
+        if source.local_project is not None:
+            try:
+                local = load_design(self.reader, source.local_project, design)
+                local_pointer = local.pointer_bytes
+            except DesignError:
+                if source.reader is self.reader:
+                    raise
+        if source.reader is self.reader:
+            record = local or load_design(source.reader, source.project, design)
+            return _Resolved(source.project, source.local_project, record, local, source.reader, source.source,
+                             source.freshness, list(source.diagnostics), local_pointer)
+        diagnostics = list(source.diagnostics)
+        try:
+            record = load_design(source.reader, source.project, design)
+        except (fs.RefUnavailable, DesignError) as exc:
+            if local is None:
+                raise
+            diagnostics.append(Diagnostic(FRESHNESS_UNKNOWN_CODE, f"cannot read the authority design ({exc}); "
+                                          "showing this worktree's copy, which may be old"))
+            return _Resolved(local.project, local.project, local, local, self.reader, "worktree", "unknown",
+                             diagnostics, local_pointer)
         if local is not None and local.pointer == record.pointer:
             freshness = "current"
         else:
             freshness = "behind"
             have = f"revision {local.current.revision}" if local is not None else "no copy"
             diagnostics.append(Diagnostic(BEHIND_CODE, f"this worktree has {have} of {project}/{design}; "
-                                          f"{pages.short_ref(authority)} has revision {record.current.revision}"))
-        return _Resolved(remote_project, local_project, record, local, remote, "authority", freshness, diagnostics)
+                                          f"{pages.short_ref(source.project.authority)} has revision "
+                                          f"{record.current.revision}"))
+        return _Resolved(source.project, source.local_project, record, local, source.reader, "authority", freshness,
+                         diagnostics, local_pointer)
 
     def _classify(self, view: pages.PageView, project: ProjectRecord, record: DesignRecord | None,
                   extra: Mapping[int, dict[str, str]] | None = None) -> str:
@@ -617,15 +715,43 @@ class DesignStore:
     def context(self, project: str, design: str) -> Context:
         """Everything about one design, read-only: the copy of record, its texts, history and diagnostics."""
         project, design = check_id(project), check_id(design, "design")
-        resolved = self._resolve(project, design)
+        return self._context(project, design)
+
+    def _context(self, project: str, design: str, source: _ProjectRead | None = None) -> Context:
+        for _ in range(3):
+            resolved = self._resolve(project, design, source)
+            try:
+                result = self._context_from(resolved, design)
+            except DesignError:
+                if self._local_unchanged(resolved, design):
+                    raise
+            else:
+                if self._local_unchanged(resolved, design):
+                    return result
+            source = None
+        raise DesignError(FRESHNESS_UNKNOWN_CODE, f"{project}/{design} changed repeatedly while oah read its "
+                          "records and page; retry the read")
+
+    def _local_unchanged(self, resolved: _Resolved, design: str) -> bool:
+        if self._custom:
+            return True
+        project = resolved.project.id
+        before = None if resolved.local_project is None else resolved.local_project.record_bytes
+        return (self.reader.read(fs.project_record_rel(project)) == before
+                and self.reader.read(fs.pointer_rel(project, design)) == resolved.local_pointer)
+
+    def _context_from(self, resolved: _Resolved, design: str) -> Context:
+        project = resolved.project.id
         record = resolved.record
-        current = Snapshot(record.current, read_texts(resolved.reader, record.current))
+        texts = _record_texts(resolved.reader, record)
+        current = Snapshot(record.current, texts[record.current.revision])
         accepted = None
         if record.accepted is not None:
             info = record.revision(record.accepted.revision)
-            accepted = current if info.revision == current.revision else Snapshot(info, read_texts(resolved.reader,
-                                                                                                    info))
-        page_state, page_diagnostic = self._page_state(resolved.local_project, resolved.local, design)
+            assert info is not None
+            accepted = current if info.revision == current.revision else Snapshot(info, texts[info.revision])
+        page_state, page_diagnostic = self._page_state(resolved.local_project or resolved.project, resolved.local,
+                                                      design)
         diagnostics = list(resolved.diagnostics)
         if page_diagnostic is not None:
             diagnostics.append(page_diagnostic)
@@ -651,77 +777,59 @@ class DesignStore:
 
     def projects(self) -> list[ProjectRecord]:
         out = []
-        for name in _project_names(self.reader):
+        catalog = self._authority_catalog()
+        for name in sorted(set(_project_names(self.reader)) | set(catalog)):
             try:
-                out.append(load_project(self.reader, name))
+                out.append(self._read_project(name, catalog).project)
             except DesignError:
                 continue
         return out
 
     def designs(self, project: str | None = None) -> list[DesignSummary]:
         """A summary per design; a record that does not verify is reported as `corrupt`, never raised."""
-        names = [check_id(project)] if project is not None else _project_names(self.reader)
-        if project is not None:
-            load_project(self.reader, names[0])  # NOT_FOUND for an unknown project
+        catalog = self._authority_catalog()
+        names = [check_id(project)] if project is not None else sorted(set(_project_names(self.reader)) | set(catalog))
         out = []
         for name in names:
-            out.extend(self._project_summaries(name))
+            try:
+                source = self._read_project(name, catalog)
+            except DesignError:
+                if project is not None:
+                    raise
+                out.extend(DesignSummary(name, design, None, None, None, "corrupt", self._page_rel(name, design),
+                                         None, "unknown") for design in _design_names(self.reader, name))
+                continue
+            out.extend(self._project_summaries(source))
         return out
 
-    def _project_summaries(self, project: str) -> list[DesignSummary]:
-        designs = _design_names(self.reader, project)
-        try:
-            record = load_project(self.reader, project)
-        except DesignError:
-            return [DesignSummary(project, name, None, None, None, "corrupt", self._page_rel(project, name), None,
-                                  "unknown") for name in designs]
-        freshness = self._freshness_map(record, designs)
+    def _project_summaries(self, source: _ProjectRead) -> list[DesignSummary]:
+        project = source.project.id
+        designs = _design_names(source.reader, project)
         out = []
         for name in designs:
             rel = self._page_rel(project, name)
             try:
-                design = load_design(self.reader, record, name)
+                context = self._context(project, name, source)
             except DesignError:
                 out.append(DesignSummary(project, name, None, None, None, "corrupt", rel, None, "unknown"))
                 continue
-            try:
-                state, _ = self._page_state(record, design, name)
-            except DesignError:
-                state = "edited"
-            accepted = design.accepted
-            out.append(DesignSummary(project, name, design.current.title,
-                                     (design.current.revision, design.current.digest),
+            accepted = context.accepted
+            out.append(DesignSummary(project, name, context.title,
+                                     (context.current.revision, context.current.digest),
                                      None if accepted is None else (accepted.revision, accepted.digest),
-                                     design.status, rel, state, freshness.get(name, "unknown")))
-        return out
-
-    def _freshness_map(self, project: ProjectRecord, designs: Sequence[str]) -> dict[str, str]:
-        if self._custom:
-            return {}
-        if self._head_or_none() == project.authority:
-            return {name: "current" for name in designs}
-        try:
-            remote = fs.GitRefReader(self.root, project.authority, f"{fs.REGISTRY_DIR}/{project.id}")
-            remote_project = load_project(remote, project.id)
-            if remote_project.uid != project.uid:
-                return {}
-            pointers = remote.read_many([fs.pointer_rel(project.id, name) for name in designs])
-        except (fs.RefUnavailable, DesignError):
-            return {}
-        out = {}
-        for name in designs:
-            theirs, ours = pointers.get(fs.pointer_rel(project.id, name)), self.reader.read(fs.pointer_rel(project.id,
-                                                                                                         name))
-            try:
-                same = theirs is not None and ours is not None and (
-                    Pointer.from_json(_loads(theirs, name), name) == Pointer.from_json(_loads(ours, name), name))
-            except DesignError:
-                continue
-            out[name] = "current" if same else "behind"
+                                     context.status, rel, context.page_state, context.freshness))
         return out
 
     def diagnostics(self, project: str | None = None, design: str | None = None) -> list[Diagnostic]:
         out = []
+        catalog = self._authority_catalog()
+        names = [check_id(project)] if project is not None else sorted(set(_project_names(self.reader)) | set(catalog))
+        for name in names:
+            try:
+                source = self._read_project(name, catalog)
+                out.extend(source.diagnostics)
+            except DesignError as exc:
+                out.append(Diagnostic(exc.code, str(exc).split(": ", 1)[-1]))
         for summary in self.designs(project):
             if design is not None and summary.design != design:
                 continue
@@ -761,14 +869,25 @@ class DesignStore:
             yield
 
     def _check_layout(self) -> None:
-        wiki = pathlib.PurePosixPath(self.wiki_dir.casefold())
-        folder = pathlib.PurePosixPath(fs.pages_rel(self.wiki_dir).casefold())
-        registry = pathlib.PurePosixPath(fs.REGISTRY_DIR.casefold())
+        assert self.wiki is not None
+        wiki = pathlib.Path(str(self.wiki.dir.resolve()).casefold())
+        folder = pathlib.Path(str((self.wiki.dir / fs.PAGES_DIR_NAME).resolve()).casefold())
+        registry = pathlib.Path(str((self.root / fs.REGISTRY_DIR).resolve()).casefold())
         if (folder == registry or registry in folder.parents or folder in registry.parents
                 or wiki == registry or registry in wiki.parents):
             raise WikiError("OAH_CONFIG_INVALID", f"[wiki] dir = {self.wiki_dir!r} puts the design pages "
                             f"({fs.pages_rel(self.wiki_dir)}) on top of the design records ({fs.REGISTRY_DIR}). Set "
                             "[wiki] dir in .oah/config.toml to another folder, then retry.", EXIT_ENVIRONMENT)
+
+    def _check_wiki_inputs(self) -> None:
+        if self.wiki is None:
+            assert self.wiki_error is not None
+            raise self.wiki_error
+        self._check_layout()
+        for name in ("index.md", "log.md"):
+            if not (self.wiki.dir / name).is_file():
+                raise WikiError("OAH_WIKI_MISSING", f"{self.wiki.dir / name} does not exist; restore it or set "
+                                "[wiki] dir to the wiki folder, then retry", EXIT_ENVIRONMENT)
 
     def _require_authority(self, project: ProjectRecord) -> str:
         head = self.head_ref()
@@ -875,6 +994,8 @@ class DesignStore:
                 for design in sorted(set(_design_names(self.reader, name)) | set(mine)):
                     head = self._head(project, design, mine)
                     if head is None:
+                        plan.diagnostics.append(Diagnostic(CORRUPT_CODE, f"{name}/{design} does not verify; its "
+                                                           "index line is kept as it was"))
                         stem = f"  - [[{fs.stem(name, design)}"
                         block.extend(line for line in group if line.startswith(stem + "|")
                                      or line.startswith(stem + "]]"))
@@ -904,21 +1025,33 @@ class DesignStore:
               pages_for: Iterable[str] = (), force: Mapping[str, str] | None = None, facts: Facts | None = None,
               extra: Mapping[tuple[str, int], dict[str, str]] | None = None) -> _Plan:
         plan = _Plan()
+        verified = {}
+        verified_texts = {}
+        for design, record in records.items():
+            try:
+                texts = {revision: value for (name, revision), value in (extra or {}).items() if name == design}
+                verified_texts[design] = _record_texts(self.reader, record, texts)
+                verified[design] = record
+            except DesignError as exc:
+                if strict:
+                    raise
+                plan.diagnostics.append(Diagnostic(exc.code, str(exc).split(": ", 1)[-1]))
         for design in pages_for:
-            record = records.get(design)
-            if record is None:
-                try:
+            try:
+                record = verified.get(design)
+                if record is None:
                     record = load_design(self.reader, project, design)
-                except DesignError as exc:
-                    if strict:
-                        raise
-                    plan.diagnostics.append(Diagnostic(exc.code, str(exc).split(": ", 1)[-1]))
-                    continue
-            texts = {revision: value for (name, revision), value in (extra or {}).items() if name == design}
-            self._design_page_write(plan, project, record, strict=strict, force=(force or {}).get(design),
-                                    extra=texts)
-        self._project_page_write(plan, project, records, strict=strict, facts=facts)
-        self._index_write(plan, {project.id: project}, {(project.id, name): record for name, record in records.items()},
+                texts = verified_texts.get(design)
+                if texts is None:
+                    texts = _record_texts(self.reader, record)
+                self._design_page_write(plan, project, record, strict=strict, force=(force or {}).get(design),
+                                        extra=texts)
+            except DesignError as exc:
+                if strict:
+                    raise
+                plan.diagnostics.append(Diagnostic(exc.code, str(exc).split(": ", 1)[-1]))
+        self._project_page_write(plan, project, verified, strict=strict, facts=facts)
+        self._index_write(plan, {project.id: project}, {(project.id, name): record for name, record in verified.items()},
                           strict=strict)
         return plan
 
@@ -973,6 +1106,8 @@ class DesignStore:
                 AcceptanceInfo.from_json(_loads(data, rel), rel)
             else:
                 raise ValueError(f"unknown journal file role {role!r}")
+            if any(existing == rel for existing, _ in files):
+                raise ValueError(f"the journal names {rel} more than once")
             files.append((rel, data))
         pointer = journal.get("pointer")
         if not isinstance(pointer, Mapping):
@@ -1026,6 +1161,82 @@ class DesignStore:
             raise DesignError(JOURNAL_CORRUPT_CODE, f"{self.journal_path}: {problem}. oah never resets it; compare the "
                               "design files with your last commit, then move the journal away by hand")
         return data
+
+    def _verify_journal_change(self, journal: Mapping) -> None:
+        try:
+            files, (rel, before, after) = self._rebuild(journal)
+            proposed = _OverlayReader(self.reader, dict([*files, (rel, after)]))
+            project = load_project(proposed, journal["project"])
+            if project.authority != journal["branch"]:
+                raise ValueError("the project names another authority branch")
+            check_event(journal["event"])
+            kind, design = journal["kind"], journal.get("design")
+            record = None
+            if kind in ("registered", "renamed"):
+                if design is not None or files or journal["pointer"]["role"] != "project":
+                    raise ValueError("a project change contains design records")
+                if (kind == "registered") != (before is None):
+                    raise ValueError("the project pointer baseline disagrees with the change kind")
+                number, digest = project.title_revision, title_digest(project.title)
+                if kind == "registered" and project.event != journal["event"]:
+                    raise ValueError("the registration has another event")
+                if kind == "registered" and project.title_revision != 1:
+                    raise ValueError("a registration does not start at title revision 1")
+            else:
+                if design is None or journal["pointer"]["role"] != "design":
+                    raise ValueError("a design change has no design pointer")
+                record = load_design(proposed, project, design)
+                _record_texts(proposed, record)
+                if kind in ("created", "saved"):
+                    current = record.current
+                    if ((kind == "created") != (before is None)
+                            or (kind == "created") != (current.parent is None)):
+                        raise ValueError("the revision parent or pointer baseline disagrees with the change kind")
+                    expected = {fs.manifest_rel(project.id, design, current.revision)}
+                    expected.update(fs.part_rel(project.id, design, current.revision, name) for name in current.parts)
+                    number, digest, event = current.revision, current.digest, current.event
+                    for name in current.parts:
+                        normalize_text(proposed.read(fs.part_rel(project.id, design, number, name)), f"{name} part")
+                else:
+                    accepted = record.accepted
+                    if accepted is None or before is None:
+                        raise ValueError("the acceptance change has no acceptance or prior pointer")
+                    expected = {fs.acceptance_rel(project.id, design, accepted.sequence)}
+                    number, digest, event = accepted.revision, accepted.digest, accepted.event
+                if set(path for path, _ in files) != expected or event != journal["event"]:
+                    raise ValueError("the proposed files or event do not match the pointer's change")
+            existing = self.reader.read(rel)
+            if before is not None and existing is not None and _sha(existing) == before:
+                if kind == "renamed":
+                    previous_project = ProjectRecord.from_json(_loads(existing, rel), rel, project.id)
+                    if (project.uid != previous_project.uid or project.authority != previous_project.authority
+                            or project.created_at != previous_project.created_at or project.event != previous_project.event
+                            or project.title_revision != previous_project.title_revision + 1
+                            or project.former_titles != (*previous_project.former_titles, previous_project.title)):
+                        raise ValueError("the rename does not extend the previous project record")
+                elif kind in ("saved", "accepted"):
+                    assert record is not None
+                    previous = Pointer.from_json(_loads(existing, rel), rel)
+                    if ((previous.project, previous.uid, previous.design, previous.created_at)
+                            != (record.pointer.project, record.pointer.uid, record.pointer.design,
+                                record.pointer.created_at)):
+                        raise ValueError("the design pointer changes identity")
+                    if kind == "saved":
+                        if (record.current.parent != (previous.current[0], previous.current[2])
+                                or record.pointer.accepted != previous.accepted):
+                            raise ValueError("the save drops its previous revision or acceptance")
+                    else:
+                        assert record.accepted is not None
+                        previous_acceptance = None if previous.accepted is None else (previous.accepted[0],
+                                                                                       previous.accepted[3])
+                        if record.pointer.current != previous.current or record.accepted.previous != previous_acceptance:
+                            raise ValueError("the acceptance changes current or drops previous acceptance evidence")
+            key = event_key(kind, project.uid, project.id, design or "", number, digest)
+            if journal["log"]["key"] != key:
+                raise ValueError("the log key does not identify this change")
+        except (ValueError, binascii.Error, DesignError, fs.RefUnavailable) as exc:
+            raise DesignError(JOURNAL_CORRUPT_CODE, f"{self.journal_path}: the proposed change does not verify "
+                              f"({exc}). Nothing was written; keep the journal and repair its records by hand") from exc
 
     def _run(self, journal: dict, fault: Fault, result: WriteResult) -> WriteResult:
         files, (pointer_rel, before, after) = self._rebuild(journal)
@@ -1118,8 +1329,12 @@ class DesignStore:
                                   "it, and it cannot be dropped")
 
     @staticmethod
-    def _applied(project: str, design: str, match: RevisionInfo, current: RevisionInfo, page: str | None) -> WriteResult:
+    def _applied(project: str, design: str, match: RevisionInfo, current: RevisionInfo, page: str | None,
+                 base: RevisionInfo, expect_digest: str) -> WriteResult:
         """A retry found its change on the chain: report it, never write it twice."""
+        if expect_digest != base.digest:
+            raise DesignError(CONTEXT_STALE_CODE, f"revision {base.revision} of {project}/{design} has digest "
+                              f"{base.digest}, not {expect_digest}; read the design again, then retry")
         return WriteResult("applied", project, design, match.revision, match.digest, match.event, page=page,
                            current=None if match.revision == current.revision else current.revision)
 
@@ -1184,6 +1399,7 @@ class DesignStore:
         today = today or datetime.date.today()
         with self._session():
             record = load_project(self.reader, project)
+            assert record.record_bytes is not None
             head = self._require_authority(record)
             page = fs.project_page_rel(self.wiki_dir, project)
             if record.title == title:
@@ -1191,12 +1407,11 @@ class DesignStore:
             renamed = dataclasses.replace(record, title=title, title_revision=record.title_revision + 1,
                                           former_titles=record.former_titles + (record.title,))
             self._plan(renamed, {}, strict=True)
-            before = self.reader.read(fs.project_record_rel(project))
             log = self._preflight_log(event_key("renamed", record.uid, project, "", renamed.title_revision,
                                                 title_digest(title)),
                                       *pages.log_entry("renamed", renamed, old_title=record.title), today)
             journal = self._journal("renamed", project=project, design=None, event=event, branch=head, files=[],
-                                    pointer={"role": "project", "before": _sha(before),
+                                    pointer={"role": "project", "before": _sha(record.record_bytes),
                                              "after": _b64(file_bytes(renamed.to_json()))}, log=log)
             return self._run(journal, fault, WriteResult("renamed", project, None, None, None, event, page=page))
 
@@ -1265,9 +1480,19 @@ class DesignStore:
             record = load_project(self.reader, project)
             head = self._require_authority(record)
             design_record = load_design(self.reader, record, design)
+            assert design_record.pointer_bytes is not None
             current = design_record.current
+            base = design_record.revision(expect_revision)
+            if base is None:
+                raise DesignError(REVISION_CONFLICT_CODE, f"revision {expect_revision} is not in the history of "
+                                  f"{project}/{design}; read the design again, then retry")
+            if base == current and expect_digest != base.digest:
+                raise DesignError(CONTEXT_STALE_CODE, f"revision {base.revision} of {project}/{design} has digest "
+                                  f"{base.digest}, not {expect_digest}: the text you read is not this revision; "
+                                  "read it again, then retry")
             page = self._page_rel(project, design)
             current_texts = read_texts(self.reader, current)
+            base_texts = current_texts if base == current else read_texts(self.reader, base)
             page_bytes = self._read_page(page)
             view = pages.read_design_page(page_bytes)
             state = self._classify(view, record, design_record)
@@ -1281,8 +1506,8 @@ class DesignStore:
                 if view.state == "unreadable":
                     raise DesignError(UNREGISTERED_EDIT_CODE, f"{page} lost its revision or part markers, so oah "
                                       "cannot tell the parts apart; restore the markers, then retry")
-                base = design_record.revision(view.revision)
-                if base is None or base.digest != view.digest:
+                page_base = design_record.revision(view.revision)
+                if page_base is None or page_base.digest != view.digest:
                     raise DesignError(REVISION_CONFLICT_CODE, f"{page} shows revision {view.revision}, which is not "
                                       "in this design's history; merge the edit by hand")
                 if view.revision != current.revision:
@@ -1294,36 +1519,35 @@ class DesignStore:
                 if state in ("edited", "foreign"):
                     diagnostic = self._page_diagnostic(state, page, project, design, view)
                     raise DesignError(diagnostic.code, diagnostic.message)
-                texts = dict(current_texts)
+                texts = dict(base_texts)
                 texts.update(given)
                 for name in drop:
                     if name not in texts:
-                        raise DesignError(NOT_FOUND_CODE, f"revision {current.revision} has no {name} part to drop")
+                        raise DesignError(NOT_FOUND_CODE, f"revision {base.revision} has no {name} part to drop")
                     del texts[name]
-            new_title = title or current.title
+            new_title = title or base.title
+            self._check_parts(texts, base_texts)
             digests = {name: text_digest(text) for name, text in texts.items()}
             digest = content_digest(record.uid, project, design, new_title, digests)
             if explicit_event:
                 match = next((info for info in design_record.chain if info.event == event), None)
                 if match is not None:
-                    if match.digest != digest:
+                    if (match.digest != digest or (match.revision != base.revision
+                            and match.parent != (base.revision, base.manifest))):
                         raise DesignError(REVISION_CONFLICT_CODE, f"event {event} already recorded revision "
                                           f"{match.revision} with other content; use a new event ID")
-                    return self._applied(project, design, match, current, page)
+                    read_texts(self.reader, match)
+                    return self._applied(project, design, match, current, page, base, expect_digest)
             else:
-                match = next((info for info in design_record.chain if info.parent is not None
-                              and info.parent[0] == expect_revision and info.digest == digest), None)
+                match = next((info for info in design_record.chain if info.parent == (base.revision, base.manifest)
+                              and info.digest == digest), None)
                 if match is not None:
-                    return self._applied(project, design, match, current, page)
+                    read_texts(self.reader, match)
+                    return self._applied(project, design, match, current, page, base, expect_digest)
             if expect_revision != current.revision:
                 raise DesignError(REVISION_CONFLICT_CODE, f"you expected revision {expect_revision}, but {project}/"
                                   f"{design} is at revision {current.revision}; read it again with `oah design show`, "
                                   "merge your change, then retry")
-            if expect_digest != current.digest:
-                raise DesignError(CONTEXT_STALE_CODE, f"revision {current.revision} of {project}/{design} has digest "
-                                  f"{current.digest}, not {expect_digest}: the text you read is not this revision; "
-                                  "read it again, then retry")
-            self._check_parts(texts, current_texts)
             if digest == current.digest:
                 written: list[str] = []
                 diagnostics: list[Diagnostic] = []
@@ -1344,10 +1568,9 @@ class DesignStore:
                        extra={(design, number): texts})
             log = self._preflight_log(event_key("saved", record.uid, project, design, number, digest),
                                       *pages.log_entry("saved", record, design=design, info=info), today)
-            before = self.reader.read(fs.pointer_rel(project, design))
             journal = self._journal("saved", project=project, design=design, event=event, branch=head,
                                     files=self._revision_files(info, texts),
-                                    pointer={"role": "design", "before": _sha(before),
+                                    pointer={"role": "design", "before": _sha(design_record.pointer_bytes),
                                              "after": _b64(file_bytes(pointer.to_json()))}, log=log)
             if force:
                 journal["page"] = {"design": design, "sha256": force[design]}
@@ -1365,6 +1588,7 @@ class DesignStore:
             record = load_project(self.reader, project)
             head = self._require_authority(record)
             design_record = load_design(self.reader, record, design)
+            assert design_record.pointer_bytes is not None
             page = self._page_rel(project, design)
             info = design_record.revision(revision)
             if info is None:
@@ -1372,6 +1596,7 @@ class DesignStore:
             if info.digest != digest:
                 raise DesignError(CONTEXT_STALE_CODE, f"revision {revision} of {project}/{design} has digest "
                                   f"{info.digest}, not {digest}: what was approved is not this revision")
+            read_texts(self.reader, info)
             latest = design_record.accepted
             if latest is not None and latest.revision == revision:
                 return WriteResult("already-accepted", project, design, revision, digest, latest.event, page=page)
@@ -1400,11 +1625,10 @@ class DesignStore:
             log = self._preflight_log(event_key("accepted", record.uid, project, design, revision, digest),
                                       *pages.log_entry("accepted", record, design=design, info=info,
                                                        acceptance=acceptance), today)
-            before = self.reader.read(fs.pointer_rel(project, design))
             journal = self._journal("accepted", project=project, design=design, event=event, branch=head,
                                     files=[{"role": "acceptance", "sequence": sequence,
                                             "data": _b64(file_bytes(acceptance.to_json()))}],
-                                    pointer={"role": "design", "before": _sha(before),
+                                    pointer={"role": "design", "before": _sha(design_record.pointer_bytes),
                                              "after": _b64(file_bytes(pointer.to_json()))}, log=log)
             return self._run(journal, fault, WriteResult("accepted", project, design, revision, digest, event,
                                                          page=page))
@@ -1452,6 +1676,11 @@ class DesignStore:
             if resolved:
                 return self._resolve_journal(journal)
             target = self._journal_store(journal)
+            target._check_wiki_inputs()
+            pages.read_index((target.wiki.dir / "index.md").read_bytes())
+            log = journal["log"]
+            target._preflight_log(log["key"], log["title"], log["body"], datetime.date.fromisoformat(log["date"]))
+            target._verify_journal_change(journal)
             moved = target.wiki_dir != journal.get("wiki_dir")
             files, (pointer_rel, before, after) = self._rebuild(journal)
             conflicts = []
@@ -1521,20 +1750,18 @@ class DesignStore:
         root = pathlib.Path(journal["root"])
         where = "missing"
         if root.is_dir():
+            target = self._journal_store(journal)
+            target._check_wiki_inputs()
+            where = "present"
             try:
-                target = self._journal_store(journal)
-            except DesignError:
-                target = None
-            if target is not None:
-                where = "present"
-                try:
-                    record = load_project(target.reader, journal["project"])
-                    if journal.get("design"):
-                        load_design(target.reader, record, journal["design"])
-                except DesignError as exc:
-                    if exc.code != NOT_FOUND_CODE:
-                        raise DesignError(RECOVERY_CONFLICT_CODE, f"the records still do not verify: {exc}. Fix them "
-                                          "by hand, then run `oah design recover --resolved` again") from exc
+                record = load_project(target.reader, journal["project"])
+                if journal.get("design"):
+                    design = load_design(target.reader, record, journal["design"])
+                    _record_texts(target.reader, design)
+            except DesignError as exc:
+                if exc.code != NOT_FOUND_CODE:
+                    raise DesignError(RECOVERY_CONFLICT_CODE, f"the records still do not verify: {exc}. Fix them "
+                                      "by hand, then run `oah design recover --resolved` again") from exc
         moment = datetime.datetime.now(datetime.timezone.utc)
         kept = self.journal_path.parent / RESOLVED_DIR_NAME / f"design-journal-{moment.strftime('%Y%m%dT%H%M%S.%fZ')}.json"
         kept.parent.mkdir(parents=True, exist_ok=True)

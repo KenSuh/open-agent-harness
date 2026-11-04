@@ -12,7 +12,7 @@ from oah.design.model import event_key
 from oah.hook_pre_commit import check as commit_check
 from oah.wiki import log as log_module
 from oah.wiki import notes
-from oah.wiki.base import WikiSettings
+from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.store import Wiki
 from tests.helpers import git_commit, git_env
 from tests.test_design_store import PAGE, TODAY, Crash, DesignRepo, crash_at
@@ -32,6 +32,86 @@ def block(text: str) -> list[str]:
 
 
 class ProjectsTest(DesignRepo, unittest.TestCase):
+    def test_c1_unclosed_index_fences_refuse_without_appending(self):
+        for fence in ("```python", "~~~"):
+            with self.subTest(fence=fence):
+                repo = self.make_repo()
+                store = self.store(repo)
+                index = repo / "docs/wiki/index.md"
+                index.write_text(f"# My wiki\n\n{fence}\nUser example\n", encoding="utf-8")
+                before = self.tree(repo, self.state(repo))
+                for _ in range(2):
+                    with self.assertRaises(WikiError) as invalid:
+                        store.add_project("acme", title="Acme", today=TODAY)
+                    self.assertEqual(invalid.exception.code, "OAH_WIKI_INDEX_INVALID")
+                    self.assertEqual(self.tree(repo, self.state(repo)), before)
+
+    def test_c1_corrupt_evidence_preserves_rows_and_never_recreates_them(self):
+        for damage in ("acceptance", "ancestor"):
+            with self.subTest(damage=damage):
+                repo = self.make_repo()
+                store = self.store(repo)
+                r1 = self.booking(store)
+                assert r1.digest is not None
+                r2 = store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                                parts={"design": "Two.\n"}, today=TODAY)
+                assert r2.digest is not None
+                store.accept("acme", "booking", revision=2, digest=r2.digest, reason="Yes", today=TODAY)
+                healthy = store.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
+                assert healthy.digest is not None
+                project_page = repo / "docs/wiki/designs/acme.md"
+                index = repo / "docs/wiki/index.md"
+                old_row = next(line for line in project_page.read_text(encoding="utf-8").splitlines()
+                               if line.startswith("- [[acme--booking"))
+                old_index = index.read_bytes()
+                folder = repo / ".oah/designs/acme/booking"
+                if damage == "acceptance":
+                    (folder / "acceptances/a1.json").unlink()
+                else:
+                    manifest = folder / "revisions/r1/revision.json"
+                    manifest.write_bytes(manifest.read_bytes().replace(b'"Created"', b'"Altered"'))
+                result = store.save("acme", "payments", expect_revision=1, expect_digest=healthy.digest,
+                                    reason="Healthy change", parts={"design": "Pay twice.\n"}, today=TODAY)
+                self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in result.diagnostics])
+                self.assertIn(old_row, project_page.read_text(encoding="utf-8").splitlines())
+                self.assertEqual(index.read_bytes(), old_index)
+                project_page.unlink()
+                index.write_bytes(b"# My wiki\n")
+                result = store.reconcile()
+                self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in result.diagnostics])
+                self.assertNotIn("acme--booking", project_page.read_text(encoding="utf-8"))
+                self.assertNotIn(b"acme--booking", index.read_bytes())
+                self.assertIn("acme--payments", project_page.read_text(encoding="utf-8"))
+
+    def test_c1_corrupt_parts_stay_isolated_during_rename_and_recovery(self):
+        for damage in ("changed", "missing"):
+            with self.subTest(damage=damage):
+                repo = self.make_repo()
+                store = self.store(repo)
+                self.booking(store)
+                store.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
+                part = repo / ".oah/designs/acme/booking/revisions/r1/design.md"
+                if damage == "changed":
+                    part.write_bytes(b"Corrupt.\n")
+                else:
+                    part.unlink()
+                page_before = (repo / PAGE).read_bytes()
+                row_before = next(line for line in (repo / "docs/wiki/designs/acme.md").read_text().splitlines()
+                                  if line.startswith("- [[acme--booking"))
+                result = store.reconcile()
+                self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in result.diagnostics])
+                self.assertEqual({d.design: d.status for d in store.designs("acme")},
+                                 {"booking": "corrupt", "payments": "draft"})
+                with self.assertRaises(Crash):
+                    store.rename_project("acme", title="Acme Web", today=TODAY,
+                                         fault=crash_at("pointer-written"))
+                self.assertIn("OAH_DESIGN_RECOVERED", store.recover())
+                self.assertFalse(store.journal_path.exists())
+                self.assertEqual((repo / PAGE).read_bytes(), page_before)
+                self.assertIn(row_before, (repo / "docs/wiki/designs/acme.md").read_text().splitlines())
+                self.assertEqual(store.context("acme", "payments").page_state, "clean")
+                self.assertEqual(store.add_project("other", title="Other", today=TODAY).action, "registered")
+
     def test_two_projects_with_one_title_and_one_design_id_stay_apart(self):
         repo = self.make_repo()
         store = self.store(repo)
