@@ -1,45 +1,151 @@
 # oah diagram style guide
 
-Custom tokens for [diagram-design](https://github.com/cathrynlavery/diagram-design) at **3eb03b8**.
-The project's supplied tokens override the upstream skin; the upstream copy stays read-only.
-Font source: **system**. No network resources, icons, animation or shadows.
+The owner selected **keep the default** for
+[diagram-design](https://github.com/cathrynlavery/diagram-design/tree/3eb03b8), commit **3eb03b8**.
+Use its editorial gallery skin, with the dotted-paper option and **Font source: system**.
+The upstream skill stays read-only. The gallery rules below cover the diagrams; the banner's
+separate neo-brutalist style is recorded under [Banner](#banner).
+
+## Tokens
 
 | Role | Light | Dark |
 |---|---|---|
-| paper | `#ffffff` | `#0d1117` |
-| paper-2 / panel | `#f6f8fa` | `#161b22` |
-| rule / rule-solid | `#d0d7de` | `#30363d` |
-| ink | `#1f2328` | `#f0f6fc` |
-| ink-2 / secondary text / soft | `#424a53` | `#c9d1d9` |
-| muted / connectors | `#6e7781` | `#8b949e` |
-| Claude Code | `#9a6700` | `#d29922` |
-| Codex CLI / default accent | `#1a7f37` | `#3fb950` |
-| Jev | `#8250df` | `#a371f7` |
-| landing / link | `#0969da` | `#58a6ff` |
+| paper | `#f5f5f5` | `#2d3142` |
+| paper-2 | `#ececec` | `#393e53` |
+| ink | `#2d3142` | `#f5f5f5` |
+| ink-strong | `#111111` | `#111111` |
+| muted | `#4f5d75` | `#bfc0c0` |
+| soft | `#5a6580` | `#949eb2` |
+| rule | `rgba(45,49,66,.12)` | `rgba(245,245,245,.12)` |
+| rule-solid | `#bfc0c0` | `rgba(191,192,192,.25)` |
+| accent | `#bf4520` | `#f08a59` |
+| accent-tint | `rgba(191,69,32,.08)` | `rgba(240,138,89,.10)` |
+| link | `#2e5aa8` | `#739fdf` |
 
-Use role colors only on the one or two focal nodes. Other nodes use paper, panel and ink.
-Use opaque panel fill under accent strokes; no extra tint is needed. Ink is the strong text color.
-Rules are decorative; muted strokes carry connections. Secondary text uses ink-2 so it stays legible
-on both paper and panel. Label every role in words as well as color.
+Use one accent hue on one or two focal nodes. Claude Code, Codex CLI and TypeSafe Jev are
+identified by their names and `CLAUDE`, `CODEX` and `JEV` tags; engine identity does not choose a color.
+The link token is reserved for an explicitly external/API connection; these figures use muted arrows.
+Keep text at full opacity. Translucent washes and rules are decorative, never the only carrier of meaning.
 
-All prose and titles use `system-ui, -apple-system, "Segoe UI", sans-serif`.
-Korean sources put `"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR"`
-first. Technical labels use `ui-monospace, "SFMono-Regular", Consolas, monospace`.
-There is no downloaded or embedded font. Platform fonts may have different metrics.
+## Fonts and readable sizes
 
-The `fit` preset uses 28px titles, 14px group headings and 12px node names. Sequence and architecture
-arrow labels use 12px monospace in English, with masks widened to fit. Plain explanatory labels use 12px sans. Korean arrow labels use
-12px sans at weight 500, without tracking. Keep generous padding; budget a full em per wide glyph
-and 0.62em per other glyph before checking a rendered preview.
+Keep the gallery's family stacks, falling back to installed system fonts. Load nothing from outside
+the file: no Google Fonts, `@font-face`, CSS import, script or external image.
 
-Aim for density 4/10, a 4px grid, 40px outer margins and a 60px footer strip.
-Use 6px node corners and oval flowchart endpoints. Flowcharts run down the page.
-Sequence diagrams put actors above dashed lifelines and time runs downwards; requests are solid,
-returns dashed. Numbered exchanges refer to the tables in the accompanying page.
-Arrows precede nodes in the markup. Labels have opaque masks with an 8px gap from their arrow.
-Any elbow added later must have an 8px radius. Do not overlap routes or labels.
+| Role | Stack | Size / weight |
+|---|---|---|
+| Figure title | `"Instrument Serif", Georgia, serif` | 28px / 400 |
+| Names and prose | `"Geist", system-ui, -apple-system, "Segoe UI", sans-serif` | Names 16px / 600; detail 12px / 400 |
+| Technical sublabels, commands, arrow labels | `"Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace` | 12px / 400 |
+| Latin tag chips and eyebrow | Same mono stack | 8px / 500 |
+| Ghost numbers | Same mono stack | 32px / 600, opacity .06 |
 
-Keep the upstream limits of nine nodes, twelve arrows, two focal accents and two callouts per figure.
-Delete decoration before shrinking text. Split a long sequence rather than making its labels smaller.
-HTML keeps a local horizontal scroller with SVG min-width equal to its viewBox; print releases it.
-GitHub uses the exported SVG as a responsive image, with the full explanation also in Markdown.
+Use a **fit** canvas with the skill's larger 16px/12px presentation text roles for readable nodes
+and detail, and its 28px standard title. Grow the canvas instead of shrinking essential text.
+Names and explanatory prose use sans; commands and technical values use mono. Tags and ghost
+numbers are nested decorative groups, excluded from the concepts nodes' source-label text.
+
+Korean extends the sans stack with `"Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic"`
+after Geist and before `system-ui, sans-serif`. Titles use
+`"Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif`.
+Hangul detail, arrow labels, group labels and legends use sans at **12px or larger**, with no tracking
+or uppercase transform. Latin-only tags retain the 8px mono treatment. Use plain 해라체 for sentences;
+do not end a Korean sentence with a colon.
+
+Reserve 1em per wide/full-width character and .60em sans or .62em mono per other character.
+Combining marks add no width. Wrap at word boundaries, preserve logical phrase breaks, and budget
+for the wider language. Both languages and both themes share the same boxes, routes, masks and canvas.
+Fallback metrics still need preview inspection.
+
+## Components and layout
+
+- Paper fills the entire canvas. Overlay a 22 × 22 dot grid: 0.9px ink dots at .10 opacity, with
+  the pattern layer at .55 opacity. No shadows, glow or gradients.
+- Use a 4px structural grid, 40px outer margins, 16px node padding, and generous gaps.
+  Text baselines, dot spacing and marker geometry are the skill's documented off-grid exceptions.
+- Draw background, zones, arrows, arrow masks, then nodes. End with a separate horizontal legend.
+- Nodes have an opaque paper mask under their treatment. Standard steps use white on light paper
+  and paper on dark paper; input nodes use muted at .10; stores use ink at .05; optional nodes
+  use ink at .02 and a `4,3` dashed border; focal nodes use accent-tint and an accent border.
+- Rectangular tags have 2px corners; ordinary nodes 6px; states and zones 8px; flow endpoints 20px.
+  Decisions use diamonds. Lease start/end pseudostates retain their dot/ring shapes.
+- Zone frames use ink at .02 with .12 rules. Keep their headings clear of arrows and at least
+  16px above nodes. Zones preserve source membership; they are not new graph nodes.
+- Use the skill's monochrome primitive icons sparingly, at 24 × 24. They supplement a written
+  label. The icon attribution and license are in [README.md](README.md#icon-license).
+- Ghost numbers indicate a local reading order, not extra commands. Sequence numbers retain
+  the original 1–15 exchanges and their adjacent table references.
+- Use at most nine nodes, twelve arrows, two focal accents and two callouts per figure.
+  Keep faithful detail in the existing paired stems; do not merge or drop source nodes.
+
+## Connections and fidelity
+
+Use muted strokes with filled arrowheads, 1.2px connections, and rounded orthogonal elbows of
+radius 8px. Off-axis diagonal connections, shared strokes, shared attach points and transit through
+another node are not allowed. Keep ports at least 12px apart. A crossing needs a bridge; current
+figures avoid crossings entirely.
+
+An arrow label has an opaque paper mask, 8px clear of the line. Place it above a horizontal route
+or beside a vertical one. Keep inline labels short; full conditions belong in lettered transition keys
+inside the figure. Conditional arrows retain short words and the matching key letter (up to 14 characters).
+The architecture route-to-Jev label explicitly keeps “SKILL ORDER + DIFFICULTY”. Label masks must also clear nodes and zone headings. Dash meanings belong in
+the legend: optional paths, returns, recorded CI exceptions, or a planned future note as appropriate.
+Sequence returns retain dashed lines; their loop frame covers only participating actors.
+
+For every concepts node retain `data-node-id`, `data-source-label` and all visible source words in
+source order. Preserve `data-parent` group membership. For every connection retain `data-edge-id`,
+`data-from`, `data-to` and `data-label`; every condition remains visible inline or in a key.
+Keep the lease refusal notes. `tests.test_docs` guards the original graphs, so changing a label's
+wrapping must not change its words.
+
+Keep the architecture's 14 unique components and 16 connections across its two figures, and all
+15 numbered sequence messages. The overview may summarize these details, but must show the whole
+harness and both user touchpoints. The guided design conversation is **planned for v0.4.0**, never
+shown as available. The features figure explains the six supporting parts together.
+
+## Banner
+
+The banner is a hand-authored **1280 × 560** chat scene with three role characters.
+It uses its own neo-brutalist style, with bold outlines and hard shadows.
+
+| Token | Light | Dark |
+|---|---|---|
+| Paper | Cream `#fff4e0` | `#17140f` |
+| Ink / main outlines | Dark ink `#141414` | `#f5ecdc`; `#141414` on bright fills and faces |
+| Secondary text | `#4a3f33` | `#d9cdb8` |
+| Dot grid | `#e6d3b0` | `#3d352a` |
+| Chat panel / reply | `#fffdf8` / `#fff4e0` | `#241f18` / `#312920` |
+| Hard shadow | `#141414` | `#7a6a52` |
+
+Dots have radius **1.6px** at `(3, 3)` in a **22 × 22px** tile. Outlines are **3px** for
+characters and the chat frame, **2.5px** for bubbles, chips and eyes, and **2px** for small
+details and checkbox borders. Hard shadows are solid duplicate shapes shifted right and down:
+**5px** for characters and ornaments, **6px** for the headline sticker, **8px** for the chat
+frame, and **4px** for bubbles and chips. Jev's outline uses a `9 6` dash pattern.
+Role fills are amber `#ffb547` for Claude Code, green `#5fd38a` for Codex CLI, and purple
+`#b9a3ff` for Jev in both themes; supporting fills are blue `#9fd8ff`, pink `#ffc2d1`,
+and mint `#c6f3d3`.
+
+Use installed system fonts only. English prose uses
+`system-ui, -apple-system, "Segoe UI", sans-serif`; headline and brand prepend
+`"Arial Black", "Segoe UI Black"`. Korean prepends
+`"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR"` to both stacks,
+before every Latin font. The Latin wordmark's mono stack is
+`ui-monospace, "SFMono-Regular", Consolas, monospace` in both languages.
+The headline is **60px / 800**, brand **24px / 800**, tagline **19px / 600**, and role labels
+**15px / 500**. Names and chat text use **17px**, checklist rows and chips **16px**.
+
+## Files and checks
+
+Edit the standalone HTML first and export with the pinned skill's `export_svg.py --system-fonts`.
+Every SVG has a first-child title, a one-sentence description, prefixed accessibility IDs, and
+`role="img"`. Page alt text must equal the description in both themes.
+
+HTML uses a local `overflow-x: auto` wrapper with SVG `min-width` equal to the viewBox width.
+Release both constraints for print. GitHub uses responsive SVG images; Markdown supplies the fuller
+explanation.
+
+Run the skill's `self_check.py --offline` on every changed source, the relevant documentation tests,
+and visual checks of all four variants. Quick Look can render previews under `.tmp/rdr-previews/`;
+an installed offline SVG rasterizer is a fallback when Quick Look is unavailable. A raster preview
+does not establish native rendering in all three browser platforms.

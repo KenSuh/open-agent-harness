@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 880 1308" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-lifecycle-ko-dark-title concepts-leases-lifecycle-ko-dark-desc" data-diagram-type="State machine" data-size="fit" id="concepts-leases-lifecycle-ko-dark-root">
+<title id="concepts-leases-lifecycle-ko-dark-title">리스 · 활성, 만료, 해제</title>
+<desc id="concepts-leases-lifecycle-ko-dark-desc">start로 활성 리스가 생기고 갱신과 로그는 활성 상태를 유지하며 TTL이 지나면 만료되고 두 상태 모두 해제할 수 있으며 다음 start가 만료 리스를 정리하되 명시된 거절 규칙이 적용된다.</desc>
+<defs>
+      <style>#concepts-leases-lifecycle-ko-dark-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #f5f5f5; }
+      #concepts-leases-lifecycle-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #concepts-leases-lifecycle-ko-dark-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
+      #concepts-leases-lifecycle-ko-dark-root .title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+      #concepts-leases-lifecycle-ko-dark-root .node { font-size: 16px; font-weight: 600; }
+      #concepts-leases-lifecycle-ko-dark-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #concepts-leases-lifecycle-ko-dark-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+      #concepts-leases-lifecycle-ko-dark-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+      @media print {
+#concepts-leases-lifecycle-ko-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<pattern id="concepts-leases-lifecycle-ko-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="concepts-leases-lifecycle-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="concepts-leases-lifecycle-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="concepts-leases-lifecycle-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="880" height="1308" fill="#2d3142"/>
+<rect width="880" height="1308" fill="url(#concepts-leases-lifecycle-ko-dark-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / STATE MACHINE</text>
+<text x="40" y="88" class="title" text-anchor="start">리스 · 활성, 만료, 해제</text>
+<path d="M 128,208 L 288,208" data-edge-id="e1" data-from="__start_1" data-to="Active" data-label="oah start, 또는 oah start --packet" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 480,160 L 480,128 Q 480,120 488,120 L 640,120 Q 648,120 648,128 L 648,200 Q 648,208 640,208 L 576,208" data-edge-id="e13" data-from="Active" data-to="Active" data-label="oah renew, oah start --packet(올린 Revision), oah log" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 432,256 L 432,360" data-edge-id="e9" data-from="Active" data-to="Stale" data-label="TTL 경과, 기본 4시간" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 288,224 L 240,224 Q 232,224 232,232 L 232,600 Q 232,608 240,608 L 288,608" data-edge-id="e7" data-from="Active" data-to="Released" data-label="oah release --reason" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 432,456 L 432,560" data-edge-id="e8" data-from="Stale" data-to="Released" data-label="oah release --reason" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 576,408 L 752,408" data-edge-id="e10" data-from="Stale" data-to="__end_1" data-label="다음 oah start가 정리" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<path d="M 432,656 L 432,712" data-edge-id="e12" data-from="Released" data-to="__end_3" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<rect x="168" y="180" width="80" height="20" rx="2" fill="#2d3142"/>
+<text x="208" y="195" class="arrow-label" text-anchor="middle">A 시작</text>
+<rect x="506" y="92" width="116" height="20" rx="2" fill="#2d3142"/>
+<text x="564" y="107" class="arrow-label" text-anchor="middle">B 활성 유지</text>
+<rect x="440" y="297" width="96" height="20" rx="2" fill="#2d3142"/>
+<text x="488" y="312" class="arrow-label" text-anchor="middle">C 만료</text>
+<rect x="120" y="401" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="172" y="416" class="arrow-label" text-anchor="middle">D 해제</text>
+<rect x="440" y="497" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="492" y="512" class="arrow-label" text-anchor="middle">E 해제</text>
+<rect x="620" y="380" width="88" height="20" rx="2" fill="#2d3142"/>
+<text x="664" y="395" class="arrow-label" text-anchor="middle">F 정리</text>
+<g data-node-id="__start_1" data-source-label="[start]">
+<circle cx="120.0" cy="208.0" r="6" fill="#f5f5f5"/>
+</g>
+<g data-node-id="Active" data-source-label="활성">
+<rect x="288" y="160" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="160" width="288" height="96" rx="8" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="304" y="176" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="187" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="218" class="node" text-anchor="start">활성</text>
+</g>
+<g data-node-id="Stale" data-source-label="STALE (만료)">
+<rect x="288" y="360" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="360" width="288" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="304" y="376" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="387" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="418" class="node" text-anchor="start">STALE (만료)</text>
+</g>
+<g data-node-id="Released" data-source-label="해제됨">
+<rect x="288" y="560" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="560" width="288" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="304" y="576" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="587" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="618" class="node" text-anchor="start">해제됨</text>
+</g>
+<g data-node-id="__end_1" data-source-label="[end]">
+<circle cx="760.0" cy="408.0" r="8" fill="#2d3142" stroke="#f5f5f5" stroke-width="1.2"/>
+<circle cx="760.0" cy="408.0" r="5" fill="#f5f5f5"/>
+</g>
+<g data-node-id="__end_3" data-source-label="[end]">
+<circle cx="432.0" cy="720.0" r="8" fill="#2d3142" stroke="#f5f5f5" stroke-width="1.2"/>
+<circle cx="432.0" cy="720.0" r="5" fill="#f5f5f5"/>
+</g>
+<text x="40" y="796" class="zone-label" text-anchor="start">전이 조건</text>
+<rect x="40" y="815" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="829" class="label" text-anchor="middle">A</text>
+<text x="80" y="829" class="prose" text-anchor="start">oah start, 또는 oah start --packet</text>
+<rect x="40" y="847" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="861" class="label" text-anchor="middle">B</text>
+<text x="80" y="861" class="prose" text-anchor="start">oah renew, oah start --packet(올린 Revision), oah log</text>
+<rect x="40" y="879" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="893" class="label" text-anchor="middle">C</text>
+<text x="80" y="893" class="prose" text-anchor="start">TTL 경과, 기본 4시간</text>
+<rect x="40" y="911" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="925" class="label" text-anchor="middle">D</text>
+<text x="80" y="925" class="prose" text-anchor="start">oah release --reason</text>
+<rect x="40" y="943" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="957" class="label" text-anchor="middle">E</text>
+<text x="80" y="957" class="prose" text-anchor="start">oah release --reason</text>
+<rect x="40" y="975" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="989" class="label" text-anchor="middle">F</text>
+<text x="80" y="989" class="prose" text-anchor="start">다음 oah start가 정리</text>
+<text x="56" y="1032" class="prose" text-anchor="start">oah status는 읽기만 한다. 각 리스를 active 또는 STALE로 보여 준다.</text>
+<text x="56" y="1076" class="prose" text-anchor="start">start는 겹치면 OAH_LEASE_CONFLICT, 내 작업이면 OAH_LEASE_EXISTS로 거절된다.</text>
+<text x="56" y="1120" class="prose" text-anchor="start">STALE 리스의 renew는 OAH_LEASE_EXPIRED로 거절된다.</text>
+<text x="56" y="1164" class="prose" text-anchor="start">다른 에이전트의 리스 release에는 --force가 필요하다(없으면 OAH_LEASE_NOT_YOURS).</text>
+<text x="56" y="1200" class="prose" text-anchor="start">활성과 만료 리스는 다음 그림의 완료 검사로 이어진다.</text>
+<line x1="40" y1="1228" x2="840" y2="1228" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1256" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="1246" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1256" class="prose" text-anchor="start">활성 리스</text>
+<path d="M 268,1252 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-leases-lifecycle-ko-dark-arrow)"/>
+<text x="304" y="1256" class="prose" text-anchor="start">상태 전이</text>
+<circle cx="420" cy="1252" r="5" fill="#f5f5f5"/>
+<text x="444" y="1256" class="prose" text-anchor="start">시작·끝</text>
+</svg>

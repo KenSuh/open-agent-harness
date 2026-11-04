@@ -1,111 +1,185 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>작업에서 증거까지</title>
-  <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; background: #0d1117; color: #f0f6fc; padding: 2rem; }
-.frame { max-width: 840px; width: 100%; min-width: 0; margin: auto; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>작업에서 증거까지</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 1040px; width: 100%; min-width: 0; margin: auto; }
 .diagram-container { width: 100%; overflow-x: auto; }
-h1 { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 600; margin-bottom: 1rem; }
-.eyebrow { font-size: 12px; color: #c9d1d9; margin-bottom: .5rem; }
-svg { width: 100%; min-width: 840px; display: block; font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; }
-.title { font-size: 28px; font-weight: 600; }
-.group { font-size: 14px; font-weight: 600; }
-.node { font-size: 12px; font-weight: 600; }
-.label { font-size: 12px; font-weight: 400; }
-.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
-.arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+h1 { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 1040px; display: block; }
+text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
 @media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
 </style>
 </head>
 <body>
 <!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
-     See ../../../THIRD_PARTY_NOTICES.md and style-guide.md. Static, offline, fit preset. -->
-<div class="frame">
-<p class="eyebrow">Architecture · oah</p>
-<h1>작업에서 증거까지</h1>
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
 <div class="diagram-container">
-<svg viewBox="0 0 840 848" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-build-ko-dark-title architecture-build-ko-dark-desc">
+<svg viewBox="0 0 1040 1388" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-build-ko-dark-title architecture-build-ko-dark-desc" data-diagram-type="Architecture" data-size="fit">
 <title id="architecture-build-ko-dark-title">작업에서 증거까지</title>
-<desc id="architecture-build-ko-dark-desc">사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 선택형 TypeSafe Jev가 스킬 순서를 판정하고 증거 게이트는 영향 지도와 위키에 연결된다.</desc>
+<desc id="architecture-build-ko-dark-desc">사용자의 패킷이 리스, 사전 점검과 배정을 거쳐 Claude Code로 가며 권장 선택형 TypeSafe Jev가 스킬 순서와 작업 난이도를 판정해 최저 기준 안에서 tier를 바꿀 수 있고 증거 게이트는 영향 지도와 위키에 연결된다.</desc>
 <defs>
-<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
-</marker>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect x="0" y="0" width="840" height="848" fill="#0d1117"/>
-<text x="40" y="64" class="title" text-anchor="start" fill="#f0f6fc">작업에서 증거까지</text>
-<rect x="40" y="184" width="488" height="576" rx="8" fill="#f0f6fc" fill-opacity="0.02" stroke="#30363d" stroke-width="1"/>
-<text x="56" y="204" class="node" text-anchor="start" fill="#c9d1d9">oah</text>
-<rect x="568" y="296" width="232" height="112" rx="8" fill="#f0f6fc" fill-opacity="0.02" stroke="#30363d" stroke-width="1"/>
-<text x="584" y="316" class="node" text-anchor="start" fill="#c9d1d9">선택형 AI 판정기</text>
-<rect x="568" y="472" width="232" height="112" rx="8" fill="#f0f6fc" fill-opacity="0.02" stroke="#30363d" stroke-width="1"/>
-<text x="584" y="492" class="node" text-anchor="start" fill="#c9d1d9">직접 설치·로그인한 엔진</text>
-<line x1="300" y1="152" x2="300" y2="224" data-from="you" data-to="intent" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<line x1="300" y1="280" x2="300" y2="320" data-from="intent" data-to="lease" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<line x1="300" y1="376" x2="300" y2="408" data-from="lease" data-to="route" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<path d="M 416,432 H 676 Q 684,432 684,424 V 392" data-from="route" data-to="jev" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
-<path d="M 416,472 H 552 Q 560,472 560,480 V 532 Q 560,540 568,540 H 584" data-from="route" data-to="claude" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<path d="M 684,568 V 620 Q 684,628 676,628 H 416" data-from="claude" data-to="gates" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<line x1="160" y1="628" x2="184" y2="628" data-from="impact" data-to="gates" fill="none" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow)"/>
-<line x1="300" y1="656" x2="300" y2="696" data-from="gates" data-to="wiki" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
-<rect x="452" y="404" width="96" height="20" rx="2" fill="#0d1117"/>
-<text x="500" y="419" class="arrow-label" text-anchor="middle" fill="#c9d1d9">스킬 순서</text>
-<rect x="440" y="444" width="120" height="20" rx="2" fill="#0d1117"/>
-<text x="500" y="459" class="arrow-label" text-anchor="middle" fill="#c9d1d9">지시문·스킬</text>
-<g data-node-id="you">
-<rect x="184" y="96" width="232" height="56" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="120" class="node" text-anchor="middle" fill="#f0f6fc">사용자 또는 리드 Claude Code</text>
-<text x="300" y="140" class="label" text-anchor="middle" fill="#c9d1d9">작업을 적는다</text>
+<rect width="1040" height="1388" fill="#2d3142"/>
+<rect width="1040" height="1388" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / ARCHITECTURE</text>
+<text x="40" y="88" class="title" text-anchor="start">작업에서 증거까지</text>
+<rect x="40" y="264" width="560" height="928" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="oah" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="288" class="zone-label" text-anchor="start">oah</text>
+<rect x="648" y="280" width="352" height="256" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="judge" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="664" y="304" class="zone-label" text-anchor="start">권장 선택형 AI 판정기</text>
+<rect x="648" y="592" width="352" height="192" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="engines" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="664" y="616" class="zone-label" text-anchor="start">설치하고 로그인한 엔진</text>
+<path d="M 316,240 L 316,312" data-edge-id="a1" data-from="you" data-to="intent" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 316,424 L 316,472" data-edge-id="a2" data-from="intent" data-to="lease" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 316,584 L 316,632" data-edge-id="a3" data-from="lease" data-to="route" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 552,680 L 616,680 Q 624,680 624,672 L 624,584 Q 624,576 632,576 L 816,576 Q 824,576 824,568 L 824,504" data-edge-id="a4" data-from="route" data-to="jev" data-label="스킬 순서·난이도" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 552,736 L 696,736" data-edge-id="a5" data-from="route" data-to="claude" data-label="지시문·스킬" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 836,760 L 836,936 Q 836,944 828,944 L 552,944" data-edge-id="a6" data-from="claude" data-to="gates" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 272,936 L 320,936" data-edge-id="a7" data-from="impact" data-to="gates" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 436,1008 L 436,1056" data-edge-id="a8" data-from="gates" data-to="wiki" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="614" y="548" width="200" height="20" rx="2" fill="#2d3142"/>
+<text x="714" y="563" class="arrow-label" text-anchor="middle">스킬 순서·난이도</text>
+<rect x="562" y="708" width="124" height="20" rx="2" fill="#2d3142"/>
+<text x="624" y="723" class="arrow-label" text-anchor="middle">지시문·스킬</text>
+<g data-node-id="you" data-source-label="사용자 또는 리드 Claude Code 작업을 적는다">
+<rect x="80" y="144" width="472" height="96" rx="6" fill="#2d3142"/>
+<rect x="80" y="144" width="472" height="96" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="96" y="160" width="36" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
+<text x="114" y="171" class="tag" text-anchor="middle">LEAD</text>
+<text x="536" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<g data-node-id="intent">
-<rect x="184" y="224" width="232" height="56" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="248" class="node" text-anchor="middle" fill="#f0f6fc">패킷과 의도</text>
-<text x="300" y="268" class="label" text-anchor="middle" fill="#c9d1d9">목표와 성공 조건</text>
+<text x="96" y="202" class="node" text-anchor="start">사용자 또는 리드 Claude Code</text>
+<text x="96" y="222" class="sub" text-anchor="start">작업을 적는다</text>
 </g>
-<g data-node-id="lease">
-<rect x="184" y="320" width="232" height="56" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="344" class="node" text-anchor="middle" fill="#f0f6fc">리스와 사전 점검</text>
-<text x="300" y="364" class="label" text-anchor="middle" fill="#c9d1d9">경로를 맡고 기준점을 확인한다</text>
+<g data-node-id="intent" data-source-label="패킷과 의도 목표와 성공 조건">
+<rect x="80" y="312" width="472" height="112" rx="6" fill="#2d3142"/>
+<rect x="80" y="312" width="472" height="112" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="328" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="120" y="339" class="tag" text-anchor="middle">INTENT</text>
+<text x="536" y="350" class="ghost" text-anchor="end">02</text>
 </g>
-<g data-node-id="route">
-<rect x="184" y="408" width="232" height="88" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="432" class="node" text-anchor="middle" fill="#f0f6fc">난이도·모델·스킬</text>
-<text x="300" y="456" class="label" text-anchor="middle" fill="#c9d1d9">규칙이 tier와 추론 강도를 정한다</text>
-<text x="300" y="476" class="label" text-anchor="middle" fill="#c9d1d9">tier도 지시문에 담는다</text>
+<text x="96" y="370" class="node" text-anchor="start">패킷과 의도</text>
+<text x="96" y="390" class="sub" text-anchor="start">목표와 성공 조건</text>
 </g>
-<g data-node-id="jev">
-<rect x="584" y="336" width="200" height="56" rx="6" fill="#161b22" stroke="#a371f7" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="684" y="360" class="node" text-anchor="middle" fill="#a371f7">TypeSafe Jev(선택)</text>
-<text x="684" y="380" class="label" text-anchor="middle" fill="#c9d1d9">선택한 스킬의 순서를 바꾼다</text>
+<g data-node-id="lease" data-source-label="리스와 사전 점검 경로를 맡고 기준점을 확인한다">
+<rect x="80" y="472" width="472" height="112" rx="6" fill="#2d3142"/>
+<rect x="80" y="472" width="472" height="112" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="488" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="499" class="tag" text-anchor="middle">LEASE</text>
+<text x="536" y="510" class="ghost" text-anchor="end">03</text>
 </g>
-<g data-node-id="claude">
-<rect x="584" y="512" width="200" height="56" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
-<text x="684" y="536" class="node" text-anchor="middle" fill="#d29922">Claude Code</text>
-<text x="684" y="556" class="label" text-anchor="middle" fill="#c9d1d9">첫 구현을 만든다</text>
+<text x="96" y="530" class="node" text-anchor="start">리스와 사전 점검</text>
+<text x="96" y="550" class="sub" text-anchor="start">경로를 맡고 기준점을 확인한다</text>
 </g>
-<g data-node-id="impact">
-<rect x="56" y="600" width="104" height="56" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="108" y="624" class="node" text-anchor="middle" fill="#f0f6fc">영향 지도</text>
-<text x="108" y="644" class="label" text-anchor="middle" fill="#c9d1d9">pin / exec</text>
+<g data-node-id="route" data-source-label="난이도·모델·스킬 규칙이 tier와 추론 강도를 정한다 Jev가 최저 기준 안에서 tier를 바꿀 수 있다 tier도 지시문에 담는다">
+<rect x="80" y="632" width="472" height="156" rx="6" fill="#2d3142"/>
+<rect x="80" y="632" width="472" height="156" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="96" y="648" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="118" y="659" class="tag" text-anchor="middle">ROUTE</text>
+<text x="536" y="670" class="ghost" text-anchor="end">04</text>
 </g>
-<g data-node-id="gates">
-<rect x="184" y="600" width="232" height="56" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="624" class="node" text-anchor="middle" fill="#f0f6fc">증거 게이트</text>
-<text x="300" y="644" class="label" text-anchor="middle" fill="#c9d1d9">명령과 기록된 결과</text>
+<text x="96" y="690" class="node" text-anchor="start">난이도·모델·스킬</text>
+<text x="96" y="710" class="sub" text-anchor="start">규칙이 tier와 추론 강도를 정한다</text>
+<text x="96" y="728" class="sub" text-anchor="start">Jev가 최저 기준 안에서</text>
+<text x="96" y="746" class="sub" text-anchor="start">tier를 바꿀 수 있다</text>
+<text x="96" y="764" class="sub" text-anchor="start">tier도 지시문에 담는다</text>
 </g>
-<g data-node-id="wiki">
-<rect x="184" y="696" width="232" height="48" rx="6" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="300" y="716" class="node" text-anchor="middle" fill="#f0f6fc">프로젝트 위키</text>
-<text x="300" y="732" class="label" text-anchor="middle" fill="#c9d1d9">결정과 이유</text>
+<g data-node-id="jev" data-source-label="TypeSafe Jev(선택) 선택한 스킬의 순서를 바꾼다 작업의 난이도를 판정한다">
+<rect x="672" y="352" width="304" height="152" rx="6" fill="#2d3142"/>
+<rect x="672" y="352" width="304" height="152" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<g aria-hidden="true">
+<rect x="688" y="368" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="704" y="379" class="tag" text-anchor="middle">JEV</text>
+<text x="960" y="390" class="ghost" text-anchor="end">05</text>
+<g transform="translate(896,364)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
 </g>
-<line x1="40" y1="788" x2="800" y2="788" stroke="#30363d" stroke-width="1"/>
-<text x="40" y="812" class="label" text-anchor="start" fill="#c9d1d9">실선은 작업과 증거, 점선은 선택 연결이다. 게이트와 영향 지도는 다음 그림으로 이어진다.</text>
+<text x="688" y="410" class="node" text-anchor="start">TypeSafe Jev(선택)</text>
+<text x="688" y="430" class="sub" text-anchor="start">선택한 스킬의 순서를 바꾼다</text>
+<text x="688" y="448" class="sub" text-anchor="start">작업의 난이도를 판정한다</text>
+</g>
+<g data-node-id="claude" data-source-label="Claude Code 첫 구현을 만든다">
+<rect x="696" y="648" width="280" height="112" rx="6" fill="#2d3142"/>
+<rect x="696" y="648" width="280" height="112" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="712" y="664" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="736" y="675" class="tag" text-anchor="middle">CLAUDE</text>
+<text x="960" y="686" class="ghost" text-anchor="end">06</text>
+<g transform="translate(896,660)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+</g>
+<text x="712" y="706" class="node" text-anchor="start">Claude Code</text>
+<text x="712" y="726" class="sub" text-anchor="start">첫 구현을 만든다</text>
+</g>
+<g data-node-id="impact" data-source-label="영향 지도 pin / exec">
+<rect x="64" y="880" width="208" height="112" rx="6" fill="#2d3142"/>
+<rect x="64" y="880" width="208" height="112" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="80" y="896" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="104" y="907" class="tag" text-anchor="middle">IMPACT</text>
+<text x="256" y="918" class="ghost" text-anchor="end">07</text>
+</g>
+<text x="80" y="938" class="node" text-anchor="start">영향 지도</text>
+<text x="80" y="958" class="sub technical" text-anchor="start">pin / exec</text>
+</g>
+<g data-node-id="gates" data-source-label="증거 게이트 명령과 기록된 결과">
+<rect x="320" y="880" width="232" height="128" rx="6" fill="#2d3142"/>
+<rect x="320" y="880" width="232" height="128" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="336" y="896" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="358" y="907" class="tag" text-anchor="middle">GATES</text>
+<text x="536" y="918" class="ghost" text-anchor="end">08</text>
+</g>
+<text x="336" y="938" class="node" text-anchor="start">증거 게이트</text>
+<text x="336" y="958" class="sub" text-anchor="start">명령과 기록된 결과</text>
+</g>
+<g data-node-id="wiki" data-source-label="프로젝트 위키 결정과 이유">
+<rect x="320" y="1056" width="232" height="112" rx="6" fill="#2d3142"/>
+<rect x="320" y="1056" width="232" height="112" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="336" y="1072" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="354" y="1083" class="tag" text-anchor="middle">WIKI</text>
+<text x="536" y="1094" class="ghost" text-anchor="end">09</text>
+</g>
+<text x="336" y="1114" class="node" text-anchor="start">프로젝트 위키</text>
+<text x="336" y="1134" class="sub" text-anchor="start">결정과 이유</text>
+</g>
+<text x="56" y="1244" class="prose" text-anchor="start">게이트와 영향 지도는 반영 그림으로 이어진다. 점선은 선택 경로다.</text>
+<line x1="40" y1="1308" x2="1000" y2="1308" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1336" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="1326" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1336" class="prose" text-anchor="start">증거 게이트</text>
+<path d="M 284,1332 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="320" y="1336" class="prose" text-anchor="start">작업·증거</text>
+<path d="M 460,1332 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<text x="496" y="1336" class="prose" text-anchor="start">선택 경로</text>
 </svg>
 </div>
-</div>
+</main>
 </body>
 </html>

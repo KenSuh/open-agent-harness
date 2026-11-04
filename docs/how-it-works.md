@@ -3,7 +3,7 @@
 [README](../README.md) · [Commands](commands.md) · [한국어](ko/how-it-works.md)
 
 `oah` is a small command-line tool that makes Claude Code and Codex CLI work as one team on your own
-repository, with TypeSafe Jev as an optional AI judge. It is for developers and small teams who already
+repository, with TypeSafe Jev as a recommended, optional judge. It is for developers and small teams who already
 use git and pull requests and want production-grade review discipline on their own machine. It was made
 first of all for people dissatisfied with AI coding results or setting up their first harness. The released
 version still expects familiarity with git and pull requests.
@@ -13,8 +13,8 @@ It drives Claude Code and Codex and keeps their work records; you install and si
 
 ## How the parts fit
 
-A **packet** is the written task and its success conditions. A **lease** is a temporary claim on the files
-that task may change. **Gates** are commands that check success and record evidence. The **impact map**
+A **packet** is the written task and its success conditions. A **lease** reserves the paths
+that task changes; an overlapping lease is refused. **Gates** are commands that check success and record evidence. The **impact map**
 lists what a change could affect and what to re-check. The **project wiki** keeps decisions and their reasons
 beside the code. A **tier** is a difficulty level that guides model choice and reasoning effort; **skills**
 are instructions loaded by the AI. **CI** is the automated testing attached to a push or pull request.
@@ -22,7 +22,7 @@ are instructions loaded by the AI. **CI** is the automated testing attached to a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
-  <img src="assets/how-it-works-light.svg" alt="You set the goal, Claude Code implements it, Codex CLI reviews and corrects until the review converges, and you confirm landing after the checks, with optional TypeSafe Jev helping judge difficulty, model choice and skill order." width="100%">
+  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
 Two AI sessions can edit the same files, call work done without evidence, or keep reviewing without an
@@ -32,7 +32,7 @@ to connect preparation with review and landing. Dashed arrows mark optional conn
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-build-dark.svg">
-  <img src="assets/architecture-build-light.svg" alt="You send a packet through leases, preflight and routing to Claude Code, with optional TypeSafe Jev skill judging and evidence gates linked to the impact map and wiki." width="100%">
+  <img src="assets/architecture-build-light.svg" alt="You send a packet through leases, preflight and routing to Claude Code, with recommended optional TypeSafe Jev reordering skills and judging task difficulty so the tier can change within its floor, and evidence gates linked to the impact map and wiki." width="100%">
 </picture>
 
 <picture>
@@ -43,8 +43,8 @@ to connect preparation with review and landing. Dashed arrows mark optional conn
 | Part | How it connects to the work |
 |---|---|
 | You, or your Claude Code session as lead | Write the packet and its intent: the goal and success conditions. The intent travels unchanged into the lease and every stage's brief. |
-| Leases and preflight | Claim paths after checking the base is fresh; overlapping sessions are refused. |
-| Difficulty, models and skills | Readable rules score the task and choose a tier, model, effort and skills. Claude receives that brief, tier and skills. Optional Jev judgements are described below. |
+| Leases and preflight | Reserve the paths the task changes after checking the base is fresh; overlapping leases are refused. |
+| Difficulty, models and skills | Readable rules score the task and choose a tier, model, effort and skills. Claude receives that brief, tier and skills. Recommended, optional Jev judgements are described below. |
 | Claude Code | Writes the first implementation, which then needs evidence gates. |
 | Evidence gates | Commands and recorded results prove completion before review. The impact map's `pin` and `exec` bindings identify gates that name or run a changed file. |
 | Project wiki | Keeps the decisions from the work and its evidence. When the configured wiki folder exists, `oah finish` checks its maintenance record. |
@@ -57,7 +57,7 @@ to connect preparation with review and landing. Dashed arrows mark optional conn
 
 ## Jev, the optional judge
 
-TypeSafe Jev is recommended but optional. `oah init` asks once whether to enable it; you can also enable
+TypeSafe Jev is the recommended, optional judge. `oah init` asks once whether to enable it; you can also enable
 it later in the config. It needs your own TypeSafe account and key. Without it, fixed rules decide.
 `oah doctor` does not check Jev's state; ranking results say `rerank=used` or `rerank=unused(<reason>)`.
 
@@ -82,14 +82,14 @@ as unreleased; their presence there does not make them available in v0.2.0.
   override is recorded.
 - **Difficulty picks the model and effort.** Fixed rules score four axes and choose a tier; optional Jev judging on main can adjust it within its floor; an effort the CLI
   cannot prove is recorded as unverified, and a lower launch effort fails (`OAH_EFFORT_DOWNGRADED`).
-- **Skills chosen for the task,** each with a reason. An optional judge, TypeSafe Jev, only re-orders that list.
+- **Skills chosen for the task,** each with a reason. The recommended, optional judge, TypeSafe Jev, only re-orders that list.
 - **An impact map** lists the gates and commands that pin or run a changed file, so you re-run exactly those.
 - **A project wiki** records decisions next to the code, and `oah finish` checks that it was maintained.
 - **Evidence gates.** A task is done when its gates pass with recorded evidence, not when an agent says so.
   Gates watch repository files and the run environment only. They do not notice changes to external services or
   ignored untracked files, so check those separately.
 - **Intent that travels** from the packet into the lease and the brief of every call.
-- **Leases and preflight** keep parallel sessions off each other's files and off a stale base.
+- **Leases** reserve the paths a task changes and refuse overlapping leases. **Preflight** checks that the base is fresh.
 - **Reviews that converge.** Codex reviews a read-only snapshot, corrections are bound to their findings, and a
   repeat or a design question stops for your decision.
 - **No secrets in the repository.** Keys are read at runtime only; `oah land` requires a gitleaks scan.
@@ -139,6 +139,11 @@ whole loop with real commands, in about 20 minutes.
 
 ## The loop
 
+Ask your AI in plain words in the project; the installed rules and each command’s next-step
+message guide it through the commands below.
+You ask about the result, answer when a repeated problem or design choice stops the loop, and confirm before landing.
+The tables show what runs underneath that conversation; where a row says “you”, your AI usually runs it for you.
+
 ### Prepare and implement
 
 <picture>
@@ -148,12 +153,12 @@ whole loop with real commands, in about 20 minutes.
 
 | Exchange | What happens |
 |---|---|
-| 1. Task | You run `oah packet new T` and write the intent and gates. |
-| 2. Route | oah provides the tier, model, effort and skills for each stage. |
-| 3. Start | You run `oah preflight`, then `oah start --packet`. |
-| 4. Build | `oah call claude --stage initial` sends the work to Claude Code. |
-| 5. Code | Claude returns the implementation to you. |
-| 6. Evidence | You run `oah wiki maintain`, then `oah gates check --approve`, then commit. |
+| 1.<br>Task | You run `oah packet new T` and write the intent and gates. |
+| 2.<br>Route | oah provides the tier, model, effort and skills for each stage. |
+| 3.<br>Start | You run `oah preflight`, then `oah start --packet`. |
+| 4.<br>Build | `oah call claude --stage initial` sends the work to Claude Code. |
+| 5.<br>Code | Claude returns the implementation to you. |
+| 6.<br>Evidence | You run `oah wiki maintain`, then `oah gates check --approve`, then commit. |
 
 ### Review, correct and land
 
@@ -164,15 +169,15 @@ whole loop with real commands, in about 20 minutes.
 
 | Exchange | What happens |
 |---|---|
-| 7. Review | `oah review` sends Codex a clean, read-only snapshot. |
-| 8. Findings | Codex returns a receipt with its verdict and findings. |
-| 9. Fix | `oah fix` asks Codex to correct P0 and P1 findings. |
-| 10. Diff | Codex returns a diff for you to inspect. |
-| 11. Bind | Maintain the wiki, run approved gates, commit, then `oah fix --bind`. Repeat review until it converges; a repeated problem or design question stops for your decision. |
-| 12. Finish | `oah finish` checks scope, gates, wiki and the return. |
-| 13. Push | You push and open a pull request. |
-| 14. Confirm | Run `oah land --check`, then `oah land --merge` after you confirm. |
-| 15. Land | oah fast-forwards the default branch to the reviewed head. |
+| 7.<br>Review | `oah review` sends Codex a clean, read-only snapshot. |
+| 8.<br>Findings | Codex returns a receipt with its verdict and findings. |
+| 9.<br>Fix | `oah fix` asks Codex to correct P0 and P1 findings. |
+| 10.<br>Diff | Codex returns a diff for you to inspect. |
+| 11.<br>Bind | Maintain the wiki, run approved gates, commit, then `oah fix --bind`. Repeat review until it converges; a repeated problem or design question stops for your decision. |
+| 12.<br>Finish | `oah finish` checks scope, gates, wiki and the return. |
+| 13.<br>Push | You push and open a pull request. |
+| 14.<br>Confirm | Run `oah land --check`, then `oah land --merge` after you confirm. |
+| 15.<br>Land | oah fast-forwards the default branch to the reviewed head. |
 
 ### Commands and guarantees
 

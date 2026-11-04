@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 1040" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="features-light-title features-light-desc" data-diagram-type="Architecture" data-size="fit" id="features-light-root">
+<title id="features-light-title">What oah keeps together</title>
+<desc id="features-light-desc">The impact map, path-reserving leases and the recommended, optional TypeSafe Jev judge support the Claude Code build and Codex CLI review loop, gates and the wiki keep evidence and decisions, overlapping leases are refused, and you ask, answer decisions and confirm before landing, with Jev difficulty-based model choice on unreleased main.</desc>
+<defs>
+      <style>#features-light-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #2d3142; }
+      #features-light-root .diagram-container { width: 100%; overflow-x: auto; }
+      #features-light-root text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #2d3142; }
+      #features-light-root .title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+      #features-light-root .node { font-size: 16px; font-weight: 600; }
+      #features-light-root .sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #features-light-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #features-light-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+      #features-light-root .prose { font-size: 12px; font-weight: 400; fill: #4f5d75; }
+      #features-light-root .zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #4f5d75; }
+      #features-light-root .arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+      #features-light-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #4f5d75; }
+      #features-light-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #2d3142; opacity: .06; }
+      @media print {
+#features-light-root .diagram-container { overflow-x: visible; }
+}</style>
+<pattern id="features-light-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity=".10"/></pattern>
+<marker id="features-light-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="features-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="features-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="960" height="1040" fill="#f5f5f5"/>
+<rect width="960" height="1040" fill="url(#features-light-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / ARCHITECTURE</text>
+<text x="40" y="88" class="title" text-anchor="start">What oah keeps together</text>
+<rect x="40" y="136" width="880" height="248" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="160" class="zone-label" text-anchor="start">Before work · know the scope</text>
+<rect x="40" y="672" width="880" height="216" rx="8" fill="#2d3142" stroke="#2d3142" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="696" class="zone-label" text-anchor="start">Keep the evidence and the reasons</text>
+<path d="M 180,328 L 180,400 Q 180,408 188,408 L 372,408 Q 380,408 380,416 L 380,448" data-edge-id="f1" data-from="lease" data-to="loop" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)"/>
+<path d="M 480,308 L 480,448" data-edge-id="f2" data-from="impact" data-to="loop" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)"/>
+<path d="M 780,352 L 780,400 Q 780,408 772,408 L 588,408 Q 580,408 580,416 L 580,448" data-edge-id="f3" data-from="jev" data-to="loop" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#features-light-arrow)"/>
+<path d="M 400,584 L 400,728" data-edge-id="f4" data-from="loop" data-to="gates" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)"/>
+<path d="M 560,584 L 560,640 Q 560,648 568,648 L 712,648 Q 720,648 720,656 L 720,728" data-edge-id="f5" data-from="loop" data-to="wiki" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)"/>
+<path d="M 416,800 L 544,800" data-edge-id="f6" data-from="gates" data-to="wiki" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)" stroke-dasharray="5,4"/>
+<g data-node-id="lease" data-source-label="Leases Reserve paths this task changes; refuse overlapping leases.">
+<rect x="64" y="192" width="232" height="136" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="192" width="232" height="136" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="208" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="219" class="tag" text-anchor="middle">LEASE</text>
+<text x="280" y="230" class="ghost" text-anchor="end">01</text>
+<g transform="translate(216,204)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/> <path d="M11 11a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"/> <path d="M12 12l0 2.5"/></g></g>
+</g>
+<text x="80" y="250" class="node" text-anchor="start">Leases</text>
+<text x="80" y="270" class="sub" text-anchor="start">Reserve paths this task</text>
+<text x="80" y="288" class="sub" text-anchor="start">changes; refuse overlapping</text>
+<text x="80" y="306" class="sub" text-anchor="start">leases.</text>
+</g>
+<g data-node-id="impact" data-source-label="Impact map See what a change touches and which checks to rerun.">
+<rect x="344" y="192" width="272" height="116" rx="6" fill="#f5f5f5"/>
+<rect x="344" y="192" width="272" height="116" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="360" y="208" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="384" y="219" class="tag" text-anchor="middle">IMPACT</text>
+<text x="600" y="230" class="ghost" text-anchor="end">02</text>
+<g transform="translate(536,204)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/> <path d="M21 21l-6 -6"/></g></g>
+</g>
+<text x="360" y="250" class="node" text-anchor="start">Impact map</text>
+<text x="360" y="270" class="sub" text-anchor="start">See what a change touches and</text>
+<text x="360" y="288" class="sub" text-anchor="start">which checks to rerun.</text>
+</g>
+<g data-node-id="jev" data-source-label="TypeSafe Jev Recommended, optional judge Judges difficulty → tier. Tier picks the model. Re-orders chosen skills. No key? Rules decide.">
+<rect x="664" y="192" width="232" height="160" rx="6" fill="#f5f5f5"/>
+<rect x="664" y="192" width="232" height="160" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<g aria-hidden="true">
+<rect x="680" y="208" width="32" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="696" y="219" class="tag" text-anchor="middle">JEV</text>
+<text x="880" y="230" class="ghost" text-anchor="end">03</text>
+<g transform="translate(816,204)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+</g>
+<text x="680" y="250" class="node" text-anchor="start">TypeSafe Jev</text>
+<text x="680" y="270" class="sub" text-anchor="start">Recommended, optional judge</text>
+<text x="680" y="286" class="sub" text-anchor="start">Judges difficulty → tier.</text>
+<text x="680" y="302" class="sub" text-anchor="start">Tier picks the model.</text>
+<text x="680" y="318" class="sub" text-anchor="start">Re-orders chosen skills.</text>
+<text x="680" y="334" class="sub" text-anchor="start">No key? Rules decide.</text>
+</g>
+<g data-node-id="loop" data-source-label="Build and review Claude Code builds. Codex CLI reviews and corrects. A repeated problem or design choice pauses the loop for your answer.">
+<rect x="280" y="448" width="400" height="136" rx="6" fill="#f5f5f5"/>
+<rect x="280" y="448" width="400" height="136" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<g aria-hidden="true">
+<rect x="296" y="464" width="88" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="340" y="475" class="tag" text-anchor="middle">CLAUDE / CODEX</text>
+<text x="664" y="486" class="ghost" text-anchor="end">04</text>
+<g transform="translate(600,460)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
+</g>
+<text x="296" y="506" class="node" text-anchor="start">Build and review</text>
+<text x="296" y="526" class="sub" text-anchor="start">Claude Code builds. Codex CLI reviews and corrects.</text>
+<text x="296" y="544" class="sub" text-anchor="start">A repeated problem or design choice</text>
+<text x="296" y="562" class="sub" text-anchor="start">pauses the loop for your answer.</text>
+</g>
+<g data-node-id="gates" data-source-label="Gates Turn success checks into commands and recorded results.">
+<rect x="64" y="728" width="352" height="116" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="728" width="352" height="116" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="744" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="755" class="tag" text-anchor="middle">GATES</text>
+<text x="400" y="766" class="ghost" text-anchor="end">05</text>
+<g transform="translate(336,740)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/></g></g>
+</g>
+<text x="80" y="786" class="node" text-anchor="start">Gates</text>
+<text x="80" y="806" class="sub" text-anchor="start">Turn success checks into commands and</text>
+<text x="80" y="824" class="sub" text-anchor="start">recorded results.</text>
+</g>
+<g data-node-id="wiki" data-source-label="Project wiki Keep decisions and reasons for the next session.">
+<rect x="544" y="728" width="352" height="116" rx="6" fill="#f5f5f5"/>
+<rect x="544" y="728" width="352" height="116" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="560" y="744" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="578" y="755" class="tag" text-anchor="middle">WIKI</text>
+<text x="880" y="766" class="ghost" text-anchor="end">06</text>
+<g transform="translate(816,740)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/> <path d="M9 9l1 0"/> <path d="M9 13l6 0"/> <path d="M9 17l6 0"/></g></g>
+</g>
+<text x="560" y="786" class="node" text-anchor="start">Project wiki</text>
+<text x="560" y="806" class="sub" text-anchor="start">Keep decisions and reasons for the next</text>
+<text x="560" y="824" class="sub" text-anchor="start">session.</text>
+</g>
+<text x="56" y="916" class="prose" text-anchor="start">Jev difficulty is on unreleased main; confidence and minimum-level rules apply.</text>
+<text x="56" y="938" class="prose" text-anchor="start">You ask, answer when the AI stops for a decision, and confirm before landing.</text>
+<line x1="40" y1="960" x2="920" y2="960" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="988" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="978" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="988" class="prose" text-anchor="start">Build / review loop</text>
+<path d="M 320,984 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#features-light-arrow)"/>
+<text x="356" y="988" class="prose" text-anchor="start">Support / evidence</text>
+<path d="M 520,984 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#features-light-arrow)"/>
+<text x="556" y="988" class="prose" text-anchor="start">Recommended, optional judge / evidence</text>
+</svg>

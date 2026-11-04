@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Landing · CI and confirmation</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 1000px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 1000px; display: block; }
+text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 1000 1332" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-landing-checks-dark-title concepts-landing-checks-dark-desc" data-diagram-type="Flowchart" data-size="fit">
+<title id="concepts-landing-checks-dark-title">Landing · CI and confirmation</title>
+<desc id="concepts-landing-checks-dark-desc">Pull requests run the repository’s CI and secrets workflows, gh reads the exact HEAD checks for land, unverified CI needs a recorded head-specific exception, and merging rechecks and asks you before a fast-forward push of HEAD.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="1000" height="1332" fill="#2d3142"/>
+<rect width="1000" height="1332" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">Landing · CI and confirmation</text>
+<rect x="40" y="296" width="920" height="216" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="actions" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="320" class="zone-label" text-anchor="start">GitHub Actions in this repository</text>
+<path d="M 420,224 L 420,272 Q 420,280 412,280 L 408,280 Q 400,280 400,288 L 400,344" data-edge-id="e6" data-from="pr" data-to="tests" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 580,224 L 580,272 Q 580,280 588,280 L 732,280 Q 740,280 740,288 L 740,344" data-edge-id="e7" data-from="pr" data-to="secrets" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 260,480 L 260,560 Q 260,568 268,568 L 432,568 Q 440,568 440,576 L 440,656" data-edge-id="e8" data-from="tests" data-to="land" data-label="gh reads HEAD's check runs" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 740,464 L 740,584 Q 740,592 732,592 L 568,592 Q 560,592 560,600 L 560,656" data-edge-id="e9" data-from="secrets" data-to="land" data-label="gh reads HEAD's check runs" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 208,748 L 136,748 Q 128,748 128,756 L 128,912" data-edge-id="e10" data-from="land" data-to="exc" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 792,748 L 848,748 Q 856,748 856,756 L 856,912" data-edge-id="e11" data-from="land" data-to="landed" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="290" y="540" width="116" height="20" rx="2" fill="#2d3142"/>
+<text x="348" y="555" class="arrow-label" text-anchor="middle">A CHECK RUNS</text>
+<rect x="594" y="564" width="116" height="20" rx="2" fill="#2d3142"/>
+<text x="652" y="579" class="arrow-label" text-anchor="middle">B CHECK RUNS</text>
+<g data-node-id="pr" data-source-label="Pull request to main">
+<rect x="340" y="144" width="320" height="80" rx="6" fill="#2d3142"/>
+<rect x="340" y="144" width="320" height="80" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="356" y="160" width="28" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
+<text x="370" y="171" class="tag" text-anchor="middle">PR</text>
+</g>
+<text x="356" y="202" class="node" text-anchor="start">Pull request to main</text></g>
+<g data-node-id="tests" data-source-label="ci: tests, install, oah --version, privacy scan macOS and Windows, PRs to main except docs/** and *.md, manual run" data-parent="actions">
+<rect x="64" y="344" width="392" height="136" rx="6" fill="#2d3142"/>
+<rect x="64" y="344" width="392" height="136" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="360" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="94" y="371" class="tag" text-anchor="middle">CI</text>
+</g>
+<text x="80" y="402" class="node" text-anchor="start">ci:</text>
+<text x="80" y="422" class="sub" text-anchor="start">tests, install, oah --version, privacy scan</text>
+<text x="80" y="440" class="sub" text-anchor="start">macOS and Windows, PRs to main except docs/**</text>
+<text x="80" y="458" class="sub" text-anchor="start">and *.md, manual run</text>
+</g>
+<g data-node-id="secrets" data-source-label="secrets: gitleaks and privacy scan, full history every pull request and push, manual run" data-parent="actions">
+<rect x="544" y="344" width="392" height="120" rx="6" fill="#2d3142"/>
+<rect x="544" y="344" width="392" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="560" y="360" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="574" y="371" class="tag" text-anchor="middle">CI</text>
+</g>
+<text x="560" y="402" class="node" text-anchor="start">secrets:</text>
+<text x="560" y="422" class="sub" text-anchor="start">gitleaks and privacy scan, full history</text>
+<text x="560" y="440" class="sub" text-anchor="start">every pull request and push, manual run</text>
+</g>
+<g data-node-id="land" data-source-label="oah land --check, exact HEAD lease, intent, review, gates, impact, required-checks, fast-forward, scan, ci">
+<polygon points="500,632 792,748 500,864 208,748" fill="#2d3142"/>
+<polygon points="500,632 792,748 500,864 208,748" fill="#f08a59" fill-opacity=".10" stroke="#f08a59" stroke-width="1.2"/>
+<g aria-hidden="true">
+<rect x="460" y="668" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="482" y="679" class="tag" text-anchor="middle">CHECK</text>
+</g>
+<text x="500" y="712" class="node" text-anchor="middle">oah land --check, exact HEAD</text><text x="500" y="732" class="sub" text-anchor="middle">lease, intent, review, gates, impact,</text><text x="500" y="750" class="sub" text-anchor="middle">required-checks, fast-forward, scan, ci</text></g>
+<g data-node-id="exc" data-source-label="Unverified CI blocks: OAH_LAND_CI_UNVERIFIED unless --accept-unverified-ci reason, recorded for that head">
+<rect x="40" y="912" width="440" height="160" rx="6" fill="#2d3142"/>
+<rect x="40" y="912" width="440" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<g aria-hidden="true">
+<rect x="56" y="928" width="64" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="88" y="939" class="tag" text-anchor="middle">EXCEPTION</text>
+</g>
+<text x="56" y="970" class="node" text-anchor="start">Unverified CI blocks:</text><text x="56" y="990" class="node" text-anchor="start">OAH_LAND_CI_UNVERIFIED</text><text x="56" y="1010" class="sub" text-anchor="start">unless --accept-unverified-ci reason, recorded for</text><text x="56" y="1028" class="sub" text-anchor="start">that head</text></g>
+<g data-node-id="landed" data-source-label="oah land --merge checks again, you confirm, fast-forward push of HEAD">
+<rect x="560" y="912" width="400" height="120" rx="20" fill="#2d3142"/>
+<rect x="560" y="912" width="400" height="120" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="576" y="928" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="594" y="939" class="tag" text-anchor="middle">LAND</text>
+</g>
+<text x="576" y="970" class="node" text-anchor="start">oah land --merge</text>
+<text x="576" y="990" class="sub" text-anchor="start">checks again, you confirm,</text>
+<text x="576" y="1008" class="sub" text-anchor="start">fast-forward push of HEAD</text>
+</g>
+<text x="40" y="1124" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="1143" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1157" class="label" text-anchor="middle">A</text>
+<text x="80" y="1157" class="prose" text-anchor="start">gh reads HEAD's check runs</text>
+<rect x="40" y="1175" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1189" class="label" text-anchor="middle">B</text>
+<text x="80" y="1189" class="prose" text-anchor="start">gh reads HEAD's check runs</text>
+<text x="56" y="1224" class="prose" text-anchor="start">The pull request and secrets continue here from the local hooks figure.</text>
+<line x1="40" y1="1252" x2="960" y2="1252" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1280" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1270" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1280" class="prose" text-anchor="start">Landing checks</text>
+<path d="M 284,1276 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="320" y="1280" class="prose" text-anchor="start">Work / evidence</text>
+<path d="M 460,1276 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<text x="496" y="1280" class="prose" text-anchor="start">Recorded exception</text>
+</svg>
+</div>
+</main>
+</body>
+</html>

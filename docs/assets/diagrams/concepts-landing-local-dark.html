@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Landing · local hooks</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 1000px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 1000px; display: block; }
+text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 1000 1156" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-landing-local-dark-title concepts-landing-local-dark-desc" data-diagram-type="Flowchart" data-size="fit">
+<title id="concepts-landing-local-dark-title">Landing · local hooks</title>
+<desc id="concepts-landing-local-dark-desc">Opt-in local hooks check wiki commits, refresh the impact map, check for open leases and scan pushed commits when gitleaks is installed, while pushes feed secrets checks and pull requests and Claude has Stop and SessionStart hooks.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="1000" height="1156" fill="#2d3142"/>
+<rect width="1000" height="1156" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">Landing · local hooks</text>
+<rect x="40" y="136" width="920" height="568" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="local" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="160" class="zone-label" text-anchor="start">On your machine, all hooks opt-in</text>
+<rect x="40" y="768" width="448" height="192" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="actions" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="792" class="zone-label" text-anchor="start">GitHub Actions in this repository</text>
+<path d="M 176,264 L 176,336" data-edge-id="e1" data-from="gcommit" data-to="pc" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 320,224 L 456,224 Q 464,224 464,232 L 464,552 Q 464,560 456,560 L 416,560" data-edge-id="e2" data-from="gcommit" data-to="post" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 740,264 L 740,336" data-edge-id="e3" data-from="gpush" data-to="pp" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 544,440 L 512,440 Q 504,440 504,448 L 504,888 Q 504,896 496,896 L 464,896" data-edge-id="e4" data-from="pp" data-to="secrets" data-label="push" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 896,432 L 936,432 Q 944,432 944,440 L 944,816 Q 944,824 936,824 L 896,824" data-edge-id="e5" data-from="pp" data-to="pr" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="448" y="721" width="48" height="20" rx="2" fill="#2d3142"/>
+<text x="472" y="736" class="arrow-label" text-anchor="middle">PUSH</text>
+<g data-node-id="gcommit" data-source-label="git commit" data-parent="local">
+<rect x="64" y="184" width="256" height="80" rx="6" fill="#2d3142"/>
+<rect x="64" y="184" width="256" height="80" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="80" y="200" width="32" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
+<text x="96" y="211" class="tag" text-anchor="middle">GIT</text>
+</g>
+<text x="80" y="242" class="node" text-anchor="start">git commit</text>
+</g>
+<g data-node-id="pc" data-source-label="pre-commit wiki commit check" data-parent="local">
+<rect x="64" y="336" width="288" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="336" width="288" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="352" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="98" y="363" class="tag" text-anchor="middle">HOOK</text>
+</g>
+<text x="80" y="394" class="node" text-anchor="start">pre-commit</text>
+<text x="80" y="414" class="sub" text-anchor="start">wiki commit check</text>
+</g>
+<g data-node-id="post" data-source-label="post-commit, post-merge refresh the impact map" data-parent="local">
+<rect x="64" y="496" width="352" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="496" width="352" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="512" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="98" y="523" class="tag" text-anchor="middle">HOOK</text>
+</g>
+<text x="80" y="554" class="node" text-anchor="start">post-commit, post-merge</text>
+<text x="80" y="574" class="sub" text-anchor="start">refresh the impact map</text>
+</g>
+<g data-node-id="gpush" data-source-label="git push" data-parent="local">
+<rect x="584" y="184" width="312" height="80" rx="6" fill="#2d3142"/>
+<rect x="584" y="184" width="312" height="80" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="600" y="200" width="32" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
+<text x="616" y="211" class="tag" text-anchor="middle">GIT</text>
+</g>
+<text x="600" y="242" class="node" text-anchor="start">git push</text>
+</g>
+<g data-node-id="pp" data-source-label="pre-push lease open, active or stale? gitleaks installed: scan pushed commits otherwise warn and allow unscanned push" data-parent="local">
+<rect x="544" y="336" width="352" height="136" rx="6" fill="#2d3142"/>
+<rect x="544" y="336" width="352" height="136" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="560" y="352" width="36" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="578" y="363" class="tag" text-anchor="middle">HOOK</text>
+</g>
+<text x="560" y="394" class="node" text-anchor="start">pre-push</text>
+<text x="560" y="414" class="sub" text-anchor="start">lease open, active or stale?</text>
+<text x="560" y="432" class="sub" text-anchor="start">gitleaks installed: scan pushed commits</text>
+<text x="560" y="450" class="sub" text-anchor="start">otherwise warn and allow unscanned push</text>
+</g>
+<g data-node-id="cc" data-source-label="Claude Code Stop and SessionStart hooks" data-parent="local">
+<rect x="544" y="592" width="352" height="96" rx="6" fill="#2d3142"/>
+<rect x="544" y="592" width="352" height="96" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02"/>
+<g aria-hidden="true">
+<rect x="560" y="608" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="584" y="619" class="tag" text-anchor="middle">CLAUDE</text>
+</g>
+<text x="560" y="650" class="node" text-anchor="start">Claude Code</text>
+<text x="560" y="670" class="sub" text-anchor="start">Stop and SessionStart hooks</text>
+</g>
+<g data-node-id="pr" data-source-label="Pull request to main">
+<rect x="584" y="784" width="312" height="80" rx="20" fill="#2d3142"/>
+<rect x="584" y="784" width="312" height="80" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="600" y="800" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="614" y="811" class="tag" text-anchor="middle">PR</text>
+</g>
+<text x="600" y="842" class="node" text-anchor="start">Pull request to main</text></g>
+<g data-node-id="secrets" data-source-label="secrets: gitleaks and privacy scan, full history every pull request and push, manual run" data-parent="actions">
+<rect x="64" y="816" width="400" height="120" rx="6" fill="#2d3142"/>
+<rect x="64" y="816" width="400" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="832" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="94" y="843" class="tag" text-anchor="middle">CI</text>
+</g>
+<text x="80" y="874" class="node" text-anchor="start">secrets:</text>
+<text x="80" y="894" class="sub" text-anchor="start">gitleaks and privacy scan, full history</text>
+<text x="80" y="912" class="sub" text-anchor="start">every pull request and push, manual run</text>
+</g>
+<text x="56" y="1012" class="prose" text-anchor="start">Claude Code hooks run on their own; the pull request and secrets continue in the next figure.</text>
+<line x1="40" y1="1076" x2="960" y2="1076" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1104" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1094" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1104" class="prose" text-anchor="start">Pre-push checks</text>
+<path d="M 288,1100 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="324" y="1104" class="prose" text-anchor="start">Trigger / handoff</text>
+
+
+</svg>
+</div>
+</main>
+</body>
+</html>

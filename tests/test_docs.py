@@ -234,13 +234,255 @@ class ReadmeLanguageTest(unittest.TestCase):
 
 
 ASSETS = REPO / "docs" / "assets"
-DIAGRAMS = ("banner", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review")
+CONCEPT_DIAGRAMS = (
+    "concepts-loop", "concepts-leases-lifecycle", "concepts-leases-finish",
+    "concepts-routing-rules", "concepts-routing-skills", "concepts-impact-freshness",
+    "concepts-impact-ranked", "concepts-review", "concepts-landing-local", "concepts-landing-checks",
+)
+DIAGRAMS = ("banner", "features", "how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review",
+            *CONCEPT_DIAGRAMS)
 DIAGRAM_PAGES = {
-    "README.md": ("banner", "how-it-works"),
-    "README.ko.md": ("banner-ko", "how-it-works-ko"),
+    "README.md": ("banner", "features", "how-it-works"),
+    "README.ko.md": ("banner-ko", "features-ko", "how-it-works-ko"),
     "docs/how-it-works.md": ("how-it-works", "architecture-build", "architecture-land", "loop-start", "loop-review"),
     "docs/ko/how-it-works.md": ("how-it-works-ko", "architecture-build-ko", "architecture-land-ko", "loop-start-ko", "loop-review-ko"),
+    "docs/concepts.md": CONCEPT_DIAGRAMS,
+    "docs/ko/concepts.md": tuple(f"{stem}-ko" for stem in CONCEPT_DIAGRAMS),
 }
+
+# Labels from git show 13b91cc:docs/concepts.md and 13b91cc:docs/ko/concepts.md,
+# never from the redraw. Each label pair is EN/KO; literal path globs are retained.
+# Mermaid <br/> becomes a newline here (a space in parsed XML attributes); [*] becomes
+# the extractor's [start]/[end] pseudostate. Empty edge labels stay empty.
+# Split figures repeat shared nodes; every source edge appears once, in source e1…eN order.
+CONCEPT_GRAPHS = (
+    (
+        ("concepts-loop",),
+        {
+            "P": ("Packet\nintent and scope", "패킷\n의도와 범위"),
+            "L": ("Lease\npreflight, start", "리스\npreflight, start"),
+            "C": ("Claude\ninitial implementation", "Claude\n1차 구현"),
+            "G": ("Gates and wiki\nevidence", "게이트와 위키\n증거"),
+            "R": ("Codex\nreview", "Codex\n리뷰"),
+            "F": ("Codex\noah fix", "Codex\noah fix"),
+            "N": ("oah finish", "oah finish"),
+            "D": ("oah land\nafter you confirm", "oah land\n사용자 확인 뒤"),
+        },
+        (
+            ("P>L", "", ""),
+            ("L>C", "", ""),
+            ("C>G", "", ""),
+            ("G>R", "", ""),
+            ("R>F", "changes requested", "수정 요청"),
+            ("F>G", "", ""),
+            ("R>N", "converged", "수렴"),
+            ("N>D", "", ""),
+        ),
+    ),
+    (
+        ("concepts-leases-lifecycle", "concepts-leases-finish",),
+        {
+            "Active": ("Active", "활성"),
+            "Stale": ("STALE (expired)", "STALE (만료)"),
+            "Finished": ("Finished", "끝남"),
+            "Released": ("Released", "해제됨"),
+            "finish_check": ("finish_check", "finish_check"),
+            "__start_1": ("[start]", "[start]"),
+            "__end_1": ("[end]", "[end]"),
+            "__end_2": ("[end]", "[end]"),
+            "__end_3": ("[end]", "[end]"),
+        },
+        (
+            ("__start_1>Active", "oah start, or oah start --packet", "oah start, 또는 oah start --packet"),
+            ("Active>finish_check", "oah finish", "oah finish"),
+            ("Stale>finish_check", "oah finish", "oah finish"),
+            ("finish_check>Finished",
+             "return, wiki, gates and scope pass, or allow flags (recorded)",
+             "반환, 위키, 게이트, 범위 통과, 또는 허용 옵션(기록됨)"),
+            ("finish_check>Active", "refused, lease still active", "거절, 리스는 그대로 활성"),
+            ("finish_check>Stale", "refused, lease expired", "거절, 리스는 만료"),
+            ("Active>Released", "oah release --reason", "oah release --reason"),
+            ("Stale>Released", "oah release --reason", "oah release --reason"),
+            ("Active>Stale", "TTL passes, 4 hours by default", "TTL 경과, 기본 4시간"),
+            ("Stale>__end_1", "pruned by the next oah start", "다음 oah start가 정리"),
+            ("Finished>__end_2", "", ""),
+            ("Released>__end_3", "", ""),
+            ("Active>Active",
+             "oah renew, oah start --packet (raised Revision), oah log",
+             "oah renew, oah start --packet(올린 Revision), oah log"),
+        ),
+    ),
+    (
+        ("concepts-routing-rules", "concepts-routing-skills",),
+        {
+            "task": (
+                "Task: stage, kind and Scope paths\naxes you give explicitly win",
+                "작업: 단계, 종류, Scope 경로\n직접 준 축이 우선",
+            ),
+            "score": (
+                "Fixed rules score four axes\nkind, intensity, reasoning, risk",
+                "고정 규칙이 네 축에 점수를 매김\n종류, 작업량, 추론, 위험",
+            ),
+            "tier": (
+                "Tier: low, medium, high or max\nrisk critical = max, migration, security = at least high",
+                "tier: low, medium, high, max\n위험 critical은 max, 마이그레이션과 보안은 최소 high",
+            ),
+            "pick": (
+                "Packet stage tier, or oah call --tier\nsource recorded: rules, packet, flag or jev",
+                "패킷의 단계별 tier, 또는 oah call --tier\n출처 기록: rules, packet, flag, jev",
+            ),
+            "model": (
+                "Model and effort the CLI supports\nan effort that cannot be observed is recorded as unverified\na lower launch effort fails: OAH_EFFORT_DOWNGRADED",
+                "CLI가 지원하는 모델과 추론 강도\n관찰할 수 없는 강도는 미검증으로 기록\n더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED",
+            ),
+            "skills": ("Deterministic skill list\nwith a reason for each skill", "결정적인 스킬 목록\n스킬마다 이유"),
+            "ask": (
+                "Not --no-rerank, enabled by you,\nprovider set AND key present?",
+                "--no-rerank가 아니고, 직접 켰고,\n제공자 설정과 키가 있는가?",
+            ),
+            "jev": (
+                "TypeSafe Jev provider\nre-orders only, never adds or drops\njudges difficulty from the Intent and Scope paths",
+                "TypeSafe Jev 제공자\n순서만 바꾸고 더하거나 빼지 않음\nIntent와 Scope 경로로 난이도 판정",
+            ),
+            "used": ("rerank=used", "rerank=used"),
+            "unused": (
+                "rerank=unused(reason)\ndisabled-by-brief, not-enabled, not-configured,\nunknown-provider, no key, no-candidates, error:CODE",
+                "rerank=unused(이유)\ndisabled-by-brief, not-enabled, not-configured,\nunknown-provider, no key, no-candidates, error:CODE",
+            ),
+            "brief": ("Packet plan, brief and run record", "패킷 계획, 브리프, 실행 기록"),
+        },
+        (
+            ("task>score", "", ""),
+            ("score>tier", "", ""),
+            ("tier>pick", "", ""),
+            ("pick>model", "", ""),
+            ("model>brief", "", ""),
+            ("task>skills", "", ""),
+            ("skills>ask", "", ""),
+            ("ask>jev", "yes, candidates present", "예, 후보 있음"),
+            ("ask>unused", "yes, no candidates", "예, 후보 없음"),
+            ("ask>unused", "no", "아니오"),
+            ("jev>used", "scoring succeeds", "점수 계산 성공"),
+            ("jev>unused", "error, original order kept", "오류, 기존 순서 유지"),
+            ("used>brief", "", ""),
+            ("unused>brief", "", ""),
+            ("jev>pick",
+             "its tier at or above difficulty_min_confidence, never below the floor",
+             "difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음"),
+        ),
+    ),
+    (
+        ("concepts-impact-freshness", "concepts-impact-ranked",),
+        {
+            "change": ("You change a file\nfor example a SQL migration", "파일을 바꿈\n예: SQL 마이그레이션"),
+            "fresh": (
+                "Worktree map fresh?\nHEAD, index, dirty files, ledgers, config, tool",
+                "워크트리 지도가 최신인가?\nHEAD, 인덱스, 수정 파일, 원장, 설정, 도구",
+            ),
+            "refresh": ("Refresh incrementally when possible\nrebuild otherwise", "가능하면 증분 갱신\n그렇지 않으면 전체 재생성"),
+            "stale": ("OAH_IMPACT_STALE\nnever used silently", "OAH_IMPACT_STALE\n몰래 쓰지 않음"),
+            "dflt": (
+                "Default-branch map\nfetched read-only, --offline or a failed fetch is labelled stale",
+                "기본 브랜치 지도\n읽기 전용으로 가져옴, --offline이나 가져오기 실패는 stale로 표시",
+            ),
+            "pinR": (
+                "pin: a gate EXPECT names it, or a gate CHECK\nor workflow, manifest or config command hashes or greps it",
+                "pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK\n또는 workflow, manifest, config 명령이 해시하거나 grep함",
+            ),
+            "execR": ("exec: a gate CHECK or such a command runs it", "exec: 게이트 CHECK나 그런 명령이 실행함"),
+            "linkR": (
+                "link: its full path is named in code, tests, workflows,\nwiki or a gate CHECK, migrations that define a SQL object",
+                "link: 코드, 테스트, workflow, 위키, 게이트 CHECK에\n전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션",
+            ),
+            "mentionR": (
+                "mention: file name or stem match, co-change,\ngraph neighbour",
+                "mention: 파일 이름이나 stem 일치, 함께 바뀐 기록,\n그래프 이웃",
+            ),
+            "rerun": (
+                "Exact gates and commands to re-run\nre-run lines with --changed-since",
+                "다시 돌릴 정확한 게이트와 명령\n--changed-since일 때 re-run 줄",
+            ),
+        },
+        (
+            ("change>fresh", "", ""),
+            ("fresh>pinR", "yes", "예"),
+            ("fresh>refresh", "no", "아니오"),
+            ("refresh>pinR", "", ""),
+            ("fresh>stale", "--no-refresh, or inputs keep moving", "--no-refresh, 또는 입력이 계속 바뀜"),
+            ("dflt>pinR", "", ""),
+            ("pinR>execR", "", ""),
+            ("execR>linkR", "", ""),
+            ("linkR>mentionR", "", ""),
+            ("pinR>rerun", "", ""),
+            ("execR>rerun", "", ""),
+        ),
+    ),
+    (
+        ("concepts-review",),
+        {
+            "R": ("oah review\nCodex, read-only snapshot", "oah review\nCodex, 읽기 전용 스냅샷"),
+            "V": ("converged", "수렴"),
+            "F": ("oah fix\nCodex corrects", "oah fix\nCodex가 고친다"),
+            "B": ("you inspect and commit,\nthen oah fix --bind", "사용자가 확인하고 커밋한 뒤\noah fix --bind"),
+            "D": ("stops and asks you\nOAH_REVIEW_NEEDS_DECISION", "멈추고 사용자에게 묻는다\nOAH_REVIEW_NEEDS_DECISION"),
+        },
+        (
+            ("R>V", "approve, or only P2/P3", "승인, 또는 P2/P3만"),
+            ("R>F", "P0/P1 findings", "P0/P1 지적"),
+            ("F>B", "", ""),
+            ("B>R", "", ""),
+            ("R>D", "repeats a corrected kind,\nor needs a design change", "이미 고친 종류가 다시 나오거나\n설계 변경이 필요"),
+        ),
+    ),
+    (
+        ("concepts-landing-local", "concepts-landing-checks",),
+        {
+            "gcommit": ("git commit", "git commit"),
+            "pc": ("pre-commit\nwiki commit check", "pre-commit\n위키 커밋 검사"),
+            "post": ("post-commit, post-merge\nrefresh the impact map", "post-commit, post-merge\n영향 지도 갱신"),
+            "gpush": ("git push", "git push"),
+            "pp": (
+                "pre-push\nlease open, active or stale?\ngitleaks installed: scan pushed commits\notherwise warn and allow unscanned push",
+                "pre-push\n리스가 남았는가(활성 또는 만료)\ngitleaks가 설치돼 있으면 푸시할 커밋 검사\n없으면 경고 후 검사 없이 푸시 허용",
+            ),
+            "cc": ("Claude Code Stop and SessionStart hooks", "Claude Code Stop, SessionStart 훅"),
+            "pr": ("Pull request to main", "main으로 가는 풀 리퀘스트"),
+            "tests": (
+                "ci: tests, install, oah --version, privacy scan\nmacOS and Windows, PRs to main except docs/** and *.md, manual run",
+                "ci: 테스트, 설치, oah --version, 개인정보 검사\nmacOS, Windows, docs/**와 *.md만 바뀐 PR은 제외, 수동 실행",
+            ),
+            "secrets": (
+                "secrets: gitleaks and privacy scan, full history\nevery pull request and push, manual run",
+                "secrets: gitleaks와 개인정보 검사, 전체 기록\n모든 풀 리퀘스트와 푸시, 수동 실행",
+            ),
+            "land": (
+                "oah land --check, exact HEAD\nlease, intent, review, gates, impact,\nrequired-checks, fast-forward, scan, ci",
+                "oah land --check, 정확한 HEAD\n리스, 의도, 리뷰, 게이트, 영향,\n필수 검사, fast-forward, 검사, CI",
+            ),
+            "exc": (
+                "Unverified CI blocks: OAH_LAND_CI_UNVERIFIED\nunless --accept-unverified-ci reason, recorded for that head",
+                "검증 안 된 CI는 막힘: OAH_LAND_CI_UNVERIFIED\n--accept-unverified-ci 이유로 그 head에 예외를 기록할 때만 통과",
+            ),
+            "landed": (
+                "oah land --merge\nchecks again, you confirm,\nfast-forward push of HEAD",
+                "oah land --merge\n다시 확인하고, 사용자가 확인하면\nHEAD를 fast-forward push",
+            ),
+        },
+        (
+            ("gcommit>pc", "", ""),
+            ("gcommit>post", "", ""),
+            ("gpush>pp", "", ""),
+            ("pp>secrets", "push", "푸시"),
+            ("pp>pr", "", ""),
+            ("pr>tests", "", ""),
+            ("pr>secrets", "", ""),
+            ("tests>land", "gh reads HEAD's check runs", "gh가 HEAD의 check run을 읽음"),
+            ("secrets>land", "gh reads HEAD's check runs", "gh가 HEAD의 check run을 읽음"),
+            ("land>exc", "", ""),
+            ("land>landed", "", ""),
+        ),
+    ),
+)
 
 
 def svg_resource_errors(text: str) -> list[str]:
@@ -387,7 +629,7 @@ class BannerTest(unittest.TestCase):
                             for node in root.iter() if node.tag in {f"{SVG}rect", f"{SVG}line", f"{SVG}path", f"{SVG}polygon"}]
                 self.assertEqual(geometry(roots[0]), geometry(roots[1]))
 
-    def test_korean_diagrams_name_korean_system_fonts_first(self):
+    def test_korean_diagrams_keep_system_fallbacks_before_generic_fonts(self):
         for path in self.diagram_files():
             if "-ko-" not in path.name:
                 continue
@@ -397,9 +639,130 @@ class BannerTest(unittest.TestCase):
                 family = re.search(r"font-family:\s*([^;]+);", css)
                 self.assertIsNotNone(family)
                 stack = family.group(1)
-                self.assertTrue(stack.startswith(KOREAN_FONTS[0]), stack)
+                # The banner retains its separate style. The gallery skin keeps Geist
+                # for Latin and extends that stack for Hangul, without downloading fonts.
+                first = KOREAN_FONTS[0] if path.name.startswith("banner-") else '"Geist"'
+                self.assertTrue(stack.startswith(first), stack)
                 positions = [stack.find(font) for font in KOREAN_FONTS]
                 self.assertTrue(all(0 <= pos < stack.index("system-ui") for pos in positions), stack)
+
+    def test_redrawn_languages_share_geometry(self):
+        geometry_keys = {"x", "y", "x1", "y1", "x2", "y2", "width", "height", "rx",
+                         "cx", "cy", "r", "d", "points", "transform"}
+        shapes = {f"{SVG}{tag}" for tag in ("rect", "line", "path", "polygon", "circle", "g")}
+        for stem in DIAGRAMS:
+            if stem == "banner":
+                continue
+            for theme in ("light", "dark"):
+                with self.subTest(stem=stem, theme=theme):
+                    roots = [ET.parse(ASSETS / f"{stem}{lang}-{theme}.svg").getroot()
+                             for lang in ("", "-ko")]
+                    self.assertEqual(roots[0].get("viewBox"), roots[1].get("viewBox"))
+                    geometry = [[(n.tag, {k: v for k, v in n.attrib.items() if k in geometry_keys})
+                                 for n in root.iter() if n.tag in shapes] for root in roots]
+                    self.assertEqual(*geometry)
+
+    def test_whole_harness_and_features_keep_their_content(self):
+        for language in ("", "-ko"):
+            for theme in ("light", "dark"):
+                with self.subTest(language=language, theme=theme):
+                    features = ET.parse(ASSETS / f"features{language}-{theme}.svg").getroot()
+                    self.assertEqual({n.get("data-node-id") for n in features.iter() if n.get("data-node-id")},
+                                     {"lease", "impact", "jev", "loop", "gates", "wiki"})
+                    overview = ET.parse(ASSETS / f"how-it-works{language}-{theme}.svg").getroot()
+                    self.assertEqual({n.get("data-node-id") for n in overview.iter() if n.get("data-node-id")},
+                                     {"request", "prepare", "build", "evidence", "review", "fix", "confirm", "land"})
+                    for figure in (features, overview):
+                        figure_text = " ".join(" ".join(t.itertext()) for t in figure.findall(f".//{SVG}text"))
+                        self.assertIn("권장 선택형" if language else "ecommended, optional judge", figure_text)
+                        if language:
+                            self.assertIn("바꿀 경로를 예약한다.", figure_text)
+                            self.assertIn("겹치는 리스는 거절한다.", figure_text)
+                        else:
+                            lease_node = next(n for n in figure.iter()
+                                              if n.get("data-node-id") == ("lease" if figure is features else "prepare"))
+                            lease_text = " ".join(" ".join(t.itertext()) for t in lease_node.findall(f"{SVG}text"))
+                            self.assertIn("Reserve paths this task changes; refuse overlapping leases."
+                                          if figure is features else
+                                          "Lease: reserve changed paths; refuse overlapping leases.", lease_text)
+                    visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
+                    for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init", "v0.4.0"):
+                        self.assertIn(phrase, visible)
+                    self.assertIn("예정된 기능이며 아직 제공하지 않는다." if language
+                                  else "Planned, not available yet.", visible)
+
+    def test_concepts_preserve_the_source_graph_and_visible_labels(self):
+        for stems, expected_nodes, expected_edges in CONCEPT_GRAPHS:
+            source_edges = {f"e{i}": edge for i, edge in enumerate(expected_edges, 1)}
+            english_shapes = {}
+            for language_index, language in enumerate(("", "-ko")):
+                for theme in ("light", "dark"):
+                    nodes, edges = set(), []
+                    for stem in stems:
+                        path = ASSETS / f"{stem}{language}-{theme}.svg"
+                        with self.subTest(asset=path.name):
+                            root = ET.parse(path).getroot()
+                            drawn_nodes = [n for n in root.iter() if n.get("data-node-id")]
+                            drawn_edges = [n for n in root.iter() if n.get("data-edge-id")]
+                            self.assertLessEqual(len(drawn_nodes), 9)
+                            self.assertLessEqual(len(drawn_edges), 12)
+                            self.assertEqual(len({n.get("data-node-id") for n in drawn_nodes}), len(drawn_nodes))
+                            nodes.update(n.get("data-node-id") for n in drawn_nodes)
+                            edges.extend(e.get("data-edge-id") for e in drawn_edges)
+                            shape = (sorted(n.get("data-node-id") for n in drawn_nodes), sorted(
+                                (e.get("data-edge-id"), e.get("data-from"), e.get("data-to"), bool(e.get("data-label")))
+                                for e in drawn_edges))
+                            if language:
+                                self.assertEqual(shape, english_shapes[stem, theme])
+                            else:
+                                english_shapes[stem, theme] = shape
+                            # Inline arrow labels and transition keys are outside the node groups.
+                            visible_labels = " ".join(" ".join(t.itertext()) for t in root.findall(f"{SVG}text"))
+                            visible_labels = " ".join(visible_labels.split()).casefold()
+                            for node in drawn_nodes:
+                                key = node.get("data-node-id")
+                                self.assertIn(key, expected_nodes)
+                                label = expected_nodes[key][language_index].replace("\n", " ")
+                                self.assertEqual(node.get("data-source-label"), label, key)
+                                if key.startswith("__"):
+                                    self.assertIsNotNone(node.find(f"{SVG}circle"))
+                                    continue  # Mermaid's start/end pseudostates are dots.
+                                visible = " ".join(" ".join(t.itertext()) for t in node.findall(f"{SVG}text"))
+                                self.assertEqual(visible.split(), label.split(), key)
+                            for edge in drawn_edges:
+                                self.assertIn(edge.tag, {f"{SVG}line", f"{SVG}path"})
+                                self.assertTrue(edge.get("marker-end"))
+                                key = edge.get("data-edge-id")
+                                self.assertIn(key, source_edges)
+                                pair, *labels = source_edges[key]
+                                label = labels[language_index].replace("\n", " ")
+                                self.assertEqual(f'{edge.get("data-from")}>{edge.get("data-to")}', pair, key)
+                                self.assertEqual(edge.get("data-label"), label, key)
+                                if label:
+                                    # Wrapping and uppercase arrow typography may differ from Mermaid.
+                                    self.assertRegex(visible_labels, r"(?<!\w)" + re.escape(label.casefold()) + r"(?!\w)", key)
+                    with self.subTest(stems=stems, language=language, theme=theme):
+                        self.assertEqual(nodes, set(expected_nodes))
+                        self.assertEqual(sorted(edges), sorted(source_edges))
+
+    def test_architecture_judgement_and_english_loop_label(self):
+        for language in ("", "-ko"):
+            for theme in ("light", "dark"):
+                path = ASSETS / f"architecture-build{language}-{theme}.svg"
+                with self.subTest(asset=path.name):
+                    root = ET.parse(path).getroot()
+                    labels = " ".join(" ".join(t.itertext()) for t in root.findall(f".//{SVG}text"))
+                    self.assertIn("권장 선택형 AI 판정기" if language else "Recommended, optional AI judge", labels)
+                    self.assertIn("작업의 난이도를 판정한다" if language else "Judges task difficulty", labels)
+                    self.assertIn("Jev가 최저 기준 안에서" if language else "Jev can adjust tier within its floor", labels)
+        for theme in ("light", "dark"):
+            path = ASSETS / f"loop-review-{theme}.svg"
+            with self.subTest(asset=path.name):
+                root = ET.parse(path).getroot()
+                loop = [t for t in root.findall(f".//{SVG}text") if t.text == "LOOP"]
+                self.assertEqual(len(loop), 1)
+                self.assertEqual(loop[0].get("class"), "label")
+                self.assertRegex(read(path), r"\.label\s*\{\s*font-size:\s*12px;")
 
     def test_pages_pick_every_diagram_by_theme_with_alt_matching_desc(self):
         for name, stems in DIAGRAM_PAGES.items():

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leases · active, stale, released</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 880px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 880px; display: block; }
+text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 880 1308" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-leases-lifecycle-dark-title concepts-leases-lifecycle-dark-desc" data-diagram-type="State machine" data-size="fit">
+<title id="concepts-leases-lifecycle-dark-title">Leases · active, stale, released</title>
+<desc id="concepts-leases-lifecycle-dark-desc">Starting creates an active lease, renewal and logging keep it active, TTL expiry makes it stale, either state can be released, and the next start prunes stale leases, subject to the stated refusal rules.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="880" height="1308" fill="#2d3142"/>
+<rect width="880" height="1308" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / STATE MACHINE</text>
+<text x="40" y="88" class="title" text-anchor="start">Leases · active, stale, released</text>
+<path d="M 128,208 L 288,208" data-edge-id="e1" data-from="__start_1" data-to="Active" data-label="oah start, or oah start --packet" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 480,160 L 480,128 Q 480,120 488,120 L 640,120 Q 648,120 648,128 L 648,200 Q 648,208 640,208 L 576,208" data-edge-id="e13" data-from="Active" data-to="Active" data-label="oah renew, oah start --packet (raised Revision), oah log" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 432,256 L 432,360" data-edge-id="e9" data-from="Active" data-to="Stale" data-label="TTL passes, 4 hours by default" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,224 L 240,224 Q 232,224 232,232 L 232,600 Q 232,608 240,608 L 288,608" data-edge-id="e7" data-from="Active" data-to="Released" data-label="oah release --reason" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 432,456 L 432,560" data-edge-id="e8" data-from="Stale" data-to="Released" data-label="oah release --reason" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 576,408 L 752,408" data-edge-id="e10" data-from="Stale" data-to="__end_1" data-label="pruned by the next oah start" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 432,656 L 432,712" data-edge-id="e12" data-from="Released" data-to="__end_3" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="168" y="180" width="80" height="20" rx="2" fill="#2d3142"/>
+<text x="208" y="195" class="arrow-label" text-anchor="middle">A START</text>
+<rect x="506" y="92" width="116" height="20" rx="2" fill="#2d3142"/>
+<text x="564" y="107" class="arrow-label" text-anchor="middle">B KEEP ACTIVE</text>
+<rect x="440" y="297" width="96" height="20" rx="2" fill="#2d3142"/>
+<text x="488" y="312" class="arrow-label" text-anchor="middle">C EXPIRE</text>
+<rect x="120" y="401" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="172" y="416" class="arrow-label" text-anchor="middle">D RELEASE</text>
+<rect x="440" y="497" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="492" y="512" class="arrow-label" text-anchor="middle">E RELEASE</text>
+<rect x="620" y="380" width="88" height="20" rx="2" fill="#2d3142"/>
+<text x="664" y="395" class="arrow-label" text-anchor="middle">F PRUNE</text>
+<g data-node-id="__start_1" data-source-label="[start]">
+<circle cx="120.0" cy="208.0" r="6" fill="#f5f5f5"/>
+</g>
+<g data-node-id="Active" data-source-label="Active">
+<rect x="288" y="160" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="160" width="288" height="96" rx="8" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="304" y="176" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="187" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="218" class="node" text-anchor="start">Active</text>
+</g>
+<g data-node-id="Stale" data-source-label="STALE (expired)">
+<rect x="288" y="360" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="360" width="288" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="304" y="376" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="387" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="418" class="node" text-anchor="start">STALE (expired)</text>
+</g>
+<g data-node-id="Released" data-source-label="Released">
+<rect x="288" y="560" width="288" height="96" rx="8" fill="#2d3142"/>
+<rect x="288" y="560" width="288" height="96" rx="8" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="304" y="576" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="326" y="587" class="tag" text-anchor="middle">STATE</text>
+</g>
+<text x="304" y="618" class="node" text-anchor="start">Released</text>
+</g>
+<g data-node-id="__end_1" data-source-label="[end]">
+<circle cx="760.0" cy="408.0" r="8" fill="#2d3142" stroke="#f5f5f5" stroke-width="1.2"/>
+<circle cx="760.0" cy="408.0" r="5" fill="#f5f5f5"/>
+</g>
+<g data-node-id="__end_3" data-source-label="[end]">
+<circle cx="432.0" cy="720.0" r="8" fill="#2d3142" stroke="#f5f5f5" stroke-width="1.2"/>
+<circle cx="432.0" cy="720.0" r="5" fill="#f5f5f5"/>
+</g>
+<text x="40" y="796" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="815" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="829" class="label" text-anchor="middle">A</text>
+<text x="80" y="829" class="prose" text-anchor="start">oah start, or oah start --packet</text>
+<rect x="40" y="847" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="861" class="label" text-anchor="middle">B</text>
+<text x="80" y="861" class="prose" text-anchor="start">oah renew, oah start --packet (raised Revision), oah log</text>
+<rect x="40" y="879" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="893" class="label" text-anchor="middle">C</text>
+<text x="80" y="893" class="prose" text-anchor="start">TTL passes, 4 hours by default</text>
+<rect x="40" y="911" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="925" class="label" text-anchor="middle">D</text>
+<text x="80" y="925" class="prose" text-anchor="start">oah release --reason</text>
+<rect x="40" y="943" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="957" class="label" text-anchor="middle">E</text>
+<text x="80" y="957" class="prose" text-anchor="start">oah release --reason</text>
+<rect x="40" y="975" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="989" class="label" text-anchor="middle">F</text>
+<text x="80" y="989" class="prose" text-anchor="start">pruned by the next oah start</text>
+<text x="56" y="1032" class="prose" text-anchor="start">oah status only reads. It shows each lease as active or STALE.</text>
+<text x="56" y="1076" class="prose" text-anchor="start">start is refused with OAH_LEASE_CONFLICT on overlap, OAH_LEASE_EXISTS for your own task.</text>
+<text x="56" y="1120" class="prose" text-anchor="start">renew on a STALE lease is refused with OAH_LEASE_EXPIRED.</text>
+<text x="56" y="1164" class="prose" text-anchor="start">release needs --force for another agent&#x27;s lease (else OAH_LEASE_NOT_YOURS).</text>
+<text x="56" y="1200" class="prose" text-anchor="start">Active and stale leases continue through the finish checks in the next figure.</text>
+<line x1="40" y1="1228" x2="840" y2="1228" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1256" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1246" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1256" class="prose" text-anchor="start">Active lease</text>
+<path d="M 268,1252 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="304" y="1256" class="prose" text-anchor="start">Transition</text>
+<circle cx="420" cy="1252" r="5" fill="#f5f5f5"/>
+<text x="444" y="1256" class="prose" text-anchor="start">Start / end</text>
+</svg>
+</div>
+</main>
+</body>
+</html>

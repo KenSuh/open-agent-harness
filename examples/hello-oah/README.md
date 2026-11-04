@@ -1,7 +1,8 @@
 # hello-oah: your first task with oah
 
-This example walks one small task through the whole `oah` loop. Claude Code implements it, Codex reviews and
-corrects it, gates prove it is done, and it lands on the default branch. It takes about 20 minutes.
+Ask your AI to make a small change, then follow what it does with oah. Claude Code builds, Codex CLI reviews
+and corrects, and the gates and wiki keep the evidence. You ask, answer when it stops for a decision, and
+confirm before the change lands. It takes about 20 minutes.
 
 [한국어](README.ko.md)
 
@@ -12,7 +13,101 @@ Tests in this repository (`tests/test_example_hello.py`) run the real Python CHE
 illustrative changes-requested path below with stand-ins for Claude Code, Codex and unlazy. The offline
 walkthrough uses a local remote and stops before landing; it does not verify GitHub CI or live engine output.
 
-## Before you start
+## Walk through the conversation
+
+Run the installer once and `oah init` once per project. Then open your AI in the project and speak in plain
+words. The installed rules and each command’s next-step message guide it through the harness. You ask, answer
+when it stops for a decision, and confirm before anything lands.
+
+The steps below follow the same order as the command walkthrough. For this example, start by asking your
+AI to prepare the practice copy; step 2 installs the project rules.
+
+### 1. Make a practice copy
+
+- **You say:** “Copy hello-oah into a separate project so I can try it.”
+- **The AI does:** Copies the folder and prepares git and a remote. There is no `oah` command at this step.
+- **You check or answer:** Choose a local practice remote or a GitHub repository. Local practice stops before
+  landing; the GitHub route needs CI and the tools listed below.
+
+### 2. Set up the project once
+
+- **You do:** Run `oah init` in a terminal, answer its questions and confirm the plan. It installs the rules,
+  wiki and templates and builds the first impact map.
+- **The AI does:** After setup, adds the bytecode ignore entries shown below and commits the setup.
+- **You check or answer:** Choose unlazy for the checks and the CI starter if you want to land on GitHub.
+  Confirm the complete setup plan and finish any missing sign-ins. This small example leaves Jev off;
+  without a key, rules decide the difficulty and model.
+
+### 3. Describe the result
+
+- **You say:** “Use oah to make hello.py greet a name. Ada should get ‘Hello, Ada!’; with no name, keep
+  ‘Hello, world!’.”
+- **The AI does:** Runs `oah packet new`, writes the goal, scope and success conditions, and prepares the checks
+  with `oah gates new`. It validates them with `oah gates lint` and `oah packet check`.
+- **You check or answer:** Confirm the intended behavior, the two checks and the scope of `hello.py` and `tests`.
+  Answer if the AI needs a choice clarified.
+
+### 4. Check the starting point
+
+- **You say:** “Is the starting point ready?”
+- **The AI does:** Runs `oah preflight` to check the starting point and refresh the impact map, then
+  `oah start --packet` to reserve the paths the task changes. An overlapping lease is refused.
+- **You check or answer:** Read any warning or refusal and settle a scope conflict before continuing.
+
+### 5. Build the change
+
+- **You say:** “Build it with that scope.”
+- **The AI does:** Runs `oah call claude --stage initial` with the accepted task, model and skills. Claude Code
+  changes the program and adds the test.
+- **You check or answer:** Look at the result and the diff. A name should work and the original greeting should
+  still work without one.
+
+### 6. Ask for the evidence
+
+- **You say:** “Did all the gates pass? Is the wiki up to date?”
+- **The AI does:** Runs `oah gates check` to show the check commands, maintains the wiki with `oah wiki maintain`,
+  then runs `oah gates check --approve` after approval and commits the result with its authoring engine recorded.
+- **You check or answer:** Read and approve the check commands before they run. Then inspect the recorded
+  results and the wiki entry, not just a claim that the task is done.
+
+### 7. Review, correct and answer decisions
+
+- **You say:** “Is the review done? Fix any blocking findings and review again.”
+- **The AI does:** Runs `oah review`. If corrections are requested, it runs `oah fix`, maintains the wiki,
+  rechecks the gates, commits the inspected correction, runs `oah fix --bind` and reviews again.
+- **You check or answer:** Inspect corrections before they are committed. A repeated problem or a design choice
+  stops the loop for your decision; answer so the AI can resume with `oah review --decision`. A converged review
+  can still have follow-ups, and Codex reviewing its own correction is labelled non-independent.
+
+### 8. Close the task
+
+- **You say:** “Show me how the result meets the goal, then finish the task.”
+- **The AI does:** Uses `oah intent show` to prepare the return, then runs `oah finish`. It checks scope, gates,
+  wiki upkeep and the return before closing the lease.
+- **You check or answer:** Check each success condition and any remaining follow-up. Finishing closes the task;
+  landing comes next.
+
+### 9. Confirm before landing
+
+- **You say:** “Is this version ready to land?” Then, after inspecting the checks, “Land this version.”
+- **The AI does:** Pushes the branch, prepares the pull request with `oah review summary`, and runs
+  `oah land --check`. After your confirmation, `oah land --merge` rechecks and lands the reviewed commit.
+- **You check or answer:** Inspect the exact version, review, gates, secret scan and CI results. Give the final
+  confirmation only for the result you want to land; a refusal still needs resolving.
+
+**Planned for v0.4.0:** before implementation, you will say what you want to build and oah will ask one design
+question at a time with a recommendation. That guided design conversation is not available yet. Today you can
+already discuss the goal with your AI and answer decisions when the review loop stops.
+
+## What runs underneath
+
+After you run `oah init` in a terminal, the installed rules and each command’s next-step message guide your AI
+through the commands below. You can also run this complete walkthrough yourself to see each result. Every `sh`
+block is kept in execution order; the review section shows which commands depend on its actual verdict.
+When your AI makes these commits it records its own engine; the walkthrough uses `Agent-Engine: human` because
+you run it by hand.
+
+### Before you start
 
 - `oah` is installed: `oah --version` prints a version. If not, follow
   [Install on macOS](../../docs/install-macos.md) or [Install on Windows](../../docs/install-windows.md).
@@ -24,7 +119,7 @@ walkthrough uses a local remote and stops before landing; it does not verify Git
 Every command below runs in a terminal. macOS lines work in zsh or bash. Where Windows PowerShell needs a
 different line, it is shown next to it.
 
-## 1. Make your own copy
+### 1. Make your own copy
 
 Copy this folder out of the `oah` checkout and make it a git repository of its own:
 
@@ -61,7 +156,7 @@ The local alternative cannot complete step 9 with gh installed: gh cannot query 
 so landing refuses with `OAH_LAND_CI_PENDING`. Use the GitHub route for landing. Without gh, CI is
 `unverified` and blocks by default with `OAH_LAND_CI_UNVERIFIED`; removing gh is not a CI verification procedure.
 
-## 2. Set up oah in the project
+### 2. Set up oah in the project
 
 ```sh
 oah init
@@ -95,7 +190,7 @@ git commit -m "set up oah" -m "Agent-Engine: human"
 git push
 ```
 
-## 3. Describe the task
+### 3. Describe the task
 
 Work on a branch, then create the task's packet. The packet holds the intent: the problem, the outcome
 you want and the success conditions.
@@ -166,7 +261,7 @@ OAH_PACKET_OK .oah/tasks/hello-name/PACKET.md intent=hello-name@r1 status=accept
 `GATES.md` stays out of git (`oah init` ignores gate ledgers); the summary that `oah gates check` writes
 later is committed instead.
 
-## 4. Check the start and take the lease
+### 4. Check the start and take the lease
 
 ```sh
 oah preflight --task hello-name
@@ -179,9 +274,9 @@ OAH_LEASE_STARTED task=hello-name agent=claude scope=hello.py,tests expires=… 
 ```
 
 Preflight checks that your branch is up to date, the tree is clean and no other lease holds these paths. The
-lease claims `hello.py` and `tests` for this task and binds the intent to it.
+lease reserves `hello.py` and `tests` for this task and binds the intent to it; an overlapping lease is refused.
 
-## 5. Claude implements
+### 5. Claude implements
 
 ```sh
 oah call claude --stage initial --task hello-name
@@ -194,7 +289,7 @@ and ask it to do the task in `.oah/tasks/hello-name/PACKET.md`; the rules block 
 When it is done, look at the change with `git diff`. `greet` should take a name, `main` should pass the first
 argument, and the tests should have a case for a name.
 
-## 6. Prove it with the gates, then commit
+### 6. Prove it with the gates, then commit
 
 ```sh
 oah gates check hello-name
@@ -221,7 +316,7 @@ git add -A
 git commit -m "greet a name" -m "Agent-Engine: claude"
 ```
 
-## 7. Codex reviews and corrects
+### 7. Codex reviews and corrects
 
 ```sh
 oah review --task hello-name
@@ -271,7 +366,7 @@ independent: no — codex wrote commits in base..head, so this is not an indepen
 This illustrative review converged. There is no fixed number of rounds: follow each new outcome using the
 rules above. Running `oah fix` after convergence refuses with `OAH_FIX_NOT_REQUESTED`; go to step 8 instead.
 
-## 8. Finish the task
+### 8. Finish the task
 
 The return is your short report: one `INTENT` line and one line per success condition. Print the `INTENT` line:
 
@@ -301,7 +396,7 @@ OAH_LEASE_FINISHED task=hello-name agent=claude changed=… gates=met intent=hel
 `finish` checks that every change is inside the scope, the gates are met, the wiki upkeep ran and the return
 matches the intent. Then it closes the lease.
 
-## 9. Open the pull request and land
+### 9. Open the pull request and land
 
 ```sh
 git push -u origin hello-name
@@ -341,7 +436,7 @@ See [Landing](../../docs/concepts.md#landing) for the target branch’s CI polic
 | Step | Command | What it proved |
 |---|---|---|
 | Intent | `oah packet new`, `oah packet check` | The goal and its success conditions are written down and accepted. |
-| Lease | `oah preflight`, `oah start` | You started on a fresh branch, and no one else holds these paths. |
+| Lease | `oah preflight`, `oah start` | You started on a fresh branch and reserved the task paths; overlapping leases are refused. |
 | Implementation | `oah call claude --stage initial` | Claude did the first implementation from the packet. |
 | Gates | `oah gates check --approve` | Each success condition has a command and recorded evidence. |
 | Review | `oah review`, `oah fix`, `oah review` | Codex reviewed, corrected, and reviewed until it converged. |

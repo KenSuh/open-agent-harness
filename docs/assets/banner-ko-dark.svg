@@ -1,46 +1,128 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 640 352" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="banner-ko-dark-title banner-ko-dark-desc" id="banner-ko-dark-root">
+<svg viewBox="0 0 1280 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="banner-ko-dark-title banner-ko-dark-desc" id="banner-ko-dark-root">
 <title id="banner-ko-dark-title">open-agent-harness</title>
-<desc id="banner-ko-dark-desc">Claude Code가 만들고 Codex CLI가 검토하고 고치며 사용자가 확인한 뒤 반영하는, 필요에 맞게 바꾸는 AI 작업 흐름이다.</desc>
+<desc id="banner-ko-dark-desc">open-agent-harness 배너는 “그냥 묻고, 확인만 하면 돼.”라는 제목과 AI가 난이도·모델 선택·위키·영향 지도·리뷰 사이클 등을 챙기며 전문가처럼 프로그램을 만들고 고치고 사용자는 묻고 판단이 필요할 때 답하고 확인한다는 설명을 보여 주며, 주황빛 사각형 캐릭터는 “Claude Code — 만든다”, 초록 원형 캐릭터는 “Codex CLI — 검토하고 고친다”, 보라 육각형 캐릭터는 “TypeSafe Jev — 권장 선택형 판정”으로 표시되고, “작업 완료 · 확인 기다리는 중”인 oah 채팅은 “로그인 기능 다 됐어?”에 완료를 알리며 영향 지도로 변경이 닿는 곳 확인, 리스로 바꿀 파일 예약, Jev의 난이도 판정과 모델 자동 선택, Claude Code의 구현, Codex CLI의 검토·수정 수렴, 게이트 4개 통과와 증거 보관, 위키에 이유 기록을 체크한 뒤 “반영할까?”라고 묻고 “반영해 줘”와 “게이트 보여 줘” 선택 칩을 보여 준다.</desc>
 <defs>
-      <style>#banner-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f0f6fc; }
+      <style>#banner-ko-dark-root { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5ecdc; }
       #banner-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
-      #banner-ko-dark-root .title { font-size: 28px; font-weight: 600; }
-      #banner-ko-dark-root .group { font-size: 14px; font-weight: 600; }
-      #banner-ko-dark-root .node { font-size: 12px; font-weight: 600; }
-      #banner-ko-dark-root .label { font-size: 12px; font-weight: 400; }
-      #banner-ko-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; }
-      #banner-ko-dark-root .arrow-label { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 500; }
+      #banner-ko-dark-root .display { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", "Arial Black", "Segoe UI Black", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 60px; font-weight: 800; }
+      #banner-ko-dark-root .brand { font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR", "Arial Black", "Segoe UI Black", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 24px; font-weight: 800; }
+      #banner-ko-dark-root .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 18px; font-weight: 600; }
+      #banner-ko-dark-root .tag { font-size: 19px; font-weight: 600; }
+      #banner-ko-dark-root .name { font-size: 17px; font-weight: 800; }
+      #banner-ko-dark-root .role { font-size: 15px; font-weight: 500; }
+      #banner-ko-dark-root .status { font-size: 15px; font-weight: 600; }
+      #banner-ko-dark-root .msg { font-size: 17px; font-weight: 500; }
+      #banner-ko-dark-root .strong { font-size: 17px; font-weight: 800; }
+      #banner-ko-dark-root .check { font-size: 16px; font-weight: 500; }
+      #banner-ko-dark-root .check-label { font-weight: 800; }
+      #banner-ko-dark-root .chip { font-size: 16px; font-weight: 700; }
       @media print {
 #banner-ko-dark-root .diagram-container { overflow-x: visible; }
 }</style>
-<marker id="banner-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#8b949e"/>
-</marker>
-<marker id="banner-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#3fb950"/>
-</marker>
-<marker id="banner-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-<polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/>
-</marker>
+<pattern id="banner-ko-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="3" cy="3" r="1.6" fill="#3d352a"/></pattern>
 </defs>
-<rect x="0" y="0" width="640" height="352" rx="0" fill="#0d1117"/>
-<line x1="484" y1="116" x2="484" y2="140" stroke="#8b949e" stroke-width="1" marker-end="url(#banner-ko-dark-arrow)"/>
-<line x1="484" y1="188" x2="484" y2="212" stroke="#8b949e" stroke-width="1" marker-end="url(#banner-ko-dark-arrow)"/>
-<text x="40" y="68" class="title" text-anchor="start" fill="#f0f6fc">oah</text>
-<text x="40" y="96" class="group" text-anchor="start" fill="#c9d1d9">open-agent-harness</text>
-<text x="40" y="152" class="title" text-anchor="start" fill="#f0f6fc">내 프로젝트에 맞는</text>
-<text x="40" y="188" class="title" text-anchor="start" fill="#f0f6fc">나만의 AI 작업 방식</text>
-<text x="40" y="228" class="label" text-anchor="start" fill="#c9d1d9">AI가 바뀌면 작업 방식도 바꾼다.</text>
-<rect x="368" y="68" width="232" height="48" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
-<text x="484.0" y="88" class="node" text-anchor="middle" fill="#d29922">Claude Code</text>
-<text x="484.0" y="104" class="label" text-anchor="middle" fill="#c9d1d9">첫 버전 구현</text>
-<rect x="368" y="140" width="232" height="48" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
-<text x="484.0" y="160" class="node" text-anchor="middle" fill="#3fb950">Codex CLI</text>
-<text x="484.0" y="176" class="label" text-anchor="middle" fill="#c9d1d9">검토 · 수정 · 재검토</text>
-<rect x="368" y="212" width="232" height="48" rx="20" fill="#0d1117" stroke="#8b949e" stroke-width="1"/>
-<text x="484.0" y="232" class="node" text-anchor="middle" fill="#f0f6fc">사용자</text>
-<text x="484.0" y="248" class="label" text-anchor="middle" fill="#c9d1d9">확인한 뒤 반영</text>
-<line x1="40" y1="292" x2="600" y2="292" stroke="#30363d" stroke-width="1"/>
-<text x="40" y="316" class="label" text-anchor="start" fill="#c9d1d9">Claude 구현 · Codex 검토 · 사용자 확인</text>
+<rect x="0" y="0" width="1280" height="560" fill="#17140f"/>
+<rect x="0" y="0" width="1280" height="560" fill="url(#banner-ko-dark-dots)"/>
+<circle cx="655" cy="63" r="22" fill="#7a6a52"/>
+<circle cx="650" cy="58" r="22" fill="#ffc2d1" stroke="#f5ecdc" stroke-width="2.5"/>
+<polygon points="1209,13 1271,25 1241,79" fill="#7a6a52"/>
+<polygon points="1204,8 1266,20 1236,74" fill="#9fd8ff" stroke="#f5ecdc" stroke-width="2.5" stroke-linejoin="round"/>
+<circle cx="668" cy="250" r="15" fill="none" stroke="#f5ecdc" stroke-width="3"/>
+<path d="M610 540 l14 -14 l14 14 l14 -14 l14 14 l14 -14" fill="none" stroke="#f5ecdc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M560 104 Q563 118 577 121 Q563 124 560 138 Q557 124 543 121 Q557 118 560 104 Z" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2" stroke-linejoin="round"/>
+<rect x="61" y="41" width="96" height="44" rx="22" fill="#7a6a52"/>
+<rect x="56" y="36" width="96" height="44" rx="22" fill="#f5ecdc" stroke="#f5ecdc" stroke-width="2.5"/>
+<text x="104" y="67" class="brand" text-anchor="middle" fill="#17140f">oah</text>
+<text x="168" y="64" class="mono" text-anchor="start" fill="#d9cdb8">open-agent-harness</text>
+<text x="56" y="160" class="display" text-anchor="start" fill="#f5ecdc">그냥 묻고,</text>
+<g transform="rotate(-4 161 223)">
+<rect x="62" y="189" width="210" height="80" rx="6" fill="#7a6a52"/>
+<rect x="56" y="183" width="210" height="80" rx="6" fill="#9fd8ff" stroke="#f5ecdc" stroke-width="3"/>
+<text x="161" y="244" class="display" text-anchor="middle" fill="#141414">확인만</text>
+</g>
+<text x="290" y="244" class="display" text-anchor="start" fill="#f5ecdc"> 하면 돼.</text>
+<text x="56" y="306" class="tag" text-anchor="start" fill="#d9cdb8">난이도와 모델 선택, 위키, 영향 지도, 리뷰 사이클까지</text>
+<text x="56" y="332" class="tag" text-anchor="start" fill="#d9cdb8">AI가 전문가처럼 챙기며 프로그램을 만들고 고친다.</text>
+<text x="56" y="358" class="tag" text-anchor="start" fill="#d9cdb8">사용자는 묻고, 판단이 필요할 때만 답하고, 확인한다.</text>
+<rect x="67" y="401" width="76" height="76" rx="18" fill="#7a6a52"/>
+<rect x="62" y="396" width="76" height="76" rx="18" fill="#ffb547" stroke="#f5ecdc" stroke-width="3"/>
+<circle cx="86" cy="428" r="8" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="87.5" cy="429" r="3.6" fill="#141414"/>
+<circle cx="114" cy="428" r="8" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="115.5" cy="429" r="3.6" fill="#141414"/>
+<circle cx="76" cy="447" r="4.5" fill="#ffc2d1"/>
+<circle cx="124" cy="447" r="4.5" fill="#ffc2d1"/>
+<path d="M88 448 Q100 459 112 448" fill="none" stroke="#141414" stroke-width="3" stroke-linecap="round"/>
+<circle cx="295" cy="439" r="38" fill="#7a6a52"/>
+<circle cx="290" cy="434" r="38" fill="#5fd38a" stroke="#f5ecdc" stroke-width="3"/>
+<circle cx="276" cy="428" r="7" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="277.5" cy="429" r="3.2" fill="#141414"/>
+<circle cx="304" cy="428" r="7" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="305.5" cy="429" r="3.2" fill="#141414"/>
+<circle cx="276" cy="428" r="12" fill="none" stroke="#141414" stroke-width="2.5"/>
+<circle cx="304" cy="428" r="12" fill="none" stroke="#141414" stroke-width="2.5"/>
+<line x1="288" y1="428" x2="292" y2="428" stroke="#141414" stroke-width="2.5"/>
+<path d="M280 450 Q290 457 300 450" fill="none" stroke="#141414" stroke-width="3" stroke-linecap="round"/>
+<polygon points="465,404 505,404 525,439 505,474 465,474 445,439" fill="#7a6a52"/>
+<polygon points="460,399 500,399 520,434 500,469 460,469 440,434" fill="#b9a3ff" stroke="#f5ecdc" stroke-width="3" stroke-dasharray="9 6" stroke-linejoin="round"/>
+<circle cx="467" cy="428" r="8" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="468.5" cy="429" r="3.6" fill="#141414"/>
+<circle cx="493" cy="428" r="8" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="494.5" cy="429" r="3.6" fill="#141414"/>
+<line x1="472" y1="451" x2="488" y2="451" stroke="#141414" stroke-width="3" stroke-linecap="round"/>
+<text x="100" y="502" class="name" text-anchor="middle" fill="#f5ecdc">Claude Code</text>
+<text x="100" y="523" class="role" text-anchor="middle" fill="#d9cdb8">만든다</text>
+<text x="290" y="502" class="name" text-anchor="middle" fill="#f5ecdc">Codex CLI</text>
+<text x="290" y="523" class="role" text-anchor="middle" fill="#d9cdb8">검토하고 고친다</text>
+<text x="480" y="502" class="name" text-anchor="middle" fill="#f5ecdc">TypeSafe Jev</text>
+<text x="480" y="523" class="role" text-anchor="middle" fill="#d9cdb8">권장 선택형 판정</text>
+<rect x="712" y="32" width="520" height="512" rx="18" fill="#7a6a52"/>
+<rect x="704" y="24" width="520" height="512" rx="18" fill="#241f18" stroke="#f5ecdc" stroke-width="3"/>
+<path d="M705.5 42 Q705.5 25.5 722 25.5 L1206 25.5 Q1222.5 25.5 1222.5 42 L1222.5 86 L705.5 86 Z" fill="#ffc2d1"/>
+<line x1="704" y1="86" x2="1224" y2="86" stroke="#f5ecdc" stroke-width="3"/>
+<circle cx="748" cy="55" r="20" fill="#ffffff" stroke="#141414" stroke-width="2.5"/>
+<circle cx="741" cy="51" r="3.2" fill="#141414"/>
+<circle cx="755" cy="51" r="3.2" fill="#141414"/>
+<path d="M741 61 Q748 68 755 61" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round"/>
+<text x="780" y="51" class="name" text-anchor="start" fill="#141414">oah</text>
+<circle cx="786" cy="69" r="5" fill="#5fd38a" stroke="#141414" stroke-width="2"/>
+<text x="798" y="74" class="status" text-anchor="start" fill="#141414">작업 완료 · 확인 기다리는 중</text>
+<circle cx="1164" cy="55" r="6" fill="#ffb547" stroke="#141414" stroke-width="2"/>
+<circle cx="1182" cy="55" r="6" fill="#5fd38a" stroke="#141414" stroke-width="2"/>
+<circle cx="1200" cy="55" r="6" fill="#b9a3ff" stroke="#141414" stroke-width="2"/>
+<rect x="914" y="104" width="290" height="44" rx="16" fill="#7a6a52"/>
+<rect x="910" y="100" width="290" height="44" rx="16" fill="#9fd8ff" stroke="#f5ecdc" stroke-width="2.5"/>
+<text x="1055" y="128" class="msg" text-anchor="middle" fill="#141414">로그인 기능 다 됐어?</text>
+<rect x="728" y="164" width="472" height="290" rx="16" fill="#7a6a52"/>
+<rect x="724" y="160" width="472" height="290" rx="16" fill="#312920" stroke="#f5ecdc" stroke-width="2.5"/>
+<text x="744" y="189" class="strong" text-anchor="start" fill="#f5ecdc">응, 다 됐어. 이렇게 진행했어.</text>
+<rect x="744" y="203" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 213 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="219" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">영향 지도</tspan>가 변경이 닿는 곳을 확인</text>
+<rect x="744" y="233" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 243 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="249" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">리스</tspan>로 바꿀 파일을 미리 맡음</text>
+<rect x="744" y="263" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 273 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="279" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">Jev</tspan>가 난이도를 판정 → 모델 자동 선택</text>
+<rect x="744" y="293" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 303 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="309" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">Claude Code</tspan>가 만듦</text>
+<rect x="744" y="323" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 333 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="339" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">Codex CLI</tspan>가 검토하고 고쳐서 수렴</text>
+<rect x="744" y="353" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 363 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="369" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">게이트</tspan> 4개 모두 통과, 증거 보관</text>
+<rect x="744" y="383" width="20" height="20" rx="4" fill="#c6f3d3" stroke="#f5ecdc" stroke-width="2"/>
+<path d="M748 393 l4 4 l8 -9" fill="none" stroke="#141414" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="774" y="399" class="check" text-anchor="start" fill="#f5ecdc"><tspan class="check-label">위키</tspan>에 왜 그렇게 했는지 기록</text>
+<text x="744" y="432" class="strong" text-anchor="start" fill="#f5ecdc">반영할까?</text>
+<rect x="728" y="474" width="140" height="42" rx="21" fill="#7a6a52"/>
+<rect x="724" y="470" width="140" height="42" rx="21" fill="#9fd8ff" stroke="#f5ecdc" stroke-width="2.5"/>
+<text x="794" y="497" class="chip" text-anchor="middle" fill="#141414">반영해 줘</text>
+<rect x="888" y="474" width="180" height="42" rx="21" fill="#7a6a52"/>
+<rect x="884" y="470" width="180" height="42" rx="21" fill="#241f18" stroke="#f5ecdc" stroke-width="2.5"/>
+<text x="974" y="497" class="chip" text-anchor="middle" fill="#f5ecdc">게이트 보여 줘</text>
 </svg>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>작업의 전체 흐름</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #f5f5f5; color: #2d3142; margin: 0; padding: 24px; }
+.frame { max-width: 1232px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 1232px; display: block; }
+text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #2d3142; }
+.title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #4f5d75; }
+.prose { font-size: 12px; font-weight: 400; fill: #4f5d75; }
+.zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #4f5d75; }
+.arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #4f5d75; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #4f5d75; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #2d3142; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 1232 756" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-ko-light-title concepts-loop-ko-light-desc" data-diagram-type="Flowchart" data-size="fit">
+<title id="concepts-loop-ko-light-title">작업의 전체 흐름</title>
+<desc id="concepts-loop-ko-light-desc">패킷이 리스, Claude 구현, 게이트와 위키 증거, Codex 리뷰를 거치며 수정 요청은 증거 단계로 돌아가고 리뷰가 수렴하면 finish 뒤 사용자 확인을 거쳐 반영된다.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#2d3142" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+</defs>
+<rect width="1232" height="756" fill="#f5f5f5"/>
+<rect width="1232" height="756" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">작업의 전체 흐름</text>
+<path d="M 232,196 L 360,196" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 552,196 L 680,196" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 872,196 L 1000,196" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 1048,248 L 1048,304 Q 1048,312 1040,312 L 784,312 Q 776,312 776,320 L 776,392" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 680,444 L 552,444" data-edge-id="e7" data-from="R" data-to="N" data-label="수렴" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 360,444 L 232,444" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 872,444 L 1000,444" data-edge-id="e5" data-from="R" data-to="F" data-label="수정 요청" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 1144,392 L 1144,248" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<rect x="558" y="416" width="116" height="20" rx="2" fill="#f5f5f5"/>
+<text x="616" y="431" class="arrow-label" text-anchor="middle">A 수렴</text>
+<rect x="884" y="416" width="104" height="20" rx="2" fill="#f5f5f5"/>
+<text x="936" y="431" class="arrow-label" text-anchor="middle">B 수정 요청</text>
+<g data-node-id="P" data-source-label="패킷 의도와 범위">
+<rect x="40" y="144" width="192" height="104" rx="20" fill="#f5f5f5"/>
+<rect x="40" y="144" width="192" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="56" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="80" y="171" class="tag" text-anchor="middle">INTENT</text>
+<text x="216" y="182" class="ghost" text-anchor="end">01</text>
+</g>
+<text x="56" y="202" class="node" text-anchor="start">패킷</text>
+<text x="56" y="222" class="sub" text-anchor="start">의도와 범위</text>
+</g>
+<g data-node-id="L" data-source-label="리스 preflight, start">
+<rect x="360" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="360" y="144" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="376" y="160" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="398" y="171" class="tag" text-anchor="middle">LEASE</text>
+<text x="536" y="182" class="ghost" text-anchor="end">02</text>
+</g>
+<text x="376" y="202" class="node" text-anchor="start">리스</text>
+<text x="376" y="222" class="sub technical" text-anchor="start">preflight, start</text>
+</g>
+<g data-node-id="C" data-source-label="Claude 1차 구현">
+<rect x="680" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="144" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="696" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="720" y="171" class="tag" text-anchor="middle">CLAUDE</text>
+<text x="856" y="182" class="ghost" text-anchor="end">03</text>
+</g>
+<text x="696" y="202" class="node" text-anchor="start">Claude</text>
+<text x="696" y="222" class="sub" text-anchor="start">1차 구현</text>
+</g>
+<g data-node-id="G" data-source-label="게이트와 위키 증거">
+<rect x="1000" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="1000" y="144" width="192" height="104" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<g aria-hidden="true">
+<rect x="1016" y="160" width="56" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="1044" y="171" class="tag" text-anchor="middle">EVIDENCE</text>
+<text x="1176" y="182" class="ghost" text-anchor="end">04</text>
+</g>
+<text x="1016" y="202" class="node" text-anchor="start">게이트와 위키</text>
+<text x="1016" y="222" class="sub" text-anchor="start">증거</text>
+</g>
+<g data-node-id="R" data-source-label="Codex 리뷰">
+<rect x="680" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="696" y="408" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="718" y="419" class="tag" text-anchor="middle">CODEX</text>
+<text x="856" y="430" class="ghost" text-anchor="end">05</text>
+</g>
+<text x="696" y="450" class="node" text-anchor="start">Codex</text>
+<text x="696" y="470" class="sub" text-anchor="start">리뷰</text>
+</g>
+<g data-node-id="N" data-source-label="oah finish">
+<rect x="360" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="360" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="376" y="408" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="400" y="419" class="tag" text-anchor="middle">FINISH</text>
+<text x="536" y="430" class="ghost" text-anchor="end">06</text>
+</g>
+<text x="376" y="450" class="node" text-anchor="start">oah finish</text>
+</g>
+<g data-node-id="D" data-source-label="oah land 사용자 확인 뒤">
+<rect x="40" y="392" width="192" height="104" rx="20" fill="#f5f5f5"/>
+<rect x="40" y="392" width="192" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="56" y="408" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="74" y="419" class="tag" text-anchor="middle">LAND</text>
+<text x="216" y="430" class="ghost" text-anchor="end">07</text>
+</g>
+<text x="56" y="450" class="node" text-anchor="start">oah land</text>
+<text x="56" y="470" class="sub" text-anchor="start">사용자 확인 뒤</text>
+</g>
+<g data-node-id="F" data-source-label="Codex oah fix">
+<rect x="1000" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="1000" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="1016" y="408" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="1038" y="419" class="tag" text-anchor="middle">CODEX</text>
+<text x="1176" y="430" class="ghost" text-anchor="end">05b</text>
+</g>
+<text x="1016" y="450" class="node" text-anchor="start">Codex</text>
+<text x="1016" y="470" class="sub technical" text-anchor="start">oah fix</text>
+</g>
+<text x="40" y="548" class="zone-label" text-anchor="start">전이 조건</text>
+<rect x="40" y="567" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="581" class="label" text-anchor="middle">A</text>
+<text x="80" y="581" class="prose" text-anchor="start">수렴</text>
+<rect x="40" y="599" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="613" class="label" text-anchor="middle">B</text>
+<text x="80" y="613" class="prose" text-anchor="start">수정 요청</text>
+<line x1="40" y1="676" x2="1192" y2="676" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="704" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="694" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="704" class="prose" text-anchor="start">주요 단계</text>
+<path d="M 236,700 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="272" y="704" class="prose" text-anchor="start">작업·증거</text>
+</svg>
+</div>
+</main>
+</body>
+</html>

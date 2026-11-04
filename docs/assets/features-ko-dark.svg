@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 960 1040" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="features-ko-dark-title features-ko-dark-desc" data-diagram-type="Architecture" data-size="fit" id="features-ko-dark-root">
+<title id="features-ko-dark-title">oah가 함께 챙기는 것</title>
+<desc id="features-ko-dark-desc">영향 지도, 경로를 예약하는 리스와 권장 선택형 판정기 TypeSafe Jev가 Claude Code 구현과 Codex CLI 검토를 돕고 게이트와 위키가 증거와 결정을 남기며, 겹치는 리스는 거절하고 사용자는 질문하고 판단에 답한 뒤 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 미출시 main에 있다.</desc>
+<defs>
+      <style>#features-ko-dark-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #f5f5f5; }
+      #features-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
+      #features-ko-dark-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
+      #features-ko-dark-root .title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+      #features-ko-dark-root .node { font-size: 16px; font-weight: 600; }
+      #features-ko-dark-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #features-ko-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+      #features-ko-dark-root .label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+      #features-ko-dark-root .prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+      #features-ko-dark-root .zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+      #features-ko-dark-root .arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+      #features-ko-dark-root .tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+      #features-ko-dark-root .ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+      @media print {
+#features-ko-dark-root .diagram-container { overflow-x: visible; }
+}</style>
+<pattern id="features-ko-dark-dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="features-ko-dark-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="features-ko-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="features-ko-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="960" height="1040" fill="#2d3142"/>
+<rect width="960" height="1040" fill="url(#features-ko-dark-dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / ARCHITECTURE</text>
+<text x="40" y="88" class="title" text-anchor="start">oah가 함께 챙기는 것</text>
+<rect x="40" y="136" width="880" height="248" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="160" class="zone-label" text-anchor="start">작업 전 · 범위를 파악한다</text>
+<rect x="40" y="672" width="880" height="216" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="696" class="zone-label" text-anchor="start">검사 증거와 결정 이유를 남긴다</text>
+<path d="M 180,328 L 180,400 Q 180,408 188,408 L 372,408 Q 380,408 380,416 L 380,448" data-edge-id="f1" data-from="lease" data-to="loop" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)"/>
+<path d="M 480,308 L 480,448" data-edge-id="f2" data-from="impact" data-to="loop" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)"/>
+<path d="M 780,352 L 780,400 Q 780,408 772,408 L 588,408 Q 580,408 580,416 L 580,448" data-edge-id="f3" data-from="jev" data-to="loop" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#features-ko-dark-arrow)"/>
+<path d="M 400,584 L 400,728" data-edge-id="f4" data-from="loop" data-to="gates" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)"/>
+<path d="M 560,584 L 560,640 Q 560,648 568,648 L 712,648 Q 720,648 720,656 L 720,728" data-edge-id="f5" data-from="loop" data-to="wiki" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)"/>
+<path d="M 416,800 L 544,800" data-edge-id="f6" data-from="gates" data-to="wiki" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)" stroke-dasharray="5,4"/>
+<g data-node-id="lease" data-source-label="리스 작업이 바꿀 경로를 예약한다. 겹치는 리스는 거절한다.">
+<rect x="64" y="192" width="232" height="136" rx="6" fill="#2d3142"/>
+<rect x="64" y="192" width="232" height="136" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="208" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="219" class="tag" text-anchor="middle">LEASE</text>
+<text x="280" y="230" class="ghost" text-anchor="end">01</text>
+<g transform="translate(216,204)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/> <path d="M11 11a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"/> <path d="M12 12l0 2.5"/></g></g>
+</g>
+<text x="80" y="250" class="node" text-anchor="start">리스</text>
+<text x="80" y="270" class="sub" text-anchor="start">작업이 바꿀 경로를 예약한다.</text>
+<text x="80" y="288" class="sub" text-anchor="start">겹치는 리스는 거절한다.</text>
+</g>
+<g data-node-id="impact" data-source-label="영향 지도 변경이 닿는 곳과 다시 돌릴 검사를 찾는다.">
+<rect x="344" y="192" width="272" height="116" rx="6" fill="#2d3142"/>
+<rect x="344" y="192" width="272" height="116" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="360" y="208" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="384" y="219" class="tag" text-anchor="middle">IMPACT</text>
+<text x="600" y="230" class="ghost" text-anchor="end">02</text>
+<g transform="translate(536,204)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/> <path d="M21 21l-6 -6"/></g></g>
+</g>
+<text x="360" y="250" class="node" text-anchor="start">영향 지도</text>
+<text x="360" y="270" class="sub" text-anchor="start">변경이 닿는 곳과 다시 돌릴 검사를</text>
+<text x="360" y="288" class="sub" text-anchor="start">찾는다.</text>
+</g>
+<g data-node-id="jev" data-source-label="TypeSafe Jev 권장 선택형 판정기다. 난이도를 판정한다. 그 등급으로 모델을 고른다. 고른 스킬 순서를 다시 매긴다. 키가 없으면 규칙이 판단한다.">
+<rect x="664" y="192" width="232" height="160" rx="6" fill="#2d3142"/>
+<rect x="664" y="192" width="232" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<g aria-hidden="true">
+<rect x="680" y="208" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="696" y="219" class="tag" text-anchor="middle">JEV</text>
+<text x="880" y="230" class="ghost" text-anchor="end">03</text>
+<g transform="translate(816,204)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+</g>
+<text x="680" y="250" class="node" text-anchor="start">TypeSafe Jev</text>
+<text x="680" y="270" class="sub" text-anchor="start">권장 선택형 판정기다.</text>
+<text x="680" y="286" class="sub" text-anchor="start">난이도를 판정한다.</text>
+<text x="680" y="302" class="sub" text-anchor="start">그 등급으로 모델을 고른다.</text>
+<text x="680" y="318" class="sub" text-anchor="start">고른 스킬 순서를 다시 매긴다.</text>
+<text x="680" y="334" class="sub" text-anchor="start">키가 없으면 규칙이 판단한다.</text>
+</g>
+<g data-node-id="loop" data-source-label="구현과 리뷰 Claude Code가 만들고 Codex CLI가 검토하고 고친다. 같은 문제가 반복되거나 설계 선택이 필요하면 멈추고 사용자에게 묻는다.">
+<rect x="280" y="448" width="400" height="136" rx="6" fill="#2d3142"/>
+<rect x="280" y="448" width="400" height="136" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="296" y="464" width="88" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="340" y="475" class="tag" text-anchor="middle">CLAUDE / CODEX</text>
+<text x="664" y="486" class="ghost" text-anchor="end">04</text>
+<g transform="translate(600,460)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
+</g>
+<text x="296" y="506" class="node" text-anchor="start">구현과 리뷰</text>
+<text x="296" y="526" class="sub" text-anchor="start">Claude Code가 만들고 Codex CLI가 검토하고 고친다.</text>
+<text x="296" y="544" class="sub" text-anchor="start">같은 문제가 반복되거나 설계 선택이 필요하면</text>
+<text x="296" y="562" class="sub" text-anchor="start">멈추고 사용자에게 묻는다.</text>
+</g>
+<g data-node-id="gates" data-source-label="게이트 성공 조건을 검사 명령과 결과 기록으로 남긴다.">
+<rect x="64" y="728" width="352" height="116" rx="6" fill="#2d3142"/>
+<rect x="64" y="728" width="352" height="116" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="744" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="755" class="tag" text-anchor="middle">GATES</text>
+<text x="400" y="766" class="ghost" text-anchor="end">05</text>
+<g transform="translate(336,740)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/></g></g>
+</g>
+<text x="80" y="786" class="node" text-anchor="start">게이트</text>
+<text x="80" y="806" class="sub" text-anchor="start">성공 조건을 검사 명령과 결과 기록으로 남긴다.</text>
+</g>
+<g data-node-id="wiki" data-source-label="프로젝트 위키 다음 세션을 위해 결정과 이유를 남긴다.">
+<rect x="544" y="728" width="352" height="116" rx="6" fill="#2d3142"/>
+<rect x="544" y="728" width="352" height="116" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="560" y="744" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="578" y="755" class="tag" text-anchor="middle">WIKI</text>
+<text x="880" y="766" class="ghost" text-anchor="end">06</text>
+<g transform="translate(816,740)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/> <path d="M9 9l1 0"/> <path d="M9 13l6 0"/> <path d="M9 17l6 0"/></g></g>
+</g>
+<text x="560" y="786" class="node" text-anchor="start">프로젝트 위키</text>
+<text x="560" y="806" class="sub" text-anchor="start">다음 세션을 위해 결정과 이유를 남긴다.</text>
+</g>
+<text x="56" y="916" class="prose" text-anchor="start">Jev 난이도 판정은 미출시 main 기능이다. 확신도와 최저 기준을 지킨다.</text>
+<text x="56" y="938" class="prose" text-anchor="start">사용자는 질문하고, 판단을 물으며 멈추면 답하고, 반영 전에 확인한다.</text>
+<line x1="40" y1="960" x2="920" y2="960" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="988" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="978" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="988" class="prose" text-anchor="start">구현·리뷰 루프</text>
+<path d="M 320,984 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#features-ko-dark-arrow)"/>
+<text x="356" y="988" class="prose" text-anchor="start">지원·증거</text>
+<path d="M 520,984 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#features-ko-dark-arrow)"/>
+<text x="556" y="988" class="prose" text-anchor="start">권장 선택형 판정기·증거 경로</text>
+</svg>

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>영향 지도 · 순위 결과</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 920px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 920px; display: block; }
+text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-weight: 500; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 920 1064" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-impact-ranked-ko-dark-title concepts-impact-ranked-ko-dark-desc" data-diagram-type="Flowchart" data-size="fit">
+<title id="concepts-impact-ranked-ko-dark-title">영향 지도 · 순위 결과</title>
+<desc id="concepts-impact-ranked-ko-dark-desc">영향 결과는 pin, exec, link, mention 순으로 이어지며 pin과 exec가 다시 돌릴 정확한 게이트와 명령을 가리키고 changed-since를 주면 re-run 줄을 보여 준다.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="920" height="1064" fill="#2d3142"/>
+<rect width="920" height="1064" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">영향 지도 · 순위 결과</text>
+<rect x="40" y="144" width="456" height="768" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="ranked" fill-opacity=".02" stroke-opacity=".12"/>
+<text x="56" y="168" class="zone-label" text-anchor="start">순위가 매겨진 결과</text>
+<path d="M 264,336 L 264,384" data-edge-id="e7" data-from="pinR" data-to="execR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 264,496 L 264,544" data-edge-id="e8" data-from="execR" data-to="linkR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 264,704 L 264,752" data-edge-id="e9" data-from="linkR" data-to="mentionR" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 464,264 L 724,264 Q 732,264 732,272 L 732,384" data-edge-id="e10" data-from="pinR" data-to="rerun" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 464,440 L 520,440" data-edge-id="e11" data-from="execR" data-to="rerun" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<g data-node-id="pinR" data-source-label="pin: 게이트 EXPECT가 이름을 말하거나, 게이트 CHECK 또는 workflow, manifest, config 명령이 해시하거나 grep함" data-parent="ranked">
+<rect x="64" y="192" width="400" height="144" rx="6" fill="#2d3142"/>
+<rect x="64" y="192" width="400" height="144" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="80" y="208" width="52" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="219" class="tag" text-anchor="middle">BINDING</text>
+</g>
+<text x="80" y="250" class="node" text-anchor="start">pin:</text>
+<text x="80" y="270" class="sub" text-anchor="start">게이트 EXPECT가 이름을 말하거나, 게이트 CHECK</text>
+<text x="80" y="288" class="sub" text-anchor="start">또는 workflow, manifest, config 명령이 해시하거나</text>
+<text x="80" y="306" class="sub" text-anchor="start">grep함</text>
+</g>
+<g data-node-id="execR" data-source-label="exec: 게이트 CHECK나 그런 명령이 실행함" data-parent="ranked">
+<rect x="64" y="384" width="400" height="112" rx="6" fill="#2d3142"/>
+<rect x="64" y="384" width="400" height="112" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="80" y="400" width="52" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="411" class="tag" text-anchor="middle">BINDING</text>
+</g>
+<text x="80" y="442" class="node" text-anchor="start">exec:</text>
+<text x="80" y="462" class="sub" text-anchor="start">게이트 CHECK나 그런 명령이 실행함</text>
+</g>
+<g data-node-id="linkR" data-source-label="link: 코드, 테스트, workflow, 위키, 게이트 CHECK에 전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션" data-parent="ranked">
+<rect x="64" y="544" width="400" height="160" rx="6" fill="#2d3142"/>
+<rect x="64" y="544" width="400" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="80" y="560" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="571" class="tag" text-anchor="middle">CONTEXT</text>
+</g>
+<text x="80" y="602" class="node" text-anchor="start">link:</text>
+<text x="80" y="622" class="sub" text-anchor="start">코드, 테스트, workflow, 위키, 게이트 CHECK에</text>
+<text x="80" y="640" class="sub" text-anchor="start">전체 경로가 나옴, SQL 객체를 정의하는 마이그레이션</text>
+</g>
+<g data-node-id="mentionR" data-source-label="mention: 파일 이름이나 stem 일치, 함께 바뀐 기록, 그래프 이웃" data-parent="ranked">
+<rect x="64" y="752" width="400" height="128" rx="6" fill="#2d3142"/>
+<rect x="64" y="752" width="400" height="128" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".05"/>
+<g aria-hidden="true">
+<rect x="80" y="768" width="52" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="106" y="779" class="tag" text-anchor="middle">CONTEXT</text>
+</g>
+<text x="80" y="810" class="node" text-anchor="start">mention:</text>
+<text x="80" y="830" class="sub" text-anchor="start">파일 이름이나 stem 일치, 함께 바뀐 기록,</text>
+<text x="80" y="848" class="sub" text-anchor="start">그래프 이웃</text>
+</g>
+<g data-node-id="rerun" data-source-label="다시 돌릴 정확한 게이트와 명령 --changed-since일 때 re-run 줄">
+<rect x="520" y="384" width="360" height="100" rx="6" fill="#2d3142"/>
+<rect x="520" y="384" width="360" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="536" y="400" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="558" y="411" class="tag" text-anchor="middle">RERUN</text>
+<g transform="translate(800,396)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/> <path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"/></g></g>
+</g>
+<text x="536" y="442" class="node" text-anchor="start">다시 돌릴 정확한 게이트와 명령</text><text x="536" y="462" class="sub" text-anchor="start">--changed-since일 때 re-run 줄</text></g>
+<text x="56" y="944" class="prose" text-anchor="start">앞선 그림의 최신 여부 검사를 거친 pin 결과가 여기서 이어진다.</text>
+<line x1="40" y1="984" x2="880" y2="984" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1012" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="1002" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1012" class="prose" text-anchor="start">결정적 근거</text>
+<path d="M 296,1008 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="332" y="1012" class="prose" text-anchor="start">순위·재실행</text>
+</svg>
+</div>
+</main>
+</body>
+</html>

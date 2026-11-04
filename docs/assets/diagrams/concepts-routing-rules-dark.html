@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Routing · tier, model and effort</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
+.frame { max-width: 960px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; }
+h1 { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+svg { width: 100%; min-width: 960px; display: block; }
+text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f5; }
+.title { font-family: "Instrument Serif", Georgia, serif; font-size: 28px; font-weight: 400; }
+.node { font-size: 16px; font-weight: 600; }
+.sub { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.prose { font-size: 12px; font-weight: 400; fill: #bfc0c0; }
+.zone-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 500; fill: #bfc0c0; }
+.arrow-label { font-size: 12px; font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 400; fill: #bfc0c0; }
+.tag { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 500; letter-spacing: .08em; fill: #bfc0c0; }
+.ghost { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 32px; font-weight: 600; fill: #f5f5f5; opacity: .06; }
+@media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Adapted from diagram-design 3eb03b8, MIT, Copyright (c) 2025 Cathryn Lavery.
+     System fonts; static, offline; fit canvas with presentation-size node text.
+     Icons from the skill's primitive-icons reference (Tabler Icons, MIT).
+     See README.md and style-guide.md in this directory. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 960 1272" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-dark-title concepts-routing-rules-dark-desc" data-diagram-type="Flowchart" data-size="fit">
+<title id="concepts-routing-rules-dark-title">Routing · tier, model and effort</title>
+<desc id="concepts-routing-rules-dark-desc">The task&#x27;s stage, kind and Scope paths, with explicit axes winning, feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record.</desc>
+<defs>
+<pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+<circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
+<marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bfc0c0"/></marker>
+<marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
+<marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
+</defs>
+<rect width="960" height="1272" fill="#2d3142"/>
+<rect width="960" height="1272" fill="url(#dots)" opacity=".55"/>
+<text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
+<text x="40" y="88" class="title" text-anchor="start">Routing · tier, model and effort</text>
+<path d="M 288,244 L 288,296" data-edge-id="e1" data-from="task" data-to="score" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,396 L 288,444" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,544 L 288,600" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,700 L 288,756" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,908 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 772,596 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="its tier at or above difficulty_min_confidence, never below the floor" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="588" y="644" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="640" y="659" class="arrow-label" text-anchor="middle">A JEV TIER</text>
+<g data-node-id="task" data-source-label="Task: stage, kind and Scope paths axes you give explicitly win">
+<rect x="64" y="144" width="496" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="144" width="496" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="160" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="98" y="171" class="tag" text-anchor="middle">TASK</text>
+<text x="544" y="182" class="ghost" text-anchor="end">01</text>
+</g>
+<text x="80" y="202" class="node" text-anchor="start">Task: stage, kind and Scope paths</text><text x="80" y="222" class="sub" text-anchor="start">axes you give explicitly win</text></g>
+<g data-node-id="score" data-source-label="Fixed rules score four axes kind, intensity, reasoning, risk">
+<rect x="64" y="296" width="496" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="296" width="496" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="312" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="323" class="tag" text-anchor="middle">RULES</text>
+<text x="544" y="334" class="ghost" text-anchor="end">02</text>
+</g>
+<text x="80" y="354" class="node" text-anchor="start">Fixed rules score four axes</text><text x="80" y="374" class="sub technical" text-anchor="start">kind, intensity, reasoning, risk</text></g>
+<g data-node-id="tier" data-source-label="Tier: low, medium, high or max risk critical = max, migration, security = at least high">
+<rect x="64" y="444" width="496" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="444" width="496" height="100" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<g aria-hidden="true">
+<rect x="80" y="460" width="36" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="98" y="471" class="tag" text-anchor="middle">TIER</text>
+<text x="544" y="482" class="ghost" text-anchor="end">03</text>
+</g>
+<text x="80" y="502" class="node" text-anchor="start">Tier: low, medium, high or max</text><text x="80" y="522" class="sub" text-anchor="start">risk critical = max, migration, security = at least high</text></g>
+<g data-node-id="pick" data-source-label="Packet stage tier, or oah call --tier source recorded: rules, packet, flag or jev">
+<rect x="64" y="600" width="496" height="100" rx="6" fill="#2d3142"/>
+<rect x="64" y="600" width="496" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="616" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="104" y="627" class="tag" text-anchor="middle">SELECT</text>
+<text x="544" y="638" class="ghost" text-anchor="end">04</text>
+</g>
+<text x="80" y="658" class="node" text-anchor="start">Packet stage tier, or oah call --tier</text><text x="80" y="678" class="sub technical" text-anchor="start">source recorded: rules, packet, flag or jev</text></g>
+<g data-node-id="model" data-source-label="Model and effort the CLI supports an effort that cannot be observed is recorded as unverified a lower launch effort fails: OAH_EFFORT_DOWNGRADED">
+<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142"/>
+<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="772" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="783" class="tag" text-anchor="middle">MODEL</text>
+<text x="544" y="794" class="ghost" text-anchor="end">05</text>
+</g>
+<text x="80" y="814" class="node" text-anchor="start">Model and effort the CLI supports</text><text x="80" y="834" class="sub" text-anchor="start">an effort that cannot be observed is recorded as</text><text x="80" y="852" class="sub" text-anchor="start">unverified</text><text x="80" y="870" class="sub" text-anchor="start">a lower launch effort fails: OAH_EFFORT_DOWNGRADED</text></g>
+<g data-node-id="brief" data-source-label="Packet plan, brief and run record">
+<rect x="64" y="956" width="496" height="80" rx="6" fill="#2d3142"/>
+<rect x="64" y="956" width="496" height="80" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<g aria-hidden="true">
+<rect x="80" y="972" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="104" y="983" class="tag" text-anchor="middle">RECORD</text>
+<text x="544" y="994" class="ghost" text-anchor="end">06</text>
+</g>
+<text x="80" y="1014" class="node" text-anchor="start">Packet plan, brief and run record</text></g>
+<g data-node-id="jev" data-source-label="TypeSafe Jev provider re-orders only, never adds or drops judges difficulty from the Intent and Scope paths">
+<rect x="624" y="444" width="296" height="152" rx="6" fill="#2d3142"/>
+<rect x="624" y="444" width="296" height="152" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<g aria-hidden="true">
+<rect x="640" y="460" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="656" y="471" class="tag" text-anchor="middle">JEV</text>
+<g transform="translate(840,456)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
+</g>
+<text x="640" y="502" class="node" text-anchor="start">TypeSafe Jev</text>
+<text x="640" y="522" class="sub" text-anchor="start">provider</text>
+<text x="640" y="540" class="sub" text-anchor="start">re-orders only, never adds or drops</text>
+<text x="640" y="558" class="sub" text-anchor="start">judges difficulty from the Intent</text>
+<text x="640" y="576" class="sub" text-anchor="start">and Scope paths</text>
+</g>
+<text x="40" y="1096" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="1115" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1129" class="label" text-anchor="middle">A</text>
+<text x="80" y="1129" class="prose" text-anchor="start">its tier at or above difficulty_min_confidence, never below the floor</text>
+<text x="56" y="1164" class="prose" text-anchor="start">Task, Jev and the brief also connect the skill-order flow in the next figure.</text>
+<line x1="40" y1="1192" x2="920" y2="1192" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1220" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1210" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1220" class="prose" text-anchor="start">Focus</text>
+<path d="M 236,1216 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="272" y="1220" class="prose" text-anchor="start">Work / evidence</text>
+<path d="M 412,1216 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<text x="448" y="1220" class="prose" text-anchor="start">Optional / return</text>
+</svg>
+</div>
+</main>
+</body>
+</html>
