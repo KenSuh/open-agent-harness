@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 960 1644" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-skills-dark-title concepts-routing-skills-dark-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-routing-skills-dark-root">
+<svg viewBox="0 0 960 1384" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-skills-dark-title concepts-routing-skills-dark-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-routing-skills-dark-root">
 <title id="concepts-routing-skills-dark-title">Routing · skill order and Jev</title>
 <desc id="concepts-routing-skills-dark-desc">The task yields a reasoned deterministic skill list, configured and enabled reranking uses Jev only with candidates, success records used, and no candidates, disabling or errors record unused with the original order kept on error.</desc>
 <defs>
@@ -25,131 +25,124 @@
 <marker id="concepts-routing-skills-dark-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#f08a59"/></marker>
 <marker id="concepts-routing-skills-dark-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker>
 </defs>
-<rect width="960" height="1644" fill="#2d3142"/>
-<rect width="960" height="1644" fill="url(#concepts-routing-skills-dark-dots)" opacity=".55"/>
+<rect width="960" height="1384" fill="#2d3142"/>
+<rect width="960" height="1384" fill="url(#concepts-routing-skills-dark-dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
 <text x="40" y="88" class="title" text-anchor="start">Routing · skill order and Jev</text>
-<path d="M 480,272 L 480,320" data-edge-id="e6" data-from="task" data-to="skills" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 480,432 L 480,480" data-edge-id="e7" data-from="skills" data-to="ask" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 200,584 L 128,584 Q 120,584 120,592 L 120,768" data-edge-id="e8" data-from="ask" data-to="jev" data-label="yes, candidates present" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 760,584 L 816,584 Q 824,584 824,592 L 824,768" data-edge-id="e9" data-from="ask" data-to="unused" data-label="yes, no candidates" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 480,688 L 480,720 Q 480,728 488,728 L 640,728 Q 648,728 648,736 L 648,768" data-edge-id="e10" data-from="ask" data-to="unused" data-label="no" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 220,928 L 220,1024" data-edge-id="e11" data-from="jev" data-to="used" data-label="scoring succeeds" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 400,848 L 584,848" data-edge-id="e12" data-from="jev" data-to="unused" data-label="error, original order kept" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 220,1112 L 220,1224 Q 220,1232 228,1232 L 280,1232" data-edge-id="e13" data-from="used" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<path d="M 752,960 L 752,1224 Q 752,1232 744,1232 L 680,1232" data-edge-id="e14" data-from="unused" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<rect x="80" y="689" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="96" y="704" class="arrow-label" text-anchor="middle">01</text>
-<rect x="832" y="689" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="848" y="704" class="arrow-label" text-anchor="middle">02</text>
-<rect x="540" y="700" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="556" y="715" class="arrow-label" text-anchor="middle">03</text>
-<rect x="228" y="965" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="244" y="980" class="arrow-label" text-anchor="middle">04</text>
-<rect x="476" y="820" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="492" y="835" class="arrow-label" text-anchor="middle">05</text>
+<path d="M 440,194 L 520,194" data-edge-id="e6" data-from="task" data-to="skills" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 720,244 L 720,264 Q 720,272 712,272 L 488,272 Q 480,272 480,280 L 480,304" data-edge-id="e7" data-from="skills" data-to="ask" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 200,408 L 128,408 Q 120,408 120,416 L 120,592" data-edge-id="e8" data-from="ask" data-to="jev" data-label="yes, candidates present" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 760,408 L 816,408 Q 824,408 824,416 L 824,592" data-edge-id="e9" data-from="ask" data-to="unused" data-label="yes, no candidates" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 480,512 L 480,544 Q 480,552 488,552 L 640,552 Q 648,552 648,560 L 648,592" data-edge-id="e10" data-from="ask" data-to="unused" data-label="no" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 220,752 L 220,828" data-edge-id="e11" data-from="jev" data-to="used" data-label="scoring succeeds" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 400,672 L 584,672" data-edge-id="e12" data-from="jev" data-to="unused" data-label="error, original order kept" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 220,908 L 220,988 Q 220,996 228,996 L 280,996" data-edge-id="e13" data-from="used" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<path d="M 752,748 L 752,988 Q 752,996 744,996 L 680,996" data-edge-id="e14" data-from="unused" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<rect x="128" y="513" width="108" height="20" rx="2" fill="#2d3142"/>
+<text x="182" y="528" class="arrow-label" text-anchor="middle">A CANDIDATES</text>
+<rect x="712" y="513" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="764" y="528" class="arrow-label" text-anchor="middle">B NO MATCH</text>
+<rect x="518" y="524" width="76" height="20" rx="2" fill="#2d3142"/>
+<text x="556" y="539" class="arrow-label" text-anchor="middle">C NO</text>
+<rect x="228" y="769" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="280" y="784" class="arrow-label" text-anchor="middle">D SUCCESS</text>
+<rect x="448" y="644" width="88" height="20" rx="2" fill="#2d3142"/>
+<text x="492" y="659" class="arrow-label" text-anchor="middle">E ERROR</text>
 <g data-node-id="task" data-source-label="Task: stage, kind and Scope paths axes you give explicitly win">
-<rect x="280" y="144" width="400" height="128" rx="6" fill="#2d3142"/>
-<rect x="280" y="144" width="400" height="128" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="40" y="144" width="400" height="100" rx="6" fill="#2d3142"/>
+<rect x="40" y="144" width="400" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="296" y="160" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="314" y="171" class="tag" text-anchor="middle">TASK</text>
-<text x="664" y="182" class="ghost" text-anchor="end">01</text>
+<rect x="56" y="160" width="36" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="74" y="171" class="tag" text-anchor="middle">TASK</text>
+<text x="424" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<text x="296" y="202" class="node" text-anchor="start">Task:</text>
-<text x="296" y="222" class="sub" text-anchor="start">stage, kind and Scope paths</text>
-<text x="296" y="240" class="sub" text-anchor="start">axes you give explicitly win</text>
-</g>
+<text x="56" y="202" class="node" text-anchor="start">Task: stage, kind and Scope paths</text><text x="56" y="222" class="sub" text-anchor="start">axes you give explicitly win</text></g>
 <g data-node-id="skills" data-source-label="Deterministic skill list with a reason for each skill">
-<rect x="280" y="320" width="400" height="112" rx="6" fill="#2d3142"/>
-<rect x="280" y="320" width="400" height="112" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="520" y="144" width="400" height="100" rx="6" fill="#2d3142"/>
+<rect x="520" y="144" width="400" height="100" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="296" y="336" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="318" y="347" class="tag" text-anchor="middle">RULES</text>
-<text x="664" y="358" class="ghost" text-anchor="end">02</text>
+<rect x="536" y="160" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="558" y="171" class="tag" text-anchor="middle">RULES</text>
+<text x="904" y="182" class="ghost" text-anchor="end">02</text>
 </g>
-<text x="296" y="378" class="node" text-anchor="start">Deterministic skill list</text>
-<text x="296" y="398" class="sub" text-anchor="start">with a reason for each skill</text>
+<text x="536" y="202" class="node" text-anchor="start">Deterministic skill list</text>
+<text x="536" y="222" class="sub" text-anchor="start">with a reason for each skill</text>
 </g>
 <g data-node-id="ask" data-source-label="Not --no-rerank, enabled by you, provider set AND key present?">
-<polygon points="480,480 760,584 480,688 200,584" fill="#2d3142"/>
-<polygon points="480,480 760,584 480,688 200,584" fill="#f08a59" fill-opacity=".10" stroke="#f08a59" stroke-width="1.2"/>
+<polygon points="480,304 760,408 480,512 200,408" fill="#2d3142"/>
+<polygon points="480,304 760,408 480,512 200,408" fill="#f08a59" fill-opacity=".10" stroke="#f08a59" stroke-width="1.2"/>
 <g aria-hidden="true">
-<rect x="440" y="516" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
-<text x="462" y="527" class="tag" text-anchor="middle">CHECK</text>
+<rect x="440" y="340" width="44" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
+<text x="462" y="351" class="tag" text-anchor="middle">CHECK</text>
 </g>
-<text x="480" y="560" class="node" text-anchor="middle">Not --no-rerank,</text>
-<text x="480" y="580" class="sub" text-anchor="middle">enabled by you,</text>
-<text x="480" y="598" class="sub" text-anchor="middle">provider set AND key present?</text>
-</g>
+<text x="480" y="384" class="node" text-anchor="middle">Not --no-rerank,</text><text x="480" y="404" class="node" text-anchor="middle">enabled by you,</text><text x="480" y="424" class="node" text-anchor="middle">provider set AND key present?</text></g>
 <g data-node-id="jev" data-source-label="TypeSafe Jev provider re-orders only, never adds or drops judges difficulty from the Intent and Scope paths">
-<rect x="40" y="768" width="360" height="160" rx="6" fill="#2d3142"/>
-<rect x="40" y="768" width="360" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="40" y="592" width="360" height="160" rx="6" fill="#2d3142"/>
+<rect x="40" y="592" width="360" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
-<rect x="56" y="784" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="72" y="795" class="tag" text-anchor="middle">JEV</text>
-<g transform="translate(320,780)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+<rect x="56" y="608" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="72" y="619" class="tag" text-anchor="middle">JEV</text>
+<g transform="translate(320,604)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
 </g>
-<text x="56" y="826" class="node" text-anchor="start">TypeSafe Jev</text>
-<text x="56" y="846" class="sub" text-anchor="start">provider</text>
-<text x="56" y="864" class="sub" text-anchor="start">re-orders only, never adds or drops</text>
-<text x="56" y="882" class="sub" text-anchor="start">judges difficulty from the Intent and Scope</text>
-<text x="56" y="900" class="sub" text-anchor="start">paths</text>
+<text x="56" y="650" class="node" text-anchor="start">TypeSafe Jev</text>
+<text x="56" y="670" class="sub" text-anchor="start">provider</text>
+<text x="56" y="688" class="sub" text-anchor="start">re-orders only, never adds or drops</text>
+<text x="56" y="706" class="sub" text-anchor="start">judges difficulty from the Intent and Scope</text>
+<text x="56" y="724" class="sub" text-anchor="start">paths</text>
 </g>
 <g data-node-id="unused" data-source-label="rerank=unused(reason) disabled-by-brief, not-enabled, not-configured, unknown-provider, no key, no-candidates, error:CODE">
-<rect x="584" y="768" width="336" height="192" rx="6" fill="#2d3142"/>
-<rect x="584" y="768" width="336" height="192" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="584" y="592" width="336" height="156" rx="6" fill="#2d3142"/>
+<rect x="584" y="592" width="336" height="156" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="600" y="784" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="624" y="795" class="tag" text-anchor="middle">RESULT</text>
+<rect x="600" y="608" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="624" y="619" class="tag" text-anchor="middle">RESULT</text>
 </g>
-<text x="600" y="826" class="node" text-anchor="start">rerank=unused(reason)</text>
-<text x="600" y="846" class="sub" text-anchor="start">disabled-by-brief, not-enabled,</text>
-<text x="600" y="864" class="sub" text-anchor="start">not-configured,</text>
-<text x="600" y="882" class="sub" text-anchor="start">unknown-provider, no key, no-candidates,</text>
-<text x="600" y="900" class="sub" text-anchor="start">error:CODE</text>
+<text x="600" y="650" class="node" text-anchor="start">rerank=unused(reason)</text>
+<text x="600" y="670" class="sub" text-anchor="start">disabled-by-brief, not-enabled,</text>
+<text x="600" y="688" class="sub" text-anchor="start">not-configured,</text>
+<text x="600" y="706" class="sub" text-anchor="start">unknown-provider, no key, no-candidates,</text>
+<text x="600" y="724" class="sub" text-anchor="start">error:CODE</text>
 </g>
 <g data-node-id="used" data-source-label="rerank=used">
-<rect x="40" y="1024" width="360" height="88" rx="6" fill="#2d3142"/>
-<rect x="40" y="1024" width="360" height="88" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="40" y="828" width="360" height="80" rx="6" fill="#2d3142"/>
+<rect x="40" y="828" width="360" height="80" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="56" y="1040" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="80" y="1051" class="tag" text-anchor="middle">RESULT</text>
+<rect x="56" y="844" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="80" y="855" class="tag" text-anchor="middle">RESULT</text>
 </g>
-<text x="56" y="1082" class="node" text-anchor="start">rerank=used</text>
+<text x="56" y="886" class="node" text-anchor="start">rerank=used</text>
 </g>
 <g data-node-id="brief" data-source-label="Packet plan, brief and run record">
-<rect x="280" y="1176" width="400" height="112" rx="20" fill="#2d3142"/>
-<rect x="280" y="1176" width="400" height="112" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="280" y="940" width="400" height="80" rx="20" fill="#2d3142"/>
+<rect x="280" y="940" width="400" height="80" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="296" y="1192" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
-<text x="320" y="1203" class="tag" text-anchor="middle">RECORD</text>
+<rect x="296" y="956" width="48" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
+<text x="320" y="967" class="tag" text-anchor="middle">RECORD</text>
 </g>
-<text x="296" y="1234" class="node" text-anchor="start">Packet plan, brief</text>
-<text x="296" y="1254" class="sub" text-anchor="start">and run record</text>
-</g>
-<text x="40" y="1340" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
-<rect x="40" y="1359" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1373" class="label" text-anchor="middle">01</text>
-<text x="80" y="1373" class="prose" text-anchor="start">yes, candidates present</text>
-<rect x="40" y="1391" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1405" class="label" text-anchor="middle">02</text>
-<text x="80" y="1405" class="prose" text-anchor="start">yes, no candidates</text>
-<rect x="40" y="1423" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1437" class="label" text-anchor="middle">03</text>
-<text x="80" y="1437" class="prose" text-anchor="start">no</text>
-<rect x="40" y="1455" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1469" class="label" text-anchor="middle">04</text>
-<text x="80" y="1469" class="prose" text-anchor="start">scoring succeeds</text>
-<rect x="40" y="1487" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1501" class="label" text-anchor="middle">05</text>
-<text x="80" y="1501" class="prose" text-anchor="start">error, original order kept</text>
-<line x1="40" y1="1564" x2="920" y2="1564" stroke="#f5f5f5" stroke-opacity=".12"/>
-<text x="40" y="1592" class="zone-label" text-anchor="start">KEY</text>
-<rect x="112" y="1582" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
-<text x="148" y="1592" class="prose" text-anchor="start">Focus</text>
-<path d="M 236,1588 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
-<text x="272" y="1592" class="prose" text-anchor="start">Work / evidence</text>
-<rect x="412" y="1582" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
-<text x="448" y="1592" class="prose" text-anchor="start">Optional</text>
+<text x="296" y="998" class="node" text-anchor="start">Packet plan, brief and run record</text></g>
+<text x="40" y="1080" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="1099" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1113" class="label" text-anchor="middle">A</text>
+<text x="80" y="1113" class="prose" text-anchor="start">yes, candidates present</text>
+<rect x="40" y="1131" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1145" class="label" text-anchor="middle">B</text>
+<text x="80" y="1145" class="prose" text-anchor="start">yes, no candidates</text>
+<rect x="40" y="1163" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1177" class="label" text-anchor="middle">C</text>
+<text x="80" y="1177" class="prose" text-anchor="start">no</text>
+<rect x="40" y="1195" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1209" class="label" text-anchor="middle">D</text>
+<text x="80" y="1209" class="prose" text-anchor="start">scoring succeeds</text>
+<rect x="40" y="1227" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="54" y="1241" class="label" text-anchor="middle">E</text>
+<text x="80" y="1241" class="prose" text-anchor="start">error, original order kept</text>
+<text x="56" y="1280" class="prose" text-anchor="start">Task, Jev and the brief also connect the difficulty flow in the previous figure.</text>
+<line x1="40" y1="1304" x2="920" y2="1304" stroke="#f5f5f5" stroke-opacity=".12"/>
+<text x="40" y="1332" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="1322" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
+<text x="148" y="1332" class="prose" text-anchor="start">Focus</text>
+<path d="M 236,1328 h 24" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-routing-skills-dark-arrow)"/>
+<text x="272" y="1332" class="prose" text-anchor="start">Work / evidence</text>
+<rect x="412" y="1322" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="448" y="1332" class="prose" text-anchor="start">Optional</text>
 </svg>

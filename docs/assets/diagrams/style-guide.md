@@ -47,7 +47,7 @@ numbers are nested decorative groups, excluded from the concepts nodes' source-l
 
 Korean extends the sans stack with `"Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic"`
 after Geist and before `system-ui, sans-serif`. Titles use
-`"Instrument Serif", "Noto Serif KR", "Batang", serif`.
+`"Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif`.
 Hangul detail, arrow labels, group labels and legends use sans at **12px or larger**, with no tracking
 or uppercase transform. Latin-only tags retain the 8px mono treatment. Use plain 해라체 for sentences;
 do not end a Korean sentence with a colon.
@@ -86,8 +86,9 @@ another node are not allowed. Keep ports at least 12px apart. A crossing needs a
 figures avoid crossings entirely.
 
 An arrow label has an opaque paper mask, 8px clear of the line. Place it above a horizontal route
-or beside a vertical one. Keep inline labels short; full conditions belong in numbered transition keys
-inside the figure. Label masks must also clear nodes and zone headings. Dash meanings belong in
+or beside a vertical one. Keep inline labels short; full conditions belong in lettered transition keys
+inside the figure. Conditional arrows retain short words and the matching key letter (up to 14 characters).
+The architecture route-to-Jev label explicitly keeps “SKILL ORDER + DIFFICULTY”. Label masks must also clear nodes and zone headings. Dash meanings belong in
 the legend: optional paths, returns, recorded CI exceptions, or a planned future note as appropriate.
 Sequence returns retain dashed lines; their loop frame covers only participating actors.
 

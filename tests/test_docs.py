@@ -672,6 +672,19 @@ class BannerTest(unittest.TestCase):
                     overview = ET.parse(ASSETS / f"how-it-works{language}-{theme}.svg").getroot()
                     self.assertEqual({n.get("data-node-id") for n in overview.iter() if n.get("data-node-id")},
                                      {"request", "prepare", "build", "evidence", "review", "fix", "confirm", "land"})
+                    for figure in (features, overview):
+                        figure_text = " ".join(" ".join(t.itertext()) for t in figure.findall(f".//{SVG}text"))
+                        self.assertIn("권장 선택형" if language else "ecommended, optional judge", figure_text)
+                        if language:
+                            self.assertIn("바꿀 경로를 예약한다.", figure_text)
+                            self.assertIn("겹치는 리스는 거절한다.", figure_text)
+                        else:
+                            lease_node = next(n for n in figure.iter()
+                                              if n.get("data-node-id") == ("lease" if figure is features else "prepare"))
+                            lease_text = " ".join(" ".join(t.itertext()) for t in lease_node.findall(f"{SVG}text"))
+                            self.assertIn("Reserve paths this task changes; refuse overlapping leases."
+                                          if figure is features else
+                                          "Lease: reserve changed paths; refuse overlapping leases.", lease_text)
                     visible = " ".join(" ".join(t.itertext()) for t in overview.findall(f".//{SVG}text"))
                     for phrase in ("Claude Code", "Codex CLI", "TypeSafe Jev", "oah init", "v0.4.0"):
                         self.assertIn(phrase, visible)

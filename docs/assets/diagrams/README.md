@@ -14,22 +14,22 @@ Its palette, outlines, hard shadows and role colors are recorded in the style gu
 
 | Stem | Skill type · fit canvas | Nodes / arrows | Purpose |
 |---|---|---|---|
-| `how-it-works` | Swimlane, 1080 × 1484 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
+| `how-it-works` | Swimlane, 1080 × 1420 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
 | `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; both READMEs |
 | `architecture-build` | Architecture, 1040 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
 | `architecture-land` | Architecture, 1040 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
 | `loop-start` | Sequence, 960 × 916 | 3 / 6 | Numbered exchanges 1–6 |
 | `loop-review` | Sequence, 1008 × 1212 | 4 / 9 | Numbered exchanges 7–15 and the correction loop |
-| `concepts-loop` | Flowchart, 840 × 1372 | 8 / 8 | Packet to confirmed landing |
+| `concepts-loop` | Flowchart, 1232 × 756 | 8 / 8 | Packet to confirmed landing |
 | `concepts-leases-lifecycle` | State machine, 880 × 1308 | 6 / 7 | Start, renew, expiry and release |
 | `concepts-leases-finish` | State machine, 880 × 1164 | 5 / 6 | Finish checks and refusals |
-| `concepts-routing-rules` | Flowchart, 960 × 1428 | 7 / 6 | Difficulty rules, tier, model and effort |
-| `concepts-routing-skills` | Flowchart, 960 × 1644 | 7 / 9 | Deterministic skills, reranking and fallbacks |
+| `concepts-routing-rules` | Flowchart, 960 × 1272 | 7 / 6 | Difficulty rules, tier, model and effort |
+| `concepts-routing-skills` | Flowchart, 960 × 1384 | 7 / 9 | Deterministic skills, reranking and fallbacks |
 | `concepts-impact-freshness` | Flowchart, 880 × 1268 | 6 / 6 | Freshness, refresh, stale input and default branch |
 | `concepts-impact-ranked` | Flowchart, 920 × 1064 | 5 / 5 | pin, exec, link, mention and exact reruns |
 | `concepts-review` | Flowchart, 880 × 980 | 5 / 5 | All review outcomes and correction/bind return |
-| `concepts-landing-local` | Flowchart, 1000 × 1204 | 8 / 5 | Opt-in local hooks and push paths |
-| `concepts-landing-checks` | Flowchart, 1000 × 1420 | 6 / 6 | CI, exact HEAD, exception and confirmation |
+| `concepts-landing-local` | Flowchart, 1000 × 1156 | 8 / 5 | Opt-in local hooks and push paths |
+| `concepts-landing-checks` | Flowchart, 1000 × 1332 | 6 / 6 | CI, exact HEAD, exception and confirmation |
 | `banner` | Hand-authored chat scene, 1280 × 560 | — | README banner in its own neo-brutalist style |
 
 [The style guide](style-guide.md) records the shipped gallery tokens, dotted paper, system font stacks,
@@ -60,6 +60,8 @@ for source in docs/assets/diagrams/*.html; do
 done
 ```
 
+To export a banner, run the same `export_svg.py <banner-*.html> <banner-*.svg> --system-fonts` command for each variant; its hand-authored chat scene retains its own style.
+
 Keep page alt text identical to both exported descriptions. Every SVG needs a first-child title,
 a description and prefixed accessibility IDs. Use a picture element with a dark source and light fallback.
 No scripts, external images, remote fonts, font faces or CSS imports belong in a source or export.
@@ -78,6 +80,7 @@ The build figure has 9 nodes / 8 arrows; landing has 7 / 8. Gates and impact rep
 Each original node remains separate, including the optional Jev judge and the four rails.
 All original node wording is retained as a short title plus logically separated detail.
 Group membership, optional paths, edge directions and the exact reviewed-HEAD landing path remain.
+The route → Jev edge retains skill ordering and difficulty as “SKILL ORDER + DIFFICULTY” / “스킬 순서·난이도”.
 Ports and routes are redrawn without crossings; no component or edge is dropped or merged.
 
 The two sequence figures keep **five unique actors and all 15 numbered messages**.
@@ -105,7 +108,7 @@ The import, semantic-patterns, type, output, layout, core primitives and export 
 
 Every source node ID, source-label value, visible word, edge ID, direction, condition and group membership
 is retained. Short bold headings and separate detail lines replace the former long centered labels.
-Long conditions use numbered transition keys. The lease note is retained in full across its two figures.
+Conditional arrows carry short words and lettered transition keys for their full conditions. The lease note is retained in full across its two figures.
 There are **no merges, collapses or drops**. Counts apply separately to English and Korean and to both themes.
 Repeated nodes join split figures; each original edge appears exactly once across its pair.
 

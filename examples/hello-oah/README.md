@@ -16,7 +16,7 @@ walkthrough uses a local remote and stops before landing; it does not verify Git
 ## Walk through the conversation
 
 Run the installer once and `oah init` once per project. Then open your AI in the project and speak in plain
-words. The rules that `oah init` installs tell it how to run the harness and its commands. You ask, answer
+words. The installed rules and each command’s next-step message guide it through the harness. You ask, answer
 when it stops for a decision, and confirm before anything lands.
 
 The steps below follow the same order as the command walkthrough. For this example, start by asking your
@@ -31,9 +31,9 @@ AI to prepare the practice copy; step 2 installs the project rules.
 
 ### 2. Set up the project once
 
-- **You say:** “Set up oah here and show me the choices.”
-- **The AI does:** Runs `oah init`, which installs the rules, wiki and templates and builds the first impact map
-  after you confirm the plan. It prepares the bytecode ignore entries shown below and commits the setup.
+- **You do:** Run `oah init` in a terminal, answer its questions and confirm the plan. It installs the rules,
+  wiki and templates and builds the first impact map.
+- **The AI does:** After setup, adds the bytecode ignore entries shown below and commits the setup.
 - **You check or answer:** Choose unlazy for the checks and the CI starter if you want to land on GitHub.
   Confirm the complete setup plan and finish any missing sign-ins. This small example leaves Jev off;
   without a key, rules decide the difficulty and model.
@@ -49,7 +49,7 @@ AI to prepare the practice copy; step 2 installs the project rules.
 
 ### 4. Check the starting point
 
-- **You say:** “Is the starting point ready, and what could this change affect?”
+- **You say:** “Is the starting point ready?”
 - **The AI does:** Runs `oah preflight` to check the starting point and refresh the impact map, then
   `oah start --packet` to reserve the paths the task changes. An overlapping lease is refused.
 - **You check or answer:** Read any warning or refusal and settle a scope conflict before continuing.
@@ -101,9 +101,11 @@ already discuss the goal with your AI and answer decisions when the review loop 
 
 ## What runs underneath
 
-The commands below are what your AI runs as it follows the installed rules. You can also run this complete
-walkthrough yourself to see each result. Every `sh` block is kept in execution order; the review section shows
-which commands depend on its actual verdict.
+After you run `oah init` in a terminal, the installed rules and each command’s next-step message guide your AI
+through the commands below. You can also run this complete walkthrough yourself to see each result. Every `sh`
+block is kept in execution order; the review section shows which commands depend on its actual verdict.
+When your AI makes these commits it records its own engine; the walkthrough uses `Agent-Engine: human` because
+you run it by hand.
 
 ### Before you start
 

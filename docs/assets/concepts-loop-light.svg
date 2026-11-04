@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg viewBox="0 0 840 1372" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-light-title concepts-loop-light-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-loop-light-root">
+<svg viewBox="0 0 1232 756" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-loop-light-title concepts-loop-light-desc" data-diagram-type="Flowchart" data-size="fit" id="concepts-loop-light-root">
 <title id="concepts-loop-light-title">The task loop</title>
 <desc id="concepts-loop-light-desc">A packet passes through a lease, Claude implementation, gates and wiki evidence, and Codex review, with requested fixes returning to evidence before convergence, finish and landing after your confirmation.</desc>
 <defs>
@@ -25,120 +25,120 @@
 <marker id="concepts-loop-light-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
 <marker id="concepts-loop-light-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
 </defs>
-<rect width="840" height="1372" fill="#f5f5f5"/>
-<rect width="840" height="1372" fill="url(#concepts-loop-light-dots)" opacity=".55"/>
+<rect width="1232" height="756" fill="#f5f5f5"/>
+<rect width="1232" height="756" fill="url(#concepts-loop-light-dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
 <text x="40" y="88" class="title" text-anchor="start">The task loop</text>
-<path d="M 232,248 L 232,288" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 232,392 L 232,432" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 232,536 L 232,576" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 232,680 L 232,720" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 232,824 L 232,864" data-edge-id="e7" data-from="R" data-to="N" data-label="converged" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 232,968 L 232,1008" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 384,772 L 552,772" data-edge-id="e5" data-from="R" data-to="F" data-label="changes requested" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<path d="M 676,720 L 676,636 Q 676,628 668,628 L 384,628" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<rect x="240" y="833" width="32" height="20" rx="2" fill="#f5f5f5"/>
-<text x="256" y="848" class="arrow-label" text-anchor="middle">01</text>
-<rect x="452" y="744" width="32" height="20" rx="2" fill="#f5f5f5"/>
-<text x="468" y="759" class="arrow-label" text-anchor="middle">02</text>
+<path d="M 232,196 L 360,196" data-edge-id="e1" data-from="P" data-to="L" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 552,196 L 680,196" data-edge-id="e2" data-from="L" data-to="C" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 872,196 L 1000,196" data-edge-id="e3" data-from="C" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 1048,248 L 1048,304 Q 1048,312 1040,312 L 784,312 Q 776,312 776,320 L 776,392" data-edge-id="e4" data-from="G" data-to="R" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 680,444 L 552,444" data-edge-id="e7" data-from="R" data-to="N" data-label="converged" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 360,444 L 232,444" data-edge-id="e8" data-from="N" data-to="D" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 872,444 L 1000,444" data-edge-id="e5" data-from="R" data-to="F" data-label="changes requested" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<path d="M 1144,392 L 1144,248" data-edge-id="e6" data-from="F" data-to="G" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<rect x="558" y="416" width="116" height="20" rx="2" fill="#f5f5f5"/>
+<text x="616" y="431" class="arrow-label" text-anchor="middle">A CONVERGED</text>
+<rect x="884" y="416" width="104" height="20" rx="2" fill="#f5f5f5"/>
+<text x="936" y="431" class="arrow-label" text-anchor="middle">B CHANGES</text>
 <g data-node-id="P" data-source-label="Packet intent and scope">
-<rect x="80" y="144" width="304" height="104" rx="20" fill="#f5f5f5"/>
-<rect x="80" y="144" width="304" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="40" y="144" width="192" height="104" rx="20" fill="#f5f5f5"/>
+<rect x="40" y="144" width="192" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="120" y="171" class="tag" text-anchor="middle">INTENT</text>
-<text x="368" y="182" class="ghost" text-anchor="end">01</text>
+<rect x="56" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="80" y="171" class="tag" text-anchor="middle">INTENT</text>
+<text x="216" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<text x="96" y="202" class="node" text-anchor="start">Packet</text>
-<text x="96" y="222" class="sub" text-anchor="start">intent and scope</text>
+<text x="56" y="202" class="node" text-anchor="start">Packet</text>
+<text x="56" y="222" class="sub" text-anchor="start">intent and scope</text>
 </g>
 <g data-node-id="L" data-source-label="Lease preflight, start">
-<rect x="80" y="288" width="304" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="288" width="304" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="360" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="360" y="144" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="304" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="118" y="315" class="tag" text-anchor="middle">LEASE</text>
-<text x="368" y="326" class="ghost" text-anchor="end">02</text>
+<rect x="376" y="160" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="398" y="171" class="tag" text-anchor="middle">LEASE</text>
+<text x="536" y="182" class="ghost" text-anchor="end">02</text>
 </g>
-<text x="96" y="346" class="node" text-anchor="start">Lease</text>
-<text x="96" y="366" class="sub technical" text-anchor="start">preflight, start</text>
+<text x="376" y="202" class="node" text-anchor="start">Lease</text>
+<text x="376" y="222" class="sub technical" text-anchor="start">preflight, start</text>
 </g>
 <g data-node-id="C" data-source-label="Claude initial implementation">
-<rect x="80" y="432" width="304" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="432" width="304" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="680" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="144" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="448" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="120" y="459" class="tag" text-anchor="middle">CLAUDE</text>
-<text x="368" y="470" class="ghost" text-anchor="end">03</text>
+<rect x="696" y="160" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="720" y="171" class="tag" text-anchor="middle">CLAUDE</text>
+<text x="856" y="182" class="ghost" text-anchor="end">03</text>
 </g>
-<text x="96" y="490" class="node" text-anchor="start">Claude</text>
-<text x="96" y="510" class="sub" text-anchor="start">initial implementation</text>
+<text x="696" y="202" class="node" text-anchor="start">Claude</text>
+<text x="696" y="222" class="sub" text-anchor="start">initial implementation</text>
 </g>
 <g data-node-id="G" data-source-label="Gates and wiki evidence">
-<rect x="80" y="576" width="304" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="576" width="304" height="104" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<rect x="1000" y="144" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="1000" y="144" width="192" height="104" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
 <g aria-hidden="true">
-<rect x="96" y="592" width="56" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
-<text x="124" y="603" class="tag" text-anchor="middle">EVIDENCE</text>
-<text x="368" y="614" class="ghost" text-anchor="end">04</text>
+<rect x="1016" y="160" width="56" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="1044" y="171" class="tag" text-anchor="middle">EVIDENCE</text>
+<text x="1176" y="182" class="ghost" text-anchor="end">04</text>
 </g>
-<text x="96" y="634" class="node" text-anchor="start">Gates and wiki</text>
-<text x="96" y="654" class="sub" text-anchor="start">evidence</text>
+<text x="1016" y="202" class="node" text-anchor="start">Gates and wiki</text>
+<text x="1016" y="222" class="sub" text-anchor="start">evidence</text>
 </g>
 <g data-node-id="R" data-source-label="Codex review">
-<rect x="80" y="720" width="304" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="720" width="304" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="680" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="736" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="118" y="747" class="tag" text-anchor="middle">CODEX</text>
-<text x="368" y="758" class="ghost" text-anchor="end">05</text>
+<rect x="696" y="408" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="718" y="419" class="tag" text-anchor="middle">CODEX</text>
+<text x="856" y="430" class="ghost" text-anchor="end">05</text>
 </g>
-<text x="96" y="778" class="node" text-anchor="start">Codex</text>
-<text x="96" y="798" class="sub" text-anchor="start">review</text>
+<text x="696" y="450" class="node" text-anchor="start">Codex</text>
+<text x="696" y="470" class="sub" text-anchor="start">review</text>
 </g>
 <g data-node-id="N" data-source-label="oah finish">
-<rect x="80" y="864" width="304" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="864" width="304" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="360" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="360" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="880" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="120" y="891" class="tag" text-anchor="middle">FINISH</text>
-<text x="368" y="902" class="ghost" text-anchor="end">06</text>
+<rect x="376" y="408" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="400" y="419" class="tag" text-anchor="middle">FINISH</text>
+<text x="536" y="430" class="ghost" text-anchor="end">06</text>
 </g>
-<text x="96" y="922" class="node" text-anchor="start">oah finish</text>
+<text x="376" y="450" class="node" text-anchor="start">oah finish</text>
 </g>
 <g data-node-id="D" data-source-label="oah land after you confirm">
-<rect x="80" y="1008" width="304" height="104" rx="20" fill="#f5f5f5"/>
-<rect x="80" y="1008" width="304" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="40" y="392" width="192" height="104" rx="20" fill="#f5f5f5"/>
+<rect x="40" y="392" width="192" height="104" rx="20" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="96" y="1024" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="114" y="1035" class="tag" text-anchor="middle">LAND</text>
-<text x="368" y="1046" class="ghost" text-anchor="end">07</text>
+<rect x="56" y="408" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="74" y="419" class="tag" text-anchor="middle">LAND</text>
+<text x="216" y="430" class="ghost" text-anchor="end">07</text>
 </g>
-<text x="96" y="1066" class="node" text-anchor="start">oah land</text>
-<text x="96" y="1086" class="sub" text-anchor="start">after you confirm</text>
+<text x="56" y="450" class="node" text-anchor="start">oah land</text>
+<text x="56" y="470" class="sub" text-anchor="start">after you confirm</text>
 </g>
 <g data-node-id="F" data-source-label="Codex oah fix">
-<rect x="552" y="720" width="248" height="104" rx="6" fill="#f5f5f5"/>
-<rect x="552" y="720" width="248" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="1000" y="392" width="192" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="1000" y="392" width="192" height="104" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="568" y="736" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="590" y="747" class="tag" text-anchor="middle">CODEX</text>
-<text x="784" y="758" class="ghost" text-anchor="end">05b</text>
+<rect x="1016" y="408" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="1038" y="419" class="tag" text-anchor="middle">CODEX</text>
+<text x="1176" y="430" class="ghost" text-anchor="end">05b</text>
 </g>
-<text x="568" y="778" class="node" text-anchor="start">Codex</text>
-<text x="568" y="798" class="sub technical" text-anchor="start">oah fix</text>
+<text x="1016" y="450" class="node" text-anchor="start">Codex</text>
+<text x="1016" y="470" class="sub technical" text-anchor="start">oah fix</text>
 </g>
-<text x="40" y="1164" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
-<rect x="40" y="1183" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
-<text x="54" y="1197" class="label" text-anchor="middle">01</text>
-<text x="80" y="1197" class="prose" text-anchor="start">converged</text>
-<rect x="40" y="1215" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
-<text x="54" y="1229" class="label" text-anchor="middle">02</text>
-<text x="80" y="1229" class="prose" text-anchor="start">changes requested</text>
-<line x1="40" y1="1292" x2="800" y2="1292" stroke="#2d3142" stroke-opacity=".12"/>
-<text x="40" y="1320" class="zone-label" text-anchor="start">KEY</text>
-<rect x="112" y="1310" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
-<text x="148" y="1320" class="prose" text-anchor="start">Focus</text>
-<path d="M 236,1316 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
-<text x="272" y="1320" class="prose" text-anchor="start">Work / evidence</text>
+<text x="40" y="548" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
+<rect x="40" y="567" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="581" class="label" text-anchor="middle">A</text>
+<text x="80" y="581" class="prose" text-anchor="start">converged</text>
+<rect x="40" y="599" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="613" class="label" text-anchor="middle">B</text>
+<text x="80" y="613" class="prose" text-anchor="start">changes requested</text>
+<line x1="40" y1="676" x2="1192" y2="676" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="704" class="zone-label" text-anchor="start">KEY</text>
+<rect x="112" y="694" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="704" class="prose" text-anchor="start">Focus</text>
+<path d="M 236,700 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-loop-light-arrow)"/>
+<text x="272" y="704" class="prose" text-anchor="start">Work / evidence</text>
 </svg>

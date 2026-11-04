@@ -52,8 +52,8 @@ You describe the result you want. Your AI uses these parts together to carry the
   <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and the recommended, optional TypeSafe Jev judge support the Claude Code build and Codex CLI review loop, gates and the wiki keep evidence and decisions, overlapping leases are refused, and you ask, answer decisions and confirm before landing, with Jev difficulty-based model choice on unreleased main." width="100%">
 </picture>
 
-- **[Impact map](docs/concepts.md#the-impact-map).** Before changing a file, your AI finds the related code,
-  documents and checks. It can see which checks must run again, so a small edit is easier to follow through.
+- **[Impact map](docs/concepts.md#the-impact-map).** When your AI changes a file, the impact map shows related code,
+  documents and the checks to rerun. It can see which checks must run again, so a small edit is easier to follow through.
 - **[Project wiki](docs/concepts.md#the-project-wiki).** Your AI keeps the task history, decisions and reasons
   beside the code. The next session has a record to read instead of making you explain everything again.
 - **[Leases](docs/concepts.md#leases).** A lease reserves the paths a task changes, and an overlapping lease
@@ -63,7 +63,7 @@ You describe the result you want. Your AI uses these parts together to carry the
 - **[Build and review](docs/concepts.md#the-review-loop-and-corrections).** Claude Code builds; Codex CLI
   reviews, corrects and reviews again. A repeated problem or a design choice stops the loop for your answer.
 - **[TypeSafe Jev](docs/how-it-works.md#jev-the-optional-judge).** The recommended, optional judge re-orders
-  chosen skills and, on unreleased main, judges difficulty so its tier picks the model automatically, subject
+  chosen skills and, on unreleased main, judges difficulty so its difficulty level (tier) picks the model automatically, subject
   to confidence and minimum-level rules. Without a key, the rules decide.
 
 ## How it works
@@ -73,10 +73,12 @@ You describe the result you want. Your AI uses these parts together to carry the
   <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
-Talk to your AI in plain words. The rules installed by `oah init` guide it through recording your goal and
-scope, reserving the paths, checking the impact map and choosing the model and skills, with Jev when enabled.
+Talk to your AI in plain words. The rules installed by `oah init` and each command’s next-step message guide it
+through recording your goal and scope, reserving paths, choosing the model and skills, and checking the impact
+map between review rounds, with Jev when enabled.
 Claude Code builds; the gates record check results and the wiki keeps the reasons. Codex CLI reviews and corrects
 until no blocking findings remain, or stops for your answer when a problem repeats or a design choice is needed.
+A round limit is optional.
 
 Ask “Is the review done?” or “Did all the gates pass?” Inspect the result and confirm before it lands in your
 project's main branch. The [full walkthrough](docs/how-it-works.md) shows the commands your AI runs underneath.

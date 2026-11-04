@@ -9,10 +9,10 @@
 body { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #2d3142; color: #f5f5f5; margin: 0; padding: 24px; }
 .frame { max-width: 1008px; width: 100%; min-width: 0; margin: auto; }
 .diagram-container { width: 100%; overflow-x: auto; }
-h1 { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+h1 { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
 svg { width: 100%; min-width: 1008px; display: block; }
 text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
-.title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+.title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
 .node { font-size: 16px; font-weight: 600; }
 .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
 .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
@@ -47,13 +47,14 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 <text x="40" y="48" class="tag" text-anchor="start">OAH / SEQUENCE</text>
 <text x="40" y="88" class="title" text-anchor="start">검토, 수정과 반영</text>
 <rect x="64" y="280" width="624" height="424" rx="4" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-opacity=".25"/>
-<rect x="64" y="280" width="72" height="28" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="100" y="299" class="zone-label" text-anchor="middle">반복</text>
-<text x="80" y="332" class="prose" text-anchor="start">수렴할 때까지 반복한다. 판단이 필요하면 멈춘다.</text>
+
+
+
 <line x1="128" y1="240" x2="128" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
 <line x1="336" y1="240" x2="336" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
 <line x1="608" y1="240" x2="608" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
 <line x1="880" y1="240" x2="880" y2="1016" stroke="#f5f5f5" stroke-opacity=".20" stroke-dasharray="3,3"/>
+<g><rect x="64" y="280" width="72" height="28" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/><text x="100" y="299" class="zone-label" text-anchor="middle">반복</text><rect x="72" y="312" width="600" height="28" rx="2" fill="#2d3142"/><text x="80" y="332" class="prose" text-anchor="start">수렴할 때까지 반복한다. 판단이 필요하면 멈춘다.</text></g>
 <path d="M 336,368 L 608,368" data-edge-id="7" data-from="oah" data-to="codex" data-label="7. 검토" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 608,432 L 336,432" data-edge-id="8" data-from="codex" data-to="oah" data-label="8. 지적" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
 <path d="M 336,496 L 608,496" data-edge-id="9" data-from="oah" data-to="codex" data-label="9. 수정" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
@@ -118,6 +119,7 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 <text x="808" y="202" class="node" text-anchor="start">git / GitHub</text>
 </g>
 <text x="56" y="1068" class="prose" text-anchor="start">번호는 옆 표의 전체 명령 순서와 같다.</text>
+<text x="56" y="1096" class="prose" text-anchor="start">수정한 뒤에는 다시 검토한다.</text>
 <line x1="40" y1="1132" x2="968" y2="1132" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="1160" class="zone-label" text-anchor="start">범례</text>
 <rect x="112" y="1150" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>

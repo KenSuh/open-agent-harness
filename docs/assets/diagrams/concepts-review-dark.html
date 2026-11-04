@@ -51,12 +51,12 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <path d="M 256,464 L 256,544" data-edge-id="e3" data-from="F" data-to="B" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 80,616 L 48,616 Q 40,616 40,608 L 40,216 Q 40,208 48,208 L 80,208" data-edge-id="e4" data-from="B" data-to="R" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 432,232 L 480,232 Q 488,232 488,240 L 488,416 Q 488,424 496,424 L 544,424" data-edge-id="e5" data-from="R" data-to="D" data-label="repeats a corrected kind, or needs a design change" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<rect x="504" y="164" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="520" y="179" class="arrow-label" text-anchor="middle">01</text>
-<rect x="264" y="301" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="280" y="316" class="arrow-label" text-anchor="middle">02</text>
-<rect x="496" y="289" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="512" y="304" class="arrow-label" text-anchor="middle">03</text>
+<rect x="468" y="164" width="104" height="20" rx="2" fill="#2d3142"/>
+<text x="520" y="179" class="arrow-label" text-anchor="middle">A APPROVE</text>
+<rect x="264" y="301" width="84" height="20" rx="2" fill="#2d3142"/>
+<text x="306" y="316" class="arrow-label" text-anchor="middle">B P0/P1</text>
+<rect x="496" y="289" width="108" height="20" rx="2" fill="#2d3142"/>
+<text x="550" y="304" class="arrow-label" text-anchor="middle">C DECISION</text>
 <g data-node-id="R" data-source-label="oah review Codex, read-only snapshot">
 <rect x="80" y="144" width="352" height="128" rx="6" fill="#2d3142"/>
 <rect x="80" y="144" width="352" height="128" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
@@ -87,9 +87,7 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <text x="114" y="571" class="tag" text-anchor="middle">BIND</text>
 <text x="416" y="582" class="ghost" text-anchor="end">03</text>
 </g>
-<text x="96" y="602" class="node" text-anchor="start">you inspect and commit,</text>
-<text x="96" y="622" class="sub" text-anchor="start">then oah fix --bind</text>
-</g>
+<text x="96" y="602" class="node" text-anchor="start">you inspect and commit, then</text><text x="96" y="622" class="node" text-anchor="start">oah fix --bind</text></g>
 <g data-node-id="V" data-source-label="converged">
 <rect x="608" y="144" width="232" height="96" rx="20" fill="#2d3142"/>
 <rect x="608" y="144" width="232" height="96" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
@@ -106,18 +104,16 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <rect x="560" y="368" width="56" height="16" rx="2" fill="none" stroke="#949eb2" stroke-width="1" stroke-opacity=".4"/>
 <text x="588" y="379" class="tag" text-anchor="middle">DECISION</text>
 </g>
-<text x="560" y="410" class="node" text-anchor="start">stops and asks you</text>
-<text x="560" y="430" class="sub technical" text-anchor="start">OAH_REVIEW_NEEDS_DECISION</text>
-</g>
+<text x="560" y="410" class="node" text-anchor="start">stops and asks you</text><text x="560" y="430" class="sub technical" text-anchor="start">OAH_REVIEW_NEEDS_DECISION</text></g>
 <text x="40" y="740" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
 <rect x="40" y="759" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="773" class="label" text-anchor="middle">01</text>
+<text x="54" y="773" class="label" text-anchor="middle">A</text>
 <text x="80" y="773" class="prose" text-anchor="start">approve, or only P2/P3</text>
 <rect x="40" y="791" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="805" class="label" text-anchor="middle">02</text>
+<text x="54" y="805" class="label" text-anchor="middle">B</text>
 <text x="80" y="805" class="prose" text-anchor="start">P0/P1 findings</text>
 <rect x="40" y="823" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="837" class="label" text-anchor="middle">03</text>
+<text x="54" y="837" class="label" text-anchor="middle">C</text>
 <text x="80" y="837" class="prose" text-anchor="start">repeats a corrected kind, or needs a design change</text>
 <line x1="40" y1="900" x2="840" y2="900" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="928" class="zone-label" text-anchor="start">KEY</text>

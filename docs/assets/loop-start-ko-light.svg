@@ -6,7 +6,7 @@
       <style>#loop-start-ko-light-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #2d3142; }
       #loop-start-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
       #loop-start-ko-light-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #2d3142; }
-      #loop-start-ko-light-root .title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+      #loop-start-ko-light-root .title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
       #loop-start-ko-light-root .node { font-size: 16px; font-weight: 600; }
       #loop-start-ko-light-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
       #loop-start-ko-light-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }

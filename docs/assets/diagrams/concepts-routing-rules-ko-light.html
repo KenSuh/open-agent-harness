@@ -9,10 +9,10 @@
 body { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; background: #f5f5f5; color: #2d3142; margin: 0; padding: 24px; }
 .frame { max-width: 960px; width: 100%; min-width: 0; margin: auto; }
 .diagram-container { width: 100%; overflow-x: auto; }
-h1 { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+h1 { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
 svg { width: 100%; min-width: 960px; display: block; }
 text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #2d3142; }
-.title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+.title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
 .node { font-size: 16px; font-weight: 600; }
 .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
 .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
@@ -32,7 +32,7 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
      See README.md and style-guide.md in this directory. -->
 <main class="frame">
 <div class="diagram-container">
-<svg viewBox="0 0 960 1428" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-ko-light-title concepts-routing-rules-ko-light-desc" data-diagram-type="Flowchart" data-size="fit">
+<svg viewBox="0 0 960 1272" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-ko-light-title concepts-routing-rules-ko-light-desc" data-diagram-type="Flowchart" data-size="fit">
 <title id="concepts-routing-rules-ko-light-title">라우팅 · tier, 모델과 추론 강도</title>
 <desc id="concepts-routing-rules-ko-light-desc">작업의 단계, 종류와 Scope 경로가 고정 규칙과 tier의 입력이 되고 직접 준 축이 우선하며 패킷이나 옵션의 선택 뒤 CLI가 지원하는 모델과 강도를 고르며 충분한 신뢰도의 Jev 판정은 최저 기준 안에서 tier를 바꾸어 계획, 브리프와 실행 기록에 담긴다.</desc>
 <defs>
@@ -42,115 +42,98 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
 <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
 </defs>
-<rect width="960" height="1428" fill="#f5f5f5"/>
-<rect width="960" height="1428" fill="url(#dots)" opacity=".55"/>
+<rect width="960" height="1272" fill="#f5f5f5"/>
+<rect width="960" height="1272" fill="url(#dots)" opacity=".55"/>
 <text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
 <text x="40" y="88" class="title" text-anchor="start">라우팅 · tier, 모델과 추론 강도</text>
-<path d="M 288,272 L 288,320" data-edge-id="e1" data-from="task" data-to="score" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,432 L 288,480" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,624 L 288,672" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,816 L 288,864" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,1040 L 288,1088" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 772,672 L 772,736 Q 772,744 764,744 L 512,744" data-edge-id="e15" data-from="jev" data-to="pick" data-label="difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-<rect x="624" y="716" width="32" height="20" rx="2" fill="#f5f5f5"/>
-<text x="640" y="731" class="arrow-label" text-anchor="middle">01</text>
+<path d="M 288,244 L 288,296" data-edge-id="e1" data-from="task" data-to="score" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,396 L 288,444" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,544 L 288,600" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,700 L 288,756" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 288,908 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 772,596 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="588" y="644" width="104" height="20" rx="2" fill="#f5f5f5"/>
+<text x="640" y="659" class="arrow-label" text-anchor="middle">A JEV 등급</text>
 <g data-node-id="task" data-source-label="작업: 단계, 종류, Scope 경로 직접 준 축이 우선">
-<rect x="64" y="144" width="448" height="128" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="144" width="448" height="128" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="64" y="144" width="496" height="100" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="144" width="496" height="100" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
 <rect x="80" y="160" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
 <text x="98" y="171" class="tag" text-anchor="middle">TASK</text>
-<text x="496" y="182" class="ghost" text-anchor="end">01</text>
+<text x="544" y="182" class="ghost" text-anchor="end">01</text>
 </g>
-<text x="80" y="202" class="node" text-anchor="start">작업:</text>
-<text x="80" y="222" class="sub" text-anchor="start">단계, 종류, Scope 경로</text>
-<text x="80" y="240" class="sub" text-anchor="start">직접 준 축이 우선</text>
-</g>
+<text x="80" y="202" class="node" text-anchor="start">작업: 단계, 종류, Scope 경로</text><text x="80" y="222" class="sub" text-anchor="start">직접 준 축이 우선</text></g>
 <g data-node-id="score" data-source-label="고정 규칙이 네 축에 점수를 매김 종류, 작업량, 추론, 위험">
-<rect x="64" y="320" width="448" height="112" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="320" width="448" height="112" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="64" y="296" width="496" height="100" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="296" width="496" height="100" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="80" y="336" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="102" y="347" class="tag" text-anchor="middle">RULES</text>
-<text x="496" y="358" class="ghost" text-anchor="end">02</text>
+<rect x="80" y="312" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="323" class="tag" text-anchor="middle">RULES</text>
+<text x="544" y="334" class="ghost" text-anchor="end">02</text>
 </g>
-<text x="80" y="378" class="node" text-anchor="start">고정 규칙이</text>
-<text x="80" y="398" class="sub" text-anchor="start">네 축에 점수를 매김</text>
-<text x="80" y="416" class="sub" text-anchor="start">종류, 작업량, 추론, 위험</text>
-</g>
+<text x="80" y="354" class="node" text-anchor="start">고정 규칙이 네 축에 점수를 매김</text><text x="80" y="374" class="sub" text-anchor="start">종류, 작업량, 추론, 위험</text></g>
 <g data-node-id="tier" data-source-label="tier: low, medium, high, max 위험 critical은 max, 마이그레이션과 보안은 최소 high">
-<rect x="64" y="480" width="448" height="144" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="480" width="448" height="144" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
+<rect x="64" y="444" width="496" height="100" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="444" width="496" height="100" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1" fill-opacity=".08"/>
 <g aria-hidden="true">
-<rect x="80" y="496" width="36" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
-<text x="98" y="507" class="tag" text-anchor="middle">TIER</text>
-<text x="496" y="518" class="ghost" text-anchor="end">03</text>
+<rect x="80" y="460" width="36" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
+<text x="98" y="471" class="tag" text-anchor="middle">TIER</text>
+<text x="544" y="482" class="ghost" text-anchor="end">03</text>
 </g>
-<text x="80" y="538" class="node" text-anchor="start">tier:</text>
-<text x="80" y="558" class="sub" text-anchor="start">low, medium, high, max</text>
-<text x="80" y="576" class="sub" text-anchor="start">위험 critical은 max, 마이그레이션과 보안은 최소 high</text>
-</g>
+<text x="80" y="502" class="node" text-anchor="start">tier: low, medium, high, max</text><text x="80" y="522" class="sub" text-anchor="start">위험 critical은 max, 마이그레이션과 보안은 최소 high</text></g>
 <g data-node-id="pick" data-source-label="패킷의 단계별 tier, 또는 oah call --tier 출처 기록: rules, packet, flag, jev">
-<rect x="64" y="672" width="448" height="144" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="672" width="448" height="144" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="64" y="600" width="496" height="100" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="600" width="496" height="100" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="80" y="688" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="104" y="699" class="tag" text-anchor="middle">SELECT</text>
-<text x="496" y="710" class="ghost" text-anchor="end">04</text>
+<rect x="80" y="616" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="104" y="627" class="tag" text-anchor="middle">SELECT</text>
+<text x="544" y="638" class="ghost" text-anchor="end">04</text>
 </g>
-<text x="80" y="730" class="node" text-anchor="start">패킷의 단계별 tier,</text>
-<text x="80" y="750" class="sub" text-anchor="start">또는 oah call --tier</text>
-<text x="80" y="768" class="sub" text-anchor="start">출처 기록: rules, packet, flag, jev</text>
-</g>
+<text x="80" y="658" class="node" text-anchor="start">패킷의 단계별 tier, 또는 oah call --tier</text><text x="80" y="678" class="sub" text-anchor="start">출처 기록: rules, packet, flag, jev</text></g>
 <g data-node-id="model" data-source-label="CLI가 지원하는 모델과 추론 강도 관찰할 수 없는 강도는 미검증으로 기록 더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED">
-<rect x="64" y="864" width="448" height="176" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="864" width="448" height="176" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="64" y="756" width="496" height="152" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="756" width="496" height="152" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="80" y="880" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="102" y="891" class="tag" text-anchor="middle">MODEL</text>
-<text x="496" y="902" class="ghost" text-anchor="end">05</text>
+<rect x="80" y="772" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="102" y="783" class="tag" text-anchor="middle">MODEL</text>
+<text x="544" y="794" class="ghost" text-anchor="end">05</text>
 </g>
-<text x="80" y="922" class="node" text-anchor="start">CLI가 지원하는</text>
-<text x="80" y="942" class="sub" text-anchor="start">모델과 추론 강도</text>
-<text x="80" y="960" class="sub" text-anchor="start">관찰할 수 없는 강도는 미검증으로 기록</text>
-<text x="80" y="978" class="sub" text-anchor="start">더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED</text>
-</g>
+<text x="80" y="814" class="node" text-anchor="start">CLI가 지원하는 모델과 추론 강도</text><text x="80" y="834" class="sub" text-anchor="start">관찰할 수 없는 강도는 미검증으로 기록</text><text x="80" y="852" class="sub" text-anchor="start">더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED</text></g>
 <g data-node-id="brief" data-source-label="패킷 계획, 브리프, 실행 기록">
-<rect x="64" y="1088" width="448" height="112" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="1088" width="448" height="112" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="64" y="956" width="496" height="80" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="956" width="496" height="80" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
-<rect x="80" y="1104" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="104" y="1115" class="tag" text-anchor="middle">RECORD</text>
-<text x="496" y="1126" class="ghost" text-anchor="end">06</text>
+<rect x="80" y="972" width="48" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="104" y="983" class="tag" text-anchor="middle">RECORD</text>
+<text x="544" y="994" class="ghost" text-anchor="end">06</text>
 </g>
-<text x="80" y="1146" class="node" text-anchor="start">패킷 계획, 브리프,</text>
-<text x="80" y="1166" class="sub" text-anchor="start">실행 기록</text>
-</g>
+<text x="80" y="1014" class="node" text-anchor="start">패킷 계획, 브리프, 실행 기록</text></g>
 <g data-node-id="jev" data-source-label="TypeSafe Jev 제공자 순서만 바꾸고 더하거나 빼지 않음 Intent와 Scope 경로로 난이도 판정">
-<rect x="624" y="480" width="296" height="192" rx="6" fill="#f5f5f5"/>
-<rect x="624" y="480" width="296" height="192" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="624" y="444" width="296" height="152" rx="6" fill="#f5f5f5"/>
+<rect x="624" y="444" width="296" height="152" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
-<rect x="640" y="496" width="32" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
-<text x="656" y="507" class="tag" text-anchor="middle">JEV</text>
-<g transform="translate(840,492)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+<rect x="640" y="460" width="32" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
+<text x="656" y="471" class="tag" text-anchor="middle">JEV</text>
+<g transform="translate(840,456)" color="#4f5d75"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
 </g>
-<text x="640" y="538" class="node" text-anchor="start">TypeSafe Jev</text>
-<text x="640" y="558" class="sub" text-anchor="start">제공자</text>
-<text x="640" y="576" class="sub" text-anchor="start">순서만 바꾸고 더하거나 빼지 않음</text>
-<text x="640" y="594" class="sub" text-anchor="start">Intent와 Scope 경로로 난이도 판정</text>
+<text x="640" y="502" class="node" text-anchor="start">TypeSafe Jev</text>
+<text x="640" y="522" class="sub" text-anchor="start">제공자</text>
+<text x="640" y="540" class="sub" text-anchor="start">순서만 바꾸고 더하거나 빼지 않음</text>
+<text x="640" y="558" class="sub" text-anchor="start">Intent와 Scope 경로로 난이도 판정</text>
 </g>
-<text x="40" y="1252" class="zone-label" text-anchor="start">전이 조건</text>
-<rect x="40" y="1271" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
-<text x="54" y="1285" class="label" text-anchor="middle">01</text>
-<text x="80" y="1285" class="prose" text-anchor="start">difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음</text>
-<line x1="40" y1="1348" x2="920" y2="1348" stroke="#2d3142" stroke-opacity=".12"/>
-<text x="40" y="1376" class="zone-label" text-anchor="start">범례</text>
-<rect x="112" y="1366" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
-<text x="148" y="1376" class="prose" text-anchor="start">주요 단계</text>
-<path d="M 236,1372 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
-<text x="272" y="1376" class="prose" text-anchor="start">작업·증거</text>
-<path d="M 412,1372 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-<text x="448" y="1376" class="prose" text-anchor="start">선택·복귀 경로</text>
+<text x="40" y="1096" class="zone-label" text-anchor="start">전이 조건</text>
+<rect x="40" y="1115" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="54" y="1129" class="label" text-anchor="middle">A</text>
+<text x="80" y="1129" class="prose" text-anchor="start">difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음</text>
+<text x="56" y="1164" class="prose" text-anchor="start">작업, Jev와 브리프는 다음 그림의 스킬 순서 흐름에도 이어진다.</text>
+<line x1="40" y1="1192" x2="920" y2="1192" stroke="#2d3142" stroke-opacity=".12"/>
+<text x="40" y="1220" class="zone-label" text-anchor="start">범례</text>
+<rect x="112" y="1210" width="24" height="12" rx="2" fill="none" stroke="#bf4520" stroke-width="1"/>
+<text x="148" y="1220" class="prose" text-anchor="start">주요 단계</text>
+<path d="M 236,1216 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="272" y="1220" class="prose" text-anchor="start">작업·증거</text>
+<path d="M 412,1216 h 24" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<text x="448" y="1220" class="prose" text-anchor="start">선택·복귀 경로</text>
 </svg>
 </div>
 </main>

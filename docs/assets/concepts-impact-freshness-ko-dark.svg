@@ -6,7 +6,7 @@
       <style>#concepts-impact-freshness-ko-dark-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #f5f5f5; }
       #concepts-impact-freshness-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
       #concepts-impact-freshness-ko-dark-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #f5f5f5; }
-      #concepts-impact-freshness-ko-dark-root .title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+      #concepts-impact-freshness-ko-dark-root .title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
       #concepts-impact-freshness-ko-dark-root .node { font-size: 16px; font-weight: 600; }
       #concepts-impact-freshness-ko-dark-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #bfc0c0; }
       #concepts-impact-freshness-ko-dark-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
@@ -30,7 +30,7 @@
 <text x="40" y="48" class="tag" text-anchor="start">OAH / FLOWCHART</text>
 <text x="40" y="88" class="title" text-anchor="start">영향 지도 · 최신 입력</text>
 <rect x="40" y="808" width="464" height="232" rx="8" fill="#f5f5f5" stroke="#f5f5f5" stroke-width="1" data-group-id="ranked" fill-opacity=".02" stroke-opacity=".12"/>
-<text x="56" y="832" class="zone-label" text-anchor="start">순위 결과</text>
+<text x="56" y="832" class="zone-label" text-anchor="start">순위가 매겨진 결과</text>
 <path d="M 440,256 L 440,304" data-edge-id="e1" data-from="change" data-to="fresh" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-ko-dark-arrow)"/>
 <path d="M 440,512 L 440,856" data-edge-id="e2" data-from="fresh" data-to="pinR" data-label="예" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-ko-dark-arrow)"/>
 <path d="M 168,408 L 128,408 Q 120,408 120,416 L 120,592" data-edge-id="e3" data-from="fresh" data-to="refresh" data-label="아니오" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-ko-dark-arrow)"/>
@@ -41,8 +41,8 @@
 <text x="468" y="760" class="arrow-label" text-anchor="middle">예</text>
 <rect x="60" y="529" width="52" height="20" rx="2" fill="#2d3142"/>
 <text x="86" y="544" class="arrow-label" text-anchor="middle">아니오</text>
-<rect x="776" y="529" width="32" height="20" rx="2" fill="#2d3142"/>
-<text x="792" y="544" class="arrow-label" text-anchor="middle">01</text>
+<rect x="688" y="529" width="72" height="20" rx="2" fill="#2d3142"/>
+<text x="724" y="544" class="arrow-label" text-anchor="middle">A 오래됨</text>
 <g data-node-id="change" data-source-label="파일을 바꿈 예: SQL 마이그레이션">
 <rect x="280" y="144" width="320" height="112" rx="6" fill="#2d3142"/>
 <rect x="280" y="144" width="320" height="112" rx="6" fill="#bfc0c0" stroke="#949eb2" stroke-width="1" fill-opacity=".10"/>
@@ -108,8 +108,9 @@
 </g>
 <text x="40" y="1092" class="zone-label" text-anchor="start">전이 조건</text>
 <rect x="40" y="1111" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
-<text x="54" y="1125" class="label" text-anchor="middle">01</text>
+<text x="54" y="1125" class="label" text-anchor="middle">A</text>
 <text x="80" y="1125" class="prose" text-anchor="start">--no-refresh, 또는 입력이 계속 바뀜</text>
+<text x="56" y="1160" class="prose" text-anchor="start">pin 결과는 다음 그림의 순위가 매겨진 결과로 이어진다.</text>
 <line x1="40" y1="1188" x2="840" y2="1188" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="1216" class="zone-label" text-anchor="start">범례</text>
 <rect x="112" y="1206" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>

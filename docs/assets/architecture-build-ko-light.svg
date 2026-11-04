@@ -6,7 +6,7 @@
       <style>#architecture-build-ko-light-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #2d3142; }
       #architecture-build-ko-light-root .diagram-container { width: 100%; overflow-x: auto; }
       #architecture-build-ko-light-root text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; fill: #2d3142; }
-      #architecture-build-ko-light-root .title { font-family: "Instrument Serif", "Noto Serif KR", "Batang", serif; font-size: 28px; font-weight: 400; }
+      #architecture-build-ko-light-root .title { font-family: "Instrument Serif", "Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", serif; font-size: 28px; font-weight: 400; }
       #architecture-build-ko-light-root .node { font-size: 16px; font-weight: 600; }
       #architecture-build-ko-light-root .sub { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; font-size: 12px; font-weight: 400; fill: #4f5d75; }
       #architecture-build-ko-light-root .technical { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; }
@@ -38,13 +38,13 @@
 <path d="M 316,240 L 316,312" data-edge-id="a1" data-from="you" data-to="intent" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 316,424 L 316,472" data-edge-id="a2" data-from="intent" data-to="lease" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 316,584 L 316,632" data-edge-id="a3" data-from="lease" data-to="route" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
-<path d="M 552,680 L 616,680 Q 624,680 624,672 L 624,560 Q 624,552 632,552 L 816,552 Q 824,552 824,544 L 824,504" data-edge-id="a4" data-from="route" data-to="jev" data-label="판정" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#architecture-build-ko-light-arrow)"/>
+<path d="M 552,680 L 616,680 Q 624,680 624,672 L 624,584 Q 624,576 632,576 L 816,576 Q 824,576 824,568 L 824,504" data-edge-id="a4" data-from="route" data-to="jev" data-label="스킬 순서·난이도" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 552,736 L 696,736" data-edge-id="a5" data-from="route" data-to="claude" data-label="지시문·스킬" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 836,760 L 836,936 Q 836,944 828,944 L 552,944" data-edge-id="a6" data-from="claude" data-to="gates" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 272,936 L 320,936" data-edge-id="a7" data-from="impact" data-to="gates" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#architecture-build-ko-light-arrow)"/>
 <path d="M 436,1008 L 436,1056" data-edge-id="a8" data-from="gates" data-to="wiki" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#architecture-build-ko-light-arrow)"/>
-<rect x="682" y="524" width="84" height="20" rx="2" fill="#f5f5f5"/>
-<text x="724" y="539" class="arrow-label" text-anchor="middle">판정</text>
+<rect x="614" y="548" width="200" height="20" rx="2" fill="#f5f5f5"/>
+<text x="714" y="563" class="arrow-label" text-anchor="middle">스킬 순서·난이도</text>
 <rect x="562" y="708" width="124" height="20" rx="2" fill="#f5f5f5"/>
 <text x="624" y="723" class="arrow-label" text-anchor="middle">지시문·스킬</text>
 <g data-node-id="you" data-source-label="사용자 또는 리드 Claude Code 작업을 적는다">
@@ -81,8 +81,8 @@
 <text x="96" y="550" class="sub" text-anchor="start">경로를 맡고 기준점을 확인한다</text>
 </g>
 <g data-node-id="route" data-source-label="난이도·모델·스킬 규칙이 tier와 추론 강도를 정한다 Jev가 최저 기준 안에서 tier를 바꿀 수 있다 tier도 지시문에 담는다">
-<rect x="80" y="632" width="472" height="184" rx="6" fill="#f5f5f5"/>
-<rect x="80" y="632" width="472" height="184" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
+<rect x="80" y="632" width="472" height="156" rx="6" fill="#f5f5f5"/>
+<rect x="80" y="632" width="472" height="156" rx="6" fill="#ffffff" stroke="#4f5d75" stroke-width="1"/>
 <g aria-hidden="true">
 <rect x="96" y="648" width="44" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
 <text x="118" y="659" class="tag" text-anchor="middle">ROUTE</text>

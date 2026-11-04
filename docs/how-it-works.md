@@ -139,9 +139,10 @@ whole loop with real commands, in about 20 minutes.
 
 ## The loop
 
-Ask your AI in plain words in the project; the rules installed by `oah init` guide it through the commands below.
+Ask your AI in plain words in the project; the installed rules and each command’s next-step
+message guide it through the commands below.
 You ask about the result, answer when a repeated problem or design choice stops the loop, and confirm before landing.
-The tables show what runs underneath that conversation.
+The tables show what runs underneath that conversation; where a row says “you”, your AI usually runs it for you.
 
 ### Prepare and implement
 
@@ -171,7 +172,7 @@ The tables show what runs underneath that conversation.
 | 7.<br>Review | `oah review` sends Codex a clean, read-only snapshot. |
 | 8.<br>Findings | Codex returns a receipt with its verdict and findings. |
 | 9.<br>Fix | `oah fix` asks Codex to correct P0 and P1 findings. |
-| 10.<br>Changes | Codex returns a diff for you to inspect. |
+| 10.<br>Diff | Codex returns a diff for you to inspect. |
 | 11.<br>Bind | Maintain the wiki, run approved gates, commit, then `oah fix --bind`. Repeat review until it converges; a repeated problem or design question stops for your decision. |
 | 12.<br>Finish | `oah finish` checks scope, gates, wiki and the return. |
 | 13.<br>Push | You push and open a pull request. |

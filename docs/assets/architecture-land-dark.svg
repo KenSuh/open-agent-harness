@@ -89,8 +89,8 @@
 <text x="96" y="630" class="sub" text-anchor="start">Recheck default branch</text>
 </g>
 <g data-node-id="land" data-source-label="oah land --check → --merge Exact reviewed HEAD Merge after you confirm Fast-forward push">
-<rect x="80" y="792" width="432" height="216" rx="6" fill="#2d3142"/>
-<rect x="80" y="792" width="432" height="216" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
+<rect x="80" y="792" width="432" height="168" rx="6" fill="#2d3142"/>
+<rect x="80" y="792" width="432" height="168" rx="6" fill="#f08a59" stroke="#f08a59" stroke-width="1" fill-opacity=".10"/>
 <g aria-hidden="true">
 <rect x="96" y="808" width="36" height="16" rx="2" fill="none" stroke="#f08a59" stroke-width="1" stroke-opacity=".4"/>
 <text x="114" y="819" class="tag" text-anchor="middle">LAND</text>

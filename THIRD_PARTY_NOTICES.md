@@ -30,8 +30,8 @@ adapt templates and styles from [Cathryn Lavery's diagram-design](https://github
 pinned at commit **3eb03b8**, under the **MIT License**. The non-banner figures use the skill's default
 gallery look: warm dotted paper, one focal accent, tag chips, mono technical labels, zones and legends.
 The adaptations use installed system fonts, English and Korean text, static layouts and accessible
-descriptions, with no external resources loaded. The banner is maintained separately. The skill itself
-is not vendored, and the existing badge SVGs are not derived from it.
+descriptions, with no external resources loaded. The banner is a hand-authored chat scene in its own style,
+exported with the same tool. The skill itself is not vendored, and the existing badge SVGs are not derived from it.
 
 The figures use **Tabler Icons**, licensed under **MIT**, from the skill's `references/primitive-icons.md`.
 These are the selected monochrome user/agent, file, log, search and shield glyphs, adapted for inline SVG
