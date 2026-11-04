@@ -89,6 +89,9 @@ class FakeProvider:
 
 
 class GatingTest(unittest.TestCase):
+    def test_status_codes_are_fixed_error_codes(self):
+        self.assertLessEqual(set(typesafe.STATUS_CODES.values()), base.ERROR_CODES)
+
     def setUp(self) -> None:
         self.key = fake_key()
         self.provider = FakeProvider({"a": 0.1, "b": 0.9, "c": 0.5})

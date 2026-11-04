@@ -308,6 +308,26 @@ different. The counts show how choices were made, not whether Jev helped: no out
 record the judge's confidence (`model_judge_confidence`, null when the answer carried none) and whether a floor raised
 the tier (`tier_floor_raised`) from this version on, so older runs count as not recorded, and the report says how many.
 
+**Exporting the choices.** `oah models export` prints one JSON line for each run folder `oah models report` counts,
+ordered by task folder and then run id, so the deterministic choice and Jev's choice can be compared run by run or
+kept to tune a rule later. Each line has a `format` number and the `run_id`, then only the decision data: the request
+axes (`axes`: kind, intensity, reasoning and risk), `stage`, `engine`, `tier`, `tier_source`, `rule_tier`, `jev_tier`,
+`jev_confidence`, `jev_status`, `tier_floor_raised`, `model_judge`, `model_judge_confidence`, from `model_choice` its
+`mode`, `floor`, `candidates`, `excluded` and the `deterministic`, `proposal` and `requested` pairs, and the outcome
+(`status`, `exit_code`, `timed_out`, `duration_s`). Each value is checked against its closed set or form as the report
+reads it; a candidate or an exclusion keeps only its model, effort or rule, and any other field of it is dropped.
+There is no prompt, brief, task name, path, command, working folder, CLI path, warning, error, note, provider name,
+worker output or environment value. Every null that is not the record's own is explained. `unreadable` names a field
+that could not be read, with the reason: a wrong type or an unknown value, `inconsistent` for a value that contradicts
+its status or belongs to a feature the record holds only in part, and `{"record": "<reason>"}` when the whole run
+folder could not be read, which still gets its line. `not_recorded` names a field the record was written before: older
+runs lack the newer fields (v0.1.0 has no model judge, v0.2.0 no Jev difficulty, and only this version records the
+judge's confidence and the floor flag). A value a correction record hashed stays hashed, is named in `hashed`, and is
+never reversed or matched to a name. `jev_status` keeps only its word, such as `below-threshold` without the number.
+Like the report it calls no provider, reaches no network, starts no process once the repository is found, and writes
+nothing; redirect stdout to keep the lines. The lines show what was chosen and how the run ended, not whether Jev
+helped: a run that finished does not prove its choice was right.
+
 The snapshot shipped with `oah` comes from this source, and a fetched copy carries the same credit with the day it was
 read:
 

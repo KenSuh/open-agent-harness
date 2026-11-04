@@ -171,10 +171,23 @@ def _features(record: dict) -> dict:
     return result
 
 
-def _record_counts(counts: dict, record: dict, features: dict) -> bool:
-    """Add one readable record to `counts`; False when any count could not read its value."""
+def _flag(value) -> bool:
+    if type(value) is not bool:
+        raise _Unreadable("hashed" if isinstance(value, str) and HASHED.fullmatch(value) else "wrong-type")
+    return value
+
+
+# The feature each feature-bound dimension belongs to; a partial feature makes them all unreadable.
+FEATURE_OF = {"jev_status": "jev_difficulty", "jev_vs_rule": "jev_difficulty", "jev_confidence": "jev_difficulty",
+              "model_judge": "model_judge", "model_change": "model_judge",
+              "model_judge_confidence": "model_judge_confidence", "tier_floor_raised": "tier_floor_raised"}
+
+
+def _dimension_readers(record: dict, features: dict) -> dict:
+    """One reader per dimension: its bucket, `_ABSENT` when not recorded, or `_Unreadable` with the reason.
+
+    `oah models export` uses the same readers, so both commands decide readability in one place."""
     get = record.get
-    counts["runs"] += 1
 
     def value(name: str, read):
         def reader():
@@ -229,9 +242,7 @@ def _record_counts(counts: dict, record: dict, features: dict) -> bool:
         return reader
 
     def floor(value):
-        if type(value) is not bool:
-            raise _Unreadable("hashed" if isinstance(value, str) and HASHED.fullmatch(value) else "wrong-type")
-        return "true" if value else "false"
+        return "true" if _flag(value) else "false"
 
     readers = {
         "tier_source": value("tier_source", lambda v: _plain(v, TIER_SOURCES)),
@@ -245,14 +256,10 @@ def _record_counts(counts: dict, record: dict, features: dict) -> bool:
                                              {"used": "used", "rejected(": "rejected"}),
         "tier_floor_raised": value("tier_floor_raised", floor),
     }
-    feature_for = {"jev_status": "jev_difficulty", "jev_vs_rule": "jev_difficulty",
-                   "jev_confidence": "jev_difficulty", "model_judge": "model_judge",
-                   "model_change": "model_judge", "model_judge_confidence": "model_judge_confidence",
-                   "tier_floor_raised": "tier_floor_raised"}
 
     def feature_reader(name):
         def reader():
-            state = features[feature_for[name]]
+            state = features[FEATURE_OF[name]]
             if state == "absent":
                 return _ABSENT
             if state == "partial":
@@ -260,8 +267,14 @@ def _record_counts(counts: dict, record: dict, features: dict) -> bool:
             return readers[name]()
         return reader
 
-    return all([_count(counts, name, feature_reader(name) if name in feature_for else readers[name])
-                for name in DIMENSIONS])
+    return {name: feature_reader(name) if name in FEATURE_OF else readers[name] for name in DIMENSIONS}
+
+
+def _record_counts(counts: dict, record: dict, features: dict) -> bool:
+    """Add one readable record to `counts`; False when any count could not read its value."""
+    counts["runs"] += 1
+    readers = _dimension_readers(record, features)
+    return all([_count(counts, name, readers[name]) for name in DIMENSIONS])
 
 
 def _identity(record: dict, name: str, words) -> str:
@@ -305,6 +318,37 @@ def _bump(table: dict, key: str) -> None:
     table[key] = table.get(key, 0) + 1
 
 
+def run_folders(state: pathlib.Path, skipped: dict):
+    """Each run folder of one state folder, by task folder name then run id; other entries are tallied in `skipped`.
+
+    A linked runs folder refuses with OAH_RUN_PATH_UNSAFE."""
+    runs = _contained_path(state, "runs")
+    tasks = sorted(runs.iterdir()) if runs.is_dir() else []
+    for task in tasks:
+        if not task.is_dir() or not TASK_RE.fullmatch(task.name):
+            _bump(skipped, "unrecognized")
+            continue
+        try:
+            folder = _contained_path(state, "runs", task.name)
+        except RunError:
+            _bump(skipped, "linked-task-folder")
+            continue
+        for entry in sorted(folder.iterdir()):
+            if entry.name == "intent-binding.json":
+                continue  # dispatch keeps the task's Intent binding beside its run folders
+            if not RUN_ID_RE.fullmatch(entry.name):
+                created = entry.name.startswith(".") and entry.name.endswith(".tmp")
+                _bump(skipped, "being-created" if created else "unrecognized")
+                continue
+            yield entry
+
+
+def read_run(entry: pathlib.Path) -> tuple[dict, str, str]:
+    """One run folder's record with its stage and engine, or `_Unreadable` with why the whole record cannot be read."""
+    record = _read(entry)
+    return record, _identity(record, "stage", routing.STAGES), _identity(record, "engine", routing.ENGINES)
+
+
 def collect(state: pathlib.Path) -> dict:
     """The report for one state folder, as one JSON-ready object."""
     state = pathlib.Path(state)
@@ -312,42 +356,23 @@ def collect(state: pathlib.Path) -> dict:
     written_before = {"model_judge": 0, "jev_difficulty": 0, "model_judge_confidence": 0, "tier_floor_raised": 0}
     groups: dict[tuple[str, str], dict] = {}
     totals = _counts()
-    runs = _contained_path(state, "runs")  # a linked runs folder refuses: OAH_RUN_PATH_UNSAFE
-    tasks = sorted(runs.iterdir()) if runs.is_dir() else []
-    for task in tasks:
-        if not task.is_dir() or not TASK_RE.fullmatch(task.name):
-            _bump(records["skipped"], "unrecognized")
-            continue
+    for entry in run_folders(state, records["skipped"]):
+        records["run_folders"] += 1
         try:
-            folder = _contained_path(state, "runs", task.name)
-        except RunError:
-            _bump(records["skipped"], "linked-task-folder")
+            record, stage, engine = read_run(entry)
+        except _Unreadable as exc:
+            _bump(records["unreadable"], exc.reason)
             continue
-        for entry in sorted(folder.iterdir()):
-            if entry.name == "intent-binding.json":
-                continue  # dispatch keeps the task's Intent binding beside its run folders
-            if not RUN_ID_RE.fullmatch(entry.name):
-                created = entry.name.startswith(".") and entry.name.endswith(".tmp")
-                _bump(records["skipped"], "being-created" if created else "unrecognized")
-                continue
-            records["run_folders"] += 1
-            try:
-                record = _read(entry)
-                stage = _identity(record, "stage", routing.STAGES)
-                engine = _identity(record, "engine", routing.ENGINES)
-            except _Unreadable as exc:
-                _bump(records["unreadable"], exc.reason)
-                continue
-            records["read"] += 1
-            features = _features(record)
-            for name, presence in features.items():
-                if presence == "absent":
-                    written_before[name] += 1
-            group = groups.setdefault((stage, engine), _counts())
-            whole = _record_counts(group, record, features)
-            _record_counts(totals, record, features)
-            if not whole:
-                records["partial"] += 1
+        records["read"] += 1
+        features = _features(record)
+        for name, presence in features.items():
+            if presence == "absent":
+                written_before[name] += 1
+        group = groups.setdefault((stage, engine), _counts())
+        whole = _record_counts(group, record, features)
+        _record_counts(totals, record, features)
+        if not whole:
+            records["partial"] += 1
     order = {stage: n for n, stage in enumerate(routing.STAGES)}
     return {"format": FORMAT, "state": str(state), "note": NOTE, "bands": list(BANDS), "records": records,
             "written_before": written_before,

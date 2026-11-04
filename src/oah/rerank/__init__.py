@@ -47,7 +47,7 @@ from typing import Callable, Mapping, Sequence
 from oah import routing, secrets
 from oah.config import ConfigError, load_config
 from oah.intent import END as INTENT_END
-from oah.rerank.base import (TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
+from oah.rerank.base import (BAD_RESPONSE, KEY_NAME, TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
                              _classify_failure, _raise_if_interrupted)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, WORK_LIMIT, TypeSafeProvider
 from oah.toolkit.checks import CONTENT_RULES
@@ -292,7 +292,7 @@ def _gate(config: Mapping, *, brief_disabled: bool, env: Mapping[str, str] | Non
             _raise_if_interrupted(exc)
             if not isinstance(exc, ValueError):
                 raise
-            return None, None, unused("error:key-name")
+            return None, None, unused(f"error:{KEY_NAME}")
         if not key:
             return None, None, unused("no key")
         return provider, key, USED
@@ -318,7 +318,7 @@ def _call(action: Callable[[], object]) -> tuple[object, str]:
 def _valid_text(value: object) -> str:
     try:
         if type(value) is not str:
-            raise ProviderError("bad-response")
+            raise ProviderError(BAD_RESPONSE)
         return value
     finally:
         del value
@@ -326,28 +326,28 @@ def _valid_text(value: object) -> str:
 
 def _valid_scores(scores: object, count: int) -> list[float]:
     if (type(scores) is not list and type(scores) is not tuple) or len(scores) != count:
-        raise ProviderError("bad-response")
+        raise ProviderError(BAD_RESPONSE)
     result = []
     for value in scores:
         if type(value) is not int and type(value) is not float:
-            raise ProviderError("bad-response")
+            raise ProviderError(BAD_RESPONSE)
         number = None
         try:
             number = float(value)
         except OverflowError:
             pass  # Only exact built-in numbers reach conversion; no provider hook can run.
         if number is None or not math.isfinite(number):
-            raise ProviderError("bad-response")
+            raise ProviderError(BAD_RESPONSE)
         result.append(number)
     return result
 
 
 def _valid_advice(answer: object) -> tuple[str, float | None]:
     if type(answer) is not tuple or len(answer) != 2:
-        raise ProviderError("bad-response")
+        raise ProviderError(BAD_RESPONSE)
     tier, confidence = answer
     if type(tier) is not str or tier not in TIERS:
-        raise ProviderError("bad-response")
+        raise ProviderError(BAD_RESPONSE)
     if confidence is not None:
         confidence = _valid_scores([confidence], 1)[0]
     return tier, confidence
@@ -359,11 +359,11 @@ def _valid_pair(answer: object) -> tuple[str, str, float | None]:
     try:
         if (type(answer) is not tuple or len(answer) not in (2, 3)
                 or any(type(item) is not str for item in answer[:2])):
-            raise ProviderError("bad-response")
+            raise ProviderError(BAD_RESPONSE)
         if len(answer) == 3 and answer[2] is not None:
             confidence = _valid_scores([answer[2]], 1)[0]
             if not 0.0 <= confidence <= 1.0:
-                raise ProviderError("bad-response")
+                raise ProviderError(BAD_RESPONSE)
         return answer[0], answer[1], confidence
     finally:
         del answer, confidence
