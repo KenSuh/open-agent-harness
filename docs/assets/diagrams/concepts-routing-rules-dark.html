@@ -34,7 +34,7 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <div class="diagram-container">
 <svg viewBox="0 0 960 1272" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="concepts-routing-rules-dark-title concepts-routing-rules-dark-desc" data-diagram-type="Flowchart" data-size="fit">
 <title id="concepts-routing-rules-dark-title">Routing · tier, model and effort</title>
-<desc id="concepts-routing-rules-dark-desc">The task&#x27;s stage, kind and Scope paths, with explicit axes winning, feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record.</desc>
+<desc id="concepts-routing-rules-dark-desc">The task's stage, kind and Scope paths, with explicit axes winning, feed fixed rules and a tier, packet or flag selection precedes CLI-supported model and effort, and a sufficiently confident Jev judgement can move the tier without crossing its floor before the plan, brief and run record.</desc>
 <defs>
 <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
 <circle cx="1" cy="1" r="0.9" fill="#f5f5f5" fill-opacity=".10"/></pattern>
@@ -50,8 +50,8 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <path d="M 288,396 L 288,444" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 288,544 L 288,600" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 288,700 L 288,756" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,908 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 772,596 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="its tier at or above difficulty_min_confidence, never below the floor" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 288,876 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 772,580 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="its tier at or above difficulty_min_confidence, never below the floor" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
 <rect x="588" y="644" width="104" height="20" rx="2" fill="#2d3142"/>
 <text x="640" y="659" class="arrow-label" text-anchor="middle">A JEV TIER</text>
 <g data-node-id="task" data-source-label="Task: stage, kind and Scope paths axes you give explicitly win">
@@ -91,14 +91,17 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 </g>
 <text x="80" y="658" class="node" text-anchor="start">Packet stage tier, or oah call --tier</text><text x="80" y="678" class="sub technical" text-anchor="start">source recorded: rules, packet, flag or jev</text></g>
 <g data-node-id="model" data-source-label="Model and effort the CLI supports an effort that cannot be observed is recorded as unverified a lower launch effort fails: OAH_EFFORT_DOWNGRADED">
-<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142"/>
-<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="64" y="756" width="496" height="120" rx="6" fill="#2d3142"/>
+<rect x="64" y="756" width="496" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
 <rect x="80" y="772" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="102" y="783" class="tag" text-anchor="middle">MODEL</text>
 <text x="544" y="794" class="ghost" text-anchor="end">05</text>
 </g>
-<text x="80" y="814" class="node" text-anchor="start">Model and effort the CLI supports</text><text x="80" y="834" class="sub" text-anchor="start">an effort that cannot be observed is recorded as</text><text x="80" y="852" class="sub" text-anchor="start">unverified</text><text x="80" y="870" class="sub" text-anchor="start">a lower launch effort fails: OAH_EFFORT_DOWNGRADED</text></g>
+<text x="80" text-anchor="start" y="814" class="node">Model and effort the CLI supports</text>
+<text x="80" text-anchor="start" y="834" class="sub">an effort that cannot be observed is recorded as unverified</text>
+<text x="80" text-anchor="start" y="852" class="sub">a lower launch effort fails: OAH_EFFORT_DOWNGRADED</text>
+</g>
 <g data-node-id="brief" data-source-label="Packet plan, brief and run record">
 <rect x="64" y="956" width="496" height="80" rx="6" fill="#2d3142"/>
 <rect x="64" y="956" width="496" height="80" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
@@ -109,18 +112,17 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 </g>
 <text x="80" y="1014" class="node" text-anchor="start">Packet plan, brief and run record</text></g>
 <g data-node-id="jev" data-source-label="TypeSafe Jev provider re-orders only, never adds or drops judges difficulty from the Intent and Scope paths">
-<rect x="624" y="444" width="296" height="152" rx="6" fill="#2d3142"/>
-<rect x="624" y="444" width="296" height="152" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="624" y="444" width="296" height="136" rx="6" fill="#2d3142"/>
+<rect x="624" y="444" width="296" height="136" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
 <rect x="640" y="460" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="656" y="471" class="tag" text-anchor="middle">JEV</text>
 <g transform="translate(840,456)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
 </g>
-<text x="640" y="502" class="node" text-anchor="start">TypeSafe Jev</text>
-<text x="640" y="522" class="sub" text-anchor="start">provider</text>
-<text x="640" y="540" class="sub" text-anchor="start">re-orders only, never adds or drops</text>
-<text x="640" y="558" class="sub" text-anchor="start">judges difficulty from the Intent</text>
-<text x="640" y="576" class="sub" text-anchor="start">and Scope paths</text>
+<text x="640" text-anchor="start" y="502" class="node">TypeSafe Jev provider</text>
+<text x="640" text-anchor="start" y="522" class="sub">re-orders only, never adds or drops</text>
+<text x="640" text-anchor="start" y="540" class="sub">judges difficulty from the Intent</text>
+<text x="640" text-anchor="start" y="558" class="sub">and Scope paths</text>
 </g>
 <text x="40" y="1096" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
 <rect x="40" y="1115" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>

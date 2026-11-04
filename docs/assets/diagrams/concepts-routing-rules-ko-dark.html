@@ -50,8 +50,8 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 <path d="M 288,396 L 288,444" data-edge-id="e2" data-from="score" data-to="tier" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 288,544 L 288,600" data-edge-id="e3" data-from="tier" data-to="pick" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
 <path d="M 288,700 L 288,756" data-edge-id="e4" data-from="pick" data-to="model" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 288,908 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
-<path d="M 772,596 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<path d="M 288,876 L 288,956" data-edge-id="e5" data-from="model" data-to="brief" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#arrow)"/>
+<path d="M 772,580 L 772,664 Q 772,672 764,672 L 560,672" data-edge-id="e15" data-from="jev" data-to="pick" data-label="difficulty_min_confidence 이상일 때 그 tier, 최저 기준 아래로는 내려가지 않음" fill="none" stroke="#bfc0c0" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
 <rect x="588" y="644" width="104" height="20" rx="2" fill="#2d3142"/>
 <text x="640" y="659" class="arrow-label" text-anchor="middle">A JEV 등급</text>
 <g data-node-id="task" data-source-label="작업: 단계, 종류, Scope 경로 직접 준 축이 우선">
@@ -91,8 +91,8 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 </g>
 <text x="80" y="658" class="node" text-anchor="start">패킷의 단계별 tier, 또는 oah call --tier</text><text x="80" y="678" class="sub" text-anchor="start">출처 기록: rules, packet, flag, jev</text></g>
 <g data-node-id="model" data-source-label="CLI가 지원하는 모델과 추론 강도 관찰할 수 없는 강도는 미검증으로 기록 더 낮은 강도로 실행하면 실패: OAH_EFFORT_DOWNGRADED">
-<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142"/>
-<rect x="64" y="756" width="496" height="152" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<rect x="64" y="756" width="496" height="120" rx="6" fill="#2d3142"/>
+<rect x="64" y="756" width="496" height="120" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
 <rect x="80" y="772" width="44" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="102" y="783" class="tag" text-anchor="middle">MODEL</text>
@@ -109,17 +109,16 @@ text { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Goth
 </g>
 <text x="80" y="1014" class="node" text-anchor="start">패킷 계획, 브리프, 실행 기록</text></g>
 <g data-node-id="jev" data-source-label="TypeSafe Jev 제공자 순서만 바꾸고 더하거나 빼지 않음 Intent와 Scope 경로로 난이도 판정">
-<rect x="624" y="444" width="296" height="152" rx="6" fill="#2d3142"/>
-<rect x="624" y="444" width="296" height="152" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="624" y="444" width="296" height="136" rx="6" fill="#2d3142"/>
+<rect x="624" y="444" width="296" height="136" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
 <rect x="640" y="460" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="656" y="471" class="tag" text-anchor="middle">JEV</text>
 <g transform="translate(840,456)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
 </g>
-<text x="640" y="502" class="node" text-anchor="start">TypeSafe Jev</text>
-<text x="640" y="522" class="sub" text-anchor="start">제공자</text>
-<text x="640" y="540" class="sub" text-anchor="start">순서만 바꾸고 더하거나 빼지 않음</text>
-<text x="640" y="558" class="sub" text-anchor="start">Intent와 Scope 경로로 난이도 판정</text>
+<text x="640" text-anchor="start" y="502" class="node">TypeSafe Jev 제공자</text>
+<text x="640" text-anchor="start" y="522" class="sub">순서만 바꾸고 더하거나 빼지 않음</text>
+<text x="640" text-anchor="start" y="540" class="sub">Intent와 Scope 경로로 난이도 판정</text>
 </g>
 <text x="40" y="1096" class="zone-label" text-anchor="start">전이 조건</text>
 <rect x="40" y="1115" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>

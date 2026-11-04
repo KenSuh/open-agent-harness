@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1080 1420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-ko-dark-title how-it-works-ko-dark-desc" data-diagram-type="Swimlane" data-size="fit" id="how-it-works-ko-dark-root">
 <title id="how-it-works-ko-dark-title">질문하고 답하고 확인한다. 하네스가 작업을 이어 간다.</title>
-<desc id="how-it-works-ko-dark-desc">사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·경로를 예약하는 리스·영향 지도와 권장 선택형 TypeSafe Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정하며, 같은 문제가 반복되거나 설계 선택이 필요해 멈추면 사용자가 답하고 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 미출시 main에 있고 안내형 설계 대화는 v0.4.0에 계획돼 있다.</desc>
+<desc id="how-it-works-ko-dark-desc">사용자가 말로 변경을 요청하면 설치된 규칙에 따라 의도·범위·경로를 예약하는 리스·영향 지도와 권장 선택형 TypeSafe Jev 판정을 준비하고, Claude Code가 구현하며 게이트와 위키가 증거를 남기고 Codex CLI가 검토·수정하며, 같은 문제가 반복되거나 설계 선택이 필요해 멈추면 사용자가 답하고 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있고 안내형 설계 대화는 v0.4.0에 계획돼 있다.</desc>
 <defs>
       <style>#how-it-works-ko-dark-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #f5f5f5; }
       #how-it-works-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -156,7 +156,7 @@
 <text x="368" y="1000" class="sub" text-anchor="start">fast-forward push한다.</text>
 </g>
 <text x="56" y="1276" class="prose" text-anchor="start">oah init이 설치한 규칙에 따라 AI가 내부 명령으로 하네스를 진행한다.</text>
-<text x="56" y="1300" class="prose" text-anchor="start">Jev 난이도 판정은 미출시 main 기능이다. 확신도와 최저 기준을 지킨다.</text>
+<text x="56" y="1300" class="prose" text-anchor="start">Jev 난이도 판정은 v0.3.0 기능이다. 확신도와 최저 기준을 지킨다.</text>
 <line x1="40" y1="1340" x2="1040" y2="1340" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="1368" class="zone-label" text-anchor="start">범례</text>
 <rect x="112" y="1358" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>

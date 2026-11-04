@@ -16,18 +16,18 @@ Its palette, outlines, hard shadows and role colors are recorded in the style gu
 |---|---|---|---|
 | `how-it-works` | Swimlane, 1080 × 1420 | 8 / 8 | Whole harness; both READMEs and both how-it-works pages |
 | `features` | Architecture, 960 × 1040 | 6 / 6 | Six parts together; both READMEs |
-| `architecture-build` | Architecture, 1040 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
-| `architecture-land` | Architecture, 1040 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
+| `architecture-build` | Architecture, 1160 × 1388 | 9 / 8 | Task preparation, routing, Jev and evidence |
+| `architecture-land` | Architecture, 1104 × 1236 | 7 / 8 | Review, git hooks, CI and confirmed landing |
 | `loop-start` | Sequence, 960 × 916 | 3 / 6 | Numbered exchanges 1–6 |
 | `loop-review` | Sequence, 1008 × 1212 | 4 / 9 | Numbered exchanges 7–15 and the correction loop |
-| `concepts-loop` | Flowchart, 1232 × 756 | 8 / 8 | Packet to confirmed landing |
+| `concepts-loop` | Flowchart, 1232 × 724 | 8 / 8 | Packet to confirmed landing |
 | `concepts-leases-lifecycle` | State machine, 880 × 1308 | 6 / 7 | Start, renew, expiry and release |
 | `concepts-leases-finish` | State machine, 880 × 1164 | 5 / 6 | Finish checks and refusals |
 | `concepts-routing-rules` | Flowchart, 960 × 1272 | 7 / 6 | Difficulty rules, tier, model and effort |
-| `concepts-routing-skills` | Flowchart, 960 × 1384 | 7 / 9 | Deterministic skills, reranking and fallbacks |
+| `concepts-routing-skills` | Flowchart, 960 × 1352 | 7 / 9 | Deterministic skills, reranking and fallbacks |
 | `concepts-impact-freshness` | Flowchart, 880 × 1268 | 6 / 6 | Freshness, refresh, stale input and default branch |
 | `concepts-impact-ranked` | Flowchart, 920 × 1064 | 5 / 5 | pin, exec, link, mention and exact reruns |
-| `concepts-review` | Flowchart, 880 × 980 | 5 / 5 | All review outcomes and correction/bind return |
+| `concepts-review` | Flowchart, 880 × 948 | 5 / 5 | All review outcomes and correction/bind return |
 | `concepts-landing-local` | Flowchart, 1000 × 1156 | 8 / 5 | Opt-in local hooks and push paths |
 | `concepts-landing-checks` | Flowchart, 1000 × 1332 | 6 / 6 | CI, exact HEAD, exception and confirmation |
 | `banner` | Hand-authored chat scene, 1280 × 560 | — | README banner in its own neo-brutalist style |
@@ -43,7 +43,7 @@ its language's SVG description verbatim as the image alt text in both themes.
 The overview and features wording follows the same contract as the pages: you ask, answer when a repeated
 problem or design choice stops the AI, and confirm before landing. A lease reserves the paths a task changes;
 an overlapping lease is refused. TypeSafe Jev is the recommended, optional judge. It re-orders chosen skills;
-on unreleased main it judges difficulty, and its tier picks the model subject to confidence and minimum-level
+in v0.3.0 it judges difficulty, and its tier picks the model subject to confidence and minimum-level
 rules. Without a key, rules decide. The guided design conversation stays planned for v0.4.0.
 
 ## Regenerate

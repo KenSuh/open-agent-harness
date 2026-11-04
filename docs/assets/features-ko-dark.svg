@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 960 1040" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="features-ko-dark-title features-ko-dark-desc" data-diagram-type="Architecture" data-size="fit" id="features-ko-dark-root">
 <title id="features-ko-dark-title">oah가 함께 챙기는 것</title>
-<desc id="features-ko-dark-desc">영향 지도, 경로를 예약하는 리스와 권장 선택형 판정기 TypeSafe Jev가 Claude Code 구현과 Codex CLI 검토를 돕고 게이트와 위키가 증거와 결정을 남기며, 겹치는 리스는 거절하고 사용자는 질문하고 판단에 답한 뒤 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 미출시 main에 있다.</desc>
+<desc id="features-ko-dark-desc">영향 지도, 경로를 예약하는 리스와 권장 선택형 판정기 TypeSafe Jev가 Claude Code 구현과 Codex CLI 검토를 돕고 게이트와 위키가 증거와 결정을 남기며, 겹치는 리스는 거절하고 사용자는 질문하고 판단에 답한 뒤 반영 전에 확인하며, Jev의 난이도에 따른 모델 선택은 v0.3.0에 포함돼 있다.</desc>
 <defs>
       <style>#features-ko-dark-root { font-family: "Geist", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif; color: #f5f5f5; }
       #features-ko-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -72,7 +72,7 @@
 <rect x="680" y="208" width="32" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="696" y="219" class="tag" text-anchor="middle">JEV</text>
 <text x="880" y="230" class="ghost" text-anchor="end">03</text>
-<g transform="translate(816,204)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4" /> <path d="M12 2v2" /> <path d="M9 12v9" /> <path d="M15 12v9" /> <path d="M5 16l4 -2" /> <path d="M15 14l4 2" /> <path d="M9 18h6" /> <path d="M10 8v.01" /> <path d="M14 8v.01" /></g></g>
+<g transform="translate(816,204)" color="#bfc0c0"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2l0 -4"/> <path d="M12 2v2"/> <path d="M9 12v9"/> <path d="M15 12v9"/> <path d="M5 16l4 -2"/> <path d="M15 14l4 2"/> <path d="M9 18h6"/> <path d="M10 8v.01"/> <path d="M14 8v.01"/></g></g>
 </g>
 <text x="680" y="250" class="node" text-anchor="start">TypeSafe Jev</text>
 <text x="680" y="270" class="sub" text-anchor="start">권장 선택형 판정기다.</text>
@@ -119,7 +119,7 @@
 <text x="560" y="786" class="node" text-anchor="start">프로젝트 위키</text>
 <text x="560" y="806" class="sub" text-anchor="start">다음 세션을 위해 결정과 이유를 남긴다.</text>
 </g>
-<text x="56" y="916" class="prose" text-anchor="start">Jev 난이도 판정은 미출시 main 기능이다. 확신도와 최저 기준을 지킨다.</text>
+<text x="56" y="916" class="prose" text-anchor="start">Jev 난이도 판정은 v0.3.0 기능이다. 확신도와 최저 기준을 지킨다.</text>
 <text x="56" y="938" class="prose" text-anchor="start">사용자는 질문하고, 판단을 물으며 멈추면 답하고, 반영 전에 확인한다.</text>
 <line x1="40" y1="960" x2="920" y2="960" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="988" class="zone-label" text-anchor="start">범례</text>
