@@ -15,6 +15,7 @@
 - [스킬 선택](#스킬-선택)
 - [영향 지도](#영향-지도)
 - [프로젝트 위키](#프로젝트-위키)
+- [설계](#설계)
 - [게이트](#게이트)
 - [리뷰 루프와 수정](#리뷰-루프와-수정)
 - [반영](#반영)
@@ -401,6 +402,61 @@ docs/wiki/
 - `oah wiki lint`와 `oah wiki hygiene`은 깨진 링크, 색인에 없는 노트, 출처가 없는 노트 같은 실제 문제를 알려
   준다. 후보만 보여 줄 뿐 어떤 위키 명령도 노트를 스스로 지우거나 옮기지 않는다.
 - graphify는 선택이고(`oah graph`) 그래프를 자동으로 다시 만드는 일은 없다.
+
+## 설계
+
+`oah design`은 oah로 만드는 제품마다 설계를 보관한다. 무엇을 해야 하는지, 그것이 어떻게 바뀌었는지, 어느 revision을
+승인했는지를 남긴다. 명령은 AI가 실행하고, 사용자는 위키의 설계 페이지를 읽고 바꿀 점을 말한다.
+
+```text
+.oah/designs/<project>/project.json           ID, 제목, uid, 설계를 바꾸는 브랜치
+.oah/designs/<project>/<design>/design.json   현재 revision과 수락한 revision, 제자리에서 바뀌는 유일한 기록
+  revisions/r<N>/                             revision 하나. revision.json과 부분마다 <part>.md 하나
+  acceptances/a<N>.json                       수락 기록 하나씩
+<wiki>/designs/<project>.md                   프로젝트의 설계 목록
+<wiki>/designs/<project>/<project>--<design>.md   설계 페이지
+```
+
+- **기록과 페이지.** `.oah/designs`가 기록이다. 그것을 바꾼 작업과 함께 커밋한다. `revisions/`와 `acceptances/`
+  아래 파일은 한 번 쓰면 바뀌지 않고, 저마다 바로 앞 파일의 다이제스트를 적어 둔다. 그래서 고친 변경 사유, 사라진
+  수락 기록, 바뀐 바이트는 다음 읽기에서 드러난다(`OAH_DESIGN_CORRUPT`). 위키의 페이지는 사람이 읽고 고치는 사본이다.
+- **ID와 부분.** 프로젝트와 설계 ID는 소문자 영문과 숫자를 하이픈 하나로 이은 40자 이하 이름이다(예를 들어
+  `academy-booking`). 제목은 어느 언어든 쓸 수 있고, ID는 그대로 둔 채 바꿀 수 있다(`oah design project rename`).
+  revision은 이름 붙은 부분을 담는다. `design`은 필수이고, `request`는 사용자가 한 말 그대로다. 뒤의 revision은
+  그 뒤에 정정만 덧붙일 수 있다. `materials`와 `coverage`는 뒤의 설계 단계가 쓴다.
+- **revision.** `oah design save`에는 읽은 revision과 다이제스트가 필요하다. 그 사이에 누가 저장했으면
+  `OAH_DESIGN_REVISION_CONFLICT`로, 다이제스트가 그 revision의 것이 아니면 `OAH_DESIGN_CONTEXT_STALE`로 거절한다.
+  이미 반영된 저장을 다시 시도하면 `OAH_DESIGN_APPLIED`를 출력하고 아무것도 두 번 쓰지 않는다. 같은 내용을 다시
+  저장해도 바뀌는 것은 없다. 예전 내용으로 돌아가는 것도 새 revision이다.
+- **수락.** `oah design accept`는 revision을 승인했다는 사실을 사유와 함께 기록한다. 더 높은 revision으로만
+  나아간다.
+- **설계를 바꾸는 브랜치는 하나다.** `oah design project add`는 실행한 브랜치를 기록한다. 그 프로젝트의 설계는
+  그 브랜치에서만 바뀐다. 다른 브랜치나 분리된 HEAD에서는 `new`, `save`, `accept`, `project rename`을
+  `OAH_DESIGN_NOT_AUTHORITY`로 거절한다. 읽기는 어디서나 된다. 다른 곳에서는 그 브랜치에 커밋된 사본을 읽고, 이
+  작업 트리의 사본이 `current`, `behind`, `unknown` 중 무엇인지 알려 준다. 대가는 다른 작업 트리가 보려면 설계
+  변경을 그 브랜치에 커밋해야 한다는 것이다.
+- **페이지 고치기.** 페이지는 자신이 보여 주는 revision을 적어 둔다. 누가 페이지를 고치면 `oah design status`와
+  `oah design context`가 `OAH_DESIGN_UNREGISTERED_EDIT`를 알리고, `oah design save --from-wiki`가 페이지의 내용을
+  다음 revision으로 저장할 때까지 `save`와 `accept`를 거절한다. 고친 것을 버리려면 페이지를 지운다.
+  `oah design reconcile`이 다시 쓴다. oah는 페이지가 자신이 쓴 그대로일 때만 다시 쓰므로 표지 위에 적은 글도 고친
+  것으로 본다. `oah:` 표지가 없는 `designs/` 아래 파일은 건드리지 않는다(`OAH_DESIGN_PAGE_FOREIGN`). 설계 안에 쓴
+  링크는 다른 노트처럼 `oah wiki lint`와 커밋 검사가 확인한다.
+- **목록과 로그.** `index.md`에는 `<!-- OAH:DESIGN_INDEX:BEGIN -->`와 `<!-- OAH:DESIGN_INDEX:END -->` 사이에 설계
+  링크 블록이 하나 생기고, 프로젝트 페이지에는 끝 표지 위에 목록이 생긴다. 둘 다 기록에서 통째로 다시 쓰고, 표지
+  밖의 내용은 그대로 둔다. 등록, revision, 수락, 이름 변경마다 `log.md` 항목이 하나씩 생기며, 다시 시도하거나
+  중단되거나 rollover가 있어도 두 번 생기지 않는다.
+- **중단된 쓰기.** 모든 변경은 먼저 상태 폴더의 저널에 남긴다. 중간에 멈추면 `oah design recover`가 변경을
+  마칠 때까지 설계 쓰기가 `OAH_DESIGN_RECOVERY_PENDING`으로 멈춘다. 읽기는 마지막으로 완성된 revision을 계속
+  보여 주고, `oah design context`는 남은 변경이 이 설계의 것인지 알려 준다(`recovery_pending.this_design`).
+  recover가 그 사이에 바뀐 파일을 찾으면 `OAH_DESIGN_RECOVERY_CONFLICT`로 거절하고 저널을 남긴다.
+  파일을 손으로 고친 뒤 `oah design recover --resolved`를 실행한다.
+- **대가.** 설계를 바꾸면 `index.md`와 `log.md`가 바뀌므로 `oah finish`가 `oah wiki maintain --task <task>`를
+  다시 요청할 수 있다. 작업의 리스 범위는 설계 파일을 넣었을 때만 그것을 덮는다. 답 하나마다가 아니라 결정 묶음이
+  정해졌을 때 저장한다. 저장할 때마다 revision과 로그 항목이 하나씩 생긴다. `oah design project add acme` 뒤에는
+  프로젝트 페이지가 그 파일 이름을 쓰므로 `oah wiki new "Acme"`에는 다른 제목이 필요하다. `[wiki] stale_days` 동안
+  커밋이 없던 설계 페이지는 `oah wiki lint`에서 `stale`로 나온다. 커밋 검사는 남은 설계 저널을 기다리지 않는다.
+  중단된 쓰기가 남긴 파일은 무시하고 그 번호는 다시 쓰지 않는다. `[wiki] dir`로 페이지를 `.oah/designs` 위에 둘 수는
+  없다.
 
 ## 게이트
 
