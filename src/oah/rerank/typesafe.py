@@ -28,7 +28,9 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import TIERS, Candidate, ProviderError, _classify_failure, _raise_if_interrupted
+from oah.rerank.base import (BAD_REQUEST, BAD_RESPONSE, HTTP_ERROR_PREFIX, INSECURE_URL, INVALID_HEADER, NETWORK,
+                             OVERLOADED, RATE_LIMITED, TIMEOUT, TIERS, UNAUTHORIZED, Candidate, ProviderError,
+                             _classify_failure, _raise_if_interrupted)
 from oah.secrets import Secret
 
 DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
@@ -39,7 +41,7 @@ WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
 PROBABILITY_SUM_TOLERANCE = 0.01
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
-STATUS_CODES = {401: "unauthorized", 429: "rate-limited", 529: "overloaded"}
+STATUS_CODES = {401: UNAUTHORIZED, 429: RATE_LIMITED, 529: OVERLOADED}
 
 TIER_CRITERIA = {
     "low": "Routine and well specified: a small, low-risk change that a quick pass can finish.",
@@ -142,15 +144,15 @@ def _parse_rerank_response(body: object, count: int) -> tuple[list[float] | None
     try:
         answers = _answers(body)
         if answers is None:
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         scores = []
         for index in range(count):
             answer = answers.get(f"c{index}")
             if not isinstance(answer, Mapping) or answer.get("type") != "noul":
-                return None, "bad-response"
+                return None, BAD_RESPONSE
             noul = _number(answer.get("noul"))
             if noul is None or not 0.0 <= noul <= 1.0:
-                return None, "bad-response"
+                return None, BAD_RESPONSE
             scores.append(noul)
         return scores, None
     finally:
@@ -191,7 +193,7 @@ def _parse_advice_response(body: object) -> tuple[tuple[str, float | None] | Non
         answers = _answers(body)
         answer = answers.get("tier") if answers is not None else None
         if not isinstance(answer, Mapping) or answer.get("type") != "choice" or answer.get("choice") not in TIERS:
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         return (answer["choice"], _number(answer.get("confidence"))), None
     finally:
         del body, answers, answer
@@ -242,24 +244,24 @@ def _parse_model_response(body: object, count: int) -> tuple[tuple[int, float | 
         answer = answers.get("pair") if answers is not None else None
         keys = [f"c{index}" for index in range(count)]
         if not isinstance(answer, Mapping) or answer.get("type") != "choice" or answer.get("choice") not in keys:
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         probabilities = answer.get("probabilities")
         if not isinstance(probabilities, Mapping) or set(probabilities) != set(keys):
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         scores = []
         for key in keys:
             score = _number(probabilities[key])
             if score is None or not 0.0 <= score <= 1.0:
-                return None, "bad-response"
+                return None, BAD_RESPONSE
             scores.append(score)
         if not 1.0 - PROBABILITY_SUM_TOLERANCE <= math.fsum(scores) <= 1.0 + PROBABILITY_SUM_TOLERANCE:
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         if scores[keys.index(answer["choice"])] != max(scores):
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         if "confidence" in answer:
             confidence = _number(answer["confidence"])
             if confidence is None or not 0.0 <= confidence <= 1.0:
-                return None, "bad-response"
+                return None, BAD_RESPONSE
         return (keys.index(answer["choice"]), confidence), None
     finally:
         del body, count, answers, answer, probabilities, confidence
@@ -289,12 +291,12 @@ def _check_url(url: str) -> str | None:
                 raise
             parts = None
         if parts is None:
-            return "insecure-url"
+            return INSECURE_URL
         if parts.scheme == "https" and host:
             return
         if parts.scheme == "http" and host in LOOPBACK_HOSTS:
             return
-        return "insecure-url"
+        return INSECURE_URL
     finally:
         del url, parts, host
 
@@ -321,10 +323,10 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         # Bearer credentials must be visible ASCII, with no whitespace or control characters.
         # Reject them before http.client can include a rejected header value in an exception.
         if not isinstance(key, Secret):
-            return None, "invalid-header"
+            return None, INVALID_HEADER
         credential = key.reveal()
         if not credential or any(not 0x21 <= ord(char) <= 0x7e for char in credential):
-            return None, "invalid-header"
+            return None, INVALID_HEADER
         data = None
         try:
             data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -335,7 +337,7 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             if not isinstance(exc, (TypeError, ValueError)):
                 raise
         if data is None:
-            return None, "bad-request"
+            return None, BAD_REQUEST
         from oah import __version__
 
         code: str | None = None
@@ -355,20 +357,20 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
         except BaseException as exc:
             _raise_if_interrupted(exc)
             if isinstance(exc, urllib.error.HTTPError):
-                code = STATUS_CODES.get(exc.code, f"http-{exc.code}")
+                code = STATUS_CODES.get(exc.code, f"{HTTP_ERROR_PREFIX}{exc.code}")
                 exc.close()
             elif isinstance(exc, urllib.error.URLError):
-                code = "timeout" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "network"
+                code = TIMEOUT if isinstance(exc.reason, (socket.timeout, TimeoutError)) else NETWORK
             elif isinstance(exc, (socket.timeout, TimeoutError)):
-                code = "timeout"
+                code = TIMEOUT
             elif isinstance(exc, (OSError, http.client.HTTPException, ValueError, OverflowError)):
-                code = "network"
+                code = NETWORK
             else:
                 raise
         if code is not None:
             return None, code
         if len(raw) > RESPONSE_LIMIT:
-            return None, "bad-response"
+            return None, BAD_RESPONSE
         try:
             return json.loads(raw.decode("utf-8")), None
         except (BaseExceptionGroup, ProviderError):
@@ -378,7 +380,7 @@ def _post_json(url: str, payload: Mapping, *, key: Secret, timeout: float) -> tu
             # Includes UnicodeDecodeError, JSONDecodeError and oversized JSON integers.
             if not isinstance(exc, ValueError):
                 raise
-        return None, "bad-response"
+        return None, BAD_RESPONSE
     finally:
         del url, payload, key, timeout, credential, data, raw, request, opener, response
 
