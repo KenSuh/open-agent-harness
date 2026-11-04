@@ -174,6 +174,22 @@ This ships in v0.3.0.
   `tier` and `tier_source`.
 - **The notice.** The first request of a project prints `OAH_RERANK_SCOPE_WIDENED` once. There is no new question and
   no setting to opt in. `enabled = false` under `[rerank]` stops every request.
+- **Outages and a daily cap.** Every Jev use that sends a request (skill ranking, difficulty advice and the model
+  judge) first reads a small file in the state folder, `rerank-circuit.json`. After `[rerank] circuit_failures`
+  failures in a row (5 by default) that are a timeout, a network error, HTTP 429 or HTTP 529, `oah` stops asking Jev
+  for `[rerank] circuit_open_seconds` (600 by default, at most 31,536,000, one year). Each use then reports
+  `unused(circuit-open)` without a request, and the rules decide as they do without Jev. After that window the next
+  use asks once. A success closes the breaker, and another such failure opens it again for a whole window. Other
+  outcomes, such as HTTP 401, a bad answer or an answer below the confidence threshold, leave the count alone.
+  `[rerank] max_requests_per_day` (`0`, the default, means no cap) limits the requests sent in one UTC day, whatever
+  their outcome, and once it is reached each use reports `unused(daily-limit)` until the next UTC day. The file holds
+  counts, UTC times and failure-kind names, nothing else. `oah doctor` reads it without a request and shows whether
+  the breaker is closed, open until a UTC time, or at the daily limit. A value that is not a whole number, or is
+  below 1 (below 0 for the cap), refuses with `OAH_CONFIG_INVALID`, naming the key. The costs: while the breaker is
+  open, calls use the rule results even if TypeSafe recovered sooner, and after the cap they do for the rest of the
+  UTC day; two `oah` processes failing at the same moment can lose one count; and `oah fix` reads the file only for
+  its difficulty question and never writes it, so a correction's other Jev requests are sent even while the breaker
+  is open, and none of its requests are counted.
 - **Design and packets.** Design and packet work comes before an Intent, so `oah call` cannot judge it. The lead session
   runs `oah recommend --kind design --task <task> --request-file <file>` with the user's request (and `--scope <path>`
   for paths it already knows), then sends the work to the `oah-<tier>` subagent of the tier it prints. Design never runs
@@ -437,6 +453,15 @@ command and the output it must produce:
   of git.
 - `oah finish` refuses unmet gates (`OAH_GATES_UNMET`). A gate that is truly impossible is written as
   `ABANDON: G<n> <reason>` and handed to you, never deleted.
+- **A gate only CI can check** can be deferred to the CI that `oah land` reads, for example
+  `ABANDON: G3 ci-check: "test (windows-latest, 1/5)" "test (windows-latest, 2/5)" — the Windows suite runs only in CI`.
+  After `ci-check:` come one or more exact check-run names in double quotes, then free text. unlazy reads the row as
+  an ordinary ABANDON, so until landing the gate is handed to you like any other, and `oah gates status` shows it as
+  `OAH_GATE_DEFERRED` with the number of named check runs. `oah land` closes it only when every named check run
+  succeeded at the exact HEAD ([Landing](#landing)). A `ci-check:` reason without a complete quoted name, with a
+  blank name or with the same name twice is a ledger error, not a handoff. The cost: the names must match the CI's
+  check-run names exactly, so renaming a CI job means editing the row, running `oah gates check` again and
+  committing the result.
 - CHECK lines must run the same in `cmd.exe` and `sh`: call `python`, `node` or `oah check`, not `grep` or
   pipes. `oah check` offers portable assertions such as `oah check contains FILE TEXT`.
 - The opt-in Claude Code Stop hook (`oah hooks install stop`) keeps a session from ending while its gates are
@@ -475,6 +500,18 @@ command and the output it must produce:
   `independent: yes` only when every commit in the range was written by another engine than the reviewer;
   unknown authorship gives `unknown`, and a Codex review of a Codex correction says `no`. That is an honest
   label for this engine order, not an error.
+- **The reviewer CLI can be pinned.** `[review] codex_sha256` pins the sha256 of the file `oah` resolves as the
+  reviewer CLI. For an npm install that file is the JavaScript launcher, which can stay the same when Codex changes,
+  so `[review] codex_version` pins the version itself: the first line of `codex --version`, such as
+  `codex-cli 0.163.0`. When it is set, each round runs `codex --version` once, after the sha256 check and before
+  anything is launched, in the reviewer's environment, without a shell and for at most 10 seconds. A line that
+  differs or cannot be read stops the round with `OAH_REVIEW_VERSION_MISMATCH`, and nothing is launched. The message
+  shows the version it read only when it looks like `codex-cli <version>`. `oah doctor` reads the resolved file
+  without running the CLI and shows its path and its sha256 as the value for `codex_sha256`. Like every `[review]`
+  setting, both are read from `.oah/config.toml` at the review's base. The costs: with a pin set, every Codex update
+  stops reviews until the new value is on the default branch and the task is rebased onto it; each round waits for
+  one more process, up to 10 seconds; and the version line is what the CLI says about itself, so it catches an
+  unplanned update, not a tampered program.
 - `oah review summary --task T` prints a block for the pull request: rounds, verdicts, gates and follow-ups. When
   the task is not converged at HEAD, the block adds a handoff: the last reviewed head, the P0/P1 findings in the
   latest receipt, the gates not met in the task's local ledgers, and one suggested next command. It asks the review
@@ -501,7 +538,7 @@ command and the output it must produce:
 | required-checks | checks that the latest default branch binds to your changed paths have passing evidence |
 | fast-forward | the default branch can move to HEAD without a merge |
 | scan | gitleaks finds nothing in the commits that would land |
-| ci | `gh` reads HEAD’s check runs and commit statuses; all latest results are successful (check runs may also be neutral or skipped), with a result for every configured required check |
+| ci | `gh` reads HEAD’s check runs and commit statuses; all latest results are successful (check runs may also be neutral or skipped), with a result for every configured required check, and every check run a deferred gate names succeeded |
 
 `oah land --merge --task T` runs every check again, asks you to confirm, and then fast-forwards the remote's
 default branch to exactly HEAD, on the condition that it still equals the commit just checked. If someone else
@@ -518,6 +555,16 @@ commands. The exception and reason are recorded for that exact head in the state
 `land/<task>/ci-exceptions.jsonl`; a new head needs its own exception. CI stays `unverified`, never a pass.
 The result is `OAH_LAND_READY_WITH_CI_EXCEPTION`, then `OAH_LAND_LANDED_WITH_CI_EXCEPTION` after landing.
 This exception cannot bypass failed or pending CI or any other failed check. Use a non-secret reason.
+
+A gate deferred to CI ([Gates](#gates)) is closed by the ci check, and only when every check run its row names
+exists at HEAD and the latest run of each completed as `success`. Commit statuses, `neutral` and `skipped` do not
+count. Otherwise, also when `gh` is missing or CI cannot be read completely, landing refuses with
+`OAH_LAND_GATES_DEFERRED`, naming the gate and how many of its named check runs did not succeed. Neither
+`--accept-unverified-ci` nor a CI exception closes it, and nothing is written to the ledger or the gate summary
+after CI, so HEAD stays the reviewed head. The landing record lists each closed gate by its id, the number of named
+check runs and a sha256 of the names, never the names. The costs: a named job that is pending, failed, or rerun
+and failed blocks landing until its latest run succeeds, and such a task cannot land without `gh` and CI results
+at HEAD.
 
 The fetched target branch’s committed `.oah/config.toml` supplies `[land]` policy:
 `ci_unverified = "block"` is the default; `"exception"` records an exception per head with reason

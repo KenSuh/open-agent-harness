@@ -164,6 +164,20 @@ TypeSafe Jev를 켰다면(`[rerank] enabled = true`와 키) `oah`가 Jev에게 �
   남는다.
 - **알림.** 프로젝트에서 처음 요청을 보낼 때 `OAH_RERANK_SCOPE_WIDENED`를 한 번 알린다. 새 질문도, 켜야 하는 설정도
   없다. `[rerank]`에 `enabled = false`를 두면 모든 요청이 멈춘다.
+- **장애와 하루 상한.** 요청을 보내는 모든 Jev 사용(스킬 순위, 난이도 판정, 모델 판정)은 먼저 상태 폴더의 작은
+  파일 `rerank-circuit.json`을 읽는다. 시간 초과, 네트워크 오류, HTTP 429, HTTP 529 실패가
+  `[rerank] circuit_failures`번(기본 5번) 잇달아 나면 `oah`는 `[rerank] circuit_open_seconds`(기본 600초, 최대 1년인
+  31,536,000초) 동안 Jev에게 묻지 않는다. 그동안 각 사용은 요청 없이 `unused(circuit-open)`을 남기고 Jev가 없을
+  때처럼 규칙대로 정한다. 그 시간이 지나면 다음 사용이 한 번 묻는다. 성공하면 차단기가 닫히고, 그런 실패가 또 나면
+  그 시간 전체 동안 다시 열린다. HTTP 401, 잘못된 답, 확신 기준에 못 미치는 답 같은 다른 결과는 횟수를 바꾸지 않는다.
+  `[rerank] max_requests_per_day`(기본값 `0`은 상한 없음)는 UTC 기준 하루에 보내는 요청 수를 결과와 상관없이
+  제한하고, 상한에 닿으면 다음 UTC 날까지 각 사용이 `unused(daily-limit)`을 남긴다. 파일에는 횟수, UTC 시각, 실패
+  종류 이름만 들어 있다. `oah doctor`는 요청 없이 이 파일을 읽어 차단기가 닫혔는지, 어느 UTC 시각까지 열렸는지,
+  하루 상한에 닿았는지 보여 준다. 정수가 아니거나 1보다 작은 값(상한은 0보다 작은 값)은 키 이름과 함께
+  `OAH_CONFIG_INVALID`로 거절한다. 대가도 있다. 차단기가 열린 동안에는 TypeSafe가 더 일찍 회복해도 규칙 결과를 쓰고,
+  상한에 닿으면 그 UTC 날이 끝날 때까지 그렇다. 두 `oah` 프로세스가 같은 순간에 실패하면 한 번을 덜 셀 수 있다.
+  `oah fix`는 난이도 질문에만 이 파일을 읽고 쓰지는 않으므로, 수정의 다른 Jev 요청은 차단기가 열려 있어도 나가고
+  수정이 보낸 요청은 하나도 세지 않는다.
 - **설계와 패킷.** 설계와 패킷 작업은 Intent보다 먼저 오므로 `oah call`이 판정할 수 없다. 리드 세션은 사용자 요청으로
   `oah recommend --kind design --task <task> --request-file <file>`을 실행하고(이미 아는 경로는 `--scope <path>`),
   출력된 tier의 `oah-<tier>` 하위 에이전트에게 작업을 맡긴다. 잘못된 설계는 그 뒤의 모든 단계에 비용을 물리므로 설계는
@@ -407,6 +421,14 @@ docs/wiki/
 - `gates check`가 쓰는 `GATES.summary.md`가 경로 없이 커밋되는 기록이다. 원장 자체는 git에 들어가지 않는다.
 - `oah finish`는 충족하지 못한 게이트가 있으면 거절한다(`OAH_GATES_UNMET`). 정말 불가능한 게이트는
   `ABANDON: G<n> <이유>`로 적어 사용자에게 넘기고 지우지 않는다.
+- **CI만 확인할 수 있는 게이트**는 `oah land`가 읽는 CI에 맡길 수 있다. 예를 들어
+  `ABANDON: G3 ci-check: "test (windows-latest, 1/5)" "test (windows-latest, 2/5)" — the Windows suite runs only in CI`처럼
+  `ci-check:` 뒤에 큰따옴표로 감싼 정확한 check run 이름을 하나 이상 쓰고 그 뒤에 자유 글을 쓴다. unlazy는 이 줄을
+  보통 ABANDON으로 읽으므로 반영 전까지 이 게이트는 다른 ABANDON처럼 사용자에게 넘어가고, `oah gates status`는 이를
+  이름 붙인 check run 개수와 함께 `OAH_GATE_DEFERRED`로 보여 준다. `oah land`는 이름 붙인 check run이 정확한 HEAD에서
+  모두 성공했을 때만 이 게이트를 닫는다([반영](#반영)). 큰따옴표로 끝까지 닫힌 이름이 없거나, 빈 이름이 있거나, 같은
+  이름이 두 번 나오는 `ci-check:` 이유는 인계가 아니라 원장 오류다. 대가도 있다. 이름이 CI의 check run 이름과 정확히
+  같아야 하므로, CI 작업 이름을 바꾸면 그 줄을 고치고 `oah gates check`를 다시 실행해 결과를 커밋해야 한다.
 - CHECK 줄은 `cmd.exe`와 `sh`에서 똑같이 돌아야 한다. `grep`이나 파이프 대신 `python`, `node`, `oah check`를
   쓴다. `oah check`는 `oah check contains FILE TEXT` 같은 운영체제 공통 검사를 제공한다.
 - 선택형 Claude Code Stop 훅(`oah hooks install stop`)은 게이트를 충족하지 못한 세션이 끝나지 못하게 한다.
@@ -442,6 +464,17 @@ docs/wiki/
 - **표시는 정직하다.** 커밋은 `Agent-Engine:` 트레일러로 쓴 엔진을 남긴다. 영수증은 범위 안의 모든 커밋을
   리뷰어와 다른 엔진이 썼을 때만 `independent: yes`라고 적는다. 쓴 엔진을 모르면 `unknown`이고, Codex가 고친
   것을 Codex가 리뷰하면 `no`다. 이것은 이 엔진 순서에 대한 정직한 표시이고 오류가 아니다.
+- **리뷰어 CLI를 고정할 수 있다.** `[review] codex_sha256`은 `oah`가 리뷰어 CLI로 찾은 파일의 sha256을 고정한다.
+  npm으로 설치했다면 그 파일은 JavaScript 실행기이고 Codex가 바뀌어도 그대로일 수 있다. 그래서
+  `[review] codex_version`이 버전 자체를 고정한다. 값은 `codex --version`의 첫 줄(예: `codex-cli 0.163.0`)이다. 이
+  값을 정하면 라운드마다 sha256 검사 뒤, 아무것도 띄우기 전에 리뷰어 환경에서 셸 없이 최대 10초 동안
+  `codex --version`을 한 번 실행한다. 그 줄이 다르거나 읽을 수 없으면 `OAH_REVIEW_VERSION_MISMATCH`로 라운드를
+  멈추고 아무것도 띄우지 않는다. 메시지는 읽은 버전이 `codex-cli <버전>` 꼴일 때만 그 버전을 보여 준다.
+  `oah doctor`는 CLI를 실행하지 않고 찾은 파일을 읽어 그 경로와 sha256을 `codex_sha256`에 넣을 값으로 보여 준다. 두
+  설정은 다른 `[review]` 설정처럼 리뷰 기준(base) 커밋의 `.oah/config.toml`에서 읽는다. 대가도 있다. 고정해 두면
+  Codex를 업데이트할 때마다 새 값이 기본 브랜치에 들어가고 작업을 그 위로 rebase할 때까지 리뷰가 멈춘다. 라운드마다
+  프로세스 하나를 최대 10초 더 기다린다. 버전 줄은 CLI가 스스로 밝히는 값이므로 계획에 없던 업데이트는 잡지만 누가
+  고친 프로그램은 막지 못한다.
 - `oah review summary --task T`는 pull request에 붙일 블록을 출력한다. 라운드, 판정, 게이트, 후속 작업이 들어 있다.
   작업이 HEAD에서 수렴하지 않았으면 블록에 인계 내용을 더한다. 마지막으로 리뷰한 head, 최신 영수증의 P0/P1 지적,
   작업의 로컬 원장에서 충족되지 않은 게이트, 다음에 실행할 명령 제안 하나다. 플래그는 리뷰 게이트에 물어보지만,
@@ -467,7 +500,7 @@ docs/wiki/
 | required-checks | 최신 기본 브랜치가 바뀐 경로에 묶은 검사에 통과한 증거가 있다 |
 | fast-forward | 기본 브랜치를 병합 없이 HEAD로 옮길 수 있다 |
 | scan | 반영할 커밋에서 gitleaks가 아무것도 찾지 못했다 |
-| ci | `gh`로 HEAD의 check run과 commit status를 읽었고, 최신 결과가 모두 성공이며(check run은 neutral·skipped도 허용), 설정된 필수 검사마다 결과가 있다 |
+| ci | `gh`로 HEAD의 check run과 commit status를 읽었고, 최신 결과가 모두 성공이며(check run은 neutral·skipped도 허용), 설정된 필수 검사마다 결과가 있고, CI에 맡긴 게이트가 이름 붙인 check run이 모두 성공했다 |
 
 `oah land --merge --task T`는 모든 검사를 다시 돌리고 사용자에게 확인을 받은 뒤, 원격의 기본 브랜치가 방금 확인한
 커밋과 여전히 같을 때만 정확히 HEAD로 fast-forward한다. 다른 사람이 먼저 반영했다면 아무것도 push하지 않는다.
@@ -482,6 +515,15 @@ CI 미검증을 명시적으로 받아들이려면 확인과 반영 명령 양�
 별도 예외가 필요하다. CI는 `unverified`로 남고 통과로 세지 않는다. 결과는 `OAH_LAND_READY_WITH_CI_EXCEPTION`,
 반영 뒤에는 `OAH_LAND_LANDED_WITH_CI_EXCEPTION`이다. 실패하거나 진행 중인 CI와 다른 실패한 검사는 우회하지
 못한다. 사유에는 비밀을 넣지 않는다.
+
+CI에 맡긴 게이트([게이트](#게이트))는 ci 검사가 닫는다. 그 줄이 이름 붙인 check run이 모두 HEAD에 있고 각 이름의
+최신 실행이 `success`로 끝났을 때만 닫힌다. commit status, `neutral`, `skipped`는 세지 않는다. 그렇지 않으면 `gh`가
+없거나 CI를 끝까지 읽지 못한 경우까지 포함해 `OAH_LAND_GATES_DEFERRED`로 반영을 거절하고, 그 게이트와 이름 붙인
+check run 중 성공하지 않은 개수를 알려 준다. `--accept-unverified-ci`도 CI 예외도 이 게이트를 닫지 않는다. CI 뒤에
+원장이나 게이트 요약에 아무것도 쓰지 않으므로 HEAD는 리뷰한 head 그대로다. 반영 기록에는 닫힌 게이트마다 id, 이름
+붙인 check run 개수, 이름의 sha256이 남고 이름 자체는 남지 않는다. 대가도 있다. 이름 붙인 작업이 진행 중이거나,
+실패했거나, 다시 돌려서 실패하면 최신 실행이 성공할 때까지 반영이 막힌다. 이런 작업은 `gh`와 HEAD의 CI 결과 없이는
+반영할 수 없다.
 
 가져온 대상 브랜치에 커밋된 `.oah/config.toml`의 `[land]`가 정책을 정한다. 기본값은
 `ci_unverified = "block"`이며 `"exception"`은 head마다 `config policy` 사유의 예외를 기록한다.
