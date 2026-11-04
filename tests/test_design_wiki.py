@@ -15,7 +15,7 @@ from oah.wiki import notes
 from oah.wiki.base import WikiError, WikiSettings
 from oah.wiki.store import Wiki
 from tests.helpers import git_commit, git_env
-from tests.test_design_store import PAGE, TODAY, Crash, DesignRepo, crash_at
+from tests.test_design_store import PAGE, RECORD_FAILURES, TODAY, Crash, DesignRepo, crash_at
 
 
 def markers(repo: pathlib.Path, wiki: str = "docs/wiki") -> list[str]:
@@ -47,7 +47,7 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                     self.assertEqual(self.tree(repo, self.state(repo)), before)
 
     def test_c1_corrupt_evidence_preserves_rows_and_never_recreates_them(self):
-        for damage in ("acceptance", "ancestor", "oversize", "directory", "alias"):
+        for damage in ("acceptance", "ancestor", "oversize", "directory", "alias", *RECORD_FAILURES):
             with self.subTest(damage=damage):
                 repo = self.make_repo()
                 store = self.store(repo)
@@ -71,6 +71,8 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                 elif damage == "ancestor":
                     manifest = folder / "revisions/r1/revision.json"
                     manifest.write_bytes(manifest.read_bytes().replace(b'"Created"', b'"Altered"'))
+                elif damage in RECORD_FAILURES:
+                    self.damage_booking_record(repo, damage)
                 else:
                     self.damage_booking_pointer(repo, damage)
                 for project in (None, "acme"):
@@ -100,17 +102,22 @@ class ProjectsTest(DesignRepo, unittest.TestCase):
                 self.assertFalse((repo / PAGE).exists())
 
     def test_c1_corrupt_parts_stay_isolated_during_rename_and_recovery(self):
-        for damage in ("changed", "missing", "oversize", "directory", "alias"):
+        for damage in ("changed", "missing", "oversize", "directory", "alias", *RECORD_FAILURES):
             with self.subTest(damage=damage):
                 repo = self.make_repo()
                 store = self.store(repo)
-                self.booking(store)
+                booking = self.booking(store)
+                if damage == "acceptance-reason":
+                    assert booking.digest is not None
+                    store.accept("acme", "booking", revision=1, digest=booking.digest, reason="Yes", today=TODAY)
                 store.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
                 part = repo / ".oah/designs/acme/booking/revisions/r1/design.md"
                 if damage == "changed":
                     part.write_bytes(b"Corrupt.\n")
                 elif damage == "missing":
                     part.unlink()
+                elif damage in RECORD_FAILURES:
+                    self.damage_booking_record(repo, damage)
                 else:
                     self.damage_booking_pointer(repo, damage)
                 page_before = (repo / PAGE).read_bytes()

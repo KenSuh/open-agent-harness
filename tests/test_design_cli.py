@@ -12,12 +12,73 @@ import unittest
 from unittest import mock
 
 from oah.cli import command_modules, main
+from oah.design import fs as design_fs
 from oah.intent import MAX_BYTES
 from tests.helpers import git_commit, make_tmp_dir
-from tests.test_design_store import PAGE, SRC, DesignRepo, git
+from tests.test_design_store import PAGE, RECORD_FAILURES, SRC, DesignRepo, git
 
 
 class CliTest(DesignRepo, unittest.TestCase):
+    def test_c3_scoped_corruption_keeps_cli_json_readable(self):
+        early = self.repo.parent / "early"
+        git(self.repo, "worktree", "add", "-q", "-b", "early", str(early))
+        digest = self.created()
+        self.assertEqual(self.oah("accept", "acme", "booking", "--revision", "1", "--digest", digest,
+                                  "--reason", "Yes")[0], 0)
+        self.assertEqual(self.oah("new", "acme", "payments", "--title", "Payments", "--file",
+                                  self.file("pay.md", "Pay.\n"))[0], 0)
+        self.assertEqual(self.oah("project", "add", "broken", "--title", "Broken")[0], 0)
+        originals = {p: p.read_bytes() for p in (self.repo / ".oah/designs").rglob("*") if p.is_file()}
+        for damage in (*RECORD_FAILURES, "oversize-pointer", "oversize-project"):
+            with self.subTest(damage=damage):
+                if damage in RECORD_FAILURES:
+                    self.damage_booking_record(self.repo, damage)
+                else:
+                    rel = (design_fs.pointer_rel("acme", "booking") if damage == "oversize-pointer"
+                           else design_fs.project_record_rel("broken"))
+                    (self.repo / rel).write_bytes(b" " * (design_fs.PAGE_LIMIT + 1))
+                git_commit(self.repo, {}, "CLI corrupt sibling")
+                for cwd in (self.repo, early):
+                    with self.subTest(worktree=cwd.name):
+                        code, out, err = self.oah("status", "--json", cwd=cwd)
+                        self.assertEqual((code, err), (0, ""))
+                        data = json.loads(out)
+                        self.assertEqual([p["id"] for p in data["projects"]], ["acme"] if damage == "oversize-project"
+                                         else ["acme", "broken"])
+                        rows = {d["design"]: d for d in data["projects"][0]["designs"]}
+                        self.assertEqual(rows["payments"]["status"], "draft")
+                        if damage == "oversize-project":
+                            self.assertEqual(rows["booking"]["status"], "accepted")
+                            self.assertTrue(any("broken" in d["message"] for d in data["diagnostics"]))
+                        else:
+                            self.assertEqual((rows["booking"]["status"], rows["booking"]["current"],
+                                              rows["booking"]["accepted"], rows["booking"]["title"]),
+                                             ("corrupt", None, None, None))
+                            self.assertIn("OAH_DESIGN_CORRUPT", [d["code"] for d in data["diagnostics"]])
+                            code, out, err = self.oah("status", "acme", "booking", "--json", cwd=cwd)
+                            self.assertEqual((code, out), (69, ""))
+                            self.assertTrue(err.startswith(("OAH_DESIGN_CORRUPT:", "OAH_DESIGN_PATH_INVALID:")))
+                for path, raw in originals.items():
+                    path.write_bytes(raw)
+
+    def test_c3_unavailable_catalog_is_a_cli_refusal(self):
+        early = self.repo.parent / "early"
+        git(self.repo, "worktree", "add", "-q", "-b", "early", str(early))
+        self.created()
+        git_commit(self.repo, {}, "authority registered")
+        store = self.store(early)
+        gitdir, moved = self.repo / ".git", self.repo / ".git-unavailable"
+        gitdir.rename(moved)
+        try:
+            with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.repo.parent)}), \
+                    mock.patch("oah.design_cli.open_store", return_value=store):
+                code, out, err = self.oah("status", "--json", cwd=early)
+            self.assertEqual((code, out), (69, ""))
+            self.assertTrue(err.startswith("OAH_DESIGN_FRESHNESS_UNKNOWN:"))
+            self.assertNotIn("Traceback", err)
+        finally:
+            moved.rename(gitdir)
+
     def test_c1_oversize_stdin_is_refused_before_normalization_or_writes(self):
         self.created()
         for name, raw in (("crlf", b"x\r\n" * (MAX_BYTES // 3 + 2) + b"Meaningful tail.\n"),

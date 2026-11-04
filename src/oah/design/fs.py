@@ -90,7 +90,10 @@ def stem(project: str, design: str) -> str:
 def revision_number(name: str) -> int | None:
     """N for a folder named r<N>, else None."""
     if len(name) > 1 and name[0] == "r" and name[1:].isdigit() and name[1] != "0":
-        return int(name[1:])
+        try:
+            return int(name[1:])
+        except ValueError:
+            return None
     return None
 
 
@@ -99,7 +102,10 @@ def acceptance_number(name: str) -> int | None:
     if name.startswith("a") and name.endswith(".json"):
         digits = name[1:-5]
         if digits.isdigit() and digits[0] != "0":
-            return int(digits)
+            try:
+                return int(digits)
+            except ValueError:
+                return None
     return None
 
 
@@ -370,7 +376,8 @@ class GitRefReader:
                     raise RefUnavailable(f"{self.ref}:{rel} is not a file")
                 size = int(header[2])
                 if size > PAGE_LIMIT:
-                    raise RefUnavailable(f"{self.ref}:{rel} is too large")
+                    raise DesignError(PATH_INVALID_CODE, f"{self.ref}:{rel} is {size} bytes, over the "
+                                      f"{PAGE_LIMIT}-byte limit")
                 self._cache[rel] = out[position:position + size]
                 position += size + 1
         return {rel: self._cache.get(rel) for rel in rels}

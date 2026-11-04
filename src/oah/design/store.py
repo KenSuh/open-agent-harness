@@ -256,7 +256,7 @@ class ReconcileResult:
 def _loads(data: bytes, where: str) -> object:
     try:
         return json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         raise corrupt(where, f"is not UTF-8 JSON ({exc})") from exc
 
 
@@ -456,6 +456,12 @@ class _ProjectRead:
     diagnostics: list[Diagnostic]
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Catalog:
+    projects: Mapping[str, Sequence[tuple[ProjectRecord, fs.Reader]]]
+    errors: Mapping[str, Sequence[Diagnostic]]
+
+
 @dataclasses.dataclass
 class _Resolved:
     project: ProjectRecord
@@ -538,7 +544,7 @@ class DesignStore:
     def recovery_state(self, project: str | None = None, design: str | None = None) -> RecoveryState:
         try:
             data = read_json(self.journal_path, None)
-        except (StateCorrupt, StorageError):
+        except (StateCorrupt, StorageError, ValueError, RecursionError):
             return RecoveryState(True, True, "unreadable")
         if data is None:
             return RecoveryState(False)
@@ -550,35 +556,35 @@ class DesignStore:
 
     # ---- reads -----------------------------------------------------------------------------------
 
-    def _authority_catalog(self) -> dict[str, list[tuple[ProjectRecord, fs.Reader]]]:
+    def _authority_catalog(self) -> _Catalog:
         from oah.paths import GitMissing, run_git
 
         found: dict[str, list[tuple[ProjectRecord, fs.Reader]]] = {}
+        errors: dict[str, list[Diagnostic]] = {}
         if self._custom:
-            return found
+            return _Catalog(found, errors)
         try:
             listed = run_git(self.root, "for-each-ref", "--format=%(refname)", "refs/heads/")
-        except GitMissing:
-            return found
-        if listed.returncode != 0:
-            return found
-        for ref in listed.stdout.splitlines():
-            try:
+            if listed.returncode != 0:
+                raise fs.RefUnavailable(f"git for-each-ref failed: {listed.stderr.strip()}")
+            for ref in listed.stdout.splitlines():
                 reader = fs.GitRefReader(self.root, ref)
                 names = _project_names(reader)
-            except (fs.RefUnavailable, DesignError):
-                continue
-            for name in names:
-                try:
-                    record = load_project(reader, name)
-                except (DesignError, fs.RefUnavailable):
-                    continue
-                if record.authority == ref:
-                    found.setdefault(name, []).append((record, reader))
-        return found
+                for name in names:
+                    try:
+                        record = load_project(reader, name)
+                    except DesignError as exc:
+                        path = f"{ref}:{fs.project_record_rel(name)}"
+                        errors.setdefault(name, []).append(Diagnostic(exc.code, f"{path}: {exc}", path))
+                        continue
+                    if record.authority == ref:
+                        found.setdefault(name, []).append((record, reader))
+        except (GitMissing, fs.RefUnavailable) as exc:
+            raise DesignError(FRESHNESS_UNKNOWN_CODE, f"cannot enumerate committed design authority: {exc}") from exc
+        return _Catalog(found, errors)
 
     def _read_project(self, project: str,
-                      catalog: Mapping[str, list[tuple[ProjectRecord, fs.Reader]]] | None = None) -> _ProjectRead:
+                      catalog: _Catalog | None = None) -> _ProjectRead:
         local_project = None
         try:
             local_project = load_project(self.reader, project)
@@ -594,8 +600,12 @@ class DesignStore:
             return _ProjectRead(local_project, local_project, self.reader, "worktree", "current", [])
         remote = None
         if local_project is None:
-            candidates = (self._authority_catalog() if catalog is None else catalog).get(project, [])
+            catalog = self._authority_catalog() if catalog is None else catalog
+            candidates = catalog.projects.get(project, [])
             if not candidates:
+                errors = catalog.errors.get(project, [])
+                if errors:
+                    raise DesignError(errors[0].code, errors[0].message)
                 raise DesignError(NOT_FOUND_CODE, f"no local registration or committed authority evidence for "
                                   f"project {project}")
             if len(candidates) != 1:
@@ -789,7 +799,7 @@ class DesignStore:
     def projects(self) -> list[ProjectRecord]:
         out = []
         catalog = self._authority_catalog()
-        for name in sorted(set(_project_names(self.reader)) | set(catalog)):
+        for name in sorted(set(_project_names(self.reader)) | set(catalog.projects)):
             try:
                 out.append(self._read_project(name, catalog).project)
             except DesignError:
@@ -799,7 +809,8 @@ class DesignStore:
     def designs(self, project: str | None = None) -> list[DesignSummary]:
         """A summary per design; a record that does not verify is reported as `corrupt`, never raised."""
         catalog = self._authority_catalog()
-        names = [check_id(project)] if project is not None else sorted(set(_project_names(self.reader)) | set(catalog))
+        names = ([check_id(project)] if project is not None
+                 else sorted(set(_project_names(self.reader)) | set(catalog.projects)))
         out = []
         for name in names:
             try:
@@ -834,7 +845,11 @@ class DesignStore:
     def diagnostics(self, project: str | None = None, design: str | None = None) -> list[Diagnostic]:
         out = []
         catalog = self._authority_catalog()
-        names = [check_id(project)] if project is not None else sorted(set(_project_names(self.reader)) | set(catalog))
+        for name, errors in catalog.errors.items():
+            if project is None or project == name:
+                out.extend(errors)
+        names = ([check_id(project)] if project is not None
+                 else sorted(set(_project_names(self.reader)) | set(catalog.projects)))
         for name in names:
             try:
                 source = self._read_project(name, catalog)
@@ -1142,7 +1157,7 @@ class DesignStore:
     def _load_journal(self) -> dict | None:
         try:
             data = read_json(self.journal_path, None)
-        except StateCorrupt as exc:
+        except (StateCorrupt, ValueError, RecursionError) as exc:
             raise DesignError(JOURNAL_CORRUPT_CODE, f"{self.journal_path} is not valid JSON ({exc}); oah never resets "
                               "it. Compare the design files with your last commit, then move the journal away by "
                               "hand") from exc

@@ -8,7 +8,6 @@ import pathlib
 import subprocess
 import sys
 import unittest
-from typing import Literal, assert_never
 from unittest import mock
 
 from oah.design import DesignError, explain_binding, open_store
@@ -24,6 +23,10 @@ TODAY = datetime.date(2026, 11, 4)
 UID = "0123456789abcdef0123456789abcdef"
 SRC = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 PAGE = "docs/wiki/designs/acme/acme--booking.md"
+JSON_FAILURES = {"syntax": b"{", "integer": b'{"format":' + b"9" * 5000 + b"}",
+                 "nesting": b"[" * 2000 + b"0" + b"]" * 2000}
+RECORD_FAILURES = (*JSON_FAILURES, "revision-title", "revision-reason", "acceptance-reason")
+NUMBER_FAILURES = ("revision-name", "acceptance-name")
 
 
 class Crash(Exception):
@@ -98,7 +101,7 @@ class DesignRepo:
         return [line for line in text.splitlines() if line.startswith(marker_prefix)]
 
     @staticmethod
-    def damage_booking_pointer(repo: pathlib.Path, damage: Literal["oversize", "directory", "alias"]) -> None:
+    def damage_booking_pointer(repo: pathlib.Path, damage: str) -> None:
         pointer = repo / design_fs.pointer_rel("acme", "booking")
         match damage:
             case "oversize":
@@ -112,8 +115,29 @@ class DesignRepo:
                 (target / "design.json").write_bytes(pointer.read_bytes())
                 pointer.unlink()
                 directory_alias(target, pointer)
-            case unreachable:
-                assert_never(unreachable)
+            case _:
+                raise AssertionError(f"unknown pointer damage {damage!r}")
+
+    @staticmethod
+    def damage_booking_record(repo: pathlib.Path, damage: str) -> None:
+        if damage in JSON_FAILURES:
+            (repo / design_fs.pointer_rel("acme", "booking")).write_bytes(JSON_FAILURES[damage])
+        elif damage == "revision-name":
+            folder = repo / design_fs.revisions_rel("acme", "booking") / "r²"
+            folder.mkdir()
+            (folder / "revision.json").write_bytes(b"{}")
+        elif damage == "acceptance-name":
+            folder = repo / design_fs.acceptances_rel("acme", "booking")
+            folder.mkdir(exist_ok=True)
+            (folder / "a².json").write_bytes(b"{}")
+        else:
+            rel, field = {"revision-title": (design_fs.manifest_rel("acme", "booking", 1), "title"),
+                          "revision-reason": (design_fs.manifest_rel("acme", "booking", 1), "reason"),
+                          "acceptance-reason": (design_fs.acceptance_rel("acme", "booking", 1), "reason")}[damage]
+            path = repo / rel
+            data = json.loads(path.read_bytes())
+            data[field] = "\ud800"
+            path.write_text(json.dumps(data), encoding="utf-8")
 
 
 class RevisionTest(DesignRepo, unittest.TestCase):
@@ -328,11 +352,14 @@ class CrashTest(DesignRepo, unittest.TestCase):
              "wrote docs/wiki/designs/acme.md", "wrote docs/wiki/index.md", "log-written")
 
     def test_c2_healthy_recovery_finishes_once_with_an_unreadable_sibling_pointer(self):
-        for damage in ("oversize", "directory", "alias"):
+        for damage in ("oversize", "directory", "alias", *RECORD_FAILURES, *NUMBER_FAILURES):
             with self.subTest(damage=damage):
                 repo = self.make_repo()
                 store = self.store(repo)
-                self.booking(store)
+                booking = self.booking(store)
+                if damage == "acceptance-reason":
+                    assert booking.digest is not None
+                    store.accept("acme", "booking", revision=1, digest=booking.digest, reason="Yes", today=TODAY)
                 healthy = store.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
                 assert healthy.digest is not None
                 with self.assertRaises(Crash):
@@ -341,7 +368,10 @@ class CrashTest(DesignRepo, unittest.TestCase):
                                fault=crash_at("journal-written"), today=TODAY)
                 journal = json.loads(store.journal_path.read_bytes())
                 marker = f"<!-- oah-design: {journal['log']['key']} -->"
-                self.damage_booking_pointer(repo, damage)
+                if damage in (*RECORD_FAILURES, *NUMBER_FAILURES):
+                    self.damage_booking_record(repo, damage)
+                else:
+                    self.damage_booking_pointer(repo, damage)
                 corrupt_before = self.tree(repo / ".oah/designs/acme/booking")
                 page_before = (repo / PAGE).read_bytes()
                 index_before = (repo / "docs/wiki/index.md").read_bytes()
@@ -357,17 +387,21 @@ class CrashTest(DesignRepo, unittest.TestCase):
                 self.assertEqual(self.log_entries(repo).count(marker), 1)
                 recovered = store.recover()
                 self.assertIn("OAH_DESIGN_RECOVERED saved acme/payments", recovered)
-                self.assertIn("OAH_DESIGN_CORRUPT", recovered)
+                if damage in NUMBER_FAILURES:
+                    self.assertNotIn("OAH_DESIGN_CORRUPT", recovered)
+                else:
+                    self.assertIn("OAH_DESIGN_CORRUPT", recovered)
                 self.assertFalse(store.journal_path.exists())
                 self.assertEqual(self.log_entries(repo).count(marker), 1)
-                self.assertEqual(len(self.log_entries(repo)), 4)
+                count = 5 if damage == "acceptance-reason" else 4
+                self.assertEqual(len(self.log_entries(repo)), count)
                 self.assertEqual(self.tree(repo / ".oah/designs/acme/booking"), corrupt_before)
                 self.assertEqual((repo / PAGE).read_bytes(), page_before)
                 self.assertIn(row_before, project_page.read_bytes().splitlines(keepends=True))
                 self.assertEqual((repo / "docs/wiki/index.md").read_bytes(), index_before)
                 self.assertEqual(store.add_project("other", title="Other", today=TODAY).action, "registered")
-                self.assertEqual(len(self.log_entries(repo)), 5)
-                self.assertEqual(len(set(self.log_entries(repo))), 5)
+                self.assertEqual(len(self.log_entries(repo)), count + 1)
+                self.assertEqual(len(set(self.log_entries(repo))), count + 1)
                 before = self.tree(repo, self.state(repo))
                 self.assertEqual(store.recover(), "OAH_DESIGN_RECOVER_NOTHING nothing to recover")
                 self.assertEqual(self.tree(repo, self.state(repo)), before)
@@ -654,6 +688,53 @@ class ConcurrencyTest(DesignRepo, unittest.TestCase):
 
 
 class TamperTest(DesignRepo, unittest.TestCase):
+    def test_c3_record_conversions_are_scoped_for_both_readers(self):
+        rels = ((design_fs.project_record_rel("acme"), ("title", "authority", "former_titles")),
+                (design_fs.pointer_rel("acme", "booking"), ()),
+                (design_fs.manifest_rel("acme", "booking", 1), ("title", "reason")),
+                (design_fs.acceptance_rel("acme", "booking", 1), ("reason",)))
+        for rel, fields in rels:
+            path = self.repo / rel
+            original = path.read_bytes()
+            cases = list(JSON_FAILURES.items())
+            for field in fields:
+                data = json.loads(original)
+                data[field] = "refs/heads/\ud800" if field == "authority" else "\ud800"
+                if field == "former_titles":
+                    data[field], data["title_revision"] = ["\ud800"], 2
+                cases.append((field, json.dumps(data).encode("utf-8")))
+            for damage, raw in cases:
+                path.write_bytes(raw)
+                git_commit(self.repo, {}, "invalid record conversion")
+                before = self.tree(self.repo, self.state(self.repo))
+                for reader in (design_fs.WorktreeReader(self.repo), design_fs.GitRefReader(self.repo, "refs/heads/main")):
+                    with self.subTest(rel=rel, damage=damage, reader=type(reader).__name__):
+                        with self.assertRaises(DesignError) as invalid:
+                            project = design_store.load_project(reader, "acme")
+                            if rel != design_fs.project_record_rel("acme"):
+                                design_store.load_design(reader, project, "booking")
+                        self.assertEqual(invalid.exception.code, "OAH_DESIGN_CORRUPT")
+                        self.assertIn(rel, str(invalid.exception))
+                        self.assertEqual(self.tree(self.repo, self.state(self.repo)), before)
+                path.write_bytes(original)
+
+    def test_c3_nonconvertible_number_entries_are_not_history(self):
+        for name, parse in (("r²", design_fs.revision_number), ("a².json", design_fs.acceptance_number),
+                            ("r" + "9" * 5000, design_fs.revision_number),
+                            ("a" + "9" * 5000 + ".json", design_fs.acceptance_number)):
+            with self.subTest(name=name[:20]):
+                self.assertIsNone(parse(name))
+        for damage in NUMBER_FAILURES:
+            self.damage_booking_record(self.repo, damage)
+        git_commit(self.repo, {}, "unparseable history entries")
+        before = self.tree(self.repo, self.state(self.repo))
+        for reader in (design_fs.WorktreeReader(self.repo), design_fs.GitRefReader(self.repo, "refs/heads/main")):
+            record = design_store.load_design(reader, design_store.load_project(reader, "acme"), "booking")
+            assert record.accepted is not None
+            self.assertEqual((record.current.revision, record.accepted.revision), (2, 2))
+            self.assertEqual(record.orphans, ())
+        self.assertEqual(self.tree(self.repo, self.state(self.repo)), before)
+
     def setUp(self):
         self.repo = self.make_repo()
         self.store_ = self.store(self.repo)
@@ -777,23 +858,36 @@ class OutputPathsTest(DesignRepo, unittest.TestCase):
 
 class AuthorityTest(DesignRepo, unittest.TestCase):
     def test_c1_worktree_predating_registration_reads_without_local_writes(self):
-        for nonregular_sibling in (False, True):
-            with self.subTest(nonregular_sibling=nonregular_sibling):
+        for damage in (None, "nonregular", "oversize", *JSON_FAILURES, "title", "authority"):
+            with self.subTest(damage=damage):
                 repo = self.make_repo()
                 task = repo.parent / "early-task"
                 git(repo, "worktree", "add", "-q", "-b", "early-task", str(task))
                 main = self.store(repo)
                 r1 = self.booking(main)
-                if nonregular_sibling:
+                if damage is not None:
                     main.add_project("broken", title="Broken", today=TODAY)
                     rel = design_fs.project_record_rel("broken")
-                    git(repo, "add", "-A")
-                    blob = git(repo, "hash-object", rel).strip()
-                    git(repo, "update-index", "--cacheinfo", f"120000,{blob},{rel}")
-                    git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "nonregular registration")
-                    with self.assertRaises(DesignError) as invalid:
-                        design_fs.GitRefReader(repo, "refs/heads/main").read(rel)
-                    self.assertEqual(invalid.exception.code, "OAH_DESIGN_PATH_INVALID")
+                    if damage == "nonregular":
+                        git(repo, "add", "-A")
+                        blob = git(repo, "hash-object", rel).strip()
+                        git(repo, "update-index", "--cacheinfo", f"120000,{blob},{rel}")
+                        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "nonregular registration")
+                    else:
+                        path = repo / rel
+                        if damage == "oversize":
+                            path.write_bytes(b" " * (design_fs.PAGE_LIMIT + 1))
+                        elif damage in JSON_FAILURES:
+                            path.write_bytes(JSON_FAILURES[damage])
+                        else:
+                            data = json.loads(path.read_bytes())
+                            data[damage] = "refs/heads/\ud800" if damage == "authority" else "\ud800"
+                            path.write_text(json.dumps(data), encoding="utf-8")
+                        git_commit(repo, {}, "invalid sibling registration")
+                    if damage in ("nonregular", "oversize"):
+                        with self.assertRaises(DesignError) as invalid:
+                            design_fs.GitRefReader(repo, "refs/heads/main").read(rel)
+                        self.assertEqual(invalid.exception.code, "OAH_DESIGN_PATH_INVALID")
                 else:
                     git_commit(repo, {}, "register after task checkout")
                 before = self.tree(task, self.state(task))
@@ -808,6 +902,95 @@ class AuthorityTest(DesignRepo, unittest.TestCase):
                                  [("booking", (1, r1.digest), "behind")])
                 self.assertEqual(self.tree(task, self.state(task)), before)
                 self.assertFalse((task / ".oah/designs/acme/project.json").exists())
+                if damage is not None:
+                    diagnostics = store.diagnostics()
+                    self.assertTrue(any(d.path == "refs/heads/main:" + design_fs.project_record_rel("broken")
+                                        and d.code in ("OAH_DESIGN_CORRUPT", "OAH_DESIGN_PATH_INVALID")
+                                        for d in diagnostics))
+                    with self.assertRaises(DesignError) as invalid:
+                        store.context("broken", "anything")
+                    self.assertIn(invalid.exception.code, ("OAH_DESIGN_CORRUPT", "OAH_DESIGN_PATH_INVALID"))
+
+    def test_c3_oversized_committed_pointer_keeps_healthy_progress(self):
+        repo = self.make_repo()
+        early = repo.parent / "early"
+        git(repo, "worktree", "add", "-q", "-b", "early", str(early))
+        main = self.store(repo)
+        self.booking(main)
+        healthy = main.new("acme", "payments", title="Payments", parts={"design": "Pay.\n"}, today=TODAY)
+        assert healthy.digest is not None
+        rel = design_fs.pointer_rel("acme", "booking")
+        bad = b" " * (design_fs.PAGE_LIMIT + 1)
+        (repo / rel).write_bytes(bad)
+        git_commit(repo, {}, "oversize committed pointer")
+        remote = self.store(early)
+        before = self.tree(early, self.state(early))
+        self.assertEqual({d.design: d.status for d in remote.designs()}, {"booking": "corrupt", "payments": "draft"})
+        self.assertIn("OAH_DESIGN_CORRUPT", [d.code for d in remote.diagnostics()])
+        self.assertEqual(remote.context("acme", "payments").current.text(), "Pay.\n")
+        self.assertEqual(self.tree(early, self.state(early)), before)
+        page = (repo / PAGE).read_bytes()
+        second = main.save("acme", "payments", expect_revision=1, expect_digest=healthy.digest,
+                           reason="Healthy", parts={"design": "Pay twice.\n"}, today=TODAY)
+        assert second.digest is not None
+        with self.assertRaises(Crash):
+            main.save("acme", "payments", expect_revision=2, expect_digest=second.digest, reason="Recover",
+                      parts={"design": "Pay thrice.\n"}, today=TODAY, fault=crash_at("journal-written"))
+        marker = "<!-- oah-design: " + json.loads(main.journal_path.read_bytes())["log"]["key"] + " -->"
+        with self.assertRaises(Crash):
+            main.recover(fault=crash_at("log-written"))
+        self.assertIn("OAH_DESIGN_RECOVERED", main.recover())
+        self.assertFalse(main.journal_path.exists())
+        self.assertEqual(self.log_entries(repo).count(marker), 1)
+        self.assertEqual(main.context("acme", "payments").current.text(), "Pay thrice.\n")
+        self.assertEqual((repo / rel).read_bytes(), bad)
+        self.assertEqual((repo / PAGE).read_bytes(), page)
+
+    def test_c3_failed_git_catalog_is_unknown_not_absent(self):
+        early = self.repo.parent / "early"
+        git(self.repo, "worktree", "add", "-q", "-b", "early", str(early), "main~1")
+        remote = self.store(early)
+        fallback = self.store(self.task)
+        pinned = design_fs.GitRefReader(self.repo, "refs/heads/main")
+        before = self.tree(early, self.state(early))
+        gitdir, moved = self.repo / ".git", self.repo / ".git-unavailable"
+        gitdir.rename(moved)
+        try:
+            with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.repo.parent)}):
+                with self.assertRaises(design_fs.RefUnavailable) as unavailable:
+                    pinned.read(design_fs.project_record_rel("acme"))
+                self.assertIn("git cat-file failed", str(unavailable.exception))
+                for call in (remote.projects, remote.designs, remote.diagnostics,
+                             lambda: remote.context("acme", "booking")):
+                    with self.assertRaises(DesignError) as unknown:
+                        call()
+                    self.assertEqual(unknown.exception.code, "OAH_DESIGN_FRESHNESS_UNKNOWN")
+                context = fallback.context("acme", "booking")
+                self.assertEqual((context.source, context.freshness), ("worktree", "unknown"))
+        finally:
+            moved.rename(gitdir)
+        self.assertEqual(self.tree(early, self.state(early)), before)
+
+    def test_c3_valid_unicode_metadata_and_branch_round_trip(self):
+        repo = self.make_repo()
+        git(repo, "branch", "-m", "정본")
+        early = repo.parent / "early"
+        git(repo, "worktree", "add", "-q", "-b", "early", str(early))
+        store = self.store(repo)
+        emoji = json.loads('"\\ud83d\\ude80"')
+        store.add_project("acme", title="학원", today=TODAY)
+        result = store.new("acme", "booking", title="예약 " + emoji, parts={"design": "수업을 예약한다.\n"},
+                           reason="초안", today=TODAY)
+        assert result.digest is not None
+        store.accept("acme", "booking", revision=1, digest=result.digest, reason="검토 완료 ✅", today=TODAY)
+        store.rename_project("acme", title="새 학원", today=TODAY)
+        git_commit(repo, {}, "valid unicode")
+        context = self.store(early).context("acme", "booking")
+        self.assertEqual((context.project.title, context.title, context.project.authority, context.source),
+                         ("새 학원", "예약 🚀", "refs/heads/정본", "authority"))
+        self.assertEqual(context.project.former_titles, ("학원",))
+        self.assertEqual(context.current.text(), "수업을 예약한다.\n")
+        self.assertEqual(context.acceptances[-1].reason, "검토 완료 ✅")
 
     def test_c1_lists_use_committed_authority_metadata(self):
         r2 = self.main.save("acme", "booking", expect_revision=1, expect_digest=self.r1.digest, reason="Two",

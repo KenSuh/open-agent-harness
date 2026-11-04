@@ -120,12 +120,20 @@ def check_digest(value: object, what: str = "digest") -> str:
     return value
 
 
+def _storable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def check_line(value: object, what: str, limit: int = LINE_MAX) -> str:
     """A one-line text field such as a title or a reason, stripped."""
     text = value.strip() if isinstance(value, str) else ""
-    if not text or _CONTROL.search(text) or len(text) > limit:
+    if not text or _CONTROL.search(text) or len(text) > limit or not _storable(text):
         raise DesignError(INPUT_INVALID_CODE, f"give the {what} as one line of up to {limit} characters, without "
-                          "tabs or other control characters")
+                          "tabs, control characters or characters UTF-8 cannot store")
     return text
 
 
@@ -142,7 +150,7 @@ def new_uid() -> str:
 
 
 def is_branch_ref(value: str) -> bool:
-    return (value.startswith("refs/heads/") and not _REF_FORBIDDEN.search(value)
+    return (_storable(value) and value.startswith("refs/heads/") and not _REF_FORBIDDEN.search(value)
             and not any(mark in value for mark in ("..", "@{")) and not value.endswith(".")
             and all(part and not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")))
 
@@ -274,7 +282,8 @@ def _number(data: Mapping, key: str, where: str) -> int:
 
 def _text(data: Mapping, key: str, where: str, limit: int = LINE_MAX) -> str:
     value = data.get(key)
-    if not isinstance(value, str) or not value.strip() or _CONTROL.search(value) or len(value) > limit:
+    if (not isinstance(value, str) or not value.strip() or _CONTROL.search(value) or len(value) > limit
+            or not _storable(value)):
         raise corrupt(where, f"{key} is not a one-line text")
     return value
 
@@ -324,7 +333,7 @@ class ProjectRecord:
         if not TASK_RE.fullmatch(record.event):
             raise corrupt(where, "event is not an event ID")
         if (len(record.former_titles) != record.title_revision - 1
-                or not all(isinstance(item, str) and item.strip() and not _CONTROL.search(item)
+                or not all(isinstance(item, str) and item.strip() and not _CONTROL.search(item) and _storable(item)
                            for item in record.former_titles)):
             raise corrupt(where, "former_titles does not match title_revision")
         return record
