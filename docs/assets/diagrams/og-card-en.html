@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>open-agent-harness</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; background: #303646; color: #f5f5f4; margin: 0; padding: 24px; }
+.frame { max-width: 1200px; width: 100%; min-width: 0; margin: auto; }
+.diagram-container { width: 100%; overflow-x: auto; scrollbar-color: #c1cad8 #303646; }
+svg { width: 100%; min-width: 1200px; display: block; }
+text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; fill: #f5f5f4; }
+.headline { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 100px; font-weight: 500; letter-spacing: -.025em; }
+.identity { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 28px; font-weight: 500; }
+.engines { font-family: "Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 22px; font-weight: 400; fill: #c1cad8; }
+.lead { font-size: 34px; font-weight: 500; }
+.detail { font-size: 30px; font-weight: 400; fill: #c1cad8; }
+::selection { background: #f5f5f4; color: #303646; }
+@media print { body { padding: 0; } .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+</style>
+</head>
+<body>
+<!-- Original static OAH identity artwork. System fonts; editable vector paths and text.
+     Export with diagram-design 3eb03b8 (MIT); see README.md and style-guide.md. -->
+<main class="frame">
+<div class="diagram-container">
+<svg viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="og-card-en-title og-card-en-desc">
+<title id="og-card-en-title">open-agent-harness</title>
+<desc id="og-card-en-desc">open-agent-harness: “Just ask, then confirm.” Your AI builds, reviews and records the work; you answer when judgment is needed and confirm before it lands, with a line-drawn OAH monogram and oah.rodeo.</desc>
+<rect width="1200" height="630" fill="#303646"/>
+<text x="64" y="66" class="identity">open-agent-harness</text>
+<text x="1136" y="66" text-anchor="end" class="engines">CLAUDE CODE + CODEX CLI</text>
+<g transform="translate(792 136) scale(.96)" aria-hidden="true" fill="none" stroke="#f5f5f4" stroke-width="6" stroke-linecap="butt" stroke-linejoin="round">
+<path d="M92 32 Q92 0 60 0 H32 Q0 0 0 32 V76 Q0 108 32 108 H60 Q92 108 92 76 Z"/>
+<path d="M128 108 V38 Q128 0 166 0 Q204 0 204 38 V108 M128 62 H204"/>
+<path d="M240 0 V108 M332 0 V108 M240 54 H264 M308 54 H332"/>
+<path d="M276 54 H296" stroke="#dc5634" stroke-width="8"/>
+</g>
+<text x="64" y="248" class="headline">Just ask,</text>
+<text x="248" y="364" class="headline">then confirm.</text>
+<text x="248" y="444" class="lead">Your AI builds, reviews and records the work.</text>
+<text x="248" y="490" class="detail">You decide when needed. Confirm before it lands.</text>
+<g aria-hidden="true" fill="none" stroke="#58677f" stroke-width="1.5">
+<path d="M64 296 V516 Q64 540 88 540 H212 M264 540 H1136"/>
+</g>
+<path d="M228 540 H248" fill="none" stroke="#dc5634" stroke-width="8" aria-hidden="true"/>
+<text x="1136" y="586" text-anchor="end" class="identity">oah.rodeo</text>
+</svg>
+</div>
+</main>
+</body>
+</html>

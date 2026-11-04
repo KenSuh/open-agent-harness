@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
-    <img src="docs/assets/banner-light.svg" alt="The open-agent-harness banner says “Just ask, then confirm.” and explains that your AI builds and fixes like an expert, coordinating difficulty, model choice, wiki, impact map, review cycle and more while you ask, answer when a decision is needed, and confirm; its three characters are an amber square labelled “Claude Code — builds”, a green circle labelled “Codex CLI — reviews, corrects”, and a purple hexagon labelled “TypeSafe Jev — recommended, optional judge”; the oah chat, marked “All done · waiting for you”, answers “Is the login feature done?” with a completed checklist showing the impact map checked what the change touches, a lease reserved the files it changes, Jev judged difficulty and a model was picked automatically, Claude Code built it, Codex CLI reviewed and corrected until convergence, all four gates passed with evidence kept, and the wiki recorded why, then asks “Shall I land it?” above “Land it” and “Show the gates” chips." width="100%">
+    <img src="docs/assets/banner-light.svg" alt="open-agent-harness: “Just ask, then confirm.” Your AI builds, reviews and records the work; you answer when judgment is needed and confirm before it lands, with a line-drawn OAH monogram and oah.rodeo." width="100%">
   </picture>
 </p>
 

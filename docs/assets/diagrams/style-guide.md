@@ -110,40 +110,52 @@ shown as available. The features figure explains the six supporting parts togeth
 
 ## Banner
 
-The banner is a hand-authored **1280 × 560** chat scene with three role characters.
-It shares the gallery's paper, dot grid and neutral tokens while keeping its own
-neo-brutalist shapes, role colors, bold outlines and hard shadows.
+The identity uses an original **OAH monogram with an open join**: a rounded O, an arched A and an H
+whose orange crosspiece is detached. The mark is editable vector linework. It suggests work held
+together with a deliberate point of human participation; it is not a success check or automatic approval.
+The monogram and rules are decorative, marked `aria-hidden`; written copy carries every product claim.
 
-| Token | Light | Dark |
-|---|---|---|
-| Paper | `#f5f5f5` | `#2d3142` |
-| Ink / main outlines | `#2d3142` | `#f5f5f5`; ink-strong `#111111` on bright fills and faces |
-| Secondary text | Muted `#4f5d75` | Muted `#bfc0c0` |
-| Dot grid | Ink `#2d3142` at .10 fill-opacity | Ink `#f5f5f5` at .10 fill-opacity |
-| Chat panel / reply | White `#ffffff` / paper-2 `#ececec` | Paper-2 `#393e53` / paper `#2d3142` |
-| Hard shadow | Ink `#2d3142` | Ink-strong `#111111` |
+The **1280 × 560 README cover** belongs to the diagram gallery's editorial family. It uses one paper
+field, the gallery's serif/sans/mono hierarchy and thin neutral rules. A 56px margin aligns the product
+name, full-width one-line promise and two supporting sentences. The domain is at the upper right;
+the engine pairing and monogram form the lower signature margin. The title baseline is y = 218,
+supporting baselines are y = 292 and 342, and rules are at y = 96 and 388. The monogram's local
+332 × 108 construction is placed at (920, 420), scale .88. Both languages and themes share this structure.
 
-Dots have radius **0.9px** at `(1, 1)` in a **22 × 22px** tile, with the pattern layer at
-**.55 opacity**, exactly as in the gallery figures. Outlines are **3px** for
-characters and the chat frame, **2.5px** for bubbles, chips and eyes, and **2px** for small
-details and checkbox borders. Hard shadows are solid duplicate shapes shifted right and down:
-**5px** for characters and ornaments, **6px** for the headline sticker, **8px** for the chat
-frame, and **4px** for bubbles and chips. Jev's outline uses a `9 6` dash pattern.
-Role fills are amber `#ffb547` for Claude Code, green `#5fd38a` for Codex CLI, and purple
-`#b9a3ff` for Jev in both themes; supporting fills are blue `#9fd8ff`, pink `#ffc2d1`,
-and mint `#c6f3d3`.
-These role and supporting fills stay the same in both themes; no banner element uses the
-gallery accent. Use theme ink on neutral surfaces and dark ink on bright fills so normal
-text reaches 4.5:1 contrast (3:1 for bold text of 24px or more).
+The **1200 × 630 OG poster** belongs to the homepage's ink/cream and sans/mono family. It is a separate
+composition on one uninterrupted ink field. “Just ask,” / “그냥 묻고,” begins at (64, 248); the reply
+“then confirm.” / “확인만 하면 돼.” steps inward to (248, 364). Supporting text follows that second axis
+at y = 444 and 490. The monogram is at (792, 136), scale .96. An open return line turns beneath the
+copy, with the same detached orange join, and the domain anchors the lower right. EN and KO have
+one fixed ink theme each and ship as PNG. This poster is neither a crop of the cover nor the homepage.
 
-Use installed system fonts only. English prose uses
-`system-ui, -apple-system, "Segoe UI", sans-serif`; headline and brand prepend
-`"Arial Black", "Segoe UI Black"`. Korean prepends
-`"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR"` to both stacks,
-before every Latin font. The Latin wordmark's mono stack is
-`ui-monospace, "SFMono-Regular", Consolas, monospace` in both languages.
-The headline is **60px / 800**, brand **24px / 800**, tagline **19px / 600**, and role labels
-**15px / 500**. Names and chat text use **17px**, checklist rows and chips **16px**.
+| Token | README light | README dark | OG |
+|---|---|---|---|
+| Paper | `#f5f5f5` | `#2d3142` | `#303646` |
+| Primary text / mark | `#2d3142` | `#f5f5f5` | `#f5f5f4` |
+| Supporting text | `#4f5d75` | `#bfc0c0` | `#c1cad8` |
+| Accent | `#bf4520` | `#f08a59` | `#dc5634` |
+| Decorative rule | `#bfc0c0` | `#555d73` | `#58677f` |
+
+The README accent also emphasizes the confirmation phrase. OG orange is used only in the graphic
+joins, never for small text. Useful text stays at full opacity. There are no split panels, radial text,
+characters, emoji, stickers, badges, gradients, shadows or embedded raster artwork.
+
+Use installed fonts only. README English headlines use `"Instrument Serif", Georgia, serif` at
+**94px / 400**; Korean uses `"Noto Serif KR", "AppleMyungjo", "Batang", "Noto Serif CJK KR", "Instrument Serif", Georgia, serif`
+at **84px / 400**. OG headlines use `"Geist", system-ui, -apple-system, "Segoe UI", sans-serif` at
+**100px / 500** English and **96px / 500** Korean. All Korean sans text prepends
+`"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Noto Sans CJK KR"` before the Latin stack.
+Headline tracking is -.025em. Supporting copy is sans: **34px / 500** for the AI sentence,
+**28px / 400** on README and **30px / 400** on OG for the user-control sentence. The name and domain
+use **28px / 500** mono; the engine pairing uses **22px / 400** mono. The mono stack is
+`"Geist Mono", ui-monospace, "SFMono-Regular", Consolas, monospace`.
+
+Keep “open-agent-harness”, “oah.rodeo”, and the exact promise “Just ask, then confirm.” /
+“그냥 묻고, 확인만 하면 돼.”. Supporting copy states that AI builds, reviews and records, and the user
+answers when judgment is needed and confirms before landing. Do not turn these into an autonomous
+approval claim or add a feature absent from the product. Keep both themes' descriptions identical
+and the README alt equal to that description. Inspect all six exports at full and preview sizes.
 
 ## Files and checks
 
