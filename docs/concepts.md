@@ -306,7 +306,7 @@ unreadable with its reason, such as a missing or invalid `result.json`, and a va
 unreadable, never as zero. In a correction record, where model names are hashed, it compares them only for same or
 different. The counts show how choices were made, not whether Jev helped: no outcome or quality is compared. Runs
 record the judge's confidence (`model_judge_confidence`, null when the answer carried none) and whether a floor raised
-the tier (`tier_floor_raised`) from this version on, so older runs count as not recorded, and the report says how many.
+the tier (`tier_floor_raised`) from v0.3.0 on, so older runs count as not recorded, and the report says how many.
 
 **Exporting the choices.** `oah models export` prints one JSON line for each run folder `oah models report` counts,
 ordered by task folder and then run id, so the deterministic choice and Jev's choice can be compared run by run or

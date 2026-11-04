@@ -48,8 +48,8 @@
 <path d="M 752,856 L 720,856 Q 712,856 712,848 L 712,704 Q 712,696 704,696 L 664,696" data-edge-id="h6" data-from="fix" data-to="evidence" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#how-it-works-light-arrow)"/>
 <path d="M 976,664 L 1024,664 Q 1032,664 1032,672 L 1032,1032 Q 1032,1040 1024,1040 L 568,1040 Q 560,1040 560,1032 L 560,1020" data-edge-id="h7" data-from="review" data-to="land" data-label="CONVERGED" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#how-it-works-light-arrow)"/>
 <path d="M 264,928 L 296,928 Q 304,928 304,936 L 304,960 Q 304,968 312,968 L 352,968" data-edge-id="h8" data-from="confirm" data-to="land" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#how-it-works-light-arrow)"/>
-<rect x="872" y="741" width="72" height="20" rx="2" fill="#f5f5f5"/>
-<text x="908" y="756" class="arrow-label" text-anchor="middle">CHANGES</text>
+<rect x="872" y="741" width="88" height="20" rx="2" fill="#f5f5f5"/>
+<text x="916" y="756" class="arrow-label" text-anchor="middle">A CHANGES</text>
 <rect x="814" y="1012" width="84" height="20" rx="2" fill="#f5f5f5"/>
 <text x="856" y="1027" class="arrow-label" text-anchor="middle">CONVERGED</text>
 <g data-node-id="request" data-source-label="Describe the change “Build this with oah.” Talk to your AI in plain words.">
@@ -169,5 +169,8 @@
 <text x="392" y="1368" class="prose" text-anchor="start">Work / handoff</text>
 <rect x="528" y="1358" width="24" height="12" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="4,3"/>
 <text x="564" y="1368" class="prose" text-anchor="start">Future design note</text>
+<rect x="792" y="1354" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>
+<text x="806" y="1368" class="label" text-anchor="middle">A</text>
+<text x="832" y="1368" class="prose" text-anchor="start">changes requested</text>
 <text x="56" y="1324" class="prose" text-anchor="start">Jev · recommended, optional judge</text>
 </svg>
