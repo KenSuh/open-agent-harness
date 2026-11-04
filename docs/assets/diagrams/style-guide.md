@@ -111,18 +111,20 @@ shown as available. The features figure explains the six supporting parts togeth
 ## Banner
 
 The banner is a hand-authored **1280 × 560** chat scene with three role characters.
-It uses its own neo-brutalist style, with bold outlines and hard shadows.
+It shares the gallery's paper, dot grid and neutral tokens while keeping its own
+neo-brutalist shapes, role colors, bold outlines and hard shadows.
 
 | Token | Light | Dark |
 |---|---|---|
-| Paper | Cream `#fff4e0` | `#17140f` |
-| Ink / main outlines | Dark ink `#141414` | `#f5ecdc`; `#141414` on bright fills and faces |
-| Secondary text | `#4a3f33` | `#d9cdb8` |
-| Dot grid | `#e6d3b0` | `#3d352a` |
-| Chat panel / reply | `#fffdf8` / `#fff4e0` | `#241f18` / `#312920` |
-| Hard shadow | `#141414` | `#7a6a52` |
+| Paper | `#f5f5f5` | `#2d3142` |
+| Ink / main outlines | `#2d3142` | `#f5f5f5`; ink-strong `#111111` on bright fills and faces |
+| Secondary text | Muted `#4f5d75` | Muted `#bfc0c0` |
+| Dot grid | Ink `#2d3142` at .10 fill-opacity | Ink `#f5f5f5` at .10 fill-opacity |
+| Chat panel / reply | White `#ffffff` / paper-2 `#ececec` | Paper-2 `#393e53` / paper `#2d3142` |
+| Hard shadow | Ink `#2d3142` | Ink-strong `#111111` |
 
-Dots have radius **1.6px** at `(3, 3)` in a **22 × 22px** tile. Outlines are **3px** for
+Dots have radius **0.9px** at `(1, 1)` in a **22 × 22px** tile, with the pattern layer at
+**.55 opacity**, exactly as in the gallery figures. Outlines are **3px** for
 characters and the chat frame, **2.5px** for bubbles, chips and eyes, and **2px** for small
 details and checkbox borders. Hard shadows are solid duplicate shapes shifted right and down:
 **5px** for characters and ornaments, **6px** for the headline sticker, **8px** for the chat
@@ -130,6 +132,9 @@ frame, and **4px** for bubbles and chips. Jev's outline uses a `9 6` dash patter
 Role fills are amber `#ffb547` for Claude Code, green `#5fd38a` for Codex CLI, and purple
 `#b9a3ff` for Jev in both themes; supporting fills are blue `#9fd8ff`, pink `#ffc2d1`,
 and mint `#c6f3d3`.
+These role and supporting fills stay the same in both themes; no banner element uses the
+gallery accent. Use theme ink on neutral surfaces and dark ink on bright fills so normal
+text reaches 4.5:1 contrast (3:1 for bold text of 24px or more).
 
 Use installed system fonts only. English prose uses
 `system-ui, -apple-system, "Segoe UI", sans-serif`; headline and brand prepend
