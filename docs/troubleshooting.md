@@ -71,6 +71,8 @@ Jev receives and when its tier counts.
 | `OAH_RECOMMEND_REQUEST_UNREADABLE` | The request file is missing, not a file, unreadable or not UTF-8. Nothing was sent or recorded. | Save the request as a UTF-8 text file and give its path. |
 | `OAH_AGENT_FILE_EDITED` | A notice from `oah doctor`: a `.claude/agents/oah-<tier>.md` file differs from what `oah` generates, so it is left alone and its model is no longer kept current. | Keep it as it is, or delete it and run `oah init --with-agents` to have `oah` write it again. |
 | `OAH_AGENT_FILE_STALE` | A notice from `oah doctor`: a subagent file `oah` generated names a model or effort that is no longer the choice, and no session-start hook will update it. | Install the hook with `oah hooks install session-start`, or delete the file and run `oah init --with-agents`. |
+| `unused(circuit-open)` | A Jev status: Jev failed `circuit_failures` times in a row (5 by default) with a timeout, a network error, HTTP 429 or HTTP 529, so `oah` stops asking it for `circuit_open_seconds` (600 by default). No request is made, and the rules decide as they do without Jev. | Nothing. After the window, the next use asks Jev once; a success closes the breaker, another such failure opens it again. `oah doctor` shows until when it is open. To change the numbers, set them under `[rerank]` in `.oah/config.toml`. |
+| `unused(daily-limit)` | A Jev status: you set `[rerank] max_requests_per_day`, and Jev was asked that many times in the current UTC day. No request is made, and the rules decide as they do without Jev. | Wait for the next UTC day, or raise `max_requests_per_day` (`0` means no limit). `oah doctor` shows the count. |
 
 ## Leases
 
@@ -113,6 +115,7 @@ Jev receives and when its tier counts.
 | `OAH_GATES_UNMET` | Some gates have no passing evidence. On a first run, CHECK commands wait for your approval. | Read the CHECK commands, then run `oah gates check <task> --approve`. If a gate is truly impossible, write `ABANDON: G<n> <reason>` in the ledger. |
 | `OAH_GATES_UNVERIFIED` | `oah finish` cannot verify the gates because unlazy is missing. | Install unlazy and run `oah gates check <task>`, or pass `--allow-structural` to finish on the ticked boxes alone (recorded as unverified). |
 | `OAH_GATES_SUMMARY_STALE` | `GATES.summary.md` no longer matches the gate records. | Run `oah gates check <task>`, commit the rewritten summary, then finish. |
+| `OAH_GATES_INVALID` | The ledger cannot be read as gates, for example an `ABANDON` row whose reason starts with `ci-check:` without a complete check-run name in double quotes. | Fix the line the message names (`oah gates status <task>` shows it too), then run the command again. |
 
 ## Wiki
 
@@ -130,6 +133,7 @@ Jev receives and when its tier counts.
 | `OAH_REVIEW_NEEDS_DECISION` | The loop stopped for you: a finding repeats a kind already corrected, or its fix needs a design or stored-format change. | Decide, then run `oah review --task <task> --decision "<what you decided>"`. The decision is recorded. |
 | `OAH_REVIEW_ROUNDS_EXHAUSTED` | You set `[review] max_rounds`, and the series reached it. | Run `oah review --task <task> --extra-round` (recorded), or raise or remove `max_rounds`. |
 | `OAH_REVIEW_ATTEMPTS_EXHAUSTED` | Several reviewer calls in this round failed without counting, so `oah` stops calling the paid reviewer. | Read the last run's `stderr.log` in the state folder's `runs/`, fix the cause, then run the command the message prints with `--extra-attempt`. |
+| `OAH_REVIEW_VERSION_MISMATCH` | You set `[review] codex_version`, and the first line of `codex --version` differs from it or could not be read. Nothing was launched. | If you updated Codex on purpose, set `codex_version` to the new line, such as `codex-cli 0.163.0`. A review reads `[review]` from `.oah/config.toml` at its base, so put the change on the default branch and rebase the task onto it. Otherwise reinstall the pinned version from Codex's official source. |
 
 `oah fix` prints one line per next step, starting with the stage it reached. Follow them in order.
 
@@ -145,6 +149,7 @@ Jev receives and when its tier counts.
 | `OAH_LAND_CI_FAILED` | A CI check run failed for this head. | Open the run on GitHub, fix the cause, push, wait for CI, then check again. See [Reading CI results](ci-starter.md#read-the-results-on-github). |
 | `OAH_LAND_CI_UNVERIFIED` | Missing gh, no results, or a required check missing for this head; landing blocks by default. | Install/sign in to gh, push the workflow and task branch, wait and retry; or add `--accept-unverified-ci "<reason>"` to check and merge. The exception is recorded per head; CI stays unverified, never passed. |
 | `OAH_LAND_CI_PENDING` | CI is unfinished or its results could not be read. | Wait for results, check `gh auth status` and the pushed branch, then retry. A CI exception cannot bypass this. |
+| `OAH_LAND_GATES_DEFERRED` | A ledger defers a gate to CI (`ABANDON: G<n> ci-check: "<check run>" …`), and a check run it names has not completed as `success` at this exact head: it is missing, pending, failed, has another conclusion, or CI could not be read. The message names the gate and how many did not succeed. | Let CI finish, or fix the failing run and push, then run `oah land --check` again. The names must match the check runs on GitHub exactly; commit statuses do not count. Neither `--accept-unverified-ci` nor a CI exception closes the gate. |
 | `OAH_LAND_IMPACT_STALE` | The default branch could not be fetched or reassessed, for example with `--offline` or a remote that is a relative path. | Use a remote with a URL or an absolute path, run `oah impact refresh`, then `oah land --check` again. |
 | `OAH_LAND_CHECKS_REQUIRED` | The latest default branch binds checks to files you changed, and they have no passing evidence for your head. | Add a gate with the same CHECK and EXPECT to your ledger, run `oah gates check <task>`, commit, then check again. |
 

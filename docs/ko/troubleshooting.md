@@ -68,6 +68,8 @@
 | `OAH_RECOMMEND_REQUEST_UNREADABLE` | 요청 파일이 없거나, 파일이 아니거나, 읽을 수 없거나, UTF-8이 아니다. 보내거나 기록한 것은 없다. | 요청을 UTF-8 텍스트 파일로 저장하고 그 경로를 준다. |
 | `OAH_AGENT_FILE_EDITED` | `oah doctor`의 알림이다. `.claude/agents/oah-<tier>.md` 파일이 `oah`가 만드는 내용과 달라서 그대로 두며, 그 모델은 더 이상 최신으로 유지하지 않는다. | 그대로 쓰거나, 지우고 `oah init --with-agents`를 실행해 `oah`가 다시 쓰게 한다. |
 | `OAH_AGENT_FILE_STALE` | `oah doctor`의 알림이다. `oah`가 만든 하위 에이전트 파일의 모델이나 추론 강도가 지금의 선택과 다르고, 이를 고칠 세션 시작 훅이 없다. | `oah hooks install session-start`로 훅을 설치하거나, 파일을 지우고 `oah init --with-agents`를 실행한다. |
+| `unused(circuit-open)` | Jev 상태다. Jev가 시간 초과, 네트워크 오류, HTTP 429, HTTP 529로 `circuit_failures`번(기본 5번) 잇달아 실패해서 `oah`가 `circuit_open_seconds`(기본 600초) 동안 Jev에게 묻지 않는다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | 할 일이 없다. 그 시간이 지나면 다음 사용에서 Jev에게 한 번 묻는다. 성공하면 차단기가 닫히고, 그런 실패가 또 나면 다시 열린다. 언제까지 열려 있는지는 `oah doctor`가 보여 준다. 숫자를 바꾸려면 `.oah/config.toml`의 `[rerank]`에 둔다. |
+| `unused(daily-limit)` | Jev 상태다. `[rerank] max_requests_per_day`를 정해 두었고 오늘(UTC 기준) Jev에게 그만큼 물었다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | UTC 기준 다음 날을 기다리거나 `max_requests_per_day`를 올린다(`0`은 제한 없음). 횟수는 `oah doctor`가 보여 준다. |
 
 ## 리스
 
@@ -110,6 +112,7 @@
 | `OAH_GATES_UNMET` | 통과한 증거가 없는 게이트가 있다. 처음 실행하면 CHECK 명령이 사용자의 승인을 기다린다. | CHECK 명령을 읽어 본 뒤 `oah gates check <task> --approve`를 실행한다. 정말 불가능한 게이트라면 원장에 `ABANDON: G<n> <이유>`를 적는다. |
 | `OAH_GATES_UNVERIFIED` | unlazy가 없어서 `oah finish`가 게이트를 검증하지 못한다. | unlazy를 설치하고 `oah gates check <task>`를 실행한다. 아니면 `--allow-structural`로 체크 표시만 보고 끝낸다(검증 안 됨으로 기록된다). |
 | `OAH_GATES_SUMMARY_STALE` | `GATES.summary.md`가 게이트 기록과 맞지 않는다. | `oah gates check <task>`를 실행하고 새로 쓴 요약을 커밋한 뒤 끝낸다. |
+| `OAH_GATES_INVALID` | 원장을 게이트로 읽을 수 없다. 예를 들어 이유가 `ci-check:`로 시작하는 `ABANDON` 줄에 큰따옴표로 끝까지 닫힌 check run 이름이 없다. | 메시지가 말한 줄을 고친 뒤(`oah gates status <task>`도 그 줄을 보여 준다) 명령을 다시 실행한다. |
 
 ## 위키
 
@@ -127,6 +130,7 @@
 | `OAH_REVIEW_NEEDS_DECISION` | 루프가 사용자를 기다리며 멈췄다. 이미 고친 종류의 지적이 다시 나왔거나 고치려면 설계나 저장 형식을 바꿔야 한다. | 결정한 뒤 `oah review --task <task> --decision "<결정한 내용>"`을 실행한다. 결정은 기록된다. |
 | `OAH_REVIEW_ROUNDS_EXHAUSTED` | `[review] max_rounds`를 정해 두었고 시리즈가 거기에 닿았다. | `oah review --task <task> --extra-round`를 실행하거나(기록된다) `max_rounds`를 올리거나 지운다. |
 | `OAH_REVIEW_ATTEMPTS_EXHAUSTED` | 이번 라운드의 리뷰어 호출이 여러 번 실패해서 `oah`가 유료 리뷰어를 더 부르지 않는다. | 상태 폴더 `runs/`에서 마지막 실행의 `stderr.log`를 읽고 원인을 고친 뒤, 메시지가 출력한 명령에 `--extra-attempt`를 붙여 실행한다. |
+| `OAH_REVIEW_VERSION_MISMATCH` | `[review] codex_version`을 정해 두었는데 `codex --version`의 첫 줄이 그 값과 다르거나 읽을 수 없다. 아무것도 실행하지 않았다. | Codex를 일부러 업데이트했다면 `codex_version`을 새 줄(예: `codex-cli 0.163.0`)로 바꾼다. 리뷰는 기준(base) 커밋의 `.oah/config.toml`에서 `[review]`를 읽으므로 그 변경을 기본 브랜치에 넣고 작업을 그 위로 rebase한다. 아니라면 고정한 버전을 Codex 공식 배포처에서 다시 설치한다. |
 
 `oah fix`는 다음에 할 일을 줄마다 하나씩 출력하고 각 줄은 도달한 단계로 시작한다. 순서대로 따라 한다.
 
@@ -142,6 +146,7 @@
 | `OAH_LAND_CI_FAILED` | 이 head의 CI 검사가 실패했다. | GitHub에서 그 실행을 열어 원인을 고치고 push한 뒤 CI를 기다렸다가 다시 확인한다. [CI 결과 읽기](ci-starter.md#github-에서-결과-읽기)를 참고한다. |
 | `OAH_LAND_CI_UNVERIFIED` | gh가 없거나 결과가 없거나 이 head의 필수 검사 결과가 빠져 기본적으로 반영을 막는다. | gh 설치·로그인 후 워크플로와 작업 브랜치를 push하고 기다렸다 다시 확인한다. 아니면 확인과 반영 명령에 `--accept-unverified-ci "<reason>"`을 붙인다. 예외는 head마다 기록하고 CI는 미검증으로 남아 통과로 세지 않는다. |
 | `OAH_LAND_CI_PENDING` | CI가 끝나지 않았거나 결과를 읽지 못했다. | 결과를 기다리고 `gh auth status`와 push한 브랜치를 확인한 뒤 다시 시도한다. CI 예외로 우회할 수 없다. |
+| `OAH_LAND_GATES_DEFERRED` | 원장이 게이트를 CI에 맡겼는데(`ABANDON: G<n> ci-check: "<check run>" …`) 그 줄이 이름 붙인 check run 중 하나가 이 head에서 `success`로 끝나지 않았다. 없거나, 아직 도는 중이거나, 실패했거나, 다른 결론으로 끝났거나, CI를 읽지 못한 경우다. 메시지는 그 게이트와 성공하지 않은 개수를 알려 준다. | CI가 끝나기를 기다리거나 실패한 실행을 고쳐 push한 뒤 `oah land --check`를 다시 실행한다. 이름은 GitHub의 check run 이름과 정확히 같아야 하고, commit status는 세지 않는다. `--accept-unverified-ci`도 CI 예외도 이 게이트를 닫지 않는다. |
 | `OAH_LAND_IMPACT_STALE` | 기본 브랜치를 가져오거나 다시 평가하지 못했다. `--offline`을 줬거나 원격이 상대 경로인 경우 등이다. | URL이나 절대 경로로 된 원격을 쓰고 `oah impact refresh`를 실행한 뒤 `oah land --check`를 다시 실행한다. |
 | `OAH_LAND_CHECKS_REQUIRED` | 최신 기본 브랜치가 내가 바꾼 파일에 검사를 묶어 두었는데 내 head에서 통과한 증거가 없다. | 같은 CHECK와 EXPECT로 게이트를 원장에 더하고 `oah gates check <task>`를 실행해 커밋한 뒤 다시 확인한다. |
 
