@@ -36,7 +36,7 @@
 <path d="M 168,408 L 128,408 Q 120,408 120,416 L 120,592" data-edge-id="e3" data-from="fresh" data-to="refresh" data-label="no" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-light-arrow)"/>
 <path d="M 200,720 L 200,856" data-edge-id="e4" data-from="refresh" data-to="pinR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-light-arrow)"/>
 <path d="M 712,408 L 760,408 Q 768,408 768,416 L 768,592" data-edge-id="e5" data-from="fresh" data-to="stale" data-label="--no-refresh, or inputs keep moving" fill="none" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#concepts-impact-freshness-light-arrow)"/>
-<path d="M 696,948 L 696,968 Q 696,976 688,976 L 488,976" data-edge-id="e6" data-from="dflt" data-to="pinR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-light-arrow)"/>
+<path d="M 696,904 L 696,968 Q 696,976 688,976 L 488,976" data-edge-id="e6" data-from="dflt" data-to="pinR" data-label="" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#concepts-impact-freshness-light-arrow)"/>
 <rect x="448" y="745" width="40" height="20" rx="2" fill="#f5f5f5"/>
 <text x="468" y="760" class="arrow-label" text-anchor="middle">YES</text>
 <rect x="60" y="529" width="52" height="20" rx="2" fill="#f5f5f5"/>
@@ -61,9 +61,9 @@
 <rect x="400" y="340" width="44" height="16" rx="2" fill="none" stroke="#bf4520" stroke-width="1" stroke-opacity=".4"/>
 <text x="422" y="351" class="tag" text-anchor="middle">CHECK</text>
 </g>
-<text x="440" y="384" class="node" text-anchor="middle">Worktree map fresh?</text>
-<text x="440" y="404" class="sub technical" text-anchor="middle">HEAD, index, dirty files, ledgers, config,</text>
-<text x="440" y="422" class="sub" text-anchor="middle">tool</text>
+<text x="440" text-anchor="middle" y="384" class="node">Worktree map fresh?</text>
+<text x="440" text-anchor="middle" y="404" class="sub">HEAD, index, dirty files,</text>
+<text x="440" text-anchor="middle" y="422" class="sub">ledgers, config, tool</text>
 </g>
 <g data-node-id="refresh" data-source-label="Refresh incrementally when possible rebuild otherwise">
 <rect x="40" y="592" width="320" height="128" rx="6" fill="#f5f5f5"/>
@@ -87,8 +87,8 @@
 <text x="568" y="670" class="sub" text-anchor="start">never used silently</text>
 </g>
 <g data-node-id="dflt" data-source-label="Default-branch map fetched read-only, --offline or a failed fetch is labelled stale">
-<rect x="552" y="784" width="288" height="164" rx="6" fill="#f5f5f5"/>
-<rect x="552" y="784" width="288" height="164" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<rect x="552" y="784" width="288" height="120" rx="6" fill="#f5f5f5"/>
+<rect x="552" y="784" width="288" height="120" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
 <g aria-hidden="true">
 <rect x="568" y="800" width="36" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
 <text x="586" y="811" class="tag" text-anchor="middle">BASE</text>
@@ -98,16 +98,16 @@
 <text x="568" y="880" class="sub" text-anchor="start">failed fetch is labelled stale</text>
 </g>
 <g data-node-id="pinR" data-source-label="pin: a gate EXPECT names it, or a gate CHECK or workflow, manifest or config command hashes or greps it" data-parent="ranked">
-<rect x="64" y="856" width="424" height="160" rx="6" fill="#f5f5f5"/>
-<rect x="64" y="856" width="424" height="160" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
+<rect x="64" y="856" width="424" height="136" rx="6" fill="#f5f5f5"/>
+<rect x="64" y="856" width="424" height="136" rx="6" fill="#2d3142" stroke="#4f5d75" stroke-width="1" fill-opacity=".05"/>
 <g aria-hidden="true">
 <rect x="80" y="872" width="52" height="16" rx="2" fill="none" stroke="#4f5d75" stroke-width="1" stroke-opacity=".4"/>
 <text x="106" y="883" class="tag" text-anchor="middle">BINDING</text>
 </g>
-<text x="80" y="914" class="node" text-anchor="start">pin:</text>
-<text x="80" y="934" class="sub" text-anchor="start">a gate EXPECT names it, or a gate CHECK</text>
-<text x="80" y="952" class="sub" text-anchor="start">or workflow, manifest or config command hashes or</text>
-<text x="80" y="970" class="sub" text-anchor="start">greps it</text>
+<text x="80" text-anchor="start" y="914" class="node">pin:</text>
+<text x="80" text-anchor="start" y="934" class="sub">a gate EXPECT names it, or a gate CHECK</text>
+<text x="80" text-anchor="start" y="952" class="sub">or workflow, manifest or config command</text>
+<text x="80" text-anchor="start" y="970" class="sub">hashes or greps it</text>
 </g>
 <text x="40" y="1092" class="zone-label" text-anchor="start">TRANSITION KEYS</text>
 <rect x="40" y="1111" width="28" height="20" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1"/>

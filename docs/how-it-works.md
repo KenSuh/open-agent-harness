@@ -22,7 +22,7 @@ are instructions loaded by the AI. **CI** is the automated testing attached to a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
-  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0." width="100%">
+  <img src="assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
 Two AI sessions can edit the same files, call work done without evidence, or keep reviewing without an
@@ -63,24 +63,24 @@ it later in the config. It needs your own TypeSafe account and key. Without it, 
 
 - **Ranking:** Jev re-orders the closed skill list produced by the rules. It never adds or drops a
   candidate. Impact-result re-ranking remains planned, not a shipped feature.
-- **Difficulty on main, not released yet:** Jev judges the accepted Intent and Scope paths. A confident
+- **Difficulty in v0.3.0:** Jev judges the accepted Intent and Scope paths. A confident
   answer may change the tier, never below its floor. With Jev off, an error or low confidence, the rules
   decide and the call is not blocked by Jev. [Difficulty details](concepts.md#jev-judges-difficulty) explains
   what is sent, privacy checks, explicit tier overrides and the recorded result.
 - **Model choice:** Jev can choose a model and effort only from candidates the rules allow, subject to
   model pins, qualified pools, supported effort and the task's minimum requirements. It cannot invent a
   candidate or bypass the floor. [Routing](concepts.md#routing-and-difficulty) and
-  [model selection on main](concepts.md#how-a-model-is-chosen) describe the current choices and limits.
+  [model selection](concepts.md#how-a-model-is-chosen) describe the current choices and limits.
 
-The [v0.3.0 roadmap](../README.md#roadmap) remains a release plan. Features already on main are identified
-as unreleased; their presence there does not make them available in v0.2.0.
+The difficulty and model-selection features described above ship in v0.3.0. The
+[roadmap](../README.md#roadmap) describes the guided design conversation planned for v0.4.0.
 
 ## Strengths
 
 - **Engines by stage.** Claude Code writes the first version; Codex CLI reviews, corrects and re-reviews. A call
   for the wrong engine at a stage is refused (`OAH_STAGE_ENGINE_MISMATCH`) unless you override it, and the
   override is recorded.
-- **Difficulty picks the model and effort.** Fixed rules score four axes and choose a tier; optional Jev judging on main can adjust it within its floor; an effort the CLI
+- **Difficulty picks the model and effort.** Fixed rules score four axes and choose a tier; optional Jev judging can adjust it within its floor; an effort the CLI
   cannot prove is recorded as unverified, and a lower launch effort fails (`OAH_EFFORT_DOWNGRADED`).
 - **Skills chosen for the task,** each with a reason. The recommended, optional judge, TypeSafe Jev, only re-orders that list.
 - **An impact map** lists the gates and commands that pin or run a changed file, so you re-run exactly those.
@@ -142,7 +142,7 @@ whole loop with real commands, in about 20 minutes.
 Ask your AI in plain words in the project; the installed rules and each command’s next-step
 message guide it through the commands below.
 You ask about the result, answer when a repeated problem or design choice stops the loop, and confirm before landing.
-The tables show what runs underneath that conversation; where a row says “you”, your AI usually runs it for you.
+The tables show what runs underneath that conversation; where a row says you run a command, your AI usually runs it for you.
 
 ### Prepare and implement
 

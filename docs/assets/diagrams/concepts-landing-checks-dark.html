@@ -73,10 +73,10 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 <rect x="80" y="360" width="28" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="94" y="371" class="tag" text-anchor="middle">CI</text>
 </g>
-<text x="80" y="402" class="node" text-anchor="start">ci:</text>
-<text x="80" y="422" class="sub" text-anchor="start">tests, install, oah --version, privacy scan</text>
-<text x="80" y="440" class="sub" text-anchor="start">macOS and Windows, PRs to main except docs/**</text>
-<text x="80" y="458" class="sub" text-anchor="start">and *.md, manual run</text>
+<text x="80" text-anchor="start" y="402" class="node">ci:</text>
+<text x="80" text-anchor="start" y="422" class="sub">tests, install, oah --version, privacy scan</text>
+<text x="80" text-anchor="start" y="440" class="sub">macOS and Windows, PRs to main</text>
+<text x="80" text-anchor="start" y="458" class="sub">except docs/** and *.md, manual run</text>
 </g>
 <g data-node-id="secrets" data-source-label="secrets: gitleaks and privacy scan, full history every pull request and push, manual run" data-parent="actions">
 <rect x="544" y="344" width="392" height="120" rx="6" fill="#2d3142"/>
@@ -98,13 +98,17 @@ text { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; f
 </g>
 <text x="500" y="712" class="node" text-anchor="middle">oah land --check, exact HEAD</text><text x="500" y="732" class="sub" text-anchor="middle">lease, intent, review, gates, impact,</text><text x="500" y="750" class="sub" text-anchor="middle">required-checks, fast-forward, scan, ci</text></g>
 <g data-node-id="exc" data-source-label="Unverified CI blocks: OAH_LAND_CI_UNVERIFIED unless --accept-unverified-ci reason, recorded for that head">
-<rect x="40" y="912" width="440" height="160" rx="6" fill="#2d3142"/>
-<rect x="40" y="912" width="440" height="160" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
+<rect x="40" y="912" width="440" height="140" rx="6" fill="#2d3142"/>
+<rect x="40" y="912" width="440" height="140" rx="6" fill="#f5f5f5" stroke="#bfc0c0" stroke-width="1" fill-opacity=".02" stroke-dasharray="4,3"/>
 <g aria-hidden="true">
 <rect x="56" y="928" width="64" height="16" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-opacity=".4"/>
 <text x="88" y="939" class="tag" text-anchor="middle">EXCEPTION</text>
 </g>
-<text x="56" y="970" class="node" text-anchor="start">Unverified CI blocks:</text><text x="56" y="990" class="node" text-anchor="start">OAH_LAND_CI_UNVERIFIED</text><text x="56" y="1010" class="sub" text-anchor="start">unless --accept-unverified-ci reason, recorded for</text><text x="56" y="1028" class="sub" text-anchor="start">that head</text></g>
+<text x="56" text-anchor="start" y="970" class="node">Unverified CI blocks:</text>
+<text x="56" text-anchor="start" y="990" class="sub technical">OAH_LAND_CI_UNVERIFIED</text>
+<text x="56" text-anchor="start" y="1010" class="sub">unless --accept-unverified-ci reason,</text>
+<text x="56" text-anchor="start" y="1028" class="sub">recorded for that head</text>
+</g>
 <g data-node-id="landed" data-source-label="oah land --merge checks again, you confirm, fast-forward push of HEAD">
 <rect x="560" y="912" width="400" height="120" rx="20" fill="#2d3142"/>
 <rect x="560" y="912" width="400" height="120" rx="20" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>

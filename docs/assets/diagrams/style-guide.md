@@ -63,6 +63,8 @@ Fallback metrics still need preview inspection.
   the pattern layer at .55 opacity. No shadows, glow or gradients.
 - Use a 4px structural grid, 40px outer margins, 16px node padding, and generous gaps.
   Text baselines, dot spacing and marker geometry are the skill's documented off-grid exceptions.
+- Size boxes for the fuller language, leaving about 20–28px below the last text baseline.
+  Keep enough room for edge ports; do not leave an extra empty row below the text.
 - Draw background, zones, arrows, arrow masks, then nodes. End with a separate horizontal legend.
 - Nodes have an opaque paper mask under their treatment. Standard steps use white on light paper
   and paper on dark paper; input nodes use muted at .10; stores use ink at .05; optional nodes
@@ -86,9 +88,12 @@ another node are not allowed. Keep ports at least 12px apart. A crossing needs a
 figures avoid crossings entirely.
 
 An arrow label has an opaque paper mask, 8px clear of the line. Place it above a horizontal route
-or beside a vertical one. Keep inline labels short; full conditions belong in lettered transition keys
-inside the figure. Conditional arrows retain short words and the matching key letter (up to 14 characters).
-The architecture route-to-Jev label explicitly keeps “SKILL ORDER + DIFFICULTY”. Label masks must also clear nodes and zone headings. Dash meanings belong in
+or beside a vertical one. A complete condition that fits in 14 characters and its mask in both languages
+stays inline without a letter or a duplicate key: `YES`, `NO`, `CONVERGED` and `P0/P1 FINDINGS` follow this rule.
+If either language needs an abbreviation, put the full condition in a lettered transition key and use the
+same letter with a short label on both language variants. Command exchanges may also use keys to retain
+their full command text. Keep keyed inline labels within 14 characters.
+The architecture route-to-Jev label explicitly keeps “SKILL ORDER + DIFFICULTY”. Label masks must also clear nodes, zone headings and zone borders; widen the gutter when needed. Dash meanings belong in
 the legend: optional paths, returns, recorded CI exceptions, or a planned future note as appropriate.
 Sequence returns retain dashed lines; their loop frame covers only participating actors.
 

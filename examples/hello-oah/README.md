@@ -31,7 +31,7 @@ AI to prepare the practice copy; step 2 installs the project rules.
 
 ### 2. Set up the project once
 
-- **You do:** Run `oah init` in a terminal, answer its questions and confirm the plan. It installs the rules,
+- **You do:** Run `oah init` in a terminal and answer its questions. It installs the rules,
   wiki and templates and builds the first impact map.
 - **The AI does:** After setup, adds the bytecode ignore entries shown below and commits the setup.
 - **You check or answer:** Choose unlazy for the checks and the CI starter if you want to land on GitHub.
@@ -104,8 +104,8 @@ already discuss the goal with your AI and answer decisions when the review loop 
 After you run `oah init` in a terminal, the installed rules and each command’s next-step message guide your AI
 through the commands below. You can also run this complete walkthrough yourself to see each result. Every `sh`
 block is kept in execution order; the review section shows which commands depend on its actual verdict.
-When your AI makes these commits it records its own engine; the walkthrough uses `Agent-Engine: human` because
-you run it by hand.
+Each commit records the engine that wrote the change; the walkthrough uses `Agent-Engine: human` for changes
+you write by hand. For AI-written changes, use `Agent-Engine: claude` or `Agent-Engine: codex`, even if you commit them yourself.
 
 ### Before you start
 

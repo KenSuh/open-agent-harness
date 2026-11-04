@@ -25,7 +25,7 @@ around an AI coding assistant.
 Your AI takes care of the whole job of building and fixing a program like an expert: checking what a change
 might affect, keeping the project wiki, proving the result and running the review cycle. With the recommended,
 optional TypeSafe Jev judge on, it also judges difficulty and picks the model automatically through that difficulty
-level (on main, awaiting release). **You ask, answer when the AI stops for a decision, and confirm before anything lands.**
+level in v0.3.0. **You ask, answer when the AI stops for a decision, and confirm before anything lands.**
 
 Take the parts that help, or start with the whole setup and make it yours. Older rules and skills
 (instructions an AI can load) can hold a newer model back or make its results worse. Keep what helps,
@@ -49,11 +49,11 @@ You describe the result you want. Your AI uses these parts together to carry the
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/features-dark.svg">
-  <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and the recommended, optional TypeSafe Jev judge support the Claude Code build and Codex CLI review loop, gates and the wiki keep evidence and decisions, overlapping leases are refused, and you ask, answer decisions and confirm before landing, with Jev difficulty-based model choice on unreleased main." width="100%">
+  <img src="docs/assets/features-light.svg" alt="The impact map, path-reserving leases and the recommended, optional TypeSafe Jev judge support the Claude Code build and Codex CLI review loop, gates and the wiki keep evidence and decisions, overlapping leases are refused, and you ask, answer decisions and confirm before landing, with Jev difficulty-based model choice in v0.3.0." width="100%">
 </picture>
 
 - **[Impact map](docs/concepts.md#the-impact-map).** When your AI changes a file, the impact map shows related code,
-  documents and the checks to rerun. It can see which checks must run again, so a small edit is easier to follow through.
+  documents and the checks to rerun, so a small edit is easier to follow through.
 - **[Project wiki](docs/concepts.md#the-project-wiki).** Your AI keeps the task history, decisions and reasons
   beside the code. The next session has a record to read instead of making you explain everything again.
 - **[Leases](docs/concepts.md#leases).** A lease reserves the paths a task changes, and an overlapping lease
@@ -63,14 +63,14 @@ You describe the result you want. Your AI uses these parts together to carry the
 - **[Build and review](docs/concepts.md#the-review-loop-and-corrections).** Claude Code builds; Codex CLI
   reviews, corrects and reviews again. A repeated problem or a design choice stops the loop for your answer.
 - **[TypeSafe Jev](docs/how-it-works.md#jev-the-optional-judge).** The recommended, optional judge re-orders
-  chosen skills and, on unreleased main, judges difficulty so its difficulty level (tier) picks the model automatically, subject
+  chosen skills and, in v0.3.0, judges difficulty so its difficulty level (tier) picks the model automatically, subject
   to confidence and minimum-level rules. Without a key, the rules decide.
 
 ## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0." width="100%">
+  <img src="docs/assets/how-it-works-light.svg" alt="You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0." width="100%">
 </picture>
 
 Talk to your AI in plain words. The rules installed by `oah init` and each command’s next-step message guide it
@@ -85,14 +85,14 @@ project's main branch. The [full walkthrough](docs/how-it-works.md) shows the co
 The guided design conversation shown separately in the figure is **planned for v0.4.0**.
 
 > [!NOTE]
-> **v0.2.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
+> **v0.3.0 is the current release.** It is for developers fluent with git and pull requests, on macOS and
 > native Windows. Linux is not yet supported.
 
 ## Install
 
 One command per OS installs `oah`. It asks before it installs any missing tool, shows the official command
 for each one, and never sees your passwords or keys. To install from a clone, run the commands below.
-For v0.2.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
+For v0.3.0, you can instead download the tag’s source archive and `SHA256SUMS` from the repository’s release
 page. Refuse to unpack it unless its SHA-256 matches that archive’s digest in `SHA256SUMS`; then run the
 included installer. The OS guides below show how to check it.
 
@@ -120,7 +120,7 @@ Then open a new terminal and check:
 
 ```console
 $ oah --version
-oah 0.2.0
+oah 0.3.0
 ```
 
 ## First run
@@ -145,13 +145,9 @@ underneath this conversation. [Your first task](examples/hello-oah/README.md) ta
 what you say, what the AI does and what you check, followed by the complete command walkthrough.
 [Setup details](docs/how-it-works.md#first-run) explain every option and generated file.
 
-## Roadmap
+## New in v0.3.0
 
-Nothing below is **available in v0.2.0** yet. Plans can change as the tools change.
-
-### v0.3.0: models chosen from benchmarks
-
-Planned, after v0.2.0:
+The current release includes these changes:
 
 - Benchmark scores pick the model. Difficulty and a profile (performance, balanced, efficient) set the score a job needs. Balanced takes
   the cheapest model that reaches it, efficient the best score per price, and performance the top scorer for the hardest work. No table ties a difficulty to a
@@ -170,6 +166,10 @@ Planned, after v0.2.0:
   not prove Jev helped.
 
 Your pinned models, tier pools, effort caps and task floors stay in force throughout.
+
+## Roadmap
+
+Plans can change as the tools change.
 
 ### v0.4.0: design together, one question at a time
 

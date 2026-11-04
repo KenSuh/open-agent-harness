@@ -2,8 +2,7 @@
 
 ## Supported versions
 
-`oah` has not had a tagged release yet. Security fixes go to the `main` branch. Once releases start, the
-latest release and `main` receive fixes.
+The latest release and `main` receive security fixes.
 
 ## Reporting a vulnerability
 

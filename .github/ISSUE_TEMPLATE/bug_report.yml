@@ -12,7 +12,7 @@ body:
     attributes:
       label: oah version
       description: Output of `oah --version`, or the commit you installed from.
-      placeholder: oah 0.2.0
+      placeholder: oah 0.3.0
     validations:
       required: true
   - type: dropdown

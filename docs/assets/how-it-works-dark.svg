@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg viewBox="0 0 1080 1420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-works-dark-title how-it-works-dark-desc" data-diagram-type="Swimlane" data-size="fit" id="how-it-works-dark-root">
 <title id="how-it-works-dark-title">You ask, answer and confirm; the harness carries the work.</title>
-<desc id="how-it-works-dark-desc">You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice on unreleased main and a guided design conversation planned for v0.4.0.</desc>
+<desc id="how-it-works-dark-desc">You describe a change in plain words; installed rules prepare intent, scope, path-reserving leases, the impact map and recommended, optional TypeSafe Jev judgement, Claude Code builds, gates and the wiki keep evidence, Codex CLI reviews and corrects, and you answer when it stops for a repeated problem or design choice and confirm before landing, with Jev difficulty-based model choice in v0.3.0 and a guided design conversation planned for v0.4.0.</desc>
 <defs>
       <style>#how-it-works-dark-root { font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif; color: #f5f5f5; }
       #how-it-works-dark-root .diagram-container { width: 100%; overflow-x: auto; }
@@ -48,8 +48,8 @@
 <path d="M 752,856 L 720,856 Q 712,856 712,848 L 712,704 Q 712,696 704,696 L 664,696" data-edge-id="h6" data-from="fix" data-to="evidence" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-dark-arrow)"/>
 <path d="M 976,664 L 1024,664 Q 1032,664 1032,672 L 1032,1032 Q 1032,1040 1024,1040 L 568,1040 Q 560,1040 560,1032 L 560,1020" data-edge-id="h7" data-from="review" data-to="land" data-label="CONVERGED" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-dark-arrow)"/>
 <path d="M 264,928 L 296,928 Q 304,928 304,936 L 304,960 Q 304,968 312,968 L 352,968" data-edge-id="h8" data-from="confirm" data-to="land" data-label="" fill="none" stroke="#bfc0c0" stroke-width="1.2" marker-end="url(#how-it-works-dark-arrow)"/>
-<rect x="872" y="741" width="72" height="20" rx="2" fill="#2d3142"/>
-<text x="908" y="756" class="arrow-label" text-anchor="middle">CHANGES</text>
+<rect x="872" y="741" width="88" height="20" rx="2" fill="#2d3142"/>
+<text x="916" y="756" class="arrow-label" text-anchor="middle">A CHANGES</text>
 <rect x="814" y="1012" width="84" height="20" rx="2" fill="#2d3142"/>
 <text x="856" y="1027" class="arrow-label" text-anchor="middle">CONVERGED</text>
 <g data-node-id="request" data-source-label="Describe the change “Build this with oah.” Talk to your AI in plain words.">
@@ -66,7 +66,7 @@
 <text x="80" y="316" class="sub" text-anchor="start">Talk to your AI in</text>
 <text x="80" y="334" class="sub" text-anchor="start">plain words.</text>
 </g>
-<g data-node-id="prepare" data-source-label="Prepare the work Intent, scope and impact map. Lease: reserve changed paths; refuse overlapping leases. TypeSafe Jev judges difficulty. Recommended, optional judge. Tier → model; re-orders chosen skills. No key? Rules decide.">
+<g data-node-id="prepare" data-source-label="Prepare the work Intent, scope and impact map. Lease: reserve changed paths; refuse overlapping leases. TypeSafe Jev judges difficulty; its tier picks the model. Recommended, optional judge; re-orders chosen skills. No key? Rules decide.">
 <rect x="352" y="200" width="312" height="208" rx="6" fill="#2d3142"/>
 <rect x="352" y="200" width="312" height="208" rx="6" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
 <g aria-hidden="true">
@@ -74,14 +74,14 @@
 <text x="384" y="227" class="tag" text-anchor="middle">OAH</text>
 <text x="648" y="238" class="ghost" text-anchor="end">02</text>
 </g>
-<text x="368" y="258" class="node" text-anchor="start">Prepare the work</text>
-<text x="368" y="278" class="sub" text-anchor="start">Intent, scope and impact map.</text>
-<text x="368" y="296" class="sub" text-anchor="start">Lease: reserve changed paths;</text>
-<text x="368" y="314" class="sub" text-anchor="start">refuse overlapping leases.</text>
-<text x="368" y="332" class="sub" text-anchor="start">TypeSafe Jev judges difficulty.</text>
-<text x="368" y="350" class="sub" text-anchor="start">Recommended, optional judge.</text>
-<text x="368" y="368" class="sub" text-anchor="start">Tier → model; re-orders chosen skills.</text>
-<text x="368" y="386" class="sub" text-anchor="start">No key? Rules decide.</text>
+<text x="368" text-anchor="start" y="258" class="node">Prepare the work</text>
+<text x="368" text-anchor="start" y="278" class="sub">Intent, scope and impact map.</text>
+<text x="368" text-anchor="start" y="296" class="sub">Lease: reserve changed paths;</text>
+<text x="368" text-anchor="start" y="314" class="sub">refuse overlapping leases.</text>
+<text x="368" text-anchor="start" y="332" class="sub">TypeSafe Jev judges difficulty;</text>
+<text x="368" text-anchor="start" y="350" class="sub">its tier picks the model.</text>
+<text x="368" text-anchor="start" y="368" class="sub">Recommended, optional judge; re-orders</text>
+<text x="368" text-anchor="start" y="386" class="sub">chosen skills. No key? Rules decide.</text>
 </g>
 <g data-node-id="build" data-source-label="Claude Code Build the first version.">
 <rect x="752" y="424" width="224" height="100" rx="6" fill="#2d3142"/>
@@ -160,7 +160,7 @@
 <text x="368" y="1000" class="sub" text-anchor="start">confirmation, fast-forward push.</text>
 </g>
 <text x="56" y="1276" class="prose" text-anchor="start">The rules installed by oah init guide your AI through the commands underneath.</text>
-<text x="56" y="1300" class="prose" text-anchor="start">Jev difficulty is on unreleased main; confidence and minimum-level rules apply.</text>
+<text x="56" y="1300" class="prose" text-anchor="start">Jev difficulty is in v0.3.0; confidence and minimum-level rules apply.</text>
 <line x1="40" y1="1340" x2="1040" y2="1340" stroke="#f5f5f5" stroke-opacity=".12"/>
 <text x="40" y="1368" class="zone-label" text-anchor="start">KEY</text>
 <rect x="112" y="1358" width="24" height="12" rx="2" fill="none" stroke="#f08a59" stroke-width="1"/>
@@ -169,5 +169,8 @@
 <text x="392" y="1368" class="prose" text-anchor="start">Work / handoff</text>
 <rect x="528" y="1358" width="24" height="12" rx="2" fill="none" stroke="#bfc0c0" stroke-width="1" stroke-dasharray="4,3"/>
 <text x="564" y="1368" class="prose" text-anchor="start">Future design note</text>
+<rect x="792" y="1354" width="28" height="20" rx="2" fill="#2d3142" stroke="#bfc0c0" stroke-width="1"/>
+<text x="806" y="1368" class="label" text-anchor="middle">A</text>
+<text x="832" y="1368" class="prose" text-anchor="start">changes requested</text>
 <text x="56" y="1324" class="prose" text-anchor="start">Jev · recommended, optional judge</text>
 </svg>
