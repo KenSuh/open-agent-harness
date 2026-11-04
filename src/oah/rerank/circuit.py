@@ -2,8 +2,9 @@
 """The Jev circuit breaker and daily request cap: one small file per project, in the re-ranker's state folder.
 
 Every Jev use that sends a request (skill ranking, difficulty advice and the model judge) asks `Breaker.refusal`
-right after the provider gate, and reports `unused(circuit-open)` or `unused(daily-limit)` without a request when
-it answers. After the request, `Breaker.record` updates the file:
+right after the provider gate, then `Breaker.reserve` immediately before dispatch. A refusal reports
+`unused(circuit-open)`, `unused(daily-limit)` or `unused(circuit-busy)` without a request.
+After the request, `Breaker.record` updates the file:
 
 - a success clears the count and closes the breaker;
 - a timeout, a network failure, HTTP 429 or HTTP 529 (`COUNTED`) adds one to the count of such failures in a row.
@@ -13,14 +14,17 @@ it answers. After the request, `Breaker.record` updates the file:
 - any other outcome (HTTP 401, a bad response, an answer below the confidence threshold) leaves the count alone.
 
 `[rerank] max_requests_per_day` (default 0, meaning off) caps the requests sent in one UTC day. Every request
-counts, whatever its outcome; the next UTC day starts again from zero.
+is reserved before dispatch, on that UTC day, and stays counted even if interrupted; the next UTC day starts
+again from zero. Recording the outcome never changes the daily count.
 
 The file holds counts, UTC times and failure-kind names only: never request text, key names, URLs or answers.
 It is replaced atomically (a temporary file, then `os.replace`). A missing, unreadable or malformed file reads as
 closed, and the next update replaces it; an open window longer than the current setting (a clock that went back,
-or a shorter setting) counts as over. The file is read again right before each update, so two processes racing
-lose at most one count. Without a state folder nothing is read or written, and with `write=False` (a correction's
-preparation) the file is read but never written. A failed write is ignored: the breaker never blocks work.
+or a shorter setting) counts as over. A short cross-process lock serializes each read, update and replacement;
+the provider request never holds it. Lock contention refuses the request after a bounded wait. Without a state
+folder nothing is read or written. With `write=False` (a correction's preparation), outcomes are not recorded,
+but an enabled daily cap still reserves the request. A failed write is ignored unless a daily reservation is
+needed, in which case the request is skipped: the breaker never blocks work.
 """
 from __future__ import annotations
 
@@ -34,9 +38,13 @@ from typing import Mapping
 
 from oah.atomic import write_text_atomic
 from oah.config import ConfigError
+from oah.lockfile import LockTimeout, StateLock
 from oah.rerank.base import NETWORK, OVERLOADED, RATE_LIMITED, TIMEOUT
 
 FILE_NAME = "rerank-circuit.json"
+LOCK_NAME = "rerank-circuit.lock"
+LOCK_WAIT_SECONDS = 1.0
+BUSY_CODE = "circuit-busy"
 COUNTED = (TIMEOUT, NETWORK, RATE_LIMITED, OVERLOADED)
 OPEN, DAILY_LIMIT, SUCCESS = "circuit-open", "daily-limit", "success"
 DEFAULTS = {"circuit_failures": 5, "circuit_open_seconds": 600, "max_requests_per_day": 0}
@@ -116,7 +124,8 @@ def _parsed(data: object) -> State | None:
 def read(path: pathlib.Path) -> tuple[State, bool]:
     """(state, sound): a missing file is sound and closed; an unreadable or malformed one is closed, not sound."""
     try:
-        raw = path.read_bytes()
+        with path.open("rb") as handle:
+            raw = handle.read(FILE_LIMIT + 1)
     except FileNotFoundError:
         return State(), True
     except OSError:
@@ -142,10 +151,6 @@ def refusal(state: State, limits: Limits, now: dt.datetime) -> str | None:
 
 def advance(state: State, limits: Limits, outcome: str | None, now: dt.datetime) -> State:
     """The state after one request whose outcome is `SUCCESS`, a `COUNTED` kind, or None (count unchanged)."""
-    day, requests = state.day, state.requests
-    if limits.per_day:
-        today = now.date().isoformat()
-        day, requests = today, (requests if day == today else 0) + 1
     failures, kind, until = state.failures, state.last_failure, state.open_until
     if outcome == SUCCESS:
         failures, kind, until = 0, None, None
@@ -154,7 +159,7 @@ def advance(state: State, limits: Limits, outcome: str | None, now: dt.datetime)
         if failures >= limits.failures:
             start = now.replace(microsecond=0) + dt.timedelta(seconds=1 if now.microsecond else 0)
             until = start + dt.timedelta(seconds=limits.open_seconds)  # a whole window, rounded up
-    return State(failures, kind, until, day, requests)
+    return State(failures, kind, until, state.day, state.requests)
 
 
 class Breaker:
@@ -171,17 +176,40 @@ class Breaker:
             return None
         return refusal(read(self.path)[0], self.limits, utc_now())
 
+    def reserve(self) -> str | None:
+        """Recheck under the lock and count a capped request before dispatch; never hold the lock over a request."""
+        if self.path is None or (not self.write and not self.limits.per_day):
+            return self.refusal()
+        try:
+            with StateLock(self.path.with_name(LOCK_NAME), timeout=LOCK_WAIT_SECONDS):
+                now = utc_now()
+                state, _sound = read(self.path)
+                blocked = refusal(state, self.limits, now)
+                if blocked is not None:
+                    return blocked
+                if self.limits.per_day:
+                    today = now.date().isoformat()
+                    updated = dataclasses.replace(state, day=today,
+                                                  requests=(state.requests if state.day == today else 0) + 1)
+                    write_text_atomic(self.path, json.dumps(updated.to_json(), sort_keys=True) + "\n", retry_seconds=0)
+        except LockTimeout:
+            return BUSY_CODE
+        except OSError:
+            return BUSY_CODE if self.limits.per_day else None
+        return None
+
     def record(self, outcome: str | None) -> None:
         """After one request: `SUCCESS`, a `COUNTED` kind, or None for an outcome that leaves the count alone."""
         if self.path is None or not self.write:
             return
-        state, sound = read(self.path)
-        updated = advance(state, self.limits, outcome, utc_now())
-        if updated == state and sound:
-            return  # nothing changed, so nothing is written
         try:
-            write_text_atomic(self.path, json.dumps(updated.to_json(), sort_keys=True) + "\n", retry_seconds=0)
-        except OSError:
+            with StateLock(self.path.with_name(LOCK_NAME), timeout=LOCK_WAIT_SECONDS):
+                state, sound = read(self.path)
+                updated = advance(state, self.limits, outcome, utc_now())
+                if updated == state and sound:
+                    return  # nothing changed, so nothing is written
+                write_text_atomic(self.path, json.dumps(updated.to_json(), sort_keys=True) + "\n", retry_seconds=0)
+        except (OSError, LockTimeout):
             pass  # an unwritable state folder never blocks a call
 
 

@@ -418,6 +418,9 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         limit = config.get("max_candidates")
         limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(items)
         sent, rest = items[:limit], items[limit:]
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return RerankResult(items, unused(blocked), provider_name)
         scores, status = _call(lambda: _valid_scores(
             provider.score(kind, query, sent, key=key, config=config), len(sent)))
         breaker.record(circuit.outcome(status))
@@ -478,6 +481,9 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
             return Advice(rule_tier, None, None, unused("no-text"), provider_name)
         if work.secret is not None:
             return Advice(rule_tier, None, None, unused("secret"), provider_name, work.truncated, work.secret)
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return Advice(rule_tier, None, None, unused(blocked), provider_name, work.truncated)
         shown = state_dir is None or _notice_shown(pathlib.Path(state_dir))
         if not shown:
             (notify or _print_notice)(SCOPE_NOTICE)
@@ -534,6 +540,9 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
             return ModelJudgement(unused("one-candidate"), None, provider_name)
         if len(pairs) > limit:
             return ModelJudgement(unused("too-many-candidates"), None, provider_name)
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return ModelJudgement(unused(blocked), None, provider_name)
         answer, status = _call(lambda: _valid_pair(provider.choose_model(sent, pairs, key=key, config=config)))
         breaker.record(circuit.outcome(status))
         if status != USED:

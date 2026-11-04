@@ -316,6 +316,42 @@ class LandTest(unittest.TestCase):
         self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_GATES_DEFERRED"))
         self.assertEqual(project.remote_main(), project.base)
 
+    def test_replacing_the_ledger_between_discovery_and_validation_cannot_change_ci_requirements(self):
+        project = DeferredProject(self)
+        bound = project.ledger.read_bytes()
+        project.ledger.write_bytes(bound.replace(FIRST.encode(), b"old first").replace(SECOND.encode(), b"old second"))
+        project.ci([run("old first"), run("old second")])
+        check = land._gates_check
+
+        def restore(*args, **kwargs):
+            project.ledger.write_bytes(bound)
+            return check(*args, **kwargs)
+
+        with patch.object(land, "_gates_check", side_effect=restore):
+            result = project.assess()
+        self.assertFalse(result.ready, describe(result))
+        self.assertEqual(result.code, "OAH_LAND_GATES_DEFERRED")
+        self.assertEqual(result.check("ci").detail["deferred"][0]["not_succeeded"], 2)
+        self.assertEqual(project.ledger.read_bytes(), bound)
+
+    def test_changing_the_ledger_after_ci_and_local_validation_refuses_before_push(self):
+        project = DeferredProject(self)
+        project.ci([run(FIRST), run(SECOND)])
+        result = project.assess()
+        self.assertTrue(result.ready, describe(result))
+        bound = project.ledger.read_bytes()
+        authorization = land._authorization
+
+        def change(*args, **kwargs):
+            digest = authorization(*args, **kwargs)
+            project.ledger.write_bytes(bound.replace(FIRST.encode(), b"new required"))
+            return digest
+
+        with project.patched(), patch.object(land, "_authorization", side_effect=change):
+            pushed = land.push(project.repo, result, env=dict(project.env))
+        self.assertEqual((pushed.landed, pushed.code), (False, "OAH_LAND_GATES_SUMMARY_STALE"))
+        self.assertEqual(project.remote_main(), project.base)
+
     def test_the_command_lands_and_refuses_without_showing_names_or_writing_gate_files(self):
         project = DeferredProject(self)
         summary = project.repo / ".oah" / "tasks" / "t1" / "GATES.summary.md"
@@ -355,7 +391,8 @@ class LandTest(unittest.TestCase):
             path = root / folder / "GATES.md"
             path.parent.mkdir()
             path.write_text(LEDGER + row, encoding="utf-8")
-        found = land._deferred_gates(root, "t1", ["a/GATES.md", "b/GATES.md"])
+        found = land._deferred_gates(root, [(root / folder / "GATES.md", (root / folder / "GATES.md").read_bytes())
+                                            for folder in ("a", "b")])
         self.assertEqual([(item.gate, item.ledger, item.label, item.names) for item in found],
                          [("G2", 2, "b/GATES.md:G2", (FIRST, SECOND))])
         self.assertIn("gate position 1 G2 digest", land._deferred_text(found[0].entry(1), True))

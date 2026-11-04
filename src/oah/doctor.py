@@ -326,7 +326,9 @@ def _pin_lines(pin: Mapping | None) -> list[str]:
         return []
     lines = ["", "Reviewer pin (read from disk; oah doctor never runs the reviewer CLI):"]
     if pin["error"] is None:
-        lines.append(f"  codex entry: {pin['path']}")
+        path = "".join(ascii(char)[1:-1] if ord(char) < 32 or 127 <= ord(char) <= 159
+                       or char in "\u2028\u2029" else char for char in str(pin["path"]))
+        lines.append(f"  codex entry: {path}")
         lines.append(f"  sha256: {pin['sha256']} (the value for [review] codex_sha256)")
     else:
         lines.append(f"  the reviewer CLI file could not be read ({pin['error']}); install Codex or fix [engines.codex] "

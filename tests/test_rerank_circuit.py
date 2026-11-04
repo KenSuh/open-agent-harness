@@ -236,6 +236,66 @@ class CountTest(BreakerCase):
 
 
 class DailyLimitTest(BreakerCase):
+    def test_each_use_reserves_before_a_paused_provider_allows_another_writer(self):
+        self.config = jev(max_requests_per_day=1)
+        for name, use in self.uses():
+            with self.subTest(use=name):
+                self.write()
+                self.provider.calls.clear()
+                nested = []
+                request = self.provider._request
+
+                def paused(kind):
+                    request(kind)
+                    if not nested:
+                        nested.append("paused")
+                        nested.append(use())
+
+                with mock.patch.object(self.provider, "_request", side_effect=paused):
+                    self.assertEqual(use(), "used")
+                self.assertEqual(nested, ["paused", "unused(daily-limit)"])
+                self.assertEqual(len(self.provider.calls), 1)
+                self.assertEqual(self.saved()["requests"], 1)
+
+    def test_each_interrupted_request_keeps_its_daily_reservation(self):
+        self.config = jev(max_requests_per_day=1)
+        for name, use in self.uses():
+            with self.subTest(use=name):
+                self.write()
+                self.provider.calls.clear()
+                self.provider.errors = [KeyboardInterrupt()]
+                with self.assertRaises(KeyboardInterrupt):
+                    use()
+                self.assertEqual(self.saved()["requests"], 1)
+                self.assertEqual(use(), "unused(daily-limit)")
+                self.assertEqual(len(self.provider.calls), 1)
+
+    def test_a_preparation_with_a_daily_cap_still_reserves_its_request(self):
+        self.config = jev(max_requests_per_day=1)
+        self.assertEqual(self.advice(record_notice=False).status, "used")
+        self.assertEqual(self.saved()["requests"], 1)
+        self.assertEqual(self.advice(record_notice=False).status, "unused(daily-limit)")
+        self.assertEqual(self.provider.calls, ["advise"])
+        self.assertFalse((self.state / rerank.NOTICE_MARKER).exists())
+
+    def test_each_request_counts_on_its_dispatch_day_across_midnight(self):
+        self.config = jev(max_requests_per_day=1)
+        for name, use in self.uses():
+            with self.subTest(use=name):
+                self.write()
+                self.now = dt.datetime(2026, 11, 4, 23, 59, 59, tzinfo=dt.timezone.utc)
+                request = self.provider._request
+
+                def midnight(kind):
+                    request(kind)
+                    self.now = dt.datetime(2026, 11, 5, 0, 0, 1, tzinfo=dt.timezone.utc)
+
+                with mock.patch.object(self.provider, "_request", side_effect=midnight):
+                    self.assertEqual(use(), "used")
+                self.assertEqual((self.saved()["day"], self.saved()["requests"]), ("2026-11-04", 1))
+                self.assertEqual(use(), "used")
+                self.assertEqual((self.saved()["day"], self.saved()["requests"]), ("2026-11-05", 1))
+
     def test_the_limit_stops_requests_until_the_next_utc_day(self):
         self.config = jev(max_requests_per_day=3)
         self.provider.errors = [None, rerank.ProviderError("unauthorized"), None]
@@ -269,6 +329,58 @@ class DailyLimitTest(BreakerCase):
 
 
 class FileTest(BreakerCase):
+    def test_reading_an_oversized_file_is_bounded(self):
+        data = io.BytesIO(b"x" * (circuit.FILE_LIMIT + 2))
+        with mock.patch.object(pathlib.Path, "open", return_value=contextlib.nullcontext(data)), \
+                mock.patch.object(data, "read", wraps=data.read) as read:
+            self.assertEqual(circuit.read(self.path), (circuit.State(), False))
+        read.assert_called_once_with(circuit.FILE_LIMIT + 1)
+        self.state.mkdir(parents=True, exist_ok=True)
+        self.path.write_bytes(b"x" * (circuit.FILE_LIMIT + 2))
+        self.assertEqual(self.judge().status, "used")
+        self.assertEqual(circuit.read(self.path), (circuit.State(), True))
+
+    def test_a_paused_writer_holds_the_lock_through_read_advance_and_replace(self):
+        from oah.lockfile import StateLock
+
+        first = circuit.Breaker(self.state, circuit.Limits(failures=3))
+        second = circuit.Breaker(self.state, circuit.Limits(failures=3))
+        original = circuit.read
+        reads = []
+
+        def paused(path):
+            found = original(path)
+            reads.append(path)
+            if len(reads) == 1:
+                for _ in range(3):
+                    second.record("network")
+            return found
+
+        def lock(path, **kwargs):
+            return StateLock(path, timeout=0)
+
+        with mock.patch.object(circuit, "StateLock", side_effect=lock, create=True), \
+                mock.patch.object(circuit, "read", side_effect=paused):
+            first.record("timeout")
+        self.assertEqual(len(reads), 1, "contending writers cannot read and later overwrite stale state")
+        for _ in range(3):
+            second.record("network")
+        self.assertEqual(self.saved()["failures"], 4)
+        self.assertIsNotNone(self.saved()["open_until"])
+        first.record(None)
+        self.assertEqual(self.saved()["failures"], 4)
+        self.assertIsNotNone(self.saved()["open_until"], "a later writer must preserve the opened window")
+
+    def test_lock_contention_refuses_every_use_without_a_request(self):
+        from oah.lockfile import StateLock
+
+        with StateLock(self.state / "rerank-circuit.lock"), \
+                mock.patch.object(circuit, "LOCK_WAIT_SECONDS", 0, create=True):
+            for name, use in self.uses():
+                with self.subTest(use=name):
+                    self.assertEqual(use(), "unused(circuit-busy)")
+        self.assertEqual(self.provider.calls, [])
+
     def test_the_file_holds_only_counts_utc_times_and_kinds(self):
         self.config = jev(max_requests_per_day=50)
         self.provider.errors = [rerank.ProviderError("overloaded")] * 5
@@ -291,7 +403,7 @@ class FileTest(BreakerCase):
         self.assertEqual(pathlib.Path(target), self.path)
         self.assertEqual(pathlib.Path(source).parent, self.state)
         self.assertNotEqual(pathlib.Path(source).name, circuit.FILE_NAME)
-        self.assertEqual(sorted(path.name for path in self.state.iterdir()), [circuit.FILE_NAME])
+        self.assertEqual(sorted(path.name for path in self.state.iterdir()), [circuit.FILE_NAME, circuit.LOCK_NAME])
 
     def test_a_malformed_file_counts_as_closed_and_is_replaced_at_the_next_update(self):
         bad = ["{", "[]", "{}", json.dumps({"failures": -1, "last_failure": None, "open_until": None, "day": None,
@@ -576,7 +688,7 @@ class DoctorBreakerTest(unittest.TestCase):
 class WordListTest(unittest.TestCase):
     def test_models_export_keeps_the_new_statuses(self):
         for field in ("model_judge", "jev_status"):
-            for status in ("unused(circuit-open)", "unused(daily-limit)"):
+            for status in ("unused(circuit-open)", "unused(daily-limit)", "unused(circuit-busy)"):
                 with self.subTest(field=field, status=status):
                     record = dict(NEW, **{field: status})
                     if field == "jev_status":
@@ -586,7 +698,7 @@ class WordListTest(unittest.TestCase):
                     self.assertEqual(one(self, record)[field], status)
 
     def test_correction_records_keep_the_new_statuses(self):
-        for status in ("unused(circuit-open)", "unused(daily-limit)"):
+        for status in ("unused(circuit-open)", "unused(daily-limit)", "unused(circuit-busy)"):
             with self.subTest(status=status):
                 for field in ("jev_status", "model_judge"):
                     self.assertEqual(runs._correction_record({field: status}, runs.RESULT_FIELDS), {field: status})

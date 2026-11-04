@@ -330,6 +330,7 @@ class Assessment:
     _push_refusal: Check | None = dataclasses.field(default=None, init=False, repr=False)
     # Gates the passing gates check deferred to named CI check runs; the ci check closes them or refuses
     _deferred: tuple[_Deferred, ...] = dataclasses.field(default=(), init=False, repr=False)
+    _gate_snapshots: tuple[tuple[pathlib.Path, bytes], ...] = dataclasses.field(default=(), init=False, repr=False)
 
     def excepted(self, check: Check) -> bool:
         """Unverified CI that a CI exception for exactly this head lets land; never failed or pending CI."""
@@ -537,19 +538,15 @@ def _gate_tools(root: pathlib.Path, env: Mapping[str, str], home: pathlib.Path |
         return None, "gate tools could not be verified; install pinned unlazy and a supported node executable"
 
 
-def _deferred_gates(root: pathlib.Path, task: str, declared: Sequence[str]) -> tuple[_Deferred, ...]:
-    """The task's gates that their ledgers defer to named CI check runs, in ledger and gate order."""
-    from oah.gates import guard, parse_ledger
-    from oah.gates.check import GateRefused, ledger_key
+def _deferred_gates(root: pathlib.Path, snapshots: Sequence[tuple[pathlib.Path, bytes]]) -> tuple[_Deferred, ...]:
+    """Deferred requirements from the ledger bytes validated against HEAD, in ledger and gate order."""
+    from oah.gates import parse_text
+    from oah.gates.check import ledger_key
 
-    try:
-        ledgers = guard.resolve_ledgers(root, task, declared)
-    except GateRefused:
-        return ()
     found = []
-    for position, path in enumerate(ledgers, 1):
-        ledger = parse_ledger(path)
-        prefix = f"{ledger_key(root, path)}:" if len(ledgers) > 1 else ""
+    for position, (path, raw) in enumerate(snapshots, 1):
+        ledger = parse_text(raw.decode("utf-8", errors="replace"), path)
+        prefix = f"{ledger_key(root, path)}:" if len(snapshots) > 1 else ""
         found += [_Deferred(gate.id, position, ledger.deferred[gate.id], prefix + gate.id)
                   for gate in ledger.gates if gate.id in ledger.deferred]
     return tuple(found)
@@ -557,7 +554,7 @@ def _deferred_gates(root: pathlib.Path, task: str, declared: Sequence[str]) -> t
 
 def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, lease: evidence.TaskLease | None,
                  settings: Mapping, tools, tools_error: str, env: Mapping[str, str],
-                 deferred: Sequence[_Deferred] = ()) -> Check:
+                 snapshots: list[tuple[pathlib.Path, bytes]] | None = None) -> Check:
     from oah.gates import check as check_mod
     from oah.gates import guard
     from oah.gates.check import GateRefused
@@ -585,14 +582,13 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
     except (GateRefused, UnlazyError):
         return _failed("gates", "OAH_LAND_GATES_UNMET", f"the task's gates do not pass at HEAD; inspect the ledgers "
                        f"and run oah gates check <task>; once they pass, {retry}")
-    later = {item.label for item in deferred}
-    plain = [label for label in report.handoff if label not in later]
-    detail = {"outcome": report.outcome,
-              "handoff": [_gate_reference(label, position) for position, label in enumerate(plain, 1)]}
-    if deferred:
-        detail["deferred"] = [item.entry(position) for position, item in enumerate(deferred, 1)]
+    try:
+        contents = tuple((path, path.read_bytes()) for path in ledgers)
+    except OSError:
+        return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
+                       f"a checked ledger could not be read; restore it and run oah gates check <task>, {retry}")
     if settings["commit_ledgers"]:
-        for position, path in enumerate(ledgers, 1):
+        for position, (path, raw) in enumerate(contents, 1):
             key = check_mod.ledger_key(root, path)
             shown = _reference_text(_reference(key, position))
             committed = evidence.committed_bytes(root, head, key)
@@ -600,7 +596,7 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
                 return _failed("gates", "OAH_LAND_GATES_SUMMARY_MISSING",
                                f"ledger {shown} is not committed at HEAD ([gates] commit_ledgers = true), so its results "
                                f"are not bound to the commit that lands; commit it, get the head reviewed, {retry}")
-            if committed.replace(b"\r\n", b"\n") != path.read_bytes().replace(b"\r\n", b"\n"):
+            if committed.replace(b"\r\n", b"\n") != raw.replace(b"\r\n", b"\n"):
                 return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
                                f"ledger {shown} at HEAD differs from disk; commit the checked ledger, get the "
                                f"head reviewed, {retry}")
@@ -611,11 +607,23 @@ def _gates_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, 
             return _failed("gates", "OAH_LAND_GATES_SUMMARY_MISSING",
                            "the gate summary is not committed at HEAD, so the gate results are not bound to the "
                            f"commit that lands; run oah gates check <task>, commit the summary, get the head reviewed, {retry}")
-        if committed.decode("utf-8", errors="replace").replace("\r\n", "\n") != report.summary_text:
+        text = committed.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        digests = re.findall(r"^ledger: ([0-9a-f]{64})$", text, re.MULTILINE)
+        if (text != report.summary_text
+                or digests != [hashlib.sha256(raw).hexdigest() for _path, raw in contents]):
             return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
                            "the gate summary at HEAD does not match the current gate records; run oah gates check <task>, "
                            f"commit the gate summary, get the head reviewed, {retry}")
         bound = "the gate summary at HEAD matches the gate records"
+    deferred = _deferred_gates(root, contents)
+    later = {item.label for item in deferred}
+    plain = [label for label in report.handoff if label not in later]
+    detail = {"outcome": report.outcome,
+              "handoff": [_gate_reference(label, position) for position, label in enumerate(plain, 1)]}
+    if deferred:
+        detail["deferred"] = [item.entry(position) for position, item in enumerate(deferred, 1)]
+    if snapshots is not None:
+        snapshots.extend(contents)
     handoff = ("; abandoned (a handoff, not met): " + "; ".join(_reference_text(item) for item in detail["handoff"])
                if plain else "")
     if deferred:
@@ -1298,10 +1306,12 @@ def _assess(root, task, *, env, offline, home, git_context, accept_unverified_ci
     proposed_settings = land_settings(config)
     settings = dict(DEFAULTS)  # No fetched target means impact refuses; HEAD never supplies land policy.
     tools, tools_error = _gate_tools(root, env, home)
-    deferred = _deferred_gates(root, task, lease.gates if lease else ())
-    gates = _gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env, deferred)
+    snapshots = []
+    gates = _gates_check(root, state, task, head, lease, gate_settings, tools, tools_error, env, snapshots)
     result.checks.append(gates)
-    result._deferred = deferred if gates.state == PASSED else ()
+    if gates.state == PASSED:
+        result._gate_snapshots = tuple(snapshots)
+        result._deferred = _deferred_gates(root, snapshots)
     with _git_environment_scope(git_context.env):
         reassessed = _reassess(root, head, git_context.env, offline, git_context)
     result.remote, result.branch, result.warnings = reassessed.remote, reassessed.branch, reassessed.warnings
@@ -1425,9 +1435,13 @@ def _revalidate_local(root: pathlib.Path, assessment: Assessment, env: Mapping[s
         return checked
     settings = load_config(root).section("gates", GATE_DEFAULTS)
     tools, error = _gate_tools(root, env, None)
-    checked = _gates_check(root, state, task, head, lease, settings, tools, error, env)
+    snapshots = []
+    checked = _gates_check(root, state, task, head, lease, settings, tools, error, env, snapshots)
     if checked.state != PASSED:
         return checked
+    if tuple(snapshots) != assessment._gate_snapshots:
+        return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
+                       "the checked ledgers changed while awaiting confirmation; run oah land --merge again")
     if assessment.required:
         seen, unread = _evidence_by_definition(root, state, task, lease, settings, tools, error, env)
         current = Assessment(task, head)
@@ -1460,6 +1474,17 @@ def _revalidate_ci(root: pathlib.Path, assessment: Assessment, env: Mapping[str,
                        "CI results for HEAD changed while awaiting confirmation; read the fresh checks with oah land "
                        "--merge and confirm again")
     return None
+
+
+def _revalidate_gate_snapshots(assessment: Assessment) -> Check | None:
+    """Keep the CI requirements bound to the same ledger bytes until the push."""
+    try:
+        if all(path.read_bytes() == raw for path, raw in assessment._gate_snapshots):
+            return None
+    except OSError:
+        pass
+    return _failed("gates", "OAH_LAND_GATES_SUMMARY_STALE",
+                   "the checked ledgers changed after the CI check; run oah land --merge again")
 
 
 def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) -> Pushed:
@@ -1503,6 +1528,10 @@ def push(root: pathlib.Path, assessment: Assessment, *, env: Mapping[str, str]) 
                             "exception log and check state permissions and free space, then run oah land --merge again")
                         assessment._push_refusal = refusal
                         return Pushed(False, refusal.code, refusal.message)
+                refusal = _revalidate_gate_snapshots(assessment)
+                if refusal is not None:
+                    assessment._push_refusal = refusal
+                    return Pushed(False, refusal.code, refusal.message)
                 with _git_environment_scope(git_context.env):
                     pushed = _push_verified(root, assessment, env=git_context.env)
                 if pushed.landed and assessment.code == READY_WITH_CI_EXCEPTION:

@@ -190,6 +190,32 @@ class DoctorPinTest(unittest.TestCase):
         self.assertEqual(text.splitlines()[-1], "DOCTOR_OK")
         self.assertNotIn("Reviewer pin", render_text(statuses, "darwin"))
 
+    def test_entry_filenames_with_newline_or_escape_are_shown_on_one_safe_line(self):
+        from oah.doctor import python_status, render_text
+
+        for character, escaped in (("\n", r"\n"), ("\x1b", r"\x1b")):
+            with self.subTest(character=escaped):
+                self.entry = self.entry.parent / f"codex{character}forged.js"
+                try:
+                    self.entry.write_bytes(b"// reviewer\n")
+                except (OSError, ValueError):
+                    self.skipTest("the file system refuses control characters in file names")
+                write_config(self.repo, f"[engines.codex]\ncommand = "
+                             f"{json.dumps([sys.executable, str(self.entry)])}\n")
+                found = self.pin()
+                self.assertIsNone(found["error"])
+                text = render_text([python_status((3, 12, 0))], "darwin", reviewer_pin=found)
+                self.assertIn(f"  codex entry: {found['path'].replace(character, escaped)}\n", text)
+                self.assertNotIn(str(self.entry), text)
+                self.assertEqual(len([line for line in text.splitlines() if "codex entry:" in line]), 1)
+
+    def test_entry_display_escapes_all_diagnostic_control_characters(self):
+        from oah.doctor import _pin_lines
+
+        controls = "".join(chr(value) for value in (*range(32), *range(127, 160), 0x2028, 0x2029))
+        line = _pin_lines({"path": "entry" + controls, "sha256": "a" * 64, "error": None})[2]
+        self.assertEqual(line, "  codex entry: entry" + "".join(ascii(char)[1:-1] for char in controls))
+
     def test_a_missing_entry_is_reported_by_code(self):
         from oah.doctor import python_status, render_text
 

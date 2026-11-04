@@ -69,7 +69,8 @@
 | `OAH_AGENT_FILE_EDITED` | `oah doctor`의 알림이다. `.claude/agents/oah-<tier>.md` 파일이 `oah`가 만드는 내용과 달라서 그대로 두며, 그 모델은 더 이상 최신으로 유지하지 않는다. | 그대로 쓰거나, 지우고 `oah init --with-agents`를 실행해 `oah`가 다시 쓰게 한다. |
 | `OAH_AGENT_FILE_STALE` | `oah doctor`의 알림이다. `oah`가 만든 하위 에이전트 파일의 모델이나 추론 강도가 지금의 선택과 다르고, 이를 고칠 세션 시작 훅이 없다. | `oah hooks install session-start`로 훅을 설치하거나, 파일을 지우고 `oah init --with-agents`를 실행한다. |
 | `unused(circuit-open)` | Jev 상태다. Jev가 시간 초과, 네트워크 오류, HTTP 429, HTTP 529로 `circuit_failures`번(기본 5번) 잇달아 실패해서 `oah`가 `circuit_open_seconds`(기본 600초) 동안 Jev에게 묻지 않는다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | 할 일이 없다. 그 시간이 지나면 다음 사용에서 Jev에게 한 번 묻는다. 성공하면 차단기가 닫히고, 그런 실패가 또 나면 다시 열린다. 언제까지 열려 있는지는 `oah doctor`가 보여 준다. 숫자를 바꾸려면 `.oah/config.toml`의 `[rerank]`에 둔다. |
-| `unused(daily-limit)` | Jev 상태다. `[rerank] max_requests_per_day`를 정해 두었고 오늘(UTC 기준) Jev에게 그만큼 물었다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | UTC 기준 다음 날을 기다리거나 `max_requests_per_day`를 올린다(`0`은 제한 없음). 횟수는 `oah doctor`가 보여 준다. |
+| `unused(daily-limit)` | Jev 상태다. `[rerank] max_requests_per_day`를 정해 두었고 오늘(UTC 기준) 요청을 보내기 전에 그만큼 예약했다. 실패하거나 중단된 요청도 횟수에 들어가며, 자정을 넘겨 끝나도 보낸 날의 횟수로 남는다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | UTC 기준 다음 날을 기다리거나 `max_requests_per_day`를 올린다(`0`은 제한 없음). 횟수는 `oah doctor`가 보여 준다. |
+| `unused(circuit-busy)` | Jev 상태다. 다른 프로세스가 1초의 대기 시간 동안 차단기 잠금을 잡고 있거나 하루 요청 예약을 기록할 수 없었다. 요청을 보내지 않고 Jev가 없을 때처럼 규칙대로 정한다. | 다른 명령이 끝난 뒤 다시 시도한다. 하루 상한을 정해 두었는데 계속 발생하면 상태 폴더에 쓸 수 있는지 확인한다. |
 
 ## 리스
 

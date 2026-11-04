@@ -182,14 +182,20 @@ This ships in v0.3.0.
   use asks once. A success closes the breaker, and another such failure opens it again for a whole window. Other
   outcomes, such as HTTP 401, a bad answer or an answer below the confidence threshold, leave the count alone.
   `[rerank] max_requests_per_day` (`0`, the default, means no cap) limits the requests sent in one UTC day, whatever
-  their outcome, and once it is reached each use reports `unused(daily-limit)` until the next UTC day. The file holds
+  their outcome. Each request reserves one unit before dispatch, on that UTC day; a failure or interruption still
+  uses that unit, even if it finishes after midnight. Once the cap is reached each use reports `unused(daily-limit)`
+  until the next UTC day. A short cross-process lock protects each reservation and each failure-count update, so
+  racing writers do not lose counts; it is released before asking the provider. If another process holds the lock
+  for one second, the use reports `unused(circuit-busy)` without a request and the rules decide. When a cap is set,
+  an unavailable reservation file also skips the request with that status. The file holds
   counts, UTC times and failure-kind names, nothing else. `oah doctor` reads it without a request and shows whether
   the breaker is closed, open until a UTC time, or at the daily limit. A value that is not a whole number, or is
   below 1 (below 0 for the cap), refuses with `OAH_CONFIG_INVALID`, naming the key. The costs: while the breaker is
   open, calls use the rule results even if TypeSafe recovered sooner, and after the cap they do for the rest of the
-  UTC day; two `oah` processes failing at the same moment can lose one count; and `oah fix` reads the file only for
-  its difficulty question and never writes it, so a correction's other Jev requests are sent even while the breaker
-  is open, and none of its requests are counted.
+  UTC day. A request can wait up to one second for the lock. `oah fix` reads the file only for its difficulty
+  question and does not record its outcome, but that question still reserves a unit when a daily cap is set.
+  A correction's other Jev requests have no state folder, so they are sent even while the breaker is open and are
+  not counted.
 - **Design and packets.** Design and packet work comes before an Intent, so `oah call` cannot judge it. The lead session
   runs `oah recommend --kind design --task <task> --request-file <file>` with the user's request (and `--scope <path>`
   for paths it already knows), then sends the work to the `oah-<tier>` subagent of the tier it prints. Design never runs
