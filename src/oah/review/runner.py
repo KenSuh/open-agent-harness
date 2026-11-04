@@ -8,7 +8,9 @@ an explicit `--base`; a review stage other than Codex; a busy series or task; di
 an impact map that cannot be refreshed (`OAH_IMPACT_STALE`); the series gate (`rounds.gate`);
 a reviewer CLI that does not match
 `[review] codex_sha256` (the resolved CLI entry file: for an npm install that is the JavaScript launcher, not the
-native program it starts).
+native program it starts); a reviewer CLI whose `--version` first line differs from `[review] codex_version`
+(`OAH_REVIEW_VERSION_MISMATCH`: one `--version` run in the reviewer environment, without a shell, for at most
+10 seconds, and only when that setting is not empty).
 
 Reviewer policy (`[stages]`, `[engines]`, `[models]` and `[review]`) comes from `.oah/config.toml` at the base
 (`config_at`). The task's max_rounds budget is the strictest of the worktree config's limit and the limits in
@@ -34,12 +36,14 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 from typing import Callable, Mapping, Sequence
 
 from oah import call, call_cli, models, preflight, runs
 from oah import intent as oah_intent
 from oah.config import Config, load_config, parse_config
 from oah.engines.effort import DOWNGRADED, MISMATCH
+from oah.engines.proc import UnsupportedBatchShim, run_command
 from oah.lease import Store
 from oah.lockfile import LockTimeout, StateLock
 from oah.paths import repo_info, run_git, state_dir
@@ -56,6 +60,10 @@ KEEP_ENV = ("PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "CODEX_HOME"
             "NODE_EXTRA_CA_CERTS")
 OUTCOME_CODES = {"converged": "OAH_REVIEW_CONVERGED", "changes-requested": "OAH_REVIEW_CHANGES_REQUESTED",
                  "needs-decision": rounds.NEEDS_DECISION}
+VERSION_MISMATCH_CODE = "OAH_REVIEW_VERSION_MISMATCH"
+VERSION_TIMEOUT = 10.0
+# The only `--version` lines a message repeats; anything else is reported as unreadable.
+VERSION_LINE = re.compile(r"codex-cli \d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.-]+)?")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -155,6 +163,15 @@ def _reviewer_entry(base: Sequence[str]) -> int:
     return 1 if len(base) > 1 and (name in INTERPRETERS or name.startswith("python3")) else 0
 
 
+def reviewer_command(command: Sequence[str], search_path: str | None = None) -> list[str]:
+    """The argv prefix `oah review` runs for `[engines.codex] command`: found on PATH, with its program and its
+    entry file (the script after an interpreter) made absolute."""
+    base = models.resolve_base(ENGINE, command, search_path)
+    for index in {0, _reviewer_entry(base)}:
+        base[index] = os.path.abspath(base[index])
+    return base
+
+
 def reviewer_binary(base: Sequence[str]) -> tuple[str, str]:
     """(resolved path, sha256) of the reviewer CLI file: the script after an interpreter, else the program."""
     entry = base[_reviewer_entry(base)]
@@ -167,6 +184,33 @@ def reviewer_binary(base: Sequence[str]) -> tuple[str, str]:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return path, digest.hexdigest()
+
+
+def _version_line(base: Sequence[str], env: Mapping[str, str]) -> str | None:
+    """The first non-empty line of `<reviewer> --version`, stripped; None when it cannot be read."""
+    try:
+        result = run_command([*base, "--version"], timeout=VERSION_TIMEOUT, env=env)
+    except (OSError, UnsupportedBatchShim):
+        return None
+    if result.timed_out or result.returncode != 0:
+        return None
+    return next((line.strip() for line in result.stdout.splitlines() if line.strip()), None)
+
+
+def check_version(base: Sequence[str], pinned: str, env: Mapping[str, str]) -> None:
+    """Refuse unless the reviewer CLI's `--version` first line equals `[review] codex_version`."""
+    observed = _version_line(base, env)
+    if observed == pinned:
+        return
+    pin = f"pins {pinned}" if VERSION_LINE.fullmatch(pinned) else "pins another value"
+    if observed is not None and VERSION_LINE.fullmatch(observed):
+        found, update = f"reports {observed}", f'set codex_version = "{observed}"'
+    else:
+        found = "gave --version output that could not be read"
+        update = "set codex_version to the first line of codex --version"
+    raise ReviewError(VERSION_MISMATCH_CODE, f"the reviewer CLI {found}, but [review] codex_version {pin}; nothing "
+                      f"was launched. If you updated Codex on purpose, {update}; otherwise reinstall Codex from its "
+                      "official source")
 
 
 def _lease(state: pathlib.Path, task: str):
@@ -371,9 +415,7 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         warnings.append("OAH_REVIEW_EXTRA_ROUND_UNUSED: this task is below [review] max_rounds, so --extra-round "
                         "changed nothing")
     decision = request.decision or rounds.round_decision(s)
-    command = models.resolve_base(ENGINE, call_settings.engines[ENGINE]["command"])
-    for index in {0, _reviewer_entry(command)}:
-        command[index] = os.path.abspath(command[index])
+    command = reviewer_command(call_settings.engines[ENGINE]["command"])
     cli_path, cli_sha = reviewer_binary(command)
     call_settings = dataclasses.replace(call_settings, engines={
         **call_settings.engines, ENGINE: {**call_settings.engines[ENGINE], "command": command}})
@@ -382,6 +424,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                           f"[review] codex_sha256 pins {conf.codex_sha256}; nothing was launched. If you updated "
                           "Codex on purpose, set codex_sha256 to the new value; otherwise reinstall Codex from its "
                           "official source")
+    if conf.codex_version:
+        check_version(command, conf.codex_version, launch_env)
     commits = authors.commit_engines(root, span.base, span.head)
     engines = [engine for _sha, engine in commits]
     changed = context.changed_files(root, span.base, span.head)

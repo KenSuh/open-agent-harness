@@ -28,6 +28,11 @@ extra_rules = []
 enabled = false
 provider = ""               # "typesafe" for TypeSafe Jev
 timeout_seconds = 10.0
+# After this many timeout, network, 429 or 529 failures in a row, Jev is not asked for
+# circuit_open_seconds; after that, one request decides whether it is asked again.
+circuit_failures = 5
+circuit_open_seconds = 600
+max_requests_per_day = 0    # Jev requests per UTC day; 0 means no limit
 
 [rerank.typesafe]
 model = "jev-latest"

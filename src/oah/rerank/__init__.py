@@ -9,8 +9,13 @@ A provider runs only when every gate passes, checked in this order:
 1. `unused(disabled-by-brief)`: the caller passed `brief_disabled=True` (`--no-rerank`, or the packet);
 2. `unused(not-enabled)`: `[rerank] enabled` is not `true` (the default is off);
 3. `unused(not-configured)`: `[rerank] provider` is empty; `unused(unknown-provider)` names none known;
-4. `unused(no key)`: `oah.secrets.get(<the provider's key name>)` found nothing.
-A key alone never enables a provider. A provider failure reports `unused(error:<code>)`.
+4. `unused(no key)`: `oah.secrets.get(<the provider's key name>)` found nothing;
+5. `unused(circuit-open)` or `unused(daily-limit)`: given a state folder (`state_dir`), the breaker in
+   `oah.rerank.circuit` is open after repeated timeout, network, 429 or 529 failures, or this UTC day's
+   `[rerank] max_requests_per_day` is used up. Every use that sends a request records its outcome there.
+A key alone never enables a provider. A provider failure reports `unused(error:<code>)`. A bad breaker key
+(`circuit_failures`, `circuit_open_seconds`, `max_requests_per_day`) refuses with `OAH_CONFIG_INVALID` before
+the gate, as does `min_confidence`.
 
 A provider only scores or advises. `rerank` builds the order itself, so the result is always a
 permutation of the input: no row is dropped, added or duplicated. Rows beyond `max_candidates` are
@@ -47,6 +52,7 @@ from typing import Callable, Mapping, Sequence
 from oah import routing, secrets
 from oah.config import ConfigError, load_config
 from oah.intent import END as INTENT_END
+from oah.rerank import circuit
 from oah.rerank.base import (BAD_RESPONSE, KEY_NAME, TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
                              _classify_failure, _raise_if_interrupted)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, WORK_LIMIT, TypeSafeProvider
@@ -62,6 +68,7 @@ DEFAULTS = {
     "timeout_seconds": 10.0,
     "max_candidates": 50,
     "difficulty_min_confidence": 0.6,
+    **circuit.DEFAULTS,  # circuit_failures 5, circuit_open_seconds 600, max_requests_per_day 0 (off)
     "typesafe": {
         "url": DEFAULT_URL,
         "model": DEFAULT_MODEL,
@@ -190,12 +197,24 @@ def _print_notice(text: str) -> None:
 
 
 def min_confidence(config: Mapping) -> float:
-    """`[rerank] difficulty_min_confidence`: Jev's tier counts only at or above it."""
+    """`[rerank] difficulty_min_confidence`: Jev's tier counts only at or above it.
+
+    It checks the breaker keys too, so a caller that reads the threshold before sending refuses a bad `[rerank]`
+    table before any request."""
     value = config.get("difficulty_min_confidence", DEFAULTS["difficulty_min_confidence"])
     if type(value) not in (int, float) or not 0 <= value <= 1 or not math.isfinite(value):
         raise ConfigError("OAH_CONFIG_INVALID", f".oah/config.toml: rerank.difficulty_min_confidence = {value!r} must be "
                           "a number from 0 to 1, such as 0.6; change it, or remove it to use the default 0.6")
+    circuit.limits(config)
     return float(value)
+
+
+def _below_threshold(confidence: float | None, config: Mapping) -> bool:
+    """Whether `decide` leaves an answer with this confidence unused; an unreadable threshold counts as none."""
+    try:
+        return confidence is None or confidence < min_confidence(config)
+    except ConfigError:
+        return confidence is None
 
 
 @dataclass(frozen=True)
@@ -372,13 +391,17 @@ def _valid_pair(answer: object) -> tuple[str, str, float | None]:
 def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query: str = "",
            brief_disabled: bool = False, env: Mapping[str, str] | None = None,
            keychain: secrets.Keychain | None = None,
-           providers: Mapping[str, Provider] | None = None) -> RerankResult:
-    """Re-order candidates when the user enabled a provider and its key exists; else keep the order."""
+           providers: Mapping[str, Provider] | None = None,
+           state_dir: pathlib.Path | None = None) -> RerankResult:
+    """Re-order candidates when the user enabled a provider and its key exists; else keep the order.
+
+    With `state_dir`, the breaker there can stop the request and records its outcome."""
     provider = key = failure = None
     try:
         items = tuple(candidates)
         if len({item.name for item in items}) != len(items):
             raise ValueError("rerank candidates need unique names")
+        breaker = circuit.Breaker(state_dir, circuit.limits(config))
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
                                       providers=providers)
         env = keychain = providers = None
@@ -387,13 +410,20 @@ def rerank(kind: str, candidates: Sequence[Candidate], *, config: Mapping, query
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return RerankResult(items, status)
+        blocked = breaker.refusal()
+        if blocked is not None:
+            return RerankResult(items, unused(blocked), provider_name)
         if not items:
             return RerankResult(items, unused("no-candidates"), provider_name)
         limit = config.get("max_candidates")
         limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(items)
         sent, rest = items[:limit], items[limit:]
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return RerankResult(items, unused(blocked), provider_name)
         scores, status = _call(lambda: _valid_scores(
             provider.score(kind, query, sent, key=key, config=config), len(sent)))
+        breaker.record(circuit.outcome(status))
         if status != USED:
             return RerankResult(items, status, provider_name)
         ranked = sorted(range(len(sent)), key=lambda index: -scores[index])
@@ -419,7 +449,8 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
     Omitted config loads root's [rerank] section for `oah call`; without root it uses disabled defaults. A plain
     string is sent as written, under the same limit and checks. With `state_dir`, the first request of the project
     prints `SCOPE_NOTICE` through `notify` (stderr by default) and, unless `record_notice` is false, records that it
-    was shown.
+    was shown; the breaker there can stop the request and, unless `record_notice` is false, records its outcome
+    (an answer below `difficulty_min_confidence` leaves the count alone).
     """
     provider = key = answer = confidence = failure = None
     try:
@@ -432,6 +463,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
         implicit_config = config is None
         if implicit_config:
             config = load_config(root).section("rerank", DEFAULTS) if root is not None else DEFAULTS
+        breaker = circuit.Breaker(state_dir, circuit.limits(config), write=record_notice)
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
                                       providers=providers)
         env = keychain = providers = None
@@ -442,10 +474,16 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return Advice(rule_tier, None, None, status, truncated=work.truncated)
+        blocked = breaker.refusal()
+        if blocked is not None:
+            return Advice(rule_tier, None, None, unused(blocked), provider_name, work.truncated)
         if not work.text.strip():
             return Advice(rule_tier, None, None, unused("no-text"), provider_name)
         if work.secret is not None:
             return Advice(rule_tier, None, None, unused("secret"), provider_name, work.truncated, work.secret)
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return Advice(rule_tier, None, None, unused(blocked), provider_name, work.truncated)
         shown = state_dir is None or _notice_shown(pathlib.Path(state_dir))
         if not shown:
             (notify or _print_notice)(SCOPE_NOTICE)
@@ -454,6 +492,7 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
         finally:
             if not shown and record_notice:
                 _record_notice(pathlib.Path(state_dir))
+        breaker.record(circuit.outcome(status, below_threshold=status == USED and _below_threshold(answer[1], config)))
         if status != USED:
             return Advice(rule_tier, None, None, status, provider_name, work.truncated)
         tier, confidence = answer
@@ -470,14 +509,18 @@ def advise_difficulty(axes: Mapping[str, str] | routing.Axes, work: Work | str, 
 def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, str]], *, config: Mapping,
                 brief_disabled: bool = False, env: Mapping[str, str] | None = None,
                 keychain: secrets.Keychain | None = None,
-                providers: Mapping[str, Provider] | None = None) -> ModelJudgement:
-    """One (model, effort) proposal from the provider, for the caller to validate against its rules."""
+                providers: Mapping[str, Provider] | None = None,
+                state_dir: pathlib.Path | None = None) -> ModelJudgement:
+    """One (model, effort) proposal from the provider, for the caller to validate against its rules.
+
+    With `state_dir`, the breaker there can stop the request and records its outcome."""
     provider = key = answer = failure = None
     try:
         axes = request.get("axes") if isinstance(request.get("axes"), Mapping) else {}
         sent = {"stage": str(request.get("stage", "")), "tier": str(request.get("tier", "")),
                 "axes": {name: str(axes[name]) for name in AXES if name in axes}}
         pairs = tuple((str(model), str(effort)) for model, effort in candidates)
+        breaker = circuit.Breaker(state_dir, circuit.limits(config))
         provider, key, status = _gate(config, brief_disabled=brief_disabled, env=env, keychain=keychain,
                                       providers=providers)
         env = keychain = providers = None
@@ -486,6 +529,9 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
         provider_name, status = _call(lambda: _valid_text(provider.name))
         if status != USED:
             return ModelJudgement(status)
+        blocked = breaker.refusal()
+        if blocked is not None:
+            return ModelJudgement(unused(blocked), None, provider_name)
         limit = config.get("max_candidates")
         limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else len(pairs)
         if not pairs:
@@ -494,7 +540,11 @@ def judge_model(request: Mapping[str, object], candidates: Sequence[tuple[str, s
             return ModelJudgement(unused("one-candidate"), None, provider_name)
         if len(pairs) > limit:
             return ModelJudgement(unused("too-many-candidates"), None, provider_name)
+        blocked = breaker.reserve()
+        if blocked is not None:
+            return ModelJudgement(unused(blocked), None, provider_name)
         answer, status = _call(lambda: _valid_pair(provider.choose_model(sent, pairs, key=key, config=config)))
+        breaker.record(circuit.outcome(status))
         if status != USED:
             return ModelJudgement(status, None, provider_name)
         return ModelJudgement(USED, answer[:2], provider_name, answer[2])

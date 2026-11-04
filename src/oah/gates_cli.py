@@ -16,7 +16,7 @@ from oah.gates import guard
 from oah.gates.summary import SummaryRejected
 from oah.gates.bindings import BindingStore
 from oah.gates.context import DEFAULTS, GateTools, default_ledger, find_tools
-from oah.gates.ledger import parse_ledger
+from oah.gates.ledger import Ledger, parse_ledger
 from oah.gates.status import STRUCTURAL_LABEL, ledger_status, structural_status
 from oah.journal import PendingTransaction
 from oah.lease import TASK_RE, Store
@@ -95,17 +95,30 @@ def _new(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools]
     return EXIT_OK
 
 
+def _deferred(ledger: Ledger) -> None:
+    """One line per gate the ledger defers to named CI check runs; the names themselves are not printed."""
+    for gate in () if ledger.errors else ledger.gates:
+        count = len(ledger.deferred.get(gate.id, ()))
+        if count:
+            runs = "its named check run" if count == 1 else f"all {count} named check runs"
+            print(f"OAH_GATE_DEFERRED {gate.id} checks={count}: deferred to CI; oah land closes it only when {runs} "
+                  "succeeded at the exact HEAD")
+
+
 def _status(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateTools], settings: dict) -> int:
     ledger = _ledger(args, info)
     _require_ledger(ledger, args.task)
     tools = find()
     if not tools.available:
-        status = structural_status(parse_ledger(ledger))
+        parsed = parse_ledger(ledger)
+        status = structural_status(parsed)
         print(f"STRUCTURAL ONLY: {tools.reason}. Without unlazy oah can only read the boxes.")
         for gate_id, state in status.states:
             print(f"  {gate_id} {state}")
         for error in status.errors:
             print(f"  INVALID {error}")
+        if status.verdict != "invalid":
+            _deferred(parsed)
         print(f"OAH_GATES_STATUS verdict={status.verdict} source=structural ({STRUCTURAL_LABEL})")
         return EXIT_OK if status.verdict == "met" else EXIT_REFUSED
     status = ledger_status(ledger, unlazy=tools.unlazy_dir, node=tools.node, root=info.root)
@@ -117,6 +130,8 @@ def _status(args: argparse.Namespace, info: RepoInfo, find: Callable[[], GateToo
                                 env_names=settings["input_env"]) if status.verdict != "invalid" else {}
     for gate_id, binding in fresh.items():
         print(f"OAH_GATE {gate_id} binding={binding}")
+    if status.verdict != "invalid":
+        _deferred(parse_ledger(ledger))
     stale = [gate_id for gate_id, binding in fresh.items() if binding in ("stale", "missing")]
     bindings = "fresh" if not stale else "stale"
     print(f"OAH_GATES_STATUS verdict={status.verdict} source=unlazy bindings={bindings}")

@@ -632,17 +632,19 @@ def home_of(env: Mapping[str, str]) -> pathlib.Path:
 
 
 def rerank_skills(selection: Selection, *, config: Mapping, query: str, brief_disabled: bool = False,
-                  env: Mapping[str, str] | None = None, keychain=None, providers=None) -> tuple[Selection, str]:
+                  env: Mapping[str, str] | None = None, keychain=None, providers=None,
+                  state_dir: pathlib.Path | None = None) -> tuple[Selection, str]:
     """The selection in the re-ranker's order, and `used` or `unused(<reason>)`.
 
     The re-ranker may only re-order: a result that is not the same set of skills keeps the rule order and
-    reports `unused(error:dropped)`. Only skill ids and their reasons are sent to an enabled provider."""
+    reports `unused(error:dropped)`. Only skill ids and their reasons are sent to an enabled provider. With
+    `state_dir`, the re-ranker's breaker there applies (`oah.rerank.circuit`)."""
     from oah import rerank
 
     candidates = [rerank.Candidate(skill.id, "; ".join(skill.reasons)) for skill in selection.skills]
     try:
         result = rerank.rerank("skills", candidates, config=config, query=query, brief_disabled=brief_disabled,
-                               env=env, keychain=keychain, providers=providers)
+                               env=env, keychain=keychain, providers=providers, state_dir=state_dir)
     except rerank.ProviderError as exc:
         return selection, f"unused(error:{exc.code})"
     names = [candidate.name for candidate in result.order]
@@ -669,4 +671,5 @@ def choose(root: pathlib.Path, *, kind: str, stage: str, risk: str, scope: Seque
                        repo_root=root, now=now)
     config = load_config(root).section("rerank", rerank.DEFAULTS)
     return rerank_skills(selection, config=config, query=f"kind={kind} stage={stage} risk={risk}",
-                         brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers)
+                         brief_disabled=brief_disabled, env=env, keychain=keychain, providers=providers,
+                         state_dir=state_dir)

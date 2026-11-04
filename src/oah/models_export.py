@@ -36,7 +36,8 @@ MODES = ("ranked", "pools", "scored", "deterministic")
 # call.py and rerank/__init__.py write these non-error reasons.
 UNUSED_REASONS = {"not-configured", "not-enabled", "tier-given", "no status", "secret", "pinned",
                   "floor-unresolved", "no-pool-for-tier", "disabled-by-brief", "unknown-provider", "no key",
-                  "no-text", "no-candidates", "one-candidate", "too-many-candidates"}
+                  "no-text", "no-candidates", "one-candidate", "too-many-candidates", "circuit-open", "daily-limit",
+                  "circuit-busy"}
 EFFORTS = frozenset((*effort_rules.ORDINARY, *effort_rules.BEHAVIOUR_CHANGING, effort_rules.HIGHEST))
 AXES = {"kind": routing.KIND_SCORES, "intensity": routing.INTENSITY_SCORES,
         "reasoning": routing.REASONING_SCORES, "risk": routing.RISK_SCORES}

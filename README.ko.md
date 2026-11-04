@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="https://oah.rodeo/ko/"><img src="docs/assets/badge-website.svg" alt="웹사이트: oah.rodeo"></a>
   <a href="../../actions/workflows/ci.yml"><img src="../../actions/workflows/ci.yml/badge.svg?event=pull_request" alt="CI status"></a>
   <a href="LICENSE"><img src="docs/assets/badge-license.svg" alt="License: MIT"></a>
   <img src="docs/assets/badge-macos.svg" alt="macOS 13+">

@@ -8,6 +8,9 @@
 - `codex_sha256`: pin the reviewer CLI file's sha256 (`sha256:` prefix optional). Empty means not pinned. The
   pinned file is the resolved CLI entry: for an npm install that is the JavaScript launcher, not the native
   program it starts.
+- `codex_version`: pin the first line of the reviewer CLI's `--version` output, such as `codex-cli 0.163.0`.
+  Empty means not pinned, and then no `--version` process runs for it. One line of text, without control
+  characters.
 - `critical_paths`: globs whose changes the prompt (and `oah review summary`) call out. The defaults include
   `.oah/config.toml`, because it configures the review itself.
 
@@ -28,6 +31,7 @@ DEFAULTS: dict[str, object] = {
     "max_rounds": None,
     "round_attempts": 2,
     "codex_sha256": "",
+    "codex_version": "",
     "critical_paths": [".github/workflows/**", "**/AGENTS.md", "**/AGENTS.override.md", "**/CLAUDE.md",
                        "**/CLAUDE.local.md", "**/.claude/**", "**/.codex/**", "**/.agents/**", "**/migrations/**",
                        ".oah/config.toml"],
@@ -41,6 +45,7 @@ class ReviewSettings:
     round_attempts: int
     codex_sha256: str | None
     critical_paths: tuple[str, ...]
+    codex_version: str | None = None
 
 
 def _count(value: object) -> bool:
@@ -77,11 +82,15 @@ def from_section(section: Mapping[str, object], where: str = ".oah/config.toml")
     pin = pin.strip().lower().removeprefix("sha256:")
     if pin and not _HEX.fullmatch(pin):
         raise invalid("codex_sha256", "the 64 hex digits of the reviewer CLI's sha256, or empty")
+    version = section["codex_version"]
+    if not isinstance(version, str) or not version.isprintable():
+        raise invalid("codex_version", 'one line of text, the first line of codex --version (such as '
+                      '"codex-cli 0.163.0"), or empty')
     paths = section["critical_paths"]
     if not isinstance(paths, (list, tuple)) or not all(isinstance(item, str) and item for item in paths):
         raise invalid("critical_paths", "an array of glob strings")
     return ReviewSettings(max_rounds=rounds, round_attempts=section["round_attempts"], codex_sha256=pin or None,
-                          critical_paths=tuple(paths))
+                          critical_paths=tuple(paths), codex_version=version.strip() or None)
 
 
 def from_config(config: Config) -> ReviewSettings:
