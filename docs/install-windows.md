@@ -19,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File .\install\install.ps1
 `-ExecutionPolicy Bypass` applies to this one run only; no system setting changes. If you prefer,
 run `Unblock-File .\install\install.ps1` once and then start it under your normal policy.
 
-**From the v0.2.0 release.** Open the repository’s release page and download the source archive of
+**From the v0.3.0 release.** Open the repository’s release page and download the source archive of
 that tag and its `SHA256SUMS` file. Use the exact archive named in `SHA256SUMS`; do not substitute a
 different archive format. No clone is needed, but git is still one of oah’s required tools.
 

@@ -149,8 +149,8 @@ above a confidence you can set, and never below the floor.
 ### Jev judges difficulty
 
 The rules score the axes from the Scope alone, so a one-line concurrency fix can score low and a 20-file rename high.
-With TypeSafe Jev on (`[rerank] enabled = true` and a key), `oah` asks Jev how hard the task really is. This is on
-`main` and not in a release yet.
+With TypeSafe Jev on (`[rerank] enabled = true` and a key), `oah` asks Jev how hard the task really is.
+This ships in v0.3.0.
 
 - **What Jev receives.** The four axes, then a work text: the five parts of the task's accepted Intent (Problem,
   Desired outcome, Success conditions, Constraints and Non-goals, with their headings), then the Scope paths, one per
@@ -195,7 +195,7 @@ charge for each request.
 
 ### How a model is chosen
 
-This is on `main` and not in a release yet. Which engine does a stage stays as `[stages]` says. This picks the model
+This ships in v0.3.0. Which engine does a stage stays as `[stages]` says. This picks the model
 inside the engine, for every call, worker, correction and review, and takes the first of these that applies:
 
 1. A model you pinned for the tier: `[engines.<engine>.tiers] <tier> = { model = "<model>" }` in `.oah/config.toml`.
@@ -321,7 +321,7 @@ worker output or environment value. Every null that is not the record's own is e
 that could not be read, with the reason: a wrong type or an unknown value, `inconsistent` for a value that contradicts
 its status or belongs to a feature the record holds only in part, and `{"record": "<reason>"}` when the whole run
 folder could not be read, which still gets its line. `not_recorded` names a field the record was written before: older
-runs lack the newer fields (v0.1.0 has no model judge, v0.2.0 no Jev difficulty, and only this version records the
+runs lack the newer fields (v0.1.0 has no model judge, v0.2.0 no Jev difficulty, and v0.3.0 adds records of the
 judge's confidence and the floor flag). A value a correction record hashed stays hashed, is named in `hashed`, and is
 never reversed or matched to a name. `jev_status` keeps only its word, such as `below-threshold` without the number.
 Like the report it calls no provider, reaches no network, starts no process once the repository is found, and writes
@@ -556,7 +556,7 @@ How to run each update is on the [Upgrade](upgrade.md) page.
 ### Tool updates after the work finishes
 
 Newer models reach you only when Claude Code and Codex themselves are current, so `oah` can keep the tools up to
-date too. This describes `main`, which is not in a release yet. It is on only when `.oah/config.toml` says
+date too. This ships in v0.3.0. It is on only when `.oah/config.toml` says
 `after_finish = true` under `[updates]`. `oah init` asks once (Yes is recommended), and a config without the key
 counts as off.
 

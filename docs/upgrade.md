@@ -119,7 +119,9 @@ The [Toolkit](toolkit.md) page lists each server with its source and license.
 
 ## 6. Models
 
-Models follow updates without edits. This describes `main`, which is not in a release yet.
+When upgrading from v0.2.0 to v0.3.0, automatic model choice switches to benchmark scores and Jev can judge
+difficulty. This release also adds model-choice reports and exports, and opt-in tool updates, described below.
+Models follow updates without edits.
 
 - Benchmark scores, the task's difficulty and `[models] profile` pick each automatic model for Claude and Codex.
   [How a model is chosen](concepts.md#how-a-model-is-chosen) has the rule.
@@ -191,7 +193,7 @@ redirect stdout to keep the lines. Like the report, it does not show whether Jev
 ### Claude Code, Codex and Claude Code plugins
 
 `oah` can now keep the tools themselves current, so newer models reach you without you remembering to update. This
-describes `main`, which is not in a release yet.
+ships in v0.3.0.
 
 - Existing projects stay as they were. A `.oah/config.toml` without `after_finish` under `[updates]` counts as off,
   `oah init` does not rewrite it, and `oah doctor` mentions the setting once. To turn it on, add:

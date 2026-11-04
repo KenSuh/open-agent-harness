@@ -36,7 +36,7 @@ cannot point at a code that is gone.
 
 ## Models
 
-These appear on `main`, which is not in a release yet. [How a model is chosen](concepts.md#how-a-model-is-chosen) has the
+These appear in v0.3.0. [How a model is chosen](concepts.md#how-a-model-is-chosen) has the
 rule, and `oah models` shows each model's score and why a model was left out.
 
 | Code | What it means | What to do next |
@@ -58,7 +58,7 @@ rule, and `oah models` shows each model's score and why a model was left out.
 
 ## Jev and difficulty
 
-These appear on `main`, which is not in a release yet. [Jev judges difficulty](concepts.md#jev-judges-difficulty) says what
+These appear in v0.3.0. [Jev judges difficulty](concepts.md#jev-judges-difficulty) says what
 Jev receives and when its tier counts.
 
 | Code | What it means | What to do next |
@@ -150,7 +150,7 @@ Jev receives and when its tier counts.
 
 ## Tool updates
 
-These appear on `main`, which is not in a release yet.
+These appear in v0.3.0.
 [Tool updates after the work finishes](concepts.md#tool-updates-after-the-work-finishes) explains the pass.
 
 | Code | What it means | What to do next |
