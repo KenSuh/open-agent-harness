@@ -210,13 +210,14 @@ class WriteResult:
     page: str | None = None
     current: int | None = None  # for applied: the design's current revision, when that is another one
 
-    WORDS = {"registered": "PROJECT_ADDED", "present": "PROJECT_PRESENT", "renamed": "PROJECT_RENAMED",
-             "unchanged": "UNCHANGED", "created": "CREATED", "saved": "SAVED", "applied": "APPLIED",
-             "accepted": "ACCEPTED", "already-accepted": "ACCEPTED"}
+    LINE_CODES = {"registered": "OAH_DESIGN_PROJECT_ADDED", "present": "OAH_DESIGN_PROJECT_PRESENT",
+                  "renamed": "OAH_DESIGN_PROJECT_RENAMED", "unchanged": "OAH_DESIGN_UNCHANGED",
+                  "created": "OAH_DESIGN_CREATED", "saved": "OAH_DESIGN_SAVED", "applied": "OAH_DESIGN_APPLIED",
+                  "accepted": "OAH_DESIGN_ACCEPTED", "already-accepted": "OAH_DESIGN_ACCEPTED"}
 
     def lines(self) -> list[str]:
         name = self.project if self.design is None else f"{self.project}/{self.design}"
-        line = f"OAH_DESIGN_{self.WORDS[self.action]} {name}"
+        line = f"{self.LINE_CODES[self.action]} {name}"
         if self.revision is not None:
             line += f" r{self.revision} {self.digest}"
         if self.action == "already-accepted":

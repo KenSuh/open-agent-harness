@@ -502,6 +502,28 @@ class BindingTest(DesignRepo, unittest.TestCase):
         self.assertIn("another project with the same ID", reason)
 
 
+class OutputPathsTest(DesignRepo, unittest.TestCase):
+    def test_output_paths_cover_every_file_a_write_changes(self):
+        settings = WikiSettings(dir="notes/wiki")
+        self.assertEqual(design_fs.design_output_paths(settings), (".oah/designs/", "notes/wiki/designs/",
+                                                                   "notes/wiki/index.md", "notes/wiki/log.md"))
+        for rel, expected in ((".oah/designs/acme/project.json", True), ("notes/wiki/designs/acme.md", True),
+                              ("notes/wiki/index.md", True), ("notes/wiki/log.md", True),
+                              ("notes/wiki/other.md", False), (".oah/designsx/a.json", False),
+                              (".oah/tasks/t1/PACKET.md", False), ("notes/wiki/log_archive_01.md", False)):
+            with self.subTest(rel=rel):
+                self.assertEqual(design_fs.is_design_output(settings, rel), expected)
+        repo = self.make_repo()
+        store = self.store(repo)
+        r1 = self.booking(store)
+        written = store.save("acme", "booking", expect_revision=1, expect_digest=r1.digest, reason="Two",
+                             title="Lesson booking", parts={"design": "Two.\n"}, today=TODAY).paths
+        self.assertIn(".oah/designs/acme/booking/design.json", written)
+        self.assertTrue(all(design_fs.is_design_output(WikiSettings(), rel) for rel in written), written)
+        changed = git(repo, "status", "--porcelain", "-uall").splitlines()
+        self.assertTrue(all(design_fs.is_design_output(WikiSettings(), line[3:]) for line in changed), changed)
+
+
 class AuthorityTest(DesignRepo, unittest.TestCase):
     def setUp(self):
         self.repo = self.make_repo()
