@@ -88,8 +88,17 @@ def _invalid(message: str) -> SourceError:
     return SourceError("OAH_SOURCES_LOCATOR_INVALID", message)
 
 
+def _refuse_hidden(url: str) -> None:
+    """urlsplit silently drops tabs, line breaks and edge spaces, so such a URL would register another address
+    than the one shown; it is refused instead."""
+    if any(ord(char) <= 0x20 or ord(char) == 0x7F for char in url):
+        raise _invalid("the URL holds a space, tab, line break or control character; paste it again without "
+                       "them")
+
+
 def github_locator(url: str) -> str:
     """The canonical `https://github.com/<owner>/<repo>` of a public GitHub repository URL."""
+    _refuse_hidden(url)
     try:
         parts = urllib.parse.urlsplit(url)
         port = parts.port
@@ -112,6 +121,7 @@ def github_locator(url: str) -> str:
 
 def doc_locator(url: str, *, allow_loopback: bool = False) -> str:
     """A public https document URL without user name, port, query or fragment (loopback http only in tests)."""
+    _refuse_hidden(url)
     try:
         parts = urllib.parse.urlsplit(url)
         port = parts.port
