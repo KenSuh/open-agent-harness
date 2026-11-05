@@ -236,6 +236,33 @@ def _check_intent(root: pathlib.Path, lease) -> oah_intent.Binding:
     return binding
 
 
+def _check_design(root: pathlib.Path, state: pathlib.Path, lease, binding: oah_intent.Binding):
+    """A review is a read-only inspection: a current design, or one with an unresolved newer draft (shown and never
+    counted as converged). The packet committed at HEAD must still name a revision the task follows."""
+    from oah.design import binding as design
+    from oah.design.model import DesignError
+    from oah.lease_cli import lease_design
+
+    judged = lease_design(lease, state, source=binding.source, root=root)
+    try:
+        judged.require("inspect", task=lease.task, agent=lease.agent)
+        if judged.task is not None:
+            committed = design.committed_text(root, binding.source)
+            try:
+                section = design.parse_section(committed) if committed is not None else None
+            except design.SectionInvalid:
+                section = None
+            if section is None or not judged.task.same_design(section) or not judged.task.holds(section.binding()):
+                raise DesignError(design.SOURCE_MISMATCH_CODE, f"{binding.source} committed at HEAD does not name a "
+                                  f"revision task {lease.task} follows ({judged.task.binding.line()}); the reviewer "
+                                  "reads the committed packet, so commit its Design section as bound, then run oah "
+                                  "review again")
+    except DesignError as exc:
+        text = str(exc)
+        raise ReviewError(exc.code, text.split(": ", 1)[1] if text.startswith(exc.code + ": ") else text) from None
+    return judged
+
+
 def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Binding) -> tuple[tuple[str, str], ...]:
     """The success conditions of the bound packet as committed at `rev`; it must match the binding."""
     shown = run_git(root, "show", f"{rev}:{binding.source}")
@@ -310,6 +337,7 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
                           f'{request.task} --agent {lease.agent} --reason "worktree removed", then start the lease '
                           "again in the task's worktree")
     binding = _check_intent(root, lease)
+    design = _check_design(root, state, lease, binding)
     chosen = _base_settings(load_config(root))
     span = context.resolve(root, request.base, remote=chosen[0], branch=chosen[1])
     dirty = context.tracked_dirty(root)
@@ -345,7 +373,7 @@ def _review(request: Request, *, cwd: pathlib.Path, env: Mapping[str, str], keyc
             with rounds._managed_dispatch(request.task, root=root, base=span.base):
                 return _round(request, root=root, state=state, env=env, lease=lease, binding=binding, conf=conf,
                               call_settings=call_settings, span=span, keychain=keychain, temp_root=temp_root,
-                              rules=rules, ensure_impact=ensure_impact)
+                              rules=rules, ensure_impact=ensure_impact, design=design)
         finally:
             task_lock.__exit__(None, None, None)
     finally:
@@ -382,7 +410,7 @@ def _impact(root: pathlib.Path, env: Mapping[str, str], ensure_impact: Callable 
 def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Mapping[str, str], lease,
            binding: oah_intent.Binding, conf: review_settings.ReviewSettings, call_settings: call.Settings,
            span: context.Range, keychain, temp_root: pathlib.Path | None, rules: Sequence[Mapping] | None,
-           ensure_impact: Callable | None) -> Result:
+           ensure_impact: Callable | None, design=None) -> Result:
     task = request.task
     launch_env = reviewer_env(env)  # refuse proxy credentials before impact, probes or retained runs
     redact = credential_redactor(env)
@@ -396,9 +424,12 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                           is_ancestor=lambda commit, head: _is_ancestor(root, commit, head))
         budget = rounds.resolve_task_budget(s, conf, root=root, state=state)
     conf = dataclasses.replace(conf, max_rounds=budget.limit)
+    from oah.design.binding import receipt_design, review_evidence
+
+    evidence = review_evidence(design) if design is not None else None
     if rounds.gate(s, head=span.head, decision=request.decision, extra_round=request.extra_round,
                    settings=conf, extra_attempt=request.extra_attempt, binding=binding,
-                   budget=budget) == rounds.CONVERGED:
+                   budget=budget, design=evidence) == rounds.CONVERGED:
         latest = s.latest
         return Result("OAH_REVIEW_CONVERGED", 0, f"OAH_REVIEW_CONVERGED: {latest.name} already approved head "
                       f"{span.head}; nothing was launched",
@@ -458,7 +489,9 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                                                   s.classes().get(class_id, {}).get("rule", "(not recorded)"))
                             for class_id, tried in s.attempted().items()),
             decision=decision, stopped=stopped if decision else None, extra_round=extra,
-            impact=impact, impact_rows=impact_rows)
+            impact=impact, impact_rows=impact_rows,
+            design_line=(f"{design.task.binding.line()}, state {design.state}"
+                         if design is not None and design.task is not None else None))
         planned_run = runs._plan_run(state, task, ENGINE, "review")
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
                  "run_id": planned_run[0].id}
@@ -577,6 +610,8 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
         "prompt_sha256": receipts.digest(prepared.run.prompt_path.read_bytes()), "output_sha256": receipts.digest(raw),
         "output_schema_sha256": receipts.digest(schema.text().encode("utf-8")),
         "started_at": _iso(started), "finished_at": _iso(finished)}
+    if design is not None and design.task is not None:
+        receipt["design"] = receipt_design(prepared.run._read_json(call.DESIGN_NAME))
     name = f"R{number}.json"
     digest = receipts.publish(state, task, name, receipt, summary={
         "round": number, "series_round": s.series_round, "base": span.base, "head": span.head,
@@ -584,6 +619,13 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     code = OUTCOME_CODES[judged.outcome]
     receipts.log_round(state, task, {"event": "finish", **where, "counted": True, "code": code, "receipt": name,
                                      "outcome": judged.outcome})
+    if judged.outcome == "converged" and design is not None and design.state == "needs-review":
+        unresolved = ("OAH_DESIGN_NEEDS_REVIEW: the reviewer approved the change against the accepted design, but the "
+                      f"newer draft r{design.context.current.revision} is unresolved, so this approval cannot complete "
+                      f"task {task}. Carry it (oah design carry) or rebind, then the receipt can count")
+        return Result("OAH_DESIGN_NEEDS_REVIEW", 1, unresolved, lines=_lines(receipt, digest, name, conf, task),
+                      warnings=warnings, receipt_path=receipts.review_dir(state, task) / name, receipt=receipt,
+                      run_dir=prepared.run_dir)
     return Result(code, 0 if judged.outcome == "converged" else 1, _headline(code, receipt, task),
                   lines=_lines(receipt, digest, name, conf, task), warnings=warnings,
                   receipt_path=receipts.review_dir(state, task) / name, receipt=receipt, run_dir=prepared.run_dir)

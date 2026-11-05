@@ -560,7 +560,8 @@ def task_view(state: pathlib.Path, task: str, *, lease=_MISSING) -> TaskView:
             if kind == "lease_started":
                 epoch = {"lease_id": event.get("lease_id"), "generation": event.get("generation"),
                          "scope": event.get("scope"), "gates": event.get("gates"), "worktree": event.get("worktree"),
-                         "intent": event.get("intent"), "ended": None, "transaction_id": event.get("transaction_id")}
+                         "intent": event.get("intent"), "ended": None, "transaction_id": event.get("transaction_id"),
+                         "output_baseline": event.get("design_output_baseline")}
                 closing, closed = None, None
                 record = _event_record(event) if event.get("design_schema") == DESIGN_SCHEMA else None
                 if "design" in event and event.get("design_schema") != DESIGN_SCHEMA:
@@ -570,6 +571,8 @@ def task_view(state: pathlib.Path, task: str, *, lease=_MISSING) -> TaskView:
                     for name in ("scope", "gates", "intent", "generation"):
                         if name in event:
                             epoch[name] = event[name]
+                    if epoch.get("output_baseline") is None and event.get("design_output_baseline") is not None:
+                        epoch["output_baseline"] = event["design_output_baseline"]
                 if event.get("design_schema") == DESIGN_SCHEMA:
                     record = _event_record(event)
                 elif record is not None and epoch is not None and event.get("lease_id") == epoch["lease_id"]:
@@ -971,6 +974,211 @@ def carry(old: TaskBinding, context, *, basis: TaskBasis, revision: int, digest:
                        secrets.token_hex(8), authority)
     record = TaskBinding(old.identity, old.basis, moved, (*old.carried, edge), ack)
     return require_fits(record, task), "carried"
+
+
+# Finish: exact generated design outputs (B2) ---------------------------------------------------------------
+
+
+def _sha(data: bytes | None) -> str | None:
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+def output_baseline(root: pathlib.Path, settings, binding: DesignBinding, *, head: str | None) -> dict:
+    """What the bound project's outputs were at design-bound lease start; the list page tail is the user's part."""
+    from oah.design import fs, pages
+
+    root = pathlib.Path(root)
+    project = binding.project
+    try:
+        record = fs.read_file(root / fs.project_record_rel(project))
+        data = fs.read_file(root / fs.project_page_rel(settings.dir, project), limit=fs.PAGE_LIMIT)
+        view = pages.read_project_page(data, project)
+    except Exception as exc:  # an unreliable baseline grants no automatic exemption
+        return {"version": 1, "reliable": False, "problem": type(exc).__name__}
+    page = {"state": "missing" if data is None else view.state, "sha256": _sha(data),
+            "tail_bytes": len(view.tail), "tail_sha256": _sha(view.tail), "eol": view.eol.decode("ascii")}
+    return {"version": 1, "reliable": view.state in ("missing", "marked"), "project_uid": binding.uid,
+            "project": project, "design": binding.design, "project_json_sha256": _sha(record),
+            "wiki_dir": str(settings.dir), "head_at_start": head, "project_page": page}
+
+
+def _registry_template() -> bytes:
+    import importlib.resources
+
+    return (importlib.resources.files("oah") / "templates" / "design" / "registry-readme.md").read_bytes() \
+        .replace(b"\r\n", b"\n")
+
+
+def _at_start(root: pathlib.Path, head: str | None, rel: str) -> bytes | None:
+    from oah.engines.proc import run_command
+    from oah.paths import GIT_TIMEOUT, git_argv, run_git
+
+    if head is None:
+        return None
+    if run_git(root, "cat-file", "-e", f"{head}:{rel}").returncode != 0:
+        return None
+    shown = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{head}:{rel}"], timeout=GIT_TIMEOUT,
+                        encoding="latin-1")
+    if shown.returncode != 0:
+        raise ValueError(f"{rel} at {head[:12]} cannot be read")
+    return shown.stdout.encode("latin-1")
+
+
+def generated_outputs(root: pathlib.Path, settings, record: TaskBinding, changed: Sequence[str],
+                      baseline: Mapping | None) -> dict:
+    """The generated-content equivalence report for changed design outputs (not proof of which process wrote them).
+
+    Only the bound project's bound design records on its verified chain, A's registry README, the bound design's
+    page and the bound project's list page may be exempt from ordinary scope, and only when their complete bytes
+    equal what oah generates from verified records. project.json, other projects, deletions, orphans, unknown names,
+    a changed user tail and a missing baseline stay ordinary."""
+    from oah.design import fs, pages, store as design_store
+    from oah.design.model import DesignError
+
+    root = pathlib.Path(root)
+    binding = record.binding
+    project_id, design = binding.project, binding.design
+    reader = fs.WorktreeReader(root, settings.dir)
+    verified, ordinary = [], []
+    head = (baseline or {}).get("head_at_start")
+    loaded = {}
+
+    def chain():
+        if "record" not in loaded:
+            project = design_store.load_project(reader, project_id)
+            if project.uid != binding.uid:
+                raise DesignError(BINDING_INVALID_CODE, "another project with the same ID")
+            loaded["project"], loaded["record"] = project, design_store.load_design(reader, project, design)
+        return loaded["project"], loaded["record"]
+
+    prefix = fs.design_dir_rel(project_id, design) + "/"
+    for rel in changed:
+        if not fs.is_design_output(settings, rel):
+            continue
+        path = root / pathlib.PurePosixPath(rel)
+        try:
+            data = path.read_bytes() if path.is_file() and not path.is_symlink() else None
+        except OSError:
+            data = None
+        if rel.endswith(("/index.md", "/log.md")) and not rel.startswith((fs.REGISTRY_DIR + "/",
+                                                                           fs.pages_rel(settings.dir) + "/")):
+            continue  # wiki maintenance keeps its own contract for index/log/archives
+        reason, kind, revision = None, None, None
+        try:
+            if data is None:
+                reason = "deleted or not a regular file"
+            elif rel == fs.readme_rel():
+                kind = "registry-readme"
+                reason = None if data.replace(b"\r\n", b"\n") == _registry_template() else "not A's template"
+            elif rel == fs.project_record_rel(project_id):
+                reason = "project.json always needs explicit scope"
+            elif rel.startswith(prefix):
+                project, verified_record = chain()
+                rest = rel[len(prefix):]
+                parts = rest.split("/")
+                if rest == "design.json":
+                    kind = "pointer"
+                elif len(parts) == 3 and parts[0] == "revisions" and fs.revision_number(parts[1]):
+                    revision = fs.revision_number(parts[1])
+                    info = verified_record.revision(revision)
+                    if info is None:
+                        reason = "a revision that is not on the verified chain"
+                    elif parts[2] == "revision.json":
+                        kind = "manifest"
+                    elif parts[2].endswith(".md") and parts[2][:-3] in info.parts:
+                        kind = "part"
+                        design_store.read_texts(reader, info)
+                    else:
+                        reason = "a file the revision does not name"
+                elif len(parts) == 2 and parts[0] == "acceptances" and fs.acceptance_number(parts[1]):
+                    kind = "acceptance"
+                    if fs.acceptance_number(parts[1]) not in {item.sequence for item in verified_record.acceptances}:
+                        reason = "an acceptance that is not on the verified chain"
+                else:
+                    reason = "an unknown design record name"
+                before = _at_start(root, head, rel) if reason is None and kind != "pointer" else None
+                if reason is None and before is not None and before != data:
+                    reason = "an existing historical record changed"
+            elif rel == fs.design_page_rel(settings.dir, project_id, design):
+                project, verified_record = chain()
+                kind = "design-page"
+                match = None
+                for info in verified_record.chain:
+                    texts = design_store.read_texts(reader, info)
+                    if data == pages.render_design_page(project.id, project.title, info, texts).encode("utf-8"):
+                        match = info.revision
+                        break
+                revision = match
+                reason = None if match is not None else "not the page oah renders for any verified revision"
+            elif rel == fs.project_page_rel(settings.dir, project_id):
+                project, _verified = chain()
+                kind = "project-page"
+                page = (baseline or {}).get("project_page") or {}
+                view = pages.read_project_page(data, project_id)
+                if not (baseline or {}).get("reliable") or view.state != "marked":
+                    reason = "no reliable start baseline or not an oah project page"
+                elif page.get("state") == "missing" and view.tail:
+                    reason = "a new project page with user text below its end marker"
+                elif page.get("state") == "marked" and (_sha(view.tail) != page.get("tail_sha256")
+                                                        or len(view.tail) != page.get("tail_bytes")
+                                                        or view.eol.decode("ascii") != page.get("eol")):
+                    reason = "the user's notes below the end marker changed"
+                else:
+                    rows = []
+                    for item in sorted(design_store._design_names(reader, project_id)):
+                        head_facts = design_store.load_head(reader, project, item)
+                        rows.append(pages.list_line(project_id, item, head_facts.title, head_facts.revision,
+                                                    head_facts.status, head_facts.accepted, head_facts.updated))
+                    if data != pages.build_project_page(view, project, rows):
+                        reason = "not the list oah builds from the verified records"
+            else:
+                reason = "an output of another project or design"
+        except (DesignError, ValueError, OSError) as exc:
+            reason = f"does not verify ({type(exc).__name__})"
+        except Exception as exc:  # A limitation: a missing Git object may escape as another exception
+            reason = f"does not verify ({type(exc).__name__})"
+        if reason is None:
+            proof = _digest({"path": rel, "kind": kind, "sha256": _sha(data), "binding": binding.to_json()})
+            verified.append({"path": rel, "sha256": _sha(data), "bytes": len(data), "kind": kind,
+                             "project_uid": binding.uid, "revision": revision, "proof_digest": proof})
+        else:
+            ordinary.append({"path": rel, "reason": reason})
+    return {"version": 1, "verified": verified, "ordinary": ordinary,
+            "baseline_digest": _digest(dict(baseline)) if baseline else None}
+
+
+def judge_task(state: pathlib.Path, task: str, *, root: pathlib.Path, view: TaskView | None = None,
+               packet_text: str | None = None, source: str | None = None) -> TaskDesign:
+    """The task's design judgement, read-only: the open lease's record against its own inputs, else the closing
+    (or last) epoch's record against that epoch's frozen intent, scope and gates; else the origin evidence."""
+    view = view if view is not None else task_view(state, task)
+    lease = view.lease
+    if view.unreadable is not None:
+        return judge(None, root=root, found=Origin("unknown", view.unreadable))
+    if lease is not None:
+        where = pathlib.Path(lease.worktree) if pathlib.Path(lease.worktree).is_dir() else root
+        try:
+            record = lease.design_record()
+        except RecordInvalid as exc:
+            return judge(None, root=where, invalid=exc.identity)
+        if record is None:
+            found = origin(state, task, packet_text=packet_text, root=where if source else None, source=source,
+                           view=view)
+            return judge(None, root=where, found=found)
+        return judge(record, root=where, basis=basis_of(record, intent=lease.intent, scope=lease.scope,
+                                                        gates=lease.gates))
+    if view.record is None:
+        if view.problem is not None:
+            return judge(None, root=root, found=Origin("invalid", view.problem))
+        found = origin(state, task, packet_text=packet_text, root=root if source else None, source=source,
+                       view=view)
+        return judge(None, root=root, found=found)
+    epoch = view.closing or view.epoch or {}
+    where = pathlib.Path(epoch["worktree"]) if epoch.get("worktree") and pathlib.Path(epoch["worktree"]).is_dir() \
+        else root
+    basis = basis_of(view.record, intent=epoch.get("intent"), scope=epoch.get("scope") or (),
+                     gates=epoch.get("gates") or ())
+    return judge(view.record, root=where, basis=basis)
 
 
 # Gate provenance and review evidence --------------------------------------------------------------------

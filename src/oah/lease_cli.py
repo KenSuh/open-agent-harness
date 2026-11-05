@@ -286,6 +286,10 @@ def _design_update(args: argparse.Namespace, info: RepoInfo, store: Store, resul
         notes.setdefault("warnings", []).extend(warnings)
         notes.update(action=action, record=record)
         extra = {"design_packet": section.to_json(), "task_basis_digest": basis.digest}
+        if locked is None or locked.design is None:  # the epoch's first design binding: capture its outputs
+            extra["design_output_baseline"] = design.output_baseline(
+                root, _wiki_settings(root), record.binding, head=locked.head_at_start if locked is not None
+                else info.head)
         if resume is not None:
             extra["resume_from"] = resume
         if old is not None and old.basis != basis.digest:
@@ -405,8 +409,9 @@ def lease_design(lease: Lease, state: pathlib.Path, *, packet_text: str | None =
     except design.RecordInvalid as exc:
         return design.judge(None, root=root, invalid=exc.identity)
     if record is None:
+        # The caller's lease is the record: never re-read leases.json here (fix captures it exactly once).
         found = design.origin(state, lease.task, packet_text=packet_text, root=root if source else None,
-                              source=source)
+                              source=source, view=design.task_view(state, lease.task, lease=lease))
         if found is None and lease.design_invalid:
             found = design.Origin("lease", "its lease records a design")
         return design.judge(None, root=root, found=found)
@@ -603,6 +608,21 @@ def _packet_section(lease: Lease, record) -> None:
                           f"rewrite it with oah packet design {lease.task} and rebind with oah start --packet")
 
 
+def _wiki_settings(root: pathlib.Path) -> WikiSettings:
+    return WikiSettings.from_mapping(load_config(root).section("wiki", WIKI_DEFAULTS)).for_root(root)
+
+
+def _design_outputs(lease: Lease, store: Store, record, changed: list[str]) -> dict:
+    """B2's generated-content equivalence report for this lease's changed design outputs."""
+    from oah.design import binding as design
+
+    view = design.task_view(store.dir, lease.task, lease=lease)
+    epoch = view.epoch or {}
+    baseline = epoch.get("output_baseline") if epoch.get("lease_id") == lease.id else None
+    root = pathlib.Path(lease.worktree)
+    return design.generated_outputs(root, _wiki_settings(root), record, changed, baseline)
+
+
 def _finish_design(lease: Lease, store: Store):
     """Judge the design before the gates (refusing early), and return the check `Store.finish` repeats under its
     lock, at the control point itself; None for an origin-free (legacy) task."""
@@ -618,7 +638,10 @@ def _finish_design(lease: Lease, store: Store):
         return None
     _packet_section(lease, judged.task)
 
-    def locked(live: Lease) -> dict:
+    def locked(live: Lease, recompute=None, preliminary=None) -> dict:
+        from oah.design.binding import CHANGED_CODE
+        from oah.design.model import DesignError
+
         again = lease_design(live, store.dir)
         if again.state == "unbound":  # a design-bound lease cannot turn legacy between the two checks
             from oah.design import binding as design
@@ -627,13 +650,17 @@ def _finish_design(lease: Lease, store: Store):
                                  found=design.Origin("lease", "its lease recorded a design"))
         again.require("finish", task=live.task, agent=live.agent)
         if again.task != judged.task:
-            from oah.design.binding import CHANGED_CODE
-            from oah.design.model import DesignError
-
             raise DesignError(CHANGED_CODE, f"the design record of task {live.task} changed during finish; the lease "
                               "stays open. Run oah finish again")
-        return {"design_report": {"version": 1, "state": again.state, "fingerprint": again.fingerprint(),
-                                  "evidence_key": again.task.key}}
+        outputs = recompute(live) if recompute is not None else None
+        if outputs is not None and preliminary is not None and outputs != preliminary:
+            raise DesignError(CHANGED_CODE, f"the design outputs of task {live.task} changed during finish (a file was "
+                              "added, changed or became unreadable); the lease stays open. Run oah finish again")
+        report = {"version": 1, "state": again.state, "fingerprint": again.fingerprint(),
+                  "evidence_key": again.task.key}
+        if outputs is not None:
+            report["outputs"] = outputs
+        return {"design_report": report}
 
     return locked
 
@@ -650,6 +677,21 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     root = pathlib.Path(lease.worktree)
     wiki_exempt, wiki_report = _wiki_maintenance(root, lease, args.allow_missing_wiki_maintenance)
     changed = [name for name in _changed_files(lease, info) if name not in artifacts and name not in wiki_exempt]
+    if design_check is not None:
+        # Only exact generated outputs of the bound design leave ordinary scope; the design state check above is
+        # independent of scope and of --allow-out-of-scope. Store.finish recomputes all of it under its lock.
+        record = lease.design_record()
+        outputs = _design_outputs(lease, store, record, changed)
+        exempt = {item["path"] for item in outputs["verified"]}
+        changed = [name for name in changed if name not in exempt]
+        first_check = design_check
+
+        def recompute(live: Lease) -> dict:
+            names = [name for name in _changed_files(live, info) if name not in artifacts and name not in wiki_exempt]
+            return _design_outputs(live, store, live.design_record(), names)
+
+        def design_check(live: Lease, _first=first_check, _outputs=outputs) -> dict:
+            return _first(live, recompute, _outputs)
     settings = load_config(root).section("gates", GATE_DEFAULTS)
     # unlazy is looked up (and its pin verified) only when a ledger governs this task.
     ledgers = guard.resolve_ledgers(root, lease.task, lease.gates)
