@@ -26,13 +26,14 @@ from __future__ import annotations
 import http.client
 import json
 import math
+import re
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Mapping, Sequence, TypeVar, cast
 
-from oah.rerank.base import (BAD_REQUEST, BAD_RESPONSE, HTTP_ERROR_PREFIX, INSECURE_URL, INVALID_HEADER, NETWORK,
+from oah.rerank.base import (BAD_REQUEST, BAD_RESPONSE, HTTP_ERROR_PREFIX, INSECURE_URL, INVALID_HEADER, NETWORK, JudgeReply,
                              OVERLOADED, RATE_LIMITED, TIMEOUT, TIERS, UNAUTHORIZED, Candidate, ProviderError,
                              _classify_failure, _raise_if_interrupted)
 from oah.secrets import Secret
@@ -44,6 +45,7 @@ DESCRIPTION_LIMIT = 200
 WORK_LIMIT = 16_000  # characters, about 4,000 tokens, over the whole work text
 RESPONSE_LIMIT = 4 * 1024 * 1024
 PROBABILITY_SUM_TOLERANCE = 0.01
+SCORE_TOLERANCE = 0.05
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 STATUS_CODES = {401: UNAUTHORIZED, 429: RATE_LIMITED, 529: OVERLOADED}
 
@@ -278,7 +280,7 @@ def build_judgement_request(model: str, state: Mapping[str, object], questions: 
             "questions": {name: dict(question) for name, question in questions.items()}}
 
 
-def parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> dict[str, dict]:
+def parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> JudgeReply:
     result = code = None
     try:
         try:
@@ -290,7 +292,7 @@ def parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> 
         del result, code
 
 
-def _parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> tuple[dict[str, dict] | None,
+def _parse_judgement_response(body: object, questions: Mapping[str, Mapping]) -> tuple[JudgeReply | None,
                                                                                        str | None]:
     """Exactly the asked question ids, each answered in its own type; a missing, extra or malformed answer fails."""
     answers = answer = probabilities = confidence = None
@@ -305,13 +307,35 @@ def _parse_judgement_response(body: object, questions: Mapping[str, Mapping]) ->
                 return None, BAD_RESPONSE
             if question["type"] == "noul":
                 noul = _number(answer.get("noul"))
-                if noul is None or not 0.0 <= noul <= 1.0:
+                if set(answer) != {"type", "noul"} or noul is None or not 0.0 <= noul <= 1.0:
                     return None, BAD_RESPONSE
                 parsed[name] = {"type": "noul", "noul": noul}
                 continue
+            if question["type"] == "score":
+                levels = question["criteria"]
+                keys = tuple(str(index) for index in range(len(levels)))
+                legend = {str(index): text for index, text in enumerate(levels)}
+                probabilities = answer.get("probabilities")
+                score, confidence = _number(answer.get("score")), _number(answer.get("confidence"))
+                if set(answer) != {"type", "score", "confidence", "legend", "probabilities"} or \
+                        answer.get("legend") != legend or not isinstance(probabilities, Mapping) or \
+                        set(probabilities) != set(keys) or score is None or confidence is None or \
+                        not 0 <= confidence <= 1 or not 0 <= score <= len(levels) - 1:
+                    return None, BAD_RESPONSE
+                scores = {key: _number(probabilities[key]) for key in keys}
+                if any(value is None or not 0 <= value <= 1 for value in scores.values()) or \
+                        abs(math.fsum(scores.values()) - 1) > PROBABILITY_SUM_TOLERANCE or \
+                        abs(math.fsum(int(key) * value for key, value in scores.items()) - score) > SCORE_TOLERANCE:
+                    return None, BAD_RESPONSE
+                parsed[name] = {"type": "score", "score": score, "confidence": confidence,
+                                "legend": legend, "probabilities": scores}
+                continue
+            if question["type"] != "choice":
+                return None, BAD_RESPONSE
             keys = tuple(question["criteria"])
             probabilities = answer.get("probabilities")
-            if answer.get("choice") not in keys or not isinstance(probabilities, Mapping) \
+            if set(answer) != {"type", "choice", "confidence", "probabilities"} or \
+                    answer.get("choice") not in keys or not isinstance(probabilities, Mapping) \
                     or set(probabilities) != set(keys):
                 return None, BAD_RESPONSE
             scores = {}
@@ -330,7 +354,10 @@ def _parse_judgement_response(body: object, questions: Mapping[str, Mapping]) ->
                     return None, BAD_RESPONSE
             parsed[name] = {"type": "choice", "choice": answer["choice"], "probabilities": scores,
                             "confidence": confidence}
-        return parsed, None
+        model = body.get("model") if isinstance(body, Mapping) else None
+        if model is not None and (not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", model)):
+            return None, BAD_RESPONSE
+        return JudgeReply(parsed, model), None
     finally:
         del body, questions, answers, answer, probabilities, confidence
 
@@ -587,7 +614,7 @@ class TypeSafeProvider:
             del self, request, candidates, key, config, model, body, index, answer
 
     def judge(self, state: Mapping[str, object], questions: Mapping[str, Mapping], *, key: Secret,
-              config: Mapping) -> dict[str, dict]:
+              config: Mapping) -> JudgeReply:
         result = code = None
         try:
             try:
@@ -599,7 +626,7 @@ class TypeSafeProvider:
             del result, code
 
     def _judge(self, state: Mapping[str, object], questions: Mapping[str, Mapping], *, key: Secret,
-               config: Mapping) -> tuple[dict[str, dict] | None, str | None]:
+               config: Mapping) -> tuple[JudgeReply | None, str | None]:
         model = body = None
         try:
             model = str(self._settings(config).get("model") or DEFAULT_MODEL)

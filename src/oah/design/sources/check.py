@@ -27,8 +27,8 @@ from oah.config import ConfigError
 from oah.design.model import check_fact, check_id
 from oah.design.sources import association, portable, queue
 from oah.design.sources import license as license_module
-from oah.design.sources.adapters import Observer, Settings, Transport
-from oah.design.sources.model import (MAX_SOURCES, VERIFICATION_POLICY, Head, Registry, SourceError, SourceSpec,
+from oah.design.sources.adapters import SOURCE_DEADLINE, Observer, Settings, Transport
+from oah.design.sources.model import (MAX_SOURCES, VERIFICATION_POLICY, Head, Observation, Registry, SourceError, SourceSpec,
                                       freshness, iso, new_registration, observation_record, parse_head, parse_iso,
                                       parse_observation, parse_registry, record_word, transition)
 from oah.design.sources.state import (ASSESSMENT_LIMIT, DESIGNS_LIMIT, DISMISSALS_LIMIT, HEAD_LIMIT, REGISTRY_LIMIT,
@@ -124,9 +124,13 @@ class Proposal:
     status: str          # open | dismissed
     reason: str | None = None
     association: str | None = None
+    assessment: Mapping | None = None
 
     def to_json(self) -> dict:
-        return dataclasses.asdict(self) | {"labels": list(self.labels)}
+        from oah.design.sources.assessment import unassessed
+
+        return dataclasses.asdict(self) | {"labels": list(self.labels),
+                                           "assessment": dict(self.assessment or unassessed())}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -368,6 +372,7 @@ class Sources:
     def check_one(self, spec: SourceSpec, *, fault: Fault = _no_fault, skip_fresh: bool = False,
                   deadline: float | None = None) -> CheckResult:
         started = self.now()
+        deadline = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
         try:
             head, generation = self._base(spec)
         except StateProblem:
@@ -397,12 +402,17 @@ class Sources:
             if latest is None:
                 self._retire_head(spec.id)  # a head of an earlier registration is kept aside, never reused
             now = self.now()
+            if deadline is not None and self.clock() >= deadline:
+                observation = Observation("failed", code="timeout", selection=observation.selection)
             updated, word = transition(start, observation, now, started)
             outcome = record_word(word)
             if outcome is not None:
                 record = observation_record(updated, outcome=outcome, started=iso(started), now=iso(now),
                                             selection=observation.selection)
                 updated = dataclasses.replace(updated, observation=self.state.put_record("observations", record))
+            if self.clock() >= deadline and observation.kind != "failed":
+                observation = Observation("failed", code="timeout", selection=observation.selection)
+                updated, word = transition(start, observation, self.now(), started)
             self.state.write_json(f"heads/{spec.id}.json", updated.to_json())
         fault("after-head")
         first_trouble = word in ("failed", "blocked") and (start.outcome != updated.outcome
@@ -590,7 +600,8 @@ class Sources:
             reads.append({"id": ref["source"], "locator": ref.get("locator"), "spec_digest": ref.get("spec_digest"),
                           "snapshot": ref.get("snapshot"),
                           "registration": None if spec is None else spec.registration,
-                          "registered_spec": None if spec is None else spec.spec_digest, "verified": verified})
+                          "registered_spec": None if spec is None else spec.spec_digest, "verified": verified,
+                          "roles": list(ref.get("roles") or [])})
         return reads
 
     def publish_association(self, view: DesignView, refs: Sequence[Mapping], *, captured_generation: int | None,
@@ -599,6 +610,9 @@ class Sources:
         from oah.design.sources.view import design_basis
 
         key = association.key_of(view.uid, view.design)
+        if view.problems():
+            return {"status": "unknown", "key": key, "generation": None, "digest": None,
+                    "problems": view.problems()}
         basis = {"current": design_basis(view, "current"), "accepted": design_basis(view, "accepted")}
         with self.state.lock():
             try:
@@ -612,12 +626,16 @@ class Sources:
                     latest = reader()
                 except ViewUnavailable:
                     return {"status": "unknown", "key": key, "generation": None, "digest": None}
-                if latest.identity() != view.identity() or latest.materials() != view.materials() \
-                        or latest.recovery_pending:
+                if latest.problems():
+                    return {"status": "unknown", "key": key, "generation": None, "digest": None,
+                            "problems": latest.problems()}
+                if latest.identity() != view.identity() or latest.observation() != view.observation() or any(
+                        latest.materials(role) != view.materials(role) for role in ("current", "accepted")):
                     return {"status": "superseded", "key": key, "generation": None, "digest": None}
             generation = 0 if existing is None else existing["generation"]
             candidate = association.build(view, self._source_reads(refs), input_basis=basis,
-                                          generation=generation + 1, observed_at=iso(self.now()))
+                                          generation=generation + 1, observed_at=iso(self.now()),
+                                          policy=self.policy_digest())
             decision = association.decide(existing, candidate)
             if decision in ("superseded", "same"):
                 current = existing if existing is not None else candidate
@@ -658,12 +676,19 @@ class Sources:
         captured = self.association_entry(view.uid, view.design)
         captured_generation = None if captured is None else captured["generation"]
         refs: list[dict] = []
-        text = view.current.texts.get("materials")
-        if text is not None:
-            try:
-                refs = refs_of(text)
-            except MaterialsError:
-                problems.append("materials-invalid")
+        for role, snapshot in (("current", view.current), ("accepted", view.accepted)):
+            text = None if snapshot is None else snapshot.texts.get("materials")
+            if text is not None:
+                try:
+                    for ref in refs_of(text):
+                        existing = next((item for item in refs if all(item.get(key) == value
+                                                                      for key, value in ref.items())), None)
+                        if existing is None:
+                            refs.append(dict(ref, roles=[role]))
+                        else:
+                            existing["roles"].append(role)
+                except MaterialsError:
+                    problems.append(f"materials-invalid:{role}")
         registry, _raw = self.registry()
         wanted = {ref["source"] for ref in refs}
         wanted |= {key for key, spec in registry.sources.items() if f"{project}/{design}" in spec.for_designs}
@@ -676,16 +701,17 @@ class Sources:
                                  skip_fresh=True, fault=fault)
         unvisited = tuple(item.source for item in results if item.result == "over-budget")
         try:
-            published = self.publish_association(view, refs, captured_generation=captured_generation, reader=reader)
+            published = ({"status": "unknown", "reason": "materials-invalid"} if problems else
+                         self.publish_association(view, refs, captured_generation=captured_generation, reader=reader))
         except (StateProblem, LockTimeout):
             published = {"status": "unknown", "key": association.key_of(view.uid, view.design)}
             problems.append("designs-cache-unavailable")
         proposals, findings = ([], [])
         if published["status"] in ("published", "unchanged", "invalid"):
             proposals, findings = self.proposals(design=(view.uid, view.design))
-        binding = {"current": view.current.ref.to_json(),
-                   "accepted": None if view.accepted is None else view.accepted.ref.to_json()}
-        return RefreshReport(reason, project, design, binding, view.freshness,
+        binding = {**view.identity(), "authority_observation": view.observation()}
+        design_state = "unknown(authority-or-association)" if view.problems() or published["status"] == "unknown" else view.freshness
+        return RefreshReport(reason, project, design, binding, design_state,
                              {"current": view.materials("current"), "accepted": view.materials("accepted")},
                              tuple(self._source_reads(refs)), published, tuple(results), unvisited, unregistered,
                              tuple(proposals), tuple(findings), tuple(problems), self.policy_digest(),
@@ -826,17 +852,15 @@ class Sources:
                 entry = self._designs().get(association.key_of(view.uid, view.design))
                 if not association.well_formed(entry):
                     return []
-                report = {"binding": {"current": view.current.ref.to_json() if entry["current"] == {
-                    "revision": view.current.ref.revision, "digest": view.current.ref.digest} else None,
-                    "accepted": self._accepted_ref(entry, view)},
-                    "materials": entry["materials"], "sources": entry["sources"], "policy": self.policy_digest(),
+                report = {"binding": entry.get("binding"),
+                    "materials": entry["materials"], "sources": entry["sources"], "policy": entry.get("policy"),
                     "conflict": entry.get("conflict")}
                 if not self.matches_view(report, view)["matches"]:
                     return []
                 registry, _raw = self.registry()
                 counts: dict[str, int] = {}
-                for ref in entry["sources"]:
-                    spec = registry.sources.get(str(ref.get("id")))
+                for source_id in sorted({str(ref.get("id")) for ref in entry["sources"]}):
+                    spec = registry.sources.get(source_id)
                     word = "unregistered" if spec is None else self.status(spec).freshness
                     counts[word] = counts.get(word, 0) + 1
                 open_count = sum(1 for item in self.proposals(design=(view.uid, view.design))[0]
@@ -945,14 +969,17 @@ class Sources:
                             if record["snapshot"] == snapshot), None)
         release = (manifest.get("observed") or {}).get("release") or {}
         release_record = None
+        selection_record = None
         if release:
             release_record = self.record("release-observations", release.get("release_observation") or "")
-            if release_record is None:
+            selection_record = self.record("selections", release.get("selection") or "")
+            if release_record is None or selection_record is None:
                 raise SourceError("OAH_SOURCES_EVIDENCE_MISSING", f"the release observation of {snapshot} is not "
                                   "stored in this clone")
         try:
             return portable.build(source_id=spec.id, spec=spec.verification(), snapshot=snapshot, manifest=manifest,
                                   observation=observation, release_observation=release_record,
+                                  selection=selection_record,
                                   registration=spec.registration, read=self.blob)
         except portable.PortableError as exc:
             raise SourceError(exc.code, str(exc).partition(": ")[2]) from None

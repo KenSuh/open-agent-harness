@@ -168,6 +168,8 @@ class Budget:
                 raise Incomplete("budget-exhausted") from None
             raise
         self.bytes += len(result.body)
+        if len(result.body) > min(RESPONSE_LIMIT, left) or self.bytes > TOTAL_LIMIT or self.remaining() <= 0:
+            raise Incomplete("budget-exhausted")
         return result
 
 
@@ -194,10 +196,12 @@ class Selector:
     def __init__(self, spec: SourceSpec, *, api_base: str, git_url: str, getter: Callable,
                  policy: Callable[[int, float], web.WebPolicy], deadline: float, timeout: float,
                  put_blob: Callable[[bytes], str], clock: Callable[[], float] = time.monotonic,
-                 wall: Callable[[], str] = gitref._now) -> None:
+                 wall: Callable[[], str] = gitref._now, advertiser: Callable | None = None) -> None:
         self.spec, self.api_base, self.git_url = spec, api_base.rstrip("/"), git_url
         self.budget = Budget(getter, policy, deadline, timeout, clock)
         self.put_blob, self.clock, self.wall = put_blob, clock, wall
+        self.advertiser = advertiser or gitref.ls_remote
+        self.originals: dict[str, list] = {"advertisements": [], "metadata": []}
         owner, repo = spec.locator.rstrip("/").split("/")[-2:]
         self.repo_api = f"{self.api_base}/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
         self.started_at, self.started = wall(), clock()
@@ -220,17 +224,26 @@ class Selector:
 
     def _advertise(self, round_name: str) -> dict[str, dict]:
         timeout = min(gitref.TIMEOUT, self.budget.remaining())
-        advertisement = gitref.ls_remote(self.git_url, tags=True, timeout=timeout)
+        advertisement = self.advertiser(self.git_url, tags=True, timeout=timeout)
         relevant = gitref.tag_map(advertisement, self.spec.tag_prefix)
         relevant_bytes = canonical(relevant)
-        blob = self.put_blob(relevant_bytes) if len(relevant_bytes) <= (8 << 20) else None
-        if blob is None:
+        if len(advertisement.raw) > gitref.BYTE_LIMIT or advertisement.rows > gitref.ROW_LIMIT:
             raise Incomplete("advertisement-too-large")
+        chunks = self._chunks(advertisement.raw)
+        self.originals["advertisements"].append({"round": round_name, "chunks": chunks})
         self.ref_rounds.append({"round": round_name, "started_at": advertisement.started_at,
                                 "ended_at": advertisement.ended_at, "bytes": len(advertisement.raw),
                                 "rows": advertisement.rows, "raw_sha256": advertisement.raw_sha256,
-                                "relevant_map_sha256": hashlib.sha256(relevant_bytes).hexdigest(), "blob": blob})
+                                "relevant_map_sha256": hashlib.sha256(relevant_bytes).hexdigest(), "chunks": chunks})
         return relevant
+
+    def _chunks(self, data: bytes) -> list[str]:
+        return [self.put_blob(data[offset:offset + RESPONSE_LIMIT]) for offset in range(0, len(data), RESPONSE_LIMIT)]
+
+    def _original(self, url: str, status: int, body: bytes = b"") -> None:
+        self.originals["metadata"].append({"endpoint": url.removeprefix(self.repo_api), "status": status,
+            "bytes": len(body), "sha256": None if status == 404 else hashlib.sha256(body).hexdigest(),
+            "chunks": self._chunks(body)})
 
     def _metadata(self, url: str, expected_tag: str | None) -> tuple[dict, dict | None, bytes | None]:
         """(observation, fields, notes). A 404 is a determinate observation; other failures raise."""
@@ -238,8 +251,10 @@ class Selector:
             result = self.budget.get(url)
         except web.WebFailure as exc:
             if exc.code == "not-found":
+                self._original(url, 404)
                 return {"status": 404, "identity": digest_of({"status": 404}), "response_sha256": None}, None, None
             raise
+        self._original(url, 200, result.body)
         try:
             data = loads(result.body, "a GitHub release")
         except StateProblem:
@@ -330,7 +345,9 @@ class Selector:
         return tag[len(self.spec.tag_prefix):]
 
     def _listing(self) -> list[dict]:
-        result = self.budget.get(f"{self.repo_api}/releases?per_page={PER_PAGE}")
+        url = f"{self.repo_api}/releases?per_page={PER_PAGE}"
+        result = self.budget.get(url)
+        self._original(url, 200, result.body)
         try:
             data = loads(result.body, "the GitHub release listing")
         except StateProblem:
@@ -349,7 +366,6 @@ class Selector:
 
     def _observe_short_list(self, ranked: list[str]) -> None:
         self.listing = self._listing()
-        matching = set(ranked)
         by_tag: dict[str, dict] = {}
         for entry in self.listing:
             tag = entry["fields"]["tag"]
@@ -358,6 +374,8 @@ class Selector:
             by_tag[tag] = entry
         for tag in ranked:
             entry = by_tag.get(tag)
+            if entry is None:
+                continue  # The complete short pages preserve the determinate absence without unbounded visits.
             visit = Visit(tag, self._sort_key(tag), self.relevant[tag]["object"], self.relevant[tag]["peeled"])
             fields = None if entry is None else entry["fields"]
             eligibility, reason = self._eligibility(fields)
@@ -442,12 +460,12 @@ class Selector:
                              "syntactic_exclusions_count": len(excluded),
                              "exclusions_digest": digest_of(excluded),
                              "canonical_refs_digest": digest_of(self.relevant),
-                             "advertisement_blob_refs": sorted({item["blob"] for item in self.ref_rounds}),
+                             "advertisement_blob_refs": sorted({sha for item in self.ref_rounds for sha in item["chunks"]}),
                              "completeness": "observed-complete" if self.complete else "incomplete"},
                 "ref_observations": [{key: item[key] for key in ("round", "started_at", "ended_at", "bytes", "rows",
                                                                  "raw_sha256", "relevant_map_sha256")}
                                      for item in self.ref_rounds],
-                "candidates": candidates, "selected": selected,
+                "candidates": candidates, "selected": selected, "originals": self.originals,
                 "budget": {"candidate_limit": SHORT_LIST_LIMIT if self.universe_kind == "short-list"
                            else CANDIDATE_LIMIT, "request_limit": REQUEST_LIMIT,
                            "response_bytes_limit": RESPONSE_LIMIT, "total_http_bytes_limit": TOTAL_LIMIT,

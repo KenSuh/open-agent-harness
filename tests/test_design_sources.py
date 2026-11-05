@@ -163,6 +163,61 @@ class SourceCase(unittest.TestCase):
         return sources.record("selections", result.selection)
 
 
+class DeadlineTest(SourceCase):
+    def test_deadline_expiring_while_saving_observation_does_not_publish_verified_freshness(self) -> None:
+        self.commit({"src/lib.rs": "pub fn a() {}\n", "LICENSE": LICENSE})
+        sources = self.sources()
+        spec = self.register(sources, track="commit", ref="HEAD")
+        self.assertEqual("changed", sources.check_one(spec).result)
+        before = sources.head(spec)
+        self.commit({"src/lib.rs": "pub fn b() {}\n"})
+        self.clock.advance(60)
+        original = sources.state.put_record
+
+        def store(group, record):
+            digest = original(group, record)
+            if group == "observations":
+                self.clock.advance(2)
+            return digest
+
+        with mock.patch.object(sources.state, "put_record", side_effect=store):
+            result = sources.check_one(spec, deadline=self.clock.monotonic() + 1)
+        self.assertEqual("failed", result.result)
+        after = sources.head(spec)
+        self.assertEqual(before.verified, after.verified)
+        self.assertEqual(before.confirmed_at, after.confirmed_at)
+        self.assertEqual("timeout", after.failure.code)
+
+    def test_git_tree_budget_reaches_every_subprocess_and_blocks_late_verification(self) -> None:
+        self.commit({"src/lib.rs": "pub fn a() {}\n", "LICENSE": LICENSE})
+        sources = self.sources()
+        spec = self.register(sources, track="commit", ref="HEAD")
+        from oah.toolkit import fetch as fetch_module
+
+        original_run = fetch_module.run_command
+        original_read = adapters.Tree.read
+        timeouts = []
+
+        def run(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return original_run(*args, **kwargs)
+
+        def read(tree, blob):
+            data = original_read(tree, blob)
+            self.clock.advance(2)
+            return data
+
+        with mock.patch.object(fetch_module, "run_command", run), mock.patch.object(adapters.Tree, "read", read):
+            result = sources.check_one(spec, deadline=self.clock.monotonic() + 1)
+        self.assertEqual("failed", result.result)
+        head = sources.head(spec)
+        assert head is not None and head.failure is not None
+        self.assertEqual("timeout", head.failure.code)
+        self.assertIsNone(head.verified)
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < timeout <= 1 for timeout in timeouts), timeouts)
+
+
 class ReleaseSelectionTest(SourceCase):
     def setUp(self) -> None:
         super().setUp()

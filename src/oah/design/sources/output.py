@@ -5,21 +5,23 @@ The destination is a new regular file beneath the verified repository root, in a
 The lexical path is checked first (no traversal, no absolute path outside the root, no drive, device, UNC, reserved
 Windows name, alternate stream, trailing dot or space, control character or case collision), then every component
 from the root anchor down is inspected with lstat and opened as a directory descriptor with O_NOFOLLOW whose identity
-must match. The bytes go to a random temporary file created O_EXCL|O_NOFOLLOW through the final parent descriptor,
-are fsynced, and appear under the final name through a no-replace hard link on the same descriptor; a renamed or
-swapped path cannot redirect the write. Native Windows refuses with OAH_MATERIALS_OUTPUT_UNVERIFIABLE until its
-handle-based path has platform evidence. Validation failures create nothing; cleanup only removes this call's own
-temporary file through the pinned parent.
+must match. The bytes go to an anonymous staging object, are fsynced, and appear under the final name through an
+operation on the owned file descriptor: an APFS
+clone on macOS or an anonymous-file hard link on Linux. Cleanup closes that descriptor and never unlinks a public
+temporary name. Filesystems without a supported object-bound operation refuse. Native Windows uses pinned handles
+and handle-based rename and cleanup. Validation failures create nothing.
 """
 from __future__ import annotations
 
 import errno
+import contextlib
+import ctypes
 import os
 import pathlib
-import secrets
 import stat
+import sys
 import unicodedata
-from typing import Callable
+from typing import Callable, Iterator
 
 COMPONENT_BYTES = 255
 PATH_BYTES = 1024
@@ -51,12 +53,13 @@ def components(root: pathlib.Path, name: str) -> list[str]:
         raise _invalid("empty", "give --out a file name")
     if name.startswith(("\\\\", "//")) or name.startswith("\\\\?\\") or name.startswith("\\\\.\\"):
         raise _invalid("unc-or-device", "UNC and device paths are not output destinations")
-    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
-        raise _invalid("drive", "drive-letter paths are not output destinations; give a path inside the repository")
+    drive = len(name) >= 2 and name[1] == ":" and name[0].isalpha()
+    if drive and (name[2:3] != "/" or not name.startswith(root.as_posix().rstrip("/") + "/")):
+        raise _invalid("drive", "a drive path must be absolute and inside this repository")
     if "\\" in name:
         raise _invalid("backslash", "use / between folders")
     rest = name
-    if name.startswith("/"):
+    if name.startswith("/") or drive:
         anchor = root.as_posix().rstrip("/") + "/"
         if not name.startswith(anchor):
             raise _invalid("outside-root", "an absolute --out must be inside this repository")
@@ -96,15 +99,99 @@ def _check_case(fd: int, part: str) -> None:
         raise _invalid("case-collision", f"{part!r} is ambiguous with another name that differs only in case")
 
 
+def _directory_path(fd: int) -> pathlib.Path:
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+
+            name = os.fsdecode(fcntl.fcntl(fd, 50, bytes(PATH_BYTES)).split(b"\0", 1)[0])
+        elif sys.platform.startswith("linux"):
+            name = os.readlink(f"/proc/self/fd/{fd}")
+        else:
+            raise OSError(errno.ENOTSUP, "directory handle path is unavailable")
+        path = pathlib.Path(name)
+        if _identity(os.stat(path, follow_symlinks=False)) != _identity(os.fstat(fd)):
+            raise OSError(errno.ESTALE, "directory handle moved")
+        return path
+    except OSError:
+        raise OutputError(UNVERIFIABLE_CODE, "directory-path-unavailable", "the pinned directory's current path "
+                          "cannot be established") from None
+
+
+@contextlib.contextmanager
+def _anonymous(parent: int) -> Iterator[int]:
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            libc.tmpfile.argtypes = []
+            libc.tmpfile.restype = ctypes.c_void_p
+            libc.fileno.argtypes = [ctypes.c_void_p]
+            libc.fileno.restype = ctypes.c_int
+            libc.fclose.argtypes = [ctypes.c_void_p]
+            libc.fclose.restype = ctypes.c_int
+        except AttributeError:
+            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging is unavailable") from None
+        stream = libc.tmpfile()
+        if not stream:
+            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging cannot be created")
+        try:
+            fd = libc.fileno(stream)
+            if fd < 0:
+                raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging has no descriptor")
+            yield fd
+        finally:
+            libc.fclose(stream)
+    elif sys.platform.startswith("linux") and hasattr(os, "O_TMPFILE"):
+        try:
+            fd = os.open(".", os.O_RDWR | os.O_TMPFILE | getattr(os, "O_CLOEXEC", 0), 0o644, dir_fd=parent)
+        except OSError:
+            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "this filesystem cannot create "
+                              "anonymous staging") from None
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+    else:
+        raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "this platform has no supported anonymous "
+                          "staging operation")
+
+
+def _publish(handle: int, parent: int, final: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        if sys.platform == "darwin":
+            operation = libc.fclonefileat
+            operation.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+            operation.restype = ctypes.c_int
+            result = operation(handle, parent, os.fsencode(final), 0)
+        else:
+            operation = libc.linkat
+            operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+            operation.restype = ctypes.c_int
+            result = operation(handle, b"", parent, os.fsencode(final), 0x1000)
+            if result and ctypes.get_errno() in (errno.EPERM, errno.EINVAL, errno.ENOENT):
+                result = operation(-100, os.fsencode(f"/proc/self/fd/{handle}"), parent, os.fsencode(final), 0x400)
+        if result:
+            code = ctypes.get_errno()
+            if code == errno.EEXIST:
+                raise OutputError(EXISTS_CODE, "final-exists", "the output appeared while writing; it was not replaced")
+            raise OutputError(UNVERIFIABLE_CODE, "object-publication-unavailable", "the filesystem cannot publish "
+                              "the owned staging object without replacement")
+    except AttributeError:
+        raise OutputError(UNVERIFIABLE_CODE, "object-publication-unavailable", "the required descriptor publication "
+                          "API is unavailable") from None
+
+
 def write_new(root: os.PathLike | str, name: str, data: bytes, *, fault: Callable[[str], None] = _no_fault,
               windows: bool | None = None) -> pathlib.Path:
     """Create `name` (relative to the verified `root`) holding `data`; the final path of any existing type refuses."""
     root = pathlib.Path(root)
     parts = components(root, name)
     if (os.name == "nt") if windows is None else windows:
-        raise OutputError(UNVERIFIABLE_CODE, "windows-handles-unqualified", "--out is not verified on native Windows "
-                          "yet; print to stdout and redirect, or save with oah design save from a file you create")
-    needed = (os.open, os.link, os.unlink, os.stat)
+        from oah.design.sources import output_windows
+
+        return output_windows.write_new(root, parts, data, fault)
+    needed = (os.open, os.stat)
     if not all(item in os.supports_dir_fd for item in needed) or os.listdir not in os.supports_fd \
             or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise OutputError(UNVERIFIABLE_CODE, "no-dir-fd", "this platform cannot pin directories for --out")
@@ -154,35 +241,26 @@ def write_new(root: os.PathLike | str, name: str, data: bytes, *, fault: Callabl
         else:
             raise OutputError(EXISTS_CODE, "final-exists", f"{name} already exists; choose a new file name")
         fault("parent-pinned")
-        temp = f".{final}.oah-{secrets.token_hex(8)}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        try:
-            handle = os.open(temp, flags, 0o644, dir_fd=fd)
-        except OSError:
-            raise OutputError(UNVERIFIABLE_CODE, "temporary-create-failed", "the temporary file cannot be created") \
-                from None
-        try:
-            try:
-                view = memoryview(data)
-                while view:
-                    written = os.write(handle, view)
-                    view = view[written:]
-                os.fsync(handle)
-            finally:
-                os.close(handle)
+        _directory_path(fd)
+        with _anonymous(fd) as handle:
+            os.fchmod(handle, 0o644)
+            view = memoryview(data)
+            while view:
+                written = os.write(handle, view)
+                if written <= 0:
+                    raise OutputError(UNVERIFIABLE_CODE, "write-failed", "the staging write did not advance")
+                view = view[written:]
+            os.fsync(handle)
             fault("temporary-written")
+            destination = _directory_path(fd)
             try:
-                os.link(temp, final, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-            except FileExistsError:
-                raise OutputError(EXISTS_CODE, "final-exists", f"{name} appeared while writing; it was not "
-                                  "replaced") from None
-        finally:
-            try:
-                os.unlink(temp, dir_fd=fd)
-            except FileNotFoundError:
-                pass
+                destination.relative_to(_directory_path(opened[0]))
+            except ValueError:
+                raise OutputError(UNVERIFIABLE_CODE, "parent-moved-outside", "the pinned parent moved outside "
+                                  "the repository") from None
+            _publish(handle, fd, final)
         os.fsync(fd)
-        return root.joinpath(*parts)
+        return destination / final
     finally:
         for item in reversed(opened):
             os.close(item)

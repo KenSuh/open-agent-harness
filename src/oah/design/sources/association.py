@@ -29,7 +29,7 @@ def key_of(uid: str, design: str) -> str:
 
 
 def build(view: DesignView, sources: Sequence[Mapping], *, input_basis: Mapping, generation: int,
-          observed_at: str) -> dict:
+          observed_at: str, policy: str) -> dict:
     """A candidate association for exactly this view; `sources` are the materials' source references."""
     return {"version": VERSION, "kind": KIND, "project_uid": view.uid, "design": view.design, "project": view.project,
             "current": {"revision": view.current.ref.revision, "digest": view.current.ref.digest},
@@ -38,6 +38,7 @@ def build(view: DesignView, sources: Sequence[Mapping], *, input_basis: Mapping,
                 "acceptance": None if view.acceptance is None else {
                     "sequence": view.acceptance["sequence"], "record": view.acceptance["record"]}},
             "materials": {"current": view.materials("current"), "accepted": view.materials("accepted")},
+            "binding": {**view.identity(), "authority_observation": view.observation()}, "policy": policy,
             "input_basis": dict(input_basis),
             "sources": sorted((dict(item) for item in sources), key=lambda item: (item["id"], item["snapshot"] or "")),
             "generation": generation, "observed_at": observed_at, "conflict": None}
@@ -81,7 +82,8 @@ def decide(existing: Mapping | None, candidate: Mapping) -> str:
             return "invalid"
     if new["revision"] > old["revision"] or (new_acc != old_acc):
         return "publish"
-    same_inputs = all(candidate.get(key) == existing.get(key) for key in ("materials", "input_basis", "sources"))
+    same_inputs = all(candidate.get(key) == existing.get(key) for key in
+                      ("materials", "input_basis", "sources", "binding", "policy"))
     return "same" if same_inputs and existing.get("conflict") is None else "refresh"
 
 
@@ -107,16 +109,21 @@ def matches_view(report: Mapping, view: DesignView, source_reads: Mapping[str, M
         reasons.append("current-changed")
     if binding.get("accepted") != identity["accepted"]:
         reasons.append("accepted-changed")
+    if binding.get("acceptance") != identity["acceptance"]:
+        reasons.append("acceptance-changed")
+    if binding.get("authority_observation") != view.observation():
+        reasons.append("authority-observation-changed")
+    reasons.extend(view.problems())
     if (binding.get("current") or {}).get("uid") != view.uid:
         reasons.append("uid-changed")
     materials = report.get("materials") or {}
     if materials.get("current") != view.materials("current") or materials.get("accepted") != view.materials(
             "accepted"):
         reasons.append("materials-changed")
-    if view.recovery_pending:
-        reasons.append("recovery-pending")
     if report.get("conflict") is not None or (report.get("association") or {}).get("status") == "invalid":
         reasons.append("association-conflict")
+    if (report.get("association") or {}).get("status") in ("unknown", "superseded"):
+        reasons.append("association-unavailable")
     if source_reads is not None:
         for item in report.get("sources") or []:
             read = source_reads.get(item.get("id"))

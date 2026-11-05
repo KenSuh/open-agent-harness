@@ -53,6 +53,7 @@ from oah import routing, secrets
 from oah.config import ConfigError, load_config
 from oah.intent import END as INTENT_END
 from oah.rerank import circuit
+from oah.rerank.judgement_policy import DEFAULTS as JUDGEMENT_DEFAULTS
 from oah.rerank.base import (BAD_RESPONSE, KEY_NAME, TIERS, Candidate, Provider, ProviderError, _INTERRUPTIONS,
                              _classify_failure, _raise_if_interrupted)
 from oah.rerank.typesafe import DEFAULT_KEY_NAME, DEFAULT_MODEL, DEFAULT_URL, WORK_LIMIT, TypeSafeProvider
@@ -76,10 +77,7 @@ DEFAULTS = {
     },
     # Source and material judgements (oah.rerank.judge): off by default and needed in addition to `enabled`; design
     # text is sent only with send_design_text = true.
-    "judgement": {
-        "enabled": False,
-        "send_design_text": False,
-    },
+    "judgement": dict(JUDGEMENT_DEFAULTS),
 }
 
 PROVIDERS: dict[str, Provider] = {"typesafe": TypeSafeProvider()}

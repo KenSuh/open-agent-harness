@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import traceback
 from dataclasses import dataclass
-from typing import Mapping, Protocol, Sequence
+from typing import Iterator, Mapping, Protocol, Sequence
 
 from oah.secrets import Secret
 
@@ -35,6 +35,21 @@ class Candidate:
 
     name: str
     description: str = ""
+
+
+@dataclass(frozen=True)
+class JudgeReply(Mapping[str, Mapping[str, object]]):
+    answers: Mapping[str, Mapping[str, object]]
+    answered_model: str | None = None
+
+    def __getitem__(self, name: str) -> Mapping[str, object]:
+        return self.answers[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.answers)
+
+    def __len__(self) -> int:
+        return len(self.answers)
 
 
 class ProviderError(Exception):

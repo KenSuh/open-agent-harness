@@ -20,6 +20,7 @@ Sources live in this clone's oah state folder (inside the repository's git folde
 | `oah sources check --scheduled` | One bounded, fair pass over the persistent queue; this is what the daily OS entry runs. |
 | `oah sources diff <id> --from S1 --to S2` | Compares two stored snapshots of one source without the network. |
 | `oah sources proposals [--design PROJECT/DESIGN]` | Lists source changes a design could review. Reads only. |
+| `oah sources proposals assess [--design PROJECT/DESIGN]` | Explicitly assesses public change evidence with the optional judge and stores advisory results. |
 | `oah sources dismiss <key> --reason "..."` | Hides one proposal, with your reason. |
 | `oah sources materials render --design PROJECT/DESIGN --input FILE` | Builds a design's materials part from a selection file. Prints it, or writes one new file with `--out`. |
 | `oah sources materials check --design PROJECT/DESIGN` | Says whether each material decision still matches its inputs. `--revision N` checks an older revision. |
@@ -80,12 +81,26 @@ decisions; oah fills in every fact from the verified snapshot:
 - A source with no verified snapshot yet refuses. `--allow-unverified` records it as unverified instead.
 - The part embeds **portable evidence**: the exact bytes each material relied on. A fresh clone with no
   sources state can still check it, and its original observation times survive later refreshes. The
-  whole part must stay under 1 MiB, or render refuses with `OAH_MATERIALS_EVIDENCE_TOO_LARGE` before
+  release selection, complete ref advertisements and used metadata originals travel with it; offline
+  reconstruction leaves upstream freshness unknown. The whole part must stay under 1 MiB, or render refuses with `OAH_MATERIALS_EVIDENCE_TOO_LARGE` before
   writing anything; narrow the selected paths or split the decisions across designs.
 - Output goes to standard output. `--out FILE` creates one new file inside this repository and refuses an
   existing file, a link or a path outside the repository (`OAH_MATERIALS_OUTPUT_EXISTS`,
-  `OAH_MATERIALS_OUTPUT_PATH_INVALID`). On Windows `--out` refuses with
-  `OAH_MATERIALS_OUTPUT_UNVERIFIABLE`; redirect standard output instead.
+  `OAH_MATERIALS_OUTPUT_PATH_INVALID`). Windows supports ordinary local NTFS/ReFS destinations when
+  the required handle and sharing guarantees can be inspected. Unsupported APIs or filesystems refuse
+  with `OAH_MATERIALS_OUTPUT_UNVERIFIABLE`; standard output remains available.
+
+For an authored or local material without a public collector, use `--allow-unverified` and replace its
+`source` ID with an explicit provenance object. No file is read from `origin`:
+
+```json
+{"kind":"local-unverified","origin":"Local prototype","revision":"draft-1","author":"project team",
+ "at":"2026-01-01T12:00:00+00:00","limitations":["License and runtime not independently checked"],
+ "evidence":[],"text":"A local booking adapter with a manually reviewed interface."}
+```
+
+`kind` is `authored` or `local-unverified`; every field above is required. The substantive text stays inline.
+License, upstream verification and freshness remain unknown, and this material cannot become a public judge field.
 
 Save the result as a new revision with
 `oah design save <project> <design> --expect-revision N --expect-digest D --reason "..." --part materials=FILE`.
@@ -136,13 +151,28 @@ oah can ask a judge (TypeSafe Jev, see [keys](keys.md)) whether a source change 
 [rerank.judgement]
 enabled = false           # true allows judgements on public source data
 send_design_text = false  # true also allows excerpts of your design text
+yes = 0.7
+no = 0.3
+choice_min = 0.6
+level_min = 0.5
+cache_hours = 24
+max_questions = 32
+max_state_chars = 16000
 ```
 
 Even when enabled, oah sends only slices of verified public snapshots and fixed labels, plus design excerpts
 only with `send_design_text = true`. Every outgoing string is screened for secrets and e-mail addresses, and
 a hit sends nothing. A stored judgement applies only while its snapshot, design revision, license policy,
-provider and model all still match. No `oah sources` command requests a judgement yet; these settings gate
-the callers that will.
+provider, model and effective settings all still match. `proposals assess` is the explicit consumer; ordinary
+listings and scheduled checks never request a judgement. It asks three independent questions about compatibility
+breaks, security fixes and platform removal, plus a three-level urgency Score. Each proposal shows
+`jev=used|used(cache)|unused(reason) applied=yes|no(reason)` independently of its deterministic labels and status.
+Assessment evidence stays after the reusable cache expires. Alias requests reuse an answered model version for
+`cache_hours` (0–720); an exactly requested and answered version can reuse for 30 days. An absent answered model
+never reuses. Cache files older than 30 days are removed on a later write; saved assessment evidence is retained.
+Each explicit command sends at most eight requests and considers at most 64 proposals; limits keep deterministic
+results with an honest fallback. The first outgoing public request explains its scope; design sending has a
+separate notice. Provider usage charges and rate limits may apply when enabled.
 
 No judgement forces an answer. A question with several options also asks whether any option fits, so the
 result is `chosen`, `no-match` or `uncertain`. Material classes are asked one at a time, so several classes
@@ -170,6 +200,6 @@ All keys live under `[sources]` in `.oah/config.toml`; `OAH_CONFIG_INVALID` name
 - Release selection reads a bounded set of tags and releases. When it cannot see them all, the observation
   says `selection-incomplete` instead of claiming the newest. A selected release is the newest oah observed,
   not a promise that nothing newer exists.
-- `--out` on Windows refuses, as above.
+- Native Windows filesystem and scheduler behavior requires platform qualification; API mocks do not prove it.
 - `schedule status` reads `launchctl print` on macOS and the Task Scheduler on Windows. A fact it cannot read
   makes the state `unverifiable`; it is never assumed.

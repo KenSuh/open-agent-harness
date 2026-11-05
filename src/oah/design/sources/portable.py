@@ -23,16 +23,21 @@ import hashlib
 from typing import Callable, Mapping
 
 from oah.design.sources.model import SourceError, parse_observation
+from oah.design.sources import selection_proof, release as release_module, gitref, web
+from oah.design.sources import license as license_module
 from oah.design.sources.state import digest_of, hex_of, is_hex, record_digest
 
 VERSION = 1
 KIND = "oah-portable-evidence"
-BLOB_KINDS = ("selected-file", "license", "notice", "document-body", "document-text", "release-notes")
+BLOB_KINDS = ("selected-file", "license", "notice", "license-manifest", "document-body", "document-text", "release-notes",
+              "release-advertisement", "release-metadata")
+MAX_BLOBS = 2048
+MAX_TOTAL_BYTES = 128 << 20
 SPEC_KEYS = ("provider", "locator", "track", "tag_prefix", "channel", "ref", "paths", "manifest_path",
              "release_order", "selection_policy", "verification_policy")
 _ENVELOPE_KEYS = {"version", "kind", "source", "spec_digest", "snapshot", "provenance", "blobs"}
 _PROVENANCE_KEYS = {"claim", "registration", "observation", "observation_digest", "release_observation",
-                    "release_observation_digest"}
+                    "release_observation_digest", "selection", "selection_digest"}
 _BLOB_KEYS = {"id", "kind", "path_or_field", "encoding", "bytes", "sha256", "data"}
 HISTORICAL = "verified-from-portable-bytes"
 OFFLINE_FRESHNESS = "unknown(offline-or-unregistered)"
@@ -48,7 +53,7 @@ def _bad(message: str) -> PortableError:
     return PortableError("OAH_SOURCES_EVIDENCE_INVALID", message)
 
 
-def uses(manifest: Mapping) -> list[tuple[str, str, str]]:
+def uses(manifest: Mapping, selection: Mapping | None = None) -> list[tuple[str, str, str]]:
     """Every original a manifest names: (kind, path or field, sha256 hex), in a fixed order."""
     out: list[tuple[str, str, str]] = []
     for item in manifest.get("files") or []:
@@ -58,6 +63,8 @@ def uses(manifest: Mapping) -> list[tuple[str, str, str]]:
         out.append(("license", item.get("path"), item.get("sha256")))
     for item in evidence.get("notices") or []:
         out.append(("notice", item.get("path"), item.get("sha256")))
+    if evidence.get("manifest") is not None:
+        out.append(("license-manifest", evidence["manifest"].get("path"), evidence["manifest"].get("sha256")))
     document = manifest.get("document") or {}
     if document:
         out.append(("document-body", "document.sha256", document.get("sha256")))
@@ -66,6 +73,18 @@ def uses(manifest: Mapping) -> list[tuple[str, str, str]]:
     notes = release.get("notes") or {}
     if notes.get("sha256"):
         out.append(("release-notes", "observed.release.notes", notes.get("sha256")))
+    if selection is not None:
+        originals = selection.get("originals") or {}
+        for kind, entries in (("release-advertisement", originals.get("advertisements") or []),
+                              ("release-metadata", originals.get("metadata") or [])):
+            if not isinstance(entries, list) or len(entries) > release_module.REQUEST_LIMIT:
+                raise _bad("selection originals exceed their count quota")
+            for index, item in enumerate(entries):
+                chunks = item.get("chunks") if isinstance(item, Mapping) else None
+                if not isinstance(chunks, list) or len(chunks) > 2:
+                    raise _bad("selection originals have invalid chunk membership")
+                for chunk, sha in enumerate(chunks):
+                    out.append((kind, f"selection.{kind}.{index}.{chunk}", sha))
     return out
 
 
@@ -75,12 +94,13 @@ def envelope_id(envelope: Mapping) -> str:
 
 def build(*, source_id: str, spec: Mapping, snapshot: str, manifest: Mapping, observation: Mapping | None,
           release_observation: Mapping | None, registration: str | None,
+          selection: Mapping | None = None,
           read: Callable[[str], bytes | None]) -> dict:
     """The envelope for one stored snapshot; OAH_SOURCES_EVIDENCE_MISSING when any original is not stored here."""
     if record_digest(manifest) != snapshot:
         raise _bad(f"snapshot {snapshot} does not match its manifest bytes")
     blobs, seen = [], set()
-    for kind, where, sha in uses(manifest):
+    for kind, where, sha in uses(manifest, selection):
         if not is_hex(sha):
             raise _bad(f"{where} names no sha256")
         if sha in seen:
@@ -101,7 +121,9 @@ def build(*, source_id: str, spec: Mapping, snapshot: str, manifest: Mapping, ob
                            "observation_digest": None if observation is None else record_digest(observation),
                            "release_observation": None if release_observation is None else dict(release_observation),
                            "release_observation_digest": (None if release_observation is None
-                                                          else record_digest(release_observation))},
+                                                          else record_digest(release_observation)),
+                           "selection": None if selection is None else dict(selection),
+                           "selection_digest": None if selection is None else record_digest(selection)},
             "blobs": blobs}
 
 
@@ -117,6 +139,7 @@ class Evidence:
     manifest: Mapping
     observation: Mapping | None
     release_observation: Mapping | None
+    selection: Mapping | None
     blobs: Mapping[str, bytes]
 
     def read(self, sha: str) -> bytes | None:
@@ -139,6 +162,44 @@ def _strict_base64(text: object, where: str) -> bytes:
     if base64.b64encode(data).decode("ascii") != text:
         raise _bad(f"{where} data is not canonical base64")
     return data
+
+
+def _originals(manifest: Mapping, spec: Mapping, blobs: Mapping[str, bytes]) -> None:
+    from oah.design.sources.adapters import FILE_COUNT_LIMIT, FILE_LIMIT, SNAPSHOT_LIMIT
+
+    files = manifest.get("files") or []
+    if not isinstance(files, list) or len(files) > FILE_COUNT_LIMIT:
+        raise _bad("selected originals exceed their file-count quota")
+    evidence = manifest.get("license") or {}
+    groups = [(files, FILE_LIMIT), (evidence.get("files") or [], license_module.FILE_LIMIT),
+              (evidence.get("notices") or [], license_module.FILE_LIMIT)]
+    package = evidence.get("manifest")
+    if package is not None:
+        if not isinstance(package, Mapping) or package.get("path") != spec.get("manifest_path"):
+            raise _bad("the package manifest is not the registered manifest")
+        groups.append(([package], license_module.MANIFEST_LIMIT))
+    elif evidence.get("declared") is not None:
+        raise _bad("a declared license has no original package manifest")
+    for entries, limit in groups:
+        if not isinstance(entries, list) or len(entries) > license_module.TREE_LIMIT:
+            raise _bad("license originals exceed their count quota")
+        paths = set()
+        for item in entries:
+            if not isinstance(item, Mapping) or not isinstance(item.get("path"), str) or item["path"] in paths:
+                raise _bad("original file membership is malformed or duplicated")
+            paths.add(item["path"])
+            data = blobs.get(item.get("sha256"))
+            if data is None or type(item.get("size")) is not int or item["size"] != len(data) or len(data) > limit:
+                raise _bad("an original file differs from its size or exceeds its source quota")
+    if sum(item["size"] for item in files) > SNAPSHOT_LIMIT:
+        raise _bad("selected originals exceed their aggregate source quota")
+    if package is not None:
+        declared, problem = license_module.declared_from_manifest(package["path"], blobs[package["sha256"]])
+        if declared != evidence.get("declared") or problem and problem not in (evidence.get("problems") or []):
+            raise _bad("the license declaration differs from the original package manifest")
+    notes = ((manifest.get("observed") or {}).get("release") or {}).get("notes") or {}
+    if notes.get("sha256") and len(blobs[notes["sha256"]]) > release_module.NOTES_LIMIT:
+        raise _bad("release notes exceed their source quota")
 
 
 def verify(envelope: object) -> Evidence:
@@ -180,6 +241,7 @@ def verify(envelope: object) -> Evidence:
         raise _bad("an observation digest without its record")
     release = (manifest.get("observed") or {}).get("release")
     release_record = provenance["release_observation"]
+    selection = provenance["selection"]
     if release:
         if (not isinstance(release_record, Mapping) or release_record.get("kind") != "oah-release-observation"
                 or record_digest(release_record) != provenance["release_observation_digest"]
@@ -188,35 +250,59 @@ def verify(envelope: object) -> Evidence:
                 or release_record.get("release_id") != release.get("id") or release_record.get("tag") != release.get("tag")
                 or release_record.get("notes") != release.get("notes")):
             raise _bad("the release observation does not match the snapshot's release")
+        if not isinstance(selection, Mapping) or record_digest(selection) != release.get("selection") \
+                or provenance["selection_digest"] != release.get("selection"):
+            raise _bad("the release selection does not match the snapshot")
     elif release_record is not None or provenance["release_observation_digest"] is not None:
         raise _bad("a release observation for a snapshot without a release")
+    elif selection is not None or provenance["selection_digest"] is not None:
+        raise _bad("a selection for a snapshot without a release")
     raw = envelope["blobs"]
-    if not isinstance(raw, list):
+    if not isinstance(raw, list) or len(raw) > MAX_BLOBS:
         raise _bad("blobs is not a list")
+    memberships = {}
+    for kind, where, sha in uses(manifest, selection):
+        if not is_hex(sha):
+            raise _bad("a required original has no valid digest")
+        memberships.setdefault(sha, (kind, where))
     blobs: dict[str, bytes] = {}
+    total = 0
     for index, item in enumerate(raw):
         where = f"blob {index}"
         if not isinstance(item, Mapping) or set(item) != _BLOB_KEYS or item["encoding"] != "base64" \
                 or item["kind"] not in BLOB_KINDS or not isinstance(item["path_or_field"], str) \
                 or not is_hex(item["sha256"]) or item["id"] != "sha256:" + item["sha256"] \
-                or type(item["bytes"]) is not int:
+                or type(item["bytes"]) is not int or not 0 <= item["bytes"] <= release_module.RESPONSE_LIMIT \
+                or not isinstance(item["data"], str) or len(item["data"]) > ((item["bytes"] + 2) // 3) * 4 \
+                or memberships.get(item["sha256"]) != (item["kind"], item["path_or_field"]):
             raise _bad(f"{where} is malformed")
+        total += item["bytes"]
+        if total > MAX_TOTAL_BYTES:
+            raise _bad("portable originals exceed their aggregate byte quota")
         data = _strict_base64(item["data"], where)
         if len(data) != item["bytes"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise _bad(f"{where} ({item['path_or_field']}) does not match its size or sha256")
         if item["sha256"] in blobs:
             raise _bad(f"{where} repeats an original")
         blobs[item["sha256"]] = data
-    needed = {sha for _kind, _where, sha in uses(manifest)}
+    needed = set(memberships)
     missing = sorted(needed - set(blobs))
     if missing:
         raise _bad(f"the originals {', '.join(sha[:12] for sha in missing)} are missing")
     extra = sorted(set(blobs) - needed)
     if extra:
         raise _bad(f"the blobs {', '.join(sha[:12] for sha in extra)} are not in the manifest")
+    _originals(manifest, spec, blobs)
+    if release:
+        try:
+            selection_proof.verify(selection, spec, release, blobs.get, release_record)
+        except (ValueError, KeyError, TypeError, AttributeError, SourceError, gitref.RefError,
+                release_module.Incomplete, release_module.Changed, web.WebFailure) as exc:
+            raise _bad(f"the release selection cannot be verified: {type(exc).__name__}") from None
     return Evidence(envelope_id(envelope), source["id"], spec, envelope["spec_digest"], snapshot["digest"],
                     dict(manifest), None if observation is None else dict(observation),
-                    None if release_record is None else dict(release_record), blobs)
+                    None if release_record is None else dict(release_record),
+                    None if selection is None else dict(selection), blobs)
 
 
 def payload_bytes(envelope: Mapping) -> int:

@@ -216,7 +216,8 @@ def _ancestors(path: str, is_dir: bool) -> list[str]:
     return folders
 
 
-def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Callable[[bytes], str]) -> dict:
+def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Callable[[bytes], str], *,
+             remaining: Callable[[], float] | None = None) -> dict:
     """License evidence for the manifest. `store(bytes) -> sha256 hex` keeps every text read.
 
     License problems (missing files, overrides, too large a scope) live inside the evidence and make the verdict
@@ -227,6 +228,8 @@ def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Calla
     scopes = []
 
     def keep(mode: str, oid: str, name: str, into: dict) -> None:
+        if remaining is not None:
+            remaining()
         if name in into or mode not in ("100644", "100755"):
             return
         size = tree.size(oid)
@@ -236,17 +239,23 @@ def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Calla
         into[name] = {"path": name, "blob": oid, "size": size, "sha256": store(tree.read(oid))}
 
     for item in (paths or ("",)):
+        if remaining is not None:
+            remaining()
         entries = tree.entries(item)
         is_dir = item == "" or any(name != item for _mode, _oid, name in entries)
         chain = _ancestors(item, is_dir)
         governing_level, governing = None, []
         for folder in chain:
+            if remaining is not None:
+                remaining()
             children = tree.children(folder)
             if any(mode == "040000" and name.rsplit("/", 1)[-1].casefold() == "licenses" for mode, _o, name in children):
                 problems.append(f"{folder or 'the top folder'} holds a LICENSES folder (per-file licensing), which "
                                 "oah does not review")
             found = [(mode, oid, name) for mode, oid, name in children if is_license_name(name.rsplit("/", 1)[-1])]
             for mode, oid, name in children:
+                if remaining is not None:
+                    remaining()
                 if is_notice_name(name.rsplit("/", 1)[-1]):
                     keep(mode, oid, name, notices)
             if found:
@@ -262,6 +271,8 @@ def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Calla
             else:
                 prefix = item.rstrip("/") + "/" if item else ""
                 for mode, oid, name in listing:
+                    if remaining is not None:
+                        remaining()
                     base = name.rsplit("/", 1)[-1]
                     deeper = name.startswith(prefix) and "/" in name[len(prefix):]
                     if not deeper:
@@ -274,6 +285,7 @@ def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Calla
         scopes.append({"path": item, "level": governing_level, "files": sorted(name for _m, _o, name in governing),
                        "nested": sorted(nested)})
     declared = None
+    manifest = None
     if manifest_path:
         found = [(mode, oid) for mode, oid, name in tree.entries(manifest_path) if name == manifest_path]
         if not found or found[0][0] not in ("100644", "100755"):
@@ -282,13 +294,18 @@ def discover(tree, paths: Sequence[str], manifest_path: str | None, store: Calla
             problems.append("the registered manifest is larger than 256 KiB")
         else:
             data = tree.read(found[0][1])
-            store(data)
+            manifest = {"path": manifest_path, "blob": found[0][1], "size": len(data), "sha256": store(data)}
             declared, problem = declared_from_manifest(manifest_path, data)
             if problem:
                 problems.append(problem)
-    return {"scopes": scopes, "files": [files[key] for key in sorted(files)],
-            "notices": [notices[key] for key in sorted(notices)], "declared": declared,
-            "problems": sorted(set(problems))}
+    if remaining is not None:
+        remaining()
+    result = {"scopes": scopes, "files": [files[key] for key in sorted(files)],
+              "notices": [notices[key] for key in sorted(notices)], "declared": declared,
+              "problems": sorted(set(problems))}
+    if manifest is not None:
+        result["manifest"] = manifest
+    return result
 
 
 # Verdicts and eligibility -------------------------------------------------------------------------------------
@@ -317,6 +334,17 @@ def verdict(evidence: Mapping | None, read: Callable[[str], bytes | None]) -> Ve
     if not isinstance(evidence, Mapping):
         return _unknown(["no license evidence (documents are not adopted code)"])
     problems = list(evidence.get("problems") or [])
+    manifest = evidence.get("manifest")
+    if manifest is not None:
+        data = read(manifest.get("sha256", ""))
+        if data is None:
+            problems.append("the stored package manifest is missing")
+        else:
+            declared, problem = declared_from_manifest(manifest.get("path", ""), data)
+            if declared != evidence.get("declared"):
+                problems.append("the declared license differs from the original package manifest")
+            if problem:
+                problems.append(problem)
     classified: dict[str, TextVerdict] = {}
     shown = []
     for item in evidence.get("files") or []:

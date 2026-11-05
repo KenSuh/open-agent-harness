@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Mapping
 
-from oah.design.sources.state import digest_of
+from oah.design.sources.state import digest_of, hex_of
 
 MATERIALS_PART = "materials"
 
@@ -71,6 +71,36 @@ class DesignView:
     def materials(self, which: str = "current") -> str | None:
         snapshot = self.current if which == "current" else self.accepted
         return None if snapshot is None else snapshot.parts.get(MATERIALS_PART)
+
+    def observation(self) -> dict:
+        return {"authority": self.authority, "source": self.source, "freshness": self.freshness,
+                "page_state": self.page_state, "recovery_pending": self.recovery_pending}
+
+    def problems(self) -> list[str]:
+        problems = []
+        if not self.authority or self.source not in ("worktree", "authority", "reader"):
+            problems.append("authority-unknown")
+        if self.freshness != "current":
+            problems.append("freshness-unknown")
+        if self.page_state != "clean":
+            problems.append("page-not-clean")
+        if self.recovery_pending:
+            problems.append("recovery-pending")
+        for snapshot in (self.current, self.accepted):
+            if snapshot is not None and (snapshot.ref.project != self.project or snapshot.ref.uid != self.uid
+                    or snapshot.ref.design != self.design or type(snapshot.ref.revision) is not int
+                    or snapshot.ref.revision < 1 or hex_of(snapshot.ref.digest) is None):
+                problems.append("design-ref-invalid")
+        if self.accepted is None and self.acceptance is not None:
+            problems.append("acceptance-invalid")
+        if self.accepted is not None and (not isinstance(self.acceptance, Mapping) or
+                set(self.acceptance) != {"sequence", "record", "revision", "digest"} or
+                type(self.acceptance.get("sequence")) is not int or self.acceptance["sequence"] < 1 or
+                hex_of(self.acceptance.get("record")) is None or
+                self.acceptance.get("revision") != self.accepted.ref.revision or
+                self.acceptance.get("digest") != self.accepted.ref.digest):
+            problems.append("acceptance-invalid")
+        return problems
 
     def snapshot(self, revision: int) -> SnapshotView | None:
         for item in (self.current, self.accepted):

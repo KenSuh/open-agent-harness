@@ -457,6 +457,8 @@ def _heads(sources, materials: Mapping[str, Mapping]) -> dict[str, tuple[str | N
     except (SourceError, StateProblem):
         return out
     for material in materials.values():
+        if material["source"].get("provider") == "authored":
+            continue
         source_id = material["source"]["id"]
         spec = registry.sources.get(source_id)
         if spec is None:
@@ -490,6 +492,32 @@ def _previous(view: DesignView) -> dict | None:
     except MaterialsError:
         return None
     return record if record.get("version") == SCHEMA else None
+
+
+def _authored_source(value: Mapping, ident: str, now: dt.datetime | None) -> dict:
+    keys = {"kind", "origin", "revision", "author", "at", "limitations", "evidence", "text"}
+    if set(value) != keys or value.get("kind") not in ("authored", "local-unverified"):
+        raise _invalid(f"material {ident}: an authored source has exactly {', '.join(sorted(keys))}")
+    limitations = _lines(value["limitations"], "authored source limitations")
+    text = _narrative(value["text"])
+    if not limitations or not text:
+        raise _invalid(f"material {ident}: an authored source needs substantive inline text and limitations")
+    return {"id": ident, "provider": "authored", "kind": value["kind"],
+            "locator": _line(value["origin"], "authored source origin", TEXT),
+            "revision": _line(value["revision"], "authored source revision", optional=True),
+            "author": _line(value["author"], "authored source author", optional=True),
+            "at": None if value["at"] is None else _time(value["at"], "authored source time", now),
+            "limitations": limitations, "evidence": _lines(value["evidence"], "authored source evidence"),
+            "text": text}
+
+
+def _authored_facts(source: Mapping) -> dict:
+    return {"source": dict(source), "spec_digest": digest_of({key: value for key, value in source.items()
+                                                            if key != "text"}),
+            "snapshot": text_digest(source["text"]), "observation": "unverified", "reviewed": None,
+            "release": None, "license": None, "portable_evidence_id": None,
+            "checked": {"observation": None, "attempted_at": None, "observed_at": None, "verified_at": None,
+                        "confirmed_at": None, "historical": "unverified", "freshness_when_recorded": "unknown"}}
 
 
 def build(selection: Mapping, sources, *, view: DesignView, allow_unverified: bool = False,
@@ -542,33 +570,39 @@ def build(selection: Mapping, sources, *, view: DesignView, allow_unverified: bo
                                                          "integration", "services", "unverified", "notes"})
         if extra:
             raise _invalid(f"material {ident} has unknown fields {', '.join(extra)}")
-        source_id = _id(item.get("source"), "source")
-        spec = registry.sources.get(source_id)
-        if spec is None:
-            raise _invalid(f"material {ident}: source {source_id} is not registered here; oah sources register it "
-                           "first")
-        status = sources.status(spec)
-        if status.problem is not None:
-            raise _invalid(f"material {ident}: the state of source {source_id} cannot be read ({status.problem})")
-        wanted = item.get("snapshot")
-        if wanted is not None:
-            digest = _digest(wanted, f"material {ident} snapshot")
-        elif status.head is not None and status.head.verified is not None:
-            digest = status.head.verified.snapshot
-        elif allow_unverified and status.head is not None and status.head.discovered is not None:
-            digest = status.head.discovered.snapshot
+        spec, status, evidence = None, None, None
+        if isinstance(item.get("source"), Mapping):
+            if not allow_unverified or item.get("snapshot") is not None:
+                raise _invalid(f"material {ident}: authored sources require --allow-unverified and no collector snapshot")
+            facts = _authored_facts(_authored_source(item["source"], ident, now))
         else:
-            raise _invalid(f"material {ident}: source {source_id} has no verified snapshot yet; run oah sources check "
-                           f"{source_id}, or pass --allow-unverified to record an unverified observation")
-        try:
-            envelope = sources.portable(spec, digest)
-            evidence = portable.verify(envelope)
-        except (SourceError, portable.PortableError) as exc:
-            raise MaterialsError(getattr(exc, "code", "OAH_MATERIALS_INVALID"),
-                                 f"material {ident}: {str(exc).partition(': ')[2]}") from None
-        facts = _facts(evidence, allow)
+            source_id = _id(item.get("source"), "source")
+            spec = registry.sources.get(source_id)
+            if spec is None:
+                raise _invalid(f"material {ident}: source {source_id} is not registered here; oah sources register it "
+                               "first")
+            status = sources.status(spec)
+            if status.problem is not None:
+                raise _invalid(f"material {ident}: the state of source {source_id} cannot be read ({status.problem})")
+            wanted = item.get("snapshot")
+            if wanted is not None:
+                digest = _digest(wanted, f"material {ident} snapshot")
+            elif status.head is not None and status.head.verified is not None:
+                digest = status.head.verified.snapshot
+            elif allow_unverified and status.head is not None and status.head.discovered is not None:
+                digest = status.head.discovered.snapshot
+            else:
+                raise _invalid(f"material {ident}: source {source_id} has no verified snapshot yet; run oah sources check "
+                               f"{source_id}, or pass --allow-unverified to record an unverified observation")
+            try:
+                envelope = sources.portable(spec, digest)
+                evidence = portable.verify(envelope)
+            except (SourceError, portable.PortableError) as exc:
+                raise MaterialsError(getattr(exc, "code", "OAH_MATERIALS_INVALID"),
+                                     f"material {ident}: {str(exc).partition(': ')[2]}") from None
+            facts = _facts(evidence, allow)
         if facts["observation"] == "unverified" and not allow_unverified:
-            raise _invalid(f"material {ident}: snapshot {digest} is an unverified observation; pass "
+            raise _invalid(f"material {ident}: snapshot {facts['snapshot']} is an unverified observation; pass "
                            "--allow-unverified to record it as such")
         choice = item.get("choice", "candidate")
         if choice not in CHOICES:
@@ -577,23 +611,26 @@ def build(selection: Mapping, sources, *, view: DesignView, allow_unverified: bo
         package = _package(item.get("package"), f"material {ident}")
         integration = _integration(item.get("integration"), f"material {ident}", now)
         unverified = []
-        if facts["observation"] == "unverified":
+        if evidence is None:
+            unverified += facts["source"]["limitations"]
+        elif facts["observation"] == "unverified":
             unverified.append("the snapshot is an unverified observation: "
                               + ", ".join(evidence.manifest.get("problems") or []))
         if package is not None:
             unverified.append("the published package was not compared with the source")
-        if spec.provider == "github":
+        if spec is not None and spec.provider == "github":
             unverified.append("transitive dependencies and their licenses were not reviewed")
         if integration["status"] == "untested":
             unverified.append("build and runtime compatibility were not tested")
         unverified += _lines(item.get("unverified"), f"material {ident} unverified")
-        checked = dict(facts["checked"], freshness_when_recorded=status.freshness)
+        checked = dict(facts["checked"], freshness_when_recorded="unknown" if status is None else status.freshness)
         materials[ident] = {"id": ident, "decision": decision, "choice": choice, **facts, "checked": checked,
                             "package": package, "integration": integration,
                             "services": _lines(item.get("services"), f"material {ident} services"),
                             "unverified": unverified,
                             "notes": _line(item.get("notes"), f"material {ident} notes", TEXT, optional=True)}
-        envelopes[evidence.ident] = envelope
+        if evidence is not None:
+            envelopes[evidence.ident] = envelope
     decision_inputs: dict[str, dict] = {}
     for key, value in inputs_in.items():
         ident = _id(key, "decision")
@@ -721,6 +758,19 @@ def _basis_history(ident: str, decision: Mapping, basis: Mapping, previous: Mapp
         return {"input_basis": dict(basis), "supported_bases": supported, "resolutions": history + list(resolutions),
                 "based_on": previous["based_on"]}
     if current in supported:
+        names = {previous.get("chosen"), *previous.get("alternatives", []),
+                 decision.get("chosen"), *decision.get("alternatives", [])} - {None}
+        changed = any(previous.get(key) != decision.get(key) for key in ("chosen", "alternatives", "status"))
+        for name in names:
+            before, after = previous_materials.get(name), materials.get(name)
+            if before is None or after is None or any(before.get(key) != after.get(key) for key in
+                                                      ("source", "spec_digest", "snapshot", "integration", "decision")):
+                changed = True
+            elif (before.get("license") or {}).get("policy_digest") != (after.get("license") or {}).get("policy_digest"):
+                changed = True
+        if changed:
+            raise MaterialsError("OAH_MATERIALS_REVIEW_REQUIRED", f"decision {ident}: source, policy or selection "
+                                 "changed; record an explicit carry or reselected resolution")
         return {"input_basis": dict(basis), "supported_bases": supported, "resolutions": history,
                 "based_on": previous["based_on"]}
     raise MaterialsError("OAH_MATERIALS_REVIEW_REQUIRED", f"decision {ident} was recorded for other design inputs; "
@@ -753,6 +803,8 @@ def _license_cell(material: Mapping) -> str:
 
 
 def _revision_cell(material: Mapping) -> str:
+    if material["source"].get("provider") == "authored":
+        return f"{material['source']['kind']} · revision {material['source']['revision'] or 'unknown'}"
     release, reviewed = material.get("release"), material.get("reviewed") or {}
     if release:
         kind = "prerelease" if release.get("prerelease") else "stable"
@@ -887,11 +939,17 @@ def _material_lines(material: Mapping, labels: Mapping) -> list[str]:
         scope.append(f"tag prefix {source['tag_prefix']}")
     if source.get("paths"):
         scope.append(f"paths {', '.join(source['paths'])}")
-    out.append(f"- {labels['source']}: {source['id']} {source['locator']} ({', '.join(scope)}; channel "
+    if source.get("provider") == "authored":
+        out += [f"- {labels['source']}: {source['kind']} ({source['locator']}); unverified, license unknown",
+                f"- Provenance: author {source['author'] or 'unknown'}, revision {source['revision'] or 'unknown'}, "
+                f"time {source['at'] or 'unknown'}; evidence {_join(source['evidence'])}",
+                f"- Limitations: {_join(source['limitations'])}", "", source["text"], ""]
+    else:
+        out.append(f"- {labels['source']}: {source['id']} {source['locator']} ({', '.join(scope)}; channel "
                f"{source.get('channel')}, ref {source.get('ref') or '-'}, release order {source.get('release_order') or '-'}"
                f", selection {source.get('selection_policy') or '-'}, verification {source.get('verification_policy')})"
                f", spec {material['spec_digest']}, snapshot {material['snapshot']} ({material['observation']})")
-    out.append(f"- {labels['evidence']}: {material['portable_evidence_id']}")
+    out.append(f"- {labels['evidence']}: {material['portable_evidence_id'] or 'none (unverified)'}")
     reviewed = material.get("reviewed") or {}
     if "files" in reviewed:
         out.append(f"- {labels['reviewed']}: commit {reviewed.get('commit') or '-'}, ref {reviewed.get('ref') or '-'}, "
@@ -900,7 +958,7 @@ def _material_lines(material: Mapping, labels: Mapping) -> list[str]:
             out.append(f"  - {escape(item['path'])} mode {item['mode']} blob {item['blob']} size {item['size']} "
                        f"sha256 {item['sha256']} ({labels['read']}: {material['portable_evidence_id']} "
                        f"sha256:{item['sha256']})")
-    else:
+    elif source.get("provider") != "authored":
         out.append(f"- {labels['reviewed']}: {escape(str(reviewed.get('final_url')))} ({reviewed.get('content_type')}, "
                    f"{reviewed.get('bytes')} bytes sha256 {reviewed.get('sha256')}; text {reviewed.get('text_bytes')} "
                    f"bytes sha256 {reviewed.get('text_sha256')}) ({labels['read']}: {material['portable_evidence_id']})")
@@ -1094,7 +1152,16 @@ def _validate(record: Mapping) -> None:
         _same(material["services"], _lines(material["services"], "services"), f"material {ident} services")
         _same(material["unverified"], _lines(material["unverified"], "unverified"), f"material {ident} unverified")
         _same(material["notes"], _line(material["notes"], "notes", TEXT, optional=True), f"material {ident} notes")
-        if material["portable_evidence_id"] not in envelope_ids:
+        authored = material["source"].get("provider") == "authored" if isinstance(material["source"], dict) else False
+        if authored:
+            source = material["source"]
+            normalized = _authored_source({"kind": source.get("kind"), "origin": source.get("locator"),
+                **{key: source.get(key) for key in ("revision", "author", "at", "limitations", "evidence", "text")}},
+                ident, None)
+            _same(source, normalized, f"material {ident} authored source")
+            _same(_identity_view(material), _identity_view(_authored_facts(normalized)),
+                  f"material {ident} authored facts")
+        elif material["portable_evidence_id"] not in envelope_ids:
             raise _invalid(f"material {ident}: its portable evidence is not in the record")
         if not isinstance(material["source"], dict):
             raise _invalid(f"material {ident}: source is an object")
@@ -1164,6 +1231,8 @@ def refs_of(text: str) -> list[dict]:
     record = parse(text)
     refs = []
     for material in record["materials"]:
+        if material["source"].get("provider") == "authored":
+            continue
         ref = {"source": material["source"]["id"], "locator": material["source"].get("locator"),
                "spec_digest": material["spec_digest"], "snapshot": material["snapshot"]}
         if ref not in refs:
@@ -1199,7 +1268,11 @@ def resolution_template(text: str, sources, view: DesignView, decision_id: str, 
         wanted = next((item for item in selection.get("materials") or []
                        if isinstance(item, Mapping) and item.get("id") == chosen), None)
         dependencies = []
-        if wanted is not None:
+        if wanted is not None and isinstance(wanted.get("source"), Mapping):
+            facts = _authored_facts(_authored_source(wanted["source"], chosen, None))
+            dependencies = [{"material": chosen, "source": chosen, "spec_digest": facts["spec_digest"],
+                             "snapshot": facts["snapshot"], "registered_spec": None, "head": None}]
+        elif wanted is not None:
             registry, _raw = sources.registry()
             spec = registry.sources.get(_id(wanted.get("source"), "source"))
             if spec is None:
@@ -1241,7 +1314,7 @@ def _chain_ok(decision: Mapping) -> bool:
     return expected == supported and digest_of(decision["input_basis"]) in supported
 
 
-def check(text: str, sources=None, policy: Mapping | None = None, context: DesignView | None = None, *,
+def check(text: str | None, sources=None, policy: Mapping | None = None, context: DesignView | None = None, *,
           unavailable: str | None = None) -> dict:
     """MaterialCheckV1 of one materials text against the checked design view, local evidence and current policy.
 
@@ -1272,6 +1345,10 @@ def check(text: str, sources=None, policy: Mapping | None = None, context: Desig
     report = {"version": 1, "checked_view": checked_view, "materials_digest": None,
               "policy_digest": policy_digest, "source_reads": [], "decisions": [], "overall": "invalid",
               "problems": []}
+    if text is None and view is None:
+        report["overall"] = "unknown"
+        report["problems"].append(f"authority-unavailable:{unavailable or 'unknown'}")
+        return report
     try:
         normalized = normalize_text(text, "materials")
     except DesignError:
@@ -1312,6 +1389,12 @@ def check(text: str, sources=None, policy: Mapping | None = None, context: Desig
                 "eligibility": None, "integration": (material.get("integration") or {}).get("status"),
                 "registration": "unknown", "registered_head": None, "upstream_freshness": portable.OFFLINE_FRESHNESS,
                 "problems": problems}
+        if material["source"].get("provider") == "authored":
+            read.update(historical_evidence="unverified(authored)", eligibility="unknown",
+                        registration="not-applicable(authored)")
+            report["source_reads"].append(read)
+            material_problems[ident] = problems
+            continue
         try:
             evidence = portable.verify(envelopes[material["portable_evidence_id"]])
         except portable.PortableError as exc:
@@ -1373,9 +1456,10 @@ def check(text: str, sources=None, policy: Mapping | None = None, context: Desig
                         problems.append("resolution-ref-unknown")
         if problems:
             status = "invalid"
-        elif view is None:
+        elif view is None or view.problems():
             status = "unknown"
-            problems.append(f"authority-unavailable:{unavailable or 'unknown'}")
+            problems.extend([f"authority-unavailable:{unavailable or 'unknown'}"] if view is None
+                            else [f"authority-invalid:{problem}" for problem in view.problems()])
         else:
             current_basis = digest_of(input_basis(view, inputs))
             accepted = input_basis(view, inputs, which="accepted")
@@ -1415,6 +1499,8 @@ def check(text: str, sources=None, policy: Mapping | None = None, context: Desig
         statuses.append("invalid")
     if edited:
         statuses.append("invalid")
+    if view is not None and view.problems():
+        statuses.append("unknown")
     report["overall"] = _worst(statuses)
     return report
 

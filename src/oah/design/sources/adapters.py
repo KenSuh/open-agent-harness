@@ -99,16 +99,20 @@ class Observer:
                 "document": document, "verified": not problems, "problems": sorted(set(problems)),
                 "notices": sorted(set(notices)), "content_key": digest_of(content)}
 
-    def _finish(self, manifest: dict, verified: dict | None, seen: str, selection: str | None = None) -> Observation:
+    def _finish(self, manifest: dict, verified: dict | None, seen: str, deadline: float,
+                selection: str | None = None) -> Observation:
+        self._left(deadline)
         if verified is not None and manifest["verified"] and verified.get("content_key") == manifest["content_key"]:
             return Observation("unchanged", seen=seen, selection=selection)
         digest = self.state.put_record("snapshots", manifest)
+        self._left(deadline)
         return Observation("snapshot", snapshot=digest, verified=manifest["verified"],
                            problems=tuple(manifest["problems"]), seen=seen, selection=selection)
 
     def read_paths(self, tree: Tree, paths: tuple[str, ...]) -> tuple[list[dict], list[str]]:
         files, problems, total = [], set(), 0
         for path in paths:
+            tree.check_deadline()
             entries = tree.entries(path)
             if not entries:
                 problems.add("path-missing")
@@ -119,6 +123,7 @@ class Observer:
                 problems.add("unsafe-entry")
                 continue
             for mode, oid, name in entries:
+                tree.check_deadline()
                 if mode in ("120000", "160000") or not oid:
                     problems.add("unsafe-entry")
                     continue
@@ -130,6 +135,7 @@ class Observer:
                 files.append({"path": name, "mode": mode, "blob": oid, "size": size,
                               "sha256": self._store(tree.read(oid))})
         files.sort(key=lambda item: item["path"])
+        tree.check_deadline()
         return files, sorted(problems)
 
     # ---- entry point ------------------------------------------------------------------------------------------
@@ -182,17 +188,19 @@ class Observer:
             else:
                 with tempfile.TemporaryDirectory(prefix="oah-source-") as scratch:
                     tree = fetch(git_url, f"refs/tags/{chosen.tag}", pathlib.Path(scratch) / "repo",
-                                 timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False)
+                                 timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
+                                 remaining=lambda: self._left(deadline))
                     fetched = tree.commit
-                    tag_head = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD"),
+                    tag_head = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD", remaining=tree.remaining),
                                         "reading the fetched tag").strip()
-                    tree_id = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD^{tree}"),
+                    tree_id = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD^{tree}", remaining=tree.remaining),
                                        "reading the fetched tree").strip()
                     if fetched != commit or tag_head != chosen.tag_object:
                         problems.append("ref-mismatch")
                     files, path_problems = self.read_paths(tree, spec.paths)
                     problems += path_problems
-                    license_evidence = license_module.discover(tree, spec.paths, spec.manifest_path, self._store)
+                    license_evidence = license_module.discover(tree, spec.paths, spec.manifest_path, self._store,
+                                                               remaining=tree.remaining)
             selector.content = {"commit": fetched, "tree": tree_id}
             selector.confirm()
         except release.Changed:
@@ -219,7 +227,7 @@ class Observer:
                                   license_evidence=license_evidence, document=None, problems=problems,
                                   content={"spec": spec.spec_digest, "release": identity, "files": files,
                                            "license": license_evidence}, notices=notices)
-        return self._finish(manifest, verified, commit, selection)
+        return self._finish(manifest, verified, commit, deadline, selection)
 
     def _blocked(self, selector: release.Selector, problems: tuple[str, ...]) -> Observation:
         return Observation("blocked", problems=problems,
@@ -230,6 +238,7 @@ class Observer:
     def _commit(self, spec: SourceSpec, verified: dict | None, deadline: float) -> Observation:
         git_url = self.transport.git_url(spec.locator)
         advertisement = gitref.ls_remote(git_url, (spec.ref,), timeout=min(gitref.TIMEOUT, self._left(deadline)))
+        self._left(deadline)
         commit = advertisement.refs.get(spec.ref)
         if commit is None:
             return Observation("blocked", problems=("ref-missing",))
@@ -238,14 +247,16 @@ class Observer:
         problems: list[str] = []
         with tempfile.TemporaryDirectory(prefix="oah-source-") as scratch:
             tree = fetch(git_url, spec.ref, pathlib.Path(scratch) / "repo",
-                         timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False)
+                         timeout=min(FETCH_TIMEOUT, self._left(deadline)), follow_redirects=False,
+                         remaining=lambda: self._left(deadline))
             if tree.commit != commit:
                 problems.append("ref-mismatch")
-            tree_id = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD^{tree}"),
+            tree_id = _checked(_git(tree.repo, "rev-parse", "--verify", "FETCH_HEAD^{tree}", remaining=tree.remaining),
                                "reading the fetched tree").strip()
             files, path_problems = self.read_paths(tree, spec.paths)
             problems += path_problems
-            license_evidence = license_module.discover(tree, spec.paths, spec.manifest_path, self._store)
+            license_evidence = license_module.discover(tree, spec.paths, spec.manifest_path, self._store,
+                                                       remaining=tree.remaining)
         content = {"spec": spec.spec_digest, "files": files, "license": license_evidence}
         if not spec.paths:
             content["commit"] = tree.commit  # without selected paths, every commit is new content
@@ -253,7 +264,7 @@ class Observer:
                                                   "release": None},
                                   files=files, license_evidence=license_evidence, document=None, problems=problems,
                                   content=content)
-        return self._finish(manifest, verified, tree.commit)
+        return self._finish(manifest, verified, tree.commit, deadline)
 
     # ---- documents ----------------------------------------------------------------------------------------
 
@@ -262,6 +273,7 @@ class Observer:
                                timeout=min(self.settings.timeout, self._left(deadline)),
                                allow_loopback=self.transport.allow_loopback, resolve=dict(self.transport.resolve))
         result = self.transport.getter(spec.locator, policy=policy, headers={"Accept": DOC_ACCEPT})
+        self._left(deadline)
         header = result.headers.get("content-type", "")
         kind = header.split(";", 1)[0].strip().lower()
         charset = "utf-8"
@@ -280,6 +292,7 @@ class Observer:
         text_bytes = text.encode("utf-8")
         text_sha = sha256_hex(text_bytes)
         content = {"spec": spec.spec_digest, "type": kind, "text_sha256": text_sha}
+        self._left(deadline)
         if verified is not None and verified.get("content_key") == digest_of(content):
             return Observation("unchanged", seen=text_sha)
         document = {"url": spec.locator, "final_url": result.final_url, "status": result.status, "content_type": kind,
@@ -287,4 +300,4 @@ class Observer:
                     "text_sha256": self._store(text_bytes), "text_bytes": len(text_bytes)}
         manifest = self._manifest(spec, observed={"commit": None, "ref": None, "release": None}, files=[],
                                   license_evidence=None, document=document, problems=[], content=content)
-        return self._finish(manifest, verified, text_sha)
+        return self._finish(manifest, verified, text_sha, deadline)

@@ -2,15 +2,21 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
+import datetime as dt
+import hashlib
 import json
 import pathlib
 import unittest
+from unittest import mock
 
 from oah import rerank
+from oah.config import Config, ConfigError
 from oah.design.sources.view import DesignRef, DesignView, SnapshotView
 from oah.rerank import base, judge, typesafe
 from tests.test_design_sources import LICENSE, SourceCase
 from tests.test_rerank import FakeServer, NoKeychain, fake_key, typesafe_config
+from tests.helpers import make_tmp_dir
 
 POLICY = "sha256:" + "a" * 64
 
@@ -35,6 +41,11 @@ class FakeJudge:
         for name, question in questions.items():
             if question["type"] == "noul":
                 answers[name] = {"type": "noul", "noul": self.fits if name == "fits" else self.labels.get(name, 0.1)}
+                continue
+            if question["type"] == "score":
+                answers[name] = {"type": "score", "score": 1.6, "confidence": 0.8,
+                                 "legend": {str(index): text for index, text in enumerate(question["criteria"])},
+                                 "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}
                 continue
             rest = (1.0 - self.top) / (len(question["criteria"]) - 1)
             answers[name] = {"type": "choice", "choice": self.choice, "confidence": self.top,
@@ -69,6 +80,7 @@ class JudgementCase(SourceCase):
         self.provider = FakeJudge()
 
     def run_judge(self, request: judge.Request, cfg: dict | None = None, **options) -> judge.Judgement:
+        options.setdefault("sources", self.store)
         return judge.judge(request, config=cfg or config(), policy=POLICY, env={"FAKE_JUDGE_KEY": "k"},
                            providers={"fake": self.provider}, **options)
 
@@ -81,6 +93,19 @@ class ProvenanceTest(JudgementCase):
 
     PRIVATE = ("Our clinic lets each nurse see only her own patients, and the board meets on Thursdays to approve "
                "new vendors.\n")
+
+    def test_default_without_store_cannot_send_a_replaced_public_field(self) -> None:
+        private = "Our clinic board meets on Tuesdays."
+        replaced = dataclasses.replace(self.notes(), text=private, length=len(private),
+                                       bytes_digest=hashlib.sha256(private.encode()).hexdigest())
+        request = judge.Request("source-change-impact", "source-change-impact/v2", (("release_note_excerpt", replaced),))
+        result = self.run_judge(request, sources=None)
+        self.assertEqual("unused(scope)", result.status)
+        self.assertEqual([], self.provider.calls)
+        self.assertEqual("unused(scope)", self.run_judge(request).status)
+        self.assertEqual([], self.provider.calls)
+        good = judge.Request("source-change-impact", "source-change-impact/v2", (("release_note_excerpt", self.notes()),))
+        self.assertEqual("used", self.run_judge(good).status)
 
     def test_private_requirement_prose_without_a_secret_pattern_sends_nothing(self) -> None:
         private = judge.design_field(view({"request": self.PRIVATE}), "part:request", 0, 60)
@@ -126,7 +151,8 @@ class ProvenanceTest(JudgementCase):
                                 (("release_note_excerpt", self.notes()),))
         self.assertEqual("unused(judgement-off)", self.run_judge(request, config(enabled=False)).status)
         self.assertEqual("unused(not-enabled)", self.run_judge(request, config(rerank_on=False)).status)
-        no_key = judge.judge(request, config=config(), policy=POLICY, env={}, providers={"fake": self.provider})
+        no_key = judge.judge(request, config=config(), policy=POLICY, env={}, providers={"fake": self.provider},
+                             sources=self.store)
         self.assertEqual("unused(no key)", no_key.status)
         self.assertEqual("unused(disabled-by-brief)", self.run_judge(request, brief_disabled=True).status)
         self.assertEqual([], self.provider.calls)
@@ -143,7 +169,9 @@ class ProvenanceTest(JudgementCase):
                 request = judge.Request("source-change-impact", "source-change-impact/v2",
                                         (("release_note_excerpt" if field.path_or_field == "release-notes"
                                           else "file_excerpt", field),))
-                self.assertEqual("unused(secret)", self.run_judge(request).status)
+                with mock.patch.object(judge, "_gate", wraps=judge._gate) as gate:
+                    self.assertEqual("unused(secret)", self.run_judge(request).status)
+                gate.assert_not_called()
         self.assertEqual([], self.provider.calls)
 
     def test_closed_allowlists_tags_and_required_inputs(self) -> None:
@@ -248,6 +276,26 @@ class OutcomeTest(JudgementCase):
     def classes(self, options: tuple[str, ...] = ()) -> judge.Request:
         excerpt = judge.public_field(self.store, self.first, "src/lib.rs", 0, 13)
         return judge.Request("material-classes", "material-classes/v2", (("manifest_excerpt", excerpt),), options)
+
+    def test_effective_judgement_settings_are_accepted_and_change_the_outcome(self) -> None:
+        cfg = config()
+        cfg["judgement"].update(yes=0.95, no=0.05, choice_min=0.95, level_min=0.8, cache_hours=0,
+                                max_questions=32, max_state_chars=16000)
+        loaded = Config(None, {"rerank": cfg}).section("rerank", rerank.DEFAULTS)
+        result = self.run_judge(self.impact(), loaded)
+        self.assertEqual("uncertain", result.outcome)
+        self.assertEqual(0.95, result.identity["thresholds"]["yes"])
+
+    def test_direct_settings_cannot_be_ignored_and_bad_ranges_refuse(self) -> None:
+        cfg = config()
+        cfg["judgement"].update(yes=0.95, choice_min=0.95)
+        self.assertEqual("uncertain", self.run_judge(self.impact(), cfg).outcome)
+        for key, value in (("yes", float("nan")), ("no", 0.95), ("cache_hours", 721),
+                           ("max_questions", 0), ("max_state_chars", 999), ("choice_min", True), ("unknown", 1)):
+            invalid = config()
+            invalid["judgement"][key] = value
+            with self.subTest(key=key), self.assertRaises(ConfigError):
+                self.run_judge(self.impact(), invalid)
 
     def test_a_choice_is_asked_with_a_companion_question_on_whether_any_option_fits(self) -> None:
         result = self.run_judge(self.impact())
@@ -371,7 +419,7 @@ class TypeSafeJudgementTest(JudgementCase):
         request = judge.Request("source-change-impact", "source-change-impact/v2",
                                 (("release_note_excerpt", self.notes()),))
         result = judge.judge(request, config=cfg, policy=POLICY, env={"TYPESAFE_API_KEY": self.key},
-                             keychain=NoKeychain())
+                             keychain=NoKeychain(), sources=self.store)
         return result, server
 
     @staticmethod
@@ -396,6 +444,54 @@ class TypeSafeJudgementTest(JudgementCase):
         self.assertEqual({"type": "noul", "instructions": instructions, "criteria": {"true": true, "false": false}},
                          body["questions"]["fits"])
         self.assertEqual(f"Bearer {self.key}", server.requests[0]["headers"]["Authorization"])
+
+    def test_answered_model_is_preserved_instead_of_collapsing_different_evidence(self) -> None:
+        first = typesafe.parse_judgement_response({"model": "jev-1.14.0", "answers": self.GOOD}, self.QUESTIONS)
+        second = typesafe.parse_judgement_response({"model": "jev-1.14.1", "answers": self.GOOD}, self.QUESTIONS)
+        self.assertNotEqual(first, second)
+
+    def test_alias_cache_expires_but_saved_assessment_evidence_survives(self) -> None:
+        def respond(path, body):
+            answers = FakeJudge().judge({}, body["questions"], key=None, config={})
+            return 200, {"model": "jev-1.14.0", "answers": answers}, 0, {}
+
+        server = FakeServer(self, respond)
+        cfg = typesafe_config(server.url())
+        cfg["typesafe"]["model"] = "jev-latest"
+        cfg["judgement"] = {"enabled": True, "send_design_text": False}
+        request = judge.Request("source-change-impact", "source-change-impact/v2", (("release_note_excerpt", self.notes()),))
+        state = make_tmp_dir(self)
+        moment = dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc)
+
+        def ask():
+            return judge.judge(request, config=cfg, policy=POLICY, sources=self.store, state_dir=state,
+                               env={"TYPESAFE_API_KEY": self.key}, keychain=NoKeychain())
+
+        with mock.patch.object(judge, "_utc_now", create=True, return_value=moment):
+            first, second = ask(), ask()
+        self.assertEqual(1, len(server.requests))
+        self.assertEqual(("used", "used(cache)"), (first.status, second.status))
+        record = first.to_record()
+        self.assertEqual("jev-1.14.0", record["answered_model"])
+        self.assertEqual("jev-latest", record["identity"]["requested_model"])
+        self.assertEqual(moment.isoformat(), record["assessed_at"])
+        durable = self.store.store_assessment(record)
+        with mock.patch.object(judge, "_utc_now", return_value=moment + dt.timedelta(hours=25)):
+            self.assertEqual("used", ask().status)
+        self.assertEqual(2, len(server.requests))
+        with mock.patch.object(judge, "_utc_now", return_value=moment + dt.timedelta(days=32)):
+            self.assertEqual("used", ask().status)
+        self.assertEqual(record, self.store.assessment(durable))
+
+    def test_score_reply_is_validated_as_an_ordered_rubric(self) -> None:
+        question = {"urgency": {"type": "score", "instructions": "How urgent is review?",
+                                 "criteria": ["Can wait", "Review soon", "Review now"]}}
+        answer = {"urgency": {"type": "score", "score": 1.6, "confidence": 0.7,
+                               "legend": {"0": "Can wait", "1": "Review soon", "2": "Review now"},
+                               "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}
+        self.assertEqual(answer, dict(typesafe.parse_judgement_response({"model": "jev-1.14.0", "answers": answer},
+                                                                       question)))
+        self.assertEqual(answer, judge._valid_answers(answer, question))
 
     def test_a_repeated_key_or_a_non_finite_number_fails_the_whole_answer(self) -> None:
         def text(questions, extra: str) -> bytes:
@@ -427,7 +523,8 @@ class TypeSafeJudgementTest(JudgementCase):
     def test_every_answer_is_checked_against_its_question(self) -> None:
         self.assertEqual({"choice": {"type": "choice", "choice": "a", "probabilities": {"a": 0.8, "b": 0.2},
                                      "confidence": 0.8}, "fits": {"type": "noul", "noul": 0.9}},
-                         typesafe.parse_judgement_response({"answers": self.GOOD}, self.QUESTIONS))
+                         dict(typesafe.parse_judgement_response({"answers": self.GOOD}, self.QUESTIONS)))
+        self.assertIsNone(typesafe.parse_judgement_response({"answers": self.GOOD}, self.QUESTIONS).answered_model)
 
         def changed(edit) -> dict:
             answers = copy.deepcopy(self.GOOD)
@@ -455,15 +552,90 @@ class TypeSafeJudgementTest(JudgementCase):
 
 
 
-class AdvisoryTest(unittest.TestCase):
+class AdvisoryTest(JudgementCase):
     """No judgement is an input to license eligibility, material checks, tested status, carry or acceptance."""
 
-    def test_design_and_source_code_never_reads_a_judgement(self) -> None:
-        root = pathlib.Path(judge.__file__).resolve().parents[1]
-        modules = [root / "design" / "materials.py", root / "sources_cli.py",
-                   *sorted((root / "design" / "sources").glob("*.py"))]
-        self.assertGreater(len(modules), 10)
-        self.assertEqual([], [path.name for path in modules if "rerank" in path.read_text(encoding="utf-8")])
+    def test_yes_answers_never_change_license_facts_or_source_proof(self) -> None:
+        before_head = self.store.head(self.spec).to_json()
+        before_manifest = self.store.snapshot(self.first)
+        eligibility = self.store.eligibility(before_manifest)
+        self.provider.labels = {key: 0.99 for key in ("may_break_users", "security_fix", "drops_platform")}
+        request = judge.Request("source-change-impact", "source-change-assessment/v1",
+                                (("release_note_excerpt", self.notes()),), input_ref="sha256:" + "1" * 64)
+        result = self.run_judge(request)
+        self.assertEqual("used", result.status)
+        applied = judge.apply(result, current_input_ref=request.input_ref, config=config(), sources=self.store,
+                              request=request, policy=POLICY)
+        self.assertTrue(applied.applied)
+        self.assertEqual({"may_break_users": "yes", "security_fix": "yes", "drops_platform": "yes"}, result.labels)
+        self.assertEqual(eligibility, self.store.eligibility(before_manifest))
+        self.assertEqual(before_head, self.store.head(self.spec).to_json())
+        self.assertEqual(before_manifest, self.store.snapshot(self.first))
+
+    def test_missing_mandatory_candidate_refuses_without_a_provider_call(self) -> None:
+        request = judge.Request("candidate-priority", "candidate-priority/v2",
+                                (("o0:evidence_excerpt", self.notes()), ("o1:evidence_excerpt", self.notes())),
+                                ("o0", "o1"), frozenset({"o2"}))
+        with self.assertRaises(ValueError):
+            self.run_judge(request)
+        self.assertEqual([], self.provider.calls)
+
+    def test_apply_rechecks_the_input_and_request_and_keeps_uncertainty(self) -> None:
+        request = judge.Request("source-change-impact", "source-change-assessment/v1",
+                                (("release_note_excerpt", self.notes()),), input_ref="sha256:" + "2" * 64)
+        result = self.run_judge(request)
+        self.assertEqual("stale-input", judge.apply(result, current_input_ref="sha256:" + "3" * 64,
+                         config=config(), sources=self.store, request=request, policy=POLICY).reason)
+        changed = dataclasses.replace(request, fields=(("release_note_excerpt", self.notes()),
+                                                       ("role", judge.label("role", "candidate"))))
+        self.assertEqual("stale-input", judge.apply(result, current_input_ref=request.input_ref,
+                         config=config(), sources=self.store, request=changed, policy=POLICY).reason)
+
+    def test_cache_version_identity_expiry_and_evidence_retention(self) -> None:
+        request = judge.Request("source-change-impact", "source-change-impact/v2", (("release_note_excerpt", self.notes()),))
+        state = make_tmp_dir(self)
+        cfg = config()
+        cfg["typesafe"]["model"] = "jev-1.14.0"
+        moment = dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc)
+        original = self.provider.judge
+        answered = ["jev-1.14.0"]
+
+        def reply(*args, **kwargs):
+            return base.JudgeReply(original(*args, **kwargs), answered[0])
+
+        def ask(item=request):
+            return self.run_judge(item, cfg, state_dir=state)
+
+        notices = []
+        with mock.patch.object(self.provider, "judge", side_effect=reply), \
+                mock.patch.object(judge, "_utc_now", return_value=moment), \
+                mock.patch.object(judge.sys, "stderr"):
+            first = ask()
+            second = ask()
+            self.assertEqual(("used", "used(cache)"), (first.status, second.status))
+            self.assertEqual(1, len(self.provider.calls))
+        durable = self.store.store_assessment(first.to_record())
+        old_cache = state / "rerank" / "judgements" / judge.cache_key(first.identity)[7:9] / (judge.cache_key(first.identity)[7:] + ".json")
+        self.assertTrue(old_cache.exists())
+        with mock.patch.object(self.provider, "judge", side_effect=reply), \
+                mock.patch.object(judge, "_utc_now", return_value=moment + dt.timedelta(days=29)):
+            self.assertEqual("used(cache)", ask().status)
+        changed = dataclasses.replace(request, fields=request.fields + (("role", judge.label("role", "chosen")),))
+        with mock.patch.object(self.provider, "judge", side_effect=reply), \
+                mock.patch.object(judge, "_utc_now", return_value=moment + dt.timedelta(days=31)):
+            self.assertEqual("used", ask(changed).status)
+        self.assertFalse(old_cache.exists())
+        self.assertEqual(first.to_record(), self.store.assessment(durable))
+        for model in (None, "jev-1.14.1"):
+            answered[0] = model
+            isolated = make_tmp_dir(self)
+            with self.subTest(answered=model), mock.patch.object(self.provider, "judge", side_effect=reply), \
+                    mock.patch.object(judge, "_utc_now", return_value=moment):
+                one = self.run_judge(request, cfg, state_dir=isolated, notify=notices.append)
+                two = self.run_judge(request, cfg, state_dir=isolated, notify=notices.append)
+                self.assertEqual(("used", "used"), (one.status, two.status))
+                self.assertEqual(model, one.answered_model)
+        self.assertEqual(2, len(notices))
 
 
 if __name__ == "__main__":

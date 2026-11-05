@@ -19,6 +19,7 @@
 | `oah sources check --scheduled` | 영속 대기열을 한정된 시간 안에 공정하게 한 번 도는 검사다. 매일 OS 항목이 실행하는 것이 이것이다. |
 | `oah sources diff <id> --from S1 --to S2` | 한 출처의 저장된 두 스냅샷을 네트워크 없이 비교한다. |
 | `oah sources proposals [--design PROJECT/DESIGN]` | 설계가 검토할 만한 출처 변화를 보여 준다. 읽기만 한다. |
+| `oah sources proposals assess [--design PROJECT/DESIGN]` | 공개 변경 근거를 선택적 판정기로 평가하고 조언 기록을 저장한다. |
 | `oah sources dismiss <key> --reason "..."` | 제안 하나를 이유와 함께 숨긴다. |
 | `oah sources materials render --design PROJECT/DESIGN --input FILE` | 선택 파일로 설계의 materials 부분을 만든다. 출력하거나 `--out` 으로 새 파일 하나를 쓴다. |
 | `oah sources materials check --design PROJECT/DESIGN` | 재료 결정마다 입력과 아직 맞는지 알려 준다. `--revision N` 은 이전 리비전을 검사한다. |
@@ -78,7 +79,21 @@
   쓰기 전에 `OAH_MATERIALS_EVIDENCE_TOO_LARGE` 로 거절한다. 선택 경로를 좁히거나 결정을 여러 설계로 나눈다.
 - 결과는 표준 출력으로 나온다. `--out FILE` 은 이 저장소 안에 새 파일 하나만 만들며, 이미 있는 파일, 링크,
   저장소 밖 경로는 거절한다(`OAH_MATERIALS_OUTPUT_EXISTS`, `OAH_MATERIALS_OUTPUT_PATH_INVALID`).
-  Windows 에서는 `--out` 을 `OAH_MATERIALS_OUTPUT_UNVERIFIABLE` 로 거절하므로 표준 출력을 리디렉션한다.
+  Windows 에서는 핸들과 공유 보장을 확인할 수 있는 로컬 NTFS/ReFS 의 일반 경로를 지원한다. API 나 파일 시스템이
+  지원되지 않으면 `OAH_MATERIALS_OUTPUT_UNVERIFIABLE` 로 거절하며, 표준 출력은 계속 쓸 수 있다.
+
+공개 수집기가 없는 작성 자료나 로컬 재료는 `--allow-unverified` 와 명시적인 출처 객체로 기록한다.
+`source` ID 대신 다음 모양을 쓰며, `origin` 이 가리키는 파일을 자동으로 읽지 않는다.
+
+```json
+{"kind":"local-unverified","origin":"Local prototype","revision":"draft-1","author":"project team",
+ "at":"2026-01-01T12:00:00+00:00","limitations":["License and runtime not independently checked"],
+ "evidence":[],"text":"A local booking adapter with a manually reviewed interface."}
+```
+
+`kind` 는 `authored` 또는 `local-unverified` 이고 위 필드는 모두 필요하다. 본문은 인라인으로 남으며 라이선스,
+상류 검증, 신선도는 모름이다. 공개 판정 필드로 보낼 수 없다. 공개 릴리스의 휴대 증거에는 선택 기록, 전체 ref 광고와
+선택에 사용한 메타데이터 원본도 들어가며, 오프라인 재구성으로 상류의 현재 신선도를 확인했다고 하지 않는다.
 
 결과는
 `oah design save <project> <design> --expect-revision N --expect-digest D --reason "..." --part materials=FILE`
@@ -134,8 +149,17 @@ send_design_text = false  # true 이면 설계 글의 발췌도 보낼 수 있�
 
 켜더라도 oah 는 검증한 공개 스냅샷의 조각과 정해진 라벨만 보내고, 설계 발췌는 `send_design_text = true` 일 때만
 보낸다. 나가는 문자열은 모두 비밀 값과 이메일 주소를 검사하며, 하나라도 걸리면 아무것도 보내지 않는다. 저장된
-판정은 스냅샷, 설계 리비전, 라이선스 정책, 제공자, 모델이 모두 그대로일 때만 적용한다. 아직 판정을 요청하는
-`oah sources` 명령은 없으며, 이 설정은 앞으로 판정을 요청할 호출자를 막는 문이다.
+판정은 스냅샷, 설계 리비전, 라이선스 정책, 제공자, 모델과 유효 설정이 모두 그대로일 때만 적용한다.
+`proposals assess` 가 명시적인 소비자이며 일반 목록과 예약 검사는 판정을 요청하지 않는다. 호환성 파괴, 보안 수정,
+플랫폼 지원 제거를 독립적으로 묻고 3단계 긴급도 Score 를 함께 받는다. 각 제안은 결정적 라벨과 상태를 유지하며
+`jev=used|used(cache)|unused(reason) applied=yes|no(reason)` 를 따로 표시한다.
+
+`[rerank.judgement]` 는 `yes=0.7`, `no=0.3`, `choice_min=0.6`, `level_min=0.5`, `cache_hours=24`,
+`max_questions=32`, `max_state_chars=16000` 을 지원한다. `no` 는 `yes` 보다 작아야 한다. 별칭 요청은 응답한
+모델 버전을 0~720시간 설정 안에서 재사용하며 요청·응답 버전이 정확히 같으면 최대 30일이다. 응답 모델이 없으면
+재사용하지 않는다. 30일이 지난 캐시는 다음 쓰기 때 지우지만 저장한 평가 증거는 보존한다. 명시 명령 하나는 최대
+8회 요청과 64개 제안을 다루며 한도 밖은 결정적 대체 결과를 유지한다. 첫 공개 전송과 허락한 설계 전송은 각각
+범위를 알린다. 활성화하면 제공자의 사용료와 요청 한도가 적용될 수 있다.
 
 판정은 답을 억지로 고르게 하지 않는다. 선택지가 여럿인 질문은 맞는 선택지가 있는지도 함께 물으므로 결과는
 `chosen`, `no-match`, `uncertain` 중 하나다. 재료 분류는 하나씩 따로 물으므로 여러 분류가 함께 맞을 수도, 하나도
@@ -161,6 +185,6 @@ send_design_text = false  # true 이면 설계 글의 발췌도 보낼 수 있�
 - 스냅샷을 정리해 지우지 않으므로, 상태 폴더는 바뀐 스냅샷마다 커진다.
 - 릴리스 선택은 한정된 수의 태그와 릴리스만 읽는다. 전부 볼 수 없으면 최신이라고 주장하지 않고
   `selection-incomplete` 라고 밝힌다. 고른 릴리스는 oah 가 관측한 것 중 최신이며, 더 새 것이 없다는 보장은 아니다.
-- Windows 의 `--out` 은 위에서 말한 대로 거절한다.
+- Windows 파일 시스템과 스케줄러의 실제 동작은 플랫폼 검증이 필요하다. API 모의 시험으로 증명되지 않는다.
 - `schedule status` 는 macOS 에서 `launchctl print`, Windows 에서 작업 스케줄러의 출력을 읽는다. 읽지 못한 사실이
   있으면 상태를 `unverifiable` 로 두고, 추정하지 않는다.

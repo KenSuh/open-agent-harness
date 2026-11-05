@@ -272,14 +272,53 @@ def desired_definition(entry: Entry, *, anchor: str | None = None) -> dict:
                 "outputs": {"stdout": str(entry.log_path), "stderr": str(entry.log_path)},
                 "constraints": {"process_type": "background"}}
     return {**base, "arguments": subprocess.list2cmdline(entry.argv[1:]),
-            "context": {"action_context": "Author", "logon_type": "InteractiveToken", "run_level": "LeastPrivilege"},
+            "context": {"action_context": "Author", "logon_type": "InteractiveToken", "run_level": "LeastPrivilege",
+                        "user_id": _current_user_sid()},
             "triggers": [{"type": "calendar-daily", "days_interval": 1, "start_boundary": anchor, "enabled": True,
-                          "end_boundary": None, "repetition": False}],
+                          "end_boundary": None, "repetition": False, "execution_time_limit": "PT72H",
+                          "random_delay": "PT0S"}],
             "outputs": None,
             "constraints": {"multiple_instances": "IgnoreNew", "disallow_start_if_on_batteries": False,
                             "start_when_available": True, "execution_time_limit": "PT1H",
                             "run_only_if_idle": False, "run_only_if_network_available": False,
                             "wake_to_run": False}}
+
+
+def _current_user_sid() -> str | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                         wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    token, needed = wintypes.HANDLE(), wintypes.DWORD()
+    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+        return None
+    try:
+        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if not needed.value or needed.value > 65536:
+            return None
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi.GetTokenInformation(token, 1, buffer, needed, ctypes.byref(needed)):
+            return None
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = wintypes.LPWSTR()
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            return None
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        kernel.CloseHandle(token)
 
 
 @dataclass(frozen=True)
@@ -452,6 +491,8 @@ def parse_task_xml(text: str, entry: Entry, now: dt.datetime) -> tuple[dict | No
             effective_triggers.append({"type": tag})
             continue
         fields = {item.tag.replace(ns, ""): item for item in node}
+        if len(fields) != len(node):
+            unknown.append("duplicate-trigger-field")
         for name in fields:
             if name not in ("StartBoundary", "EndBoundary", "Enabled", "ScheduleByDay", "Repetition",
                             "ExecutionTimeLimit", "RandomDelay"):
@@ -473,17 +514,27 @@ def parse_task_xml(text: str, entry: Entry, now: dt.datetime) -> tuple[dict | No
         effective_triggers.append({"type": "calendar-daily" if by_day is not None else "calendar-other",
                                    "days_interval": days, "start_boundary": start,
                                    "enabled": _flag(fields["Enabled"].text if "Enabled" in fields else None, True),
-                                   "end_boundary": end or None, "repetition": "Repetition" in fields})
+                                   "end_boundary": end or None, "repetition": "Repetition" in fields,
+                                   "execution_time_limit": (fields["ExecutionTimeLimit"].text or "").strip()
+                                   if "ExecutionTimeLimit" in fields else "PT72H",
+                                   "random_delay": (fields["RandomDelay"].text or "").strip()
+                                   if "RandomDelay" in fields else "PT0S"})
     principals = task.find(f"{ns}Principals")
     principal_nodes = [] if principals is None else list(principals)
     context = {"action_context": None if actions is None else actions.get("Context"), "logon_type": None,
-               "run_level": None}
+               "run_level": None, "user_id": None}
     if len(principal_nodes) != 1:
         unknown.append("principal")
     else:
         principal = principal_nodes[0]
         context["logon_type"] = principal.findtext(f"{ns}LogonType")
         context["run_level"] = principal.findtext(f"{ns}RunLevel") or "LeastPrivilege"
+        context["user_id"] = principal.findtext(f"{ns}UserId")
+        if not context["user_id"]:
+            unknown.append("principal-user-id")
+        for item in principal:
+            if item.tag not in {f"{ns}{name}" for name in ("UserId", "GroupId", "LogonType", "RunLevel")}:
+                unknown.append(f"principal-field:{item.tag.replace(ns, '')}")
         if principal.find(f"{ns}GroupId") is not None:
             different.append("principal-group")
         if principal.get("id") != context["action_context"]:
@@ -584,6 +635,8 @@ def inspect_entry(entry: Entry, *, runner: Runner = run_command, search_path: st
     effective, unknown, different = parse_task_xml(result.stdout, entry, clock())
     anchor = _anchor(effective)
     desired = desired_definition(entry, anchor=anchor)
+    if desired["context"]["user_id"] is None:
+        unknown.append("current-user-identity")
     if effective is None or unknown or anchor is None:
         missing = tuple(unknown or (["start-boundary"] if effective is not None else ["task-xml"]))
         return Inspection("unverifiable", tuple(f"missing:{item}" for item in missing), desired, effective, missing,

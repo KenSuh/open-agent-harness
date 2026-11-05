@@ -229,6 +229,23 @@ class InputBasisTest(MaterialsCase):
         self.save({"materials": rebuilt.text}, "Carry policy")
         self.assertEqual("current", materials.check(self.saved_text(), strict, None, self.view())["overall"])
 
+    def test_rebuild_cannot_clear_policy_review_without_resolution(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.save({"materials": built.text}, "Materials")
+        strict = self.make_sources(self.sources.state_dir, license_allow=["MIT", "Apache-2.0"])
+        with self.assertRaises(materials.MaterialsError) as policy:
+            materials.build(self.selection(), strict, view=self.view(), now=self.clock.now())
+        self.assertEqual("OAH_MATERIALS_REVIEW_REQUIRED", policy.exception.code)
+
+    def test_rebuild_cannot_clear_source_review_without_resolution(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.save({"materials": built.text}, "Materials")
+        self.release("v1.1.0", {"src/lib.rs": "pub fn changed() {}\n"})
+        self.assertEqual("changed", self.sources.check_one(self.spec).result)
+        with self.assertRaises(materials.MaterialsError) as source:
+            materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.assertEqual("OAH_MATERIALS_REVIEW_REQUIRED", source.exception.code)
+
     def test_unknown_authority_and_legacy_records_are_never_current(self) -> None:
         built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
         report = materials.check(built.text, self.sources, None, None, unavailable="OAH_DESIGN_NOT_FOUND")
@@ -286,6 +303,47 @@ class InputBasisTest(MaterialsCase):
 class PortableEvidenceTest(MaterialsCase):
     """Complete originals survive an empty clone, with S1 times kept apart from S2 freshness."""
 
+    def test_registered_license_manifest_is_preserved_and_rechecked_offline(self) -> None:
+        data = b'[package]\nname = "example"\nversion = "1.0.1"\nlicense = "MIT"\n'
+        self.release("v1.0.1", {"Cargo.toml": data})
+        spec = self.sources.register(build_spec(url=LOCATOR, source_id="with-manifest", paths=["src"],
+                                                manifest_path="Cargo.toml"))[1]
+        self.assertEqual("changed", self.sources.check_one(spec).result)
+        selection = self.selection(materials=[{"id": "lib", "source": spec.id, "choice": "selected",
+                                               "decision": "storage"}])
+        built = materials.build(selection, self.sources, view=self.view(), now=self.clock.now())
+        envelope = built.record["portable_evidence"][0]
+        evidence = portable.verify(envelope)
+        self.assertEqual(data, evidence.read(hashlib.sha256(data).hexdigest()))
+        self.assertEqual("eligible", materials.check(built.text, None, None, self.view())["source_reads"][0]
+                         ["eligibility"])
+        from oah.design.sources.state import record_digest
+
+        altered = json.loads(json.dumps(envelope))
+        altered["snapshot"]["manifest"]["license"]["declared"]["value"] = "ISC"
+        altered["snapshot"]["digest"] = record_digest(altered["snapshot"]["manifest"])
+        altered["provenance"]["observation"]["snapshot"] = altered["snapshot"]["digest"]
+        altered["provenance"]["observation_digest"] = record_digest(altered["provenance"]["observation"])
+        with self.assertRaises(portable.PortableError):
+            portable.verify(altered)
+
+    def test_rehashed_selected_original_cannot_exceed_the_source_file_quota(self) -> None:
+        from oah.design.sources.state import record_digest
+
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        envelope = json.loads(json.dumps(built.record["portable_evidence"][0]))
+        file = envelope["snapshot"]["manifest"]["files"][0]
+        blob = next(item for item in envelope["blobs"] if item["sha256"] == file["sha256"])
+        data = b"x" * ((1 << 20) + 1)
+        sha = hashlib.sha256(data).hexdigest()
+        file.update(size=len(data), sha256=sha)
+        blob.update(id="sha256:" + sha, sha256=sha, bytes=len(data), data=base64.b64encode(data).decode("ascii"))
+        envelope["snapshot"]["digest"] = record_digest(envelope["snapshot"]["manifest"])
+        envelope["provenance"]["observation"]["snapshot"] = envelope["snapshot"]["digest"]
+        envelope["provenance"]["observation_digest"] = record_digest(envelope["provenance"]["observation"])
+        with self.assertRaises(portable.PortableError):
+            portable.verify(envelope)
+
     def test_empty_clone_round_trip_keeps_s1_times_and_reports_s2_freshness(self) -> None:
         built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
         self.save({"materials": built.text}, "Materials")
@@ -305,6 +363,27 @@ class PortableEvidenceTest(MaterialsCase):
             self.assertEqual(portable.HISTORICAL, read["historical_evidence"])
             self.assertEqual(portable.OFFLINE_FRESHNESS, read["upstream_freshness"])
             self.assertEqual("eligible", read["eligibility"])
+
+    def test_portable_release_reconstructs_the_selection_and_its_originals(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        envelope = built.record["portable_evidence"][0]
+        evidence = portable.verify(envelope)
+        selection_id = evidence.manifest["observed"]["release"]["selection"]
+        selection = self.sources.record("selections", selection_id)
+        self.assertEqual(selection, envelope["provenance"].get("selection"))
+        self.assertTrue(selection["universe"]["advertisement_blob_refs"])
+        for original in selection["originals"]["advertisements"] + selection["originals"]["metadata"]:
+            for digest in original["chunks"]:
+                self.assertEqual(self.sources.blob(digest), evidence.read(digest))
+        for change in ("selection", "original"):
+            altered = json.loads(json.dumps(envelope))
+            if change == "selection":
+                altered["provenance"]["selection"]["universe"]["matching_count"] += 1
+            else:
+                digest = selection["universe"]["advertisement_blob_refs"][0]
+                altered["blobs"] = [blob for blob in altered["blobs"] if blob["sha256"] != digest]
+            with self.subTest(change=change), self.assertRaises(portable.PortableError):
+                portable.verify(altered)
 
     def test_marker_control_bidi_binary_and_long_originals_are_lossless(self) -> None:
         originals = {"src/marker.md": "<!-- oah-design: not a marker -->\n```oah-materials\n{}\n```\n",
@@ -327,6 +406,31 @@ class PortableEvidenceTest(MaterialsCase):
         self.assertNotIn("‮", self.saved_text())
         self.assertNotIn("\x1b", self.saved_text())
         self.assertEqual("current", materials.check(self.saved_text(), None, None, self.view())["overall"])
+
+    def test_rehashed_selection_claims_still_need_the_original_universe_and_quotas(self) -> None:
+        from oah.design.sources.state import record_digest
+
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        for change in ("universe", "extra-response", "kind", "quota"):
+            envelope = json.loads(json.dumps(built.record["portable_evidence"][0]))
+            selection = envelope["provenance"]["selection"]
+            if change == "universe":
+                selection["universe"]["matching_count"] += 1
+            elif change == "extra-response":
+                selection["originals"]["metadata"].append(dict(selection["originals"]["metadata"][-1]))
+            elif change == "kind":
+                envelope["blobs"][-1]["kind"] = "license"
+            else:
+                envelope["blobs"][-1]["bytes"] = (8 << 20) + 1
+            selection_digest = record_digest(selection)
+            envelope["provenance"]["selection_digest"] = selection_digest
+            envelope["snapshot"]["manifest"]["observed"]["release"]["selection"] = selection_digest
+            envelope["snapshot"]["digest"] = record_digest(envelope["snapshot"]["manifest"])
+            observation = envelope["provenance"]["observation"]
+            observation["snapshot"] = envelope["snapshot"]["digest"]
+            envelope["provenance"]["observation_digest"] = record_digest(observation)
+            with self.subTest(change=change), self.assertRaises(portable.PortableError):
+                portable.verify(envelope)
 
     def test_oversized_evidence_refuses_before_any_save(self) -> None:
         self.clock.advance(60)
@@ -371,6 +475,39 @@ class PortableEvidenceTest(MaterialsCase):
         self.assertTrue(projection["semantic_fits_inline"])
         self.assertEqual([portable.envelope_id(built.record["portable_evidence"][0])],
                          [item["id"] for item in projection["envelopes"]])
+
+    def test_authored_and_local_materials_keep_inline_provenance_and_unknown_facts(self) -> None:
+        for kind in ("authored", "local-unverified"):
+            source = {"kind": kind, "origin": "Local architecture note", "revision": None, "author": "main-ai",
+                      "at": self.clock.now().isoformat(), "limitations": ["No public source or license verified"],
+                      "evidence": ["Text supplied by the author"], "text": "Keep the booking log in one local file."}
+            selection = self.selection(materials=[{"id": "lib", "source": source, "choice": "selected",
+                                                  "decision": "storage"}])
+            with self.subTest(kind=kind):
+                built = materials.build(selection, self.sources, view=self.view(), allow_unverified=True,
+                                        now=self.clock.now())
+                material = built.record["materials"][0]
+                self.assertEqual(kind, material["source"]["kind"])
+                self.assertEqual("unverified", material["observation"])
+                self.assertIsNone(material["license"])
+                self.assertIsNone(material["release"])
+                self.assertIsNone(material["portable_evidence_id"])
+                self.assertIsNone(material["checked"]["verified_at"])
+                self.assertEqual([], built.record["portable_evidence"])
+                self.assertEqual([], materials.refs_of(built.text))
+                self.assertIn(source["text"], built.text)
+                self.assertEqual(0, built.projection["original_payload_bytes"])
+                self.assertEqual(built.record, materials.parse(built.text))
+                check = materials.check(built.text, None, None, self.view())
+                self.assertEqual("current", check["overall"], check)
+                self.assertEqual("unknown", check["source_reads"][0]["eligibility"])
+                self.assertEqual("unverified(authored)", check["source_reads"][0]["historical_evidence"])
+                with self.assertRaises(materials.MaterialsError):
+                    materials.build(selection, self.sources, view=self.view(), now=self.clock.now())
+                selection["materials"][0]["source"]["verified"] = True
+                with self.assertRaises(materials.MaterialsError):
+                    materials.build(selection, self.sources, view=self.view(), allow_unverified=True,
+                                    now=self.clock.now())
 
 
 
@@ -452,6 +589,66 @@ class AssociationTest(MaterialsCase):
         self.assertEqual("unknown(io)", report.design_state)
         self.assertEqual("unknown", report.association["status"])
         self.assertEqual(before, self.entry())
+
+    def test_a_real_managed_page_edit_and_an_invalid_final_read_preserve_the_good_association(self) -> None:
+        report = self.sources.refresh_for(self.store, "acme", "booking", reason="start").to_json()
+        good = self.entry()
+        old_view = self.view()
+        page = self.repo / self.store.context("acme", "booking").page
+        page.write_bytes(page.read_bytes().replace(b"People book a lesson.", b"People share all calendars."))
+        edited = self.view()
+        self.assertEqual("edited", edited.page_state)
+        self.assertFalse(self.sources.matches_view(report, edited)["matches"])
+        checked = materials.check(self.saved_text(), self.sources, None, edited)
+        self.assertEqual("unknown", checked["overall"])
+        self.assertEqual([], self.provider()("acme", "booking"))
+        reads = iter([old_view, edited])
+        final = self.sources.refresh_for(self.store, "acme", "booking", reason="resume", reader=lambda: next(reads))
+        self.assertEqual("unknown", final.association["status"])
+        self.assertTrue(final.design_state.startswith("unknown"))
+        self.assertFalse(self.sources.matches_view(final.to_json(), old_view)["matches"])
+        self.assertEqual(good, self.entry())
+
+    def test_refresh_keeps_sources_referenced_only_by_accepted_materials(self) -> None:
+        empty = materials.build({"materials": [], "decisions": []}, self.sources, view=self.view(),
+                                now=self.clock.now())
+        self.save({"materials": empty.text}, "Working materials no longer use lib")
+        self.clock.advance(25 * 3600)
+        report = self.sources.refresh_for(self.store, "acme", "booking", reason="resume").to_json()
+        self.assertEqual(["lib"], [item["source"] for item in report["results"]])
+        self.assertEqual(["lib"], [item["id"] for item in report["sources"]])
+        self.assertEqual(["accepted"], report["sources"][0]["roles"])
+
+    def test_acceptance_identity_is_part_of_the_consumer_recheck(self) -> None:
+        report = self.sources.refresh_for(self.store, "acme", "booking", reason="start").to_json()
+        current = self.view()
+        self.assertIsNotNone(current.acceptance)
+        changed = dataclasses.replace(current, acceptance=dict(current.acceptance or {}, record="sha256:" + "f" * 64))
+        result = self.sources.matches_view(report, changed)
+        self.assertFalse(result["matches"])
+        self.assertIn("acceptance-changed", result["reasons"])
+
+    def test_invalid_authority_observations_discard_facts_and_keep_last_good_association(self) -> None:
+        report = self.sources.refresh_for(self.store, "acme", "booking", reason="start").to_json()
+        good = self.entry()
+        for changed in (dataclasses.replace(self.view(), freshness="unknown"),
+                        dataclasses.replace(self.view(), page_state="unregistered-edit"),
+                        dataclasses.replace(self.view(), recovery_pending=True)):
+            with self.subTest(freshness=changed.freshness, page=changed.page_state,
+                              recovery=changed.recovery_pending):
+                self.assertFalse(self.sources.matches_view(report, changed)["matches"])
+                again = self.sources.refresh_for(self.store, "acme", "booking", reason="resume", reader=lambda: changed)
+                self.assertEqual("unknown", again.association["status"])
+                self.assertEqual(good, self.entry())
+
+    def test_material_check_keeps_invalid_a_observations_unknown(self) -> None:
+        for changed in (dataclasses.replace(self.view(), freshness="unknown"),
+                        dataclasses.replace(self.view(), page_state="unregistered-edit"),
+                        dataclasses.replace(self.view(), recovery_pending=True)):
+            with self.subTest(freshness=changed.freshness, page=changed.page_state,
+                              recovery=changed.recovery_pending):
+                report = materials.check(self.saved_text(), self.sources, None, changed)
+                self.assertEqual("unknown", report["overall"])
 
     def test_source_or_policy_identity_change_discards_cached_facts(self) -> None:
         report = self.sources.refresh_for(self.store, "acme", "booking", reason="start").to_json()
@@ -561,16 +758,229 @@ class GuardedOutputTest(unittest.TestCase):
         self.assertEqual(b"theirs", (self.root / "out" / "materials.md").read_bytes())
         self.assertEqual(["out", "out/materials.md"], self.listing())
 
+    def test_replaced_temporary_never_publishes_or_unlinks_the_replacement(self) -> None:
+        substituted = []
+
+        def replace(step: str) -> None:
+            if step == "temporary-written":
+                names = list((self.root / "out").glob("*.tmp"))
+                temp = names[0] if names else self.root / "out" / ".materials.md.oah-decoy.tmp"
+                if names:
+                    temp.rename(self.root / "out" / "moved-owned")
+                temp.write_bytes(b"theirs")
+                substituted.append(temp)
+
+        try:
+            final = output.write_new(self.root, "out/materials.md", b"ours", fault=replace)
+        except output.OutputError:
+            self.assertFalse((self.root / "out" / "materials.md").exists())
+        else:
+            self.assertEqual(b"ours", final.read_bytes())
+        moved = self.root / "out" / "moved-owned"
+        if moved.exists():
+            self.assertEqual(b"ours", moved.read_bytes())
+        self.assertEqual(b"theirs", substituted[0].read_bytes())
+
 
 class WindowsOutputTest(unittest.TestCase):
-    def test_native_windows_refuses_as_unverifiable_before_writing(self) -> None:
+    def test_native_primitives_deny_mutation_sharing_and_rename_and_discard_the_owned_handle(self) -> None:
+        import ctypes
+        from types import SimpleNamespace
+        from oah.design.sources.output_windows import Native
+
+        api = SimpleNamespace(CreateFileW=mock.Mock(return_value=7), SetFileInformationByHandle=mock.Mock(return_value=1))
+        native = object.__new__(Native)
+        native.api = api
+        self.assertEqual(7, native.open_directory("C:/repo/out"))
+        directory = api.CreateFileW.call_args.args
+        self.assertEqual((0x81, 1, None, 3, 0x02200000, None), directory[1:])
+        self.assertEqual(7, native.create_file("C:/repo/out/temp"))
+        self.assertEqual((0xC0010000, 1, None, 1, 0x00200080, None), api.CreateFileW.call_args.args[1:])
+        native.rename(7, "C:/repo/out/materials.md")
+        handle, kind, buffer, size = api.SetFileInformationByHandle.call_args.args
+        self.assertEqual((7, 3), (handle, kind))
+        self.assertEqual(0, ctypes.string_at(buffer, 1)[0])
+        self.assertTrue(ctypes.string_at(buffer, size).endswith("C:/repo/out/materials.md".encode("utf-16-le")))
+        native.discard(7)
+        self.assertEqual((7, 4), api.SetFileInformationByHandle.call_args.args[:2])
+
+    def api(self):
+        from oah.design.sources.output_windows import Info
+
+        class FakeNative:
+            def __init__(self):
+                self.handles = {}
+                self.closed = []
+                self.reparse = False
+                self.unsupported = False
+                self.fail_write = False
+
+            def open_directory(self, name):
+                handle = os.open(name, os.O_RDONLY | os.O_DIRECTORY)
+                self.handles[handle] = name
+                return handle
+
+            def create_file(self, name):
+                handle = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                self.handles[handle] = name
+                return handle
+
+            def info(self, handle):
+                info = os.fstat(handle)
+                attributes = 0x10 if pathlib.Path(self.handles[handle]).is_dir() else 0x80
+                return Info(self.handles[handle], info.st_dev, info.st_ino.to_bytes(16, "little"),
+                            attributes | (0x400 if self.reparse else 0))
+
+            def volume(self, handle):
+                if self.unsupported:
+                    raise output.OutputError(output.UNVERIFIABLE_CODE, "filesystem-unsupported", "unsupported filesystem")
+
+            def names(self, handle):
+                return os.listdir(self.handles[handle])
+
+            def write(self, handle, data):
+                if self.fail_write:
+                    raise OSError("injected write failure")
+                os.write(handle, data)
+
+            def flush(self, handle):
+                os.fsync(handle)
+
+            def rename(self, handle, destination):
+                if os.path.lexists(destination):
+                    error = OSError("already exists")
+                    error.winerror = 183
+                    raise error
+                os.link(self.handles[handle], destination)
+                os.unlink(self.handles[handle])
+                self.handles[handle] = destination
+
+            def discard(self, handle):
+                os.unlink(self.handles[handle])
+
+            def close(self, handle):
+                self.closed.append(handle)
+                os.close(handle)
+
+        return FakeNative()
+
+    def test_supported_windows_handle_path_creates_an_ordinary_file(self) -> None:
+        from oah.design.sources import output_windows
+
         root = make_tmp_dir(self)
-        with self.assertRaises(output.OutputError) as caught:
+        (root / "out").mkdir()
+        api = self.api()
+        with mock.patch.object(output_windows, "Native", return_value=api):
+            path = output.write_new(root, "out/materials.md", b"ours", windows=True)
+        self.assertEqual(b"ours", path.read_bytes())
+        self.assertEqual(["materials.md"], os.listdir(root / "out"))
+        self.assertEqual(set(api.handles), set(api.closed))
+
+    def test_missing_native_apis_refuse_before_writing(self) -> None:
+        from oah.design.sources import output_windows
+
+        root = make_tmp_dir(self)
+        with mock.patch.object(output_windows.ctypes, "WinDLL", create=True, side_effect=OSError("unavailable")), \
+                self.assertRaises(output.OutputError) as caught:
             output.write_new(root, "materials.md", b"x", windows=True)
-        self.assertEqual((output.UNVERIFIABLE_CODE, "windows-handles-unqualified"),
+        self.assertEqual((output.UNVERIFIABLE_CODE, "windows-api-unavailable"),
                          (caught.exception.code, caught.exception.reason))
         self.assertEqual([], list(root.iterdir()))
 
+    def test_windows_reparse_filesystem_and_write_failures_preserve_other_files(self) -> None:
+        from oah.design.sources import output_windows
+
+        for field, reason in (("reparse", "link"), ("unsupported", "filesystem-unsupported"),
+                              ("fail_write", "windows-handle-refused")):
+            root = make_tmp_dir(self)
+            api = self.api()
+            setattr(api, field, True)
+            with self.subTest(field=field), mock.patch.object(output_windows, "Native", return_value=api), \
+                    self.assertRaises(output.OutputError) as caught:
+                output.write_new(root, "materials.md", b"ours", windows=True)
+            self.assertEqual(reason, caught.exception.reason)
+            self.assertEqual([], list(root.iterdir()))
+            self.assertEqual(set(api.handles), set(api.closed))
+
+
+
+class ProposalAssessmentTest(MaterialsCase):
+    def prepare_proposal(self):
+        from oah.design.sources import assessment
+        from tests.test_design_judgement import FakeJudge, config
+
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.save({"materials": built.text}, "Materials")
+        self.sources.refresh_for(self.store, "acme", "booking", reason="start")
+        self.release("v1.1.0", {"src/lib.rs": "pub fn changed() {}\n"})
+        self.assertEqual("changed", self.sources.check_one(self.spec).result)
+        proposals, findings = self.sources.proposals()
+        self.assertEqual([], findings)
+        self.assertEqual(1, len(proposals))
+        provider = FakeJudge()
+        provider.labels = {"may_break_users": 0.82, "security_fix": 0.93, "drops_platform": 0.1}
+        return assessment, proposals, provider, config()
+
+    def test_public_assessment_is_saved_displayed_and_has_no_authority(self) -> None:
+        assessment, proposals, provider, config = self.prepare_proposal()
+        before_files = {str(path.relative_to(self.repo)): path.read_bytes() for path in self.repo.rglob("*")
+                        if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
+        before_head = self.sources.head(self.spec).to_json()
+        before_material = materials.parse(self.saved_text())
+        reader = lambda project, design: read_view(self.store, project, design)
+        with mock.patch.object(self.store, "save", side_effect=AssertionError("assessment may not save")), \
+                mock.patch.object(self.store, "accept", side_effect=AssertionError("assessment may not accept")), \
+                mock.patch.object(self.sources, "dismiss", side_effect=AssertionError("assessment may not dismiss")):
+            rows = assessment.assess(self.sources, proposals, reader=reader, config=config,
+                                     env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        self.assertEqual(1, len(provider.calls))
+        state, questions = provider.calls[0]
+        self.assertEqual({"may_break_users", "security_fix", "drops_platform", "urgency"}, set(questions))
+        self.assertEqual("score", questions["urgency"]["type"])
+        self.assertEqual(("v1.0.0", "v1.1.0", "minor", "chosen"), tuple(state["fields"][key] for key in
+                         ("from_tag", "to_tag", "version_delta", "role")))
+        self.assertNotIn("One teacher", json.dumps(state))
+        row = rows[0]
+        self.assertEqual(("used", "yes", "2"), (row.assessment["jev"], row.assessment["applied"],
+                                                 row.assessment["urgency"]))
+        self.assertEqual({"may_break_users", "security_fix"}, {item["label"] for item in row.assessment["labels"]})
+        self.assertEqual(proposals[0].labels, row.labels)
+        self.assertEqual("open", row.status)
+        digest = row.assessment["record"]
+        stored = self.sources.assessment(digest)
+        self.assertEqual("oah-proposal-assessment", stored["kind"])
+        self.assertEqual("source-change-assessment/v1", stored["judgement"]["identity"]["rubric"])
+        displayed = assessment.recorded(self.sources, proposals, reader=reader, config=config)[0]
+        self.assertEqual(row.assessment, displayed.assessment)
+        self.assertEqual(before_head, self.sources.head(self.spec).to_json())
+        self.assertEqual(before_material, materials.parse(self.saved_text()))
+        self.assertEqual(before_files, {str(path.relative_to(self.repo)): path.read_bytes() for path in self.repo.rglob("*")
+                                      if path.is_file() and ".git" not in path.relative_to(self.repo).parts})
+        changed = dict(config, judgement=dict(config["judgement"], yes=0.95))
+        stale = assessment.recorded(self.sources, proposals, reader=reader, config=changed)[0]
+        self.assertEqual("no(thresholds-changed)", stale.assessment["applied"])
+        self.assertEqual(stored, self.sources.assessment(digest))
+
+    def test_a_design_change_during_assessment_preserves_prior_good_evidence(self) -> None:
+        assessment, proposals, provider, config = self.prepare_proposal()
+        reader = lambda project, design: read_view(self.store, project, design)
+        first = assessment.assess(self.sources, proposals, reader=reader, config=config,
+                                  env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})[0]
+        before_index = self.sources.state.read_json("assessment-index.json", 1 << 20)
+        good = self.sources.assessment(first.assessment["record"])
+        original = provider.judge
+
+        def concurrent_change(*args, **kwargs):
+            reply = original(*args, **kwargs)
+            self.save({"request": MULTI}, "Concurrent correction")
+            return reply
+
+        with mock.patch.object(provider, "judge", side_effect=concurrent_change), self.assertRaises(ViewUnavailable):
+            assessment.assess(self.sources, proposals, reader=reader, config=config,
+                              env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        self.assertEqual(before_index, self.sources.state.read_json("assessment-index.json", 1 << 20))
+        self.assertEqual(good, self.sources.assessment(first.assessment["record"]))
+        self.assertEqual("open", self.sources.proposals()[0][0].status)
 
 
 class SourcesCliTest(MaterialsCase):
@@ -626,6 +1036,50 @@ class SourcesCliTest(MaterialsCase):
         self.assertIn("unavailable", out)
         code, _out, err = self.cli("sources", "diff", "lib", "--from", "HEAD", "--to", head)
         self.assertEqual((1, True), (code, err.startswith("OAH_SOURCES_USAGE")))
+
+    def test_unavailable_a_check_is_unknown_without_fabricated_materials(self) -> None:
+        with mock.patch("oah.design.sources.read_view", side_effect=ViewUnavailable("ref-unavailable")):
+            code, out, err = self.cli("sources", "materials", "check", "--design", "acme/booking", "--json")
+        self.assertEqual(1, code, err)
+        report = json.loads(out)
+        self.assertEqual("unknown", report["overall"])
+        self.assertIsNone(report["materials_digest"])
+        self.assertEqual([], report["decisions"])
+        self.assertEqual("ref-unavailable", report["checked_view"]["authority_observation"]["code"])
+
+    def test_unavailable_a_render_is_a_closed_refusal(self) -> None:
+        with mock.patch("oah.design.sources.read_view", side_effect=ViewUnavailable("ref-unavailable")):
+            code, out, err = self.cli("sources", "materials", "render", "--design", "acme/booking", "--input",
+                                      str(self.selection_file()))
+        self.assertEqual(69, code)
+        self.assertEqual("", out)
+        self.assertIn("OAH_SOURCES_DESIGN_UNAVAILABLE", err)
+        self.assertIn("ref-unavailable", err)
+
+    def test_historical_a_read_failure_keeps_the_original_closed_residual(self) -> None:
+        with mock.patch("oah.design.store.DesignStore.snapshot", side_effect=design_fs.RefUnavailable("not available")):
+            code, out, err = self.cli("sources", "materials", "check", "--design", "acme/booking", "--revision", "1", "--json")
+        self.assertEqual(1, code, err)
+        report = json.loads(out)
+        self.assertEqual("unknown", report["overall"])
+        self.assertIsNone(report["materials_digest"])
+        self.assertEqual("ref-unavailable", report["checked_view"]["authority_observation"]["code"])
+
+    def test_explicit_proposal_assessment_has_an_honest_disabled_fallback(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.save({"materials": built.text}, "Materials")
+        self.sources.refresh_for(self.store, "acme", "booking", reason="start")
+        self.release("v1.1.0", {"src/lib.rs": "pub fn changed() {}\n"})
+        self.assertEqual("changed", self.sources.check_one(self.spec).result)
+        before = self.view().identity()
+        code, out, err = self.cli("sources", "proposals", "assess", "--design", "acme/booking", "--json")
+        self.assertEqual(0, code, err)
+        proposals = json.loads(out)["proposals"]
+        self.assertTrue(proposals)
+        self.assertEqual("unused(judgement-off)", proposals[0]["assessment"]["jev"])
+        self.assertEqual("no(judgement-off)", proposals[0]["assessment"]["applied"])
+        self.assertEqual("open", proposals[0]["status"])
+        self.assertEqual(before, self.view().identity())
 
 
 
@@ -719,11 +1173,11 @@ SHARED_SHAPES = json.loads(r"""
  "materials-projection-v1": {
   "version": 1,
   "kind": "oah-materials-projection",
-  "part_bytes": 15622,
+  "part_bytes": 20994,
   "part_digest": "sha256:<digest>",
-  "semantic_bytes": 14162,
+  "semantic_bytes": 19034,
   "semantic_sha256": "<sha256>",
-  "original_payload_bytes": 1460,
+  "original_payload_bytes": 1960,
   "envelopes": [
    {
     "id": "sha256:<digest>",
@@ -753,6 +1207,22 @@ SHARED_SHAPES = json.loads(r"""
       "bytes": 16,
       "sha256": "<sha256>",
       "encoded_bytes": 24
+     },
+     {
+      "id": "sha256:<digest>",
+      "kind": "release-advertisement",
+      "path_or_field": "selection.release-advertisement.0.0",
+      "bytes": 119,
+      "sha256": "<sha256>",
+      "encoded_bytes": 160
+     },
+     {
+      "id": "sha256:<digest>",
+      "kind": "release-metadata",
+      "path_or_field": "selection.release-metadata.0.0",
+      "bytes": 253,
+      "sha256": "<sha256>",
+      "encoded_bytes": 340
      }
     ]
    }
@@ -768,6 +1238,8 @@ SHARED_SHAPES = json.loads(r"""
   "project": "acme",
   "design": "booking",
   "binding": {
+   "uid": "<id>",
+   "design": "booking",
    "current": {
     "project": "acme",
     "uid": "<id>",
@@ -781,6 +1253,19 @@ SHARED_SHAPES = json.loads(r"""
     "design": "booking",
     "revision": 2,
     "digest": "sha256:<digest>"
+   },
+   "acceptance": {
+    "sequence": 2,
+    "record": "sha256:<digest>",
+    "revision": 2,
+    "digest": "sha256:<digest>"
+   },
+   "authority_observation": {
+    "authority": "refs/heads/main",
+    "source": "worktree",
+    "freshness": "current",
+    "page_state": "clean",
+    "recovery_pending": false
    }
   },
   "design_state": "current",
@@ -796,7 +1281,8 @@ SHARED_SHAPES = json.loads(r"""
     "snapshot": "sha256:<digest>",
     "registration": "<id>",
     "registered_spec": "sha256:<digest>",
-    "verified": "sha256:<digest>"
+    "verified": "sha256:<digest>",
+    "roles": ["current", "accepted"]
    }
   ],
   "association": {

@@ -66,6 +66,7 @@ def register(commands: argparse._SubParsersAction) -> None:
     diff.add_argument("--json", action="store_true")
 
     proposals = sub.add_parser("proposals", help="source changes a design could review (reads only)")
+    proposals.add_argument("action", choices=("list", "assess"), nargs="?", default="list")
     proposals.add_argument("--design", metavar="PROJECT/DESIGN")
     proposals.add_argument("--json", action="store_true")
 
@@ -93,13 +94,21 @@ def register(commands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    from oah.design.fs import RefUnavailable
+    from oah.design.model import DesignError
     from oah.design.materials import MaterialsError
     from oah.design.sources import SourceError, StateProblem
     from oah.design.sources.output import OutputError
+    from oah.design.sources.view import ViewUnavailable
     from oah.toolkit.schedule import ScheduleError
 
     try:
         return HANDLERS[args.sources_command](args)
+    except (ViewUnavailable, DesignError, RefUnavailable) as exc:
+        code = getattr(exc, "code", "ref-unavailable")
+        print(f"OAH_SOURCES_DESIGN_UNAVAILABLE: {code}; design authority is unknown. Retry the read before "
+              "using design-dependent results.", file=sys.stderr)
+        return EXIT_ENVIRONMENT
     except (Refused, SourceError, MaterialsError, OutputError, ScheduleError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_ENVIRONMENT if getattr(exc, "code", "") in ENVIRONMENT_CODES else EXIT_REFUSED
@@ -244,21 +253,31 @@ def _split_design(value: str) -> tuple[str, str]:
 
 
 def _proposals(args: argparse.Namespace) -> int:
+    from oah.config import load_config
+    from oah.design import open_store
+    from oah.design.sources import assessment, read_view
+    from oah.rerank import DEFAULTS
+
     sources = _sources()
+    store = open_store(pathlib.Path.cwd())
+    config = load_config(pathlib.Path.cwd()).section("rerank", DEFAULTS)
+    reader = lambda project, name: read_view(store, project, name)
     design = None
     if args.design:
-        from oah.design import open_store
-
         project, name = _split_design(args.design)
-        context = open_store(pathlib.Path.cwd()).context(project, name)
-        design = (context.project.uid, context.design)
+        view = reader(project, name)
+        design = (view.uid, view.design)
     proposals, findings = sources.proposals(design=design)
+    proposals = (assessment.assess(sources, proposals, reader=reader, config=config) if args.action == "assess"
+                 else assessment.recorded(sources, proposals, reader=reader, config=config))
     if args.json:
         _print({"proposals": [item.to_json() for item in proposals], "findings": [item.to_json() for item in findings]})
         return EXIT_OK
     for item in proposals:
         print(f"{item.status:9} {item.key}  {item.project}/{item.design} {item.source}: {item.kind} "
-              f"{', '.join(item.labels)}")
+              f"{', '.join(item.labels)} jev={item.assessment['jev']} applied={item.assessment['applied']}")
+        for label in item.assessment["labels"]:
+            print(f"  jev: {label['label']} ({label['probability']:.2f})")
     for item in findings:
         print(f"finding   {item.kind} {item.project}/{item.design} {item.source}: {item.detail}")
     return EXIT_OK
@@ -272,6 +291,8 @@ def _dismiss(args: argparse.Namespace) -> int:
 
 def _materials(args: argparse.Namespace) -> int:
     from oah.design import materials, open_store
+    from oah.design.fs import RefUnavailable
+    from oah.design.model import DesignError
     from oah.design.sources import ViewUnavailable, read_view
 
     project, name = _split_design(args.design)
@@ -280,19 +301,15 @@ def _materials(args: argparse.Namespace) -> int:
     if args.materials_command == "check":
         try:
             view = read_view(store, project, name)
-        except ViewUnavailable as exc:
-            view, unavailable = None, exc.code
+            text = view.current.texts.get("materials") if args.revision is None else store.snapshot(
+                project, name, args.revision).texts.get("materials")
+        except (ViewUnavailable, DesignError, RefUnavailable) as exc:
+            view, unavailable, text = None, getattr(exc, "code", "ref-unavailable"), None
         else:
             unavailable = None
-        if view is None:
-            text = None
-        elif args.revision is None:
-            text = view.current.texts.get("materials")
-        else:
-            text = store.snapshot(project, name, args.revision).texts.get("materials")
         if text is None and view is not None:
             raise Refused("OAH_MATERIALS_MISSING", f"{project}/{name} has no materials part at that revision")
-        report = materials.check(text or "", sources, None, view, unavailable=unavailable)
+        report = materials.check(text, sources, None, view, unavailable=unavailable)
         if args.json:
             _print(report)
         else:

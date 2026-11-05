@@ -17,8 +17,8 @@ import stat
 import tempfile
 import unicodedata
 import urllib.parse
-from dataclasses import dataclass
-from typing import Iterator
+from dataclasses import dataclass, field
+from typing import Callable, Iterator
 
 from oah.atomic import write_json_atomic
 from oah.engines.proc import RunResult, run_command
@@ -86,10 +86,14 @@ def _git_env() -> Iterator[dict[str, str]]:
 
 
 def _git(repo: pathlib.Path, *args: str, timeout: float = FETCH_TIMEOUT, stdin_text: str | None = None,
-         extra_config: tuple[str, ...] = ()) -> RunResult:
+         extra_config: tuple[str, ...] = (), remaining: Callable[[], float] | None = None) -> RunResult:
     with _git_env() as env:
-        return run_command((*git_argv(), *GIT_SAFE_CONFIG, *extra_config, "-C", str(repo), *args), timeout=timeout,
-                           env=env, stdin_text=stdin_text)
+        result = run_command((*git_argv(), *GIT_SAFE_CONFIG, *extra_config, "-C", str(repo), *args),
+                             timeout=timeout if remaining is None else min(timeout, remaining()),
+                             env=env, stdin_text=stdin_text)
+        if remaining is not None:
+            remaining()
+        return result
 
 
 def _redirects(follow_redirects: bool) -> tuple[str, ...]:
@@ -112,15 +116,21 @@ class Tree:
 
     repo: pathlib.Path
     commit: str
+    remaining: Callable[[], float] | None = field(default=None, repr=False, compare=False)
+
+    def check_deadline(self) -> None:
+        if self.remaining is not None:
+            self.remaining()
 
     def entries(self, path: str) -> list[tuple[str, str, str]]:
         """(mode, blob id, repository path) for every entry at or below path ('' is the whole tree)."""
         args = ["ls-tree", "-r", "-z", "--full-tree", self.commit]
         if path:
             args += ["--", path]
-        out = _checked(_git(self.repo, *args), f"listing {path or 'the tree'}")
+        out = _checked(_git(self.repo, *args, remaining=self.remaining), f"listing {path or 'the tree'}")
         found = []
         for record in out.split("\0"):
+            self.check_deadline()
             if not record:
                 continue
             meta, name = record.split("\t", 1)
@@ -133,13 +143,15 @@ class Tree:
     def read(self, blob: str) -> bytes:
         with _git_env() as env:
             result = run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(self.repo), "cat-file", "blob", blob),
-                                 timeout=FETCH_TIMEOUT, env=env, encoding="latin-1")
+                                 timeout=FETCH_TIMEOUT if self.remaining is None else min(FETCH_TIMEOUT, self.remaining()),
+                                 env=env, encoding="latin-1")
+        self.check_deadline()
         _checked(result, f"reading blob {blob}")
         return result.stdout.encode("latin-1")
 
     def size(self, blob: str) -> int:
         """The size of a blob in bytes, read from the object store before its bytes are."""
-        out = _checked(_git(self.repo, "cat-file", "-s", blob), f"sizing blob {blob}").strip()
+        out = _checked(_git(self.repo, "cat-file", "-s", blob, remaining=self.remaining), f"sizing blob {blob}").strip()
         if not out.isdigit():
             raise FetchError(f"git printed no size for blob {blob}")
         return int(out)
@@ -149,9 +161,10 @@ class Tree:
         args = ["ls-tree", "-z", "--full-tree", self.commit]
         if folder:
             args += ["--", folder.rstrip("/") + "/"]
-        out = _checked(_git(self.repo, *args), f"listing {folder or 'the top folder'}")
+        out = _checked(_git(self.repo, *args, remaining=self.remaining), f"listing {folder or 'the top folder'}")
         found = []
         for record in out.split("\0"):
+            self.check_deadline()
             if not record:
                 continue
             meta, name = record.split("\t", 1)
@@ -161,21 +174,25 @@ class Tree:
 
 
 def fetch(repository: str, ref: str, scratch: pathlib.Path, *, paths: tuple[str, ...] = (),
-          timeout: float = FETCH_TIMEOUT, follow_redirects: bool = True) -> Tree:
+          timeout: float = FETCH_TIMEOUT, follow_redirects: bool = True,
+          remaining: Callable[[], float] | None = None) -> Tree:
     """Fetch ref (a branch, tag or full commit id) of a public repository into an empty scratch folder."""
     validate_repository(repository)
+    if remaining is not None:
+        remaining()
     scratch = pathlib.Path(scratch)
     if scratch.exists() and any(scratch.iterdir()):
         raise FetchError("scratch directory is not empty; retry with a fresh temporary directory")
     scratch.mkdir(parents=True, exist_ok=True)
-    _checked(_git(scratch, "init", "-q", "--template="), "git init")
-    _checked(_git(scratch, "remote", "add", "origin", repository), "git remote add")
+    _checked(_git(scratch, "init", "-q", "--template=", remaining=remaining), "git init")
+    _checked(_git(scratch, "remote", "add", "origin", repository, remaining=remaining), "git remote add")
     _checked(_git(scratch, "fetch", "--quiet", "--no-tags", "--depth", "1",
-                  "origin", ref, timeout=timeout, extra_config=_redirects(follow_redirects)),
+                  "origin", ref, timeout=timeout, extra_config=_redirects(follow_redirects), remaining=remaining),
              f"fetching {ref} from {repository}")
-    commit = _checked(_git(scratch, "rev-parse", "--verify", "FETCH_HEAD^{commit}"), "reading FETCH_HEAD").strip()
+    commit = _checked(_git(scratch, "rev-parse", "--verify", "FETCH_HEAD^{commit}", remaining=remaining),
+                      "reading FETCH_HEAD").strip()
     # Fetch complete objects, without checkout or lazy fetching: no attributes, filters or hooks run.
-    return Tree(scratch, commit)
+    return Tree(scratch, commit, remaining)
 
 
 def _portable_paths(paths: list[str]) -> None:

@@ -163,7 +163,20 @@ class TaskSchedulerTest(ScheduleCase):
 
     def inspect(self, entry: schedule.Entry, text: str | None) -> schedule.Inspection:
         runner = Runner({"/Query": ok(text) if text is not None else fail(1)})
-        return schedule.inspect_entry(entry, runner=runner, now=lambda: NOW)
+        with mock.patch.object(schedule, "_current_user_sid", create=True, return_value="S-1-5-21-1"):
+            return schedule.inspect_entry(entry, runner=runner, now=lambda: NOW)
+
+    def test_another_principal_is_different_and_unknown_identity_is_unverifiable(self) -> None:
+        entry = self.entry("win32")
+        def changed(task, ns, ET):
+            task.find(f"{ns}Principals/{ns}Principal/{ns}UserId").text = "S-1-5-21-2"
+        result = self.inspect(entry, self.exported(entry, changed))
+        self.assertEqual("scheduled-different", result.state)
+        self.assertIn("context-differs", result.reasons)
+        with mock.patch.object(schedule, "_current_user_sid", return_value=None):
+            result = schedule.inspect_entry(entry, runner=Runner({"/Query": ok(self.exported(entry))}), now=lambda: NOW)
+        self.assertEqual("unverifiable", result.state)
+        self.assertIn("current-user-identity", result.missing)
 
     def test_the_generated_daily_task_is_scheduled_with_its_installed_anchor(self) -> None:
         entry = self.entry("win32")
@@ -231,6 +244,23 @@ class TaskSchedulerTest(ScheduleCase):
         self.assertIn("exec-field:Shell", unknown.missing)
         self.assertEqual("unverifiable", self.inspect(entry, self.exported(entry, no_anchor)).state)
         self.assertEqual("absent", self.inspect(entry, None).state)
+
+    def test_trigger_execution_limit_and_delay_change_the_effective_definition(self) -> None:
+        entry = self.entry("win32")
+        for tag, value in (("ExecutionTimeLimit", "PT1S"), ("RandomDelay", "PT12H")):
+            def changed(task, ns, ET):
+                trigger = task.find(f"{ns}Triggers/{ns}CalendarTrigger")
+                node = ET.Element(f"{ns}{tag}")
+                node.text = value
+                if tag == "ExecutionTimeLimit":
+                    trigger.insert(1, node)
+                else:
+                    trigger.append(node)
+            with self.subTest(tag=tag):
+                result = self.inspect(entry, self.exported(entry, changed))
+                self.assertEqual("scheduled-different", result.state)
+                self.assertIn("triggers-differs", result.reasons)
+                self.assertNotEqual(result.to_json()["desired_digest"], result.to_json()["effective_digest"])
 
     def test_os_run_observation_uses_a_fixed_query_with_the_name_as_data(self) -> None:
         entry = self.entry("win32")
