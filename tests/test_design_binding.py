@@ -13,7 +13,9 @@ import hashlib
 import json
 import pathlib
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from oah.design import binding as design
 from oah.design.binding import TaskBasis, TaskBinding, TaskIdentity
@@ -352,6 +354,132 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
         self.assertIn(spaced, self.path.read_text(encoding="utf-8"))
         notes = [item for item in self.events("note") if item.get("transaction_id") == "t" * 32]
         self.assertEqual(len(notes), 1)  # replayed exactly once
+
+
+class ReadoutTest(DesignTask, unittest.TestCase):
+    """Status, intent show and the session-start hook name the bound design from the records they read."""
+
+    def test_status_intent_and_session_start_name_the_design(self):
+        self.build({"design": "People book a lesson.\n"})
+        status = self.oah("status", "--json")
+        lease = next(item for item in json.loads(status.stdout)["leases"] if item["task"] == "t1")
+        self.assertEqual(lease["design_state"], "current")
+        self.assertIn(" design=current", self.oah("status").stdout)
+        shown = self.oah("intent", "show", "t1")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("design=current DESIGN acme/booking@r1", shown.stdout)
+        hook = subprocess.run([sys.executable, "-m", "oah", "hook", "session-start"], cwd=self.repo, input=b"",
+                              capture_output=True, env=self.env, timeout=60)
+        text = hook.stdout.decode("utf-8")
+        self.assertIn("design=acme/booking@r1", text)
+        self.assertIn("oah design task <task>", text)
+
+
+SRC_DIR = str(pathlib.Path(__file__).resolve().parent.parent / "src")
+
+
+def design_fix_project(test: unittest.TestCase):
+    """test_fix's FixProject (read-only reuse) whose task t1 follows an accepted design on its branch."""
+    from oah.design import open_store
+    from oah.wiki import notes
+    from tests.test_design_store import Clock
+    from tests.test_fix import FixProject
+
+    scaffold = {f"docs/wiki/{rel}": data for rel, data in notes.scaffold_files(TODAY).items()}
+    project = FixProject(test, files=scaffold, packet=packet_text(scope=("src", ".oah/tasks/t1")))
+    store = open_store(project.repo, env={"OAH_STATE_DIR": str(project.state)}, now=Clock())
+    store.add_project("acme", title="Acme", event="ev-project", today=TODAY)
+    r1 = store.new("acme", "booking", title="Booking", parts={"design": "People book a lesson.\n"}, event="ev-r1",
+                   today=TODAY)
+    store.accept("acme", "booking", revision=1, digest=r1.digest, reason="ok", today=TODAY)
+    section = design.PacketDesign.of(store.context("acme", "booking").binding("accepted"))
+    packet = (project.repo / PACKET).read_text(encoding="utf-8")
+    project.commit({PACKET: design.replace_section(packet, section)}, "design bound")
+    env = dict(project.env, PYTHONPATH=SRC_DIR)
+    bound = subprocess.run([sys.executable, "-m", "oah", "start", "--task", "t1", "--agent", "claude", "--packet",
+                            PACKET], cwd=project.repo, env=env, capture_output=True, text=True, timeout=120)
+    test.assertEqual(bound.returncode, 0, bound.stdout + bound.stderr)
+    project.design_store = store
+    return project
+
+
+class ReviewDesignTest(unittest.TestCase):
+    """B-T13 (test_review) and SC4-P4-R through real review rounds of a design-bound task."""
+
+    def test_a_design_review_keeps_its_key_and_disposes_its_snapshot(self):
+        project = design_fix_project(self)
+        result = project.review()
+        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+        receipt = project.receipt(1)
+        from oah.lease import Store
+
+        lease = next(item for item, _stale in Store(project.state).snapshot() if item.task == "t1")
+        self.assertEqual(receipt["design"]["evidence_key"], lease.design_record().key)
+        self.assertEqual(list(project.temp_root.iterdir()), [])  # the proven no-origin branch disposed it
+        prompt = project.calls()[-1]["prompt"]
+        self.assertIn("People book a lesson.", prompt)
+
+    def test_a_newer_draft_is_reviewed_but_never_converges(self):
+        project = design_fix_project(self)
+        context = project.design_store.context("acme", "booking")
+        project.design_store.save("acme", "booking", expect_revision=1, expect_digest=context.current.digest,
+                                  reason="draft", parts={"design": "People book two lessons.\n"}, today=TODAY)
+        project.commit({}, "save the draft")  # a review reads a commit
+        result = project.review()
+        self.assertEqual(result.code, "OAH_DESIGN_NEEDS_REVIEW", result.message)
+        prompt = project.calls()[-1]["prompt"]
+        self.assertIn("People book a lesson.", prompt)
+        self.assertIn("People book two lessons.", prompt)
+        from oah.review import summary
+
+        head = subprocess.run(["git", "-C", str(project.repo), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        from oah.lease import Store
+
+        lease = next(item for item, _stale in Store(project.state).snapshot() if item.task == "t1")
+        judged = design.judge_task(project.state, "t1", root=project.repo)
+        found = summary.convergence(project.repo, project.state, "t1", head, lease.binding(),
+                                    design=design.review_evidence(judged))
+        self.assertFalse(found.converged)
+
+
+class FixTargetOnlyTest(unittest.TestCase):
+    """B-T10: an unrelated lease's writes during a design-bound correction never fail its outcome or normalize its
+    own design bytes; the unrelated task's malformed design value is preserved, not repaired."""
+
+    def test_unrelated_writes_keep_the_outcome_and_the_exact_design_bytes(self):
+        from oah.lease import Store, read_lease_document
+        from oah.paths import repo_info
+        from oah.review import fix
+        from tests.test_fix import FIXED, applied
+
+        project = design_fix_project(self)
+        Store(project.state).start(task="other", agent="claude", scope=("docs",), note="parallel", ttl_hours=1,
+                                   info=repo_info(project.repo))
+        path = project.state / "leases.json"
+        text = path.read_text(encoding="utf-8")
+        own = read_lease_document(text.encode("utf-8"), path).record("t1").design.raw
+        spaced = own.replace('": ', '":  ')
+        other = read_lease_document(text.encode("utf-8"), path).record("other").raw
+        text = text.replace(own, spaced, 1).replace(other, other[:-1] + ', "design": ' + "[" * 40 + "]" * 40 + "}",
+                                                     1)
+        path.write_text(text, encoding="utf-8")
+        judge = fix._Attempt._judge
+        writes = []
+
+        def changed(attempt, *args, **kwargs):
+            result = judge(attempt, *args, **kwargs)
+            Store(project.state, lock_timeout=0).renew(task="other", agent="claude", ttl_hours=2)
+            writes.append(True)
+            return result
+
+        with mock.patch.object(fix._Attempt, "_judge", changed):
+            applied(self, project, {"write": FIXED})
+        self.assertEqual(writes, [True])
+        after = path.read_text(encoding="utf-8")
+        self.assertIn(spaced, after)  # the target's own noncanonical design bytes, exactly
+        self.assertNotIn("[" * 40, after)  # the unrelated invalid value is enveloped, its bytes kept aside
+        self.assertTrue(any((project.state / "design-invalid").iterdir()))
 
 
 if __name__ == "__main__":

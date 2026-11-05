@@ -42,6 +42,7 @@ def main(argv):
         return fake_claude.main(argv)
     prompt = fakelib.read_stdin()
     fakelib.record(argv, prompt)
+    fakelib.misbehave()
     mode = os.environ.get("FAKE_STREAM_MODE", "full")
     out = [{{"type": "system", "subtype": "init", "session_id": "s1", "cwd": os.getcwd(),
             "tools": ["Read", "Grep", "Glob", "Bash"], "model": "fake"}}]
@@ -694,6 +695,63 @@ class ReferenceCallTest(DesignTask, unittest.TestCase):
         self.assertEqual(finished.returncode, 1)
         self.assertIn(tc.TRANSPORT_STAGED, finished.stderr)  # sticky after unstaging
 
+    def test_a_claude_inspection_reads_by_reference_in_plan_mode(self):
+        self.build(BIG_PARTS)
+        result = self.oah("call", "claude", "--stage", "review", "--task", "t1", "--tier", "high",
+                          "--override-stage")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = json.loads(self.record.read_text())["argv"]
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        origin = self.events("design_transport_origin")[0]["transport"]["record"]
+        self.assertEqual(origin["profile"]["operation"], "inspect")
+        self.assertTrue(json.loads((self.last_run() / "design.json").read_text())["receiving"]["delivered"])
+
+    def test_continuity_is_recorded_typed_before_any_data(self):
+        self.build(BIG_PARTS)
+        self.assertEqual(self.call().returncode, 0)
+        origin = self.events("design_transport_origin")[0]["transport"]["record"]
+        self.assertEqual(origin["continuity"]["status"], "unsupported")  # recorded; not a launch prerequisite
+        self.assertIsNone(origin["continuity"]["host"])
+        self.assertEqual(origin["boot"]["status"], "unsupported")
+        self.assertIsNone(origin["boot"]["value_digest"])
+        self.assertTrue(all(root["volume_uuid_digest"] is None for root in origin["continuity"]["roots"]))
+
+    def test_a_killed_runner_leaves_a_blocked_origin_and_its_data(self):
+        import signal
+        import time
+
+        self.build(BIG_PARTS)
+        started = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low", "--background",
+                           env={"FAKE_SLEEP": "4"})
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            kinds = [event["transport"].get("kind") for event in self.events()]
+            if "running" in kinds:
+                break
+            time.sleep(0.1)
+        self.assertIn("running", kinds)
+        run = self.last_run()
+        pid = json.loads((run / "result.json").read_text())["pid"]
+        os.kill(pid, signal.SIGKILL)  # before any durable exit; the child keeps its own session
+        time.sleep(6)
+        view = next(iter(tc.transport_views(self.state_dir).values()))
+        self.assertEqual(view.state, "RUNNING")
+        self.assertFalse(view.quiescent)
+        self.assertTrue((self.repo / tc.DATA_DIR).exists())  # nothing is deleted on a guess
+        finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "s",
+                            "--return", str(self.returned()))
+        self.assertEqual(finished.returncode, 1)
+        self.assertIn(tc.TRANSPORT_NONTERMINAL, finished.stderr)
+        latest = view.latest
+        cleanup = self.oah("design", "task", "t1", "--run", run.name, "--transport-cleanup", "--evidence-plan",
+                           view.record["manifest"], "--expect-origin", view.origin, "--expect-record",
+                           f"{latest['sequence']}:{latest['record_digest']}", "--expect-task-basis",
+                           view.record["task_basis_digest"], "--settle", "aborted")
+        self.assertEqual(cleanup.returncode, 1)
+        self.assertIn(tc.TRANSPORT_NONTERMINAL, cleanup.stderr)  # a lost runner needs a qualified changed boot
+
     def test_codex_and_unqualified_claude_refuse_before_a_child(self):
         self.build(BIG_PARTS)
         refused = self.call("codex")
@@ -744,6 +802,16 @@ class CodexDeliveryTest(DesignTask, unittest.TestCase):
         stdin = self.stdin()
         self.assertIn("ALPHA people book a lesson.", stdin)
         self.assertIn("CHARLIE people book two lessons.", stdin)
+
+    def test_a_header_mismatch_fails_a_design_run_as_without_a_design(self):
+        self.build({"design": "ALPHA people book a lesson.\n"})
+        result = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high",
+                          env={"FAKE_CODEX_HEADER_MODEL": "gpt-other"})
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        saved = json.loads((self.last_run() / "result.json").read_text())
+        self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["header_code"], "OAH_MODEL_MISMATCH")
+        self.assertIn("ALPHA people book a lesson.", self.stdin())  # the human header route is unchanged
 
     def test_a_design_that_needs_references_never_reaches_codex(self):
         self.build(BIG_PARTS)
@@ -830,6 +898,19 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         passed = self.oah(*finish)
         self.assertNotIn("OAH_DESIGN_TRANSPORT", passed.stderr)  # retained exact files are not out of scope
         self.assertNotIn("OAH_SCOPE_EXCEEDED", passed.stderr)
+
+    def test_manually_missing_files_are_acknowledged_never_claimed_as_cleaned(self):
+        directory = self.repo / tc.DATA_DIR / self.manifest
+        os.chmod(directory, 0o755)
+        (directory / self.name).unlink()  # deleted by hand, with no cleanup intent
+        cleaned = self.oah("design", "task", "t1", "--transport-cleanup", *self.expect())
+        self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        self.assertIn("OAH_DESIGN_TRANSPORT_ACK_RETAINED", cleaned.stdout)
+        view = tc.transport_views(self.state_dir)[self.origin]
+        self.assertEqual(view.state, "ACK_RETAINED")
+        leaves = view.resolution["fact"]["leaves"]
+        self.assertEqual(leaves[self.name]["state"], "absent-unattributed")
+        self.assertEqual(leaves[self.manifest]["state"], "removed-under-intent")
 
     def test_exact_cleanup_removes_only_the_created_files(self):
         stale = self.oah("design", "task", "t1", "--transport-cleanup", *self.expect()[:-6],
