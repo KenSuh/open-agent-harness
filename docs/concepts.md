@@ -501,6 +501,48 @@ revision was approved. The AI runs these commands; you read the design pages in 
   check does not wait for a pending design journal; files an interrupted write left behind are ignored, and their
   numbers are never reused. `[wiki] dir` cannot put the pages on top of `.oah/designs`.
 
+### Tasks that follow a design
+
+A task follows a design when its packet has a `## Design` section (`oah packet new <task> --design
+<project>/<design>`, or `oah packet design <task>` to rewrite it). `oah start --packet` binds the task to the accepted
+revision for its exact inputs: the task and its instance, the project and design, the accepted intent, the normalized
+scope and the declared gates. A TTL renewal, or an exact restart after the lease expired, keeps that identity and the
+gate evidence and review receipts made for it. A changed intent, scope or gate list does not.
+
+- **States.** `oah design task <task>` shows the design, its state and its whole text. `current` permits work. A newer
+  accepted revision makes the task `stale`. A newer draft that nobody accepted makes it `needs-review`: work refuses
+  (`OAH_DESIGN_NEEDS_REVIEW`) and a read-only review sees both texts. `oah design carry <task>` records, for these exact
+  task inputs, that the change does not affect the task, so its evidence keeps counting; otherwise accept the
+  revision, rewrite the Design section and start again. A decision made for other inputs does not apply
+  (`OAH_DESIGN_TASK_INPUTS_CHANGED`).
+- **Delivery.** Every managed brief carries the accepted parts and the newest distinct draft parts whole, within
+  262,144 bytes. A design whose only large content is the verified public originals of a materials record (license
+  and notice texts, documents) is sent with every semantic field inline and those originals as read-only files under
+  `.oah-design-data/<plan>/` for that run. That route needs Claude Code 2.1.318 on macOS arm64 and a local Claude
+  policy oah can read and verify; the remote server policy stays the CLI's own. Codex reports no read it made, so it
+  refuses such a design before any paid call (`OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING`), and so does native Windows
+  (`OAH_DESIGN_REFERENCE_UNAVAILABLE`). Anything else over the budget refuses with a split plan
+  (`OAH_DESIGN_CONTEXT_TOO_LARGE`).
+- **Design data.** Those files are external data, not product. oah records the run before the files exist, matches
+  each Read against their exact bytes, checks the index and every new commit for them after the run, and removes
+  exactly the unchanged files it created. Staged or committed data stays recorded (`OAH_DESIGN_TRANSPORT_STAGED`,
+  `OAH_DESIGN_TRANSPORT_COMMITTED`): unstaging does not clear it, so that task cannot finish or land. A run that did
+  not read every required original keeps its edits but cannot complete the task (`OAH_DESIGN_TRANSPORT_NOT_DELIVERED`).
+  `oah design task <task> --run <run>` shows a run's record; with `--transport-cleanup` it removes, or with `--retain`
+  acknowledges, data a run left, and finish then counts acknowledged files as retained rather than out of scope
+  (`OAH_DESIGN_TRANSPORT_RETAINED` until then). A run whose exit was never recorded blocks finish
+  (`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
+- **Finish, gates, reviews and land.** Each judges the design again at its own control point. Gate evidence carries
+  the task's evidence key and goes stale when the design moves, without a rebind; unchanged checks keep their
+  entries, and meaningful history rotates into create-only pages (`oah design task <task> --gate-history`). Finish
+  exempts only the exact generated pages and records of the bound design, and `project.json` always needs explicit
+  scope. Land refuses a task whose finished design is not current (`OAH_LAND_DESIGN_NOT_CURRENT`). A malformed design
+  value of one task refuses that task only and its bytes are kept (`OAH_DESIGN_RECORD_INVALID`). Dispatched workers
+  cannot change, accept or carry designs (`OAH_DESIGN_WORKER_REFUSED`); that guard is cooperative, not a security
+  boundary.
+- **Limits.** A run whose process was lost before its exit was recorded can only be settled after a qualified
+  same-host reboot, and this release qualifies no such profile, so that run stays blocked; nothing is deleted.
+
 ## Gates
 
 "Done" is not something an agent says; it is a ledger of evidence. A **gate** is one checkable result with a

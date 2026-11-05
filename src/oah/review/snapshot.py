@@ -324,6 +324,46 @@ def _write_page(directory: pathlib.Path, data: bytes) -> str:
     return name
 
 
+def write_pages(allocation: dict, entries: list[dict], pages_dir: pathlib.Path) -> dict:
+    """Pack ordered entries into create-only canonical pages (each <= PAGE_BYTES including metadata and <=
+    PAGE_ENTRIES whole entries, the byte accounting exact) and return the descriptor fields."""
+    scan = hashlib.sha256()
+    previous, ordinal, count, total = None, 0, 0, 0
+    page: list[dict] = []
+
+    def base() -> int:
+        return len(_canonical({"version": 1, "allocation": allocation, "ordinal": ordinal, "previous": previous,
+                               "entries": []}))
+
+    def flush() -> None:
+        nonlocal previous, ordinal, total, page
+        data = _canonical({"version": 1, "allocation": allocation, "ordinal": ordinal, "previous": previous,
+                           "entries": page})
+        if len(data) > PAGE_BYTES or len(page) > PAGE_ENTRIES:
+            raise PlanUnavailable("a page exceeds its bound")
+        name = _write_page(pages_dir, data)
+        previous = {"sha256": name, "bytes": len(data), "ordinal": ordinal}
+        total += len(data)
+        ordinal += 1
+        page = []
+
+    size = base()
+    for item in entries:
+        encoded = _canonical(item)
+        scan.update(encoded + b"\n")
+        if page and (len(page) + 1 > PAGE_ENTRIES or size + 1 + len(encoded) > PAGE_BYTES):
+            flush()
+            size = base()
+        if size + len(encoded) > PAGE_BYTES:
+            raise PlanUnavailable(f"one entry is larger than a page ({'/'.join(item['path'])[:80]})")
+        size += len(encoded) + (1 if page else 0)
+        page.append(item)
+        count += 1
+    flush()  # the last page (also the single empty page of an empty container)
+    return {"head": {"sha256": previous["sha256"], "bytes": previous["bytes"]}, "page_count": ordinal,
+            "total_entries": count, "total_page_bytes": total, "complete_scan_digest": "sha256:" + scan.hexdigest()}
+
+
 def capture_retirement_plan(allocation: dict, parent: pathlib.Path, state_dir: pathlib.Path, *,
                             output_slot: dict, exclude: tuple[tuple[str, ...], ...] = ()) -> RetirementPlan:
     """The complete prelaunch inventory of the B-created container as linked create-only pages; every page is
@@ -333,42 +373,9 @@ def capture_retirement_plan(allocation: dict, parent: pathlib.Path, state_dir: p
         allocation_id = hashlib.sha256(_canonical(allocation)).hexdigest()
         pages_dir = pathlib.Path(state_dir) / RETIREMENT_DIR / allocation_id / "pages"
         pages_dir.mkdir(parents=True, exist_ok=True)
-        scan = hashlib.sha256()
-        previous, ordinal, count, total = None, 0, 0, 0
-        page: list[dict] = []
-        base = len(_canonical({"allocation": allocation, "entries": [], "ordinal": 0,
-                               "previous": {"bytes": UINT64, "ordinal": UINT64, "sha256": "0" * 64}, "version": 1}))
-
-        def flush() -> None:
-            nonlocal previous, ordinal, total, page
-            data = _canonical({"version": 1, "allocation": allocation, "ordinal": ordinal, "previous": previous,
-                               "entries": page})
-            if len(data) > PAGE_BYTES or len(page) > PAGE_ENTRIES:
-                raise PlanUnavailable("a page exceeds its bound")
-            name = _write_page(pages_dir, data)
-            previous = {"sha256": name, "bytes": len(data), "ordinal": ordinal}
-            total += len(data)
-            ordinal += 1
-            page = []
-
-        size = base
-        for item in entries:
-            encoded = _canonical(item)
-            scan.update(encoded + b"\n")
-            if page and (len(page) + 1 > PAGE_ENTRIES or size + 1 + len(encoded) > PAGE_BYTES):
-                flush()
-                size = base
-            if base + len(encoded) > PAGE_BYTES:
-                raise PlanUnavailable(f"one entry is larger than a page ({'/'.join(item['path'])[:80]})")
-            size += len(encoded) + (1 if page else 0)
-            page.append(item)
-            count += 1
-        flush()  # the last page (also the single empty page of an empty container)
+        fields = write_pages(allocation, entries, pages_dir)
         _fsync(pages_dir)
-        descriptor = {"version": 1, "allocation": allocation, "head": {"sha256": previous["sha256"],
-                                                                         "bytes": previous["bytes"]},
-                      "page_count": ordinal, "total_entries": count, "total_page_bytes": total,
-                      "complete_scan_digest": "sha256:" + scan.hexdigest(), "output_slot": output_slot}
+        descriptor = {"version": 1, "allocation": allocation, **fields, "output_slot": output_slot}
         return RetirementPlan(descriptor, hashlib.sha256(_canonical(descriptor)).hexdigest(), pages_dir)
     except PlanUnavailable:
         raise

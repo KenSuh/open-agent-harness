@@ -876,7 +876,8 @@ def _json_object(data: bytes) -> tuple[dict | None, str | None]:
 
 
 def _rule_matches(rule: str, paths: Sequence[str]) -> bool:
-    """Whether a permission rule for Read could cover any of the data paths (conservative)."""
+    """Whether a permission rule for Read could cover any of the data paths. Conservative: a pattern this profile
+    cannot place (home-relative, or any unknown form) counts as covering them."""
     import fnmatch
 
     if rule == "Read":
@@ -884,12 +885,25 @@ def _rule_matches(rule: str, paths: Sequence[str]) -> bool:
     if not (rule.startswith("Read(") and rule.endswith(")")):
         return False
     pattern = rule[5:-1].strip()
-    if not pattern:
+    if pattern in ("", "*", "**", "/**", "./**", "//**"):
         return True
-    pattern = pattern.lstrip("/") if pattern.startswith("//") else pattern
-    candidates = [pattern, pattern.replace("**", "*")]
-    return any(fnmatch.fnmatchcase(path, item) or fnmatch.fnmatchcase(path.lstrip("/"), item.lstrip("/./"))
-               or fnmatch.fnmatchcase(os.path.basename(path), item) for path in paths for item in candidates)
+    if pattern.startswith("~"):
+        return True
+    if pattern.startswith("//"):
+        pattern = pattern[1:]  # an absolute path pattern
+    elif pattern.startswith("./"):
+        pattern = pattern[2:]
+    elif pattern.startswith("/"):
+        pattern = pattern[1:]  # relative to the settings' project root
+    glob = pattern.replace("**", "*")
+    for path in paths:
+        parts = path.strip("/").split("/")
+        suffixes = ["/".join(parts[n:]) for n in range(len(parts))]
+        if fnmatch.fnmatchcase(path, glob) or any(fnmatch.fnmatchcase(item, glob) for item in suffixes):
+            return True
+        if "/" not in pattern and any(fnmatch.fnmatchcase(part, glob) for part in parts):
+            return True
+    return False
 
 
 def _hook_problem(hooks: object, where: str) -> str | None:
@@ -1870,66 +1884,72 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
 
     `current`: {task_instance_id, task_basis_digest} of the task now, or None for a task without a design.
     `worktree`: `root` is the task's own worktree (finish), so its own origins get the full H0/index/roster check;
-    otherwise (land) every origin is checked for intersection with the candidate `head`."""
-    views = transport_views(state_dir, events=events)
+    otherwise (land) every origin is checked for intersection with the candidate `head`.
+    Refusals come in a fixed order across all origins: unreadable history, a run without a recorded exit, sticky
+    exposure, current exposure, unresolved data, then missing delivery."""
+    views = [view for view in transport_views(state_dir, events=events).values()
+             if repo is None or view.record.get("repo_common_identity") == repo]
     if not views:
         return Completion(None, "no design transport origin")
-    exempt: list[str] = []
-    summaries = []
-    own_work = []
-    for view in views.values():
-        mine = view.task == task
-        if repo is not None and view.record.get("repo_common_identity") != repo:
-            continue
-        summaries.append(view.summary())
-        run = view.record.get("run")
-        where = f"run {run} of task {view.task}"
+    summaries = tuple(view.summary() for view in views)
+    mine = [view for view in views if view.task == task]
+
+    def where(view) -> str:
+        return f"run {view.record.get('run')} of task {view.task}"
+
+    for view in views:
         if view.problem is not None:
-            return Completion(TRANSPORT_HISTORY_UNKNOWN, f"{where}: {view.problem}", origins=tuple(summaries))
-        if mine and not view.quiescent:
-            return Completion(TRANSPORT_NONTERMINAL, f"{where} has no recorded exit or settlement "
+            return Completion(TRANSPORT_HISTORY_UNKNOWN, f"{where(view)}: {view.problem}", origins=summaries)
+    for view in mine:
+        if not view.quiescent:
+            return Completion(TRANSPORT_NONTERMINAL, f"{where(view)} has no recorded exit or settlement "
                               f"({view.state}); its process may still be writing. Inspect it with oah design task "
-                              f"{task} --run {run}", origins=tuple(summaries))
+                              f"{task} --run {view.record.get('run')}", origins=summaries)
+    for view in views:
         sticky = view.exposure
         if sticky is not None:
-            return Completion(_P4_CODES[sticky["state"]], f"{where}: its design data was "
+            return Completion(_P4_CODES[sticky["state"]], f"{where(view)}: its design data was "
                               f"{sticky['state']} ({sticky.get('why')}). That exposure stays recorded (unstaging, "
                               "deleting or cleanup do not clear it), so this task cannot finish or land; remove the "
                               "data from the index and history, then continue the work as a new task",
-                              origins=tuple(summaries))
+                              origins=summaries)
+    checks = {}
+    for view in views:
         resolution = view.resolution
         expect = ("cleaned" if resolution is not None and resolution["kind"] == "verified-cleaned" else
                   "acknowledged" if resolution is not None else "unresolved")
-        if mine and worktree:
+        if view.task == task and worktree:
             checked = verify_transport_origin(view.record, root,
                                               expect=expect if expect != "unresolved" else "cleaned",
                                               acknowledged=resolution["fact"] if expect == "acknowledged" else None)
         else:
             checked = intersects(view.record, root, head)
         if checked["state"] in ("committed", "staged", "unknown"):
-            return Completion(checked["code"], f"{where}: {checked['why']}", origins=tuple(summaries))
-        if not mine:
-            continue  # a proved nonintersecting origin of another task does not bind this one
+            return Completion(checked["code"], f"{where(view)}: {checked['why']}", origins=summaries)
+        checks[view.origin] = (expect, checked)
+    exempt: list[str] = []
+    for view in mine:
+        expect, checked = checks[view.origin]
         if expect == "unresolved":
-            return Completion(TRANSPORT_RETAINED, f"{where} still has its design data ({view.state}); clean or "
-                              f"acknowledge it with oah design task {task} --run {run} --transport-cleanup",
-                              origins=tuple(summaries))
+            return Completion(TRANSPORT_RETAINED, f"{where(view)} still has its design data ({view.state}); clean or "
+                              f"acknowledge it with oah design task {task} --run {view.record.get('run')} "
+                              "--transport-cleanup", origins=summaries)
         if checked["state"] != "clean" and worktree:
-            return Completion(checked["code"], f"{where}: {checked['why']}", origins=tuple(summaries))
+            return Completion(checked["code"], f"{where(view)}: {checked['why']}", origins=summaries)
         if expect == "acknowledged":
-            for name, item in (resolution["fact"].get("leaves") or {}).items():
+            for name, item in (view.resolution["fact"].get("leaves") or {}).items():
                 if item.get("state") == "present-unchanged":
                     exempt.append(f"{DATA_DIR}/{view.record['manifest']}/{name}")
-        if (current is not None and view.record.get("task_identity", {}).get("task_instance_id")
-                == current.get("task_instance_id") and view.record.get("task_basis_digest")
-                == current.get("task_basis_digest") and (view.record.get("profile") or {}).get("operation") == "work"):
-            own_work.append(view)
+    own_work = [view for view in mine if current is not None
+                and view.record.get("task_identity", {}).get("task_instance_id") == current.get("task_instance_id")
+                and view.record.get("task_basis_digest") == current.get("task_basis_digest")
+                and (view.record.get("profile") or {}).get("operation") == "work"]
     if own_work and not own_work[-1].delivered:
         view = own_work[-1]
         return Completion(TRANSPORT_NOT_DELIVERED, f"the latest design-bound run {view.record.get('run')} did not "
                           "receive its complete design (its required originals were not all read); its edits stay, "
-                          "but completion needs a run that received it. Run oah call again", origins=tuple(summaries))
-    return Completion(None, f"{len(summaries)} transport origin(s) accounted", tuple(exempt), tuple(summaries))
+                          "but completion needs a run that received it. Run oah call again", origins=summaries)
+    return Completion(None, f"{len(views)} transport origin(s) accounted", tuple(exempt), summaries)
 
 
 # ReadChunkV1: the guarded read-only chunk command ---------------------------------------------------------------

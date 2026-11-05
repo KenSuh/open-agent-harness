@@ -10,7 +10,7 @@
 |---|---|
 | `oah init` | 안내형 설정. 도구, 로그인, 프로젝트 파일, 첫 영향 지도를 준비한다. |
 | `oah doctor` | `oah`가 쓰는 도구를 확인하고 빠진 도구마다 설치 명령을 알려 준다. |
-| `oah packet new` / `check` | 작업 패킷(`.oah/tasks/<task>/PACKET.md`)을 만들거나 검사한다. |
+| `oah packet new` / `check` / `design` | 작업 패킷(`.oah/tasks/<task>/PACKET.md`)을 만들거나 검사한다. `design`은 작업이 따르는 설계를 적는 Design 섹션을 쓴다. |
 | `oah intent show` / `check` | 작업의 의도와 다이제스트, 결속 상태를 보여 준다. |
 | `oah preflight` | 시작하기 전에 기본 브랜치, 작업 트리, 리스를 확인한다. |
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | 리스. 경로를 잡고, 연장하고, 목록을 보고, 검사하며 닫고, 내려놓고, 메모를 남긴다. |
@@ -20,7 +20,7 @@
 | `oah gates` | 작업의 게이트 원장을 쓰고, 검토하고, 검사한다. |
 | `oah check` | 게이트 CHECK 줄에 쓰는 운영체제 공통 검사. |
 | `oah wiki` | 프로젝트 위키의 링크와 출처, 정리 상태를 관리한다. |
-| `oah design` | 제품마다 설계를 관리한다. revision과 수락한 revision을 기록하고 위키에 설계 페이지를 둔다. |
+| `oah design` | 제품마다 설계를 관리한다. revision과 수락한 revision을 기록하고 위키에 설계 페이지를 둔다. `oah design task`는 작업이 따르는 설계와 그 상태를 보여 주고, `oah design carry`는 바뀐 설계가 작업을 바꾸지 않는다는 판단을 기록한다. |
 | `oah impact` | 파일이나 데이터베이스 객체가 바뀔 때 다시 확인할 것을 알려 준다. |
 | `oah eval` | 정답을 숨긴 실제 사례를 재현하고 변형별 결과를 한계와 함께 보여 준다. |
 | `oah graph` | graphify가 있으면 그 지식 그래프를 쓴다. |

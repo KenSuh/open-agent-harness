@@ -466,6 +466,44 @@ docs/wiki/
   중단된 쓰기가 남긴 파일은 무시하고 그 번호는 다시 쓰지 않는다. `[wiki] dir`로 페이지를 `.oah/designs` 위에 둘 수는
   없다.
 
+### 설계를 따르는 작업
+
+패킷에 `## Design` 섹션이 있으면 작업은 그 설계를 따른다(`oah packet new <task> --design <project>/<design>`로 만들고
+`oah packet design <task>`로 다시 쓴다). `oah start --packet`은 작업의 정확한 입력, 곧 작업과 그 인스턴스, 프로젝트와
+설계, 수락된 의도, 정규화한 범위, 선언한 게이트에 수락된 revision을 결속한다. TTL 갱신이나 만료 뒤의 정확한 재시작은
+그 정체성을 유지하고, 그에 맞춰 만든 게이트 증거와 리뷰 영수증도 유지한다. 의도·범위·게이트 목록이 바뀌면 유지되지
+않는다.
+
+- **상태.** `oah design task <task>`는 설계와 상태와 전체 텍스트를 보여 준다. `current`일 때만 작업할 수 있다. 더 새
+  revision이 수락되면 `stale`이 된다. 아무도 수락하지 않은 새 초안이 있으면 `needs-review`가 되어 작업은 거부되고
+  (`OAH_DESIGN_NEEDS_REVIEW`) 읽기 전용 리뷰는 두 텍스트를 모두 본다. `oah design carry <task>`는 이 정확한 작업 입력에
+  대해 그 변경이 작업을 바꾸지 않는다고 기록해 증거가 계속 쓰이게 한다. 바꾼다면 revision을 수락하고 Design 섹션을
+  다시 쓴 뒤 다시 시작한다. 다른 입력에 대해 내린 판단은 적용되지 않는다(`OAH_DESIGN_TASK_INPUTS_CHANGED`).
+- **전달.** 관리되는 모든 브리프는 수락된 부분과 그보다 새 초안의 다른 부분을 262,144바이트 안에 통째로 싣는다. 큰
+  내용이 materials 기록의 검증된 공개 원본(라이선스·고지 텍스트, 문서)뿐인 설계는 의미 필드를 모두 본문에 싣고 그
+  원본은 그 실행 동안 `.oah-design-data/<plan>/` 아래 읽기 전용 파일로 보낸다. 이 경로에는 macOS arm64의 Claude Code
+  2.1.318과, oah가 읽고 검증할 수 있는 로컬 Claude 정책이 필요하다. 원격 서버 정책은 CLI 자신의 몫으로 남는다. Codex는
+  자신이 읽은 내용을 보고하지 않으므로 그런 설계는 유료 호출 전에 거부한다
+  (`OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING`). 네이티브 Windows도 같다(`OAH_DESIGN_REFERENCE_UNAVAILABLE`). 그 밖에
+  예산을 넘는 설계는 분할 계획과 함께 거부한다(`OAH_DESIGN_CONTEXT_TOO_LARGE`).
+- **설계 데이터.** 그 파일은 제품이 아니라 외부 데이터다. oah는 파일이 생기기 전에 실행을 기록하고, 각 Read를 정확한
+  바이트와 맞춰 보고, 실행 뒤 색인과 새 커밋 전부에서 그 파일을 찾고, 자신이 만든 바뀌지 않은 파일만 정확히 지운다.
+  스테이징되거나 커밋된 데이터는 기록으로 남는다(`OAH_DESIGN_TRANSPORT_STAGED`, `OAH_DESIGN_TRANSPORT_COMMITTED`).
+  스테이징을 풀어도 지워지지 않으므로 그 작업은 완료하거나 반영할 수 없다. 필요한 원본을 다 읽지 않은 실행은 수정을
+  남기지만 작업을 완료할 수 없다(`OAH_DESIGN_TRANSPORT_NOT_DELIVERED`). `oah design task <task> --run <run>`은 실행의
+  기록을 보여 주고, `--transport-cleanup`은 실행이 남긴 데이터를 지우거나 `--retain`과 함께 남긴다고 확인한다. 그 뒤
+  완료는 확인된 파일을 범위 밖이 아니라 남긴 파일로 센다(그 전까지는 `OAH_DESIGN_TRANSPORT_RETAINED`). 종료가 기록되지
+  않은 실행은 완료를 막는다(`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
+- **완료·게이트·리뷰·반영.** 각자 자신의 제어 지점에서 설계를 다시 판정한다. 게이트 증거는 작업의 증거 키를 싣고,
+  설계가 움직이면 재결속 없이도 낡은 것이 된다. 바뀌지 않은 검사는 항목을 그대로 두고, 의미 있는 기록은 생성 전용
+  페이지로 넘긴다(`oah design task <task> --gate-history`). 완료는 결속된 설계가 생성한 정확한 페이지와 기록만 범위에서
+  빼고 `project.json`에는 늘 명시적인 범위가 필요하다. 반영은 완료된 설계가 current가 아닌 작업을 거부한다
+  (`OAH_LAND_DESIGN_NOT_CURRENT`). 한 작업의 설계 값이 망가지면 그 작업만 거부되고 바이트는 보존된다
+  (`OAH_DESIGN_RECORD_INVALID`). 디스패치된 워커는 설계를 바꾸거나 수락하거나 carry할 수 없다
+  (`OAH_DESIGN_WORKER_REFUSED`). 이 가드는 협력 규칙이지 보안 경계가 아니다.
+- **한계.** 종료를 기록하기 전에 프로세스를 잃은 실행은 검증된 같은 호스트 재부팅 뒤에만 정리할 수 있다. 이번 릴리스는
+  그런 프로필을 검증하지 않으므로 그 실행은 막힌 채로 남고 아무것도 지우지 않는다.
+
 ## 게이트
 
 "끝났다"는 에이전트가 하는 말이 아니라 증거 원장이다. **게이트**는 확인할 수 있는 결과 하나와 그 결과를 내야 하는

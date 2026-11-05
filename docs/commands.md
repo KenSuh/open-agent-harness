@@ -10,7 +10,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 |---|---|
 | `oah init` | Guided setup: tools, sign-ins, project files and the first impact map. |
 | `oah doctor` | Checks the tools `oah` uses and prints the install command for each missing one. |
-| `oah packet new` / `check` | Creates or checks a task packet (`.oah/tasks/<task>/PACKET.md`). |
+| `oah packet new` / `check` / `design` | Creates or checks a task packet (`.oah/tasks/<task>/PACKET.md`); `design` writes the Design section that names the design a task follows. |
 | `oah intent show` / `check` | Shows a task's intent, its digest and its binding state. |
 | `oah preflight` | Checks the base branch, the working tree and the leases before you start. |
 | `oah start`, `renew`, `status`, `finish`, `release`, `log` | Leases: claim paths, extend, list, close with checks, drop, note. |
@@ -20,7 +20,7 @@ affects; the wiki keeps decisions; a tier is a difficulty level; and skills are 
 | `oah gates` | Writes, lints and checks a task's gate ledger. |
 | `oah check` | Portable assertions for gate CHECK lines. |
 | `oah wiki` | Keeps the project wiki linked, sourced and tidy. |
-| `oah design` | Keeps each product's design: its revisions, which one is accepted, and its pages in the wiki. |
+| `oah design` | Keeps each product's design: its revisions, which one is accepted, and its pages in the wiki. `oah design task` shows the design a task follows and its state; `oah design carry` records that a change leaves the task unchanged. |
 | `oah impact` | Lists what to re-check when files or database objects change. |
 | `oah eval` | Replays real cases with hidden expected answers and reports each variant, with its limits. |
 | `oah graph` | Uses the graphify knowledge graph when graphify is installed. |

@@ -128,6 +128,13 @@ def register(commands: argparse._SubParsersAction) -> None:
     task.add_argument("--settle", choices=("failed", "aborted"),
                       help="how a run without a recorded exit is settled (needs a qualified changed-boot profile)")
     task.add_argument("--retain", action="store_true", help="acknowledge the data as retained instead of removing it")
+    task.add_argument("--gate-history", action="store_true",
+                      help="the task's gate evidence history: the live recent page, or one archive page (reads only)")
+    task.add_argument("--page", help="with --gate-history: an archive page's sha256 hex")
+    task.add_argument("--restore-gate-history", metavar="PAGE",
+                      help="rebuild a lost or damaged live gate binding file from this exact archive page")
+    task.add_argument("--expect-current", help="with --restore-gate-history: the live file's sha256 hex now, or "
+                      "'absent'")
 
     carry = sub.add_parser("carry", help="record that a design change does not change a task, so its evidence "
                            "keeps counting")
@@ -346,6 +353,67 @@ def _reconcile(args: argparse.Namespace, store) -> int:
 def _recover(args: argparse.Namespace, store) -> int:
     print(store.recover(resolved=args.resolved))
     return EXIT_OK
+
+
+def _gate_history(args: argparse.Namespace, store) -> int:
+    """B4's read and recovery path: one verified gate history page per call, or a live-file rebuild from an exact
+    archive page under the dispatcher's expected-current-byte check. It never searches for a green record."""
+    import hashlib
+
+    from oah.gates.bindings import BindingStore
+    from oah.gates.check import GateRefused, history_page
+    from oah.lease import TASK_RE
+
+    if not TASK_RE.fullmatch(args.task or ""):
+        raise LeaseError("OAH_TASK_INVALID", f"{args.task!r}: use letters, digits, '.', '_' or '-' (max 64)")
+    bindings = BindingStore(store.state, args.task)
+    try:
+        if args.restore_gate_history is None:
+            page = history_page(bindings, args.page)
+            if args.json:
+                print(json.dumps(page, indent=2, ensure_ascii=False))
+            else:
+                head = page.get("archive_head")
+                print(f"OAH_GATE_HISTORY task={args.task} page={page['page']} entries={len(page['history'])} "
+                      f"previous={head['sha256'] if head else 'none'}")
+                for item in page["history"]:
+                    print(f"  {item.get('kind')} {item.get('title') or item.get('id') or ''} "
+                          f"recorded={item.get('recorded_at')}")
+            return EXIT_OK
+        if os.environ.get("OAH_WORKER") == "1":
+            from oah.design.binding import WORKER_REFUSED_CODE
+
+            raise DesignError(WORKER_REFUSED_CODE, "dispatched workers do not restore gate history; nothing was "
+                              "changed")
+        if args.expect_current is None:
+            raise GateRefused("OAH_GATES_HISTORY_INVALID", "--restore-gate-history needs --expect-current (the live "
+                              "file's sha256 hex now, or 'absent')")
+        history_page(bindings, args.restore_gate_history)  # the exact page must verify first
+        page_bytes = (bindings.path.parent / "design-history" / f"{args.restore_gate_history}.json").read_bytes()
+        from oah.atomic import write_text_atomic
+        from oah.lockfile import StateLock
+
+        with StateLock(store.state / ".lock", timeout=bindings.lock_timeout):
+            try:
+                current = hashlib.sha256(bindings.path.read_bytes()).hexdigest()
+            except FileNotFoundError:
+                current = "absent"
+            if current != args.expect_current:
+                raise GateRefused("OAH_GATES_HISTORY_INVALID", f"the live gate file is {current}, not "
+                                  f"{args.expect_current}; nothing was changed")
+            if hashlib.sha256(page_bytes).hexdigest() != args.restore_gate_history:
+                raise GateRefused("OAH_GATES_HISTORY_INVALID", "the archive page changed while it was restored")
+            bindings.path.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(bindings.path, page_bytes.decode("utf-8"))
+        print(f"OAH_GATE_HISTORY_RESTORED task={args.task} from={args.restore_gate_history} replaced={current}: the "
+              "live file now holds that page's exact bytes; run oah gates check to refresh current evidence")
+        return EXIT_OK
+    except GateRefused as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
+    except (OSError, ValueError) as exc:
+        print(f"OAH_GATES_HISTORY_INVALID: the gate history cannot be read ({type(exc).__name__})", file=sys.stderr)
+        return EXIT_REFUSED
 
 
 def _transport_eligibility(store, task: str, view) -> dict:
@@ -582,6 +650,8 @@ def _task(args: argparse.Namespace, store) -> int:
 
     if args.run is not None:
         return _task_run(args, store)
+    if args.gate_history or args.restore_gate_history is not None:
+        return _gate_history(args, store)
     view, judged = _task_view(store, args.task)
     record = judged.task
     block = task_context.readout_block(judged, task=args.task, root=store.root)

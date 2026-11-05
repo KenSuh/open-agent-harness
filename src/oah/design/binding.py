@@ -1173,6 +1173,12 @@ def judge_task(state: pathlib.Path, task: str, *, root: pathlib.Path, view: Task
         found = origin(state, task, packet_text=packet_text, root=root if source else None, source=source,
                        view=view)
         return judge(None, root=root, found=found)
+    if view.problem is not None:  # a malformed later event never leaves an earlier record in force
+        return judge(None, root=root, found=Origin("invalid", view.problem))
+    if view.closed in ("released", "expired"):
+        # Only a finished epoch can be landed or carried closed; a released or expired one must be resumed first.
+        return judge(None, root=root, found=Origin("closed", f"its last lease was {view.closed}, not finished; "
+                                                               "resume it with oah start --packet"))
     epoch = view.closing or view.epoch or {}
     where = pathlib.Path(epoch["worktree"]) if epoch.get("worktree") and pathlib.Path(epoch["worktree"]).is_dir() \
         else root
@@ -1202,10 +1208,14 @@ def gate_provenance(state: pathlib.Path, task: str, *, root: pathlib.Path | None
         return Provenance(None, frozenset(), view.unreadable, "unknown")
     if view.record is None and not view.origin and view.problem is None:
         return None
+    if view.problem is not None:  # the same rule as judge_task: a malformed event never leaves a record in force
+        return Provenance(None, frozenset(), view.problem, "invalid")
     if view.record is None:
-        return Provenance(None, frozenset(), view.problem or "the task follows a design but has no binding",
-                          "required")
+        return Provenance(None, frozenset(), "the task follows a design but has no binding", "required")
     lease = view.lease
+    if lease is None and view.closed in ("released", "expired"):
+        return Provenance(view.record.key, frozenset(), f"its last lease was {view.closed}, not finished",
+                          "required")
     if lease is not None:
         basis = basis_of(view.record, intent=lease.intent, scope=lease.scope, gates=lease.gates)
         where = pathlib.Path(lease.worktree)
