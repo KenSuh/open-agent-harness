@@ -74,6 +74,12 @@ DEFAULTS = {
         "model": DEFAULT_MODEL,
         "key_name": DEFAULT_KEY_NAME,
     },
+    # Source and material judgements (oah.rerank.judge): off by default and needed in addition to `enabled`; design
+    # text is sent only with send_design_text = true.
+    "judgement": {
+        "enabled": False,
+        "send_design_text": False,
+    },
 }
 
 PROVIDERS: dict[str, Provider] = {"typesafe": TypeSafeProvider()}

@@ -85,10 +85,16 @@ def _git_env() -> Iterator[dict[str, str]]:
         yield env
 
 
-def _git(repo: pathlib.Path, *args: str, timeout: float = FETCH_TIMEOUT, stdin_text: str | None = None) -> RunResult:
+def _git(repo: pathlib.Path, *args: str, timeout: float = FETCH_TIMEOUT, stdin_text: str | None = None,
+         extra_config: tuple[str, ...] = ()) -> RunResult:
     with _git_env() as env:
-        return run_command((*git_argv(), *GIT_SAFE_CONFIG, "-C", str(repo), *args), timeout=timeout,
+        return run_command((*git_argv(), *GIT_SAFE_CONFIG, *extra_config, "-C", str(repo), *args), timeout=timeout,
                            env=env, stdin_text=stdin_text)
+
+
+def _redirects(follow_redirects: bool) -> tuple[str, ...]:
+    """Git config that makes a moved repository fail instead of answering from its new place."""
+    return () if follow_redirects else ("-c", "http.followRedirects=false")
 
 
 def _checked(result: RunResult, what: str) -> str:
@@ -131,9 +137,31 @@ class Tree:
         _checked(result, f"reading blob {blob}")
         return result.stdout.encode("latin-1")
 
+    def size(self, blob: str) -> int:
+        """The size of a blob in bytes, read from the object store before its bytes are."""
+        out = _checked(_git(self.repo, "cat-file", "-s", blob), f"sizing blob {blob}").strip()
+        if not out.isdigit():
+            raise FetchError(f"git printed no size for blob {blob}")
+        return int(out)
+
+    def children(self, folder: str) -> list[tuple[str, str, str]]:
+        """(mode, object id, repository path) for the direct children of folder ('' is the top of the tree)."""
+        args = ["ls-tree", "-z", "--full-tree", self.commit]
+        if folder:
+            args += ["--", folder.rstrip("/") + "/"]
+        out = _checked(_git(self.repo, *args), f"listing {folder or 'the top folder'}")
+        found = []
+        for record in out.split("\0"):
+            if not record:
+                continue
+            meta, name = record.split("\t", 1)
+            mode, _kind, oid = meta.split()
+            found.append((mode, oid, name))
+        return found
+
 
 def fetch(repository: str, ref: str, scratch: pathlib.Path, *, paths: tuple[str, ...] = (),
-          timeout: float = FETCH_TIMEOUT) -> Tree:
+          timeout: float = FETCH_TIMEOUT, follow_redirects: bool = True) -> Tree:
     """Fetch ref (a branch, tag or full commit id) of a public repository into an empty scratch folder."""
     validate_repository(repository)
     scratch = pathlib.Path(scratch)
@@ -143,7 +171,8 @@ def fetch(repository: str, ref: str, scratch: pathlib.Path, *, paths: tuple[str,
     _checked(_git(scratch, "init", "-q", "--template="), "git init")
     _checked(_git(scratch, "remote", "add", "origin", repository), "git remote add")
     _checked(_git(scratch, "fetch", "--quiet", "--no-tags", "--depth", "1",
-                  "origin", ref, timeout=timeout), f"fetching {ref} from {repository}")
+                  "origin", ref, timeout=timeout, extra_config=_redirects(follow_redirects)),
+             f"fetching {ref} from {repository}")
     commit = _checked(_git(scratch, "rev-parse", "--verify", "FETCH_HEAD^{commit}"), "reading FETCH_HEAD").strip()
     # Fetch complete objects, without checkout or lazy fetching: no attributes, filters or hooks run.
     return Tree(scratch, commit)
@@ -171,6 +200,11 @@ def _portable_paths(paths: list[str]) -> None:
                 raise StageError(f"portable path collision: {previous[0]!r} and {spelling!r}; "
                                  "ask upstream to rename them before retrying")
             seen[key] = spelling, is_file
+
+
+def check_portable_paths(paths: list[str]) -> None:
+    """The staging path rules (no escape, alias, reserved or device name, no case collision); raises StageError."""
+    _portable_paths(list(paths))
 
 
 def manifest_problems(folder: pathlib.Path, files: dict | Upstream) -> list[str]:

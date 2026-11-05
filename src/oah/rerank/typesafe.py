@@ -267,6 +267,41 @@ def _parse_model_response(body: object, count: int) -> tuple[tuple[int, float | 
         del body, count, answers, answer, probabilities, confidence
 
 
+def build_judgement_request(model: str, state: Mapping[str, object], instructions: str,
+                            options: Mapping[str, str]) -> dict:
+    """A closed-purpose choice: the state holds only tagged field texts, instructions and criteria are oah's."""
+    return {"model": model, "state": dict(state),
+            "questions": {"judgement": {"type": "choice", "instructions": instructions, "criteria": dict(options)}}}
+
+
+def _parse_judgement_response(body: object, keys: Sequence[str]) -> tuple[tuple[str, float | None] | None, str | None]:
+    answers = answer = probabilities = confidence = None
+    try:
+        answers = _answers(body)
+        answer = answers.get("judgement") if answers is not None else None
+        if not isinstance(answer, Mapping) or answer.get("type") != "choice" or answer.get("choice") not in keys:
+            return None, BAD_RESPONSE
+        probabilities = answer.get("probabilities")
+        if not isinstance(probabilities, Mapping) or set(probabilities) != set(keys):
+            return None, BAD_RESPONSE
+        scores = []
+        for key in keys:
+            score = _number(probabilities[key])
+            if score is None or not 0.0 <= score <= 1.0:
+                return None, BAD_RESPONSE
+            scores.append(score)
+        if not 1.0 - PROBABILITY_SUM_TOLERANCE <= math.fsum(scores) <= 1.0 + PROBABILITY_SUM_TOLERANCE \
+                or scores[list(keys).index(answer["choice"])] != max(scores):
+            return None, BAD_RESPONSE
+        if "confidence" in answer:
+            confidence = _number(answer["confidence"])
+            if confidence is None or not 0.0 <= confidence <= 1.0:
+                return None, BAD_RESPONSE
+        return (answer["choice"], confidence), None
+    finally:
+        del body, keys, answers, answer, probabilities, confidence
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Never follow a redirect: it would carry the Authorization header to another address."""
 
@@ -499,6 +534,30 @@ class TypeSafeProvider:
             return (*pairs[index], answer[1]), None
         finally:
             del self, request, candidates, key, config, model, body, index, answer
+
+    def judge(self, state: Mapping[str, object], instructions: str, options: Mapping[str, str], *, key: Secret,
+              config: Mapping) -> tuple[str, float | None]:
+        result = code = None
+        try:
+            try:
+                result, code = _outcome(self._judge, state, instructions, options, key=key, config=config)
+            finally:
+                del self, state, instructions, options, key, config
+            return _finish(result, code)
+        finally:
+            del result, code
+
+    def _judge(self, state: Mapping[str, object], instructions: str, options: Mapping[str, str], *, key: Secret,
+               config: Mapping) -> tuple[tuple[str, float | None] | None, str | None]:
+        model = body = None
+        try:
+            model = str(self._settings(config).get("model") or DEFAULT_MODEL)
+            body, code = self._post_result(build_judgement_request(model, state, instructions, options), key, config)
+            if code is not None:
+                return None, code
+            return _parse_judgement_response(body, tuple(options))
+        finally:
+            del self, state, instructions, options, key, config, model, body
 
     def __repr__(self) -> str:
         return "TypeSafeProvider()"
