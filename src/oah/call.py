@@ -881,7 +881,7 @@ def _check_dispatch_lease(lease, root: pathlib.Path, *, stage: str) -> None:
                               "--worktree set to that exact path")
     inputs = _CORRECTION_INPUTS.get()
     if inputs is not None:
-        # Both the working and committed intent were checked while capturing this snapshot.
+        check_lease_binding(lease)
         _check_lease_source(lease.binding(), inputs.packet, lease.task)
         return
     check_lease_binding(lease)
@@ -937,15 +937,18 @@ def dispatch_guard(prepared: Prepared):
     run = prepared.run
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
-        # Fix authorized this immutable lease at start publication and owns the task review lock.
-        publication.budget_check()
-        sealed = publication.plan.design_record
-        try:
-            _check_design_unchanged(prepared, publication.holder(), json.loads(sealed) if sealed else None)
-        except EngineError as exc:
-            _record_refusal(prepared, exc)
-            raise
-        yield
+        if publication.launch_guard is None:
+            raise EngineError("OAH_RUN_LAUNCH_INVALID", "the correction has no current target comparison")
+        with publication.launch_guard() as live:
+            publication.budget_check()
+            _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
+            sealed = publication.plan.design_record
+            try:
+                _check_design_unchanged(prepared, live, json.loads(sealed) if sealed else None)
+            except EngineError as exc:
+                _record_refusal(prepared, exc)
+                raise
+            yield
         return
     try:
         saved = run._read_json("lease.json")
@@ -1341,6 +1344,7 @@ class _CorrectionInputs:
     metadata_json: str
     max_rounds: int | None = None
     budget_check: Callable[[], None] | None = None
+    launch_guard: Callable | None = None
     snapshot: _CorrectionSnapshot | None = None
     plan: _CallPlan | None = None
     run: _CorrectionRun | None = None
@@ -1519,12 +1523,13 @@ def _lease_scope(state_dir: pathlib.Path, task: str) -> tuple[str, ...]:
 
 @contextmanager
 def _correction_inputs(check, *, state, lease_json, bound, packet, config, metadata_json, max_rounds=None,
-                       budget_check=None):
+                       budget_check=None, launch_guard=None):
     """Check correction brief inputs before creating a run; other callers keep their landed behavior."""
     token = _CORRECTION_INPUT_CHECK.set(check)
     try:
         inputs = _CorrectionInputs(state, lease_json, json.dumps(bound), packet, _CorrectionCatalog(state), config,
-                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check)
+                                   metadata_json, max_rounds=max_rounds, budget_check=budget_check,
+                                   launch_guard=launch_guard)
         snapshot = _CORRECTION_INPUTS.set(inputs)
         try:
             yield inputs

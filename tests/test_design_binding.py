@@ -492,5 +492,133 @@ class FixTargetOnlyTest(unittest.TestCase):
         self.assertTrue(any((project.state / "design-invalid").iterdir()))
 
 
+class CorrectionAuthorityTest(DesignTask, unittest.TestCase):
+    def test_malformed_open_task_replay_refuses_before_launch(self):
+        from oah.atomic import append_jsonl
+        from oah.lease_cli import lease_design
+
+        self.build({"design": "People book.\n"})
+        lease, _ = self.judged()
+        append_jsonl(self.state_dir / "events.jsonl", {"event": "design_carried", "task": "t1",
+                      "design_schema": 2, "target": None, "design": {}})
+        self.assertNotEqual(design.judge_task(self.state_dir, "t1", root=self.repo).state, "current")
+        self.assertNotEqual(lease_design(lease, self.state_dir).state, "current")
+        refused = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertEqual(design.judge_task(self.state_dir, "other", root=self.repo).state, "unbound")
+
+    def test_fix_recaptures_target_before_the_child_can_write(self):
+        from oah import call
+        from oah.lease import Store
+        from oah.review import ReviewError
+        from tests.test_fix import FIXED
+
+        project = design_fix_project(self)
+        project.changes_requested()
+        project.queue_fix({"write": FIXED})
+        execute = call.execute
+
+        def changed(prepared, **kwargs):
+            Store(project.state).renew(task="t1", agent="claude", ttl_hours=1,
+                                       scope=("src", ".oah/tasks/t1", "new-scope"))
+            return execute(prepared, **kwargs)
+
+        with mock.patch.object(call, "execute", changed), self.assertRaises(ReviewError) as caught:
+            project.fix()
+        self.assertEqual(caught.exception.code, "OAH_LEASE_CHANGED")
+        self.assertEqual(project.fix_calls(), [])
+
+    def test_unknown_core_fields_survive_renewal_and_enter_the_target_stamp(self):
+        from oah.lease import Store, read_lease_document
+        from oah.review.fix import _target
+
+        self.build({"design": "People book.\n"})
+        path = self.state_dir / "leases.json"
+        data = json.loads(path.read_bytes())
+        data["leases"][0]["design#future"] = {"keep": "first"}
+        data["leases"][0]["design#0"] = "real field"
+        path.write_text(json.dumps(data))
+        document = read_lease_document(path.read_bytes(), path)
+        before, _ = _target(document, "t1")
+        self.assertEqual(document.record("t1").core["design#future"], {"keep": "first"})
+        Store(self.state_dir).renew(task="t1", agent="claude", ttl_hours=2)
+        fresh = json.loads(path.read_bytes())["leases"][0]
+        self.assertEqual(fresh["design#future"], {"keep": "first"})
+        self.assertEqual(fresh["design#0"], "real field")
+        data["leases"][0]["design#future"] = {"keep": "second"}
+        changed, _ = _target(read_lease_document(json.dumps(data).encode(), path), "t1")
+        self.assertNotEqual(before, changed)
+
+    def test_pruning_preserves_the_invalid_pre_mutation_document(self):
+        from oah.lease import Store
+        from oah.paths import repo_info
+
+        case = LeaseDocumentTest("test_duplicate_design_keys_are_invalid_not_last_wins")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        _, original = case.corrupt_t1("[" * 40 + "]" * 40)
+        future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=30)
+        Store(case.state_dir, now=lambda: future).start(task="t3", agent="claude", scope=("new",),
+                    note="", ttl_hours=1, info=repo_info(case.repo))
+        saved = case.state_dir / "design-invalid" / (hashlib.sha256(original.encode()).hexdigest() + ".raw")
+        self.assertEqual(saved.read_bytes(), original.encode())
+        self.assertEqual([item.task for item, _ in Store(case.state_dir).snapshot()], ["t3"])
+
+    def test_short_preservation_writes_keep_the_complete_original(self):
+        import os
+        from oah.lease import Store
+
+        case = LeaseDocumentTest("test_duplicate_design_keys_are_invalid_not_last_wins")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        _, original = case.corrupt_t1("[" * 40 + "]" * 40)
+        raw = original.encode()
+        write = os.write
+        with mock.patch("oah.lease.os.write", side_effect=lambda fd, data: write(fd, data[:7])):
+            Store(case.state_dir).renew(task="t2", agent="claude", ttl_hours=2)
+        saved = case.state_dir / "design-invalid" / (hashlib.sha256(raw).hexdigest() + ".raw")
+        self.assertEqual(saved.read_bytes(), raw)
+
+
+class HistoricalReadFailureTest(unittest.TestCase):
+    def test_git_unknown_never_exempts_rewritten_history_at_finish(self):
+        from oah import lease_cli, paths
+        from oah.design import fs
+        from oah.design.model import digest_of
+        from oah.engines.proc import RunResult
+        from oah.lease import LeaseError, Store
+        from tests.fixtures.gates.support import build_args
+
+        for fault in (128, 124):
+            with self.subTest(fault=fault):
+                case = GeneratedOutputTest("test_the_exact_generated_design_page_is_verified")
+                case.setUp()
+                self.addCleanup(case.doCleanups)
+                rel = fs.acceptance_rel("acme", "booking", 1)
+                acceptance = json.loads((case.repo / rel).read_bytes())
+                acceptance["reason"] = "rewritten historical acceptance"
+                (case.repo / rel).write_text(json.dumps(acceptance))
+                pointer_path = case.repo / fs.pointer_rel("acme", "booking")
+                pointer = json.loads(pointer_path.read_bytes())
+                pointer["accepted"]["record"] = digest_of(acceptance)
+                pointer_path.write_text(json.dumps(pointer))
+                run_git = paths.run_git
+
+                def failed(root, *args):
+                    if args[:2] == ("cat-file", "-e") and args[2].endswith(":" + rel):
+                        return RunResult(fault, "", "controlled Git read failure", fault == 124)
+                    return run_git(root, *args)
+
+                args = build_args(["finish", "--task", "t1", "--agent", "claude", "--summary", "done",
+                      "--return", str(case.returned()), "--allow-missing-wiki-maintenance", "--allow-structural"])
+                with mock.patch.object(paths, "run_git", failed):
+                    self.assertEqual(case.outputs([rel])["verified"], [])
+                    with self.assertRaises(LeaseError) as caught:
+                        lease_cli._finish(args, paths.repo_info(case.repo), Store(case.state_dir))
+                self.assertEqual(caught.exception.code, "OAH_SCOPE_EXCEEDED")
+                self.assertEqual([item.task for item, _ in Store(case.state_dir).snapshot()], ["t1"])
+
+
 if __name__ == "__main__":
     unittest.main()

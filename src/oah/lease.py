@@ -22,6 +22,7 @@ import os
 import pathlib
 import re
 import secrets
+import stat
 from contextlib import contextmanager
 from typing import Callable, Iterator, Sequence
 
@@ -477,13 +478,22 @@ def read_lease_document(raw: bytes | None, source: pathlib.Path) -> LeaseDocumen
     # Mask every lease's design values (renamed keys, null values) so the core decodes without them.
     edits: list[tuple[int, int, str]] = []
     designs: list[list[tuple[int, int, int, int]]] = []
+    placeholders: list[set[str]] = []
     for _start, _end, members in lease_spans:
         mine = [(start, end, depth, digits) for key, key_start, start, end, depth, digits in members
                 if key == "design"]
         designs.append(mine)
+        used = {item[0] for item in members}
+        introduced: set[str] = set()
         for number, (key, key_start, start, end, _depth, _digits) in enumerate(
                 [item for item in members if item[0] == "design"]):
-            edits.append((key_start, end, f'"design#{number}": null'))
+            placeholder = f"design#{number}"
+            while placeholder in used:
+                placeholder += "#"
+            used.add(placeholder)
+            introduced.add(placeholder)
+            edits.append((key_start, end, json.dumps(placeholder) + ": null"))
+        placeholders.append(introduced)
     masked, cursor = [], 0
     for start, end, replacement in sorted(edits):
         masked.append(text[cursor:start])
@@ -498,10 +508,10 @@ def read_lease_document(raw: bytes | None, source: pathlib.Path) -> LeaseDocumen
             and len(data["leases"]) == len(lease_spans)):
         raise corrupt("not a version-1 lease list")
     records = []
-    for (start, end, _members_), item, spans in zip(lease_spans, data["leases"], designs):
+    for (start, end, _members_), item, spans, introduced in zip(lease_spans, data["leases"], designs, placeholders):
         if not isinstance(item, dict):
             raise corrupt("a lease entry is not an object")
-        core = {key: value for key, value in item.items() if not key.startswith("design#")}
+        core = {key: value for key, value in item.items() if key not in introduced}
         field = _design_field(text, spans, digest) if spans else ABSENT
         lease = Lease.from_json(core, source, design=field)
         records.append(LeaseRecordV1(lease.task, core, text[start:end], field, lease, lease.to_json()))
@@ -571,34 +581,64 @@ def serialize_lease_document(document: LeaseDocumentV1 | None, leases: Sequence[
     return '{\n  "leases": [' + (f"\n    {body}\n  " if texts else "") + '],\n  "version": 1\n}\n'
 
 
-def preserve_invalid(state: pathlib.Path, document: LeaseDocumentV1 | None, leases: Sequence["Lease"]) -> list[dict]:
-    """Before an unrelated mutation rewrites a document holding Invalid design values, keep the original bytes."""
+def persist_create_only(path: pathlib.Path, raw: bytes) -> None:
     from oah.atomic import _fsync_folder
 
-    pending = [lease for lease in leases if lease.design_field is not None and lease.design_field.kind == "invalid"
-               and not lease.design_field.preserved]
-    if not pending or document is None or document.raw is None:
+    flags = getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o600)
+    except FileExistsError:
+        fd = os.open(path, os.O_RDONLY | flags)
+        created = False
+    else:
+        created = True
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError("evidence is not a single-link regular file")
+        if created:
+            offset = 0
+            while offset < len(raw):
+                written = os.write(fd, raw[offset:])
+                if written <= 0:
+                    raise OSError("evidence writer made no progress")
+                offset += written
+        os.lseek(fd, 0, os.SEEK_SET)
+        remaining = len(raw)
+        chunks = []
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if b"".join(chunks) != raw or os.read(fd, 1):
+            raise OSError("create-only evidence bytes differ")
+        if not os.path.samestat(os.fstat(fd), path.lstat()):
+            raise OSError("create-only evidence object changed")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_folder(path.parent)
+
+
+def preserve_invalid(state: pathlib.Path, document: LeaseDocumentV1 | None, leases: Sequence["Lease"]) -> list[dict]:
+    """Before an unrelated mutation rewrites a document holding Invalid design values, keep the original bytes."""
+    if document is None or document.raw is None:
+        return []
+    pending = [record for record in document.records if record.design.kind == "invalid"
+               and not record.design.preserved]
+    if not pending:
         return []
     folder = pathlib.Path(state) / INVALID_DIR_NAME
     target = folder / f"{document.sha256}.raw"
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        try:
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-        except FileExistsError:
-            if target.read_bytes() != document.raw:
-                raise StateCorrupt(f"{StateCorrupt.code}: {target} exists with other bytes; nothing was changed")
-        else:
-            try:
-                os.write(fd, document.raw)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            _fsync_folder(folder)
+        persist_create_only(target, document.raw)
     except OSError as exc:
         raise StorageError(target, exc) from exc
-    return [{"task": lease.task, "code": lease.design_field.code, "document_sha256": document.sha256}
-            for lease in pending]
+    return [{"task": record.task, "code": record.design.code, "document_sha256": document.sha256}
+            for record in pending]
 
 
 class LeaseJournal:

@@ -185,7 +185,8 @@ def publish_design_bindings(store: BindingStore, key: str, entries: dict[str, di
     `old` are complete previous entries that a meaningful change replaced. `check()` runs under the lock first and
     raises to publish nothing (a moved design or lease generation). Rotation writes the exact previous live bytes
     to a create-only archive page and then replaces the live file: that replace is the single commit point."""
-    from oah.atomic import StateCorrupt, write_json_atomic
+    from oah.atomic import write_json_atomic
+    from oah.lease import persist_create_only
     from oah.lockfile import StateLock
 
     with StateLock(store.state_dir / ".lock", timeout=store.lock_timeout):
@@ -218,25 +219,16 @@ def publish_design_bindings(store: BindingStore, key: str, entries: dict[str, di
             page = store.path.parent / HISTORY_DIR_NAME / (hashlib.sha256(raw).hexdigest() + ".json")
             try:
                 page.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-                except FileExistsError:
-                    if page.read_bytes() != raw:
-                        raise GateRefused("OAH_GATES_HISTORY_INVALID", f"{page} exists with other bytes; nothing was "
-                                          "changed") from None
-                else:
-                    try:
-                        os.write(fd, raw)
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
+                persist_create_only(page, raw)
             except OSError as exc:
                 raise GateRefused("OAH_GATES_HISTORY_STORAGE", f"the gate history page {page} ({len(raw)} bytes) cannot "
                                   f"be written ({exc}); free storage or fix permissions, then run the same check "
                                   "again (successful unchanged gates are not rerun)") from None
-            candidate = {"version": 1, "ledgers": current, "design_history": added[-RECENT_LIMIT:],
+            candidate = {"version": 1, "ledgers": current,
+                         "design_history": added[-RECENT_LIMIT:] if RECENT_LIMIT else [],
                          "design_archive_head": {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw),
-                                                 "previous_head": head}}
+                                                 "previous_head": None if head is None else
+                                                 {"sha256": head["sha256"], "bytes": head["bytes"]}}}
             if _size(candidate) > LIVE_LIMIT:
                 sizes = {name: _size({"ledgers": {name: value}}) for name, value in current.items()}
                 raise GateRefused("OAH_GATES_CURRENT_TOO_LARGE", f"the current gate entries alone are over the live "

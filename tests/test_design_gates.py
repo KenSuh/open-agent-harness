@@ -102,6 +102,42 @@ class DesignGateTest(DesignTask, unittest.TestCase):
         self.assertEqual(caught.exception.code, "OAH_DESIGN_CHANGED")
         self.assertFalse(self.bindings.path.exists())  # no new successful key
 
+    def test_expired_or_changed_actual_intent_refuses_before_check(self):
+        self.runnable()
+        path = self.state_dir / "leases.json"
+        original = path.read_bytes()
+        data = json.loads(original)
+        data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
+        path.write_text(json.dumps(data))
+        with self.assertRaises(check_mod.GateRefused):
+            self.check()
+        self.assertEqual(self.stub.calls("gate-check.mjs"), [])
+        path.write_bytes(original)
+        packet = self.repo / PACKET
+        packet.write_text(packet.read_text().replace("Revision: 1", "Revision: 2"))
+        with self.assertRaises(check_mod.GateRefused):
+            self.check()
+        self.assertEqual(self.stub.calls("gate-check.mjs"), [])
+        self.assertFalse(self.bindings.path.exists())
+
+    def test_expiry_during_check_publishes_no_successful_evidence(self):
+        self.runnable()
+        check = check_mod.unlazy_mod.gate_check
+
+        def expire_after(*args, **kwargs):
+            result = check(*args, **kwargs)
+            path = self.state_dir / "leases.json"
+            data = json.loads(path.read_bytes())
+            data["leases"][0]["expires_at"] = "2000-01-01T00:00:00Z"
+            path.write_text(json.dumps(data))
+            return result
+
+        with mock.patch.object(check_mod.unlazy_mod, "gate_check", expire_after):
+            with self.assertRaises(check_mod.GateRefused) as caught:
+                self.check()
+        self.assertEqual(caught.exception.code, "OAH_DESIGN_CHANGED")
+        self.assertFalse(self.bindings.path.exists())
+
     def test_attested_gates_follow_the_same_rule(self):
         self.runnable(SPLIT)
         first = self.check()
@@ -192,6 +228,42 @@ class DesignGateTest(DesignTask, unittest.TestCase):
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         self.assertEqual(self.fresh(), {"G1": "fresh"})  # same instance, basis and design: same key
         self.assertEqual(self.entry()["design"], self.key())
+
+
+class ArchiveDurabilityTest(unittest.TestCase):
+    def test_short_writes_preserve_exact_archive_bytes(self):
+        import os
+
+        store = BindingStore(make_tmp_dir(self), "t1")
+        check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "run"}}, [])
+        before = store.path.read_bytes()
+        write = os.write
+        with mock.patch.object(check_mod, "RECENT_LIMIT", 0), mock.patch(
+                "oah.gates.check.os.write", side_effect=lambda fd, data: write(fd, data[:7])):
+            check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "attest"}}, [{"kind": "run"}])
+        head = json.loads(store.path.read_bytes())["design_archive_head"]
+        page = store.path.parent / check_mod.HISTORY_DIR_NAME / (head["sha256"] + ".json")
+        self.assertEqual(page.read_bytes(), before)
+        self.assertEqual(check_mod.history_page(store, head["sha256"])["ledgers"], {"ledger": {"G1": {"kind": "run"}}})
+
+    def test_many_rotations_keep_live_metadata_bounded_and_history_reachable(self):
+        store = BindingStore(make_tmp_dir(self), "t1")
+        check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "run"}}, [])
+        previous = []
+        with mock.patch.object(check_mod, "RECENT_LIMIT", 1):
+            for number in range(520):
+                previous.append(store.path.read_bytes())
+                check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "run"}},
+                                                   [{"kind": "run", "evidence": str(number) + "a"},
+                                                    {"kind": "run", "evidence": str(number) + "b"}])
+        self.assertLess(store.path.stat().st_size, 4096)
+        head = check_mod.history_page(store)["archive_head"]
+        for expected in reversed(previous):
+            digest = head["sha256"]
+            page = store.path.parent / check_mod.HISTORY_DIR_NAME / (digest + ".json")
+            self.assertEqual(page.read_bytes(), expected)
+            head = check_mod.history_page(store, digest)["archive_head"]
+        self.assertIsNone(head)
 
 
 if __name__ == "__main__":

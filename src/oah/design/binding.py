@@ -1015,11 +1015,21 @@ def _at_start(root: pathlib.Path, head: str | None, rel: str) -> bytes | None:
 
     if head is None:
         return None
-    if run_git(root, "cat-file", "-e", f"{head}:{rel}").returncode != 0:
+    listed = run_git(root, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", head, "--", rel)
+    if listed.returncode != 0 or listed.timed_out:
+        raise ValueError(f"{rel} at {head[:12]} has unknown tree membership")
+    if listed.stdout == "":
         return None
+    rows = listed.stdout.split("\0")
+    if (len(rows) != 2 or rows[-1] != "" or "\t" not in rows[0]
+            or rows[0].split("\t", 1)[1] != rel):
+        raise ValueError(f"{rel} at {head[:12]} has ambiguous tree membership")
+    exists = run_git(root, "cat-file", "-e", f"{head}:{rel}")
+    if exists.returncode != 0 or exists.timed_out:
+        raise ValueError(f"{rel} at {head[:12]} has unknown object availability")
     shown = run_command([*git_argv(), "-C", str(root), "cat-file", "blob", f"{head}:{rel}"], timeout=GIT_TIMEOUT,
                         encoding="latin-1")
-    if shown.returncode != 0:
+    if shown.returncode != 0 or shown.timed_out:
         raise ValueError(f"{rel} at {head[:12]} cannot be read")
     return shown.stdout.encode("latin-1")
 
@@ -1155,6 +1165,10 @@ def judge_task(state: pathlib.Path, task: str, *, root: pathlib.Path, view: Task
     lease = view.lease
     if view.unreadable is not None:
         return judge(None, root=root, found=Origin("unknown", view.unreadable))
+    if lease is not None and lease.design_invalid:
+        return judge(None, root=root, invalid=lease.design_field.identity())
+    if view.problem is not None:
+        return judge(None, root=root, found=Origin("invalid", view.problem))
     if lease is not None:
         where = pathlib.Path(lease.worktree) if pathlib.Path(lease.worktree).is_dir() else root
         try:
@@ -1165,16 +1179,20 @@ def judge_task(state: pathlib.Path, task: str, *, root: pathlib.Path, view: Task
             found = origin(state, task, packet_text=packet_text, root=where if source else None, source=source,
                            view=view)
             return judge(None, root=where, found=found)
+        from oah.lease import utc_now
+
+        if lease.expired(utc_now()):
+            return TaskDesign("required", CHANGED_CODE, "the task's execution lease expired; resume it before "
+                              "using design authority", record)
+        problem = _intent_problem(record, lease.intent, where)
+        if problem is not None:
+            return problem
         return judge(record, root=where, basis=basis_of(record, intent=lease.intent, scope=lease.scope,
                                                         gates=lease.gates))
     if view.record is None:
-        if view.problem is not None:
-            return judge(None, root=root, found=Origin("invalid", view.problem))
         found = origin(state, task, packet_text=packet_text, root=root if source else None, source=source,
                        view=view)
         return judge(None, root=root, found=found)
-    if view.problem is not None:  # a malformed later event never leaves an earlier record in force
-        return judge(None, root=root, found=Origin("invalid", view.problem))
     if view.closed in ("released", "expired"):
         # Only a finished epoch can be landed or carried closed; a released or expired one must be resumed first.
         return judge(None, root=root, found=Origin("closed", f"its last lease was {view.closed}, not finished; "
@@ -1184,7 +1202,23 @@ def judge_task(state: pathlib.Path, task: str, *, root: pathlib.Path, view: Task
         else root
     basis = basis_of(view.record, intent=epoch.get("intent"), scope=epoch.get("scope") or (),
                      gates=epoch.get("gates") or ())
+    problem = _intent_problem(view.record, epoch.get("intent"), where)
+    if problem is not None:
+        return problem
     return judge(view.record, root=where, basis=basis)
+
+
+def _intent_problem(record: TaskBinding, bound: Mapping | None, root: pathlib.Path) -> TaskDesign | None:
+    from oah import intent
+
+    try:
+        binding = intent.Binding.from_json(bound) if bound is not None else None
+        state, reason = intent.explain_binding(binding, root)
+    except (ValueError, OSError) as exc:
+        return _unknown(record, f"the actual task intent cannot be checked ({type(exc).__name__})")
+    if state != "current":
+        return TaskDesign("stale", INPUTS_CHANGED_CODE, f"the actual task intent is {state}: {reason}", record)
+    return None
 
 
 # Gate provenance and review evidence --------------------------------------------------------------------
@@ -1217,14 +1251,11 @@ def gate_provenance(state: pathlib.Path, task: str, *, root: pathlib.Path | None
         return Provenance(view.record.key, frozenset(), f"its last lease was {view.closed}, not finished",
                           "required")
     if lease is not None:
-        basis = basis_of(view.record, intent=lease.intent, scope=lease.scope, gates=lease.gates)
         where = pathlib.Path(lease.worktree)
     else:
         closing = view.closing or view.epoch or {}
-        basis = basis_of(view.record, intent=closing.get("intent"), scope=closing.get("scope") or (),
-                         gates=closing.get("gates") or ())
         where = pathlib.Path(closing.get("worktree") or root or ".")
-    judged = judge(view.record, root=root or where, basis=basis)
+    judged = judge_task(state, task, root=root or where, view=view)
     if judged.state != "current":
         return Provenance(view.record.key, frozenset(), f"{judged.code}: {judged.reason}", judged.state)
     return Provenance(view.record.key, view.record.keys(), view.problem, judged.state)

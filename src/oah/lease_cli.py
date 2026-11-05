@@ -405,6 +405,9 @@ def lease_design(lease: Lease, state: pathlib.Path, *, packet_text: str | None =
     from oah.design import binding as design
 
     root = root or pathlib.Path(lease.worktree)
+    view = design.task_view(state, lease.task, lease=lease)
+    if view.unreadable is not None or view.problem is not None:
+        return design.judge_task(state, lease.task, root=root, view=view, packet_text=packet_text, source=source)
     try:
         record = lease.design_record()
     except design.RecordInvalid as exc:
@@ -416,8 +419,7 @@ def lease_design(lease: Lease, state: pathlib.Path, *, packet_text: str | None =
         if found is None and lease.design_invalid:
             found = design.Origin("lease", "its lease records a design")
         return design.judge(None, root=root, found=found)
-    basis = design.basis_of(record, intent=lease.intent, scope=lease.scope, gates=lease.gates)
-    return design.judge(record, root=root, basis=basis)
+    return design.judge_task(state, lease.task, root=root, view=view, packet_text=packet_text, source=source)
 
 
 def _design_state(lease: Lease, state: pathlib.Path) -> tuple[str, str]:

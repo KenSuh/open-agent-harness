@@ -474,6 +474,7 @@ class _TargetStamp:
     design_kind: str
     design_sha256: str | None
     design_bytes: int
+    design_value: bytes | None
 
 
 def _target(document, task: str):
@@ -484,7 +485,7 @@ def _target(document, task: str):
     field = record.design
     raw = field.raw.encode("utf-8") if field.raw is not None else None
     stamp = _TargetStamp(json.dumps(record.core, sort_keys=True, ensure_ascii=False), field.kind,
-                         hashlib.sha256(raw).hexdigest() if raw is not None else None, len(raw or b""))
+                         hashlib.sha256(raw).hexdigest() if raw is not None else None, len(raw or b""), raw)
     return stamp, record.lease
 
 
@@ -882,7 +883,7 @@ def _publication(t: _Task, h: _History):
         try:
             with receipts._correction_publication(t.state, t.name, h.index_bytes, h.index_lines):
                 try:
-                    yield
+                    yield live
                 finally:
                     publication = receipts._CORRECTION_PUBLICATION.get()
                     h.index_bytes, h.index_lines = publication["index"], tuple(publication["lines"])
@@ -1358,7 +1359,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
                                          metadata_json=json.dumps(metadata), max_rounds=limit,
-                                         budget_check=check_budget) as inputs:
+                                         budget_check=check_budget, launch_guard=lambda: _publication(t, h)) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,
