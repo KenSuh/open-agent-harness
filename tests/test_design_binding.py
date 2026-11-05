@@ -57,6 +57,16 @@ class BasisTest(unittest.TestCase):
                          reason="r", agent="a", at="t", authority=None, task="t1")
         self.assertEqual(caught.exception.code, design.INPUTS_CHANGED_CODE)
 
+    def test_earlier_record_shapes_are_refused_not_migrated(self):
+        current = TaskBinding(self.identity, self.basis().digest,
+                              design.DesignBinding("acme", "a" * 32, "booking", 1, "sha256:" + "1" * 64)).to_json()
+        self.assertEqual(TaskBinding.from_json(current).to_json(), current)
+        for old in ({**current, "version": 1}, {k: v for k, v in current.items() if k != "basis"},
+                    {"binding": current["binding"], "carried": [], "draft": None}):
+            with self.subTest(old=sorted(old)):
+                with self.assertRaises(ValueError):
+                    TaskBinding.from_json(old)
+
     def test_the_evidence_key_names_identity_basis_and_binding_only(self):
         binding = design.DesignBinding("acme", "u1", "booking", 1, "sha256:" + "1" * 64)
         key = design.evidence_key(self.identity, self.basis().digest, binding)

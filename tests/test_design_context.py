@@ -38,6 +38,11 @@ sys.path.insert(0, {fakes!r})
 import fake_claude, fakelib
 
 def main(argv):
+    if "-p" in argv and os.environ.get("FAKE_REDIRECTED_CHILD"):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        open(os.environ["FAKE_REDIRECTED_CHILD"], "w").write(str(child.pid))
     if "-p" not in argv or "stream-json" not in argv:
         return fake_claude.main(argv)
     prompt = fakelib.read_stdin()
@@ -822,6 +827,56 @@ class CodexDeliveryTest(DesignTask, unittest.TestCase):
                 self.assertIn(tc.CODEX_REFERENCE_PENDING_CODE, refused.stderr)
                 self.assertFalse(self.record.exists())
         self.assertEqual(self.events(), [])
+
+
+@unittest.skipIf(os.name == "nt", "POSIX process signals")
+class DescendantPolicyTest(DesignTask, unittest.TestCase):
+    """SC4-P5 ordinary descendant policy: a design-bound run stops its redirected background descendants before
+    accounting; a run without a design keeps the baseline (it does not)."""
+
+    @staticmethod
+    def alive(pid: int) -> bool:
+        import time
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def test_design_runs_stop_redirected_descendants_and_plain_runs_do_not(self):
+        import signal
+
+        self.build({"design": "People book a lesson.\n"})
+        pidfile = self.work / "child.pid"
+        # The launcher lives briefly after starting its server, as a real one does; a descendant that is reparented
+        # before the owned-tree watcher sees it is outside any guarantee (the existing _PosixTree limit).
+        result = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low",
+                          env={"FAKE_REDIRECTED_CHILD": str(pidfile), "FAKE_SLEEP": "0.5"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.alive(int(pidfile.read_text())))
+        git_commit(self.repo, {".oah/tasks/t2/PACKET.md": packet_text("t2", scope=("lib",))}, "plain packet")
+        started = self.oah("start", "--task", "t2", "--agent", "claude", "--packet", ".oah/tasks/t2/PACKET.md")
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        pidfile.unlink()
+        result = self.oah("call", "claude", "--stage", "initial", "--task", "t2", "--tier", "low",
+                          env={"FAKE_REDIRECTED_CHILD": str(pidfile), "FAKE_SLEEP": "0.5"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pid = int(pidfile.read_text())
+        try:
+            os.kill(pid, 0)
+            survived = True
+        except ProcessLookupError:
+            survived = False
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.assertTrue(survived)
 
 
 class RetainedOriginTest(DesignTask, unittest.TestCase):
