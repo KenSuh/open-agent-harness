@@ -92,20 +92,12 @@ class TextVerdict:
 
 def _preamble_end(lines: list[str]) -> int:
     """Index of the first line after an optional title and copyright block."""
-    index, in_copyright = 0, False
+    index = 0
     while index < len(lines):
         raw = lines[index]
         line = raw.strip().strip("#*_ ").strip()
         folded = normalize(line).rstrip(".:")
-        if not line:
-            in_copyright = False
-        elif folded in _TITLES:
-            in_copyright = False
-        elif folded.startswith(_COPYRIGHT_START):
-            in_copyright = True
-        elif in_copyright and raw[:1] in (" ", "\t"):
-            pass  # an indented continuation of a copyright line
-        else:
+        if line and folded not in _TITLES and not folded.startswith(_COPYRIGHT_START):
             return index
         index += 1
     return index

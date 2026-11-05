@@ -261,6 +261,8 @@ def _fetch(url: str, *, policy: WebPolicy, headers: Mapping[str, str], deadline:
                 if size > policy.max_bytes:
                     raise WebFailure("oversize", response.status)
                 chunks.append(chunk)
+            if length is not None and size != int(length):
+                raise WebFailure("network", response.status)
             return WebResult(response.status, current, kept, b"".join(chunks))
         except WebFailure:
             raise

@@ -631,6 +631,8 @@ class FairQueueTest(unittest.TestCase):
         self.register_docs(sources, 2)
         self.assertEqual("complete", sources.scheduled().outcome)
         self.assertEqual("not-due", sources.scheduled().outcome)
+        self.assertEqual("not-due", sources.schedule_state()["source_command_run"]["outcome"])
+        self.assertEqual("--scheduled", sources.schedule_state()["cooperative_scheduled_run"]["flag"])
         confirmed = sources.head(sources.spec("s00")).confirmed_at
         self.clock.advance(7200)
         report = sources.scheduled()
@@ -930,6 +932,28 @@ class LoopbackCase(unittest.TestCase):
 class PublicHttpTest(LoopbackCase):
     """Credential-free direct requests to vetted public addresses, closed refusal codes and no error bodies."""
 
+    def test_truncated_body_preserves_last_verified_document(self) -> None:
+        body = b"The original complete public document."
+        self.reply("/guide", body=body, headers=(("Content-Type", "text/plain"),
+                                                ("Content-Length", str(len(body)))))
+        clock = Clock()
+        sources = Sources(make_tmp_dir(self) / "state", transport=Transport(allow_loopback=True),
+                          now=clock.now, clock=clock.monotonic)
+        spec = sources.register(build_spec(url=self.base + "/guide", source_id="guide", allow_loopback=True))[1]
+        self.assertEqual("changed", sources.check_one(spec).result)
+        before = sources.head(spec)
+        assert before is not None
+        clock.advance(60)
+        self.reply("/guide", body=b"incomplete changed document", headers=(("Content-Type", "text/plain"),
+                                                                           ("Content-Length", "54")))
+        self.assertEqual("failed", sources.check_one(spec).result)
+        after = sources.head(spec)
+        assert after is not None
+        self.assertEqual(before.verified, after.verified)
+        self.assertEqual(before.confirmed_at, after.confirmed_at)
+        self.assertEqual("unavailable", sources.status(spec).freshness)
+        self.assertNotEqual(before.attempted_at, after.attempted_at)
+
     def test_unsafe_urls_refuse_before_any_connection(self) -> None:
         for url in ("https://user:pw@docs.example.org/guide", "https://docs.example.org/guide#part",
                     "http://docs.example.org/guide", "ftp://docs.example.org/guide", "https://docs.example.org:x/"):
@@ -1153,6 +1177,24 @@ class LicenseTest(unittest.TestCase):
 
 class LicenseDiscoveryTest(SourceCase):
     """The license of the tagged commit governs: the nearest file at or above each path, and nested ones agree."""
+
+    def test_indented_restriction_is_not_discarded_from_the_governing_license(self) -> None:
+        self.commit({"LICENSE": LICENSE, "src/lib.rs": "pub fn a() {}\n"})
+        self.tag("v1.0.0")
+        self.github.add("v1.0.0")
+        sources = self.sources()
+        spec = self.register(sources)
+        good = sources.check_one(spec)
+        assert good.snapshot is not None
+        self.assertEqual("eligible", sources.eligibility(sources.snapshot(good.snapshot)).status)
+        changed = LICENSE.replace("Copyright (c) 2026 Acme", "Copyright (c) 2026 Acme\n    Commercial use is forbidden.")
+        self.commit({"LICENSE": changed})
+        self.tag("v1.0.1")
+        self.github.add("v1.0.1")
+        result = sources.check_one(spec)
+        self.assertEqual("changed", result.result)
+        assert result.snapshot is not None
+        self.assertEqual("unknown", sources.eligibility(sources.snapshot(result.snapshot)).status)
 
     def test_nearest_license_at_the_tag_governs_and_nested_ones_must_agree(self) -> None:
         self.commit({"LICENSE": LICENSE, "src/LICENSE": ISC, "src/lib.rs": "pub fn a() {}\n"})

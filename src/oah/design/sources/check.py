@@ -488,8 +488,7 @@ class Sources:
             if cycle is None or not cycle["pending"]:
                 if not queue.due(data, started, self.settings["check_interval_hours"]):
                     data["scan"]["reservation"] = None
-                    self._write_schedule(data)
-                    self.record_command("not-due", started, {}, scheduled)
+                    self._record_command(data, "not-due", started, {}, scheduled)
                     return ScanReport("not-due")
                 queue.start_cycle(data, registry.sources, started)
             queue.reconcile(data, registry.sources)
@@ -540,23 +539,26 @@ class Sources:
 
     def record_command(self, outcome: str, started: dt.datetime, counts: Mapping, scheduled: bool) -> None:
         """source_command_run and, for --scheduled, the cooperative record; neither proves an OS timer fired."""
-        from oah import __version__
-
         try:
             with self.state.lock():
-                data = self._schedule()
-                data["source_command_run"] = {"command": "sources check" + (" --scheduled" if scheduled else ""),
-                                              "started_at": iso(started), "ended_at": iso(self.now()),
-                                              "outcome": outcome, "counts": dict(sorted(counts.items())),
-                                              "executable": sys.executable,
-                                              "root": None if self.repo_root is None else str(self.repo_root),
-                                              "version": __version__}
-                if scheduled:
-                    data["cooperative_scheduled_run"] = {"at": iso(started), "flag": "--scheduled", "job": None,
-                                                         "definition_digest": None}
-                self._write_schedule(data)
+                self._record_command(self._schedule(), outcome, started, counts, scheduled)
         except (StateProblem, LockTimeout):
             pass
+
+    def _record_command(self, data: dict[str, object], outcome: str, started: dt.datetime, counts: Mapping[str, int],
+                        scheduled: bool) -> None:
+        from oah import __version__
+
+        data["source_command_run"] = {"command": "sources check" + (" --scheduled" if scheduled else ""),
+                                      "started_at": iso(started), "ended_at": iso(self.now()),
+                                      "outcome": outcome, "counts": dict(sorted(counts.items())),
+                                      "executable": sys.executable,
+                                      "root": None if self.repo_root is None else str(self.repo_root),
+                                      "version": __version__}
+        if scheduled:
+            data["cooperative_scheduled_run"] = {"at": iso(started), "flag": "--scheduled", "job": None,
+                                                 "definition_digest": None}
+        self._write_schedule(data)
 
     # ---- design associations ---------------------------------------------------------------------------------
 
