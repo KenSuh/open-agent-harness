@@ -309,7 +309,7 @@ def _design_readout(lease: Lease, notes: dict, as_json: bool) -> tuple[list[str]
         return [], None
     basis = design.basis_of(record, intent=lease.intent, scope=lease.scope, gates=lease.gates)
     judged = design.judge(record, root=pathlib.Path(lease.worktree), basis=basis)
-    block = task_context.render(judged)
+    block = task_context.readout_block(judged, task=lease.task, root=pathlib.Path(lease.worktree))
     word = {"bound": "OAH_DESIGN_BOUND", "rebound": "OAH_DESIGN_REBOUND", "kept": "OAH_DESIGN_BINDING_KEPT",
             "rebased": "OAH_DESIGN_INPUTS_REBOUND"}
     lines = [f"{word[notes['action']]} task={lease.task} {record.binding.line()} state={judged.state} "
@@ -319,8 +319,9 @@ def _design_readout(lease: Lease, notes: dict, as_json: bool) -> tuple[list[str]
                      "earlier binding or inputs no longer count")
     if not as_json:
         lines.append(block.readout().rstrip("\n"))
-    data = {"state": judged.state, "delivered": block.delivered, "block": block.text, "record": block.record,
-            "plan": block.plan}
+    # Start offers the text; delivery is a terminal fact of a run that received it.
+    data = {"state": judged.state, "delivered": False, "offered": block.delivered, "block": block.text,
+            "record": block.record, "plan": block.plan}
     return lines, data
 
 
@@ -665,11 +666,35 @@ def _finish_design(lease: Lease, store: Store):
     return locked
 
 
+def _transport_guard(lease: Lease, store: Store):
+    """SC4-P4's scope-independent transport guard: every retained origin that can intersect this worktree is
+    replayed and re-checked before gates, generated outputs and ordinary scope. A task with none passes as before."""
+    from oah.design import task_context
+    from oah.design.binding import repo_identity
+    from oah.design.model import DesignError
+
+    root = pathlib.Path(lease.worktree)
+    record = lease.design if isinstance(lease.design, dict) else None
+    current = None
+    if record is not None and isinstance(record.get("task_identity"), dict):
+        current = {"task_instance_id": record["task_identity"].get("task_instance_id"),
+                   "task_basis_digest": record.get("basis")}
+    try:
+        repo = repo_identity(root)
+    except DesignError:
+        repo = None
+    result = task_context.completion_guard(store.dir, lease.task, root=root, repo=repo, current=current)
+    if not result.ok:
+        raise DesignError(result.code, f"task {lease.task}: {result.reason}; the lease stays open")
+    return result
+
+
 def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     _refuse_worker_lease()
     lease = store.inspect(args.task)
     intent_report = _check_intent(args, lease)
     design_check = _finish_design(lease, store)
+    transport = _transport_guard(lease, store)
     # The task's ledgers and summary are gate artifacts written by oah and unlazy, not changes to the scope.
     artifacts = {f".oah/tasks/{lease.task}/{LEDGER_NAME}", f".oah/tasks/{lease.task}/{SUMMARY_NAME}", *lease.gates}
     if intent_report is not None:
@@ -677,6 +702,10 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
     root = pathlib.Path(lease.worktree)
     wiki_exempt, wiki_report = _wiki_maintenance(root, lease, args.allow_missing_wiki_maintenance)
     changed = [name for name in _changed_files(lease, info) if name not in artifacts and name not in wiki_exempt]
+    if transport.exempt:
+        # Only exact retained owned DATA leaves (ACK_RETAINED present-unchanged) leave ordinary change accounting.
+        retained = set(transport.exempt)
+        changed = [name for name in changed if name not in retained]
     if design_check is not None:
         # Only exact generated outputs of the bound design leave ordinary scope; the design state check above is
         # independent of scope and of --allow-out-of-scope. Store.finish recomputes all of it under its lock.
@@ -692,6 +721,23 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
 
         def design_check(live: Lease, _first=first_check, _outputs=outputs) -> dict:
             return _first(live, recompute, _outputs)
+    if transport.origins:
+        inner = design_check
+
+        def design_check(live: Lease, _inner=inner, _first=transport) -> dict:
+            from oah.design.binding import CHANGED_CODE
+            from oah.design.model import DesignError
+
+            again = _transport_guard(live, store)  # repeated at the locked control point
+            if again.exempt != _first.exempt:
+                raise DesignError(CHANGED_CODE, f"the design transport accounting of task {live.task} changed during "
+                                  "finish; the lease stays open. Run oah finish again")
+            fields = dict((_inner(live) if _inner is not None else None) or {})
+            if fields:  # design-bound only: an origin-free lease keeps its exact legacy finish event
+                fields["transport_report"] = {"version": 1, "origins": [item["origin"] for item in again.origins
+                                                                          if item["task"] == live.task],
+                                              "exempt": list(again.exempt)}
+            return fields
     settings = load_config(root).section("gates", GATE_DEFAULTS)
     # unlazy is looked up (and its pin verified) only when a ledger governs this task.
     ledgers = guard.resolve_ledgers(root, lease.task, lease.gates)

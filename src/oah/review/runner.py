@@ -263,6 +263,35 @@ def _check_design(root: pathlib.Path, state: pathlib.Path, lease, binding: oah_i
     return judged
 
 
+def _snapshot_disposal(state: pathlib.Path, run_id: str, disposition: list):
+    """The exclusive run-bound finalizer of a design-bound review snapshot (SC4-P4-R). An exact-run replay proving
+    NO transport origin, plus the still-owned folder, takes the controlled legacy disposal; anything else retains
+    (an origin-bearing review needs its complete captured plan, see snapshot.validate_retirement_plan)."""
+
+    def dispose(parent: pathlib.Path, created: dict) -> tuple[str, str | None]:
+        from oah.design import task_context
+
+        views = task_context.transport_views(state, run=run_id)
+        if views:
+            outcome = ("retained", "this review registered a design transport origin; only its complete paged "
+                                   "retirement plan may remove the snapshot")
+        else:
+            try:
+                current = snapshot._object(os.lstat(parent))
+            except OSError:
+                current = None
+            if current != created:
+                outcome = ("retained", "the snapshot folder is not the one this review created")
+            elif snapshot.remove(parent):
+                outcome = ("legacy-disposed", None)
+            else:
+                outcome = ("retained", "the snapshot folder could not be removed")
+        disposition.append(outcome)
+        return outcome
+
+    return dispose
+
+
 def committed_conditions(root: pathlib.Path, rev: str, binding: oah_intent.Binding) -> tuple[tuple[str, str], ...]:
     """The success conditions of the bound packet as committed at `rev`; it must match the binding."""
     shown = run_git(root, "show", f"{rev}:{binding.source}")
@@ -472,7 +501,14 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     number, attempt = s.next_number, sum(1 for line in s.round_lines() if line.get("event") == "start") + 1
     tools = call_cli.intent_tools()
     started = dt.datetime.now(dt.timezone.utc)
-    with snapshot.make(root, span.head, base=span.base, temp_root=temp_root, warnings=warnings) as snap:
+    # SC4-P4-R: the run is allocated before the snapshot, and a design-bound review arms the run-bound exclusive
+    # disposal closure; a review without a design keeps the baseline removal.
+    planned_run = runs._plan_run(state, task, ENGINE, "review")
+    disposition: list[tuple[str, str | None]] = []
+    dispose = (_snapshot_disposal(state, planned_run[0].id, disposition)
+               if design is not None and design.task is not None else None)
+    with snapshot.make(root, span.head, base=span.base, temp_root=temp_root, warnings=warnings,
+                       dispose=dispose) as snap:
         value = canary.plant(snap.tree)
         schema_path = snap.tree.parent / "output-schema.json"
         schema_path.write_bytes(schema.text().encode("utf-8"))  # the bytes the receipt's digest names
@@ -492,7 +528,6 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
             impact=impact, impact_rows=impact_rows,
             design_line=(f"{design.task.binding.line()}, state {design.state}"
                          if design is not None and design.task is not None else None))
-        planned_run = runs._plan_run(state, task, ENGINE, "review")
         where = {"base": span.base, "series_round": s.series_round, "round": number, "attempt": attempt,
                  "run_id": planned_run[0].id}
         started_round = []
@@ -565,6 +600,10 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                          canary_value=value, db_line=db.line)
         except ReviewError as exc:
             code, message = exc.code, str(exc)
+    if dispose is not None and (not disposition or disposition[-1][0] == "retained") and code is None:
+        why = disposition[-1][1] if disposition else "the disposal check did not run"
+        code, message = "OAH_REVIEW_SNAPSHOT_RETAINED", (f"OAH_REVIEW_SNAPSHOT_RETAINED: the review snapshot was kept "
+                                                         f"({why}), so this round does not count")
     if code is not None:
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})

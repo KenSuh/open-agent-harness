@@ -112,6 +112,22 @@ def register(commands: argparse._SubParsersAction) -> None:
     task.add_argument("task")
     task.add_argument("--json", action="store_true", help="print the state and the design text as JSON")
     task.add_argument("--check", action="store_true", help="exit 1 unless the task's design permits work")
+    task.add_argument("--run", help="one run of the task: its design transport origin, history and the actions "
+                      "it is eligible for (reads only, unless --transport-cleanup)")
+    task.add_argument("--evidence-plan", help="with --run: the run's read plan (its manifest sha256 hex)")
+    task.add_argument("--blob", help="with --run and --evidence-plan: print one exact chunk of this DATA file as "
+                      "ReadChunkV1 JSON (reads only)")
+    task.add_argument("--offset", type=int, default=0, help="the chunk's byte offset (default 0)")
+    task.add_argument("--length", type=int, default=32768, help="the chunk's byte length (at most 32768)")
+    task.add_argument("--transport-cleanup", action="store_true",
+                      help="with --run: remove the run's exact unchanged design data, or with --retain record it "
+                      "as retained; needs the exact --expect-* values a --run readout prints")
+    task.add_argument("--expect-origin", help="the origin sha256 the readout printed")
+    task.add_argument("--expect-record", help="the latest record SEQUENCE:DIGEST the readout printed")
+    task.add_argument("--expect-task-basis", help="the task basis digest the readout printed")
+    task.add_argument("--settle", choices=("failed", "aborted"),
+                      help="how a run without a recorded exit is settled (needs a qualified changed-boot profile)")
+    task.add_argument("--retain", action="store_true", help="acknowledge the data as retained instead of removing it")
 
     carry = sub.add_parser("carry", help="record that a design change does not change a task, so its evidence "
                            "keeps counting")
@@ -332,6 +348,195 @@ def _recover(args: argparse.Namespace, store) -> int:
     return EXIT_OK
 
 
+def _transport_eligibility(store, task: str, view) -> dict:
+    """Which current authority-bearing actions a transport origin is eligible for, separately from its OLD facts."""
+    from oah.lease import Store
+
+    lease = next((entry for entry, stale in Store(store.state).snapshot() if entry.task == task and not stale), None)
+    design = lease.design if lease is not None and isinstance(lease.design, dict) else {}
+    current = (lease is not None and (design.get("task_identity") or {}).get("task_instance_id")
+               == (view.record.get("task_identity") or {}).get("task_instance_id")
+               and design.get("basis") == view.record.get("task_basis_digest"))
+    blocked = []
+    if not view.quiescent:
+        blocked.append("no recorded exit or settlement")
+    if view.exposure is not None:
+        blocked.append(f"sticky exposure ({view.exposure.get('state')})")
+    if view.resolution is not None:
+        blocked.append(f"already {view.state}")
+    if not current:
+        blocked.append("no current unexpired lease on the origin's task instance and basis")
+    return {"current_authority": bool(current), "cleanup": "eligible" if not blocked else "blocked",
+            "blocked_by": blocked}
+
+
+def _task_run(args: argparse.Namespace, store) -> int:
+    from oah.design import task_context
+    from oah.lease import TASK_RE
+
+    if not TASK_RE.fullmatch(args.task or ""):
+        raise LeaseError("OAH_TASK_INVALID", f"{args.task!r}: use letters, digits, '.', '_' or '-' (max 64)")
+    if args.blob is not None:
+        if args.evidence_plan is None:
+            raise DesignError(task_context.REFERENCE_UNAVAILABLE_CODE, "--blob needs --evidence-plan")
+        chunk = task_context.read_chunk(store.root, task=args.task, run=args.run, manifest=args.evidence_plan,
+                                        blob=args.blob, offset=args.offset, length=args.length)
+        print(json.dumps(chunk, ensure_ascii=False))
+        return EXIT_OK
+    if args.transport_cleanup:
+        if os.environ.get("OAH_WORKER") == "1":
+            from oah.design.binding import WORKER_REFUSED_CODE
+
+            raise DesignError(WORKER_REFUSED_CODE, "dispatched workers do not clean design transport data; nothing "
+                              "was changed. Return your work to the dispatcher")
+        return _transport_cleanup(args, store)
+    views = task_context.transport_views(store.state, task=args.task, run=args.run)
+    rows = []
+    for view in views.values():
+        row = view.summary()
+        row["eligibility"] = _transport_eligibility(store, args.task, view)
+        row["history"] = [{"sequence": item["sequence"], "kind": item["kind"], "record_digest": item["record_digest"]}
+                          for item in view.observations]
+        rows.append(row)
+    if args.json:
+        print(json.dumps({"task": args.task, "run": args.run, "origins": rows}, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    if not rows:
+        print(f"OAH_DESIGN_TASK_RUN task={args.task} run={args.run} origins=0: the run delivered its design inline "
+              "(or had none), so it has no design transport origin")
+        return EXIT_OK
+    for row in rows:
+        latest = row["latest"]
+        print(f"OAH_DESIGN_TASK_RUN task={args.task} run={args.run} origin={row['origin']} state={row['state']} "
+              f"quiescent={str(row['quiescent']).lower()} delivered={str(row['delivered']).lower()}")
+        print(f"  expect: --evidence-plan {row['manifest']} --expect-origin {row['origin']} --expect-record "
+              f"{latest['sequence']}:{latest['record_digest']} --expect-task-basis {row['task_basis_digest']}")
+        if row["exposure"] is not None:
+            print(f"  exposure: {row['exposure'].get('state')} — {row['exposure'].get('why')} (sticky)")
+        eligibility = row["eligibility"]
+        print(f"  cleanup: {eligibility['cleanup']}" + (f" ({'; '.join(eligibility['blocked_by'])})"
+                                                         if eligibility["blocked_by"] else ""))
+        for item in row["history"]:
+            print(f"  {item['sequence']:>3} {item['kind']}")
+    return EXIT_OK
+
+
+def _transport_cleanup(args: argparse.Namespace, store) -> int:
+    """SC4-P5: exact cleanup or ACK_RETAINED of one quiescent origin under current authority and a fresh P4."""
+    import secrets
+
+    from oah.design import task_context as tc
+    from oah.lease import Store
+
+    for name in ("evidence_plan", "expect_origin", "expect_record", "expect_task_basis", "settle"):
+        if getattr(args, name) is None:
+            raise DesignError(tc.REFERENCE_UNAVAILABLE_CODE, f"--transport-cleanup needs --{name.replace('_', '-')}; "
+                              "read the exact values with oah design task <task> --run <run>")
+    sequence, _sep, digest = args.expect_record.partition(":")
+    if not sequence.isdigit():
+        raise DesignError(tc.REFERENCE_UNAVAILABLE_CODE, "--expect-record is SEQUENCE:DIGEST")
+    expected = {"sequence": int(sequence), "record_digest": digest}
+    view = tc.transport_views(store.state, task=args.task, run=args.run).get(args.expect_origin)
+    if view is None or view.record.get("manifest") != args.evidence_plan:
+        raise DesignError(tc.TRANSPORT_HISTORY_UNKNOWN, f"run {args.run} of task {args.task} has no transport origin "
+                          f"{args.expect_origin} with plan {args.evidence_plan}")
+    if view.record.get("task_basis_digest") != args.expect_task_basis or view.latest != expected:
+        raise DesignError(tc.TRANSPORT_CONFLICT, f"origin {view.origin} is now at "
+                          f"{view.latest['sequence']}:{view.latest['record_digest']} for basis "
+                          f"{view.record.get('task_basis_digest')}; nothing was changed. Read it again with --run")
+    if not view.quiescent:
+        raise DesignError(tc.TRANSPORT_NONTERMINAL, f"run {args.run} has no recorded exit, so its process may still "
+                          "be writing. Settling a lost runner needs a qualified same-host changed-boot profile, which "
+                          "this build does not provide (recovery continuity is recorded as unsupported); nothing was "
+                          "changed")
+    if view.exposure is not None:
+        raise DesignError(tc._P4_CODES[view.exposure["state"]], f"run {args.run}'s design data was "
+                          f"{view.exposure['state']}; remove it from the index and every new commit first. Nothing "
+                          "was changed (the exposure stays recorded)")
+    if view.resolution is not None:
+        print(f"OAH_DESIGN_TRANSPORT_RESOLVED run={args.run} state={view.state}: nothing to do")
+        return EXIT_OK
+    root = store.root
+    checked = tc.intersects(view.record, root)
+    if checked["state"] != "clean":
+        raise DesignError(checked["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, f"{checked['why']}; nothing was changed")
+    installed = next((item["fact"] for item in view.observations if item["kind"] == "installed"), {})
+    done, states = tc.reopen(root, view.record["manifest"], installed)
+    try:
+        intents = {name for item in view.observations if item["kind"] == "cleanup-intent"
+                   for name in [entry["name"] for entry in item["fact"].get("planned", [])]}
+        unknown = sorted(name for name, state in states.items() if state in ("changed", "unexpected", "unknown"))
+        if unknown:
+            raise DesignError(tc.TRANSPORT_CHANGED, f"the design data of run {args.run} changed ({unknown[:3]}); "
+                              "nothing is removed or adopted")
+        writer = Store(store.state)
+        operation = secrets.token_hex(8)
+        leaves = {}
+        for name, state in sorted(states.items()):
+            item = next(entry for entry in installed.get("leaves", []) if entry["name"] == name)
+            if state == "present-unchanged":
+                leaves[name] = {"state": "present-unchanged", "sha256": item["sha256"]}
+            else:
+                leaves[name] = {"state": "absent-after-intent" if name in intents else "absent-unattributed"}
+        present = sorted(name for name, item in leaves.items() if item["state"] == "present-unchanged")
+        if args.retain or len(present) != len(leaves):
+            removed = []
+            if not args.retain and present and done is not None:
+                expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
+                                                    kind="cleanup-intent", fact={"operation": operation,
+                                                    "planned": [{"name": name, "identity_digest": next(
+                                                        entry["identity_digest"] for entry in installed["leaves"]
+                                                        if entry["name"] == name)} for name in present], "dirs": []})
+
+                def after(name: str, observed: str, entry: str) -> None:
+                    nonlocal expected
+                    expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
+                                                        kind="cleanup-progress", fact={"operation": operation,
+                                                        "name": name, "entry": entry, "observed": observed})
+
+                tc.remove_leaves(done, present, before=lambda name: None, after=after)
+                removed = present
+                for name in removed:
+                    leaves[name] = {"state": "removed-under-intent"}
+            writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="ack-retained",
+                                     fact={"operation": operation, "settle": args.settle,
+                                           "reason": "retained by request" if args.retain else "partial or missing",
+                                           "leaves": leaves, "missing": sorted(name for name, item in leaves.items()
+                                                                               if item["state"].startswith("absent"))})
+            print(f"OAH_DESIGN_TRANSPORT_ACK_RETAINED run={args.run} present={sum(1 for item in leaves.values() if item['state'] == 'present-unchanged')} "
+                  f"missing={sum(1 for item in leaves.values() if item['state'].startswith('absent'))} "
+                  f"removed={len(removed)}")
+            return EXIT_OK
+        expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
+                                            kind="cleanup-intent", fact={"operation": operation, "planned": [
+                                                {"name": name, "identity_digest": next(
+                                                    entry["identity_digest"] for entry in installed["leaves"]
+                                                    if entry["name"] == name)} for name in present],
+                                                "dirs": [view.record["manifest"]] + (
+                                                    [tc.DATA_DIR] if installed.get("data_dir_created") else [])})
+
+        def progress(name: str, observed: str, entry: str) -> None:
+            nonlocal expected
+            expected = writer.observe_transport(task=args.task, origin=view.origin, expected=expected,
+                                                kind="cleanup-progress", fact={"operation": operation, "name": name,
+                                                                               "entry": entry, "observed": observed})
+
+        tc.remove_leaves(done, present, before=lambda name: None, after=progress)
+        tc.remove_directories(done, before=lambda name: None, after=progress)
+        final = tc.verify_transport_origin(view.record, root, expect="cleaned")
+        if final["state"] != "clean":
+            raise DesignError(final["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, final["why"])
+        writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="verified-cleaned",
+                                 fact={"operation": operation, "head": final["head"]})
+        print(f"OAH_DESIGN_TRANSPORT_CLEANED run={args.run} removed={len(present)}")
+        return EXIT_OK
+    except tc.InstallRefused as exc:
+        raise DesignError(tc.TRANSPORT_CHANGED, f"{exc}; the remaining data stays") from None
+    finally:
+        if done is not None:
+            done.close()
+
+
 def _task_view(store, task: str):
     """(task view, judgement, basis inputs) of a task; reads only, writes nothing, never reconciles."""
     from oah.design import binding as design
@@ -375,9 +580,11 @@ def _task(args: argparse.Namespace, store) -> int:
     from oah.design import binding as design
     from oah.design import task_context
 
+    if args.run is not None:
+        return _task_run(args, store)
     view, judged = _task_view(store, args.task)
     record = judged.task
-    block = task_context.render(judged)
+    block = task_context.readout_block(judged, task=args.task, root=store.root)
     lease = view.lease
     agent = lease.agent if lease is not None else "<you>"
     held = "open" if lease is not None else (f"closed ({view.closed})" if view.closed else "none")
@@ -385,8 +592,8 @@ def _task(args: argparse.Namespace, store) -> int:
         print(json.dumps({"task": args.task, "lease": held, "state": judged.state, "code": judged.code,
                           "reason": judged.reason, "next": judged.next_step(args.task, agent),
                           "instance": record.identity.instance if record is not None else None,
-                          "record": block.record, "delivered": block.delivered, "block": block.text,
-                          "plan": block.plan}, indent=2, ensure_ascii=False))
+                          "record": block.record, "delivered": False, "offered": block.delivered,
+                          "block": block.text, "plan": block.plan}, indent=2, ensure_ascii=False))
     else:
         bound = record.binding.line() if record is not None else "no design binding"
         print(f"OAH_DESIGN_TASK task={args.task} state={judged.state} {bound} lease={held}")

@@ -519,6 +519,9 @@ def _design_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
     source = binding.source if binding is not None else f".oah/tasks/{task}/PACKET.md"
     judged = design.judge_task(state, task, root=pathlib.Path(root), source=source,
                                packet_text=design.committed_text(root, source, head))
+    transport = _transport_check(root, state, task, head, judged)
+    if transport is not None:
+        return None, transport
     if judged.state == "unbound":
         return None, _passed("design", "no design is bound to this task")
     refuse = ("the task's design is " + judged.state + f" ({judged.code}); " + judged.next_step(task, "<agent>") +
@@ -535,6 +538,27 @@ def _design_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,
     return design.review_evidence(judged), _passed("design", f"{judged.task.binding.line()} is current for the "
                                                              "task's inputs and committed at HEAD",
                                                    {"evidence_key": judged.task.key})
+
+
+def _transport_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str, judged):
+    """SC4-P4 at land: every retained transport origin is replayed and the candidate's reachable history and index
+    are checked for its exact DATA directory; a failed check, or None to continue."""
+    from oah.design import task_context
+    from oah.design.binding import repo_identity
+    from oah.design.model import DesignError
+
+    record = judged.task
+    current = (None if record is None else
+               {"task_instance_id": record.identity.instance, "task_basis_digest": record.basis})
+    try:
+        repo = repo_identity(pathlib.Path(root))
+    except DesignError:
+        repo = None
+    found = task_context.completion_guard(state, task, root=pathlib.Path(root), repo=repo, current=current,
+                                          head=head, worktree=False)
+    if found.ok:
+        return None
+    return _failed("design", found.code, f"{found.reason}, then run oah land again")
 
 
 def _review_check(root: pathlib.Path, state: pathlib.Path, task: str, head: str,

@@ -91,6 +91,8 @@ _PREPARATION_RUN = ContextVar("oah_preparation_run", default=None)
 _PREPARATION_START = ContextVar("oah_preparation_start", default=None)  # `oah review` starts its round after admission
 _CORRECTION_STATE_LOCK = ContextVar("oah_correction_state_lock", default=None)
 _CORRECTION_PUBLICATION = ContextVar("oah_correction_publication", default=None)
+_REFERENCE_RUN = ContextVar("oah_reference_run", default=None)  # the ORIGINAL runner's ReferenceRun, if any
+_DESIGN_RUN = ContextVar("oah_design_run", default=False)  # design-bound: stop owned descendants on every return
 DEFAULT_TASK = "adhoc"
 MODEL_MISMATCH = "OAH_MODEL_MISMATCH"
 BELOW_FLOOR = "OAH_MODEL_BELOW_FLOOR"
@@ -956,8 +958,8 @@ def dispatch_guard(prepared: Prepared):
         except ValueError:
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run has no valid checked intent binding; "
                               "run oah call again to prepare it from the current lease") from None
-        with Store(run.path.parents[2]).checked(task=prepared.task, lease_id=saved["id"],
-                                               generation=saved["generation"]) as live:
+        store = Store(run.path.parents[2])
+        with store.checked(task=prepared.task, lease_id=saved["id"], generation=saved["generation"]) as live:
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
             from oah.review import rounds
             _task_dispatch_gate(run.path.parents[2], prepared.task, pathlib.Path(live.worktree), stage=prepared.stage,
@@ -974,7 +976,21 @@ def dispatch_guard(prepared: Prepared):
                     raise EngineError("OAH_RUN_LAUNCH_INVALID", "the run's design record cannot be read; run oah "
                                       "call again to prepare it from the current design") from None
                 _check_design_unchanged(prepared, live, design_saved)
-            yield
+            reference = _REFERENCE_RUN.get()
+            if reference is not None and reference.run_id == prepared.run_id:
+                from oah.design.model import DesignError
+
+                try:
+                    reference.spawn_intent(store)
+                except DesignError as exc:
+                    raise _design_error(exc) from None
+                reference.held_store = store
+                try:
+                    yield
+                finally:
+                    reference.held_store = None
+            else:
+                yield
     except (LeaseError, EngineError) as exc:
         error = EngineError(exc.code, str(exc).split(": ", 1)[1] if prepared.retain_worker_text else "")
         _record_refusal(prepared, error)
@@ -1059,11 +1075,51 @@ def _task_design(holder, packet: Packet | None, *, state_dir: pathlib.Path, stag
         judged.require("inspect" if stage == "review" else "dispatch", task=task, agent=holder.agent)
         if record is None:
             return judged, None
-        block = task_context.render(judged)
-        task_context.require_delivery(block, task=task, engine=engine)
+        # Whole-inline, or (Claude only) a reference plan built once the run is allocated; Codex and native
+        # Windows refuse here when the design needs references.
+        block = task_context.select(judged, task=task, engine=engine)
     except design.DesignError as exc:
         raise _design_error(exc) from None
     return judged, block
+
+
+def _reference_design(task_design, block, request, *, root: pathlib.Path, run_id: str | None):
+    """The reference-transport block for a design whose whole parts do not fit (Claude only, see select)."""
+    from oah.design import task_context
+
+    if run_id is None:
+        raise _design_error(task_context.DesignError(task_context.TOO_LARGE_CODE, f"task {request.task}: "
+                            f"{block.plan}; nothing was launched"))
+    try:
+        transport = task_context.prepare_transport(
+            task_design, task=request.task, run=run_id, root=root, engine=request.engine,
+            operation="inspect" if request.stage == "review" else "work",
+            root_role="review-snapshot" if request.stage == "review" and request.isolated else "holder-worktree")
+    except task_context.DesignError as exc:
+        raise _design_error(exc) from None
+    return transport.block
+
+
+def _reference_profile_problem(request, settings: Settings, resolution: "Resolution") -> str | None:
+    from oah.design import task_context
+    from oah.engines.claude import READ_ONLY_TOOLS
+
+    tools = READ_ONLY_TOOLS if request.stage == "review" else tuple(settings.engines["claude"]["tools"])
+    return task_context.qualify_profile(request.engine, "inspect" if request.stage == "review" else "work",
+                                        executable=resolution.base[0], cli_version=resolution.cli_version,
+                                        tools=tools)
+
+
+def _argv_tools(argv: Sequence[str]) -> tuple[str, ...]:
+    return tuple(argv[argv.index("--tools") + 1].split(",")) if "--tools" in argv else ()
+
+
+def _design_bound(prepared: "Prepared") -> bool:
+    try:
+        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(prepared.run.file_path(DESIGN_NAME)) else None
+    except Exception:
+        return True  # an unreadable design record is still a design-bound run
+    return isinstance(saved, dict) and saved.get("task") is not None
 
 
 def _design_check_record(saved: object, digest_only: bool) -> dict:
@@ -1497,7 +1553,9 @@ def _brief_text(request, run_id, packet, scope, stored, footer, has_footer, warn
                         skills_block=chosen.brief_text(rerank=skills_rerank) if chosen is not None else None,
                         skill_ids=[skill.id for skill in chosen.skills] if chosen is not None else (),
                         design_block=design.text if design is not None else None,
-                        design_line=design.preamble if design is not None else None)
+                        design_line=design.preamble if design is not None else None,
+                        design_data=(design.transport.relative("").rstrip("/") if design is not None
+                                     and design.transport is not None else None))
 
 
 def _brief_skills(root, *, kind, stage, risk, scope, state_dir, env, keychain, brief_disabled, now):
@@ -1604,6 +1662,9 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
 
         planned_run = _PREPARATION_RUN.get() or runs._plan_run(
             state_dir, request.task, request.engine, request.stage, now=now)
+    if design is not None and not design.delivered:
+        design = _reference_design(task_design, design, request, root=root, run_id=planned_run[0].id
+                                   if planned_run is not None else None)
     axes = scored.axes if recorded is not None else None
     # `oah review` passed its own gate under the task lock, with its decision and extra round, which only a
     # logged start carries. Until that start, the gate below would not know them.
@@ -1676,6 +1737,14 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
     warnings.extend(resolution.warnings)
     pinned = bool(settings.engines[request.engine]["tiers"][tier]["model"])
     admit(resolution, settings, stage=request.stage, tier=tier, floor_tier=floor_tier, freshness=checked[1])
+    if design is not None and design.transport is not None:
+        # The reference profile is known once the executable and its version are resolved, before any paid judge.
+        problem = _reference_profile_problem(request, settings, resolution)
+        if problem is not None:
+            from oah.design import task_context
+
+            raise EngineError(task_context.REFERENCE_UNAVAILABLE_CODE, f"task {request.task}: the design needs "
+                              f"reference delivery and {problem}; nothing was launched")
     check_budget()
     if inputs is None:
         if start_round is not None:
@@ -1785,6 +1854,11 @@ def _plan_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, ro
         argv = claude.build_command(resolution.base, model=resolution.model, effort=resolution.launch_effort,
                                     permission_mode=section["permission_mode"], tools=section["tools"],
                                     read_only=read_only)
+        if design is not None and design.transport is not None:
+            # SC4-P1: the actual child's tool events are observed from stream-json; the result line is unchanged.
+            at = argv.index("--output-format")
+            argv[at + 1] = "stream-json"
+            argv.insert(at + 2, "--verbose")
     additions = {"OAH_WORKER": "1", "OAH_RUN_ID": run.id, "OAH_TASK": request.task}
     timeout_s = float(request.timeout_s) if request.timeout_s else resolution.timeout_s
     result_fields = dict(status="prepared", command=list(argv) if request.retain_worker_text else None,
@@ -1838,6 +1912,10 @@ def _finish_prepare(request: CallRequest, settings: Settings, run: runs.Run, *, 
         from oah.atomic import write_json_atomic
 
         write_json_atomic(run.file_path(DESIGN_NAME), dict(design.record, worktree=checked_lease.worktree))
+        if design.transport is not None:
+            from oah.design import task_context
+
+            task_context.freeze(run.path, design.transport)
     run.result(**plan.result_fields)
     if packet is not None:
         record_dispatch_binding(state_dir, packet, request.task, run.id, checked_lease=checked_lease, root=root)
@@ -1901,22 +1979,41 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
               run.prompt_path.read_bytes().decode("utf-8"))  # the brief goes to stdin byte for byte
     if prepared.retain_worker_text:
         run.file_path("last-message.md")
+    reference = _start_reference(prepared, env)
+    tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
         result = _run_prepared(prepared, env, prompt)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if prepared.retain_worker_text:
             run.write_logs("", "")
+        extra = _end_reference_failed(reference)
         return run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                           error=(clean(f"OAH_ENGINE_LAUNCH_FAILED: {exc}") if prepared.retain_worker_text else
-                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)))
+                                 _recorded_error(EngineError(getattr(exc, "code", "OAH_ENGINE_LAUNCH_FAILED"), ""), False)),
+                          **({"warnings": [*run.read().get("warnings", []), *extra]} if extra else {}))
     except (KeyboardInterrupt, SystemExit):
         # _run_prepared already stopped the process tree; never leave the run looking alive.
         if prepared.retain_worker_text:
             run.write_logs("", "")
+        _end_reference_failed(reference)
         run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
                    error="OAH_RUN_INTERRUPTED: the run was interrupted (Ctrl-C or a stop signal) and its process "
                          "tree was stopped; call the engine again when you are ready")
         raise
+    except EngineError:
+        _end_reference_failed(reference)
+        raise
+    finally:
+        for var, token in zip((_REFERENCE_RUN, _DESIGN_RUN), tokens):
+            var.reset(token)
+    transport_warnings, transport_failure = [], None
+    if reference is not None:
+        try:
+            stdout, transport_warnings, transport_failure = reference.conclude(
+                result.stdout, returncode=result.returncode, timed_out=result.timed_out)
+            result = dataclasses.replace(result, stdout=stdout)
+        finally:
+            reference.release()
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -1951,12 +2048,51 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
                                    f"{prepared.launch_effort}; this run does not count")
     else:
         status, error = "finished", None
+    if transport_failure is not None and status == "finished":
+        status, error = "failed", transport_warnings[0]  # exposed design data: this run does not count
     if prepared.retain_worker_text:
         moved = _design_after(prepared)  # corrections keep their closed vocabulary; their next checkpoint re-judges
-        if moved is not None:
-            fields["warnings"] = [*run.read().get("warnings", []), moved]
+        if moved is not None or transport_warnings:
+            fields["warnings"] = [*run.read().get("warnings", []), *transport_warnings,
+                                  *([moved] if moved is not None else [])]
     return run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
                       exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
+
+
+def _start_reference(prepared: "Prepared", env: Mapping[str, str]):
+    """Register the run's transport origin and install its DATA (SC4-P3) in the process that will own Popen; a
+    refusal is recorded on the run and raised with nothing launched."""
+    if prepared.engine != "claude" or not prepared.retain_worker_text:
+        return None
+    from oah.design import task_context
+    from oah.design.model import DesignError
+    from oah.lease import LeaseError
+
+    reference = None
+    try:
+        reference = task_context.ReferenceRun.load(prepared, env, _argv_tools(prepared.argv))
+        if reference is not None:
+            reference.prepare()
+    except (DesignError, LeaseError, OSError) as exc:
+        if reference is not None:
+            reference.release()
+        code = getattr(exc, "code", task_context.REFERENCE_UNAVAILABLE_CODE)
+        text = str(exc)
+        error = EngineError(code, text.split(": ", 1)[1] if text.startswith(code + ": ") else text)
+        _record_refusal(prepared, error)
+        raise error from None
+    return reference
+
+
+def _end_reference_failed(reference) -> list[str]:
+    if reference is None:
+        return []
+    try:
+        return reference.conclude_failed()
+    except Exception as exc:  # accounting must never hide the original failure
+        return [f"{type(exc).__name__}: the design data could not be accounted after the failure"]
+    finally:
+        reference.release()
 
 
 @contextmanager
@@ -2267,6 +2403,11 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                {"start_new_session": True})
     child = None
     communicator = None
+    reference = _REFERENCE_RUN.get()
+    reference = reference if reference is not None and reference.run_id == prepared.run_id else None
+    design_run = _DESIGN_RUN.get()
+    # P5-F: what the owning runner actually established, appended before the tree/Job below are released.
+    outcome = {"kind": "aborted", "returncode": None, "timed_out": False, "quiescent": False}
     try:
         with _paid_dispatch(prepared), dispatch_guard(prepared):
             with _deferred_creation_signals():
@@ -2286,6 +2427,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                         raise
                 else:
                     child._oah_posix_tree = _PosixTree(child)
+                if reference is not None:
+                    reference.running(reference.held_store, child)
         if not prepared.retain_worker_text:
             return _stream_correction(child, prepared, prompt)
         output, errors = [], []
@@ -2309,6 +2452,7 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
             if remaining <= 0:
                 _kill_owned_tree(child)
                 communicator.join(timeout=REAP_SECONDS)
+                outcome.update(kind="failed", timed_out=True, quiescent=not communicator.is_alive())
                 out, err = output[0] if output else (b"", b"")
                 return RunResult(None, decode_output(out), decode_output(err), True)
             exchanged.wait(timeout=min(POLL_SECONDS, remaining))
@@ -2316,15 +2460,19 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
         if errors:
             raise errors[0]
         out, err = output[0]
-        if _CORRECTION_CLEANUP.get():
-            # A completed correction must leave no owned descendants changing the tree during accounting.
+        if _CORRECTION_CLEANUP.get() or design_run:
+            # A completed correction or design-bound run must leave no owned descendants changing the tree
+            # during accounting (redirected background servers are stopped too).
             _kill_owned_tree(child)
+            outcome["quiescent"] = True
+        outcome.update(kind="exit-observed", returncode=child.returncode)
         return RunResult(child.returncode, decode_output(out), decode_output(err), False)
     except BaseException:
         # Ctrl-C or a stop signal: the worker has its own session or job, so it would keep running.
         # An exited launcher can leave descendants holding the pipes and modifying the worktree.
         if child is not None:
             _kill_owned_tree(child)
+            outcome.update(kind="aborted", quiescent=True)
             try:
                 if communicator is not None and communicator.ident is not None:
                     communicator.join(timeout=REAP_SECONDS)
@@ -2334,6 +2482,8 @@ def _run_prepared(prepared: Prepared, env: Mapping[str, str], prompt: str):
                 pass
         raise
     finally:
+        if reference is not None:
+            reference.finish_process(outcome)  # before the original tree/Job proof is released
         if child is not None and hasattr(child, "_oah_posix_tree"):
             child._oah_posix_tree.close()
         if job is not None:

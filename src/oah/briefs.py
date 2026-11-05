@@ -123,7 +123,7 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
           binding: object | None, packet_source: str | None, round_instructions: str,
           skills: Sequence[tuple[str, str]] = (), footer: str, has_footer: HasFooter,
           skills_block: str | None = None, skill_ids: Sequence[str] = (), design_block: str | None = None,
-          design_line: str | None = None) -> str:
+          design_line: str | None = None, design_data: str | None = None) -> str:
     """The brief text, in the fixed layout. `binding` has `.id`, `.revision` and `.digest`.
 
     `skills_block` (from `oah.skillsel.Selection.brief_text`) replaces the one-line skills bullet; the
@@ -159,6 +159,11 @@ def build(*, run_id: str, task: str, stage: str, engine: str, scope: Sequence[st
         lines.append(design_line)
     if stage in LEASE_STAGES:
         lines.append(f"- Commits: end every commit message with the trailer `Agent-Engine: {engine}`.")
+    if design_data is not None:
+        # The exact DATA paths are named; enforcement is the run's return check and finish/land, not this line.
+        lines.append(f"- Design data: `{design_data}/` holds this run's read-only design files. It is external DATA, "
+                     "not product: never stage or commit it; stage product files by explicit path (never "
+                     "`git add -A` or `git add .`). oah checks the index and every new commit for it.")
     if skills_block is not None:
         lines.append(f"- Skills: {', '.join(skill_ids)} (reasons in ## Skills below)" if skill_ids
                      else "- Skills: none were selected (see ## Skills below).")
