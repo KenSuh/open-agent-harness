@@ -9,7 +9,11 @@ Every outgoing value is one of three tagged fields, never a caller string:
 - `DesignTextField` - a bounded slice of the design's own text (`design_field`), sent only when
   `[rerank.judgement] send_design_text = true`.
 
-Instructions and criteria come from closed versioned rubrics (`RUBRICS`); options are opaque keys. Gate order:
+Instructions and criteria come from closed versioned rubrics (`RUBRICS`); options are opaque keys. No question
+forces an answer: a `ChoiceRubric` asks for one option together with a yes/no question on whether any option fits,
+so the outcome is `chosen`, `no-match` or `uncertain`; a `LabelRubric` asks one yes/no question per label, so
+several labels or none can hold (`matched`, `no-match` or `uncertain`). `THRESHOLDS` are the provider's suggested
+starting points, not calibrated values, and are part of the recorded identity. Gate order:
 purpose, rubric and the purpose's closed field allowlist (`unused(scope)`), the design-text permission
 (`unused(design-text-off)`) and required inputs (`unused(insufficient-input)`); then `[rerank.judgement] enabled`
 (`unused(judgement-off)`); then the shared rerank gate (brief, provider, key, breaker); then every outgoing string,
@@ -24,6 +28,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import pathlib
 import re
 from typing import Mapping, Sequence
@@ -31,13 +36,17 @@ from typing import Mapping, Sequence
 from oah import secrets
 from oah.rerank import USED, _call, _gate, circuit, unused
 from oah.rerank.base import BAD_RESPONSE, Provider, ProviderError
+from oah.rerank.typesafe import PROBABILITY_SUM_TOLERANCE
 from oah.toolkit.checks import CONTENT_RULES
 
-CONSTRUCTOR_VERSION = "judge-fields-v1"
+CONSTRUCTOR_VERSION = "judge-fields-v2"
 FIELD_BYTES = 4096
 TOTAL_CHARACTERS = 16_000
 OPTION_LIMIT = 20
 DEFAULTS = {"enabled": False, "send_design_text": False}
+# A yes/no answer at or above `yes` reads as yes, at or below `no` as no, and between as uncertain; a chosen option
+# also needs at least `choice_min`. Starting points from the provider's guidance, not calibrated product values.
+THRESHOLDS = {"yes": 0.7, "no": 0.3, "choice_min": 0.6}
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 
 LABELS = {
@@ -68,21 +77,74 @@ PURPOSES = {
     "next-stage": ({"stage": "label:stage"}, {"answers", "unresolved", "context"}, True),
 }
 
-RUBRICS = {
-    "source-change-impact/v1": ("source-change-impact", "How much does the public change between the old and new "
-                                "snapshot excerpts matter to a design that uses this source?",
-                                {"none": "Nothing in the excerpts changes behavior, interfaces or terms.",
-                                 "review": "Something changed that a person should read before relying on it.",
-                                 "reselect": "The change is large enough that the choice should be made again."}),
-    "material-classes/v1": ("material-classes", "Which category best describes this public material?",
-                            {label: f"The material is mainly about {label}." for label in LABELS["category"]}),
-    "material-fit/v1": ("material-fit", "Which option's public evidence fits the stated role and platform best?", None),
-    "candidate-priority/v1": ("candidate-priority", "Which option should be looked at first, from its public "
-                              "evidence?", None),
-    "search-path/v1": ("search-path", "Which handler should look for candidates first?", None),
-    "stack-comparison/v1": ("stack-comparison", "Which option's components fit the runtime and platform best?", None),
-    "next-stage/v1": ("next-stage", "Which stage should come next?",
-                      {label: f"Go to the {label} stage." for label in LABELS["stage"]}),
+@dataclasses.dataclass(frozen=True)
+class ChoiceRubric:
+    """One option, asked together with a yes/no question on whether any option fits at all."""
+    purpose: str
+    instructions: str
+    options: Mapping[str, str] | None   # fixed option criteria; None means opaque keys o0..oN
+    fits: tuple[str, str, str]          # the companion yes/no question: instructions, true, false
+
+
+@dataclasses.dataclass(frozen=True)
+class LabelRubric:
+    """One yes/no question per label, so several labels or none can hold; `{meaning}` is the label's meaning."""
+    purpose: str
+    instructions: str
+    true: str
+    false: str
+    labels: Mapping[str, str]           # label -> meaning
+
+
+RUBRICS: dict[str, ChoiceRubric | LabelRubric] = {
+    "source-change-impact/v2": ChoiceRubric(
+        "source-change-impact",
+        "How much does the public change between the old and new snapshot excerpts matter to a design that uses "
+        "this source?",
+        {"none": "Nothing in the excerpts changes behavior, interfaces or terms.",
+         "review": "Something changed that a person should read before relying on it.",
+         "reselect": "The change is large enough that the choice should be made again."},
+        ("Do the excerpts show what changed between the two snapshots?",
+         "The excerpts describe a change, such as a fix, a new feature, a removal or new terms.",
+         "The excerpts describe no change, for example both are the same license text or an unrelated passage.")),
+    "material-classes/v2": LabelRubric(
+        "material-classes", "Is this public material about {meaning}?",
+        "The material is about {meaning}, as its main subject or as one of several.",
+        "The material is about other things and mentions {meaning} only in passing, if at all.",
+        {"storage": "keeping data, such as databases, files, caches or object stores",
+         "network": "talking over a network, such as HTTP, sockets, messaging or remote calls",
+         "ui": "what people see and use, such as screens, widgets, layout or styling",
+         "auth": "who may do what, such as sign-in, sessions or permissions",
+         "build": "turning code into something that runs, such as compiling, bundling or packaging",
+         "test": "checking that code works, such as test runners, fixtures or coverage",
+         "docs": "explaining the software to people, such as guides, references or examples"}),
+    "material-fit/v2": ChoiceRubric(
+        "material-fit", "Which option's public evidence fits the stated role and platform best?", None,
+        ("Does any option's public evidence fit the stated role and platform?",
+         "At least one option's evidence shows that it can fill the role on the platform.",
+         "No option's evidence covers the role or the platform, for example every option targets another "
+         "platform.")),
+    "candidate-priority/v2": ChoiceRubric(
+        "candidate-priority", "Which option should be looked at first, from its public evidence?", None,
+        ("Does any option's public evidence give a reason to look at it?",
+         "At least one option's evidence shows something worth checking, such as a matching feature or recent work.",
+         "No option's evidence shows anything worth checking, for example every excerpt is empty or boilerplate.")),
+    "search-path/v2": ChoiceRubric(
+        "search-path", "Which handler should look for candidates first?", None,
+        ("Can any of these handlers find candidates for the technology described?",
+         "At least one handler covers where this kind of technology is published.",
+         "None of the handlers covers it, for example the technology publishes neither releases nor documents.")),
+    "stack-comparison/v2": ChoiceRubric(
+        "stack-comparison", "Which option's components fit the runtime and platform best?", None,
+        ("Do any option's components fit the runtime and platform?",
+         "At least one option's components run on the runtime and the platform.",
+         "No option's components run there, for example every option needs another runtime.")),
+    "next-stage/v2": ChoiceRubric(
+        "next-stage", "Which stage should come next?",
+        {label: f"Go to the {label} stage." for label in LABELS["stage"]},
+        ("Does any of these stages fit as the next step?",
+         "One of the stages follows from the answers and the unresolved decisions.",
+         "None of the stages fits, for example the work waits on a decision these stages do not cover.")),
 }
 
 
@@ -220,28 +282,45 @@ class Judgement:
     status: str                    # used | unused(<reason>)
     purpose: str
     identity: Mapping | None
-    choice: str | None = None
-    confidence: float | None = None
+    outcome: str | None = None     # chosen | matched | no-match | uncertain, read under the recorded THRESHOLDS
+    choice: str | None = None      # the option, only when the outcome is chosen
+    labels: Mapping[str, str] | None = None   # label -> yes | no | uncertain, for a label rubric
+    answers: Mapping | None = None            # the validated answers the outcome was read from
     provider: str | None = None
     applied: str = "not-applied"   # a consumer sets applied only after `recheck` passes
 
     def to_record(self) -> dict:
         return {"version": 1, "kind": "oah-judgement", "status": self.status, "purpose": self.purpose,
-                "identity": None if self.identity is None else dict(self.identity), "choice": self.choice,
-                "confidence": self.confidence, "provider": self.provider, "applied": self.applied}
+                "identity": None if self.identity is None else dict(self.identity), "outcome": self.outcome,
+                "choice": self.choice, "labels": None if self.labels is None else dict(self.labels),
+                "answers": None if self.answers is None else json.loads(json.dumps(self.answers)),
+                "provider": self.provider, "applied": self.applied}
 
 
-def _options(request: Request) -> dict[str, str] | None:
-    entry = RUBRICS.get(request.rubric)
-    if entry is None:
+def _questions(request: Request) -> dict[str, dict] | None:
+    """The closed question set for the request, keyed by question id, or None when the options do not fit."""
+    rubric = RUBRICS.get(request.rubric)
+    if isinstance(rubric, LabelRubric):
+        if request.options:
+            return None
+        return {label: {"type": "noul", "instructions": rubric.instructions.replace("{meaning}", meaning),
+                        "criteria": {"true": rubric.true.replace("{meaning}", meaning),
+                                     "false": rubric.false.replace("{meaning}", meaning)}}
+                for label, meaning in rubric.labels.items()}
+    if not isinstance(rubric, ChoiceRubric):
         return None
-    fixed = entry[2]
-    if fixed is not None:
-        return None if request.options else dict(fixed)
-    keys = request.options
-    if not 2 <= len(keys) <= OPTION_LIMIT or keys != tuple(f"o{index}" for index in range(len(keys))):
-        return None
-    return {key: f"Option {key}: the fields whose role starts with `{key}:`." for key in keys}
+    if rubric.options is not None:
+        if request.options:
+            return None
+        options = dict(rubric.options)
+    else:
+        keys = request.options
+        if not 2 <= len(keys) <= OPTION_LIMIT or keys != tuple(f"o{index}" for index in range(len(keys))):
+            return None
+        options = {key: f"Option {key}: the fields whose role starts with `{key}:`." for key in keys}
+    instructions, true, false = rubric.fits
+    return {"choice": {"type": "choice", "instructions": rubric.instructions, "criteria": options},
+            "fits": {"type": "noul", "instructions": instructions, "criteria": {"true": true, "false": false}}}
 
 
 def _scope_ok(request: Request) -> tuple[bool, bool]:
@@ -274,7 +353,7 @@ def identity_of(request: Request, *, policy: str, provider: str | None, model: s
     return {"version": 1, "constructor": CONSTRUCTOR_VERSION, "purpose": request.purpose, "rubric": request.rubric,
             "options": list(request.options),
             "fields": [{"role": role, **value.identity()} for role, value in request.fields],
-            "policy": policy, "provider": provider, "requested_model": model}
+            "policy": policy, "provider": provider, "requested_model": model, "thresholds": dict(THRESHOLDS)}
 
 
 def _flagged(text: str) -> bool:
@@ -306,17 +385,17 @@ def _fields_hold(request: Request, sources, view) -> bool:
 def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=None, brief_disabled: bool = False,
           env: Mapping[str, str] | None = None, keychain: secrets.Keychain | None = None,
           providers: Mapping[str, Provider] | None = None, state_dir: pathlib.Path | None = None) -> Judgement:
-    """One advisory choice for a closed purpose, or `unused(<reason>)` with nothing sent.
+    """One advisory outcome for a closed purpose, or `unused(<reason>)` with nothing sent.
 
     With `sources` (and `view` for design text) every slice is read again from the rehashed store before sending."""
     provider = key = None
     try:
         if request.purpose not in PURPOSES or request.rubric not in RUBRICS \
-                or RUBRICS[request.rubric][0] != request.purpose:
+                or RUBRICS[request.rubric].purpose != request.purpose:
             return Judgement(unused("scope"), str(request.purpose), None)
-        options = _options(request)
+        questions = _questions(request)
         allowed, has_authored = _scope_ok(request)
-        if options is None or not allowed or not _fields_hold(request, sources, view):
+        if questions is None or not allowed or not _fields_hold(request, sources, view):
             return Judgement(unused("scope"), request.purpose, None)
         settings = config.get("judgement") if isinstance(config.get("judgement"), Mapping) else DEFAULTS
         if has_authored and settings.get("send_design_text") is not True:
@@ -334,9 +413,10 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         typesafe_settings = config.get("typesafe")
         model = str(typesafe_settings.get("model") or "") if isinstance(typesafe_settings, Mapping) else None
         identity = identity_of(request, policy=policy, provider=getattr(provider, "name", None), model=model)
-        instructions = RUBRICS[request.rubric][1]
         state = {"purpose": request.purpose, "fields": {role: value.text for role, value in request.fields}}
-        strings = [instructions, *options.values(), *state["fields"].values(), *state["fields"]]
+        strings = [*questions, *state["fields"].values(), *state["fields"]]
+        for question in questions.values():
+            strings += [question["instructions"], *question["criteria"], *question["criteria"].values()]
         if sum(len(item) for item in strings) > TOTAL_CHARACTERS:
             return Judgement(unused("too-large"), request.purpose, identity)
         if any(_flagged(item) for item in strings):
@@ -344,23 +424,65 @@ def judge(request: Request, *, config: Mapping, policy: str, sources=None, view=
         blocked = breaker.refusal() or breaker.reserve()
         if blocked is not None:
             return Judgement(unused(blocked), request.purpose, identity)
-        answer, status = _call(lambda: _valid_choice(provider.judge(state, instructions, options, key=key,
-                                                                    config=config), options))
+        answers, status = _call(lambda: _valid_answers(provider.judge(state, questions, key=key, config=config),
+                                                       questions))
         breaker.record(circuit.outcome(status))
         if status != USED:
             return Judgement(status, request.purpose, identity, provider=identity["provider"])
-        return Judgement(USED, request.purpose, identity, answer[0], answer[1], identity["provider"])
+        outcome, choice, labels = _read(RUBRICS[request.rubric], answers)
+        return Judgement(USED, request.purpose, identity, outcome, choice, labels, answers, identity["provider"])
     finally:
         del provider, key
 
 
-def _valid_choice(answer: object, options: Mapping[str, str]) -> tuple[str, float | None]:
-    if type(answer) is not tuple or len(answer) != 2 or answer[0] not in options:
+def _probability(value: object) -> float:
+    if type(value) not in (int, float) or not 0.0 <= value <= 1.0:   # also refuses NaN and infinities
         raise ProviderError(BAD_RESPONSE)
-    confidence = answer[1]
-    if confidence is not None and (type(confidence) not in (int, float) or not 0.0 <= confidence <= 1.0):
+    return float(value)
+
+
+def _valid_answers(answers: object, questions: Mapping[str, Mapping]) -> dict[str, dict]:
+    """Exactly one well-formed answer per asked question, whatever the provider; anything else is a bad response."""
+    if not isinstance(answers, Mapping) or set(answers) != set(questions):
         raise ProviderError(BAD_RESPONSE)
-    return answer[0], None if confidence is None else float(confidence)
+    valid = {}
+    for name, question in questions.items():
+        answer = answers[name]
+        if not isinstance(answer, Mapping) or answer.get("type") != question["type"]:
+            raise ProviderError(BAD_RESPONSE)
+        if question["type"] == "noul":
+            valid[name] = {"type": "noul", "noul": _probability(answer.get("noul"))}
+            continue
+        keys = tuple(question["criteria"])
+        probabilities, choice = answer.get("probabilities"), answer.get("choice")
+        if not isinstance(probabilities, Mapping) or set(probabilities) != set(keys) or choice not in keys:
+            raise ProviderError(BAD_RESPONSE)
+        scores = {key: _probability(probabilities[key]) for key in keys}
+        if abs(math.fsum(scores.values()) - 1.0) > PROBABILITY_SUM_TOLERANCE or scores[choice] != max(scores.values()):
+            raise ProviderError(BAD_RESPONSE)
+        confidence = answer.get("confidence")
+        valid[name] = {"type": "choice", "choice": choice, "probabilities": scores,
+                       "confidence": None if confidence is None else _probability(confidence)}
+    return valid
+
+
+def _reading(noul: float) -> str:
+    return "yes" if noul >= THRESHOLDS["yes"] else "no" if noul <= THRESHOLDS["no"] else "uncertain"
+
+
+def _read(rubric: ChoiceRubric | LabelRubric, answers: Mapping[str, Mapping]) -> tuple[str, str | None,
+                                                                                     dict[str, str] | None]:
+    """(outcome, chosen option, label readings): only a decisive answer names an option."""
+    if isinstance(rubric, LabelRubric):
+        labels = {label: _reading(answers[label]["noul"]) for label in rubric.labels}
+        readings = set(labels.values())
+        return ("matched" if "yes" in readings else "no-match" if readings == {"no"} else "uncertain"), None, labels
+    fits, choice = _reading(answers["fits"]["noul"]), answers["choice"]
+    if fits == "no":
+        return "no-match", None, None
+    if fits == "uncertain" or choice["probabilities"][choice["choice"]] < THRESHOLDS["choice_min"]:
+        return "uncertain", None, None
+    return "chosen", choice["choice"], None
 
 
 def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, provider: str | None,
@@ -377,6 +499,8 @@ def recheck(judgement: Judgement | Mapping, *, sources, view=None, policy: str, 
         reasons.append("policy-changed")
     if identity.get("provider") != provider or identity.get("requested_model") != model:
         reasons.append("provider-changed")
+    if identity.get("thresholds") != THRESHOLDS:
+        reasons.append("thresholds-changed")
     for field in identity.get("fields") or []:
         try:
             if field.get("tag") == "public-snapshot":

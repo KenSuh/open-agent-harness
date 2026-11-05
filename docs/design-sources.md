@@ -144,6 +144,12 @@ a hit sends nothing. A stored judgement applies only while its snapshot, design 
 provider and model all still match. No `oah sources` command requests a judgement yet; these settings gate
 the callers that will.
 
+No judgement forces an answer. A question with several options also asks whether any option fits, so the
+result is `chosen`, `no-match` or `uncertain`. Material classes are asked one at a time, so several classes
+or none can apply. A yes/no answer of 0.7 or more counts as yes and 0.3 or less as no; these are suggested
+starting points, not values tuned on real cases. A judgement is advice only: it never accepts, installs or
+removes anything.
+
 ## Settings
 
 All keys live under `[sources]` in `.oah/config.toml`; `OAH_CONFIG_INVALID` names a bad one.
