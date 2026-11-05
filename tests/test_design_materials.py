@@ -1,14 +1,16 @@
-# 재료 부분 시험 — 실제 설계 저장소와 로컬 출처로 입력 기준(현재·검토 필요·낡음·무효·모름), 명시적 이어받기·재선택, 빈 클론의 휴대 증거 재검증, 표식·제어·양방향 원본, 크기 초과 거부를 본다.
+# 재료 부분 시험 — 실제 설계 저장소와 로컬 출처로 입력 기준(현재·검토 필요·낡음·무효·모름), 명시적 이어받기·재선택, 빈 클론의 휴대 증거 재검증, 표식·제어·양방향 원본, 크기 초과 거부와 다른 부분이 따라 만드는 공유 JSON 모양을 본다.
 from __future__ import annotations
 
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import io
 import datetime as dt
 import json
 import os
 import pathlib
+import re
 import unittest
 from unittest import mock
 
@@ -624,6 +626,298 @@ class SourcesCliTest(MaterialsCase):
         self.assertIn("unavailable", out)
         code, _out, err = self.cli("sources", "diff", "lib", "--from", "HEAD", "--to", head)
         self.assertEqual((1, True), (code, err.startswith("OAH_SOURCES_USAGE")))
+
+
+
+# ---- shared shapes ---------------------------------------------------------------------------------------------
+# Neutral JSON that other parts of oah build against without importing this code: the real output of the calls in
+# SharedShapesTest for its fixed inputs, with run-specific identities replaced by markers. A change here is a change
+# to a shared record shape, so make it together with the code that reads it.
+SHARED_SHAPES = json.loads(r"""
+{
+ "material-input-basis-v1": {
+  "version": 1,
+  "project": "acme",
+  "uid": "<id>",
+  "design": "booking",
+  "title": "Booking",
+  "parts": {
+   "design": "sha256:<digest>",
+   "request": "sha256:<digest>"
+  },
+  "decision_inputs_digest": "sha256:<digest>"
+ },
+ "material-check-v1": {
+  "version": 1,
+  "checked_view": {
+   "accepted": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 1,
+    "digest": "sha256:<digest>"
+   },
+   "working": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 2,
+    "digest": "sha256:<digest>"
+   },
+   "authority_observation": {
+    "status": "read",
+    "source": "worktree",
+    "freshness": "current",
+    "page_state": "clean",
+    "recovery_pending": false,
+    "acceptance": {
+     "sequence": 1,
+     "record": "sha256:<digest>",
+     "revision": 1,
+     "digest": "sha256:<digest>"
+    }
+   }
+  },
+  "materials_digest": "sha256:<digest>",
+  "policy_digest": "sha256:<digest>",
+  "source_reads": [
+   {
+    "material": "lib",
+    "source": "lib",
+    "spec_digest": "sha256:<digest>",
+    "snapshot": "sha256:<digest>",
+    "envelope": "sha256:<digest>",
+    "historical_evidence": "verified-from-portable-bytes",
+    "historical_times": {
+     "verified_at": "<time>",
+     "confirmed_at": "<time>"
+    },
+    "recorded_eligibility": "eligible",
+    "eligibility": "eligible",
+    "integration": "untested",
+    "registration": "same-spec",
+    "registered_head": "sha256:<digest>",
+    "upstream_freshness": "fresh",
+    "problems": []
+   }
+  ],
+  "decisions": [
+   {
+    "id": "storage",
+    "selection_status": "selected",
+    "input_status": "current",
+    "current_basis": "sha256:<digest>",
+    "recorded_basis": "sha256:<digest>",
+    "execution_relevance": "selected",
+    "problems": [],
+    "resolution_ref": null
+   }
+  ],
+  "overall": "current",
+  "problems": []
+ },
+ "materials-projection-v1": {
+  "version": 1,
+  "kind": "oah-materials-projection",
+  "part_bytes": 15622,
+  "part_digest": "sha256:<digest>",
+  "semantic_bytes": 14162,
+  "semantic_sha256": "<sha256>",
+  "original_payload_bytes": 1460,
+  "envelopes": [
+   {
+    "id": "sha256:<digest>",
+    "source": "lib",
+    "snapshot": "sha256:<digest>",
+    "blobs": [
+     {
+      "id": "sha256:<digest>",
+      "kind": "selected-file",
+      "path_or_field": "src/lib.rs",
+      "bytes": 14,
+      "sha256": "<sha256>",
+      "encoded_bytes": 20
+     },
+     {
+      "id": "sha256:<digest>",
+      "kind": "license",
+      "path_or_field": "LICENSE",
+      "bytes": 1061,
+      "sha256": "<sha256>",
+      "encoded_bytes": 1416
+     },
+     {
+      "id": "sha256:<digest>",
+      "kind": "release-notes",
+      "path_or_field": "observed.release.notes",
+      "bytes": 16,
+      "sha256": "<sha256>",
+      "encoded_bytes": 24
+     }
+    ]
+   }
+  ],
+  "inline_budget": 262144,
+  "semantic_fits_inline": true,
+  "limit": 1048576
+ },
+ "sources-refresh-v1": {
+  "version": 1,
+  "kind": "oah-sources-refresh",
+  "reason": "start",
+  "project": "acme",
+  "design": "booking",
+  "binding": {
+   "current": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 2,
+    "digest": "sha256:<digest>"
+   },
+   "accepted": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 2,
+    "digest": "sha256:<digest>"
+   }
+  },
+  "design_state": "current",
+  "materials": {
+   "current": "sha256:<digest>",
+   "accepted": "sha256:<digest>"
+  },
+  "sources": [
+   {
+    "id": "lib",
+    "locator": "https://github.com/acme/lib",
+    "spec_digest": "sha256:<digest>",
+    "snapshot": "sha256:<digest>",
+    "registration": "<id>",
+    "registered_spec": "sha256:<digest>",
+    "verified": "sha256:<digest>"
+   }
+  ],
+  "association": {
+   "status": "published",
+   "key": "<id>/booking",
+   "generation": 1,
+   "digest": "sha256:<digest>"
+  },
+  "results": [
+   {
+    "source": "lib",
+    "result": "skipped-fresh",
+    "snapshot": null,
+    "previous": null,
+    "problems": [],
+    "http": null,
+    "notable": false,
+    "freshness": "fresh",
+    "retry_after": null,
+    "observation": "sha256:<digest>",
+    "selection": null
+   }
+  ],
+  "unvisited": [],
+  "unregistered": [],
+  "proposals": [],
+  "findings": [],
+  "problems": [],
+  "policy": "sha256:<digest>",
+  "observation_window": {
+   "started_at": "<time>",
+   "ended_at": "<time>"
+  }
+ },
+ "view-match-v1": {
+  "matches": true,
+  "reasons": []
+ },
+ "source-facts-v1": [
+  "sources 1 fresh"
+ ],
+ "material-resolution-v1": {
+  "kind": "carry",
+  "decision_id": "storage",
+  "from_basis": "sha256:<digest>",
+  "to_basis": "sha256:<digest>",
+  "old_and_new_design_refs": {
+   "old": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 2,
+    "digest": "sha256:<digest>"
+   },
+   "new": {
+    "project": "acme",
+    "uid": "<id>",
+    "design": "booking",
+    "revision": 3,
+    "digest": "sha256:<digest>"
+   }
+  },
+  "source_dependencies": [
+   {
+    "material": "lib",
+    "source": "lib",
+    "spec_digest": "sha256:<digest>",
+    "snapshot": "sha256:<digest>",
+    "registered_spec": "sha256:<digest>",
+    "head": "sha256:<digest>"
+   }
+  ],
+  "policy_digest": "sha256:<digest>",
+  "reason": "Reviewed old and new bodies",
+  "actor": "main-ai",
+  "at": "<time>"
+ }
+}
+""")
+_MARKERS = ((re.compile(r"sha256:[0-9a-f]{64}"), "sha256:<digest>"), (re.compile(r"\b[0-9a-f]{64}\b"), "<sha256>"),
+            (re.compile(r"\b[0-9a-f]{40}\b"), "<commit>"), (re.compile(r"\b[0-9a-f]{32}\b"), "<id>"),
+            (re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(?:Z|[+-][0-9]{2}:[0-9]{2})"), "<time>"))
+
+
+def neutral(value: object) -> object:
+    """Digests, commits, ids, registration tokens and times replaced by fixed markers; everything else kept."""
+    if isinstance(value, dict):
+        return {key: neutral(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [neutral(item) for item in value]
+    if isinstance(value, str):
+        for pattern, marker in _MARKERS:
+            value = pattern.sub(marker, value)
+    return value
+
+
+class SharedShapesTest(MaterialsCase):
+    """The input basis, check, resolution, projection, refresh report, view match and facts lines as the API emits
+    them, so another part can be built against the JSON alone."""
+
+    def test_the_api_emits_the_shared_shapes(self) -> None:
+        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        self.save({"materials": built.text}, "Materials")
+        inputs = self.selection()["decision_inputs"]["storage"]
+        actual = {"material-input-basis-v1": materials.input_basis(self.view(), inputs),
+                  "material-check-v1": self.check(), "materials-projection-v1": built.projection}
+        canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.assertEqual("sha256:" + hashlib.sha256(canonical).hexdigest(),
+                         actual["material-input-basis-v1"]["decision_inputs_digest"])
+        self.accept_current()
+        report = self.sources.refresh_for(self.store, "acme", "booking", reason="start").to_json()
+        actual["sources-refresh-v1"] = report
+        actual["view-match-v1"] = self.sources.matches_view(report, self.view())
+        actual["source-facts-v1"] = self.sources.list_facts(
+            lambda project, design: read_view(self.store, project, design))("acme", "booking")
+        self.save({"request": MULTI}, "Corrected")
+        actual["material-resolution-v1"] = self.resolve("carry")
+        self.assertEqual(set(SHARED_SHAPES), set(actual))
+        for name, shape in SHARED_SHAPES.items():
+            with self.subTest(shape=name):
+                self.assertEqual(shape, neutral(actual[name]))
 
 
 if __name__ == "__main__":
