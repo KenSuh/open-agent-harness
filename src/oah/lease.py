@@ -592,7 +592,7 @@ def persist_create_only(path: pathlib.Path, raw: bytes) -> None:
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o600)
     except FileExistsError:
-        fd = os.open(path, os.O_RDONLY | flags)
+        fd = os.open(path, os.O_RDWR | flags)
         created = False
     else:
         created = True
@@ -600,8 +600,23 @@ def persist_create_only(path: pathlib.Path, raw: bytes) -> None:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("evidence is not a single-link regular file")
-        if created:
-            offset = 0
+        if not created:
+            remaining = len(raw) + 1
+            chunks = []
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            existing = b"".join(chunks)
+            if not raw.startswith(existing):
+                raise OSError("create-only evidence bytes differ")
+        else:
+            existing = b""
+        if len(existing) < len(raw):
+            offset = len(existing)
+            os.lseek(fd, offset, os.SEEK_SET)
             while offset < len(raw):
                 written = os.write(fd, raw[offset:])
                 if written <= 0:
@@ -817,10 +832,12 @@ class Store:
                 **extra: object) -> None:
         """Publish `leases` losslessly: unchanged records and healthy design values keep their exact bytes."""
         _refuse_worker_lease()
+        text = serialize_lease_document(self._document, leases)
+        if len(text.encode("utf-8")) > DOCUMENT_LIMIT:
+            raise LeaseError("OAH_STATE_TOO_LARGE", "the lease publication exceeds its read limit; narrow the task metadata before retrying")
         preserved = preserve_invalid(self.dir, self._document, leases)
         if preserved:
             extra = dict(extra, preserved_design_problems=preserved)
-        text = serialize_lease_document(self._document, leases)
         record = {"ts": _iso(self.now()), "event": event, "task": task, "agent": agent, "lease_id": lease_id, **extra}
         self.journal.commit(text, record)
         self._document = read_lease_document(text.encode("utf-8"), self.leases_path)
@@ -831,8 +848,10 @@ class Store:
 
     @contextmanager
     def _lock(self) -> Iterator[None]:
+        entered = False
         try:
             with StateLock(self.lock_path, timeout=self.lock_timeout):
+                entered = True
                 if os.environ.get("OAH_WORKER") == "1":
                     self.journal.check_pending()  # recovery writes lease state; leave it to the dispatcher
                 else:
@@ -841,6 +860,8 @@ class Store:
         except StorageError:
             raise
         except OSError as exc:
+            if entered:
+                raise
             raise StorageError(self.lock_path, exc) from exc
 
     def inspect(self, task: str) -> Lease:
@@ -1059,6 +1080,8 @@ class Store:
             lease = next((entry for entry in leases if entry.task == task), None)
             if lease is not None and lease.agent != agent:
                 raise LeaseError("OAH_LEASE_NOT_YOURS", f"{lease.describe()}; the lease holder records design carries")
+            if lease is not None and lease.expired(self.now()):
+                raise LeaseError("OAH_LEASE_EXPIRED", f"{lease.describe()}; resume it with oah start before carrying its design")
             design, action, extra = update(lease)
             if lease is not None:
                 lease.design = design
@@ -1284,12 +1307,19 @@ class Store:
                                      f"recorded one of origin {origin}; nothing was changed")
             if view.problem is not None:
                 raise LeaseError(task_context.TRANSPORT_HISTORY_UNKNOWN, f"origin {origin}: {view.problem}")
-            if dict(expected) != view.latest:
-                raise LeaseError(task_context.TRANSPORT_CONFLICT, f"origin {origin} moved to sequence "
-                                 f"{view.latest['sequence']}; reread it before appending or replaying")
             same = next((item for item in reversed(view.observations)
                          if item["kind"] == kind and task_context.canonical(item["fact"]) ==
                          task_context.canonical(dict(fact))), None)
+            predecessor = ({"sequence": len(view.observations) - 1,
+                            "record_digest": view.observations[-2]["record_digest"]
+                                             if len(view.observations) > 1 else view.origin}
+                           if view.observations else None)
+            if dict(expected) != view.latest and not (
+                    same is not None and same["sequence"] == view.latest["sequence"]
+                    and predecessor == dict(expected)
+                    and live_proof is not None and live_proof.holds(origin)):
+                raise LeaseError(task_context.TRANSPORT_CONFLICT, f"origin {origin} moved to sequence "
+                                 f"{view.latest['sequence']}; reread it before appending or replaying")
             if same is not None:
                 if any(item["kind"] not in task_context.COMPATIBLE for item in
                        view.observations[same["sequence"]:]):

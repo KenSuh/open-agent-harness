@@ -20,7 +20,7 @@ from unittest import mock
 from oah.design import binding as design
 from oah.design.binding import TaskBasis, TaskBinding, TaskIdentity
 from oah.design.model import DesignError
-from tests.helpers import git_commit, git_env
+from tests.helpers import git_commit, git_env, make_git_repo, make_tmp_dir
 from tests.test_design_context import DesignTask
 from tests.test_design_store import TODAY
 from tests.test_intent_wiring import packet_text
@@ -155,6 +155,20 @@ class ExpiryResumeTest(DesignTask, unittest.TestCase):
     def instance_and_key(self) -> tuple[str, str]:
         data = json.loads(self.oah("design", "task", "t1", "--json").stdout)
         return data["instance"], data["record"]["evidence_key"]
+
+    def test_expired_open_lease_cannot_publish_a_carry(self):
+        self.build({"design": "People book a lesson.\n"})
+        store = self.store(self.repo)
+        current = store.context("acme", "booking").current
+        newer = store.save("acme", "booking", expect_revision=1, expect_digest=current.digest,
+                           reason="wording", parts={"request": "Choose a lesson.\n"}, today=TODAY)
+        self.expire()
+        before = {name: (self.state_dir / name).read_bytes() for name in ("leases.json", "events.jsonl")}
+        carried = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", "2", "--digest",
+                           newer.digest, "--reason", "wording only")
+        self.assertEqual(carried.returncode, 1, carried.stdout + carried.stderr)
+        self.assertIn("OAH_LEASE_EXPIRED", carried.stderr)
+        self.assertEqual({name: (self.state_dir / name).read_bytes() for name in before}, before)
 
     def test_exact_resume_after_expiry_keeps_the_evidence_identity(self):
         self.build({"design": "People book a lesson.\n"})
@@ -380,6 +394,40 @@ class LeaseDocumentTest(DesignTask, unittest.TestCase):
         leases = {lease.task: lease for lease, _stale in Store(self.state_dir).snapshot()}
         self.assertEqual(leases["t1"].design_field.code, "duplicate-design-keys")
 
+    def test_failed_invalid_evidence_write_does_not_block_a_retry(self):
+        import errno
+        import os
+        from oah.atomic import StorageError
+        from oah.lease import Store
+
+        _spaced, original = self.corrupt_t1("null")
+        write = os.write
+        calls = []
+
+        def interrupted(fd, data):
+            calls.append(len(data))
+            if len(calls) == 1:
+                return write(fd, data[:7])
+            raise OSError(errno.ENOSPC, "controlled preservation failure")
+
+        if os.name == "nt":
+            from oah.design import task_context as tc
+            native_write = tc._WindowsIO.write
+
+            def interrupted_native(native, handle, data):
+                native_write(native, handle, data[:7])
+                raise OSError(errno.ENOSPC, "controlled native preservation failure")
+
+            fault = mock.patch.object(tc._WindowsIO, "write", interrupted_native)
+        else:
+            fault = mock.patch("oah.lease.os.write", side_effect=interrupted)
+        with fault:
+            with self.assertRaises(StorageError):
+                Store(self.state_dir).renew(task="t2", agent="claude", ttl_hours=1)
+        Store(self.state_dir).renew(task="t2", agent="claude", ttl_hours=1)
+        kept = self.state_dir / "design-invalid" / (hashlib.sha256(original.encode()).hexdigest() + ".raw")
+        self.assertEqual(kept.read_bytes(), original.encode())
+
     def test_a_pending_transaction_recovers_with_the_exact_bytes(self):
         spaced, _text = self.corrupt_t1("null")
         state_text = self.path.read_text(encoding="utf-8")
@@ -412,6 +460,44 @@ class ReadoutTest(DesignTask, unittest.TestCase):
         text = hook.stdout.decode("utf-8")
         self.assertIn("design=acme/booking@r1", text)
         self.assertIn("oah design task <task>", text)
+
+    def test_hook_keeps_normal_design_labels_and_invalid_records_visible(self):
+        self.build({"design": "People book a lesson.\n"})
+        path = self.state_dir / "leases.json"
+        original = path.read_bytes()
+        for project, name in (("shop", "checkout-flow"), ("academy-booking", "lesson-planner"), (None, None)):
+            with self.subTest(project=project, name=name):
+                document = json.loads(original)
+                if project is None:
+                    document["leases"][0]["design"] = None
+                else:
+                    document["leases"][0]["design"]["binding"].update(project=project, design=name)
+                path.write_text(json.dumps(document), encoding="utf-8")
+                hooked = self.oah("hook", "session-start")
+                self.assertIn("- task=t1 agent=claude", hooked.stdout)
+                self.assertNotIn("OAH_SESSION_START_UNSAFE", hooked.stdout)
+                self.assertIn(name if name is not None else "invalid", hooked.stdout)
+
+    def test_intent_show_explains_unknown_design_history(self):
+        self.build({"design": "People book.\n"})
+        with (self.state_dir / "events.jsonl").open("a") as handle:
+            handle.write("unreadable event\n")
+        shown = self.oah("intent", "show", "t1")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("design=unknown", shown.stdout)
+        self.assertIn(design.ORIGIN_UNKNOWN_CODE, shown.stdout)
+        self.assertIn("next:", shown.stdout)
+
+    def test_missing_design_error_does_not_repeat_its_code(self):
+        import dataclasses
+
+        self.build({"design": "People book.\n"})
+        lease, _judged = self.judged()
+        record = lease.design_record()
+        missing = dataclasses.replace(record, binding=dataclasses.replace(record.binding, design="not-registered"))
+        judged = design.read_context(missing.binding, root=self.repo, task=missing)
+        self.assertEqual(judged.state, "missing")
+        self.assertEqual(str(judged.error("dispatch", "t1", "claude")).count(judged.code), 1)
 
 
 SRC_DIR = str(pathlib.Path(__file__).resolve().parent.parent / "src")
@@ -451,6 +537,25 @@ class ReviewDesignTest(unittest.TestCase):
 
     def test_interrupted_onstack_retirement_never_publishes_a_counted_review(self):
         self.origin_round(interrupt=True)
+
+    def test_whole_inline_reviews_accept_clone_names_without_retirement_pages(self):
+        import os
+
+        for kind in ("plain", "link", "backslash"):
+            with self.subTest(kind=kind):
+                project = design_fix_project(self)
+                if kind == "link":
+                    os.symlink("app.py", project.repo / "src" / "link.py")
+                if kind == "backslash":
+                    if os.name == "nt":
+                        continue
+                    (project.repo / "src" / "back\\slash.py").write_text("x = 1\n", encoding="utf-8")
+                if kind != "plain":
+                    project.commit({})
+                reviewed = project.review()
+                self.assertEqual(reviewed.code, "OAH_REVIEW_CONVERGED", reviewed.message)
+                self.assertFalse((project.state / "design-retirement").exists())
+                self.assertEqual(list(project.temp_root.iterdir()), [])
 
     def origin_round(self, *, interrupt: bool) -> None:
         from oah.design import task_context as tc
@@ -536,9 +641,6 @@ class ReviewDesignTest(unittest.TestCase):
         self.assertFalse(observed["root"].parent.exists())
         self.assertEqual(list(project.temp_root.iterdir()), [])
         log = runner.receipts.read_round_log(project.state, "t1")
-        print("ORIGIN_ROUND", json.dumps({"interrupted": interrupt, "code": result.code,
-              "disposition": observed["disposition"], "receipts": project.names(), "round_log": log,
-              "retired": view.last("retired"), "absence_ack": view.last("retirement-absence-ack")}), flush=True)
         if interrupt:
             self.assertEqual(observed["disposition"][-1][0], "disposed-noncounting")
             retired = view.last("retired")
@@ -646,6 +748,40 @@ class ReviewDesignTest(unittest.TestCase):
         found = summary.convergence(project.repo, project.state, "t1", head, lease.binding(),
                                     design=design.review_evidence(judged))
         self.assertFalse(found.converged)
+
+
+class LegacyPacketDesignTest(unittest.TestCase):
+    def test_main_shaped_lease_with_free_form_design_can_resume_read_and_finish(self):
+        from oah import call, intent, packet
+        from oah.lease import Store
+        from oah.paths import repo_info
+        from tests.test_intent_wiring import clean_env
+
+        repo = make_git_repo(self)
+        text = packet_text().replace("## Plan", "## Design\nA queue feeds the worker.\n\n## Plan")
+        git_commit(repo, {PACKET: text, "src/app.py": "x = 1\n"})
+        state, home = make_tmp_dir(self), make_tmp_dir(self)
+        binding = intent.parse(text).bind(PACKET)
+        Store(state).start(task="t1", agent="claude", scope=("src",), note="main-started legacy lease",
+                           ttl_hours=1, info=repo_info(repo), intent=binding)
+        env = clean_env(home, OAH_STATE_DIR=str(state))
+
+        def oah(*args):
+            return subprocess.run([sys.executable, "-B", "-m", "oah", *args], cwd=repo, env=env,
+                                  capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(packet.check_text(text, task="t1").errors, ())
+        self.assertIsNone(call.read_packet(repo, repo / PACKET, parse_intent=intent.parse).design)
+        resumed = oah("start", "--task", "t1", "--agent", "claude", "--packet", PACKET)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        returned = home / "return.txt"
+        parsed = intent.parse(text)
+        returned.write_text("\n".join(["Summary: done.", parsed.line(), *(f"{ac}: met — ok" for ac in parsed.acs)]) + "\n")
+        finished = oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(returned),
+                       "--allow-missing-wiki-maintenance", "--allow-structural")
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+        self.assertEqual((repo / PACKET).read_text(), text)
+        self.assertNotIn("design_origin", (state / "events.jsonl").read_text())
 
 
 class FixTargetOnlyTest(unittest.TestCase):

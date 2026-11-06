@@ -937,10 +937,13 @@ def dispatch_guard(prepared: Prepared):
     run = prepared.run
     publication = _CORRECTION_PUBLICATION.get()
     if publication is not None and publication.plan.prepared == prepared:
+        publication.budget_check()
+        if publication.plan.design_record is None:
+            yield publication.holder()
+            return
         if publication.launch_guard is None:
             raise EngineError("OAH_RUN_LAUNCH_INVALID", "the correction has no current target comparison")
         with publication.launch_guard() as live:
-            publication.budget_check()
             _check_dispatch_lease(live, pathlib.Path(prepared.cwd), stage=prepared.stage)
             sealed = publication.plan.design_record
             try:
@@ -1806,7 +1809,9 @@ def _prepare(request: CallRequest, settings: Settings, *, root: pathlib.Path, st
                                         "max_rounds": inputs.max_rounds}),
             design_record=None if design is None else json.dumps(
                 {"version": 1, "state": design.record["state"], "fingerprint": design.record["fingerprint"],
-                 "block_sha256": design.record["block_sha256"], "block_bytes": design.record["block_bytes"]}) + "\n")
+                 "block_sha256": design.record["block_sha256"], "block_bytes": design.record["block_bytes"],
+                 "inline_complete": design.record["inline_complete"],
+                 "evidence_key": design.record["evidence_key"]}) + "\n")
         captured = {"metadata": json.loads(inputs.metadata_json), "lease": json.loads(inputs.lease_json),
                     "binding": bound, "settings": dataclasses.asdict(settings), "packet": dataclasses.asdict(packet),
                     "config": json.loads(json.dumps(inputs.config.raw, default=
@@ -1970,6 +1975,33 @@ def _recorded_error(exc: BaseException, retain_worker_text: bool) -> str:
     return _error_diagnostic(exc)[1]
 
 
+def _finish_inline_delivery(prepared: Prepared) -> None:
+    from oah.atomic import write_json_atomic
+    from oah.design import task_context
+
+    publication = _CORRECTION_PUBLICATION.get()
+    if publication is not None:
+        saved = json.loads(publication.plan.design_record) if publication.plan.design_record else None
+    else:
+        path = prepared.run.file_path(DESIGN_NAME)
+        saved = prepared.run._read_json(DESIGN_NAME) if os.path.lexists(path) else None
+    if not isinstance(saved, dict) or not saved.get("inline_complete") or saved.get("transport"):
+        return
+    if publication is None:
+        after = prepared.run._read_json(DESIGN_AFTER_NAME)
+        if after.get("changed") is not False:
+            return
+    else:
+        _check_design_unchanged(prepared, publication.holder(), saved)
+    saved["receiving"] = dict(task_context._whole_receiving(), delivered=True,
+                              provided=[{"inline_bytes": saved["block_bytes"], "references": 0}])
+    saved["delivered"] = True
+    if publication is not None:
+        publication.artifacts[DESIGN_NAME] = json.dumps(saved, sort_keys=True) + "\n"
+    else:
+        write_json_atomic(prepared.run.file_path(DESIGN_NAME), saved)
+
+
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
@@ -2013,12 +2045,29 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             var.reset(token)
     transport_warnings, transport_failure = [], None
     if reference is not None:
+        concluded = False
+        accounting_problem = "transport accounting did not complete"
         try:
             stdout, transport_warnings, transport_failure = reference.conclude(
                 result.stdout, returncode=result.returncode, timed_out=result.timed_out)
             result = dataclasses.replace(result, stdout=stdout)
+            concluded = True
+        except (OSError, ValueError) as exc:
+            accounting_problem = f"transport accounting failed ({type(exc).__name__})"
         finally:
-            reference.release()
+            try:
+                if not concluded:
+                    try:
+                        if prepared.retain_worker_text:
+                            run.write_logs("", "")
+                    finally:
+                        run.result(status="failed", finished_at=_iso(dt.datetime.now(dt.timezone.utc)),
+                                   error=f"OAH_DESIGN_ACCOUNTING_FAILED: {accounting_problem}; inspect oah design task "
+                                         f"{prepared.task} --run {prepared.run_id} before retrying")
+            finally:
+                reference.release()
+        if not concluded:
+            return run.read()
     finished = dt.datetime.now(dt.timezone.utc)
     if prepared.retain_worker_text:
         run.write_logs(clean(result.stdout), clean(result.stderr))
@@ -2060,8 +2109,11 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
         if moved is not None or transport_warnings:
             fields["warnings"] = [*run.read().get("warnings", []), *transport_warnings,
                                   *([moved] if moved is not None else [])]
-    return run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
-                      exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
+    completed = run.result(status=status, finished_at=_iso(finished), duration_s=round((finished - started).total_seconds(), 3),
+                           exit_code=result.returncode, timed_out=result.timed_out, error=error, **fields)
+    if status == "finished" and reference is None:
+        _finish_inline_delivery(prepared)
+    return completed
 
 
 def _start_reference(prepared: "Prepared", env: Mapping[str, str]):

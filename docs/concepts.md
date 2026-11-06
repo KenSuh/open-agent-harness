@@ -515,6 +515,9 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   task inputs, that the change does not affect the task, so its evidence keeps counting; otherwise accept the
   revision, rewrite the Design section and start again. A decision made for other inputs does not apply
   (`OAH_DESIGN_TASK_INPUTS_CHANGED`).
+- **Packet upgrades.** A free-form `## Design` heading remains user prose. Only the structured binding fields make
+  it a task design; upgrading an existing lease does not replace that prose. A carry, like a rebind, needs a live
+  lease. Local task readouts keep the state, reason and recovery command even when a worktree path is private.
 - **Delivery.** Every managed brief carries the accepted parts and the newest distinct draft parts whole, within
   262,144 bytes. A design whose only large content is the verified public originals of a materials record (license
   and notice texts, documents) is sent with every semantic field inline and those originals as read-only files under
@@ -523,6 +526,9 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   refuses such a design before any paid call (`OAH_DESIGN_CODEX_REFERENCE_PROFILE_PENDING`), and so does native Windows
   (`OAH_DESIGN_REFERENCE_UNAVAILABLE`). Anything else over the budget refuses with a split plan
   (`OAH_DESIGN_CONTEXT_TOO_LARGE`).
+  Whole-inline reviews use ordinary clone cleanup and write no design-retirement pages. Reference delivery still
+  needs guarded retirement. The configured process command and wrappers require operator verification: the
+  current profile checks the native executable header and reported version, but does not attest every argv or wrapper.
 - **Design data.** Those files are external data, not product. oah records the run before the files exist, matches
   each Read against their exact bytes, checks the index and every new commit for them after the run, and removes
   exactly the unchanged files it created. Staged or committed data stays recorded (`OAH_DESIGN_TRANSPORT_STAGED`,
@@ -532,6 +538,10 @@ gate evidence and review receipts made for it. A changed intent, scope or gate l
   acknowledges, data a run left, and finish then counts acknowledged files as retained rather than out of scope
   (`OAH_DESIGN_TRANSPORT_RETAINED` until then). A run whose exit was never recorded blocks finish
   (`OAH_DESIGN_TRANSPORT_NONTERMINAL`).
+  The run readout prints the exact cleanup command and expected origin/latest identities. A recorded exit needs no
+  `--settle`; a partial install can be cleaned or acknowledged from its install-progress record. After cleanup, a
+  later complete delivery for the current task and exact design can satisfy an earlier incomplete read, including
+  a whole-inline delivery. Exposure and nonterminal runs still block completion.
 - **Finish, gates, reviews and land.** Each judges the design again at its own control point. Gate evidence carries
   the task's evidence key and goes stale when the design moves, without a rebind; unchanged checks keep their
   entries, and meaningful history rotates into create-only pages (`oah design task <task> --gate-history`). Finish

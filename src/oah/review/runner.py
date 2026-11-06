@@ -268,6 +268,8 @@ class _SnapshotDisposal:
     def __init__(self, state: pathlib.Path, run_id: str, disposition: list):
         self.state, self.run_id, self.disposition = state, run_id, disposition
         self.plan: snapshot.RetirementPlan | None = None
+        self.parent: pathlib.Path | None = None
+        self.allocation: dict | None = None
 
     def prepare(self, parent: pathlib.Path, design, *, metadata: dict | None = None) -> None:
         allocation = {"version": 1, "run": self.run_id, "task_identity": design.task.identity.to_json(),
@@ -275,14 +277,16 @@ class _SnapshotDisposal:
                       "review": dict(metadata or {})}
         if os.path.lexists(parent / "last-message.md"):
             raise snapshot.PlanUnavailable("the designated output slot was not absent before launch")
-        self.plan = snapshot.capture_retirement_plan(allocation, parent, self.state,
-                    output_slot={"path": ["last-message.md"], "producer": {"run": self.run_id, "engine": ENGINE}})
+        self.parent, self.allocation = parent, allocation
 
     def adopt(self, record: dict) -> dict:
-        if (self.plan is None or record.get("run") != self.run_id or
-                record.get("task_identity") != self.plan.descriptor["allocation"]["task_identity"] or
-                record.get("task_basis_digest") != self.plan.descriptor["allocation"]["task_basis_digest"]):
+        if (self.allocation is None or self.parent is None or record.get("run") != self.run_id or
+                record.get("task_identity") != self.allocation["task_identity"] or
+                record.get("task_basis_digest") != self.allocation["task_basis_digest"]):
             raise snapshot.PlanUnavailable("the origin does not match the prelaunch allocation")
+        if self.plan is None:
+            self.plan = snapshot.capture_retirement_plan(self.allocation, self.parent, self.state,
+                        output_slot={"path": ["last-message.md"], "producer": {"run": self.run_id, "engine": ENGINE}})
         return dict(record, retirement={"descriptor": self.plan.descriptor, "sha256": self.plan.descriptor_sha256,
                     "pages_relative": list(self.plan.pages_dir.relative_to(self.state).parts)})
 
@@ -787,11 +791,13 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
     def record_failure(exc):
         if started_round:
             outcome = disposition[-1] if disposition else ("retained", "the disposal outcome is unavailable")
+            disposal_fields = ({"snapshot_disposition": outcome[0],
+                                "snapshot_reason": redact(outcome[1])[:600] if outcome[1] else None}
+                               if dispose is not None else {})
             receipts.log_round(state, task, {"event": "finish", **where, "counted": False,
                                "code": getattr(exc, "code", type(exc).__name__),
                                "message": redact(str(exc))[:600],
-                               "snapshot_disposition": outcome[0],
-                               "snapshot_reason": redact(outcome[1])[:600] if outcome[1] else None})
+                               **disposal_fields})
 
     with _snapshot_failure(record_failure), snapshot.make(
             root, span.head, base=span.base, temp_root=temp_root, warnings=warnings, dispose=dispose) as snap:

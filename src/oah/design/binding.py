@@ -155,7 +155,14 @@ def _section_span(lines: Sequence[str]) -> tuple[list[int], int | None]:
         elif line == END:
             inside = False
         elif not inside and line.rstrip() == SECTION_HEADING:
-            heads.append(number)
+            body = []
+            for following in lines[number + 1:]:
+                if following.startswith(("## ", "# ")) or following in (BEGIN, END):
+                    break
+                body.append(following.strip())
+            if any((match := _BULLET.fullmatch(item)) is not None and match.group(1) in SECTION_KEYS
+                   for item in body) or any("oah packet design <task> rewrites this section" in item for item in body):
+                heads.append(number)
     if not heads:
         return heads, None
     end = len(lines)
@@ -168,7 +175,7 @@ def _section_span(lines: Sequence[str]) -> tuple[list[int], int | None]:
 
 
 def has_section(text: str) -> bool:
-    """True when `text` has a `## Design` heading outside the intent markers (valid or not)."""
+    """True for a structured design binding outside the intent markers, including malformed bindings."""
     return bool(_section_span(_lines(text))[0])
 
 
@@ -787,11 +794,12 @@ def read_context(binding: DesignBinding, *, root: pathlib.Path, store=None, env:
             store = open_store(root, env=env)
         return store.context(binding.project, binding.design)
     except DesignError as exc:
+        reason = str(exc).removeprefix(exc.code + ": ")
         if exc.code == NOT_FOUND_CODE:
-            return TaskDesign("missing", NOT_FOUND_CODE, str(exc), task)
+            return TaskDesign("missing", NOT_FOUND_CODE, reason, task)
         if exc.code in (CORRUPT_CODE, PATH_INVALID_CODE):
-            return TaskDesign("invalid", BINDING_INVALID_CODE, str(exc), task)
-        return _unknown(task, str(exc), exc.code if exc.code == RECOVERY_PENDING_CODE else FRESHNESS_UNKNOWN_CODE)
+            return TaskDesign("invalid", BINDING_INVALID_CODE, reason, task)
+        return _unknown(task, reason, exc.code if exc.code == RECOVERY_PENDING_CODE else FRESHNESS_UNKNOWN_CODE)
     except Exception as exc:  # A limitation: a missing Git object may escape as another exception
         return _unknown(task, f"the design records could not be read ({type(exc).__name__})")
 

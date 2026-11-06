@@ -237,6 +237,13 @@ class MaterialsRecordTest(unittest.TestCase):
 
 
 class CodecAndScreenTest(unittest.TestCase):
+    def test_ambiguous_design_blocks_refuse_reuse_instead_of_retaining_old_text(self):
+        for text in (f"{tc.BEGIN}\nold\n{tc.END}\n{tc.BEGIN}\nolder\n{tc.END}\n",
+                     f"{tc.BEGIN} \nold\n{tc.END}\n", f"{tc.BEGIN}\nold\n"):
+            with self.subTest(text=text):
+                with self.assertRaises(DesignError):
+                    tc.strip_block(text)
+
     def test_read_codec_limits(self):
         self.assertIsNone(tc.read_codec_problem(b"one\ntwo\n"))
         for data, word in ((b"a\r\nb\n", "CR"), ("﻿a\n".encode(), "byte-order"), (b"a\x00\n", "NUL"),
@@ -854,6 +861,30 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 raise tc.InstallRefused('native fixture nonempty directory')
             self.nodes[self.handles[handle]]['deleted'] = True
 
+    def test_native_create_only_evidence_recovers_an_exact_prefix(self):
+        import errno
+
+        native = self.Native()
+        native.kernel = mock.Mock()
+        native.kernel.SetFilePointerEx.return_value = True
+        write = native.write
+        raw = b"exact immutable evidence\n"
+
+        def interrupted(handle, data):
+            write(handle, data[:7])
+            raise OSError(errno.ENOSPC, "controlled native evidence failure")
+
+        with mock.patch.object(tc, "_WindowsIO", return_value=native):
+            with mock.patch.object(native, "write", side_effect=interrupted):
+                with self.assertRaises(OSError):
+                    tc._windows_persist_create_only(pathlib.PureWindowsPath(r"C:\work\evidence.raw"), raw)
+            tc._windows_persist_create_only(pathlib.PureWindowsPath(r"C:\work\evidence.raw"), raw)
+            tc._windows_persist_create_only(pathlib.PureWindowsPath(r"C:\work\evidence.raw"), raw)
+            with self.assertRaises(OSError):
+                tc._windows_persist_create_only(pathlib.PureWindowsPath(r"C:\work\evidence.raw"), b"different")
+        kept = next(item for item in native.nodes.values() if item["name"] == "evidence.raw")
+        self.assertEqual(kept["data"], raw)
+
     def test_create_only_native_roster_checked_bytes_guarded_cleanup_and_reopen(self):
         native = self.Native()
         manifest, first, second = 'a' * 64, 'b' * 64, 'c' * 64
@@ -1354,6 +1385,15 @@ class PolicyCollectorTest(unittest.TestCase):
 
 @unittest.skipIf(os.name == "nt", "the anchored POSIX install is the qualified route")
 class InstallExposureTest(unittest.TestCase):
+    def test_invalid_data_names_refuse_before_creating_any_files(self):
+        root = make_tmp_dir(self)
+        for manifest, payloads in (("../escaped", {"a" * 64: b"a"}), ("a" * 64, {"../../escaped": b"a"})):
+            with self.subTest(manifest=manifest, names=list(payloads)):
+                with self.assertRaises(tc.InstallRefused):
+                    done = tc.install(root, manifest, payloads)
+                    done.close()
+                self.assertEqual(list(root.iterdir()), [])
+
     def test_replaced_root_and_lost_authority_refuse_before_the_next_install_mutation(self):
         import contextlib
 
@@ -1971,6 +2011,236 @@ with mock.patch.object(Store, "observe_transport_exit", persist):
         self.assertIn(tc.REFERENCE_UNAVAILABLE_CODE, refused.stderr)
         self.assertFalse(self.record.exists())
         self.assertEqual(self.events(), [])
+
+
+class CorrectionRecoveryTest(DesignTask, unittest.TestCase):
+    def command_in_process(self, patcher, argv=None):
+        import contextlib
+        import io
+        from oah.cli import main
+
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.chdir(self.repo), mock.patch.dict(os.environ, self.env, clear=True), patcher, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            rc = main(argv or ["call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low"])
+        return rc, output.getvalue(), errors.getvalue()
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_durable_exit_replay_keeps_complete_reads_and_delivery(self):
+        from oah.atomic import StorageError
+        from oah.lease import Store
+
+        self.build(BIG_PARTS)
+        observe = Store.observe_transport_exit
+        failed = []
+
+        def durable_then_error(writer, **kwargs):
+            result = observe(writer, **kwargs)
+            if kwargs["kind"] == "exit-observed" and not failed:
+                failed.append(True)
+                raise StorageError(writer.dir, OSError("controlled error after durable exit"))
+            return result
+
+        rc, output, errors = self.command_in_process(mock.patch.object(Store, "observe_transport_exit", durable_then_error))
+        self.assertEqual(rc, 0, output + errors)
+        self.assertEqual(failed, [True])
+        saved = json.loads((self.last_run() / "design.json").read_bytes())
+        self.assertTrue(saved["receiving"]["delivered"])
+        self.assertFalse((self.repo / tc.DATA_DIR).exists())
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_missing_stream_result_does_not_retain_the_tool_transcript(self):
+        self.build(BIG_PARTS)
+        script = self.work / "fake_stream_claude.py"
+        script.write_text(script.read_text().replace("for event in out:", "for event in out[:-1]:"))
+        called = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low")
+        self.assertEqual(called.returncode, 0, called.stderr)
+        self.assertEqual((self.last_run() / "stdout.log").read_text(), "")
+        self.assertFalse(json.loads((self.last_run() / "design.json").read_bytes())["receiving"]["delivered"])
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_transport_conclusion_error_leaves_a_terminal_run(self):
+        self.build(BIG_PARTS)
+        rc, output, errors = self.command_in_process(mock.patch.object(tc.ReferenceRun, "conclude", side_effect=ValueError("controlled conclusion failure")))
+        self.assertEqual(rc, 1, output + errors)
+        self.assertEqual(json.loads((self.last_run() / "result.json").read_bytes())["status"], "failed")
+        self.assertTrue(self.record.exists())
+
+    def test_malformed_transport_of_another_task_does_not_block_this_task(self):
+        from oah.design.binding import repo_identity
+
+        for task in ("other", "t1"):
+            with self.subTest(task=task):
+                self.build({"design": "People book.\n"})
+                with (self.state_dir / "events.jsonl").open("a") as handle:
+                    handle.write(json.dumps({"event": "design_transport_origin", "task": task}) + "\n")
+                checked = tc.completion_guard(self.state_dir, "t1", root=self.repo,
+                                               repo=repo_identity(self.repo), current=None)
+                self.assertEqual(checked.ok, task == "other", checked.reason)
+
+    def test_finish_rechecks_a_transport_origin_created_after_the_first_check(self):
+        from oah.lease import Store
+
+        self.build({"design": "People book.\n"}, scope="repo")
+        finish = Store.finish
+
+        def racing(writer, **kwargs):
+            with (self.state_dir / "events.jsonl").open("a") as handle:
+                handle.write(json.dumps({"event": "design_transport_origin", "task": "t1"}) + "\n")
+            return finish(writer, **kwargs)
+
+        rc, output, errors = self.command_in_process(mock.patch.object(Store, "finish", racing),
+            ["finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(self.returned()),
+             "--allow-missing-wiki-maintenance", "--allow-structural"])
+        self.assertEqual(rc, 1, output + errors)
+        self.assertIn(tc.TRANSPORT_HISTORY_UNKNOWN, errors)
+        self.assertEqual(Store(self.state_dir).inspect("t1").task, "t1")
+
+    def cleanup_args(self, *, retain=False):
+        view = next(iter(tc.transport_views(self.state_dir, task="t1").values()))
+        return ["design", "task", "t1", "--run", view.record["run"], "--transport-cleanup",
+                "--evidence-plan", view.record["manifest"], "--expect-origin", view.origin, "--expect-record",
+                f"{view.latest['sequence']}:{view.latest['record_digest']}", "--expect-task-basis",
+                view.record["task_basis_digest"], *(["--retain"] if retain else [])]
+
+    def test_refused_start_does_not_publish_a_lease(self):
+        from oah.lease import Store
+
+        started = self.build({"design": "Deploy to /" + "home/ubuntu/app.\n"}, allow_refusal=True)
+        self.assertEqual(started.returncode, 1)
+        self.assertEqual(Store(self.state_dir).snapshot(), [])
+
+    def test_local_stale_readout_keeps_reason_and_next_after_a_carry(self):
+        self.build({"design": "People book.\n"})
+        store = self.store(self.repo)
+        current = store.context("acme", "booking").current
+        newer = store.save("acme", "booking", expect_revision=1, expect_digest=current.digest,
+                           reason="wording", parts={"request": "Choose a lesson.\n"}, today=TODAY)
+        carried = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", "2", "--digest",
+                           newer.digest, "--reason", "wording only")
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        path = self.repo / ".oah/tasks/t1/PACKET.md"
+        path.write_text(path.read_text().replace("Reports miss files.", "Reports miss many files."))
+        text = self.oah("design", "task", "t1")
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn("state=stale", text.stdout)
+        self.assertIn("next:", text.stdout)
+        shown = self.oah("design", "task", "t1", "--json")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        data = json.loads(shown.stdout)
+        self.assertEqual(data["state"], "stale")
+        self.assertTrue(data["reason"] and data["next"])
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_exited_transport_cleanup_needs_no_settle_and_keeps_its_exit_truth(self):
+        self.build(BIG_PARTS)
+        rc, output, errors = self.command_in_process(mock.patch.object(tc.ReferenceRun, "clean", return_value="controlled retention"))
+        self.assertEqual(rc, 0, output + errors)
+        view = next(iter(tc.transport_views(self.state_dir, task="t1").values()))
+        self.assertIsNotNone(view.last("exit-observed"))
+        readout = self.oah("design", "task", "t1", "--run", view.record["run"])
+        self.assertIn("--transport-cleanup", readout.stdout)
+        cleaned = self.oah(*self.cleanup_args(retain=True))
+        self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        after = tc.transport_views(self.state_dir)[view.origin]
+        self.assertIsNone(after.last("aborted", "failed"))
+        self.assertIsNone(after.resolution["fact"].get("settle"))
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_later_whole_inline_delivery_satisfies_finish_and_land_after_partial_reference(self):
+        self._later_inline_delivery_case("correction")
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_later_whole_inline_review_satisfies_finish_and_land_after_partial_reference(self):
+        self._later_inline_delivery_case("review")
+
+    def _later_inline_delivery_case(self, stage):
+        from oah.design.binding import repo_identity
+
+        self.build(BIG_PARTS, scope="repo")
+        first = self.oah("call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low",
+                         env={"FAKE_STREAM_MODE": "partial"})
+        self.assertEqual(first.returncode, 0, first.stderr)
+        store = self.store(self.repo)
+        current = store.context("acme", "booking").current
+        newer = store.save("acme", "booking", expect_revision=1, expect_digest=current.digest,
+                           reason="shorter evidence", parts={"materials": "## Materials\nSee library notes.\n"}, today=TODAY)
+        store.accept("acme", "booking", revision=2, digest=newer.digest, reason="ok", today=TODAY)
+        carried = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", "2", "--digest",
+                           newer.digest, "--reason", "task unchanged")
+        self.assertEqual(carried.returncode, 0, carried.stderr)
+        run = self.oah("call", "codex", "--stage", stage, "--task", "t1", "--tier", "high")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lease, _judged = self.judged()
+        current = {"task_instance_id": lease.design["task_identity"]["task_instance_id"],
+                   "task_basis_digest": lease.design["basis"]}
+        folder = self.last_run()
+        for name, key, invalid in (("design.json", "evidence_key", "sha256:" + "0" * 64),
+                                   ("design.json", "fingerprint", {}),
+                                   ("result.json", "status", "failed"),
+                                   ("result.json", "finished_at", "1900-01-01T00:00:00Z")):
+            with self.subTest(name=name, key=key):
+                path = folder / name
+                original = path.read_bytes()
+                data = json.loads(original)
+                data[key] = invalid
+                path.write_text(json.dumps(data), encoding="utf-8")
+                try:
+                    denied = tc.completion_guard(self.state_dir, "t1", root=self.repo,
+                                                repo=repo_identity(self.repo), current=current)
+                    self.assertEqual(denied.code, tc.TRANSPORT_NOT_DELIVERED, denied.reason)
+                finally:
+                    path.write_bytes(original)
+        for worktree in (True, False):
+            checked = tc.completion_guard(self.state_dir, "t1", root=self.repo, repo=repo_identity(self.repo),
+                                           current=current, worktree=worktree)
+            self.assertTrue(checked.ok, checked.reason)
+        saved = json.loads((self.last_run() / "design.json").read_bytes())
+        self.assertTrue(saved["receiving"]["delivered"])
+        finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done",
+                            "--return", str(self.returned()), "--allow-missing-wiki-maintenance", "--allow-structural")
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
+    def test_local_unreadable_paths_do_not_hide_a_secret(self):
+        self.build({"design": "People book.\n"})
+        judged = self.judged()[1]
+        for path in ("/" + "Us" + "ers/alice/project", "/" + "home/alice/project"):
+            with self.subTest(path=path):
+                unavailable = dataclasses.replace(judged, context=None, reason=f"cannot read {path}")
+                self.assertIn(path, tc.readout_block(unavailable, task="t1", root=self.repo).readout())
+                secret = "AK" + "IA" + "QWERTYUIOPASDFGH"
+                unavailable = dataclasses.replace(unavailable, reason=f"cannot read {path}; {secret}")
+                with self.assertRaises(DesignError) as caught:
+                    tc.readout_block(unavailable, task="t1", root=self.repo)
+                self.assertNotIn(secret, str(caught.exception))
+
+    @unittest.skipIf(os.name == "nt", "POSIX installation fault; native roster has its own coverage")
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_interrupted_data_install_is_recoverable_from_its_progress(self):
+        import errno
+
+        for retain in (False, True):
+            with self.subTest(retain=retain):
+                self.build(BIG_PARTS)
+                chmod = os.fchmod
+                calls = []
+
+                def interrupted(fd, mode):
+                    if mode == 0o444:
+                        calls.append(fd)
+                        if len(calls) == 2:
+                            raise OSError(errno.ENOSPC, "controlled DATA install failure")
+                    return chmod(fd, mode)
+
+                rc, output, errors = self.command_in_process(mock.patch.object(tc.os, "fchmod", side_effect=interrupted))
+                self.assertEqual(rc, 1, output + errors)
+                self.assertNotIn("OAH_STATE_IO", errors)
+                cleaned = self.oah(*self.cleanup_args(retain=retain))
+                self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+                view = next(iter(tc.transport_views(self.state_dir, task="t1").values()))
+                self.assertIsNotNone(view.resolution)
+                if not retain:
+                    self.assertFalse((self.repo / tc.DATA_DIR).exists())
 
 
 class CodexDeliveryTest(DesignTask, unittest.TestCase):

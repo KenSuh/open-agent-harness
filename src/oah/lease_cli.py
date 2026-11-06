@@ -282,9 +282,13 @@ def _design_update(args: argparse.Namespace, info: RepoInfo, store: Store, resul
         record, action, warnings = design.next_record(old, section, context, identity=identity, basis=basis,
                                                       draft=draft)
         design.require_fits(record, args.task)
-        design.judge_with_context(record, context).require("start", task=args.task, agent=args.agent)
+        judged = design.judge_with_context(record, context)
+        judged.require("start", task=args.task, agent=args.agent)
+        from oah.design import task_context
+
+        block = task_context.readout_block(judged, task=args.task, root=root)
         notes.setdefault("warnings", []).extend(warnings)
-        notes.update(action=action, record=record)
+        notes.update(action=action, record=record, readout=block, judged=judged)
         extra = {"design_packet": section.to_json(), "task_basis_digest": basis.digest}
         if locked is None or locked.design is None:  # the epoch's first design binding: capture its outputs
             extra["design_output_baseline"] = design.output_baseline(
@@ -301,15 +305,11 @@ def _design_update(args: argparse.Namespace, info: RepoInfo, store: Store, resul
 
 def _design_readout(lease: Lease, notes: dict, as_json: bool) -> tuple[list[str], dict | None]:
     """After a bound start: the state line and the design text (or an explicit non-delivery), read lock-free."""
-    from oah.design import binding as design
-    from oah.design import task_context
-
     record = notes.get("record")
     if record is None:
         return [], None
-    basis = design.basis_of(record, intent=lease.intent, scope=lease.scope, gates=lease.gates)
-    judged = design.judge(record, root=pathlib.Path(lease.worktree), basis=basis)
-    block = task_context.readout_block(judged, task=lease.task, root=pathlib.Path(lease.worktree))
+    judged = notes["judged"]
+    block = notes["readout"]
     word = {"bound": "OAH_DESIGN_BOUND", "rebound": "OAH_DESIGN_REBOUND", "kept": "OAH_DESIGN_BINDING_KEPT",
             "rebased": "OAH_DESIGN_INPUTS_REBOUND"}
     lines = [f"{word[notes['action']]} task={lease.task} {record.binding.line()} state={judged.state} "
@@ -723,23 +723,22 @@ def _finish(args: argparse.Namespace, info: RepoInfo, store: Store) -> int:
 
         def design_check(live: Lease, _first=first_check, _outputs=outputs) -> dict:
             return _first(live, recompute, _outputs)
-    if transport.origins:
-        inner = design_check
+    inner = design_check
 
-        def design_check(live: Lease, _inner=inner, _first=transport) -> dict:
-            from oah.design.binding import CHANGED_CODE
-            from oah.design.model import DesignError
+    def design_check(live: Lease, _inner=inner, _first=transport) -> dict:
+        from oah.design.binding import CHANGED_CODE
+        from oah.design.model import DesignError
 
-            again = _transport_guard(live, store)  # repeated at the locked control point
-            if again.exempt != _first.exempt:
-                raise DesignError(CHANGED_CODE, f"the design transport accounting of task {live.task} changed during "
-                                  "finish; the lease stays open. Run oah finish again")
-            fields = dict((_inner(live) if _inner is not None else None) or {})
-            if fields:  # design-bound only: an origin-free lease keeps its exact legacy finish event
-                fields["transport_report"] = {"version": 1, "origins": [item["origin"] for item in again.origins
-                                                                          if item["task"] == live.task],
-                                              "exempt": list(again.exempt)}
-            return fields
+        again = _transport_guard(live, store)
+        if again.exempt != _first.exempt:
+            raise DesignError(CHANGED_CODE, f"the design transport accounting of task {live.task} changed during "
+                              "finish; the lease stays open. Run oah finish again")
+        fields = dict((_inner(live) if _inner is not None else None) or {})
+        if fields and again.origins:
+            fields["transport_report"] = {"version": 1, "origins": [item["origin"] for item in again.origins
+                                                                      if item["task"] == live.task],
+                                          "exempt": list(again.exempt)}
+        return fields
     settings = load_config(root).section("gates", GATE_DEFAULTS)
     # unlazy is looked up (and its pin verified) only when a ledger governs this task.
     ledgers = guard.resolve_ledgers(root, lease.task, lease.gates)

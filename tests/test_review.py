@@ -330,6 +330,30 @@ class RecordsTest(unittest.TestCase):
 
 
 class SnapshotTest(unittest.TestCase):
+    def test_finalizer_interrupts_and_authority_errors_propagate(self):
+        from oah.lease import LeaseError
+
+        for error in (KeyboardInterrupt(), LeaseError("OAH_LEASE_CHANGED", "controlled lease change")):
+            with self.subTest(error=type(error).__name__):
+                repo, base, head = self.repo_with_history()
+                temporary = make_tmp_dir(self)
+
+                def dispose(_parent, _created):
+                    raise error
+
+                with self.assertRaises(type(error)):
+                    with snapshot.make(repo, head, base=base, temp_root=temporary, dispose=dispose):
+                        pass
+
+    def test_failed_windows_container_anchor_removes_the_allocated_temp_folder(self):
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        with mock.patch.object(snapshot, "_container_object", side_effect=FileNotFoundError("RUNNER~1")):
+            with self.assertRaises(FileNotFoundError):
+                with snapshot.make(repo, head, base=base, temp_root=temporary):
+                    self.fail("the failed anchor cannot yield a snapshot")
+        self.assertEqual(list(temporary.iterdir()), [])
+
     def repo_with_history(self) -> tuple[pathlib.Path, str, str]:
         repo = make_git_repo(self)
         base = git_commit(repo, {"README.md": "base\n"})

@@ -252,6 +252,43 @@ class DesignGateTest(DesignTask, unittest.TestCase):
 
 
 class ArchiveDurabilityTest(unittest.TestCase):
+    def test_failed_create_only_archive_can_be_retried_after_storage_recovers(self):
+        import errno
+        import os
+
+        store = BindingStore(make_tmp_dir(self), "t1")
+        check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "run"}}, [])
+        original = store.path.read_bytes()
+        write = os.write
+        calls = []
+
+        def interrupted(fd, data):
+            calls.append(len(data))
+            if len(calls) == 1:
+                return write(fd, data[:7])
+            raise OSError(errno.ENOSPC, "controlled archive failure")
+
+        if os.name == "nt":
+            from oah.design import task_context as tc
+            native_write = tc._WindowsIO.write
+
+            def interrupted_native(native, handle, data):
+                native_write(native, handle, data[:7])
+                raise OSError(errno.ENOSPC, "controlled native archive failure")
+
+            fault = mock.patch.object(tc._WindowsIO, "write", interrupted_native)
+        else:
+            fault = mock.patch("oah.lease.os.write", side_effect=interrupted)
+        with mock.patch.object(check_mod, "RECENT_LIMIT", 0):
+            with fault:
+                with self.assertRaises(check_mod.GateRefused):
+                    check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "attest"}}, [{"kind": "run"}])
+            self.assertEqual(store.path.read_bytes(), original)
+            check_mod.publish_design_bindings(store, "ledger", {"G1": {"kind": "attest"}}, [{"kind": "run"}])
+        head = json.loads(store.path.read_bytes())["design_archive_head"]
+        page = store.path.parent / check_mod.HISTORY_DIR_NAME / (head["sha256"] + ".json")
+        self.assertEqual(page.read_bytes(), original)
+
     def test_short_writes_preserve_exact_archive_bytes(self):
         import os
 

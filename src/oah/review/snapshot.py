@@ -164,8 +164,9 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         if not _SHA.fullmatch(value or ""):
             raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", f"the {name} {value!r} is not a full commit SHA")
     parent = pathlib.Path(tempfile.mkdtemp(prefix="oah-review-", dir=temp_root))
-    created = _container_object(parent)
+    created = None
     try:
+        created = _container_object(parent)
         hooks = parent / "no-hooks"
         hooks.mkdir()
         tree = parent / "tree"
@@ -187,14 +188,14 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
         _strip(tree, removed)
         yield Snapshot(tree=tree, head=head, stripped=tuple(removed), parent=parent)
     finally:
-        if dispose is None:
+        if dispose is None or created is None:
             if not remove(parent) and warnings is not None:
                 warnings.append(f"OAH_REVIEW_SNAPSHOT_LEFT: the review snapshot {parent} could not be removed; "
                                 "delete it by hand once no reviewer process uses it")
         else:
             try:
                 outcome = dispose(parent, created)
-            except BaseException as exc:  # an interrupted or failing finalizer retains; it never falls back
+            except (OSError, ValueError, RuntimeError, Retained, PlanUnavailable) as exc:
                 outcome = ("retained", f"the disposal check failed ({type(exc).__name__})")
             if not (isinstance(outcome, tuple) and len(outcome) == 2
                     and outcome[0] in ("disposed", "legacy-disposed", "disposed-noncounting", "retained")):

@@ -91,6 +91,8 @@ def _design_line(info: RepoInfo | None, task: str | None) -> str | None:
     if judged.state == "unbound":
         return None
     named = judged.task.binding.line() if judged.task is not None else "no design binding"
+    if judged.state == "unknown":
+        return f"design=unknown {named} code={judged.code}: {judged.reason}; next: {judged.next_step(task)}"
     return f"design={judged.state} {named}"
 
 

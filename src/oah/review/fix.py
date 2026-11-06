@@ -860,6 +860,22 @@ class _PublicationConflict(ReviewError):
 
 
 @contextlib.contextmanager
+def _design_launch(t: _Task):
+    from oah.lease import utc_now
+
+    store = Store(t.state)
+    with _ExistingLock(store.lock_path):
+        stamp, live = _target(store.capture_document(), t.name)
+        if stamp != t.stamp or live is None or live.expired(utc_now()):
+            raise _PublicationConflict("OAH_LEASE_CHANGED", _ERROR_DIAGNOSTICS["OAH_LEASE_CHANGED"])
+        token = call._CORRECTION_STATE_LOCK.set(t.state)
+        try:
+            yield live
+        finally:
+            call._CORRECTION_STATE_LOCK.reset(token)
+
+
+@contextlib.contextmanager
 def _publication(t: _Task, h: _History):
     """Optimistically compare dependencies before any write, holding only a bounded publication lock."""
     from oah.lease import utc_now
@@ -1359,7 +1375,7 @@ def _correct(request: Request, *, cwd, env, keychain, rules, temp_root, redact) 
             with call._correction_inputs(lambda value: _safe_inputs(value, redact), state=t.state,
                                          lease_json=t.lease_json, bound=bound, packet=packet, config=config,
                                          metadata_json=json.dumps(metadata), max_rounds=limit,
-                                         budget_check=check_budget, launch_guard=lambda: _publication(t, h)) as inputs:
+                                         budget_check=check_budget, launch_guard=lambda: _design_launch(t)) as inputs:
                 prepared = call.prepare(
                     call.CallRequest(engine=ENGINE, stage=STAGE, task=t.name, tier=request.tier,
                                      round_instructions=instructions, timeout_s=request.timeout_s,

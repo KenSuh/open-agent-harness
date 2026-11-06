@@ -657,7 +657,7 @@ def _round_shape(line, task):
         return False
     if "snapshot_disposition" in line or "snapshot_reason" in line:
         if (event != "finish" or line["counted"] is not False or
-                line.get("snapshot_disposition") not in ("retained", "disposed", "legacy-disposed") or
+                line.get("snapshot_disposition") not in ("retained", "disposed", "legacy-disposed", "disposed-noncounting") or
                 "snapshot_reason" not in line or
                 line["snapshot_reason"] is not None and not (
                     isinstance(line["snapshot_reason"], str) and len(line["snapshot_reason"]) <= 600)):

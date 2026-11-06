@@ -38,12 +38,14 @@ class DesignBlock:
     plan: str | None = None  # why nothing was delivered, and what to do
     preamble: str | None = None  # the brief's one-line pointer to the block
     transport: object | None = None  # the reference Transport (payload bytes) when originals go by reference
+    local: bool = False
 
     def readout(self) -> str:
         """What a person or the starting AI sees: the block, or an explicit non-delivery line."""
         if self.delivered and self.text is not None:
             return self.text
-        return _screen_outgoing([f"OAH_DESIGN_CONTEXT_NOT_DELIVERED: {self.plan}\n"], parts={})
+        line = f"OAH_DESIGN_CONTEXT_NOT_DELIVERED: {self.plan}\n"
+        return _screen_outgoing([line], parts={}, local=self.local)
 
 
 def _fence(text: str) -> str:
@@ -126,15 +128,15 @@ def _header(task_design: TaskDesign, shared: list[dict]) -> list[str]:
     return lines
 
 
-def render(task_design: TaskDesign, *, limit: int = DESIGN_BLOCK_LIMIT) -> DesignBlock:
+def render(task_design: TaskDesign, *, limit: int = DESIGN_BLOCK_LIMIT, local: bool = False) -> DesignBlock:
     """The block for a bound task with a readable design; a block that would not fit is not delivered at all."""
     record = dict(task_design.record(), fingerprint=task_design.fingerprint(), limit=limit, included=[], shared=[],
                   omitted=[], block_bytes=0, block_sha256=None, delivered=False, inline_complete=False)
     if task_design.task is None or task_design.context is None:
         why = ("no design is bound to this task" if task_design.task is None else
                f"the design cannot be read ({task_design.state}: {task_design.reason})")
-        _screen_outgoing([why, *_strings(record)], parts={})
-        return DesignBlock(None, record, False, why)
+        _screen_outgoing([why, *_strings(record)], parts={}, local=local)
+        return DesignBlock(None, record, False, why, local=local)
     required, shared = _parts(task_design)
     for _role, revision, name, value in required:
         _screen_materials(value, task=task_design.task.identity.task, part=name, revision=revision)
@@ -205,8 +207,10 @@ def strip_block(text: str) -> str:
     lines = text.splitlines(keepends=True)
     begins = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == BEGIN]
     ends = [n for n, line in enumerate(lines) if line.rstrip("\r\n") == END]
-    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+    if not begins and not ends and BEGIN not in text and END not in text:
         return text
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the stored brief has ambiguous design context markers; rebuild it from the current packet")
     return "".join(lines[:begins[0]] + lines[ends[0] + 1:])
 
 
@@ -675,11 +679,13 @@ def _reconstructs(part: MaterialsPart, projection: str, refs: Mapping[tuple[int,
 # Screening and the pinned Read codec ----------------------------------------------------------------------------
 
 
-def screen_hit(text: str) -> str | None:
+def screen_hit(text: str, *, allow_home_paths: bool = False) -> str | None:
     """The privacy-scanner content rule a provider-readable text matches, never the match itself."""
     from oah.toolkit.checks import CONTENT_RULES
 
     for rule, pattern in CONTENT_RULES:
+        if allow_home_paths and rule == "home-path":
+            continue
         if pattern.search(text):
             return rule
     return None
@@ -689,7 +695,7 @@ class _OutgoingPrivacyRefused(DesignError):
     pass
 
 
-def _screen_outgoing(pieces: Sequence[str], *, parts: Mapping[int, tuple[str, str]]) -> str:
+def _screen_outgoing(pieces: Sequence[str], *, parts: Mapping[int, tuple[str, str]], local: bool = False) -> str:
     """Screen the assembled block; only exact recognized blob-data positions get a separate decoded screen.
 
     The inspection copy omits those encodings only. Returned text, including metadata and originals, is unchanged.
@@ -713,7 +719,8 @@ def _screen_outgoing(pieces: Sequence[str], *, parts: Mapping[int, tuple[str, st
                                           "cannot be screened; nothing was delivered")
         semantic[index] = (semantic[index][:start] + "\n" + canonical(record).decode("utf-8") + "\n"
                            + semantic[index][start + len(framed):])
-    hit = screen_hit("\n".join(semantic))
+    joined = "\n".join(semantic)
+    hit = screen_hit(joined, allow_home_paths=True) if local else screen_hit(joined)
     if hit is not None:
         raise _OutgoingPrivacyRefused(REFERENCE_UNAVAILABLE_CODE, f"the assembled design context matches the "
                                      f"privacy rule {hit}; edit the private text before delivery; nothing was delivered")
@@ -1024,7 +1031,7 @@ def prepare_transport(task_design: TaskDesign, *, task: str, run: str, root: pat
 def readout_block(task_design: TaskDesign, *, task: str, root: pathlib.Path) -> DesignBlock:
     """What start and `oah design task` show: the whole-inline block, or for a design that needs references the
     complete semantic block with each original named by identity (a run installs them as files)."""
-    block = render(task_design)
+    block = render(task_design, local=True)
     if block.delivered or task_design.task is None or task_design.context is None:
         return block
     try:
@@ -3238,8 +3245,16 @@ def _windows_persist_create_only(path, raw: bytes) -> None:
             native.write(leaf, raw)
         except FileExistsError:
             leaf, _ = native.open_child(parent, path.name, directory=False, writable=True)
-            if native.read(leaf, len(raw)) != raw:
+            current = native.info(leaf)
+            if current["type"] != "file" or current["nlink"] != 1 or current["size"] > len(raw):
+                raise InstallRefused("native create-only evidence is not a single-link prefix")
+            existing = native.read(leaf, len(raw))
+            if not raw.startswith(existing):
                 raise InstallRefused("native create-only evidence bytes differ")
+            if existing != raw:
+                if not native.kernel.SetFilePointerEx(leaf, 0, None, 0):
+                    raise InstallRefused("native evidence seek failed")
+                native.write(leaf, raw)
         before = native.info(leaf)
         if before["type"] != "file" or before["nlink"] != 1 or before["size"] != len(raw):
             raise InstallRefused("native create-only evidence object is not exact")
@@ -3272,9 +3287,11 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
     @contextlib.contextmanager
     def step(name):
         with guard(name, done) if guard is not None else contextlib.nullcontext():
-            yield
-            if progress is not None:
-                progress(name, done)
+            try:
+                yield
+            finally:
+                if progress is not None:
+                    progress(name, done)
 
     try:
         with step(DATA_DIR):
@@ -3295,12 +3312,17 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
             with step(name):
                 leaf, _ = native.open_child(done.m_fd, name, directory=False, create=True, writable=True, delete=True)
                 done.leaf_handles[name] = leaf
-                native.write(leaf, data)
-                native.seal(leaf)
-                info = native.info(leaf)
+                try:
+                    native.write(leaf, data)
+                    native.seal(leaf)
+                finally:
+                    info = native.info(leaf)
+                    actual = native.read(leaf, len(data))
+                    done.leaves[name] = {**info, "sha256": "sha256:" + _sha(actual)}
                 if info["type"] != "file" or info["nlink"] != 1 or info["size"] != len(data):
                     raise InstallRefused("the native created leaf is not a single-link exact file")
-                done.leaves[name] = {**info, "sha256": "sha256:" + _sha(data)}
+                if done.leaves[name]["sha256"] != "sha256:" + _sha(data):
+                    raise InstallRefused("the native written DATA bytes differ")
                 native.flush(done.m_fd)
         with step("sealed"):
             native.seal(done.m_fd)
@@ -3335,6 +3357,10 @@ def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *,
     """Create R/.oah-design-data/M/{H..., M} create-only through anchored no-link descriptors. A preexisting M is
     refused (even if equal); an existing plain .oah-design-data is kept as user storage and none of its entries
     are adopted. Files end read-only and M non-writable; that does not stop git add, which the checks catch."""
+    if (_HEX64.fullmatch(manifest) is None or len(payloads) > ENTRY_LIMIT + 1 or
+            any(_HEX64.fullmatch(name) is None for name in payloads) or
+            sum(len(data) for data in payloads.values()) > BUNDLE_LIMIT):
+        raise InstallRefused("the DATA roster identity or budget is invalid")
     if os.name == "nt":
         return _install_windows(root, manifest, payloads, expected_root=expected_root, guard=guard,
                                 progress=progress)
@@ -3347,9 +3373,11 @@ def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *,
     @contextlib.contextmanager
     def step(name):
         with guard(name, done) if guard is not None else contextlib.nullcontext():
-            yield
-            if progress is not None:
-                progress(name, done)
+            try:
+                yield
+            finally:
+                if progress is not None:
+                    progress(name, done)
 
     try:
         with step(DATA_DIR):
@@ -3383,17 +3411,21 @@ def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *,
                         view = view[count:]
                     os.fchmod(descriptor, 0o444)
                     os.fsync(descriptor)
-                    info = os.fstat(descriptor)
-                    os.lseek(descriptor, 0, os.SEEK_SET)
-                    digest = hashlib.sha256()
-                    total = 0
-                    while chunk := os.read(descriptor, 65536):
-                        total += len(chunk)
-                        if total > len(data):
-                            raise InstallRefused("the DATA readback exceeds its exact size")
-                        digest.update(chunk)
                 finally:
-                    os.close(descriptor)
+                    try:
+                        info = os.fstat(descriptor)
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        digest = hashlib.sha256()
+                        total = 0
+                        while chunk := os.read(descriptor, 65536):
+                            total += len(chunk)
+                            if total > len(data):
+                                raise InstallRefused("the DATA readback exceeds its exact size")
+                            digest.update(chunk)
+                        if stat_module.S_ISREG(info.st_mode) and info.st_nlink == 1 and total == info.st_size:
+                            done.leaves[name] = dict(_identity(info), sha256="sha256:" + digest.hexdigest())
+                    finally:
+                        os.close(descriptor)
                 if (not stat_module.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != len(data)
                         or total != len(data) or digest.hexdigest() != _sha(data)):
                     raise InstallRefused(f"{name} is not the complete single-link regular file just written")
@@ -4088,6 +4120,11 @@ def _reopened_anchors(done: Installation, installed: Mapping, progress: Sequence
     return writable and current.get("m") == expected["m_writable"]
 
 
+def installation_facts(view: TransportView) -> dict:
+    observed = view.last("installed", "install-progress")
+    return observed["fact"] if observed is not None else {}
+
+
 def _reopen_windows(root, manifest: str, installed: Mapping, progress=(), *, native=None):
     native = native if native is not None else _WindowsIO()
     recorded = {item["name"]: item for item in installed.get("leaves", [])}
@@ -4373,6 +4410,44 @@ class Completion:
         return self.code is None
 
 
+def _later_inline_delivery(state_dir: pathlib.Path, task: str, current: Mapping, after: TransportView) -> bool:
+    from datetime import datetime
+    from oah.design.binding import judge, task_view
+
+    view = task_view(state_dir, task)
+    record = view.record
+    if record is None or record.identity.instance != current.get("task_instance_id") or record.basis != current.get("task_basis_digest"):
+        return False
+    try:
+        terminal = after.last(*QUIESCENT)
+        cutoff = datetime.fromisoformat(terminal["ts"].replace("Z", "+00:00"))
+        where = view.lease.worktree if view.lease is not None else (view.epoch or {}).get("worktree")
+        if not isinstance(where, str):
+            return False
+        expected = judge(record, root=pathlib.Path(where)).fingerprint()
+        folder = pathlib.Path(state_dir) / "runs" / task
+        for path in sorted(folder.iterdir(), reverse=True):
+            try:
+                raw = _read_regular(path / "result.json", POLICY_FILE_LIMIT)
+                saved = _read_regular(path / "design.json", POLICY_FILE_LIMIT)
+                if raw is None or saved is None:
+                    continue
+                result, data = strict_json(raw.decode("utf-8")), strict_json(saved.decode("utf-8"))
+                finished = datetime.fromisoformat(result["finished_at"].replace("Z", "+00:00"))
+                receiving = data.get("receiving") or {}
+                if (finished > cutoff and result.get("status") == "finished" and result.get("stage") in ("initial", "correction", "review")
+                        and result.get("exit_code") == 0 and result.get("timed_out") is False
+                        and data.get("evidence_key") == record.key and data.get("fingerprint") == expected
+                        and data.get("inline_complete") is True and receiving.get("reference_delivery") == "not-required"
+                        and receiving.get("delivered") is True and data.get("delivered") is True):
+                    return True
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                continue
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return False
+    return False
+
+
 def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, repo: str | None,
                      current: Mapping | None, events: Sequence[Mapping] | None = None, head: str | None = None,
                      worktree: bool = True) -> Completion:
@@ -4385,7 +4460,8 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
     Refusals come in a fixed order across all origins: unreadable history, a run without a recorded exit, sticky
     exposure, current exposure, unresolved data, then missing delivery."""
     views = [view for view in transport_views(state_dir, events=events).values()
-             if repo is None or view.record.get("repo_common_identity") == repo or view.problem is not None]
+             if repo is None or view.task == task or view.record.get("repo_common_identity") == repo
+             or not view.task]
     if not views:
         return Completion(None, "no design transport origin")
     summaries = tuple(view.summary() for view in views)
@@ -4462,11 +4538,14 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
                 and view.record.get("task_identity", {}).get("task_instance_id") == current.get("task_instance_id")
                 and view.record.get("task_basis_digest") == current.get("task_basis_digest")
                 and (view.record.get("profile") or {}).get("operation") == "work"]
-    if own_work and not own_work[-1].delivered:
+    if own_work and not own_work[-1].delivered and not _later_inline_delivery(
+            state_dir, task, current, own_work[-1]):
         view = own_work[-1]
         return Completion(TRANSPORT_NOT_DELIVERED, f"the latest design-bound run {view.record.get('run')} did not "
                           "receive its complete design (its required originals were not all read); its edits stay, "
-                          "but completion needs a run that received it. Run oah call again", origins=summaries)
+                          f"but completion needs a run that received it. Run oah call claude --stage initial --task {task}; "
+                          f"for a whole-inline design, oah call codex --stage correction --task {task} also delivers it",
+                          origins=summaries)
     return Completion(None, f"{len(views)} transport origin(s) accounted", tuple(exempt), summaries)
 
 
@@ -4976,7 +5055,7 @@ class ReferenceRun:
                      "model_directed_observation": reads["model_directed"], "application_evidence": "not-observed",
                      "delivered": delivered}
         update_sidecar(self.run_dir, receiving=receiving, origin=self.origin)
-        return (result_line or stdout), warnings, failure
+        return result_line, warnings, failure
 
     def _files(self) -> list[TransportFile]:
         return [TransportFile(_bare(item["sha256"]), self.payloads[_bare(item["sha256"])], item["kind"],

@@ -69,8 +69,10 @@ def _leases(info, env: Mapping[str, str]) -> list[str]:
         more = f",+{len(lease.scope) - MAX_SCOPE} more" if len(lease.scope) > MAX_SCOPE else ""
         design = _design_label(lease)
         designed = designed or bool(design)
-        out.append(f"- task={lease.task} agent={lease.agent} scope={','.join(lease.scope[:MAX_SCOPE])}{more}{design} "
+        out.append(f"- task={lease.task} agent={lease.agent} scope={','.join(lease.scope[:MAX_SCOPE])}{more} "
                    f"({when})")
+        if design:
+            out.append(f"  {design}")
     if len(entries) > MAX_LEASES:
         out.append(f"- and {len(entries) - MAX_LEASES} more; `oah status` lists them all.")
     if designed:
@@ -81,11 +83,15 @@ def _leases(info, env: Mapping[str, str]) -> list[str]:
 def _design_label(lease) -> str:
     """The bound design from the lease record alone: no store read, no git (the hook stays fast)."""
     if getattr(lease, "design_invalid", False):
-        return " design=invalid-record"
+        return "design: invalid record; run oah design task <task>"
     binding = (lease.design or {}).get("binding") if isinstance(lease.design, dict) else None
     if not isinstance(binding, dict):
         return ""
-    return f" design={binding.get('project')}/{binding.get('design')}@r{binding.get('revision')}"
+    label = f"design={binding.get('project')}/{binding.get('design')}@r{binding.get('revision')}"
+    if _preview_text(label.encode("utf-8")) is not None:
+        return label
+    label = f"project: {binding.get('project')}; design: {binding.get('design')}; revision: {binding.get('revision')}"
+    return label if _preview_text(label.encode("utf-8")) is not None else "design: bound; run oah design task <task>"
 
 
 def _log(root: pathlib.Path) -> list[str]:

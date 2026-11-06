@@ -484,6 +484,11 @@ def _task_run(args: argparse.Namespace, store) -> int:
               f"quiescent={str(row['quiescent']).lower()} delivered={str(row['delivered']).lower()}")
         print(f"  expect: --evidence-plan {row['manifest']} --expect-origin {row['origin']} --expect-record "
               f"{latest['sequence']}:{latest['record_digest']} --expect-task-basis {row['task_basis_digest']}")
+        command = (f"oah design task {args.task} --run {args.run} --transport-cleanup "
+                   f"--evidence-plan {row['manifest']} --expect-origin {row['origin']} --expect-record "
+                   f"{latest['sequence']}:{latest['record_digest']} --expect-task-basis {row['task_basis_digest']}")
+        print(f"  run: {command}" + ("" if row["quiescent"] else
+              " --settle aborted (only after confirming the original runner stopped; use failed for a failed run)"))
         if row["exposure"] is not None:
             print(f"  exposure: {row['exposure'].get('state')} — {row['exposure'].get('why')} (sticky)")
         eligibility = row["eligibility"]
@@ -501,7 +506,7 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
     from oah.design import task_context as tc
     from oah.lease import Store
 
-    for name in ("evidence_plan", "expect_origin", "expect_record", "expect_task_basis", "settle"):
+    for name in ("evidence_plan", "expect_origin", "expect_record", "expect_task_basis"):
         if getattr(args, name) is None:
             raise DesignError(tc.REFERENCE_UNAVAILABLE_CODE, f"--transport-cleanup needs --{name.replace('_', '-')}; "
                               "read the exact values with oah design task <task> --run <run>")
@@ -527,6 +532,8 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
             raise DesignError(tc.TRANSPORT_HISTORY_UNKNOWN, "the original review allocation cannot be located")
         receiving = pathlib.Path(cwd)
     if not view.quiescent:
+        if args.settle is None:
+            raise DesignError(tc.TRANSPORT_NONTERMINAL, "the run has no recorded exit; after confirming its runner stopped, give --settle aborted or --settle failed")
         writer = Store(store.state)
         expected = writer.settle_transport(task=args.task, origin=view.origin, expected=expected,
                                           root=receiving, settle=args.settle)
@@ -570,8 +577,7 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
     if checked["state"] != "clean":
         raise DesignError(checked["code"] or tc.TRANSPORT_HISTORY_UNKNOWN, f"{checked['why']}; nothing was changed")
     settled = view.last("boot-settled")
-    installed = settled["fact"]["installed_current"] if settled else \
-        next((item["fact"] for item in view.observations if item["kind"] == "installed"), {})
+    installed = settled["fact"]["installed_current"] if settled else tc.installation_facts(view)
     done, states = tc.reopen(root, view.record["manifest"], installed, progress=view.observations)
     try:
         intents = {name for item in view.observations if item["kind"] == "cleanup-intent"
@@ -622,7 +628,7 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
                 identity = tc.retained_identity(done)
                 writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="ack-retained",
                                          authority=authority, held=True,
-                                         fact={"operation": operation, "settle": args.settle,
+                                         fact={"operation": operation, "settle": settled["fact"].get("settle") if settled else None,
                                                "reason": "retained by request" if args.retain else "partial or missing",
                                                "leaves": leaves, "retained_identity": identity,
                                                "missing": sorted(name for name, item in leaves.items()
