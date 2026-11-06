@@ -166,7 +166,15 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
     parent = pathlib.Path(tempfile.mkdtemp(prefix="oah-review-", dir=temp_root))
     created = None
     try:
-        created = _container_object(parent)
+        if dispose is not None:
+            from oah.design import task_context as tc
+
+            try:
+                parent = tc._trusted_root(parent)
+                created = _container_object(parent)
+            except (OSError, ValueError, tc.InstallRefused, tc.RootUnavailable) as exc:
+                raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", "the design snapshot root cannot be anchored; "
+                                  "check its path, permissions and local filesystem, then retry") from exc
         hooks = parent / "no-hooks"
         hooks.mkdir()
         tree = parent / "tree"

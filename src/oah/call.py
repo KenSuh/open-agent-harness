@@ -2012,6 +2012,8 @@ def _finish_inline_delivery(prepared: Prepared) -> None:
 def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
             rules: Sequence[Mapping] | None = None, redact: Callable[[str], str] | None = None) -> dict:
     """Run a prepared call in the foreground and record what happened."""
+    from oah.design.task_context import RootUnavailable
+
     run = prepared.run
     env = dict(os.environ if base_env is None else base_env)
     env.update(prepared.env_additions)
@@ -2027,7 +2029,7 @@ def execute(prepared: Prepared, *, base_env: Mapping[str, str] | None = None,
     tokens = (_REFERENCE_RUN.set(reference), _DESIGN_RUN.set(_design_bound(prepared)))
     try:
         result = _run_prepared(prepared, env, prompt)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError, RootUnavailable) as exc:
         if prepared.retain_worker_text:
             run.write_logs("", "")
         extra = _end_reference_failed(reference)

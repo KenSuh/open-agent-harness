@@ -782,7 +782,8 @@ class LegacyPacketDesignTest(unittest.TestCase):
         self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
         returned = home / "return.txt"
         parsed = intent.parse(text)
-        returned.write_text("\n".join(["Summary: done.", parsed.line(), *(f"{ac}: met — ok" for ac in parsed.acs)]) + "\n")
+        returned.write_text("\n".join(["Summary: done.", parsed.line(), *(f"{ac}: met — ok" for ac in parsed.acs)]) + "\n",
+                            encoding="utf-8")
         finished = oah("finish", "--task", "t1", "--agent", "claude", "--summary", "done", "--return", str(returned),
                        "--allow-missing-wiki-maintenance", "--allow-structural")
         self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)

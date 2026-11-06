@@ -349,9 +349,21 @@ class SnapshotTest(unittest.TestCase):
         repo, base, head = self.repo_with_history()
         temporary = make_tmp_dir(self)
         with mock.patch.object(snapshot, "_container_object", side_effect=FileNotFoundError("RUNNER~1")):
-            with self.assertRaises(FileNotFoundError):
-                with snapshot.make(repo, head, base=base, temp_root=temporary):
+            with self.assertRaises(ReviewError) as caught:
+                with snapshot.make(repo, head, base=base, temp_root=temporary, dispose=lambda *_: None):
                     self.fail("the failed anchor cannot yield a snapshot")
+        self.assertEqual(caught.exception.code, "OAH_REVIEW_SNAPSHOT_FAILED")
+        self.assertIn("permissions", str(caught.exception))
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_design_free_snapshot_keeps_working_when_design_native_identity_is_unavailable(self):
+        from oah.design import task_context as tc
+
+        repo, base, head = self.repo_with_history()
+        temporary = make_tmp_dir(self)
+        with mock.patch.object(snapshot, "_container_object", side_effect=tc.InstallRefused("native unavailable")):
+            with snapshot.make(repo, head, base=base, temp_root=temporary) as snap:
+                self.assertEqual((snap.tree / "src/app.py").read_bytes(), b"print('hi')\n")
         self.assertEqual(list(temporary.iterdir()), [])
 
     def repo_with_history(self) -> tuple[pathlib.Path, str, str]:

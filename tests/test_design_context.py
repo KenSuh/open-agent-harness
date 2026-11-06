@@ -8,6 +8,7 @@ elsewhere with that reason. Nothing here launches a real engine or reaches the n
 from __future__ import annotations
 
 import base64
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -656,7 +657,7 @@ class TransportPlanTest(DesignTask, unittest.TestCase):
     def test_reference_plan_keeps_every_semantic_field_inline(self):
         self.build(BIG_PARTS)
         _lease, judged = self.judged()
-        self.assertFalse(tc.select(judged, task="t1", engine="claude").delivered)
+        self.assertFalse(tc.select(judged, task="t1", engine="claude", platform="darwin").delivered)
         plan = tc.prepare_transport(judged, task="t1", run="r1", root=self.repo, engine="claude", operation="work")
         text = plan.block.text
         self.assertLessEqual(len(text.encode("utf-8")), tc.INLINE_LIMIT)
@@ -751,10 +752,11 @@ class CodexPolicyTest(unittest.TestCase):
             return self.value
 
     def collect(self, *, user=b'', preferences=None, argv=(), files=None):
-        sources = {"/users/fixture/.codex/config.toml": user, **(files or {})}
+        sources = {str(pathlib.Path(path).absolute()): raw for path, raw in
+                   {"/users/fixture/.codex/config.toml": user, **(files or {})}.items()}
 
         def read(path):
-            raw = sources.get(str(path))
+            raw = sources.get(str(pathlib.Path(path).absolute()))
             return ("present", raw, None) if raw is not None else ("absent", None, None)
 
         def directory(path):
@@ -796,14 +798,15 @@ class CodexPolicyTest(unittest.TestCase):
         files = {'/workspace/.codex/config.toml': b'deny_read = ["**"]\n'}
         ignored = self.collect(files=files)
         self.assertEqual(ignored['local_policy'], 'verified')
-        trusted = b'[projects."/workspace"]\ntrust_level = "trusted"\n'
+        selector = json.dumps(str(pathlib.Path('/workspace').absolute()))
+        trusted = f'[projects.{selector}]\ntrust_level = "trusted"\n'.encode('utf-8')
         found = self.collect(user=trusted, files=files)
         self.assertEqual(found['local_policy'], 'denied')
         self.assertEqual(next(row['trust_level'] for row in found['sources'] if row['kind'] == 'project-trust'),
                          'trusted')
         self.assertEqual(self.collect(user=trusted, files={'/workspace/.codex/config.toml':
                          b'model = "gpt-6.1-sol"\n'})['local_policy'], 'verified')
-        self.assertEqual(self.collect(user=b'[projects."/workspace"]\ntrust_level = "maybe"\n',
+        self.assertEqual(self.collect(user=f'[projects.{selector}]\ntrust_level = "maybe"\n'.encode('utf-8'),
                                       files=files)['local_policy'], 'unknown')
 
     def test_malformed_legacy_profile_table_is_unknown_without_throwing(self):
@@ -813,6 +816,52 @@ class CodexPolicyTest(unittest.TestCase):
                     '/users/fixture/.codex/research.config.toml': b'model = "gpt-6.1-sol"\n'})
                 self.assertEqual(found['local_policy'], 'unknown')
                 self.assertFalse(found['launch_eligible'])
+
+
+class RootAnchoringTest(unittest.TestCase):
+    def test_trusted_root_resolves_ancestors_but_pinned_owned_root_cannot_be_swapped(self):
+        base = make_tmp_dir(self)
+        owned = base / "owned"
+        owned.mkdir()
+        alias = base / "alias"
+        alias.symlink_to(base, target_is_directory=True)
+        live = tc.LiveRoots({"receiving-root": alias / "owned"})
+        self.addCleanup(live.close)
+        self.assertTrue(live.current())
+        if os.name == "nt":
+            with self.assertRaises(PermissionError):
+                owned.rename(base / "original")
+            self.assertTrue(live.current())
+            return
+        owned.rename(base / "original")
+        owned.mkdir()
+        self.assertFalse(live.current())
+
+    def test_installation_keeps_the_resolved_root_and_rejects_owned_data_links(self):
+        base = make_tmp_dir(self)
+        owned = base / "owned"
+        owned.mkdir()
+        alias = base / "alias"
+        alias.symlink_to(base, target_is_directory=True)
+        done = tc.install(alias / "owned", 'a' * 64, {'b' * 64: b'owned bytes'})
+        self.addCleanup(done.close)
+        self.assertEqual(done.root, owned)
+        self.assertIsNone(tc.check_leaves(done))
+        other = base / "other"
+        other.mkdir()
+        (other / tc.DATA_DIR).symlink_to(owned / tc.DATA_DIR, target_is_directory=True)
+        with self.assertRaises((tc.InstallRefused, OSError)):
+            tc.install(other, 'c' * 64, {'d' * 64: b'never written'})
+        self.assertFalse((owned / tc.DATA_DIR / ('c' * 64)).exists())
+
+    def test_anchor_os_errors_are_typed_actionable_refusals(self):
+        base = make_tmp_dir(self)
+        owner = "_WindowsIO" if os.name == "nt" else "_open_dir"
+        with mock.patch.object(tc, owner, side_effect=PermissionError("controlled anchor refusal")):
+            with self.assertRaises(DesignError) as caught:
+                tc.LiveRoots({"receiving-root": base})
+        self.assertTrue(caught.exception.code.startswith("OAH_"))
+        self.assertIn("permissions", str(caught.exception))
 
 
 class WindowsNativeRosterTest(unittest.TestCase):
@@ -1104,6 +1153,50 @@ class WindowsNativeRosterTest(unittest.TestCase):
         with self.assertRaisesRegex(tc.InstallRefused, 'no-progress'):
             native.write(7, b'cannot progress')
 
+    def test_getsecurityinfo_self_relative_bytes_are_bounded_hashed_and_freed(self):
+        import ctypes as ct
+        import types
+
+        raw = struct.pack('<BBHIIII', 1, 0, 0x8004, 20, 0, 0, 32) + bytes(range(20))
+        for length in (20, len(raw), 65536, 0, 19, 65537):
+            with self.subTest(length=length):
+                calls = []
+                allocation = ct.create_string_buffer(raw.ljust(65536, b'\0'), 65536)
+                address = ct.addressof(allocation)
+
+                def get_security(handle, kind, fields, owner, group, dacl, sacl, descriptor):
+                    calls.append(('GetSecurityInfo', handle, kind, fields))
+                    owner._obj.value, dacl._obj.value = address + 20, address + 32
+                    descriptor._obj.value = address
+                    return 0
+
+                def descriptor_length(descriptor):
+                    calls.append(('GetSecurityDescriptorLength', descriptor.value))
+                    return length
+
+                def copy(descriptor, size):
+                    calls.append(('string_at', descriptor.value, size))
+                    return ct.string_at(descriptor, size)
+
+                native = tc._WindowsIO.__new__(tc._WindowsIO)
+                native.ct = types.SimpleNamespace(c_void_p=ct.c_void_p, c_uint32=ct.c_uint32,
+                    byref=ct.byref, string_at=copy, create_string_buffer=ct.create_string_buffer)
+                native.security = types.SimpleNamespace(GetSecurityInfo=get_security,
+                    GetSecurityDescriptorLength=descriptor_length,
+                    MakeSelfRelativeSD=mock.Mock(return_value=0))
+                native.kernel = types.SimpleNamespace(LocalFree=lambda descriptor:
+                    calls.append(('LocalFree', descriptor.value)))
+                expected = [('GetSecurityInfo', 7, 1, 5), ('GetSecurityDescriptorLength', address)]
+                if 20 <= length <= 65536:
+                    digest = native.security_digest(7)
+                    self.assertEqual(digest, 'sha256:' + hashlib.sha256(allocation.raw[:length]).hexdigest())
+                    expected.append(('string_at', address, length))
+                else:
+                    with self.assertRaisesRegex(tc.InstallRefused, 'windows-security-descriptor-bound'):
+                        native.security_digest(7)
+                self.assertEqual(calls, [*expected, ('LocalFree', address)])
+                native.security.MakeSelfRelativeSD.assert_not_called()
+
 
 class WindowsPolicyTest(unittest.TestCase):
     class Registry:
@@ -1163,6 +1256,25 @@ class NativeContinuityTest(unittest.TestCase):
             self.host_reads = 0
             self.fail = None
             self.mount_id = b"mount001"
+            self.opened = {}
+            self.next_fd = 10000
+
+        def open(self, name, flags, *, dir_fd=None):
+            path = self.opened[dir_fd][0] / name if dir_fd is not None else pathlib.Path(name)
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise OSError("controlled Darwin no-follow refusal")
+            values = list(info)
+            values[1] = info.st_ino % (2 ** 64)
+            self.next_fd += 1
+            self.opened[self.next_fd] = (path, os.stat_result(values))
+            return self.next_fd
+
+        def fstat(self, descriptor):
+            return self.opened[descriptor][1]
+
+        def close(self, descriptor):
+            del self.opened[descriptor]
 
         def host_uuid(self):
             self.host_reads += 1
@@ -1176,7 +1288,8 @@ class NativeContinuityTest(unittest.TestCase):
             data[48:56] = self.mount_id
             struct.pack_into("<I", data, 64, 0x1000)
             data[72:76] = b"hfs\0"
-            data[88:90] = b"/\0"
+            mount = os.fsencode(pathlib.Path.cwd().anchor) + b"\0"
+            data[88:88 + len(mount)] = mount
             if self.fail == "remote":
                 struct.pack_into("<I", data, 64, 0)
             if self.fail == "apfs":
@@ -1196,7 +1309,7 @@ class NativeContinuityTest(unittest.TestCase):
                 struct.pack_into("<II", data, 72, 0x40, 0xC0060000)
                 struct.pack_into("<II", data, 92, 0x40, 0xC0060000)
             else:
-                data[24:32] = os.fstat(descriptor).st_ino.to_bytes(8, "little")
+                data[24:32] = self.fstat(descriptor).st_ino.to_bytes(8, "little")
             if self.fail == "short":
                 return bytes(data[:-1])
             if self.fail == "invalid-mask":
@@ -1212,9 +1325,19 @@ class NativeContinuityTest(unittest.TestCase):
         self.root = make_tmp_dir(self)
         self.reader = self.Reader()
 
-    def capture(self):
+    @contextlib.contextmanager
+    def observation(self):
+        import types
+
+        system = types.SimpleNamespace(**vars(os))
+        system.open, system.close, system.fstat = self.reader.open, self.reader.close, self.reader.fstat
         with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
-                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader, create=True):
+                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader, create=True), \
+                mock.patch.object(tc, "os", system):
+            yield
+
+    def capture(self):
+        with self.observation():
             return tc.capture_local_continuity("12" * 32, {"receiving": self.root, "holder": self.root})
 
     def test_candidate_reads_are_real_but_do_not_assert_installed_qualification(self):
@@ -1224,7 +1347,7 @@ class NativeContinuityTest(unittest.TestCase):
         self.assertEqual(found["observation_provenance"]["candidate_status"], "verified")
         self.assertEqual(found["roots"][0]["roles"], ["holder", "receiving"])
         self.assertIsNotNone(found["roots"][0]["permanent_object_digest"])
-        self.assertNotIn(str(os.getuid()), json.dumps(found))
+        self.assertNotIn(f'"uid": {self.reader.principal()[0]}', json.dumps(found))
 
     def test_native_buffers_remote_filesystem_and_invalid_attributes_refuse(self):
         for failure in ("remote", "apfs", "short", "invalid-mask", "zero-object"):
@@ -1254,8 +1377,7 @@ class NativeContinuityTest(unittest.TestCase):
         next_boot = {**boot, "value_digest": "sha256:" + "b" * 64}
         leaf = self.root / "controlled-node"
         leaf.write_bytes(b"bytes")
-        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
-                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+        with self.observation():
             nodes = tc.capture_node_continuity("12" * 32, {"controlled-node": leaf})
         nodes["status"] = "qualified"
         record = {"nonce": "12" * 32, "continuity": old, "boot": boot}
@@ -1275,8 +1397,7 @@ class NativeContinuityTest(unittest.TestCase):
     def test_node_candidate_uses_native_permanent_object_and_refuses_replacement(self):
         leaf = self.root / "leaf"
         leaf.write_bytes(b"bytes")
-        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
-                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+        with self.observation():
             before = tc.capture_node_continuity("12" * 32, {"leaf": leaf})
             leaf.rename(self.root / "old-leaf")
             leaf.write_bytes(b"bytes")
@@ -1298,8 +1419,7 @@ class NativeContinuityTest(unittest.TestCase):
         done = tc.install(case.repo, manifest, {manifest: manifest_bytes})
         self.addCleanup(done.close)
         paths = tc.installation_node_paths(case.repo, manifest, tuple(done.leaves), data_created=True)
-        with mock.patch.object(tc, "_recovery_problem", return_value="recovery-profile-not-installed-qualified"), \
-                mock.patch.object(tc, "_DarwinContinuity", return_value=self.reader):
+        with self.observation():
             continuity = tc.capture_local_continuity(nonce, roots)
             nodes = tc.capture_node_continuity(nonce, paths)
         continuity["status"] = continuity["host"]["status"] = nodes["status"] = "qualified"
@@ -1345,8 +1465,11 @@ class PolicyCollectorTest(unittest.TestCase):
         self.paths = [str(self.root / tc.DATA_DIR / ("a" * 64) / ("b" * 64))]
 
     def collect(self):
-        return tc.collect_process_policy(self.root, {"HOME": str(self.home)}, operation="work",
-                                         data_paths=self.paths)
+        native = {"files": [], "values": [], "sources": [], "problems": [],
+                  "managed_dir": self.home / "managed-settings.d"}
+        with mock.patch.object(tc._WindowsPolicy, "collect", return_value=native):
+            return tc.collect_process_policy(self.root, {"HOME": str(self.home)}, operation="work",
+                                             data_paths=self.paths)
 
     def settings(self, where: pathlib.Path, value) -> None:
         where.parent.mkdir(parents=True, exist_ok=True)
@@ -1420,7 +1543,9 @@ class PolicyCollectorTest(unittest.TestCase):
                     raise PermissionError("controlled directory failure")
                 return real(path)
 
-            with mock.patch.object(concrete, "iterdir", unreadable):
+            owner, name, failure = ((tc._WindowsIO, "names", mock.Mock(side_effect=PermissionError("controlled native directory failure")))
+                                    if os.name == "nt" else (concrete, "iterdir", unreadable))
+            with mock.patch.object(owner, name, failure):
                 self.assertEqual(self.collect()["local_policy"], "unknown")
 
 
@@ -2372,6 +2497,24 @@ class CodexDeliveryTest(DesignTask, unittest.TestCase):
         self.assertEqual([item["part"] for item in saved["included"]], ["design", "request"])
         self.assertEqual(saved["receiving"]["reference_delivery"], "not-required")
         self.assertEqual(self.events(), [])  # whole-inline: no transport origin
+
+    def test_an_anchor_io_refusal_records_failure_without_a_traceback_or_child(self):
+        self.build({"design": "People book a lesson.\n"})
+        probe = ("import sys\nfrom unittest import mock\nfrom oah.cli import main\n"
+                 "from oah.design import task_context as tc\n"
+                 "with mock.patch.object(tc, sys.argv[1], side_effect=PermissionError('controlled anchor failure')):\n"
+                 "    raise SystemExit(main(sys.argv[2:]))\n")
+        result = subprocess.run([sys.executable, '-B', '-c', probe,
+            '_WindowsIO' if os.name == 'nt' else '_open_dir',
+            'call', 'codex', '--stage', 'correction', '--task', 't1', '--tier', 'high'],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(tc.REFERENCE_UNAVAILABLE_CODE, result.stderr)
+        self.assertIn('permissions', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+        saved = json.loads((self.last_run() / 'result.json').read_text(encoding='utf-8'))
+        self.assertEqual(saved['status'], 'failed')
+        self.assertFalse(self.record.exists())
 
     def test_a_review_receives_the_accepted_text_and_the_newer_draft(self):
         self.build({"design": "ALPHA people book a lesson.\n"})

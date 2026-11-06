@@ -2253,7 +2253,7 @@ def _continuity_collection(reader, nonce: str, roots: Mapping[str, pathlib.Path]
               "namespace": "native-darwin-kernel"}
     grouped, allocated = {}, 0
     for role, path in sorted(roots.items()):
-        path = pathlib.Path(path).absolute()
+        path = _trusted_root(path)
         fd = _continuity_open(path)
         volume_fd = None
         try:
@@ -2456,6 +2456,25 @@ class InstallRefused(Exception):
     pass
 
 
+class RootUnavailable(DesignError):
+    def __init__(self, reason: str) -> None:
+        DesignError.__init__(self, REFERENCE_UNAVAILABLE_CODE,
+                             f"{reason}. Check the selected root, its permissions and ancestor directories, then retry")
+
+
+def _trusted_root(root: pathlib.Path) -> pathlib.Path:
+    try:
+        path = pathlib.Path(root).absolute()
+        if len(path.parts) > 64 or len(os.fsencode(path)) > 1024 or ".." in path.parts:
+            raise RootUnavailable("the selected root path exceeds its bound")
+        resolved = path.resolve(strict=True)
+        if len(resolved.parts) > 64 or len(os.fsencode(resolved)) > 1024:
+            raise RootUnavailable("the resolved root path exceeds its bound")
+        return resolved
+    except (OSError, RuntimeError) as exc:
+        raise RootUnavailable("the selected root cannot be resolved") from exc
+
+
 class _WindowsIO:
     def __init__(self):
         import ctypes as ct
@@ -2510,7 +2529,7 @@ class _WindowsIO:
             (self.security, "InitializeAcl", [ct.c_void_p, ct.c_uint32, ct.c_uint32], ct.c_int32),
             (self.security, "AddAccessAllowedAce", [ct.c_void_p, ct.c_uint32, ct.c_uint32, ct.c_void_p], ct.c_int32),
             (self.security, "GetLengthSid", [ct.c_void_p], ct.c_uint32),
-            (self.security, "MakeSelfRelativeSD", [ct.c_void_p, ct.c_void_p, ct.POINTER(ct.c_uint32)], ct.c_int32),
+            (self.security, "GetSecurityDescriptorLength", [ct.c_void_p], ct.c_uint32),
             (self.security, "OpenProcessToken", [ct.c_void_p, ct.c_uint32, ct.POINTER(ct.c_void_p)], ct.c_int32),
             (self.security, "GetTokenInformation", [ct.c_void_p, ct.c_int, ct.c_void_p, ct.c_uint32,
                                                     ct.POINTER(ct.c_uint32)], ct.c_int32),
@@ -2556,16 +2575,12 @@ class _WindowsIO:
         owner, dacl, descriptor = ct.c_void_p(), ct.c_void_p(), ct.c_void_p()
         try:
             if self.security.GetSecurityInfo(handle, 1, 5, ct.byref(owner), None, ct.byref(dacl), None,
-                                             ct.byref(descriptor)) != 0 or not owner.value or not dacl.value:
+                                             ct.byref(descriptor)) != 0 or not descriptor.value or not owner.value or not dacl.value:
                 self._error("windows-owner-or-acl-unreadable")
-            size = ct.c_uint32(0)
-            self.security.MakeSelfRelativeSD(descriptor, None, ct.byref(size))
-            if not 20 <= size.value <= 65536:
+            size = self.security.GetSecurityDescriptorLength(descriptor)
+            if not 20 <= size <= 65536:
                 self._error("windows-security-descriptor-bound")
-            buffer = ct.create_string_buffer(size.value)
-            if not self.security.MakeSelfRelativeSD(descriptor, buffer, ct.byref(size)):
-                self._error("windows-security-descriptor-copy-failed")
-            return "sha256:" + _sha(buffer.raw[:size.value])
+            return "sha256:" + _sha(ct.string_at(descriptor, size))
         finally:
             if descriptor.value:
                 self.kernel.LocalFree(descriptor)
@@ -2920,16 +2935,15 @@ class LiveRoots:
     def __init__(self, roots: Mapping[str, pathlib.Path]):
         if not roots or len(roots) > 6:
             raise InstallRefused("the live root role count is outside its bound")
-        self.native = _WindowsIO() if os.name == "nt" else None
+        self.native = None
         self.rows, self.closed = [], False
         grouped = {}
-        for role, path in roots.items():
-            path = pathlib.Path(path).absolute()
-            grouped.setdefault(str(path), (path, []))[1].append(role)
         try:
+            self.native = _WindowsIO() if os.name == "nt" else None
+            for role, path in roots.items():
+                path = _trusted_root(path)
+                grouped.setdefault(str(path), (path, []))[1].append(role)
             for path, roles in grouped.values():
-                if len(path.parts) > 64 or len(os.fsencode(path)) > 1024 or ".." in path.parts:
-                    raise InstallRefused("the live root path exceeds its bound")
                 if self.native is not None:
                     _root, handles = self.native.open_anchor(path)
                     try:
@@ -2950,6 +2964,9 @@ class LiveRoots:
                         raise
                 self.rows.append({"path": path, "roles": sorted(roles), "handles": handles,
                                   "identities": identities})
+        except (OSError, InstallRefused) as exc:
+            self.close()
+            raise RootUnavailable("the selected role roots cannot be anchored") from exc
         except BaseException:
             self.close()
             raise
@@ -3044,7 +3061,7 @@ def verify_live_roots(record: Mapping, roots: Mapping[str, pathlib.Path], *, ret
             if not live.current() or observed != {role: value for role, value in original.items() if role not in omitted}:
                 return "a holder, common, state, receiving root or its ancestors changed"
         return None
-    except (OSError, ValueError, TypeError, KeyError, InstallRefused):
+    except (OSError, ValueError, TypeError, KeyError, InstallRefused, RootUnavailable):
         return "the complete current role roots cannot be verified"
 
 
@@ -3338,18 +3355,24 @@ def _install_windows(root, manifest: str, payloads: Mapping[str, bytes], *, nati
         raise
 
 
-def open_root(root: pathlib.Path) -> tuple[int, dict]:
-    if os.name == "nt":
-        native = _WindowsIO()
-        descriptor, ancestors = native.open_anchor(root)
-        return WindowsAnchor(native, descriptor, ancestors), native.info(descriptor)
-    descriptor = _open_dir(str(root))
-    held = os.fstat(descriptor)
-    named = os.stat(root)
-    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
-        os.close(descriptor)
-        raise InstallRefused("the receiving root changed while it was opened")
-    return descriptor, _identity(held)
+def open_root(root: pathlib.Path) -> tuple[int, dict[str, int | str], pathlib.Path]:
+    root = _trusted_root(root)
+    descriptor = None
+    try:
+        descriptor = _continuity_open(root)
+        held = os.fstat(descriptor)
+        named = os.stat(root, follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+            raise InstallRefused("the receiving root changed while it was opened")
+        return descriptor, _identity(held), root
+    except (OSError, InstallRefused) as exc:
+        if descriptor is not None:
+            _close_root(descriptor)
+        raise RootUnavailable("the selected receiving root cannot be anchored") from exc
+    except BaseException:
+        if descriptor is not None:
+            _close_root(descriptor)
+        raise
 
 
 def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *, expected_root=None,
@@ -3362,9 +3385,9 @@ def install(root: pathlib.Path, manifest: str, payloads: Mapping[str, bytes], *,
             sum(len(data) for data in payloads.values()) > BUNDLE_LIMIT):
         raise InstallRefused("the DATA roster identity or budget is invalid")
     if os.name == "nt":
-        return _install_windows(root, manifest, payloads, expected_root=expected_root, guard=guard,
+        return _install_windows(_trusted_root(root), manifest, payloads, expected_root=expected_root, guard=guard,
                                 progress=progress)
-    root_fd, root_identity = open_root(root)
+    root_fd, root_identity, root = open_root(root)
     done = Installation(pathlib.Path(root), manifest, root_fd, None, None, root_identity, False)
     if expected_root is not None and _anchor_stamp(root_identity) != _anchor_stamp(expected_root):
         done.close()
@@ -4170,11 +4193,14 @@ def reopen(root: pathlib.Path, manifest: str, installed: Mapping, *,
     """Anchored reopen of a recorded installation for later same-host housekeeping: (installation of the leaves
     still present and matching, per-leaf state present-unchanged|absent|changed)."""
     if os.name == "nt":
-        return _reopen_windows(root, manifest, installed, progress)
+        try:
+            return _reopen_windows(_trusted_root(root), manifest, installed, progress)
+        except RootUnavailable:
+            return None, {item["name"]: "unknown" for item in installed.get("leaves", [])}
     states: dict[str, str] = {}
     try:
-        root_fd, root_identity = open_root(root)
-    except (OSError, InstallRefused):
+        root_fd, root_identity, root = open_root(root)
+    except (OSError, InstallRefused, RootUnavailable):
         return None, {item["name"]: "unknown" for item in installed.get("leaves", [])}
     done = Installation(pathlib.Path(root), manifest, root_fd, None, None, root_identity,
                         bool(installed.get("data_dir_created")))
@@ -4376,7 +4402,7 @@ def acknowledged_problem(root: pathlib.Path, manifest: str, acknowledged: Mappin
         finally:
             if done is not None:
                 done.close()
-    except (OSError, InstallRefused, KeyError, TypeError, ValueError):
+    except (OSError, InstallRefused, RootUnavailable, KeyError, TypeError, ValueError):
         return "the exact retained object and parent identities cannot be verified"
     return None
 
@@ -4638,11 +4664,12 @@ def read_chunk(root: pathlib.Path, *, task: str, run: str, manifest: str, blob: 
                           "offset not negative")
     if os.name == "nt":
         try:
-            data = _windows_read_blob(root, task=task, run=run, manifest=manifest, blob=blob)
-        except (OSError, InstallRefused, ValueError) as exc:
-            raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the native design read cannot be verified") from exc
+            data = _windows_read_blob(_trusted_root(root), task=task, run=run, manifest=manifest, blob=blob)
+        except (OSError, InstallRefused, ValueError, RootUnavailable) as exc:
+            raise DesignError(REFERENCE_UNAVAILABLE_CODE, "the native design read cannot be verified; check the "
+                              "selected root and its permissions, then retry") from exc
         return _chunk_result(data, run=run, manifest=manifest, blob=blob, offset=offset, length=length)
-    root_fd, _identity_now = open_root(root)
+    root_fd, _identity_now, _resolved = open_root(root)
     try:
         data_fd = _open_dir(DATA_DIR, dir_fd=root_fd)
         try:
