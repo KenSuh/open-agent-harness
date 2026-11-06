@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import unittest
 from unittest import mock
 
@@ -302,6 +303,29 @@ class InputBasisTest(MaterialsCase):
 
 class PortableEvidenceTest(MaterialsCase):
     """Complete originals survive an empty clone, with S1 times kept apart from S2 freshness."""
+
+    def test_restricted_copyright_preambles_stay_unknown_in_materials(self) -> None:
+        notice = "Copyright (c) 2026 Acme"
+        prefixes = (notice + ". Commercial use is forbidden.",
+                    notice + "\nCopyright notice: commercial use is forbidden.",
+                    notice + "\nAll rights reserved; commercial use is forbidden.")
+        for index, prefix in enumerate(prefixes):
+            with self.subTest(prefix=prefix):
+                original = LICENSE.replace(notice, prefix).encode()
+                self.release(f"v1.0.{index + 1}", {"LICENSE": original.decode()})
+                checked = self.sources.check_one(self.spec)
+                self.assertEqual("changed", checked.result)
+                assert checked.snapshot is not None
+                manifest = self.sources.snapshot(checked.snapshot)
+                assert manifest is not None
+                saved = manifest["license"]["files"][0]
+                self.assertEqual(original, self.sources.blob(saved["sha256"]))
+                built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+                self.assertEqual("unknown", built.record["materials"][0]["license"]["eligibility"])
+                empty = self.make_sources(make_tmp_dir(self) / "empty")
+                report = materials.check(built.text, empty, None, self.view())
+                self.assertEqual("unknown", report["source_reads"][0]["eligibility"])
+                self.assertEqual("verified-from-portable-bytes", report["source_reads"][0]["historical_evidence"])
 
     def test_registered_license_manifest_is_preserved_and_rechecked_offline(self) -> None:
         data = b'[package]\nname = "example"\nversion = "1.0.1"\nlicense = "MIT"\n'
@@ -716,6 +740,34 @@ class GuardedOutputTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.refuses(name, output.PATH_INVALID_CODE, reason)
 
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS descriptor staging")
+    def test_staging_is_an_owned_unlinked_descriptor_on_the_pinned_filesystem(self) -> None:
+        observed: list[int] = []
+        original = output._publish
+        missing = str(self.root / "missing-staging")
+
+        def publish(handle: int, parent: int, final: str) -> None:
+            info = os.fstat(handle)
+            self.assertEqual(os.fstat(parent).st_dev, info.st_dev)
+            self.assertEqual(0, info.st_nlink)
+            self.assertFalse(os.get_inheritable(handle))
+            self.assertEqual(missing, os.environ["TMPDIR"])
+            observed.append(handle)
+            original(handle, parent, final)
+
+        with mock.patch.dict(os.environ, {"TMPDIR": missing}), mock.patch.object(output, "_publish", side_effect=publish):
+            path = output.write_new(self.root, "out/materials.md", b"owned bytes")
+        self.assertEqual(1, len(observed))
+        with self.assertRaises(OSError):
+            os.fstat(observed[0])
+        self.assertEqual(b"owned bytes", path.read_bytes())
+        self.assertEqual(["out", "out/materials.md"], self.listing())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS descriptor staging")
+    def test_unavailable_staging_interpreter_refuses_without_public_files(self) -> None:
+        with mock.patch.object(output.sys, "executable", str(self.root / "missing-python")):
+            self.refuses("out/materials.md", output.UNVERIFIABLE_CODE, "anonymous-file-unavailable")
+
     def test_links_missing_or_non_folder_parents_and_existing_finals_refuse(self) -> None:
         (self.root / "linked").symlink_to(self.outside, target_is_directory=True)
         (self.root / "file").write_bytes(b"")
@@ -905,11 +957,11 @@ class WindowsOutputTest(unittest.TestCase):
 
 
 class ProposalAssessmentTest(MaterialsCase):
-    def prepare_proposal(self):
+    def prepare_proposal(self: MaterialsCase, selection=None):
         from oah.design.sources import assessment
         from tests.test_design_judgement import FakeJudge, config
 
-        built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
+        built = materials.build(selection or self.selection(), self.sources, view=self.view(), now=self.clock.now())
         self.save({"materials": built.text}, "Materials")
         self.sources.refresh_for(self.store, "acme", "booking", reason="start")
         self.release("v1.1.0", {"src/lib.rs": "pub fn changed() {}\n"})
@@ -920,6 +972,42 @@ class ProposalAssessmentTest(MaterialsCase):
         provider = FakeJudge()
         provider.labels = {"may_break_users": 0.82, "security_fix": 0.93, "drops_platform": 0.1}
         return assessment, proposals, provider, config()
+
+    def test_roles_follow_decision_membership_in_current_and_accepted_materials(self) -> None:
+        def selection(role: str, snapshot: str | None = None):
+            return self.selection(
+                decisions=[{"id": "storage", "status": "selected" if role == "chosen" else "open",
+                            "chosen": "storage-option" if role == "chosen" else None,
+                            "alternatives": ["storage-option"] if role == "alternative" else [], "reason": "Compare"}],
+                materials=[{"id": "storage-option", "source": "lib", "decision": "storage",
+                            "choice": "selected" if role == "chosen" else "candidate",
+                            **({"snapshot": snapshot} if snapshot else {})}])
+
+        assessment, proposals, provider, cfg = self.prepare_proposal(selection("alternative"))
+        snapshot = proposals[0].from_snapshot
+        reader = lambda project, design: read_view(self.store, project, design)
+        cases = ((None, "alternative"), ("dependency", "alternative"), ("chosen", "chosen"),
+                 ("alternative", "chosen"), ("dependency", "chosen"), (None, "dependency"))
+        for index, (current, expected) in enumerate(cases):
+            with self.subTest(current=current, expected=expected):
+                if index in (1, 3, 5):
+                    self.accept_current()
+                if current:
+                    changed = selection(current, snapshot)
+                    changed["resolutions"] = [self.resolve("reselected", selection=changed)]
+                    built = materials.build(changed, self.sources, view=self.view(), now=self.clock.now())
+                    self.save({"materials": built.text}, "Explicit material selection")
+                self.sources.refresh_for(self.store, "acme", "booking", reason="resume")
+                proposals, findings = self.sources.proposals()
+                self.assertEqual([], findings)
+                self.assertEqual(1, len(proposals))
+                before = len(provider.calls)
+                rows = assessment.assess(self.sources, proposals, reader=reader, config=cfg,
+                                         env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+                self.assertEqual(before + 1, len(provider.calls))
+                self.assertEqual(expected, provider.calls[-1][0]["fields"]["role"])
+                self.assertEqual("yes", rows[0].assessment["applied"])
+                self.assertEqual("open", rows[0].status)
 
     def test_public_assessment_is_saved_displayed_and_has_no_authority(self) -> None:
         assessment, proposals, provider, config = self.prepare_proposal()
@@ -1025,6 +1113,78 @@ class SourcesCliTest(MaterialsCase):
         code, out, _err = self.cli("sources", "materials", "check", "--design", "acme/booking", "--revision", "2",
                                    "--json")
         self.assertEqual("needs-review", json.loads(out)["overall"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS anonymous staging")
+    def test_render_out_uses_the_destination_with_a_missing_private_tmpdir(self) -> None:
+        selection = str(self.selection_file())
+        (self.repo / "out").mkdir()
+        missing = self.repo.parent / "missing" / "tmp"
+        self.assertFalse(missing.exists())
+        with mock.patch.dict(os.environ, {"TMPDIR": str(missing)}):
+            code, text, err = self.cli("sources", "materials", "render", "--design", "acme/booking", "--input", selection)
+            self.assertEqual(0, code, err)
+            self.assertIsNotNone(materials.parse(text))
+            code, _out, err = self.cli("sources", "materials", "render", "--design", "acme/booking", "--input", selection,
+                                      "--out", "out/materials.md")
+        self.assertEqual(0, code, err)
+        self.assertEqual(text.encode(), (self.repo / "out/materials.md").read_bytes())
+        self.assertEqual(["materials.md"], sorted(p.name for p in (self.repo / "out").iterdir()))
+        self.assertFalse(missing.exists())
+
+    def test_stale_advice_keeps_other_proposals_and_never_reassesses(self) -> None:
+        from oah.config import load_config
+        from oah.rerank import DEFAULTS, judge
+        from oah.design.sources.state import digest_of
+
+        assessment, proposals, provider, _cfg = ProposalAssessmentTest.prepare_proposal(self)
+        (self.repo / ".oah/config.toml").write_text(
+            '[rerank]\nenabled = true\nprovider = "fake"\n[rerank.judgement]\nenabled = true\n', encoding="utf-8")
+        cfg = load_config(self.repo).section("rerank", DEFAULTS)
+        other = self.store.new("acme", "reporting", title="Reporting", parts={"design": "Reports.\n"}, today=TODAY)
+        assert other.revision is not None and other.digest is not None
+        other_view = read_view(self.store, "acme", "reporting")
+        selected = self.selection()
+        selected["materials"][0]["snapshot"] = proposals[0].from_snapshot
+        built = materials.build(selected, self.sources, view=other_view, now=self.clock.now())
+        self.store.save("acme", "reporting", expect_revision=other.revision, expect_digest=other.digest,
+                        reason="Materials", parts={"materials": built.text}, today=TODAY)
+        self.sources.refresh_for(self.store, "acme", "reporting", reason="start")
+        reader = lambda project, design: read_view(self.store, project, design)
+        proposals, findings = self.sources.proposals()
+        self.assertEqual([], findings)
+        assessed = assessment.assess(self.sources, proposals, reader=reader, config=cfg,
+                                     env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        self.assertEqual(["yes", "yes"], [p.assessment["applied"] for p in assessed])
+        stale = next(p for p in assessed if p.design == "booking")
+        stored = self.sources.assessment(stale.assessment["record"])
+        assert stored is not None
+        self.save({"request": MULTI}, "New requirements")
+        before = {str(p.relative_to(self.sources.state.root)): p.read_bytes()
+                  for p in self.sources.state.root.rglob("*") if p.is_file()}
+        calls = len(provider.calls)
+        with mock.patch.object(judge, "judge", side_effect=AssertionError("listing cannot infer")), \
+                mock.patch.object(Sources, "refresh_for", side_effect=AssertionError("listing cannot refresh")):
+            rows = assessment.recorded(self.sources, proposals, reader=reader, config=cfg)
+            by_design = {p.design: p for p in rows}
+            self.assertEqual({"booking", "reporting"}, set(by_design))
+            self.assertEqual("no(stale-or-unknown)", by_design["booking"].assessment["applied"])
+            self.assertEqual([], by_design["booking"].assessment["labels"])
+            self.assertIsNone(by_design["booking"].assessment["urgency"])
+            self.assertEqual("yes", by_design["reporting"].assessment["applied"])
+            code, out, err = self.cli("sources", "proposals", "--json")
+            self.assertEqual(0, code, err)
+            self.assertEqual({"booking", "reporting"}, {p["design"] for p in json.loads(out)["proposals"]})
+            with self.assertRaises(ViewUnavailable):
+                assessment.assess(self.sources, [stale], reader=reader, config=cfg,
+                                  env={"FAKE_JUDGE_KEY": "k"}, providers={"fake": provider})
+        current = dict(stored["basis"], binding=reader("acme", "booking").identity())
+        request = assessment.request_for(self.sources, stale, current, reader("acme", "booking"))
+        applied = judge.apply(stored["judgement"], current_input_ref=digest_of(current), config=cfg,
+                              sources=self.sources, request=request, policy=self.sources.policy_digest())
+        self.assertEqual((False, "stale-input"), (applied.applied, applied.reason))
+        self.assertEqual(calls, len(provider.calls))
+        self.assertEqual(before, {str(p.relative_to(self.sources.state.root)): p.read_bytes()
+                                 for p in self.sources.state.root.rglob("*") if p.is_file()})
 
     def test_diff_exit_codes(self) -> None:
         head = self.sources.head(self.spec).verified.snapshot

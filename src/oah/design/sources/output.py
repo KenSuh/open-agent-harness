@@ -14,11 +14,14 @@ and handle-based rename and cleanup. Validation failures create nothing.
 from __future__ import annotations
 
 import errno
+import array
 import contextlib
 import ctypes
 import os
 import pathlib
+import socket
 import stat
+import subprocess
 import sys
 import unicodedata
 from typing import Callable, Iterator
@@ -30,6 +33,28 @@ _RESERVED = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f
 EXISTS_CODE = "OAH_MATERIALS_OUTPUT_EXISTS"
 PATH_INVALID_CODE = "OAH_MATERIALS_OUTPUT_PATH_INVALID"
 UNVERIFIABLE_CODE = "OAH_MATERIALS_OUTPUT_UNVERIFIABLE"
+_DARWIN_STAGING = """
+import array, ctypes, os, socket, sys
+os.fchdir(int(sys.argv[1]))
+libc = ctypes.CDLL(None, use_errno=True)
+libc.tmpfile.argtypes = []
+libc.tmpfile.restype = ctypes.c_void_p
+libc.fileno.argtypes = [ctypes.c_void_p]
+libc.fileno.restype = ctypes.c_int
+libc.fclose.argtypes = [ctypes.c_void_p]
+libc.fclose.restype = ctypes.c_int
+stream = libc.tmpfile()
+if not stream:
+    raise SystemExit(1)
+try:
+    fd = libc.fileno(stream)
+    if fd < 0:
+        raise SystemExit(1)
+    with socket.socket(fileno=int(sys.argv[2])) as channel:
+        channel.sendmsg([b"stage"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))])
+finally:
+    libc.fclose(stream)
+"""
 
 
 class OutputError(Exception):
@@ -121,26 +146,37 @@ def _directory_path(fd: int) -> pathlib.Path:
 @contextlib.contextmanager
 def _anonymous(parent: int) -> Iterator[int]:
     if sys.platform == "darwin":
-        libc = ctypes.CDLL(None, use_errno=True)
+        handles = array.array("i")
         try:
-            libc.tmpfile.argtypes = []
-            libc.tmpfile.restype = ctypes.c_void_p
-            libc.fileno.argtypes = [ctypes.c_void_p]
-            libc.fileno.restype = ctypes.c_int
-            libc.fclose.argtypes = [ctypes.c_void_p]
-            libc.fclose.restype = ctypes.c_int
-        except AttributeError:
-            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging is unavailable") from None
-        stream = libc.tmpfile()
-        if not stream:
-            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging cannot be created")
+            receiver, sender = socket.socketpair()
+            with receiver, sender:
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", _DARWIN_STAGING, str(parent), str(sender.fileno())],
+                    pass_fds=(parent, sender.fileno()), env={"TMPDIR": ".", "PYTHONDONTWRITEBYTECODE": "1"},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=30, check=False)
+                if result.returncode:
+                    raise OSError(errno.ENOTSUP, "anonymous staging failed")
+                receiver.settimeout(1)
+                message, ancillary, flags, _address = receiver.recvmsg(5, socket.CMSG_SPACE(handles.itemsize))
+                for level, kind, data in ancillary:
+                    if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                        handles.frombytes(data[:len(data) - len(data) % handles.itemsize])
+                if message != b"stage" or flags or len(handles) != 1:
+                    raise OSError(errno.EIO, "anonymous descriptor transfer failed")
+            info = os.fstat(handles[0])
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 0 or info.st_dev != os.fstat(parent).st_dev:
+                raise OSError(errno.ENOTSUP, "anonymous staging is not on the pinned filesystem")
+            os.set_inheritable(handles[0], False)
+        except (OSError, subprocess.TimeoutExpired):
+            for handle in handles:
+                os.close(handle)
+            raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "the pinned filesystem cannot provide "
+                              "anonymous staging") from None
         try:
-            fd = libc.fileno(stream)
-            if fd < 0:
-                raise OutputError(UNVERIFIABLE_CODE, "anonymous-file-unavailable", "anonymous staging has no descriptor")
-            yield fd
+            yield handles[0]
         finally:
-            libc.fclose(stream)
+            os.close(handles[0])
     elif sys.platform.startswith("linux") and hasattr(os, "O_TMPFILE"):
         try:
             fd = os.open(".", os.O_RDWR | os.O_TMPFILE | getattr(os, "O_CLOEXEC", 0), 0o644, dir_fd=parent)

@@ -41,7 +41,14 @@ _TITLES = {"mit license", "the mit license", "mit license (mit)", "the mit licen
            "the isc license", "isc license (isc)", "the isc license (isc)", "isc", "bsd 2-clause license",
            "bsd 3-clause license", "bsd-2-clause license", "bsd-3-clause license", "the bsd license", "bsd license",
            "the 2-clause bsd license", "the 3-clause bsd license", "new bsd license", "simplified bsd license"}
-_COPYRIGHT_START = ("copyright", "(c)", "©", "portions copyright", "all rights reserved")
+_HOLDER_WORD = r"[\w&'-]+(?:\.[\w&'-]+)*"
+_COPYRIGHT_NOTICE = re.compile(
+    r"(?i:(?:portions )?copyright(?:\s*(?:\(c\)|©))?|\(c\)|©)\s+"
+    r"[0-9]{4}(?:\s*[-,]\s*[0-9]{4})*\s+"
+    + _HOLDER_WORD + r"(?:[ \t]+" + _HOLDER_WORD + r")*"
+    r"(?:, (?i:inc|ltd|llc|corp|co))?\.?"
+    r"(?: <[\w.+-]+@[\w.-]+>)?"
+    r"(?: (?i:all rights reserved)\.?)?")
 _QUOTES = str.maketrans({"‘": "'", "’": "'", "‚": "'", "‛": "'", "“": '"', "”": '"',
                          "„": '"', "‟": '"', "–": "-", "—": "-", "‐": "-", "‑": "-",
                          " ": " ", "\f": " "})
@@ -97,7 +104,7 @@ def _preamble_end(lines: list[str]) -> int:
         raw = lines[index]
         line = raw.strip().strip("#*_ ").strip()
         folded = normalize(line).rstrip(".:")
-        if line and folded not in _TITLES and not folded.startswith(_COPYRIGHT_START):
+        if line and folded not in _TITLES and folded != "all rights reserved" and not _COPYRIGHT_NOTICE.fullmatch(line):
             return index
         index += 1
     return index

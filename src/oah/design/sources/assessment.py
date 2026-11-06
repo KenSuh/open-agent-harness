@@ -13,6 +13,7 @@ from oah.rerank.base import Provider
 
 if TYPE_CHECKING:
     from oah.design.sources.check import Proposal, Sources
+    from oah.design.sources.model import SourceSpec
 
 MAX_ASSESSMENTS = 64
 INDEX_LIMIT = 1 << 20
@@ -58,20 +59,24 @@ def _basis(sources: Sources, proposal: Proposal,
             "freshness": status.freshness}, view
 
 
-def _role(view: DesignView, source: str) -> str:
+def _role(view: DesignView, spec: SourceSpec) -> str:
     from oah.design import materials
 
-    roles = []
+    alternative = False
     for snapshot in (view.current, view.accepted):
         if snapshot is None or "materials" not in snapshot.texts:
             continue
         record = materials.parse(snapshot.texts["materials"])
         if record is None:
             continue
-        for item in record["materials"]:
-            if (item.get("source") or {}).get("id") == source and item.get("choice") in ("selected", "alternative"):
-                roles.append("chosen" if item["choice"] == "selected" else "alternative")
-    return "chosen" if "chosen" in roles else "alternative" if roles else "dependency"
+        identities = {item["id"] for item in record["materials"]
+                      if item.get("source") == {"id": spec.id, **spec.verification()}
+                      and item.get("spec_digest") == spec.spec_digest}
+        for decision in record["decisions"]:
+            if decision["chosen"] in identities:
+                return "chosen"
+            alternative = alternative or bool(identities.intersection(decision["alternatives"]))
+    return "alternative" if alternative else "dependency"
 
 
 def request_for(sources: Sources, proposal: Proposal, basis: Mapping[str, Any], view: DesignView) -> judge.Request:
@@ -104,7 +109,7 @@ def request_for(sources: Sources, proposal: Proposal, basis: Mapping[str, Any], 
                   ("semver-major", "semver-minor", "semver-patch")), "metadata-only" if
                  proposal.kind == "release-metadata-changed" else "unknown")
     fields.extend((("version_delta", judge.label("version-delta", delta)),
-                   ("role", judge.label("role", _role(view, proposal.source)))))
+                   ("role", judge.label("role", _role(view, sources.spec(proposal.source))))))
     return judge.Request("source-change-impact", "source-change-assessment/v1", tuple(fields),
                          input_ref=digest_of(dict(basis)))
 
@@ -179,7 +184,11 @@ def recorded(sources: Sources, proposals: Sequence[Proposal], *, reader: Callabl
                 or not isinstance(record.get("judgement"), Mapping) \
                 or record.get("input_ref") != digest_of(record["basis"]):
             raise StateProblem("bad-record", "assessment-index.json", "assessment evidence has an unknown shape")
-        basis, view = _basis(sources, proposal, reader)
+        try:
+            basis, view = _basis(sources, proposal, reader)
+        except ViewUnavailable:
+            rows.append(dataclasses.replace(proposal, assessment=dict(unassessed("stale-or-unknown"), record=digest)))
+            continue
         request = request_for(sources, proposal, basis, view)
         applied = judge.apply(record["judgement"], current_input_ref=digest_of(basis), config=config, sources=sources,
                               request=request, policy=sources.policy_digest())
