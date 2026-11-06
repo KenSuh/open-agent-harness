@@ -395,9 +395,17 @@ class Sources:
 
     def _source_turn(self, spec: SourceSpec, *, fault: Fault, skip_fresh: bool,
                      deadline: float | None) -> SourceTurn:
-        started = self.now()
+        started: dt.datetime | None = None
         head, prepared = None, False
+        publication: Head | None = None
+
+        def publish(candidate: Head) -> None:
+            nonlocal publication
+            publication = candidate
+            self.state.write_json(f"heads/{spec.id}.json", candidate.to_json())
+
         try:
+            started = self.now()
             head = self.head(spec)
             prepared = True
             # Suspend for fair ordering without moving preparation outside the source boundary.
@@ -405,13 +413,14 @@ class Sources:
             started = self.now()
             head = self.head(spec)
             limit = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
-            return self._check_prepared(spec, head, started, deadline=limit, fault=fault, skip_fresh=skip_fresh)
+            return self._check_prepared(spec, head, started, deadline=limit, fault=fault, skip_fresh=skip_fresh,
+                                        publish=publish)
         except _AuthorityFailure:
             raise
         except Exception:
             if not prepared:
                 yield None
-            return self._failed_attempt(spec, head, started, captured=prepared)
+            return self._failed_attempt(spec, head, started, captured=prepared, publication=publication)
 
     def _finish_turn(self, turn: SourceTurn, fault: Fault) -> CheckResult:
         try:
@@ -442,7 +451,7 @@ class Sources:
             raise local_error
 
     def _check_prepared(self, spec: SourceSpec, head: Head | None, started: dt.datetime, *, deadline: float,
-                        fault: Fault, skip_fresh: bool) -> CheckResult:
+                        fault: Fault, skip_fresh: bool, publish: Callable[[Head], None]) -> CheckResult:
         generation = None if head is None else head.generation
         current = freshness(head, started, self.settings["fresh_hours"])
         retry = parse_iso(head.retry_after) if head is not None else None
@@ -457,7 +466,7 @@ class Sources:
                             or entry.spec_digest != spec.spec_digest or latest_generation != generation):
                         return CheckResult(spec.id, "superseded", notable=True, freshness=current)
                     head = dataclasses.replace(head, generation=head.generation + 1, retry_after=iso(capped))
-                    self.state.write_json(f"heads/{spec.id}.json", head.to_json())
+                    publish(head)
             retry = capped
         if retry is not None and started < retry:
             return CheckResult(spec.id, "skipped-rate-limited", problems=("rate-limited",),
@@ -465,10 +474,10 @@ class Sources:
         if skip_fresh and current == "fresh":
             return CheckResult(spec.id, "skipped-fresh", freshness="fresh",
                                observation=None if head is None else head.observation)
-        return self._attempt_one(spec, head, started, deadline=deadline, fault=fault)
+        return self._attempt_one(spec, head, started, deadline=deadline, fault=fault, publish=publish)
 
-    def _failed_attempt(self, spec: SourceSpec, before: Head | None, started: dt.datetime, *,
-                        captured: bool) -> CheckResult:
+    def _failed_attempt(self, spec: SourceSpec, before: Head | None, started: dt.datetime | None, *,
+                        captured: bool, publication: Head | None) -> CheckResult:
         problems = ("attempt-failed",)
         with self._source_authority() as registry:
             entry = registry.sources.get(spec.id)
@@ -479,10 +488,14 @@ class Sources:
                 if not captured:
                     return CheckResult(spec.id, "failed", problems=problems + ("failure-record-unavailable",),
                                        notable=True, freshness="unavailable")
-                if generation != (None if before is None else before.generation):
+                if (generation != (None if before is None else before.generation)
+                        and (publication is None or latest != publication)):
                     return CheckResult(spec.id, "superseded", notable=True)
-                failed, _word = transition(latest or Head(spec.id, spec.registration, spec.spec_digest),
+                assert started is not None
+                failed, _word = transition(before or Head(spec.id, spec.registration, spec.spec_digest),
                                            Observation("failed", code="attempt-failed"), self.now(), started)
+                if latest is not None:
+                    failed = dataclasses.replace(failed, generation=latest.generation + 1)
                 if latest is None:
                     self._retire_head(spec.id)
                 self.state.write_json(f"heads/{spec.id}.json", failed.to_json())
@@ -491,7 +504,7 @@ class Sources:
         return CheckResult(spec.id, "failed", problems=problems, notable=True, freshness="unavailable")
 
     def _attempt_one(self, spec: SourceSpec, head: Head | None, started: dt.datetime, *, deadline: float,
-                     fault: Fault) -> CheckResult:
+                     fault: Fault, publish: Callable[[Head], None]) -> CheckResult:
         generation = None if head is None else head.generation
         current = freshness(head, started, self.settings["fresh_hours"])
         observation = self.observer.observe(spec, head, deadline=deadline)
@@ -528,7 +541,7 @@ class Sources:
                                  freshness=freshness(updated, self.now(), self.settings["fresh_hours"]),
                                  retry_after=updated.retry_after, observation=updated.observation,
                                  selection=observation.selection)
-            self.state.write_json(f"heads/{spec.id}.json", updated.to_json())
+            publish(updated)
         return result
 
     def check(self, ids: Iterable[str] | None = None, *, deadline_seconds: float | None = None,

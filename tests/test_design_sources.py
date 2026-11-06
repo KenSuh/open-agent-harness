@@ -1225,7 +1225,7 @@ class ResponseIsolationTest(LoopbackCase):
         view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
                           None, None, "clean", False, "current", "worktree")
         self.reply("/bad", body=b"historical proof", headers=(("Content-Type", "text/plain"),))
-        for failure in ("cooldown", "result"):
+        for failure in ("cooldown", "result", "publication", "cooldown-publication"):
             for mode in ("check", "scheduled", "refresh"):
                 with self.subTest(failure=failure, mode=mode):
                     sources = self.store(fresh_hours=1)
@@ -1236,7 +1236,7 @@ class ResponseIsolationTest(LoopbackCase):
                     self.assertEqual("changed", sources.check_one(bad).result)
                     before = sources.head(bad)
                     assert before is not None
-                    if failure == "cooldown":
+                    if failure in ("cooldown", "cooldown-publication"):
                         before = dataclasses.replace(before, retry_after="3000-01-01T00:00:00+00:00")
                         sources.state.write_json(f"heads/{bad.id}.json", before.to_json())
                     write, fresh = sources.state.write_json, check_module.freshness
@@ -1245,6 +1245,10 @@ class ResponseIsolationTest(LoopbackCase):
                     def cap_write(rel, data):
                         if failure == "cooldown" and rel == f"heads/{bad.id}.json" and data["outcome"] != "failed":
                             raise OSError("private failure value")
+                        if (failure in ("publication", "cooldown-publication") and rel == f"heads/{bad.id}.json"
+                                and data["outcome"] != "failed"):
+                            with mock.patch("oah.atomic._fsync_folder", side_effect=OSError("private failure value")):
+                                return write(rel, data)
                         return write(rel, data)
 
                     def render_freshness(head, *args):
