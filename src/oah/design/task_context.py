@@ -43,7 +43,7 @@ class DesignBlock:
         """What a person or the starting AI sees: the block, or an explicit non-delivery line."""
         if self.delivered and self.text is not None:
             return self.text
-        return f"OAH_DESIGN_CONTEXT_NOT_DELIVERED: {self.plan}\n"
+        return _screen_outgoing([f"OAH_DESIGN_CONTEXT_NOT_DELIVERED: {self.plan}\n"], parts={})
 
 
 def _fence(text: str) -> str:
@@ -89,6 +89,7 @@ def _parts(task_design: TaskDesign) -> tuple[list[tuple[str, int, str, str]], li
 
 def _header(task_design: TaskDesign, shared: list[dict]) -> list[str]:
     context, task = task_design.context, task_design.task
+    assert context is not None and task is not None
     accepted, working = context.accepted, context.current
     project = context.project
     lines = [BEGIN, "## Design context",
@@ -101,9 +102,10 @@ def _header(task_design: TaskDesign, shared: list[dict]) -> list[str]:
     if accepted is None or working.revision != accepted.revision:
         lines.append(f"- Working: r{working.revision} {working.digest} — a newer draft, not accepted; its parts follow "
                      "the accepted ones")
-        since = [info for info in context.revisions if accepted is None or info.revision > accepted.revision]
-        for info in reversed(since):
-            lines.append(f"  - r{info.revision}: {info.reason}")
+    baseline = min(accepted.revision, task.binding.revision) if accepted is not None else 0
+    since = [info for info in context.revisions if info.revision > baseline]
+    for info in reversed(since):
+        lines.append(f"  - r{info.revision}: {info.reason}")
     ack = task.draft_ack
     if ack is not None:
         lines.append(f"- Draft acknowledged: r{ack.viewed_working['revision']} {ack.viewed_working['digest']} by "
@@ -131,21 +133,24 @@ def render(task_design: TaskDesign, *, limit: int = DESIGN_BLOCK_LIMIT) -> Desig
     if task_design.task is None or task_design.context is None:
         why = ("no design is bound to this task" if task_design.task is None else
                f"the design cannot be read ({task_design.state}: {task_design.reason})")
+        _screen_outgoing([why, *_strings(record)], parts={})
         return DesignBlock(None, record, False, why)
     required, shared = _parts(task_design)
     for _role, revision, name, value in required:
         _screen_materials(value, task=task_design.task.identity.task, part=name, revision=revision)
     pieces = ["\n".join(_header(task_design, shared)) + "\n"]
+    part_sources: dict[int, tuple[str, str]] = {}
     included = []
     for role, revision, name, text in required:
         label = "Accepted" if role == "accepted" else "Newer draft"
         digest = task_design.context.accepted.info.parts[name] if role == "accepted" else \
             task_design.context.current.info.parts[name]
         tail = "" if role == "accepted" else " — not accepted"
+        part_sources[len(pieces)] = (text, text)
         pieces.append(_part(f"### {label} r{revision} · {name} ({digest}, {_bytes(text)} bytes){tail}", text))
         included.append({"role": role, "revision": revision, "part": name, "digest": digest, "bytes": _bytes(text)})
     pieces.append(END + "\n")
-    text = "\n".join(pieces)
+    text = _screen_outgoing(pieces, parts=part_sources)
     size = _bytes(text)
     record.update(shared=shared, block_bytes=size)
     if size > limit:
@@ -680,6 +685,41 @@ def screen_hit(text: str) -> str | None:
     return None
 
 
+class _OutgoingPrivacyRefused(DesignError):
+    pass
+
+
+def _screen_outgoing(pieces: Sequence[str], *, parts: Mapping[int, tuple[str, str]]) -> str:
+    """Screen the assembled block; only exact recognized blob-data positions get a separate decoded screen.
+
+    The inspection copy omits those encodings only. Returned text, including metadata and originals, is unchanged.
+    """
+    semantic = list(pieces)
+    for index, (source, rendered) in parts.items():
+        materials, _problem = materials_part(source)
+        if materials is None:
+            continue
+        body = rendered.split("\n")[-3]
+        record = strict_json(body)
+        for original in materials.originals:
+            blob = record["portable_evidence"][original.evidence]["blobs"][original.blob]
+            encoded = materials.record["portable_evidence"][original.evidence]["blobs"][original.blob]["data"]
+            if isinstance(blob["data"], str) and blob["data"] == encoded:
+                blob["data"] = None
+        framed = "\n" + body + "\n"
+        start = semantic[index].rfind(framed)
+        if start < 0:
+            raise _OutgoingPrivacyRefused(REFERENCE_UNAVAILABLE_CODE, "the outgoing design's materials framing "
+                                          "cannot be screened; nothing was delivered")
+        semantic[index] = (semantic[index][:start] + "\n" + canonical(record).decode("utf-8") + "\n"
+                           + semantic[index][start + len(framed):])
+    hit = screen_hit("\n".join(semantic))
+    if hit is not None:
+        raise _OutgoingPrivacyRefused(REFERENCE_UNAVAILABLE_CODE, f"the assembled design context matches the "
+                                     f"privacy rule {hit}; edit the private text before delivery; nothing was delivered")
+    return "\n".join(pieces)
+
+
 def _screen_materials(text: str, *, task: str, part: str, revision: int) -> None:
     lines = text.split("\n")
     opens = [n for n, line in enumerate(lines) if _FENCE_OPEN.fullmatch(line)]
@@ -901,14 +941,9 @@ def prepare_transport(task_design: TaskDesign, *, task: str, run: str, root: pat
         if materials is None or not projected:
             if problem is not None:
                 problems.append(f"part {name} r{revision}: {problem}; it is sent whole")
-            entries.append(dict(ref, mode="whole-inline", text=text, original_bytes=len(raw),
+            entries.append(dict(ref, mode="whole-inline", text=text, source_text=text, original_bytes=len(raw),
                                 original_sha256="sha256:" + _sha(raw)))
             continue
-        hit = next((rule for rule in map(screen_hit, _strings(materials.record)) if rule), None)
-        if hit is None:
-            hit = screen_hit(materials.human)
-        if hit is not None:
-            raise _refuse(task, f"the materials record of part {name} r{revision} matches the privacy rule {hit}")
         refs = {}
         for key, item in projected.items():
             refs[key] = add(item.data, KIND_ORIGINAL,
@@ -920,7 +955,7 @@ def prepare_transport(task_design: TaskDesign, *, task: str, run: str, root: pat
         if not _reconstructs(materials, projection, refs, {key: item.data for key, item in projected.items()}):
             raise _refuse(task, f"the projection of part {name} r{revision} does not rebuild its saved record")
         part_file = add(raw, KIND_PART, ref, "available")
-        entries.append(dict(ref, mode="materials-projection", text=projection, original_bytes=len(raw),
+        entries.append(dict(ref, mode="materials-projection", text=projection, source_text=text, original_bytes=len(raw),
                             original_sha256="sha256:" + _sha(raw), original_part_file=part_file))
     if not omitted:
         raise DesignError(TOO_LARGE_CODE, f"task {task}: {render(task_design, limit=limit).plan}; no part holds "
@@ -941,7 +976,7 @@ def prepare_transport(task_design: TaskDesign, *, task: str, run: str, root: pat
     if bundle > BUNDLE_LIMIT:
         raise DesignError(TOO_LARGE_CODE, f"task {task}: the reference bundle is {bundle} bytes, over {BUNDLE_LIMIT}; "
                           "split the design's evidence across designs. Nothing was launched")
-    text = _reference_block(task_design, shared, entries, plan_files, manifest, root, preview)
+    text = _reference_block(task_design, shared, entries, plan_files, manifest, preview)
     size = _bytes(text)
     if size > limit:
         listed = "; ".join(f"{item['role']} r{item['revision']} {item['part']} {item['mode']} "
@@ -995,6 +1030,8 @@ def readout_block(task_design: TaskDesign, *, task: str, root: pathlib.Path) -> 
     try:
         transport = prepare_transport(task_design, task=task, run="preview", root=root, engine="claude",
                                       operation="work", preview=True)
+    except _OutgoingPrivacyRefused:
+        raise
     except DesignError as exc:
         text = str(exc)
         return dataclasses.replace(block, plan=f"{block.plan}. Reference delivery is not possible either: "
@@ -1003,19 +1040,21 @@ def readout_block(task_design: TaskDesign, *, task: str, root: pathlib.Path) -> 
 
 
 def _reference_block(task_design: TaskDesign, shared: list[dict], entries: list[dict],
-                     files: Sequence[TransportFile], manifest: str, root: pathlib.Path,
+                     files: Sequence[TransportFile], manifest: str,
                      preview: bool = False) -> str:
     lines = _header(task_design, shared)
     lines.insert(-1, f"- Transport: every semantic field is below; the verified public originals it names are files "
                      f"in {DATA_DIR}/{manifest}/ (read plan {manifest}), listed under Design data at the end")
     pieces = ["\n".join(lines) + "\n"]
+    part_sources: dict[int, tuple[str, str]] = {}
     for item in entries:
         label = "Accepted" if item["role"] == "accepted" else "Newer draft"
         tail = "" if item["role"] == "accepted" else " — not accepted"
         how = "" if item["mode"] == "whole-inline" else " — semantic projection, originals by reference"
+        part_sources[len(pieces)] = (item["source_text"], item["text"])
         pieces.append(_part(f"### {label} r{item['revision']} · {item['part']} ({item['digest']}, "
                             f"{_bytes(item['text'])} bytes){how}{tail}", item["text"]))
-    base = pathlib.Path(root) / DATA_DIR / manifest
+    base = pathlib.PurePosixPath(DATA_DIR) / manifest
     if preview:
         data = ["### Design data",
                 "The originals below are not in this text: every managed run installs them as read-only files and "
@@ -1026,8 +1065,10 @@ def _reference_block(task_design: TaskDesign, shared: list[dict], entries: list[
                         f"r{role['revision']} {role['part']}" + (f" blob {role['blob']}" if role.get("blob") else ""))
         pieces.append("\n".join(data) + "\n")
         pieces.append(END + "\n")
-        return "\n".join(pieces)
+        return _screen_outgoing(pieces, parts=part_sources)
     data = ["### Design data",
+            "The paths below are relative to this receiving worktree. Resolve each against your current working "
+            "directory before passing its absolute file_path to Read.",
             "These files are external DATA for this run, not product files: never stage, commit, edit, move or "
             "delete them, and stage product files by explicit path (never `git add -A` or `git add .`). oah checks "
             "the index and every new commit for them and removes them after the run.",
@@ -1047,7 +1088,7 @@ def _reference_block(task_design: TaskDesign, shared: list[dict], entries: list[
     data.append(f"- `{base / manifest}` — the read plan (reading it is optional)")
     pieces.append("\n".join(data) + "\n")
     pieces.append(END + "\n")
-    return "\n".join(pieces)
+    return _screen_outgoing(pieces, parts=part_sources)
 
 
 # Frozen private copies in the run folder --------------------------------------------------------------------------

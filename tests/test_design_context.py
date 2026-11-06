@@ -54,6 +54,7 @@ def main(argv):
             "tools": ["Read", "Grep", "Glob", "Bash"], "model": "fake"}}]
     n = 0
     for path in re.findall(r"^- `([^`]+)` — original .*: read whole$", prompt, re.M):
+        path = os.path.abspath(path)
         if mode == "none":
             break
         lines = open(path, "rb").read().decode("utf-8").split("\\n")
@@ -415,6 +416,170 @@ class PrivacyScreenTest(DesignTask, unittest.TestCase):
         self.assertIn("People book.", received)
 
 
+class OutgoingPrivacyTest(DesignTask, unittest.TestCase):
+    actor = "claude"
+    synthetic = "AK" + "IA" + "QWERTYUIOPASDFGH"
+
+    def oah(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        words = list(args)
+        if words[0] == "start":
+            words[words.index("--agent") + 1] = self.actor
+        return super().oah(*words, env=env)
+
+    def exercise_headers(self, reference: bool) -> None:
+        for field in ("revision-reason", "ack-reason", "ack-actor", "carry-reason", "carry-actor"):
+            for negative in (False, True):
+                with self.subTest(field=field, reference=reference, negative=negative):
+                    text = self.synthetic if negative else "Public clarification with full Korean text 공개 이유"
+                    self.actor = (self.synthetic if negative else "public-actor.full-01") if field.endswith("actor") else "claude"
+                    self.build(BIG_PARTS if reference else {"design": "People book complete public lessons.\n"})
+                    store = self.store(self.repo)
+                    current = store.context("acme", "booking").current
+                    draft = self.work / "draft.txt"
+                    draft.write_text(current.texts.get("request", "") + "Complete public draft request.\n")
+                    saved = self.oah("design", "save", "acme", "booking", "--expect-revision", str(current.revision),
+                                     "--expect-digest", current.digest, "--reason",
+                                     text if field == "revision-reason" else "Public revision clarification",
+                                     "--part", f"request={draft}")
+                    self.assertEqual(saved.returncode, 0, saved.stdout + saved.stderr)
+                    current = store.context("acme", "booking").current
+                    if field.startswith("carry"):
+                        accepted = self.oah("design", "accept", "acme", "booking", "--revision", str(current.revision),
+                                            "--digest", current.digest, "--reason", "Explicit public approval")
+                        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+                    carried = self.oah("design", "carry", "t1", "--agent", self.actor, "--revision", str(current.revision),
+                                       "--digest", current.digest, "--reason",
+                                       text if field in {"ack-reason", "carry-reason"} else "Public unaffected-task clarification")
+                    self.assertEqual(carried.returncode, 0, carried.stdout + carried.stderr)
+                    engine, stage = ("claude", "initial") if reference else ("codex", "correction")
+                    called = self.oah("call", engine, "--stage", stage, "--task", "t1", "--tier", "high")
+                    shown = self.oah("design", "task", "t1", "--json")
+                    plain = self.oah("design", "task", "t1")
+                    resumed = self.oah("start", "--task", "t1", "--agent", self.actor,
+                                       "--packet", ".oah/tasks/t1/PACKET.md", "--scope", "src/")
+                    needle = self.actor if field.endswith("actor") else text
+                    received = json.loads(self.record.read_text())["stdin"] if self.record.exists() else ""
+                    results = {"call": called, "json-readout": shown, "plain-readout": plain, "start": resumed}
+                    print("OUTGOING_HEADER", json.dumps({"field": field, "reference": reference, "negative": negative,
+                          "rc": {name: result.returncode for name, result in results.items()},
+                          "child_created": self.record.exists(), "needle_in_child": needle in received,
+                          "run_files": [str(p.relative_to(self.state_dir)) for p in (self.state_dir / "runs").rglob("*") if p.is_file()]}), flush=True)
+                    if negative:
+                        for name, result in results.items():
+                            with self.subTest(path=name):
+                                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                                self.assertIn(tc.REFERENCE_UNAVAILABLE_CODE, result.stdout + result.stderr)
+                                self.assertNotIn(self.synthetic, result.stdout + result.stderr)
+                        self.assertFalse(self.record.exists())
+                        self.assertEqual([p for p in (self.state_dir / "runs").rglob("*") if p.is_file()], [])
+                    else:
+                        for name, result in results.items():
+                            with self.subTest(path=name):
+                                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(needle, received)
+                        self.assertIn(draft.read_text(), received)
+                        self.assertIn(needle, json.loads(shown.stdout)["block"])
+                        self.assertIn(needle, plain.stdout)
+                        self.assertIn(needle, resumed.stdout)
+                        self.assertEqual("### Design data" in received, reference)
+
+    def test_inline_header_fields_refuse_keys_and_keep_complete_safe_text(self):
+        self.exercise_headers(False)
+
+    @unittest.skipUnless(NATIVE, NATIVE_ONLY)
+    def test_reference_header_fields_refuse_keys_and_keep_complete_safe_text(self):
+        self.exercise_headers(True)
+
+    def test_only_recognized_blob_data_is_excluded_from_the_whole_block_screen(self):
+        raw = b"Public UTF-8 original.\n"
+        encoded = base64.b64encode(raw).decode("ascii")
+        screen, header = tc.screen_hit, tc._header
+
+        def policy(text: str) -> str | None:
+            return "fixture-encoding" if encoded in text else screen(text)
+
+        def added_header(*args):
+            return [*header(*args), "- Additional renderer label: " + encoded]
+
+        for reference in (False, True):
+            with self.subTest(reference=reference):
+                blobs = [*BIG[:1], ("NOTICE", raw)] if reference else [("NOTICE", raw)]
+                original = materials_part(blobs)
+                recognized, problem = tc.materials_part(original)
+                self.assertIsNone(problem)
+                self.assertIsNotNone(recognized)
+                if reference:
+                    self.assertIsNone(tc.read_codec_problem(raw))
+                self.build({"design": "People book.\n", "materials": original})
+                judged = self.judged()[1]
+                plan = tc.prepare_transport(judged, task="t1", run="r1", root=self.repo,
+                                             engine="claude", operation="work") if reference else None
+                before = plan.block if plan is not None else tc.render(judged)
+                with mock.patch.object(tc, "screen_hit", policy):
+                    delivered = tc.prepare_transport(judged, task="t1", run="r1", root=self.repo,
+                                                      engine="claude", operation="work") if reference else None
+                    after = delivered.block if delivered is not None else tc.render(judged)
+                    self.assertEqual(before.text, after.text)
+                    if delivered is not None:
+                        self.assertIn(raw, [item.data for item in delivered.files])
+                        self.assertIn(original.encode(), [item.data for item in delivered.files])
+                    else:
+                        assert after.text is not None
+                        self.assertIn(encoded, after.text)
+                    with mock.patch.object(tc, "_header", added_header):
+                        with self.assertRaises(DesignError) as caught:
+                            tc.prepare_transport(judged, task="t1", run="r1", root=self.repo,
+                                                 engine="claude", operation="work") if reference else tc.render(judged)
+                    self.assertEqual(caught.exception.code, tc.REFERENCE_UNAVAILABLE_CODE)
+                    self.assertIn("fixture-encoding", str(caught.exception))
+                    self.assertNotIn(encoded, str(caught.exception))
+
+    def test_reference_preview_privacy_refusal_cannot_become_a_non_delivery_echo(self):
+        self.build(BIG_PARTS)
+        judged = self.judged()[1]
+        safe = tc.readout_block(judged, task="t1", root=self.repo)
+        self.assertTrue(safe.delivered)
+        lines = tc._header(judged, tc._parts(judged)[1])
+        with mock.patch.object(tc, "_header", side_effect=[lines, [*lines, "- Future label: " + self.synthetic]]):
+            with self.assertRaises(DesignError) as caught:
+                tc.readout_block(judged, task="t1", root=self.repo)
+        self.assertEqual(caught.exception.code, tc.REFERENCE_UNAVAILABLE_CODE)
+        self.assertNotIn(self.synthetic, str(caught.exception))
+
+    def test_readout_screens_accepted_revision_reasons_while_the_task_is_still_bound_to_the_old_revision(self):
+        for negative in (False, True):
+            with self.subTest(negative=negative):
+                self.build({"design": "People book.\n"})
+                store = self.store(self.repo)
+                current = store.context("acme", "booking").current
+                text = self.synthetic if negative else "Complete public accepted revision reason 공개 이유"
+                saved = store.save("acme", "booking", expect_revision=1, expect_digest=current.digest,
+                                   reason=text, parts={"design": "People book two lessons.\n"}, today=TODAY)
+                assert saved.revision is not None and saved.digest is not None
+                store.accept("acme", "booking", revision=saved.revision, digest=saved.digest,
+                             reason="Explicit public approval", today=TODAY)
+                for options in ((), ("--json",)):
+                    result = self.oah("design", "task", "t1", *options)
+                    self.assertEqual(result.returncode, 1 if negative else 0, result.stdout + result.stderr)
+                    if negative:
+                        self.assertNotIn(self.synthetic, result.stdout + result.stderr)
+                    else:
+                        self.assertIn(text, json.loads(result.stdout)["block"] if options else result.stdout)
+
+    def test_unreadable_design_cannot_bypass_metadata_screening_in_readout(self):
+        self.build({"design": "People book.\n"})
+        judged = self.judged()[1]
+        for reason in ("Public unreadable metadata note", self.synthetic):
+            with self.subTest(reason=reason):
+                unavailable = dataclasses.replace(judged, context=None, reason=reason)
+                if reason == self.synthetic:
+                    with self.assertRaises(DesignError) as caught:
+                        tc.readout_block(unavailable, task="t1", root=self.repo)
+                    self.assertNotIn(self.synthetic, str(caught.exception))
+                else:
+                    self.assertIn(reason, tc.readout_block(unavailable, task="t1", root=self.repo).readout())
+
+
 class TransportPlanTest(DesignTask, unittest.TestCase):
     def test_inline_originals_and_semantic_strings_are_screened_before_delivery(self):
         sensitive = ("s" + "k-" + "z" * 24).encode()
@@ -458,7 +623,9 @@ class TransportPlanTest(DesignTask, unittest.TestCase):
         self.assertEqual(kinds, [tc.KIND_ORIGINAL, tc.KIND_ORIGINAL, tc.KIND_PART])
         for item in plan.files:
             self.assertEqual(hashlib.sha256(item.data).hexdigest(), item.name)
-            self.assertIn(str(self.repo / tc.DATA_DIR / plan.manifest / item.name), text)
+            address = pathlib.PurePosixPath(tc.DATA_DIR) / plan.manifest / item.name
+            self.assertIn(f"`{address}`", text)
+            self.assertEqual((self.repo / address).resolve(), self.repo / tc.DATA_DIR / plan.manifest / item.name)
         self.assertEqual({item["reason"] for item in plan.record["omitted_inline"]}, {"portable-original-encoding"})
         self.assertNotIn("data", json.dumps(plan.record["parts"]))  # digest-only record, no narrative/originals
         self.assertNotIn("We pick lib X.", json.dumps(plan.record))
