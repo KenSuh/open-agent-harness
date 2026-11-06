@@ -34,7 +34,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 from oah.engines.proc import run_command
 from oah.paths import git_argv
@@ -158,7 +158,8 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
     """A sanitized clone of `source` at `head` for the duration of the block.
 
     `dispose(parent, created)` (design-bound reviews): the exclusive finalizer. It returns (disposition, why) with
-    disposition disposed | legacy-disposed | retained; anything else, or an exception, retains the folder."""
+    disposition disposed | legacy-disposed | disposed-noncounting | retained; only the first two can count a round.
+    Anything else, or an exception, retains the folder."""
     for name, value in (("head", head), ("base", base)):
         if not _SHA.fullmatch(value or ""):
             raise ReviewError("OAH_REVIEW_SNAPSHOT_FAILED", f"the {name} {value!r} is not a full commit SHA")
@@ -196,11 +197,14 @@ def make(source: pathlib.Path, head: str, *, base: str, temp_root: pathlib.Path 
             except BaseException as exc:  # an interrupted or failing finalizer retains; it never falls back
                 outcome = ("retained", f"the disposal check failed ({type(exc).__name__})")
             if not (isinstance(outcome, tuple) and len(outcome) == 2
-                    and outcome[0] in ("disposed", "legacy-disposed", "retained")):
+                    and outcome[0] in ("disposed", "legacy-disposed", "disposed-noncounting", "retained")):
                 outcome = ("retained", "the disposal check returned no valid result")
             if outcome[0] == "retained" and warnings is not None:
                 warnings.append(f"OAH_REVIEW_SNAPSHOT_RETAINED: the review snapshot {parent} was kept "
                                 f"({outcome[1]}); this round does not count")
+            if outcome[0] == "disposed-noncounting" and warnings is not None:
+                warnings.append("OAH_REVIEW_SNAPSHOT_INTERRUPTED: retirement completed after an interrupted "
+                                "delete; its absence acknowledgment does not count the original round")
 
 
 # Complete bounded retirement inventory (SC4-P4-R-I) -------------------------------------------------------------
@@ -629,6 +633,7 @@ class ValidatedPlan:
     entries: Entries
     parent: pathlib.Path
     all_entries: Entries
+    pending_absent: bool = False
 
 
 def _uint64(value) -> bool:
@@ -679,8 +684,64 @@ def read_evidence(path: pathlib.Path, limit: int) -> bytes:
                 os.close(descriptor)
 
 
+def retirement_parent_proof(parent: pathlib.Path, nonce: str) -> dict[str, object]:
+    from oah.design import task_context as tc
+
+    with contextlib.closing(tc.LiveRoots({"retirement-surviving-parent": parent.parent})) as live:
+        proof = live.facts(nonce)
+        if not live.current():
+            raise Retained("the surviving retirement parent changed")
+        return proof
+
+
+def _pending_retirement_entry(pending, final: dict[str, object], entries: Entries, removed) -> Mapping[str, object]:
+    from oah.design import task_context as tc
+
+    try:
+        fact, predecessor = pending["fact"], pending["predecessor"]
+        entry = next((item for index, item in enumerate(entries) if index == len(removed)),
+                     {"path": [], "type": "root"})
+        if (len(removed) > len(entries) or fact["plan_sha256"] != final["base_plan_sha256"]
+                or fact["final_sha256"] != hashlib.sha256(_canonical(final)).hexdigest()
+                or type(fact["cursor"]) is not int or fact["cursor"] != len(removed)
+                or fact["observed"] != "intent" or fact["path"] != entry["path"]
+                or fact["entry_sha256"] != hashlib.sha256(_canonical(entry)).hexdigest()
+                or type(pending["sequence"]) is not int or type(predecessor["sequence"]) is not int
+                or predecessor["sequence"] < 0 or pending["sequence"] != predecessor["sequence"] + 1
+                or pending["record_digest"] != tc.observation_digest(pending["origin"], pending["sequence"],
+                                                                   predecessor, "retirement-intent", fact)):
+            raise Retained("the pending entry, plan or exact intent predecessor changed")
+        return entry
+    except (KeyError, TypeError, ValueError):
+        raise Retained("the pending retirement proof is incomplete") from None
+
+
+def _pending_root_absent(parent: pathlib.Path, final: dict[str, object], pending) -> bool:
+    from oah.design import task_context as tc
+
+    plan_digest = final.get("base_plan_sha256")
+    if not isinstance(plan_digest, str):
+        raise Retained("the pending root has no exact plan digest")
+    with contextlib.closing(tc.LiveRoots({"retirement-surviving-parent": parent.parent})) as live:
+        if (live.facts(plan_digest) != pending["fact"].get("surviving_parent")
+                or not live.current()):
+            raise Retained("the pending root absence has no exact surviving-parent proof")
+        handle = live.rows[0]["handles"][-1]
+        try:
+            if live.native is None:
+                os.stat(parent.name, dir_fd=handle, follow_symlinks=False)
+            else:
+                child, _ = live.native.open_child(handle, parent.name, directory=None, inspect=True)
+                live.native.close(child)
+        except FileNotFoundError:
+            if live.current():
+                return True
+            raise Retained("the surviving retirement parent changed during the absence check") from None
+        return False
+
+
 def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathlib.Path, *,
-                             removed: frozenset = frozenset(), container_removed=False) -> ValidatedPlan:
+                             removed: frozenset[tuple[str, ...]] = frozenset(), container_removed=False, pending=None) -> ValidatedPlan:
     """Read EVERY linked page (exact length/hash, schema, ordinals, linkage, order, uniqueness, allocation,
     totals, scan digest) and enumerate the whole current container; any extra, missing (without recorded
     progress), changed or unowned entry raises Retained before the first deletion."""
@@ -689,7 +750,9 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
             or descriptor.get("version") != 1
             or not all(_uint64(descriptor.get(name)) for name in ("page_count", "total_entries", "total_page_bytes"))):
         raise Retained("the retirement descriptor is malformed or does not match its sha256")
-    if not container_removed and _container_object(parent) != descriptor.get("container_object"):
+    pending_root = (pending is not None and pending.get("fact", {}).get("path") == []
+                    and not os.path.lexists(parent))
+    if not container_removed and not pending_root and _container_object(parent) != descriptor.get("container_object"):
         raise Retained("the owned snapshot container was replaced")
     working = Inventory(pathlib.Path(pages_dir).parent)
     link, total_bytes = descriptor["head"], 0
@@ -741,7 +804,7 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
                 or not isinstance(producer.get("checkpoint"), str) or not producer["checkpoint"]):
             raise Retained("the final output lacks its exact run and producer checkpoint")
         observed = final_slot
-        if slot not in removed and not container_removed:
+        if slot not in removed and not container_removed and (pending is None or pending["fact"]["path"] != list(slot)):
             observed = capture_output_slot(parent, list(slot), producer=producer)
             if observed != final_slot:
                 raise Retained("the output slot changed after its final capture")
@@ -751,20 +814,29 @@ def validate_retirement_plan(final: dict, parent: pathlib.Path, pages_dir: pathl
     working.remove_slot(slot)
     if output_entry is not None:
         working.add(output_entry)
+    pending_entry = _pending_retirement_entry(pending, final, working.entries(), removed) if pending is not None else None
+    pending_absent = False
     try:
         working.removed(removed)
-        if container_removed:
+        if container_removed or pending_root:
             if os.path.lexists(parent) or len(working.entries(remaining=True)) != 0:
                 raise Retained("the removed container has no exact complete durable progress")
+            if pending_root:
+                if pending_entry != {"path": [], "type": "root"} or not _pending_root_absent(parent, final, pending):
+                    raise Retained("the missing container has no exact pending root proof")
+                pending_absent = True
         else:
             for item in _census(parent):
                 working.observe(item)
+            if not working.complete() and pending is not None and pending_entry is not None and pending_entry["path"]:
+                working.removed([tuple(pending["fact"]["path"])])
+                pending_absent = True
             if not working.complete():
                 raise Retained("a planned entry is missing without recorded progress")
     except (PlanUnavailable, ValueError, sqlite3.Error) as exc:
         raise Retained(f"the complete census does not match the immutable plan ({type(exc).__name__})") from exc
     return ValidatedPlan(json.loads(_canonical(final)), working.entries(remaining=True), pathlib.Path(parent),
-                         working.entries())
+                         working.entries(), pending_absent)
 
 
 def _guarded_remove(parent: pathlib.Path, plan: ValidatedPlan, progress, guard=None) -> bool:

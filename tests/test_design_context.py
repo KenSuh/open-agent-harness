@@ -252,7 +252,7 @@ class CodecAndScreenTest(unittest.TestCase):
 class DesignTask(DesignRepo):
     """A real repository, an accepted design, a bound packet and a started lease, driven through `python -m oah`."""
 
-    def build(self, parts: dict, *, claude_version: str = "2.1.318", scope: str = "src/"):
+    def build(self, parts: dict[str, str], *, claude_version: str = "2.1.318", scope: str = "src/", allow_refusal: bool = False):
         self.repo = self.make_repo()
         store = self.store(self.repo)
         store.add_project("acme", title="Acme", event="ev-project", today=TODAY)
@@ -268,7 +268,8 @@ class DesignTask(DesignRepo):
             "slug": "gpt-test-a", "is_default": True,
             "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high", "xhigh", "max")]}]}))
         toml = lambda argv: "[" + ", ".join(json.dumps(part) for part in argv) + "]"  # noqa: E731
-        config = (f"[engines.claude]\ncommand = {toml([sys.executable, str(fake)])}\n"
+        config = ("[models]\nfetch_scores = false\n"
+                  f"[engines.claude]\ncommand = {toml([sys.executable, str(fake)])}\n"
                   "quality_order = [\"opus\", \"sonnet\"]\n"
                   f"[engines.codex]\ncommand = {toml(FAKE_CODEX)}\nquality_order = [\"gpt-test-a\"]\n")
         git_commit(self.repo, {".oah/tasks/t1/PACKET.md": replace_section(packet_text(), section),
@@ -279,7 +280,8 @@ class DesignTask(DesignRepo):
                              FAKE_RECORD=str(self.record), FAKE_CLAUDE_VERSION=claude_version)
         started = self.oah("start", "--task", "t1", "--agent", "claude", "--packet", ".oah/tasks/t1/PACKET.md",
                            "--scope", scope)
-        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+        if not allow_refusal:
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
         return started
 
     def oah(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -312,6 +314,105 @@ class DesignTask(DesignRepo):
 
 
 BIG_PARTS = {"design": "People book.\n", "request": "I want lessons.\n", "materials": materials_part(BIG)}
+
+
+class PrivacyScreenTest(DesignTask, unittest.TestCase):
+    synthetic = "AK" + "IA" + "QWERTYUIOPASDFGH"
+    preparation: subprocess.CompletedProcess[str] | None = None
+
+    def build(self, parts: dict[str, str], **kwargs):
+        self.preparation = super().build(parts, allow_refusal=True, **kwargs)
+        return self.preparation
+
+    def assert_refused_before_child(self):
+        result = self.preparation
+        if result is None:
+            self.fail("the privacy fixture has not run preparation")
+        if result.returncode == 0:
+            result = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(tc.REFERENCE_UNAVAILABLE_CODE, result.stdout + result.stderr)
+        self.assertNotIn(self.synthetic, result.stdout + result.stderr)
+        self.assertFalse(self.record.exists())
+        runs = self.state_dir / "runs" / "t1"
+        self.assertFalse(any(runs.rglob("prompt.md")) if runs.exists() else False)
+
+    def test_utf16_original_is_refused_before_outgoing_artifacts(self):
+        raw = ("Public notice " + self.synthetic + "\n").encode("utf-16-le")
+        self.assertIn("\0", raw.decode("utf-8", errors="strict"))
+        self.build({"design": "People book.\n", "materials": materials_part([("LICENSE", raw)])})
+        self.assert_refused_before_child()
+
+    def test_invalid_utf8_original_is_refused(self):
+        self.build({"design": "People book.\n", "materials": materials_part([("LICENSE", b"\xff\xfe\x00\x01binary")])})
+        self.assert_refused_before_child()
+
+    def test_nul_and_binary_control_originals_are_refused(self):
+        for raw in (b"public\x00notice", b"public\x01notice"):
+            with self.subTest(raw=raw):
+                self.build({"design": "People book.\n", "materials": materials_part([("LICENSE", raw)])})
+                self.assert_refused_before_child()
+
+    def test_mixed_reference_keeps_no_unscreenable_inline_original(self):
+        public, _ = tc.materials_part(materials_part([("LICENSE", BIG[0][1])]))
+        local, _ = tc.materials_part(materials_part([("README", b"\xff\xfe\x00binary")], provider="local"))
+        if public is None or local is None:
+            self.fail("fixture material must be recognized")
+        record = public.record
+        record["materials"].extend(local.record["materials"])
+        record["materials"][-1]["id"] = "local-entry"
+        record["portable_evidence"].extend(local.record["portable_evidence"])
+        part = "Public selection.\n\n```oah-materials\n" + canonical(record).decode() + "\n```\n"
+        self.build({"design": "People book.\n", "materials": part})
+        preparation = self.preparation
+        if preparation is None:
+            self.fail("the mixed privacy fixture has not run preparation")
+        if preparation.returncode != 0:
+            self.assert_refused_before_child()
+        else:
+            with self.assertRaises(DesignError):
+                tc.prepare_transport(self.judged()[1], task="t1", run="1" * 16, root=self.repo,
+                                     engine="claude", operation="work")
+
+    def test_utf8_key_original_and_material_semantic_key_are_refused(self):
+        for part in (materials_part([("LICENSE", self.synthetic.encode())]),
+                     materials_part([("LICENSE", b"Public notice.\n")], narrative=self.synthetic)):
+            with self.subTest(part=part[:40]):
+                self.build({"design": "People book.\n", "materials": part})
+                self.assert_refused_before_child()
+
+    def test_accepted_plain_design_and_request_are_screened(self):
+        for name in ("design", "request"):
+            with self.subTest(part=name):
+                self.build({"design": "People book.\n", name: "Configuration " + self.synthetic + "\n"})
+                self.assert_refused_before_child()
+
+    def test_newer_plain_draft_is_screened(self):
+        self.build({"design": "People book.\n"})
+        store = self.store(self.repo)
+        current = store.context("acme", "booking").current
+        saved = store.save("acme", "booking", expect_revision=current.revision, expect_digest=current.digest,
+                           reason="draft", parts={"request": self.synthetic + "\n"}, today=TODAY)
+        if saved.digest is None or saved.revision is None:
+            self.fail("the draft fixture was not saved")
+        carried = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", str(saved.revision),
+                           "--digest", saved.digest, "--reason", "Only a fixture example changes")
+        self.assertEqual(carried.returncode, 0, carried.stdout + carried.stderr)
+        self.assert_refused_before_child()
+
+    def test_public_utf8_and_safe_plain_text_keep_complete_encoding(self):
+        raw = "Public permission notice.\r\n공개 원문.\t\n".encode()
+        self.build({"design": "People book.\n", "materials": materials_part([("LICENSE", raw)])})
+        selected = tc.select(self.judged()[1], task="t1", engine="codex")
+        self.assertTrue(selected.delivered)
+        if selected.text is None:
+            self.fail("the complete inline block is missing")
+        self.assertIn(base64.b64encode(raw).decode(), selected.text)
+        result = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        received = json.loads(self.record.read_text())["stdin"]
+        self.assertIn(base64.b64encode(raw).decode(), received)
+        self.assertIn("People book.", received)
 
 
 class TransportPlanTest(DesignTask, unittest.TestCase):
@@ -1525,6 +1626,65 @@ class ReferenceCallTest(DesignTask, unittest.TestCase):
         return self.oah("call", engine, "--stage", "initial" if engine == "claude" else "review", "--task", "t1",
                         "--tier", "low" if engine == "claude" else "high", env=env)
 
+    def read_fact_case(self, *, fail: bool):
+        self.build(BIG_PARTS)
+        program = '''import sys
+from unittest import mock
+from oah.lease import Store
+from oah.cli import main
+original = Store.observe_transport_exit
+def persist(writer, **kwargs):
+    if sys.argv[1] == "fault" and kwargs["kind"] == "reads":
+        fact = kwargs["fact"]
+        assert fact["reference_delivery"] == "complete"
+        assert all(row["complete"] for row in fact["coverage"].values())
+        print("CONTROL: complete actual fixture observations; controlled read-fact write failure", file=sys.stderr)
+        raise OSError("controlled read-fact publication failure")
+    return original(writer, **kwargs)
+with mock.patch.object(Store, "observe_transport_exit", persist):
+    raise SystemExit(main(["call", "claude", "--stage", "initial", "--task", "t1", "--tier", "low"]))
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", program, "fault" if fail else "normal"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True, timeout=90)
+        print("READ_FACT_CHILD", "fault" if fail else "normal", result.returncode, result.stdout, result.stderr)
+        return result
+
+    def test_failed_read_fact_retains_data_and_cannot_deliver_or_finish(self):
+        result = self.read_fact_case(fail=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("complete actual fixture observations", result.stderr)
+        kinds = [item["transport"].get("kind") for item in self.events()]
+        self.assertNotIn("reads", kinds)
+        self.assertNotIn("delivery-complete", kinds)
+        self.assertNotIn("cleanup-intent", kinds)
+        self.assertNotIn("verified-cleaned", kinds)
+        self.assertTrue((self.repo / tc.DATA_DIR).exists())
+        sidecar = self.last_run() / "design.json"
+        saved = json.loads(sidecar.read_bytes())["receiving"]
+        self.assertFalse(saved["delivered"])
+        self.assertEqual(saved["reference_delivery"], "unverified")
+        self.assertTrue(saved["observed_reads"])
+        self.assertTrue(all(row["model_directed"] == "matched" for row in saved["observed_reads"]))
+        sidecar.unlink()
+        finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "s",
+                            "--return", str(self.returned()), "--allow-missing-wiki-maintenance", "--allow-structural")
+        self.assertEqual(finished.returncode, 1, finished.stdout + finished.stderr)
+        self.assertNotIn("reads", [item["transport"].get("kind") for item in self.events()])
+
+    def test_durable_read_fact_precedes_delivery_cleanup_and_successful_finish(self):
+        result = self.read_fact_case(fail=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kinds = [item["transport"].get("kind") for item in self.events()]
+        self.assertLess(kinds.index("reads"), kinds.index("delivery-complete"))
+        self.assertLess(kinds.index("delivery-complete"), kinds.index("cleanup-intent"))
+        self.assertLess(kinds.index("cleanup-intent"), kinds.index("verified-cleaned"))
+        self.assertFalse((self.repo / tc.DATA_DIR).exists())
+        saved = json.loads((self.last_run() / "design.json").read_bytes())["receiving"]
+        self.assertTrue(saved["delivered"])
+        finished = self.oah("finish", "--task", "t1", "--agent", "claude", "--summary", "s",
+                            "--return", str(self.returned()), "--allow-missing-wiki-maintenance", "--allow-structural")
+        self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+
     def test_a_complete_read_is_delivered_and_cleaned(self):
         self.build(BIG_PARTS)
         result = self.call()
@@ -1846,6 +2006,125 @@ class RetainedOriginTest(DesignTask, unittest.TestCase):
         self.assertEqual(leaves[self.name]["state"], "absent-unattributed")
         self.assertEqual(leaves[self.manifest]["state"], "removed-under-intent")
 
+    def acknowledge(self):
+        result = self.oah("design", "task", "t1", "--transport-cleanup", "--retain", *self.expect())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for worktree in (True, False):
+            checked = tc.completion_guard(self.state_dir, "t1", root=self.repo, repo=None, current=None,
+                                          worktree=worktree)
+            self.assertTrue(checked.ok, checked.reason)
+
+    def assert_changed_retention(self):
+        for worktree in (True, False):
+            checked = tc.completion_guard(self.state_dir, "t1", root=self.repo, repo=None, current=None,
+                                          worktree=worktree)
+            self.assertFalse(checked.ok, checked.reason)
+
+    def test_retained_same_byte_new_object_refuses_completion_and_landing(self):
+        self.acknowledge()
+        directory = self.repo / tc.DATA_DIR / self.manifest
+        path = directory / self.name
+        before = path.stat()
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        directory.chmod(0o755)
+        replacement = directory / "replacement"
+        replacement.write_bytes(self.data)
+        replacement.chmod(stat.S_IMODE(before.st_mode))
+        os.replace(replacement, path)
+        directory.chmod(mode)
+        self.assertNotEqual(path.stat().st_ino, before.st_ino)
+        self.assert_changed_retention()
+        self.assertEqual(path.read_bytes(), self.data)
+        self.assertNotEqual(path.stat().st_ino, before.st_ino)
+
+    def test_retained_content_change_refuses_completion_and_landing(self):
+        self.acknowledge()
+        path = self.repo / tc.DATA_DIR / self.manifest / self.name
+        path.chmod(0o644)
+        path.write_bytes(b"changed original\n")
+        path.chmod(0o444)
+        self.assert_changed_retention()
+        self.assertEqual(path.read_bytes(), b"changed original\n")
+
+    def test_retained_leaf_mode_change_refuses_completion_and_landing(self):
+        self.acknowledge()
+        path = self.repo / tc.DATA_DIR / self.manifest / self.name
+        path.chmod(0o644)
+        self.assert_changed_retention()
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+
+    def test_retained_parent_mode_change_refuses_completion_and_landing(self):
+        self.acknowledge()
+        directory = self.repo / tc.DATA_DIR / self.manifest
+        directory.chmod(0o700)
+        self.assert_changed_retention()
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+
+    def test_retained_parent_replacement_refuses_completion_and_landing(self):
+        self.acknowledge()
+        directory = self.repo / tc.DATA_DIR / self.manifest
+        before = directory.stat()
+        moved = directory.with_name("old-parent")
+        directory.rename(moved)
+        directory.mkdir()
+        for path in moved.iterdir():
+            target = directory / path.name
+            target.write_bytes(path.read_bytes())
+            target.chmod(stat.S_IMODE(path.stat().st_mode))
+        directory.chmod(stat.S_IMODE(before.st_mode))
+        self.assert_changed_retention()
+        self.assertTrue(moved.exists())
+        self.assertEqual((directory / self.name).read_bytes(), self.data)
+
+    def test_retained_owner_change_refuses_completion_and_landing(self):
+        import types
+
+        self.acknowledge()
+        path = self.repo / tc.DATA_DIR / self.manifest / self.name
+        original = path.stat()
+        named, held = os.stat, os.fstat
+
+        def changed(value):
+            if (value.st_dev, value.st_ino) != (original.st_dev, original.st_ino):
+                return value
+            fields = {key: getattr(value, key) for key in dir(value) if key.startswith("st_")}
+            return types.SimpleNamespace(**dict(fields, st_gid=value.st_gid + 1))
+
+        with mock.patch.object(os, "stat", side_effect=lambda *a, **kw: changed(named(*a, **kw))), \
+                mock.patch.object(os, "fstat", side_effect=lambda *a, **kw: changed(held(*a, **kw))):
+            self.assert_changed_retention()
+        self.assertEqual(path.read_bytes(), self.data)
+
+    def test_landing_elsewhere_rechecks_the_original_retained_objects(self):
+        self.acknowledge()
+        candidate = make_git_repo(self)
+        git_commit(candidate, {"README.md": "other candidate\n"}, "candidate")
+        checked = tc.completion_guard(self.state_dir, "t1", root=candidate, repo=None, current=None, worktree=False)
+        self.assertTrue(checked.ok, checked.reason)
+        path = self.repo / tc.DATA_DIR / self.manifest / self.name
+        path.chmod(0o644)
+        checked = tc.completion_guard(self.state_dir, "t1", root=candidate, repo=None, current=None, worktree=False)
+        self.assertFalse(checked.ok, checked.reason)
+
+    def test_missing_manifest_cannot_adopt_a_replaced_surviving_data_parent(self):
+        parent = self.repo / tc.DATA_DIR
+        saved = parent.with_name("saved-data-parent")
+        parent.rename(saved)
+        parent.mkdir()
+        result = self.oah("design", "task", "t1", "--transport-cleanup", "--retain", *self.expect())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("ack-retained", tc.transport_views(self.state_dir)[self.origin].kinds())
+        self.assertTrue(saved.exists())
+        self.assertTrue(parent.exists())
+
+    def test_retained_root_ancestor_mode_change_refuses_completion_and_landing(self):
+        self.acknowledge()
+        ancestor = self.repo.parent
+        previous = stat.S_IMODE(ancestor.stat().st_mode)
+        ancestor.chmod(previous ^ stat.S_IXGRP)
+        self.assert_changed_retention()
+        self.assertEqual(stat.S_IMODE(ancestor.stat().st_mode), previous ^ stat.S_IXGRP)
+
     def test_exact_cleanup_removes_only_the_created_files(self):
         stale = self.oah("design", "task", "t1", "--transport-cleanup", *self.expect()[:-6],
                          "--expect-record", "1:sha256:" + "0" * 64, *self.expect()[-4:])
@@ -2141,6 +2420,190 @@ class SnapshotRetirementTest(unittest.TestCase):
                               "head": head, "output_preserved": True})
         self.assertEqual(disposition[-1][0], "disposed", disposition)
         self.assertFalse(parent.exists())
+
+    def interrupted_retirement(self, *, at_root: bool = False):
+        from oah.design.binding import repo_identity
+        from oah.lease import Store, persist_create_only
+        from oah.review import runner, snapshot
+
+        case = TransportLedgerTest("test_stale_expected_record_refuses_without_writing")
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        head = tc.git_head(case.repo)["head"]
+        if case.lease.design is None:
+            self.fail("the retirement fixture has no design-bound lease")
+        disposition, faulted = [], []
+        observe = Store.observe_transport
+
+        def fail_progress(writer, **kwargs):
+            if kwargs["kind"] == "retirement-progress" and not faulted and (not at_root or not kwargs["fact"]["path"]):
+                faulted.append(kwargs["fact"]["path"])
+                raise OSError("controlled progress write failure after unlink and directory flush")
+            return observe(writer, **kwargs)
+
+        with mock.patch.object(Store, "observe_transport", fail_progress):
+            with snapshot.make(case.repo, head, base=head,
+                               dispose=runner._snapshot_disposal(case.state_dir, "rS", disposition)) as snap:
+                parent = snap.parent
+                if parent is None:
+                    self.fail("the retirement fixture has no owned container")
+                plan = snapshot.capture_retirement_plan(
+                    {"version": 1, "run": "rS", "task_identity": case.lease.design["task_identity"],
+                     "task_basis_digest": case.lease.design["basis"]}, parent, case.state_dir,
+                    output_slot={"path": ["last-message.md"]})
+                roots = tc.LiveRoots(tc.current_role_roots(case.lease, case.state_dir, snap.tree, retirement=True))
+                try:
+                    record = tc.origin_record(transport={"read_plan": {"files": [], "manifest_sha256": "sha256:" + "c" * 64},
+                                "view": {}}, root=snap.tree, repo=repo_identity(case.repo), run="rS",
+                                task_identity=case.lease.design["task_identity"], basis=case.lease.design["basis"],
+                                epoch={"lease_id": case.lease.id, "generation": case.lease.generation},
+                                profile={"operation": "inspect"}, h0=tc.git_head(snap.tree), policy={}, nonce="00" * 32,
+                                continuity={}, boot={}, root_identity={}, live_roots=roots.facts("00" * 32))
+                finally:
+                    roots.close()
+                record["retirement"] = {"descriptor": plan.descriptor, "sha256": plan.descriptor_sha256,
+                                        "pages_relative": list(plan.pages_dir.relative_to(case.state_dir).parts)}
+                writer = Store(case.state_dir)
+                start = writer.register_transport_origin(task="t1", lease_id=case.lease.id,
+                                                         generation=case.lease.generation, record=record)
+                origin = start["record_digest"]
+                original = {"origin": origin, **{key: record[key] for key in
+                    ("run", "task_identity", "task_basis_digest", "epoch", "root_digest", "manifest")}}
+                latest, _ = writer.observe_transport_exit(original=original, expected=start, kind="no-spawn",
+                    fact={"quiescent": True, "spawn_intent": False}, live_proof=case.proof(origin))
+                latest = writer.observe_transport(task="t1", origin=origin, expected=latest, kind="verified-cleaned",
+                                                  fact={"head": head})
+                final = snapshot.finalize_retirement_plan(plan, {"presence": "absent"})
+                raw = snapshot._canonical(final)
+                digest = hashlib.sha256(raw).hexdigest()
+                relative = [*plan.pages_dir.parent.relative_to(case.state_dir).parts, digest + ".json"]
+                persist_create_only(case.state_dir.joinpath(*relative), raw)
+                writer.observe_transport(task="t1", origin=origin, expected=latest, kind="retirement-checkpoint",
+                    fact={"base_plan_sha256": plan.descriptor_sha256, "final_sha256": digest,
+                          "final_bytes": len(raw), "final_relative": relative, "data_checkpoint": latest,
+                          "head": head, "output_preserved": True})
+        self.assertEqual(disposition[-1][0], "retained", disposition)
+        self.assertEqual(len(faulted), 1)
+        self.assertFalse(parent.joinpath(*faulted[0]).exists())
+        self.addCleanup(snapshot.remove, parent)
+        return case, parent, origin, plan, final
+
+    def test_pending_absence_recovers_exact_entry_without_counting_original_attempt(self):
+        from oah.review import runner
+
+        case, parent, origin, _plan, _final = self.interrupted_retirement()
+        view = tc.transport_views(case.state_dir)[origin]
+        old_history = list(view.observations)
+        self.assertEqual(old_history[-1]["kind"], "retirement-intent")
+        outcome = runner.retire_snapshot(case.state_dir, view, parent)
+        self.assertEqual(outcome[0], "disposed-noncounting", outcome)
+        self.assertFalse(parent.exists())
+        after = tc.transport_views(case.state_dir)[origin]
+        self.assertEqual(after.observations[:len(old_history)], old_history)
+        ack = after.last("retirement-absence-ack")
+        if ack is None:
+            self.fail("the exact pending absence was not acknowledged")
+        self.assertEqual(ack["fact"]["observed"], "absence-after-intent")
+        self.assertEqual(ack["fact"]["causality"], "unknown")
+        self.assertIs(ack["fact"]["counted"], False)
+        self.assertEqual(ack["fact"]["path"], old_history[-1]["fact"]["path"])
+        self.assertEqual(ack["fact"]["intent_record"], view.latest)
+        retired = after.last("retired")
+        if retired is None:
+            self.fail("the complete recovered retirement was not recorded")
+        self.assertIs(retired["fact"]["counted"], False)
+
+    def test_pending_absence_requires_exact_plan_predecessor_and_complete_census(self):
+        import copy
+        from oah.review import snapshot
+
+        case, parent, origin, plan, final = self.interrupted_retirement()
+        view = tc.transport_views(case.state_dir)[origin]
+        event = view.observations[-1]
+        predecessor = view.observations[-2]
+        proof = {"origin": origin, "sequence": event["sequence"], "record_digest": event["record_digest"],
+                 "predecessor": {"sequence": predecessor["sequence"], "record_digest": predecessor["record_digest"]},
+                 "fact": event["fact"]}
+        with self.assertRaises(snapshot.Retained):
+            snapshot.validate_retirement_plan(final, parent, plan.pages_dir)
+        for field in ("plan_sha256", "final_sha256", "entry_sha256"):
+            bad = copy.deepcopy(proof)
+            bad["fact"][field] = "0" * 64
+            with self.subTest(field=field), self.assertRaises(snapshot.Retained):
+                snapshot.validate_retirement_plan(final, parent, plan.pages_dir, pending=bad)
+        bad = copy.deepcopy(proof)
+        bad["predecessor"]["record_digest"] = "sha256:" + "0" * 64
+        with self.assertRaises(snapshot.Retained):
+            snapshot.validate_retirement_plan(final, parent, plan.pages_dir, pending=bad)
+        validated = snapshot.validate_retirement_plan(final, parent, plan.pages_dir, pending=proof)
+        self.assertTrue(validated.pending_absent)
+        replacement = parent.joinpath(*event["fact"]["path"])
+        replacement.write_bytes(b"foreign replacement")
+        with self.assertRaises(snapshot.Retained):
+            snapshot.validate_retirement_plan(final, parent, plan.pages_dir, pending=proof)
+        self.assertEqual(replacement.read_bytes(), b"foreign replacement")
+
+    def test_pending_absence_cannot_borrow_missing_root_or_expired_authority(self):
+        from oah.lease import LeaseError, Store
+        from oah.review import runner, snapshot
+
+        case, parent, origin, _plan, _final = self.interrupted_retirement()
+        view = tc.transport_views(case.state_dir)[origin]
+        with mock.patch.object(Store, "transport_action_basis", side_effect=LeaseError(tc.TRANSPORT_AUTHORITY, "expired")):
+            with self.assertRaises(LeaseError):
+                runner.retire_snapshot(case.state_dir, view, parent)
+        self.assertEqual(tc.transport_views(case.state_dir)[origin].observations, view.observations)
+        moved = parent.with_name(parent.name + "-moved")
+        parent.rename(moved)
+        self.addCleanup(snapshot.remove, moved)
+        with self.assertRaises((OSError, ValueError, snapshot.Retained)):
+            runner.retire_snapshot(case.state_dir, view, parent)
+
+    def test_pending_absence_refuses_another_unexplained_missing_entry(self):
+        from oah.review import runner, snapshot
+
+        case, parent, origin, plan, final = self.interrupted_retirement()
+        view = tc.transport_views(case.state_dir)[origin]
+        pending_path = view.observations[-1]["fact"]["path"]
+        pages = snapshot.validate_retirement_plan(final, parent, plan.pages_dir, pending={
+            "origin": origin, "sequence": view.latest["sequence"], "record_digest": view.latest["record_digest"],
+            "predecessor": {"sequence": view.observations[-2]["sequence"],
+                            "record_digest": view.observations[-2]["record_digest"]},
+            "fact": view.observations[-1]["fact"]})
+        other = next(item for item in pages.all_entries if item["type"] == "file" and item["path"] != pending_path)
+        parent.joinpath(*other["path"]).unlink()
+        with self.assertRaises(snapshot.Retained):
+            runner.retire_snapshot(case.state_dir, view, parent)
+        self.assertEqual(tc.transport_views(case.state_dir)[origin].observations, view.observations)
+
+    def test_pending_root_absence_uses_surviving_parent_and_never_counts(self):
+        import copy
+        from oah.review import runner, snapshot
+
+        case, parent, origin, plan, final = self.interrupted_retirement(at_root=True)
+        view = tc.transport_views(case.state_dir)[origin]
+        event, previous = view.observations[-1], view.observations[-2]
+        self.assertEqual(event["fact"]["path"], [])
+        removed = frozenset(tuple(row["fact"]["path"]) for row in view.observations if row["kind"] == "retirement-progress")
+        proof = {"origin": origin, "sequence": event["sequence"], "record_digest": event["record_digest"],
+                 "predecessor": {"sequence": previous["sequence"], "record_digest": previous["record_digest"]},
+                 "fact": event["fact"]}
+        bad_fact = copy.deepcopy(event["fact"])
+        bad_fact.pop("surviving_parent")
+        predecessor = {"sequence": previous["sequence"], "record_digest": previous["record_digest"]}
+        bad = {**proof, "fact": bad_fact, "record_digest": tc.observation_digest(
+            origin, event["sequence"], predecessor, "retirement-intent", bad_fact)}
+        with self.assertRaises(snapshot.Retained):
+            snapshot.validate_retirement_plan(final, parent, plan.pages_dir, removed=removed, pending=bad)
+        result = runner.retire_snapshot(case.state_dir, view, parent)
+        self.assertEqual(result[0], "disposed-noncounting", result)
+        current = tc.transport_views(case.state_dir)[origin]
+        self.assertEqual(current.observations[:len(view.observations)], view.observations)
+        acknowledged, retired = current.last("retirement-absence-ack"), current.last("retired")
+        if acknowledged is None or retired is None:
+            self.fail("the recovered root retirement has no complete non-counting history")
+        self.assertEqual(acknowledged["fact"]["path"], [])
+        self.assertIs(retired["fact"]["counted"], False)
 
     def test_the_disposal_callback_is_exclusive(self):
         from oah.review import snapshot

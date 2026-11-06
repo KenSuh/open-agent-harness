@@ -557,9 +557,10 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
             print(f"OAH_DESIGN_TRANSPORT_ACK_RETAINED run={args.run} snapshot=true counted=false")
             return EXIT_OK
         outcome, reason = retire_snapshot(store.state, view, pathlib.Path(cwd).parent)
-        if outcome != "disposed":
+        if outcome not in ("disposed", "disposed-noncounting"):
             raise DesignError(tc.TRANSPORT_RETAINED, reason or "the review snapshot was retained")
-        print(f"OAH_DESIGN_TRANSPORT_RETIRED run={args.run}")
+        print(f"OAH_DESIGN_TRANSPORT_RETIRED run={args.run}" +
+              (" counted=false causality=unknown" if outcome == "disposed-noncounting" else ""))
         return EXIT_OK
     if view.resolution is not None:
         print(f"OAH_DESIGN_TRANSPORT_RESOLVED run={args.run} state={view.state}: nothing to do")
@@ -616,11 +617,16 @@ def _transport_cleanup(args: argparse.Namespace, store) -> int:
                 removed = present
                 for name in removed:
                     leaves[name] = {"state": "removed-under-intent"}
-            writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="ack-retained",
-                                     authority=authority, fact={"operation": operation, "settle": args.settle,
-                                           "reason": "retained by request" if args.retain else "partial or missing",
-                                           "leaves": leaves, "missing": sorted(name for name, item in leaves.items()
-                                                                               if item["state"].startswith("absent"))})
+            with writer.transport_action(task=args.task, origin=view.origin, expected=expected, authority=authority,
+                                         receiving_root=root):
+                identity = tc.retained_identity(done)
+                writer.observe_transport(task=args.task, origin=view.origin, expected=expected, kind="ack-retained",
+                                         authority=authority, held=True,
+                                         fact={"operation": operation, "settle": args.settle,
+                                               "reason": "retained by request" if args.retain else "partial or missing",
+                                               "leaves": leaves, "retained_identity": identity,
+                                               "missing": sorted(name for name, item in leaves.items()
+                                                                 if item["state"].startswith("absent"))})
             print(f"OAH_DESIGN_TRANSPORT_ACK_RETAINED run={args.run} present={sum(1 for item in leaves.values() if item['state'] == 'present-unchanged')} "
                   f"missing={sum(1 for item in leaves.values() if item['state'].startswith('absent'))} "
                   f"removed={len(removed)}")

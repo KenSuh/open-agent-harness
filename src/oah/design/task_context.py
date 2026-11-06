@@ -684,6 +684,9 @@ def _screen_materials(text: str, *, task: str, part: str, revision: int) -> None
     lines = text.split("\n")
     opens = [n for n, line in enumerate(lines) if _FENCE_OPEN.fullmatch(line)]
     if not opens:
+        hit = screen_hit(text)
+        if hit is not None:
+            raise _refuse(task, f"the semantic text of part {part} r{revision} matches the privacy rule {hit}")
         return
     if _bytes(text) >= PART_LIMIT:
         raise _refuse(task, f"part {part} r{revision} exceeds the bounded materials inspection")
@@ -715,13 +718,19 @@ def _screen_materials(text: str, *, task: str, part: str, revision: int) -> None
             total += len(raw)
             if total > BUNDLE_LIMIT:
                 raise DesignError(TOO_LARGE_CODE, f"part {part} r{revision} exceeds the bounded original inspection")
-            hit = screen_hit(raw.decode("utf-8", errors="replace"))
+            try:
+                original = raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                raise _refuse(task, f"an original of part {part} r{revision} is not screenable UTF-8 text") from None
+            if any((ord(char) < 32 and char not in "\t\n\r") or 127 <= ord(char) <= 159 for char in original):
+                raise _refuse(task, f"an original of part {part} r{revision} contains an unscreenable text control")
+            hit = screen_hit(original)
             if hit is not None:
                 raise _refuse(task, f"an original of part {part} r{revision} matches the privacy rule {hit}")
             blob["data"] = None
     hit = next((rule for rule in map(screen_hit, _strings(semantic)) if rule), None)
     if hit is None:
-        hit = screen_hit("\n".join(lines[:opens[0]]))
+        hit = screen_hit("\n".join([*lines[:opens[0]], *lines[opens[0] + 2:]]))
     if hit is not None:
         raise _refuse(task, f"the materials record of part {part} r{revision} matches the privacy rule {hit}")
 
@@ -2993,7 +3002,7 @@ def verify_live_roots(record: Mapping, roots: Mapping[str, pathlib.Path], *, ret
 
 @dataclasses.dataclass
 class WindowsInstallation(Installation):
-    native: object | None = None
+    native: _WindowsIO | None = None
     ancestors: list = dataclasses.field(default_factory=list)
     ancestor_identities: list = dataclasses.field(default_factory=list)
     leaf_handles: dict = dataclasses.field(default_factory=dict)
@@ -3606,7 +3615,7 @@ QUIESCENT = ("exit-observed", "failed", "aborted", "no-spawn", "boot-settled")
 STICKY = ("committed", "staged")
 HOUSEKEEPING = frozenset({"cleanup-intent", "cleanup-progress", "verified-cleaned", "ack-retained",
                           "retirement-intent", "retirement-progress", "retirement-checkpoint", "retired",
-                          "retirement-ack-retained", "retirement-cancel"})
+                          "retirement-ack-retained", "retirement-cancel", "retirement-absence-ack"})
 
 
 def _origin_problem(record: Mapping, task: object) -> str | None:
@@ -4094,10 +4103,14 @@ def reopen(root: pathlib.Path, manifest: str, installed: Mapping, *,
     recorded = {item["name"]: item for item in installed.get("leaves", [])}
     try:
         done.data_fd = _open_dir(DATA_DIR, dir_fd=root_fd)
+        done.data_identity = _identity(os.fstat(done.data_fd))
         done.m_fd = _open_dir(manifest, dir_fd=done.data_fd)
         done.m_identity = _identity(os.fstat(done.m_fd))
-        done.data_identity = _identity(os.fstat(done.data_fd))
     except (OSError, InstallRefused):
+        current = done.facts()["anchors"]
+        if any(current.get(name) != installed.get("anchors", {}).get(name) for name in ("root", "data")
+               if name in current):
+            return done, dict.fromkeys(recorded, "changed")
         for name in recorded:
             states[name] = "absent" if not os.path.lexists(pathlib.Path(root) / DATA_DIR / manifest / name) \
                 else "changed"
@@ -4238,22 +4251,69 @@ def remove_directories(done: Installation, *, before, after) -> None:
             after(DATA_DIR, "absent" if not _exists_at(done.root_fd, DATA_DIR) else "present", "dir")
 
 
-def acknowledged_problem(root: pathlib.Path, manifest: str, acknowledged: Mapping) -> str | None:
-    """ACK_RETAINED holds: every acknowledged present leaf still matches, every absent one is still absent."""
-    leaves = acknowledged.get("leaves") or {}
-    for name, item in leaves.items():
-        path = pathlib.Path(root) / DATA_DIR / manifest / name
-        if item.get("state") == "present-unchanged":
-            data = _read_regular(path, BUNDLE_LIMIT)
-            if data is None or "sha256:" + _sha(data) != item.get("sha256"):
-                return f"retained data file {name} changed after its acknowledgment"
-        elif os.path.lexists(path):
-            return f"acknowledged-absent data file {name} exists again"
-    directory = pathlib.Path(root) / DATA_DIR / manifest
-    if directory.is_dir() and not directory.is_symlink():
-        extra = set(os.listdir(directory)) - set(leaves)
-        if extra:
-            return "the retained data directory holds unexpected files"
+def retained_identity(done: Installation | None) -> dict[str, object]:
+    if done is None or done.root_fd is None or check_cleanup_anchors(done) is not None:
+        raise InstallRefused("the retained root and parent identities cannot be verified")
+    if isinstance(done, WindowsInstallation):
+        native = done.native
+        if native is None:
+            raise InstallRefused("the retained native identity reader is unavailable")
+        exists = lambda parent, name: name in native.names(parent)
+    else:
+        exists = _exists_at
+    if done.data_fd is None and exists(done.root_fd, DATA_DIR):
+        raise InstallRefused("the retained DATA parent cannot be opened")
+    if done.data_fd is not None and done.m_fd is None and exists(done.data_fd, done.manifest):
+        raise InstallRefused("the retained manifest parent cannot be opened")
+    if (done.m_fd is None and done.leaves) or (done.m_fd is not None and check_leaves(done) is not None):
+        raise InstallRefused("the exact retained objects, roster and bytes cannot be verified")
+    with contextlib.closing(LiveRoots({"retained-root": done.root})) as live:
+        if (not live.current() or _anchor_stamp(live.identity("retained-root")) != _anchor_stamp(done.root_identity)
+                or check_cleanup_anchors(done) is not None):
+            raise InstallRefused("the retained root's complete anchored path changed")
+        return {**done.facts(), "root_anchors": live.facts(done.manifest)}
+
+
+def acknowledged_problem(root: pathlib.Path, manifest: str, acknowledged: Mapping[str, object]) -> str | None:
+    """Recheck the acknowledged nodes and anchored parents, including exact absence, without adopting replacements."""
+    expected, leaves = acknowledged.get("retained_identity"), acknowledged.get("leaves")
+    anchors = expected.get("anchors") if isinstance(expected, dict) else None
+    if not isinstance(expected, dict) or not isinstance(leaves, dict) or not isinstance(anchors, dict) or "root" not in anchors:
+        return "the retained acknowledgment has no exact object and parent identities"
+    try:
+        if any(_HEX64.fullmatch(name) is None or not isinstance(item, dict) or item.get("state") not in
+               ("present-unchanged", "absent-after-intent", "absent-unattributed", "removed-under-intent")
+               for name, item in leaves.items()):
+            return "the retained acknowledgment's exact leaf states are unknown"
+        present = {name for name, item in leaves.items() if item["state"] == "present-unchanged"}
+        if present != {item["name"] for item in expected["leaves"]}:
+            return "the retained acknowledgment's exact object roster is unknown"
+        done, states = reopen(root, manifest, expected)
+        try:
+            if states != dict.fromkeys(present, "present-unchanged"):
+                return "a retained object was changed, replaced, removed or added"
+            current = retained_identity(done)
+            if any(current[key] != expected[key] for key in ("anchors", "leaves", "data_dir_created", "root_anchors")):
+                return "a retained object or anchored parent identity, owner, mode or bytes changed"
+        finally:
+            if done is not None:
+                done.close()
+    except (OSError, InstallRefused, KeyError, TypeError, ValueError):
+        return "the exact retained object and parent identities cannot be verified"
+    return None
+
+
+def _retained_origin_root(state_dir: pathlib.Path, view: TransportView, root: pathlib.Path) -> pathlib.Path | None:
+    from oah.design.binding import task_view
+
+    candidates = [root]
+    epoch = task_view(state_dir, view.task).epoch
+    if epoch is not None and isinstance(epoch.get("worktree"), str):
+        candidates.append(pathlib.Path(epoch["worktree"]))
+    for candidate in candidates:
+        if candidate.is_absolute() and _label_digest("oah-receiving-root", view.record["nonce"],
+                os.fsencode(os.path.realpath(candidate))) == view.record["root_digest"]:
+            return candidate
     return None
 
 
@@ -4330,6 +4390,14 @@ def completion_guard(state_dir: pathlib.Path, task: str, *, root: pathlib.Path, 
                                               acknowledged=resolution["fact"] if expect == "acknowledged" else None)
         else:
             checked = intersects(view.record, root, head)
+            if view.task == task and expect == "acknowledged" and checked["state"] == "clean":
+                if resolution is None:
+                    return Completion(TRANSPORT_HISTORY_UNKNOWN, f"{where(view)} has no retained acknowledgment", origins=summaries)
+                original_root = _retained_origin_root(state_dir, view, root)
+                problem = (acknowledged_problem(original_root, view.record["manifest"], resolution["fact"])
+                           if original_root is not None else "the exact retained receiving root cannot be located")
+                if problem is not None:
+                    return Completion(TRANSPORT_CHANGED, f"{where(view)}: {problem}", origins=summaries)
         if checked["state"] in ("committed", "staged", "unknown"):
             return Completion(checked["code"], f"{where(view)}: {checked['why']}", origins=summaries)
         checks[view.origin] = (expect, checked)
@@ -4818,10 +4886,14 @@ class ReferenceRun:
         whole = [item.name for item in self._files() if item.obligation == "whole"]
         reads = observe_reads(events, root=self.root, manifest=self.manifest, payloads=self.payloads, whole=whole)
         rows = [{key: value for key, value in row.items() if key != "session"} for row in reads["rows"]]
-        self._fact("reads", {"rows": rows, "coverage": reads["coverage"], "problems": reads["problems"],
+        read_problem = self._fact("reads", {"rows": rows, "coverage": reads["coverage"], "problems": reads["problems"],
                              "stream_problem": stream_problem, "reference_delivery": reads["reference_delivery"]})
         checked = verify_transport_origin(self.record, self.root, installation=self.installation, expect="live")
-        failure = None
+        failure = TRANSPORT_NOT_DELIVERED if read_problem is not None else None
+        if read_problem is not None:
+            warnings.append(f"{TRANSPORT_NOT_DELIVERED}: run {self.run_id} observed {reads['reference_delivery']} "
+                            "tool reads, but their original fact could not be persisted; delivery stays "
+                            "unverified, this run does not count, and its DATA is retained")
         if checked["state"] != "clean":
             self._fact("exposure", {"state": checked["state"], "why": checked["why"], "head": checked["head"],
                                     "evidence": checked["evidence"]})
@@ -4857,7 +4929,9 @@ class ReferenceRun:
                      "provided": [{"inline_bytes": self.plan["block_bytes"], "references": len(self.payloads),
                                    "remote_policy": "cli-enforced-unobserved"}],
                      "semantic_inline_provided": True, "references_offered": len(whole),
-                     "reference_delivery": reads["reference_delivery"], "observed_reads": rows,
+                     "reference_delivery": reads["reference_delivery"] if read_problem is None else "unverified",
+                     "read_fact_persistence": "durable" if read_problem is None else "unrecorded",
+                     "observed_reference_delivery": reads["reference_delivery"], "observed_reads": rows,
                      "model_directed_observation": reads["model_directed"], "application_evidence": "not-observed",
                      "delivered": delivered}
         update_sidecar(self.run_dir, receiving=receiving, origin=self.origin)
