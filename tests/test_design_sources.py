@@ -1240,6 +1240,7 @@ class ResponseIsolationTest(LoopbackCase):
                         before = dataclasses.replace(before, retry_after="3000-01-01T00:00:00+00:00")
                         sources.state.write_json(f"heads/{bad.id}.json", before.to_json())
                     write, fresh = sources.state.write_json, check_module.freshness
+                    generation = before.generation
 
                     def cap_write(rel, data):
                         if failure == "cooldown" and rel == f"heads/{bad.id}.json" and data["outcome"] != "failed":
@@ -1248,7 +1249,7 @@ class ResponseIsolationTest(LoopbackCase):
 
                     def render_freshness(head, *args):
                         if (failure == "result" and head is not None and head.id == bad.id
-                                and head.generation > before.generation and head.outcome != "failed"):
+                                and head.generation > generation and head.outcome != "failed"):
                             raise RuntimeError("private failure value")
                         return fresh(head, *args)
 
