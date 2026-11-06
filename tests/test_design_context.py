@@ -111,7 +111,8 @@ def materials_part(blobs, *, provider: str = "github", member: bool = True, narr
     source = {"id": "lib", **spec}
     manifest = {"kind": "oah-source-snapshot", "version": 1, "spec": spec, "spec_digest": spec_digest,
                 "verified": True, "files": files, "license": {"files": [], "notices": []}, "document": None,
-                "observed": {"commit": "c" * 40, "ref": "HEAD", "release": None}}
+                "observed": {"commit": "c" * 40, "ref": "HEAD", "release": None}, "notices": [], "problems": [],
+                "content_key": "sha256:" + hashlib.sha256(canonical(files)).hexdigest()}
     snapshot = record_digest(manifest)
     times = {key: "2026-11-01T12:00:00+00:00" for key in
              ("attempted_at", "observed_at", "confirmed_at", "verified_at")}
@@ -163,6 +164,43 @@ class MaterialsRecordTest(unittest.TestCase):
 
     def test_parts_without_the_block_are_not_materials(self):
         self.assertEqual(tc.materials_part("## Design\nPeople book a lesson.\n"), (None, None))
+
+    def test_rebound_wire_identities_do_not_validate_unknown_or_boolean_wire_schemas(self):
+        def digest(record):
+            return "sha256:" + hashlib.sha256((json.dumps(record, ensure_ascii=False, sort_keys=True, indent=1)
+                                               + "\n").encode()).hexdigest()
+
+        text = materials_part(BIG[:1])
+        body = text.split("\n")[3]
+        for mutation in ("manifest-version", "observation-version", "manifest-field", "source-track"):
+            with self.subTest(mutation=mutation):
+                record = json.loads(body)
+                envelope = record["portable_evidence"][0]
+                manifest = envelope["snapshot"]["manifest"]
+                observation = envelope["provenance"]["observation"]
+                if mutation == "manifest-version":
+                    manifest["version"] = True
+                elif mutation == "observation-version":
+                    observation["version"] = True
+                elif mutation == "manifest-field":
+                    manifest["not-a-wire-field"] = "unlisted"
+                else:
+                    envelope["source"]["track"] = "unknown-track"
+                    manifest["spec"]["track"] = "unknown-track"
+                spec = {key: value for key, value in envelope["source"].items() if key != "id"}
+                spec_digest = "sha256:" + hashlib.sha256(canonical(spec)).hexdigest()
+                envelope["spec_digest"] = manifest["spec_digest"] = spec_digest
+                observation["source"]["spec_digest"] = spec_digest
+                envelope["snapshot"]["digest"] = observation["snapshot"] = digest(manifest)
+                envelope["provenance"]["observation_digest"] = digest(observation)
+                material = record["materials"][0]
+                material.update(source=envelope["source"], snapshot=envelope["snapshot"]["digest"],
+                                spec_digest=spec_digest)
+                material["checked"]["observation"] = envelope["provenance"]["observation_digest"]
+                material["portable_evidence_id"] = "sha256:" + hashlib.sha256(canonical(envelope)).hexdigest()
+                part, problem = tc.materials_part(text.replace(body, canonical(record).decode()))
+                self.assertTrue(part is None, mutation)
+                self.assertIsNotNone(problem)
 
     def test_edited_unknown_or_unverified_records_are_never_projected(self):
         good = materials_part(BIG[:1])
@@ -452,6 +490,14 @@ class CodexPolicyTest(unittest.TestCase):
         self.assertEqual(self.collect(user=b'[projects."/workspace"]\ntrust_level = "maybe"\n',
                                       files=files)['local_policy'], 'unknown')
 
+    def test_malformed_legacy_profile_table_is_unknown_without_throwing(self):
+        for value in (b'profiles = 3\n', b'profiles = ["research"]\n'):
+            with self.subTest(value=value):
+                found = self.collect(user=value, argv=['--profile', 'research'], files={
+                    '/users/fixture/.codex/research.config.toml': b'model = "gpt-6.1-sol"\n'})
+                self.assertEqual(found['local_policy'], 'unknown')
+                self.assertFalse(found['launch_eligible'])
+
 
 class WindowsNativeRosterTest(unittest.TestCase):
     class Native:
@@ -580,6 +626,19 @@ class WindowsNativeRosterTest(unittest.TestCase):
                 with self.assertRaises(tc.InstallRefused):
                     tc.remove_leaves(done, ['b' * 64], before=lambda name: None, after=lambda *row: None)
                 done.close()
+
+    def test_native_cleanup_requires_parent_durability_before_absence_progress(self):
+        native = self.Native()
+        name = 'b' * 64
+        done = tc._install_windows(pathlib.PureWindowsPath(r'C:\work'), 'a' * 64,
+                                   {name: b'original\n'}, native=native)
+        self.addCleanup(done.close)
+        progress = []
+        with mock.patch.object(native, 'flush', side_effect=tc.InstallRefused('controlled directory flush failed')):
+            with self.assertRaisesRegex(tc.InstallRefused, 'directory flush'):
+                tc.remove_leaves(done, [name], before=lambda _: None, after=lambda *row: progress.append(row))
+        self.assertEqual(progress, [])
+        self.assertNotIn(name, native.names(done.m_fd))
 
     def test_native_read_manifest_and_package_pin_use_owned_handles(self):
         native = self.Native()
@@ -1113,6 +1172,36 @@ class InstallExposureTest(unittest.TestCase):
         self.assertTrue((self.repo / tc.DATA_DIR / "mine.txt").exists())
         self.assertFalse((self.repo / tc.DATA_DIR / self.manifest).exists())
         self.assertEqual(steps[-1], (self.manifest, "absent", "dir"))
+
+    def test_cleanup_flushes_each_changed_directory_before_publishing_progress(self):
+        done = self.installed()
+        targets = {"mode": done.m_fd, "file": done.m_fd, self.manifest: done.data_fd, tc.DATA_DIR: done.root_fd}
+        flushed = []
+        fsync = os.fsync
+
+        def flush(descriptor):
+            fsync(descriptor)
+            flushed.append(descriptor)
+
+        def after(name, observed, entry):
+            target = targets[entry if entry != "dir" else name]
+            self.assertTrue(flushed, (name, observed, entry))
+            self.assertEqual(flushed.pop(), target)
+
+        with mock.patch.object(os, "fsync", side_effect=flush):
+            tc.remove_leaves(done, sorted(done.leaves), before=lambda _: None, after=after)
+            tc.remove_directories(done, before=lambda _: None, after=after)
+        self.assertFalse((self.repo / tc.DATA_DIR).exists())
+
+    def test_failed_cleanup_flush_retains_unknown_progress_after_unlink(self):
+        done = self.installed()
+        names, progress = sorted(done.leaves), []
+        with mock.patch.object(os, "fsync", side_effect=[None, OSError("controlled directory flush failed")]):
+            with self.assertRaisesRegex(OSError, "directory flush"):
+                tc.remove_leaves(done, names, before=lambda _: None, after=lambda *row: progress.append(row))
+        self.assertEqual(progress, [(self.manifest, "writable", "mode")])
+        self.assertFalse((self.repo / tc.DATA_DIR / self.manifest / names[0]).exists())
+        self.assertTrue((self.repo / tc.DATA_DIR / self.manifest / names[1]).exists())
 
     def test_product_commits_pass_and_every_exposure_is_found(self):
         done = self.installed()
@@ -1971,6 +2060,32 @@ class SnapshotRetirementTest(unittest.TestCase):
                     self.assertFalse(snapshot.remove(parent, expected_plan=validated,
                                                        progress=lambda item, state: None))
                 self.assertEqual(output.read_bytes(), b"result")
+
+    def test_final_output_owner_change_cannot_reuse_the_same_object_and_bytes(self):
+        import types
+        from oah.review import snapshot
+
+        parent = self.container(1)
+        captured, _ = self.plan(parent)
+        output = parent / "last-message.md"
+        output.write_bytes(b"result")
+        original = output.stat()
+        final = snapshot.finalize_retirement_plan(captured, snapshot.capture_output_slot(
+            parent, [output.name], producer={"run": "rS", "checkpoint": "final-output"}))
+        named, held = os.stat, os.fstat
+
+        def changed(info):
+            if (info.st_dev, info.st_ino) != (original.st_dev, original.st_ino):
+                return info
+            value = {key: getattr(info, key) for key in dir(info) if key.startswith("st_")}
+            value["st_gid"] += 1
+            return types.SimpleNamespace(**value)
+
+        with mock.patch.object(os, "stat", side_effect=lambda *a, **kw: changed(named(*a, **kw))), \
+                mock.patch.object(os, "fstat", side_effect=lambda *a, **kw: changed(held(*a, **kw))):
+            with self.assertRaises(snapshot.Retained):
+                snapshot.validate_retirement_plan(final, parent, captured.pages_dir)
+        self.assertEqual(output.read_bytes(), b"result")
 
     def test_origin_bearing_snapshot_consumes_its_durable_complete_plan(self):
         from oah.design.binding import repo_identity

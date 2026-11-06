@@ -216,6 +216,35 @@ class ClosedTaskTest(DesignTask, unittest.TestCase):
         _evidence, check = land._design_check(self.repo, self.state_dir, "t1", head, lease.binding())
         self.assertNotEqual(check.state, land.PASSED)
 
+    def test_finished_task_retains_exact_draft_and_unaffected_carry_without_new_work_authority(self):
+        self.build({"design": "People book a lesson.\n"})
+        self.assertEqual(self.finish().returncode, 0)
+        original = design.task_view(self.state_dir, "t1").record
+        store = self.store(self.repo)
+        context = store.context("acme", "booking")
+        draft = store.save("acme", "booking", expect_revision=1, expect_digest=context.current.digest,
+                           reason="draft wording", parts={"design": "People book a lesson at a chosen time.\n"},
+                           today=TODAY)
+        self.assertEqual(design.judge_task(self.state_dir, "t1", root=self.repo).state, "needs-review")
+        acknowledged = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", "2", "--digest",
+                                draft.digest, "--reason", "wording does not affect completed work")
+        self.assertEqual(acknowledged.returncode, 0, acknowledged.stdout + acknowledged.stderr)
+        self.assertEqual(design.judge_task(self.state_dir, "t1", root=self.repo).state, "current")
+        store.accept("acme", "booking", revision=2, digest=draft.digest, reason="accepted wording", today=TODAY)
+        self.assertEqual(design.judge_task(self.state_dir, "t1", root=self.repo).state, "stale")
+        carried = self.oah("design", "carry", "t1", "--agent", "claude", "--revision", "2", "--digest",
+                          draft.digest, "--reason", "completed behavior is unchanged")
+        self.assertEqual(carried.returncode, 0, carried.stdout + carried.stderr)
+        closed = design.task_view(self.state_dir, "t1")
+        self.assertIsNone(closed.lease)
+        self.assertEqual(closed.closed, "finished")
+        self.assertEqual(closed.record.identity, original.identity)
+        self.assertEqual(closed.record.basis, original.basis)
+        self.assertEqual(design.judge_task(self.state_dir, "t1", root=self.repo).state, "current")
+        refused = self.oah("call", "codex", "--stage", "correction", "--task", "t1", "--tier", "high")
+        self.assertEqual(refused.returncode, 1)
+        self.assertFalse(self.record.exists())
+
     def test_a_tampered_closed_carry_target_is_a_problem_not_a_binding(self):
         self.build({"design": "People book a lesson.\n"})
         self.assertEqual(self.finish().returncode, 0)
@@ -576,6 +605,39 @@ class ReviewDesignTest(unittest.TestCase):
 class FixTargetOnlyTest(unittest.TestCase):
     """B-T10: an unrelated lease's writes during a design-bound correction never fail its outcome or normalize its
     own design bytes; the unrelated task's malformed design value is preserved, not repaired."""
+
+    def test_unrelated_start_prune_and_roster_reordering_keep_the_correction_authorized(self):
+        from oah.lease import Store, read_lease_document
+        from oah.paths import repo_info
+        from oah.review import fix
+        from tests.test_fix import FIXED, applied
+
+        project = design_fix_project(self)
+        past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)
+        Store(project.state, now=lambda: past).start(task="expired-other", agent="claude", scope=("docs",),
+            note="old unrelated lease", ttl_hours=1, info=repo_info(project.repo))
+        path = project.state / "leases.json"
+        original = read_lease_document(path.read_bytes(), path).record("t1").raw
+        judge, writes = fix._Attempt._judge, []
+
+        def changed(attempt, *args, **kwargs):
+            result = judge(attempt, *args, **kwargs)
+            Store(project.state, lock_timeout=0).start(task="new-other", agent="claude", scope=("docs",),
+                note="concurrent unrelated start", ttl_hours=1, info=repo_info(project.repo))
+            document = read_lease_document(path.read_bytes(), path)
+            self.assertIsNone(document.record("expired-other"))
+            path.write_text('{"version":1,"leases":[' +
+                            ",".join(record.raw for record in reversed(document.records)) + "]}\n",
+                            encoding="utf-8")
+            writes.append(True)
+            return result
+
+        with mock.patch.object(fix._Attempt, "_judge", changed):
+            applied(self, project, {"write": FIXED})
+        self.assertEqual(writes, [True])
+        document = read_lease_document(path.read_bytes(), path)
+        self.assertEqual(document.record("t1").raw, original)
+        self.assertIsNotNone(document.record("new-other"))
 
     def test_unrelated_writes_keep_the_outcome_and_the_exact_design_bytes(self):
         from oah.lease import Store, read_lease_document

@@ -157,6 +157,27 @@ class DesignGateTest(DesignTask, unittest.TestCase):
         self.assertEqual(json.loads(first).get("design_history", []), [])
         self.assertEqual(len(self.stub.calls("gate-check.mjs")), 1)
 
+    def test_manual_only_attest_and_carry_still_check_the_actual_source_at_publication(self):
+        self.ledger.write_text("# Gates\n\n- [x] G1: manual observation\n  EVIDENCE: observed locally\n", encoding="utf-8")
+        self.assertEqual(self.check().actions["G1"], "attest")
+        before = self.bindings.path.read_bytes()
+        self.assertEqual(self.check().actions["G1"], "carry")
+        self.assertEqual(self.bindings.path.read_bytes(), before)
+        collect = check_mod.collect_inputs
+
+        def changed(*args, **kwargs):
+            result = collect(*args, **kwargs)
+            packet = self.repo / PACKET
+            packet.write_text(packet.read_text().replace("Revision: 1", "Revision: 2"), encoding="utf-8")
+            return result
+
+        with mock.patch.object(check_mod, "collect_inputs", changed):
+            with self.assertRaises(check_mod.GateRefused) as caught:
+                self.check()
+        self.assertEqual(caught.exception.code, "OAH_DESIGN_CHANGED")
+        self.assertEqual(self.bindings.path.read_bytes(), before)
+        self.assertEqual(self.stub.calls("gate-check.mjs"), [])
+
     def rotate(self) -> str:
         """Make meaningful changes until the live history rotates into an archive page; its digest."""
         self.runnable()

@@ -328,6 +328,8 @@ _PROVENANCE_KEYS = frozenset({"claim", "registration", "observation", "observati
 _OBSERVATION_KEYS = frozenset({"version", "kind", "source", "snapshot", "outcome", "head_generation",
                                "attempted_at", "observed_at", "confirmed_at", "verified_at", "previous",
                                "selection_observation", "verification_policy"})
+_SNAPSHOT_KEYS = frozenset({"version", "kind", "spec", "spec_digest", "content_key", "files", "license",
+                           "document", "notices", "observed", "verified", "problems"})
 
 
 class _PortableInvalid(ValueError):
@@ -406,12 +408,46 @@ def _portable_envelope(evidence: dict, materials: list, n: int) -> list[Original
             and (spec["selection_policy"] is None or isinstance(spec["selection_policy"], str))
             and (spec["manifest_path"] is None or isinstance(spec["manifest_path"], str)) and
             len(spec["paths"]) <= ENTRY_LIMIT, "invalid SourceSpec field types or bounds")
+    if spec["provider"] in PUBLIC_PROVIDERS:
+        release_track = spec["track"] == "release"
+        require(spec["track"] in (("release", "commit") if spec["provider"] == "github" else ("doc",)) and
+                spec["channel"] in (("stable", "prerelease") if release_track else ("stable",)) and
+                spec["selection_policy"] == ("release-selection-v2" if release_track else None) and
+                spec["release_order"] in (("auto", "semver", "published") if release_track else ("",)),
+                "unsupported SourceSpec tracking policy")
+        require(len(spec["paths"]) <= 16 and spec["paths"] == sorted(set(spec["paths"])),
+                "SourceSpec paths are not a bounded canonical roster")
+        for path in [*spec["paths"], *([] if spec["manifest_path"] is None else [spec["manifest_path"]])]:
+            require(isinstance(path, str) and 0 < len(path) <= 300 and not path.startswith(("/", "-"))
+                    and not path.endswith("/") and "//" not in path and
+                    all(p not in ("", ".", "..") and not p.endswith((".", " ")) and
+                        re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", p) is None
+                        for p in path.split("/")) and
+                    not any(c in path for c in '\\[]:*?"<>|') and
+                    not any(ord(c) < 32 or ord(c) == 127 for c in path), "invalid SourceSpec portable path")
+        if spec["manifest_path"] is not None:
+            require(spec["manifest_path"].rsplit("/", 1)[-1] in ("Cargo.toml", "package.json", "pyproject.toml"),
+                    "unsupported SourceSpec manifest")
+        require((spec["ref"] == "HEAD" or spec["ref"].startswith("refs/heads/") and
+                 re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}", spec["ref"][11:]) is not None and
+                 ".." not in spec["ref"] and "//" not in spec["ref"] and not spec["ref"].endswith(("/", ".lock")))
+                if spec["track"] == "commit" else spec["ref"] == "", "invalid SourceSpec ref")
+        require((re.fullmatch(r"(?:[A-Za-z0-9._@][A-Za-z0-9._/@-]{0,63})?", spec["tag_prefix"]) is not None
+                 and ".." not in spec["tag_prefix"] and "@{" not in spec["tag_prefix"]) if release_track else
+                spec["tag_prefix"] == "", "invalid SourceSpec tag prefix")
+        if spec["provider"] == "http":
+            require(not spec["paths"] and spec["manifest_path"] is None, "document SourceSpec has repository paths")
     snapshot = evidence["snapshot"]
     require(isinstance(snapshot, dict) and set(snapshot) == {"digest", "manifest"} and
             isinstance(snapshot["manifest"], dict), "malformed nested snapshot")
     manifest = snapshot["manifest"]
-    require(_portable_record_digest(manifest) == snapshot["digest"] and
-            manifest.get("kind") == "oah-source-snapshot" and manifest.get("version") == 1 and
+    require(set(manifest) == _SNAPSHOT_KEYS and _portable_record_digest(manifest) == snapshot["digest"] and
+            manifest.get("kind") == "oah-source-snapshot" and type(manifest.get("version")) is int and
+            manifest["version"] == 1 and type(manifest.get("verified")) is bool and
+            _bare(manifest.get("content_key")) is not None and
+            isinstance(manifest.get("files"), list) and isinstance(manifest.get("notices"), list) and
+            isinstance(manifest.get("problems"), list) and isinstance(manifest.get("observed"), dict) and
+            set(manifest["observed"]) == {"commit", "ref", "release"} and
             manifest.get("spec") == spec and manifest.get("spec_digest") == evidence["spec_digest"],
             "snapshot manifest identity mismatch")
     provenance = evidence["provenance"]
@@ -421,7 +457,8 @@ def _portable_envelope(evidence: dict, materials: list, n: int) -> list[Original
     observation = provenance["observation"]
     if observation is not None:
         require(isinstance(observation, dict) and set(observation) == _OBSERVATION_KEYS and
-                observation["kind"] == "oah-source-observation" and observation["version"] == 1 and
+                observation["kind"] == "oah-source-observation" and type(observation["version"]) is int and
+                observation["version"] == 1 and
                 observation["outcome"] in ("established", "confirmed", "recovered") and
                 type(observation["head_generation"]) is int and observation["head_generation"] > 0 and
                 observation["verification_policy"] == spec["verification_policy"], "malformed observation")
@@ -445,6 +482,7 @@ def _portable_envelope(evidence: dict, materials: list, n: int) -> list[Original
     release_record = provenance["release_observation"]
     if release:
         require(isinstance(release_record, dict) and release_record.get("kind") == "oah-release-observation" and
+                type(release_record.get("version")) is int and release_record["version"] == 1 and
                 _portable_record_digest(release_record) == provenance["release_observation_digest"] ==
                 release.get("release_observation") and release_record.get("spec_digest") == evidence["spec_digest"] and
                 all(release_record.get(a) == release.get(b) for a, b in
@@ -457,7 +495,8 @@ def _portable_envelope(evidence: dict, materials: list, n: int) -> list[Original
     selection_digest = provenance.get("selection_digest")
     if selection is not None:
         require(isinstance(selection, dict) and selection.get("kind") == "oah-release-selection" and
-                selection.get("version") == 2 and _portable_record_digest(selection) == selection_digest and
+                type(selection.get("version")) is int and selection["version"] == 2 and
+                _portable_record_digest(selection) == selection_digest and
                 selection.get("source_registration") == provenance["registration"] and
                 selection.get("spec_digest") == evidence["spec_digest"] and
                 (selection.get("policy") or {}).get("version") == spec["selection_policy"],
@@ -1910,8 +1949,12 @@ def _collect_codex_policy(root, env, *, operation, data_paths, argv, cli_version
             continue
         if kind == "hooks" and value:
             reasons.append("a native local hook contribution requires independent read-policy qualification")
-        if kind == "user" and (value.get("profile") or (profile is not None and value.get("profiles", {}).get(profile))):
-            reasons.append("legacy and named profile selection cannot be mixed")
+        if kind == "user":
+            legacy = value.get("profiles", {})
+            if not isinstance(legacy, dict):
+                reasons.append("the legacy profile contribution is not a table")
+            elif value.get("profile") or profile is not None and legacy.get(profile):
+                reasons.append("legacy and named profile selection cannot be mixed")
         found, problems = _codex_restrictions(value, data_paths)
         denied = denied or found
         reasons.extend(problems)
@@ -3030,6 +3073,7 @@ class WindowsInstallation(Installation):
                 del self.leaves[name]
                 if name in self.native.names(self.m_fd):
                     raise InstallRefused("native deletion is not observed absent")
+                self.native.flush(self.m_fd)
                 removed.append(name)
                 after(name, "absent", "file")
         return removed
@@ -3053,6 +3097,7 @@ class WindowsInstallation(Installation):
                 setattr(self, field, None)
                 if name in self.native.names(getattr(self, parent_field)):
                     raise InstallRefused("the native directory removal is not observed absent")
+                self.native.flush(getattr(self, parent_field))
                 after(name, "absent", "dir")
 
 
@@ -4143,6 +4188,7 @@ def remove_leaves(done: Installation, names: Sequence[str], *, before, after) ->
     with _mutation(before, done.manifest):
         os.fchmod(done.m_fd, 0o700)
         done.m_identity = _identity(os.fstat(done.m_fd))
+        os.fsync(done.m_fd)
         after(done.manifest, "writable", "mode")
     for name in names:
         with _mutation(before, name):
@@ -4153,6 +4199,7 @@ def remove_leaves(done: Installation, names: Sequence[str], *, before, after) ->
             observed = "absent" if not _exists_at(done.m_fd, name) else "present"
             if observed == "absent":
                 done.leaves.pop(name)
+            os.fsync(done.m_fd)
             after(name, observed, "file")
         if observed != "absent":
             raise InstallRefused(f"data file {name} is still present after its removal")
@@ -4178,6 +4225,7 @@ def remove_directories(done: Installation, *, before, after) -> None:
         os.rmdir(done.manifest, dir_fd=done.data_fd)
         os.close(done.m_fd)
         done.m_fd = None
+        os.fsync(done.data_fd)
         after(done.manifest, "absent" if not _exists_at(done.data_fd, done.manifest) else "present", "dir")
     if done.data_created and not os.listdir(done.data_fd):
         with _mutation(before, DATA_DIR):
@@ -4186,6 +4234,7 @@ def remove_directories(done: Installation, *, before, after) -> None:
             os.rmdir(DATA_DIR, dir_fd=done.root_fd)
             os.close(done.data_fd)
             done.data_fd = None
+            os.fsync(done.root_fd)
             after(DATA_DIR, "absent" if not _exists_at(done.root_fd, DATA_DIR) else "present", "dir")
 
 
