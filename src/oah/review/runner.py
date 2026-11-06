@@ -890,10 +890,16 @@ def _round(request: Request, *, root: pathlib.Path, state: pathlib.Path, env: Ma
                          canary_value=value, db_line=db.line)
         except ReviewError as exc:
             code, message = exc.code, str(exc)
-    if dispose is not None and (not disposition or disposition[-1][0] == "retained") and code is None:
+    if (dispose is not None and code is None
+            and (not disposition or disposition[-1][0] not in ("disposed", "legacy-disposed"))):
         why = disposition[-1][1] if disposition else "the disposal check did not run"
-        code, message = "OAH_REVIEW_SNAPSHOT_RETAINED", (f"OAH_REVIEW_SNAPSHOT_RETAINED: the review snapshot was kept "
-                                                         f"({why}), so this round does not count")
+        if disposition and disposition[-1][0] == "disposed-noncounting":
+            code, message = "OAH_REVIEW_SNAPSHOT_NONCOUNTING", ("OAH_REVIEW_SNAPSHOT_NONCOUNTING: snapshot retirement "
+                                "completed after an interrupted delete; its absence acknowledgment does not count "
+                                "the original round")
+        else:
+            code, message = "OAH_REVIEW_SNAPSHOT_RETAINED", ("OAH_REVIEW_SNAPSHOT_RETAINED: the review snapshot has "
+                                                           f"no counting disposal proof ({why}), so this round does not count")
     if code is not None:
         receipts.log_round(state, task, {"event": "finish", **where, "counted": False, "code": code,
                                          "message": message[:600]})

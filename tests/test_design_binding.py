@@ -425,7 +425,8 @@ def design_fix_project(test: unittest.TestCase):
     from tests.test_fix import FixProject
 
     scaffold = {f"docs/wiki/{rel}": data for rel, data in notes.scaffold_files(TODAY).items()}
-    project = FixProject(test, files=scaffold, packet=packet_text(scope=("src", ".oah/tasks/t1")))
+    project = FixProject(test, files=scaffold, packet=packet_text(scope=("src", ".oah/tasks/t1")),
+                         config="\n[models]\nfetch_scores = false\n")
     store = open_store(project.repo, env={"OAH_STATE_DIR": str(project.state)}, now=Clock())
     store.add_project("acme", title="Acme", event="ev-project", today=TODAY)
     r1 = store.new("acme", "booking", title="Booking", parts={"design": "People book a lesson.\n"}, event="ev-r1",
@@ -446,6 +447,12 @@ class ReviewDesignTest(unittest.TestCase):
     """B-T13 (test_review) and SC4-P4-R through real review rounds of a design-bound task."""
 
     def test_simulated_origin_flows_through_all_review_retirement_boundaries(self):
+        self.origin_round(interrupt=False)
+
+    def test_interrupted_onstack_retirement_never_publishes_a_counted_review(self):
+        self.origin_round(interrupt=True)
+
+    def origin_round(self, *, interrupt: bool) -> None:
         from oah.design import task_context as tc
         from oah.design.binding import repo_identity
         from oah.lease import Store
@@ -454,6 +461,7 @@ class ReviewDesignTest(unittest.TestCase):
         project = design_fix_project(self)
         project.commit({"probe.txt": "written by the fake reviewer\n"})
         prepare, execute = runner.call.prepare, runner.call.execute
+        capture_final = runner._SnapshotDisposal.capture_final
         writer = Store(project.state)
         observed = {}
 
@@ -498,9 +506,28 @@ class ReviewDesignTest(unittest.TestCase):
                                        fact={"head": tc.git_head(observed["root"])["head"]})
             return result
 
-        with mock.patch.object(runner.call, "prepare", prepared), mock.patch.object(runner.call, "execute", completed):
+        def captured(disposal, parent, source, copied):
+            capture_final(disposal, parent, source, copied)
+            if interrupt:
+                observe, faulted = Store.observe_transport, []
+
+                def fail_progress(store, **options):
+                    if options["kind"] == "retirement-progress" and not faulted:
+                        faulted.append(options["fact"]["path"])
+                        raise OSError("controlled progress append failure after real unlink")
+                    return observe(store, **options)
+
+                view = tc.transport_views(project.state)[observed["origin"]]
+                with mock.patch.object(Store, "observe_transport", fail_progress):
+                    first = runner.retire_snapshot(project.state, view, parent)
+                self.assertEqual(first[0], "retained")
+                self.assertEqual(len(faulted), 1)
+                self.assertFalse(parent.joinpath(*faulted[0]).exists())
+            observed["disposition"] = disposal.disposition
+
+        with mock.patch.object(runner.call, "prepare", prepared), mock.patch.object(runner.call, "execute", completed), \
+                mock.patch.object(runner._SnapshotDisposal, "capture_final", captured):
             result = project.review()
-        self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
         self.assertEqual(len(project.calls()), 1)
         view = tc.transport_views(project.state)[observed["origin"]]
         self.assertIsNone(view.problem)
@@ -508,6 +535,25 @@ class ReviewDesignTest(unittest.TestCase):
         self.assertEqual(view.observations[-1]["kind"], "retired")
         self.assertFalse(observed["root"].parent.exists())
         self.assertEqual(list(project.temp_root.iterdir()), [])
+        log = runner.receipts.read_round_log(project.state, "t1")
+        print("ORIGIN_ROUND", json.dumps({"interrupted": interrupt, "code": result.code,
+              "disposition": observed["disposition"], "receipts": project.names(), "round_log": log,
+              "retired": view.last("retired"), "absence_ack": view.last("retirement-absence-ack")}), flush=True)
+        if interrupt:
+            self.assertEqual(observed["disposition"][-1][0], "disposed-noncounting")
+            retired = view.last("retired")
+            assert retired is not None
+            self.assertFalse(retired["fact"]["counted"])
+            self.assertEqual(result.code, "OAH_REVIEW_SNAPSHOT_NONCOUNTING", result.message)
+            self.assertEqual(project.names(), [])
+            self.assertEqual([line["event"] for line in log], ["start", "finish"])
+            self.assertFalse(log[-1]["counted"])
+            self.assertEqual(log[-1]["code"], "OAH_REVIEW_SNAPSHOT_NONCOUNTING")
+        else:
+            self.assertEqual(result.code, "OAH_REVIEW_CONVERGED", result.message)
+            self.assertEqual(observed["disposition"][-1][0], "disposed")
+            self.assertEqual(project.names(), ["R1.json"])
+            self.assertTrue(log[-1]["counted"])
 
     def test_prelaunch_plan_failure_is_typed_and_spends_no_attempt(self):
         from oah.review import ReviewError, receipts, runner, snapshot
