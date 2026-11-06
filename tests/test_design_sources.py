@@ -1119,6 +1119,235 @@ class ResponseIsolationTest(LoopbackCase):
         self.clock.advance(30 * 86400)
         self.assertEqual("unchanged", sources.check_one(spec).result)
 
+    def test_entire_source_turn_failure_is_scoped_across_all_consumers_and_daily_wakes(self) -> None:
+        from oah.design.sources.view import DesignRef, DesignView, SnapshotView
+
+        ref = DesignRef("acme", "u" * 8, "booking", 1, "sha256:" + "a" * 64)
+        view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
+                          None, None, "clean", False, "current", "worktree")
+        self.reply("/bad", body=b"historical proof", headers=(("Content-Type", "text/plain"),))
+        for failure in ("chmod", "head-read", "cap-write", "failure-record", "failure-record-read"):
+            for mode in ("check", "scheduled", "refresh"):
+                with self.subTest(failure=failure, mode=mode):
+                    sources = self.store(fresh_hours=1)
+                    bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True,
+                                                      for_designs=["acme/booking"]))[1]
+                    good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True,
+                                                       for_designs=["acme/booking"]))[1]
+                    self.assertEqual("changed", sources.check_one(bad).result)
+                    self.assertEqual("changed", sources.check_one(good).result)
+                    before = sources.head(bad)
+                    assert before is not None
+                    rel = f"heads/{bad.id}.json"
+                    head_file = sources.state.path(rel)
+                    if failure == "cap-write":
+                        before = dataclasses.replace(before, retry_after="3000-01-01T00:00:00+00:00")
+                        sources.state.write_json(rel, before.to_json())
+                    original = head_file.read_bytes()
+                    mode_before = head_file.stat().st_mode & 0o777
+                    if failure == "chmod":
+                        head_file.chmod(0)
+                        if os.access(head_file, os.R_OK):
+                            head_file.chmod(mode_before)
+                            continue
+                    read, write, observe = sources.state.read_json, sources.state.write_json, sources.observer.observe
+                    recording = [False]
+
+                    def read_head(name, limit):
+                        if name == rel and (failure == "head-read" or failure == "failure-record-read" and recording[0]):
+                            raise OSError("private failure value")
+                        return read(name, limit)
+
+                    def write_head(name, data):
+                        if name == rel and failure in ("cap-write", "failure-record"):
+                            raise OSError("private failure value")
+                        return write(name, data)
+
+                    def observe_source(spec, *args, **kwargs):
+                        if failure in ("failure-record", "failure-record-read") and spec.id == bad.id:
+                            recording[0] = True
+                            raise RuntimeError("private failure value")
+                        return observe(spec, *args, **kwargs)
+
+                    self.seen.clear()
+                    wakes = 6 if mode == "scheduled" else 1
+                    try:
+                        with mock.patch.object(sources.state, "read_json", side_effect=read_head), \
+                                mock.patch.object(sources.state, "write_json", side_effect=write_head), \
+                                mock.patch.object(sources.observer, "observe", side_effect=observe_source):
+                            for _day in range(wakes):
+                                self.clock.advance(86400)
+                                match mode:
+                                    case "check":
+                                        results = sources.check()
+                                        rendered = json.dumps([item.to_json() for item in results])
+                                    case "scheduled":
+                                        report = sources.scheduled()
+                                        self.assertEqual(("complete", ()), (report.outcome, report.outstanding))
+                                        self.assertEqual(self.clock.now().isoformat(),
+                                                         sources.schedule_state()["scan"]["last_complete_scan_at"])
+                                        results, rendered = report.results, json.dumps(report.to_json())
+                                        for _wake in range(2):
+                                            idle = sources.scheduled()
+                                            self.assertEqual(("not-due", ()), (idle.outcome, idle.results))
+                                    case "refresh":
+                                        report = sources.refresh_for(None, "acme", "booking", reason="resume",
+                                                                     reader=lambda: view)
+                                        results, rendered = report.results, json.dumps(report.to_json())
+                                    case _:
+                                        self.fail("unknown consumer")
+                                self.assertEqual({bad.id, good.id}, {item.source for item in results})
+                                failed = next(item for item in results if item.source == bad.id)
+                                self.assertEqual(("failed", ("attempt-failed", "failure-record-unavailable"), "unavailable"),
+                                                 (failed.result, failed.problems, failed.freshness))
+                                self.assertIsNone(failed.snapshot)
+                                self.assertIsNone(failed.observation)
+                                good_head = sources.head(good)
+                                assert good_head is not None
+                                self.assertEqual(self.clock.now().isoformat(), good_head.attempted_at)
+                                self.assertNotIn("private failure value", rendered)
+                    finally:
+                        head_file.chmod(mode_before)
+                    self.assertEqual(["/good"] * wakes, [path for path, _headers in self.seen])
+                    self.assertEqual(original, head_file.read_bytes())
+                    self.assertEqual(before, sources.head(bad))
+                    self.clock.advance(86400)
+                    recovered = sources.check()
+                    self.assertEqual({bad.id, good.id}, {item.source for item in recovered})
+                    if failure != "cap-write":
+                        self.assertEqual("unchanged", next(item for item in recovered if item.source == bad.id).result)
+
+    def test_preparation_and_result_failures_persist_failure_before_exposing_a_fresh_head(self) -> None:
+        from oah.design.sources import check as check_module
+        from oah.design.sources.view import DesignRef, DesignView, SnapshotView
+
+        ref = DesignRef("acme", "u" * 8, "booking", 1, "sha256:" + "a" * 64)
+        view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
+                          None, None, "clean", False, "current", "worktree")
+        self.reply("/bad", body=b"historical proof", headers=(("Content-Type", "text/plain"),))
+        for failure in ("cooldown", "result"):
+            for mode in ("check", "scheduled", "refresh"):
+                with self.subTest(failure=failure, mode=mode):
+                    sources = self.store(fresh_hours=1)
+                    bad = sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True,
+                                                      for_designs=["acme/booking"]))[1]
+                    good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True,
+                                                       for_designs=["acme/booking"]))[1]
+                    self.assertEqual("changed", sources.check_one(bad).result)
+                    before = sources.head(bad)
+                    assert before is not None
+                    if failure == "cooldown":
+                        before = dataclasses.replace(before, retry_after="3000-01-01T00:00:00+00:00")
+                        sources.state.write_json(f"heads/{bad.id}.json", before.to_json())
+                    write, fresh = sources.state.write_json, check_module.freshness
+
+                    def cap_write(rel, data):
+                        if failure == "cooldown" and rel == f"heads/{bad.id}.json" and data["outcome"] != "failed":
+                            raise OSError("private failure value")
+                        return write(rel, data)
+
+                    def render_freshness(head, *args):
+                        if (failure == "result" and head is not None and head.id == bad.id
+                                and head.generation > before.generation and head.outcome != "failed"):
+                            raise RuntimeError("private failure value")
+                        return fresh(head, *args)
+
+                    self.clock.advance(86400)
+                    with mock.patch.object(sources.state, "write_json", side_effect=cap_write), \
+                            mock.patch.object(check_module, "freshness", side_effect=render_freshness):
+                        match mode:
+                            case "check":
+                                results = sources.check()
+                            case "scheduled":
+                                report = sources.scheduled()
+                                self.assertEqual("complete", report.outcome)
+                                results = report.results
+                            case "refresh":
+                                results = sources.refresh_for(None, "acme", "booking", reason="resume",
+                                                              reader=lambda: view).results
+                            case _:
+                                self.fail("unknown consumer")
+                    failed = next(item for item in results if item.source == bad.id)
+                    self.assertEqual(("failed", ("attempt-failed",), "unavailable"),
+                                     (failed.result, failed.problems, failed.freshness))
+                    after, sibling = sources.head(bad), sources.head(good)
+                    assert after is not None and sibling is not None
+                    self.assertEqual((before.verified, before.confirmed_at), (after.verified, after.confirmed_at))
+                    self.assertEqual(("failed", self.clock.now().isoformat()), (after.outcome, after.attempted_at))
+                    self.assertEqual(self.clock.now().isoformat(), sibling.attempted_at)
+                    self.assertNotIn("private failure value", json.dumps([item.to_json() for item in results]))
+
+    def test_shared_authority_faults_stop_all_source_consumers_even_when_transient(self) -> None:
+        from oah.design.sources.view import DesignRef, DesignView, SnapshotView
+
+        ref = DesignRef("acme", "u" * 8, "booking", 1, "sha256:" + "a" * 64)
+        view = DesignView("acme", "u" * 8, "authority", "booking", SnapshotView(ref, "Booking", {}, {}),
+                          None, None, "clean", False, "current", "worktree")
+        self.reply("/bad", body=b"public proof", headers=(("Content-Type", "text/plain"),))
+        for shared in ("registry", "lock-enter", "lock-exit"):
+            for mode in ("check", "scheduled", "refresh"):
+                with self.subTest(shared=shared, mode=mode):
+                    sources = self.store()
+                    sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True,
+                                                for_designs=["acme/booking"]))
+                    good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True,
+                                                       for_designs=["acme/booking"]))[1]
+                    armed = [False]
+                    registry, lock = sources.registry, sources.state.lock
+
+                    def fault(step: str) -> None:
+                        if step == "after-store":
+                            armed[0] = True
+
+                    def read_registry():
+                        if armed[0] and shared == "registry":
+                            armed[0] = False
+                            raise OSError("private shared failure")
+                        return registry()
+
+                    @contextlib.contextmanager
+                    def authority_lock():
+                        with lock():
+                            if armed[0] and shared == "lock-enter":
+                                armed[0] = False
+                                raise OSError("private shared failure")
+                            yield
+                            if armed[0] and shared == "lock-exit":
+                                armed[0] = False
+                                raise OSError("private shared failure")
+
+                    self.seen.clear()
+                    with mock.patch.object(sources, "registry", side_effect=read_registry), \
+                            mock.patch.object(sources.state, "lock", side_effect=authority_lock):
+                        with self.assertRaises(OSError):
+                            match mode:
+                                case "check":
+                                    sources.check(fault=fault)
+                                case "scheduled":
+                                    sources.scheduled(fault=fault)
+                                case "refresh":
+                                    sources.refresh_for(None, "acme", "booking", reason="resume", reader=lambda: view,
+                                                        fault=fault)
+                                case _:
+                                    self.fail("unknown consumer")
+                    self.assertEqual(["/bad"], [path for path, _headers in self.seen])
+                    self.assertIsNone(sources.head(good))
+
+    def test_fair_preparation_rereads_a_head_changed_before_its_turn(self) -> None:
+        sources = self.store()
+        sources.register(build_spec(url=self.base + "/bad", source_id="a-bad", allow_loopback=True))
+        good = sources.register(build_spec(url=self.base + "/good", source_id="z-good", allow_loopback=True))[1]
+        self.reply("/bad", body=b"public proof", headers=(("Content-Type", "text/plain"),))
+
+        def concurrent_check(step: str) -> None:
+            if step == "after-store":
+                sources.check_one(good)
+
+        results = sources.check(skip_fresh=True, fault=concurrent_check)
+        self.assertEqual([("a-bad", "changed"), ("z-good", "skipped-fresh")],
+                         [(item.source, item.result) for item in results])
+        self.assertEqual(["/bad", "/good"], [path for path, _headers in self.seen])
+
     def test_non_text_codecs_fail_without_stopping_healthy_sources(self) -> None:
         for charset in ("undefined", "base64", "zlib", "rot13", "hex", "bz2", "uu", "quopri", "idna"):
             with self.subTest(charset=charset):

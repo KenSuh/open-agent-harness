@@ -889,6 +889,34 @@ class AssociationTest(MaterialsCase):
         self.assertEqual("published", again["association"]["status"])
         self.assertEqual(2, again["association"]["generation"])
 
+    def test_refresh_returns_source_failure_when_a_saved_material_head_is_unreadable(self) -> None:
+        self.sources.refresh_for(self.store, "acme", "booking", reason="start")
+        original = self.entry()
+        good = self.sources.register(build_spec(url=LOCATOR, paths=["LICENSE"], source_id="z-good",
+                                                for_designs=["acme/booking"]))[1]
+        self.assertNotEqual(self.spec.id, good.id)
+        self.clock.advance(2 * 86400)
+        read = self.sources.state.read_json
+
+        def read_head(rel, limit):
+            if rel == f"heads/{self.spec.id}.json":
+                raise OSError("private failure value")
+            return read(rel, limit)
+
+        with mock.patch.object(self.sources.state, "read_json", side_effect=read_head):
+            report = self.sources.refresh_for(self.store, "acme", "booking", reason="resume")
+        results = {item.source: item for item in report.results}
+        self.assertEqual({self.spec.id, good.id}, set(results))
+        self.assertEqual(("failed", "unavailable"), (results[self.spec.id].result, results[self.spec.id].freshness))
+        self.assertEqual("unknown", report.association["status"])
+        self.assertEqual(original, self.entry())
+        self.assertTrue(report.sources)
+        self.assertEqual({None}, {item["verified"] for item in report.sources})
+        good_head = self.sources.head(good)
+        assert good_head is not None
+        self.assertEqual(self.clock.now().isoformat(), good_head.attempted_at)
+        self.assertNotIn("private failure value", json.dumps(report.to_json()))
+
     def test_an_older_read_never_overwrites_a_newer_entry(self) -> None:
         old_view = self.view()
         self.save({"request": MULTI}, "Multi-organization")

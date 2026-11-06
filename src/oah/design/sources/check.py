@@ -13,6 +13,7 @@ binding, and no external change saves, accepts or rebinds a design.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
@@ -21,7 +22,7 @@ import os
 import pathlib
 import sys
 import time
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 
 from oah.config import ConfigError
 from oah.design.model import check_fact, check_id
@@ -97,6 +98,15 @@ class CheckResult:
 
     def to_json(self) -> dict:
         return dataclasses.asdict(self) | {"problems": list(self.problems)}
+
+
+SourceTurn = Generator[Head | None, None, CheckResult]
+
+
+class _AuthorityFailure(Exception):
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -379,20 +389,68 @@ class Sources:
 
     def check_one(self, spec: SourceSpec, *, fault: Fault = _no_fault, skip_fresh: bool = False,
                   deadline: float | None = None) -> CheckResult:
+        turn = self._source_turn(spec, fault=fault, skip_fresh=skip_fresh, deadline=deadline)
+        next(turn)
+        return self._finish_turn(turn, fault)
+
+    def _source_turn(self, spec: SourceSpec, *, fault: Fault, skip_fresh: bool,
+                     deadline: float | None) -> SourceTurn:
         started = self.now()
-        deadline = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
+        head, prepared = None, False
         try:
-            head, generation = self._base(spec)
-        except StateProblem:
-            return CheckResult(spec.id, "state-corrupt", notable=True)
+            head = self.head(spec)
+            prepared = True
+            # Suspend for fair ordering without moving preparation outside the source boundary.
+            yield head
+            started = self.now()
+            head = self.head(spec)
+            limit = self.clock() + SOURCE_DEADLINE if deadline is None else deadline
+            return self._check_prepared(spec, head, started, deadline=limit, fault=fault, skip_fresh=skip_fresh)
+        except _AuthorityFailure:
+            raise
+        except Exception:
+            if not prepared:
+                yield None
+            return self._failed_attempt(spec, head, started, captured=prepared)
+
+    def _finish_turn(self, turn: SourceTurn, fault: Fault) -> CheckResult:
+        try:
+            next(turn)
+        except StopIteration as done:
+            result = done.value
+        except _AuthorityFailure as exc:
+            raise exc.cause from None
+        else:
+            raise SourceError("OAH_SOURCES_INTERNAL", "a prepared source turn did not finish")
+        if result.result in ("changed", "unchanged", "recovered", "failed", "blocked", "unverified"):
+            fault("after-head")
+        return result
+
+    @contextlib.contextmanager
+    def _source_authority(self) -> Iterator[Registry]:
+        local_error: Exception | None = None
+        try:
+            with self.state.lock():
+                registry, _raw = self.registry()
+                try:
+                    yield registry
+                except Exception as exc:
+                    local_error = exc
+        except Exception as exc:
+            raise _AuthorityFailure(exc) from exc
+        if local_error is not None:
+            raise local_error
+
+    def _check_prepared(self, spec: SourceSpec, head: Head | None, started: dt.datetime, *, deadline: float,
+                        fault: Fault, skip_fresh: bool) -> CheckResult:
+        generation = None if head is None else head.generation
         current = freshness(head, started, self.settings["fresh_hours"])
         retry = parse_iso(head.retry_after) if head is not None else None
         if retry is not None and head is not None:
             anchor = min(parse_iso(head.attempted_at) or started, started)
             capped = min(retry, anchor + dt.timedelta(days=7))
             if started < capped < retry:
-                with self.state.lock():
-                    registry, _raw = self.registry()
+                with self._source_authority() as registry:
                     entry = registry.sources.get(spec.id)
                     latest, latest_generation = self._base(spec)
                     if (entry is None or entry.registration != spec.registration
@@ -407,40 +465,28 @@ class Sources:
         if skip_fresh and current == "fresh":
             return CheckResult(spec.id, "skipped-fresh", freshness="fresh",
                                observation=None if head is None else head.observation)
-        try:
-            result = self._attempt_one(spec, head, started, deadline=deadline, fault=fault)
-        except Exception:
-            result = self._failed_attempt(spec, head, started)
-        if result.result in ("changed", "unchanged", "recovered", "failed", "blocked", "unverified"):
-            fault("after-head")
-        return result
+        return self._attempt_one(spec, head, started, deadline=deadline, fault=fault)
 
-    def _failed_attempt(self, spec: SourceSpec, before: Head | None, started: dt.datetime) -> CheckResult:
-        with self.state.lock():
-            registry, _raw = self.registry()
+    def _failed_attempt(self, spec: SourceSpec, before: Head | None, started: dt.datetime, *,
+                        captured: bool) -> CheckResult:
+        problems = ("attempt-failed",)
+        with self._source_authority() as registry:
             entry = registry.sources.get(spec.id)
             if entry is None or entry.registration != spec.registration or entry.spec_digest != spec.spec_digest:
                 return CheckResult(spec.id, "superseded", notable=True)
             try:
                 latest, generation = self._base(spec)
-            except StateProblem:
-                latest, generation = None, None
-                writable = False
-            else:
-                writable = True
-            if writable and generation != (None if before is None else before.generation):
-                return CheckResult(spec.id, "superseded", notable=True)
-            problems = ("attempt-failed",)
-            if writable:
+                if not captured:
+                    return CheckResult(spec.id, "failed", problems=problems + ("failure-record-unavailable",),
+                                       notable=True, freshness="unavailable")
+                if generation != (None if before is None else before.generation):
+                    return CheckResult(spec.id, "superseded", notable=True)
                 failed, _word = transition(latest or Head(spec.id, spec.registration, spec.spec_digest),
                                            Observation("failed", code="attempt-failed"), self.now(), started)
-                try:
-                    if latest is None:
-                        self._retire_head(spec.id)
-                    self.state.write_json(f"heads/{spec.id}.json", failed.to_json())
-                except Exception:
-                    writable = False
-            if not writable:
+                if latest is None:
+                    self._retire_head(spec.id)
+                self.state.write_json(f"heads/{spec.id}.json", failed.to_json())
+            except Exception:
                 problems += ("failure-record-unavailable",)
         return CheckResult(spec.id, "failed", problems=problems, notable=True, freshness="unavailable")
 
@@ -450,15 +496,11 @@ class Sources:
         current = freshness(head, started, self.settings["fresh_hours"])
         observation = self.observer.observe(spec, head, deadline=deadline)
         fault("after-store")
-        with self.state.lock():
-            registry, _raw = self.registry()
+        with self._source_authority() as registry:
             entry = registry.sources.get(spec.id)
             if entry is None or entry.registration != spec.registration or entry.spec_digest != spec.spec_digest:
                 return CheckResult(spec.id, "superseded", notable=True, freshness=current)
-            try:
-                latest, latest_generation = self._base(spec)
-            except StateProblem:
-                return CheckResult(spec.id, "state-corrupt", notable=True)
+            latest, latest_generation = self._base(spec)
             if latest_generation != generation:
                 return CheckResult(spec.id, "superseded", notable=True,
                                    freshness=freshness(latest, self.now(), self.settings["fresh_hours"]))
@@ -477,16 +519,17 @@ class Sources:
             if self.clock() >= deadline and observation.kind != "failed":
                 observation = Observation("failed", code="timeout", selection=observation.selection)
                 updated, word = transition(start, observation, self.now(), started)
+            first_trouble = word in ("failed", "blocked") and (start.outcome != updated.outcome
+                                                               or start.problems != updated.problems)
+            result = CheckResult(spec.id, word, snapshot=observation.snapshot,
+                                 previous=start.verified.snapshot if start.verified else None,
+                                 problems=updated.problems, http=observation.http,
+                                 notable=word in ("changed", "unverified", "recovered") or first_trouble,
+                                 freshness=freshness(updated, self.now(), self.settings["fresh_hours"]),
+                                 retry_after=updated.retry_after, observation=updated.observation,
+                                 selection=observation.selection)
             self.state.write_json(f"heads/{spec.id}.json", updated.to_json())
-        first_trouble = word in ("failed", "blocked") and (start.outcome != updated.outcome
-                                                           or start.problems != updated.problems)
-        return CheckResult(spec.id, word, snapshot=observation.snapshot,
-                           previous=start.verified.snapshot if start.verified else None,
-                           problems=updated.problems, http=observation.http,
-                           notable=word in ("changed", "unverified", "recovered") or first_trouble,
-                           freshness=freshness(updated, self.now(), self.settings["fresh_hours"]),
-                           retry_after=updated.retry_after, observation=updated.observation,
-                           selection=observation.selection)
+        return result
 
     def check(self, ids: Iterable[str] | None = None, *, deadline_seconds: float | None = None,
               max_sources: int | None = None, skip_fresh: bool = False,
@@ -506,26 +549,26 @@ class Sources:
                 else:
                     raise SourceError("OAH_SOURCES_NOT_FOUND", f"no registered source {key!r}; oah sources list "
                                       "shows them")
-        specs = self._fair_order(specs)
         deadline = None if deadline_seconds is None else self.clock() + deadline_seconds
-        for index, spec in enumerate(specs):
+        turns = self._fair_order([(spec, self._source_turn(spec, fault=fault, skip_fresh=skip_fresh,
+                                                        deadline=deadline)) for spec in specs])
+        for index, (spec, turn) in enumerate(turns):
             if ((deadline is not None and self.clock() >= deadline)
                     or (max_sources is not None and index >= max_sources)):
-                results.extend(CheckResult(item.id, "over-budget", notable=True) for item in specs[index:])
+                results.extend(CheckResult(item.id, "over-budget", notable=True) for item, _turn in turns[index:])
                 break
-            results.append(self.check_one(spec, fault=fault, skip_fresh=skip_fresh, deadline=deadline))
+            results.append(self._finish_turn(turn, fault))
         return results
 
-    def _fair_order(self, specs: list[SourceSpec]) -> list[SourceSpec]:
+    def _fair_order(self, turns: list[tuple[SourceSpec, SourceTurn]]) -> list[tuple[SourceSpec, SourceTurn]]:
         """Never-attempted first, then the oldest attempt; ties by ID."""
-        def key(spec: SourceSpec) -> tuple:
-            try:
-                head = self.head(spec)
-            except StateProblem:
-                head = None
+        prepared = [(spec, turn, next(turn)) for spec, turn in turns]
+
+        def key(item: tuple[SourceSpec, SourceTurn, Head | None]) -> tuple[bool, str, str]:
+            spec, _turn, head = item
             return (head is not None and head.attempted_at is not None,
                     "" if head is None or head.attempted_at is None else head.attempted_at, spec.id)
-        return sorted(specs, key=key)
+        return [(spec, turn) for spec, turn, _head in sorted(prepared, key=key)]
 
     # ---- scheduled run (fair queue) --------------------------------------------------------------------------
 
@@ -648,13 +691,13 @@ class Sources:
         entry = self._designs().get(association.key_of(uid, design))
         return dict(entry) if association.well_formed(entry) else None
 
-    def _source_reads(self, refs: Sequence[Mapping]) -> list[dict]:
+    def _source_reads(self, refs: Sequence[Mapping], *, unavailable: frozenset[str] = frozenset()) -> list[dict]:
         registry, _raw = self.registry()
         reads = []
         for ref in refs:
             spec = registry.sources.get(ref["source"])
             verified = None
-            if spec is not None:
+            if spec is not None and spec.id not in unavailable:
                 try:
                     head = self.head(spec)
                 except StateProblem:
@@ -763,8 +806,12 @@ class Sources:
             results = self.check(selected, deadline_seconds=deadline_seconds, max_sources=max_sources,
                                  skip_fresh=True, fault=fault)
         unvisited = tuple(item.source for item in results if item.result == "over-budget")
+        unavailable = frozenset(item.source for item in results if "failure-record-unavailable" in item.problems)
+        if unavailable:
+            problems.append("source-state-unavailable")
         try:
-            published = ({"status": "unknown", "reason": "materials-invalid"} if problems else
+            published = ({"status": "unknown", "reason": "source-state-unavailable" if unavailable else "materials-invalid"}
+                         if problems else
                          self.publish_association(view, refs, captured_generation=captured_generation, reader=reader))
         except (StateProblem, LockTimeout):
             published = {"status": "unknown", "key": association.key_of(view.uid, view.design)}
@@ -776,7 +823,8 @@ class Sources:
         design_state = "unknown(authority-or-association)" if view.problems() or published["status"] == "unknown" else view.freshness
         return RefreshReport(reason, project, design, binding, design_state,
                              {"current": view.materials("current"), "accepted": view.materials("accepted")},
-                             tuple(self._source_reads(refs)), published, tuple(results), unvisited, unregistered,
+                              tuple(self._source_reads(refs, unavailable=unavailable)), published, tuple(results),
+                              unvisited, unregistered,
                              tuple(proposals), tuple(findings), tuple(problems), self.policy_digest(),
                              {"started_at": window_start, "ended_at": iso(self.now())})
 
