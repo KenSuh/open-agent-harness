@@ -11,6 +11,8 @@ BSD-3-Clause, Apache-2.0) with only a title and copyright lines before it. A sni
 one file or control characters read as unrecognized. A few other licenses are named by their titles, which is
 enough to call them excluded, never eligible.
 
+Populated preamble, BSD-3 name and Apache appendix fields share one raw single-identifier holder parser.
+
 `verdict(evidence, read)` → form single | choice | conjunction | unknown; `eligibility(verdict, allow)` → eligible |
 eligible-by-choice | excluded | unknown. Both are recomputed on every read, so a policy or matcher change needs no
 new observation.
@@ -42,9 +44,9 @@ _TITLES = {"mit license", "the mit license", "mit license (mit)", "the mit licen
            "bsd 3-clause license", "bsd-2-clause license", "bsd-3-clause license", "the bsd license", "bsd license",
            "the 2-clause bsd license", "the 3-clause bsd license", "new bsd license", "simplified bsd license"}
 _HOLDER_ID = r"[A-Z][A-Za-z0-9]*(?:['-][A-Z][A-Za-z0-9]*)*"
-_COPYRIGHT_NOTICE = re.compile(
-    r"(?i:(?:portions )?copyright(?:\s*(?:\(c\)|©))?|\(c\)|©)\s+"
-    r"[0-9]{4}(?:\s*[-,]\s*[0-9]{4})*\s+"
+_HOLDER_FIELD = re.compile(
+    r"(?:(?P<notice>(?i:(?:portions )?copyright(?:[ \t]*(?:\(c\)|©))?|\(c\)|©)[ \t]+"
+    r"[0-9]{4}(?:[ \t]*[-,][ \t]*[0-9]{4})*[ \t]+))?"
     + _HOLDER_ID +
     r"(?:, (?i:inc|ltd|llc|corp|co))?\.?"
     r"(?: <[\w.+-]+@[\w.-]+>)?"
@@ -74,20 +76,29 @@ def normalize(text: str) -> str:
     return " ".join(text.translate(_QUOTES).lower().split())
 
 
-def _template(text: str, slots: Mapping[str, str]) -> re.Pattern[str]:
+def _template(text: str, slots: Mapping[str, str], *, raw: bool = False) -> re.Pattern[str]:
     pattern = re.escape(text)
+    if raw:
+        pattern = pattern.replace(r"\ ", r"\s+").replace('"', '["“”„‟]').replace("'", "['‘’‚‛]")
+        pattern = pattern.replace(r"\-", "[-–—‐‑]")
+        pattern = pattern.replace(r"copyright\s+holder", r"copyright\s+(?:holder|owner)")
+        pattern = pattern.replace(r"http://www\.apache\.org/", r"https?://www\.apache\.org/")
     for name, regex in slots.items():
         pattern = pattern.replace(re.escape("{" + name + "}"), regex)
-    return re.compile(pattern)
+    return re.compile(pattern, re.IGNORECASE if raw else 0)
 
 
 _MIT = re.compile(re.escape(texts.MIT_BODY))
 _BSD2 = _template(texts.BSD_OPENING + " " + texts.BSD_DISCLAIMER, {})
-_BSD3 = _template(texts.BSD_OPENING + " " + texts.BSD_THIRD + " " + texts.BSD_DISCLAIMER,
-                  {"HOLDER": r"[^.;]{1,200}?", "ITS": r"(?:its|their)"})
+_BSD3 = _template(texts.BSD_OPENING.replace("redistributions", "{MARKER}redistributions")
+                  + " {MARKER}" + texts.BSD_THIRD + " " + texts.BSD_DISCLAIMER,
+                  {"HOLDER": r"(?P<holder>[\s\S]{1,200}?)", "ITS": r"(?:its|their)",
+                   "MARKER": rf"(?:{_LIST_MARKER.pattern}\s+)?"}, raw=True)
 _ISC = _template(texts.ISC_BODY, {"AND": r"(?:and/or|and)", "DISCLAIM": r"(?:author disclaims|authors disclaim)",
                                   "AUTHOR": r"authors?"})
-_APPENDIX = _template(texts.APACHE_APPENDIX, {"COPYRIGHT": r"copyright [^\n]{1,200}?"})
+_APPENDIX = _template(texts.APACHE_APPENDIX, {"COPYRIGHT": r"(?P<holder>[\s\S]{1,200}?)"}, raw=True)
+_APACHE_END = re.compile(r"end\s+of\s+terms\s+and\s+conditions", re.IGNORECASE)
+_APACHE_EXAMPLE = "Copyright [yyyy] [name of copyright owner]"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,15 +108,29 @@ class TextVerdict:
     problem: str | None = None
 
 
+def _valid_holder(value: str, *, notices: bool = False) -> bool:
+    populated = False
+    for raw in value.splitlines() if notices else [value]:
+        line = raw.strip()
+        if notices and (not line or re.fullmatch(r"(?i:all rights reserved)\.?", line)):
+            continue
+        match = _HOLDER_FIELD.fullmatch(line)
+        if match is None or (notices and match["notice"] is None):
+            return False
+        populated = True
+    return populated
+
+
 def _preamble_end(lines: list[str]) -> int:
     """Index of the first line after an optional title and copyright block."""
     index = 0
     while index < len(lines):
         raw = lines[index]
-        line = raw.strip().strip("#*_ ").strip()
-        folded = normalize(line).rstrip(".:")
-        if line and folded not in _TITLES and folded != "all rights reserved" and not _COPYRIGHT_NOTICE.fullmatch(line):
-            return index
+        line = raw.strip()
+        if line and not _valid_holder(line, notices=True):
+            folded = normalize(line.strip("#*_ ").strip()).rstrip(".:")
+            if folded not in _TITLES and folded != "all rights reserved":
+                return index
         index += 1
     return index
 
@@ -125,32 +150,36 @@ def classify_text(data: bytes) -> TextVerdict:
     if _controls(text):
         return TextVerdict(None, False, "license text holds control or invisible formatting characters")
     lines = text.split("\n")
-    body = normalize("\n".join(lines[_preamble_end(lines):]))
+    raw_body = "\n".join(lines[_preamble_end(lines):]).strip()
+    unknown = TextVerdict(None, False, "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause "
+                          "or Apache-2.0) with supported holder fields")
+    bsd3 = _BSD3.fullmatch(raw_body)
+    if bsd3:
+        return TextVerdict("BSD-3-Clause", True) if _valid_holder(bsd3["holder"]) else unknown
+    end = _APACHE_END.search(raw_body)
+    if end:
+        rest = raw_body[end.end():].strip()
+        appendix = _APPENDIX.fullmatch(rest)
+        if rest and (appendix is None or (appendix["holder"] != _APACHE_EXAMPLE
+                                         and not _valid_holder(appendix["holder"], notices=True))):
+            return unknown
+        terms = normalize(raw_body[:end.end()]).replace("https://www.apache.org/", "http://www.apache.org/")
+        if terms.startswith(texts.APACHE_START) and hashlib.sha256(terms.encode("utf-8")).hexdigest() == texts.APACHE_TERMS_SHA256:
+            return TextVerdict("Apache-2.0", True)
+    body = normalize(raw_body)
     if _MIT.fullmatch(body):
         return TextVerdict("MIT", True)
     if _ISC.fullmatch(body):
         return TextVerdict("ISC", True)
     bsd = " ".join(token for token in body.split(" ") if not _LIST_MARKER.fullmatch(token))
     bsd = bsd.replace("copyright owner", "copyright holder")
-    if _BSD3.fullmatch(bsd):
-        return TextVerdict("BSD-3-Clause", True)
     if _BSD2.fullmatch(bsd):
         return TextVerdict("BSD-2-Clause", True)
-    apache = body.replace("https://www.apache.org/", "http://www.apache.org/")
-    if apache.startswith(texts.APACHE_START):
-        end = apache.find(texts.APACHE_END)
-        if end >= 0:
-            end += len(texts.APACHE_END)
-            terms, rest = apache[:end], apache[end:].strip()
-            if hashlib.sha256(terms.encode("utf-8")).hexdigest() == texts.APACHE_TERMS_SHA256 and (
-                    not rest or _APPENDIX.fullmatch(rest)):
-                return TextVerdict("Apache-2.0", True)
     whole = normalize(text)
     for spdx, phrases in texts.OTHER_TITLES:
         if all(phrase in whole[:4000] for phrase in phrases):
             return TextVerdict(spdx, False, f"reads as {spdx}, which this kit never treats as eligible")
-    return TextVerdict(None, False, "not one complete supported license text (MIT, ISC, BSD-2-Clause, BSD-3-Clause "
-                       "or Apache-2.0) with only a title and copyright lines before it")
+    return unknown
 
 
 # Declared expressions -----------------------------------------------------------------------------------------

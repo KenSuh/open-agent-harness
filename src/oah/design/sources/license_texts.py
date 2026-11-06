@@ -2,13 +2,14 @@
 """Normalized license texts the strict matcher compares a whole file with. `{NAME}` marks a variable part.
 
 Normalization (see `license.normalize`): typographic quotes and dashes become ASCII, letters are lower-cased and
-every run of whitespace becomes one space. The BSD templates also drop list markers and read "copyright owner" as
-"copyright holder", their two common spellings. The checked-in templates were compared with real license files
+every run of whitespace becomes one space. BSD-2 drops list markers; BSD-3 permits them before its three clauses.
+Both read "copyright owner" as "copyright holder", their two common spellings. The templates were compared with real license files
 (six MIT, two Apache-2.0, three BSD) before use; tests pin them.
 
 Apache-2.0 is long, so its terms (from "apache license version 2.0, january 2004" through "end of terms and
 conditions") are pinned by the sha256 of their normalized text, with `https://www.apache.org/` read as `http://`.
-The appendix after the terms is optional and its copyright line is free.
+The optional appendix accepts only the exact unfilled example or populated copyright notices checked by the
+same raw single-identifier holder parser as preambles and the BSD-3 name slot, before case/whitespace normalization.
 """
 from __future__ import annotations
 

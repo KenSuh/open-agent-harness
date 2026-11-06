@@ -18,7 +18,7 @@ from unittest import mock
 from oah.cli import main
 from oah.design import fs as design_fs
 from oah.design import materials, open_store
-from oah.design.sources import association, output, portable
+from oah.design.sources import association, license_texts, output, portable
 from oah.design.sources.adapters import Transport
 from oah.design.sources.check import Sources
 from oah.design.sources.model import build_spec
@@ -30,6 +30,42 @@ from tests.test_design_sources import LICENSE, Clock, FakeGitHub, git
 TODAY = dt.date(2026, 11, 1)
 MULTI = "One teacher books alone.\nCorrection: many organizations share one booking service.\n"
 LOCATOR = "https://github.com/acme/lib"
+
+
+def populated_holder_cases() -> list[tuple[str, bytes, str]]:
+    notice = "Copyright (c) 2026 Acme\n"
+    bsd = notice + license_texts.BSD_OPENING + " " + license_texts.BSD_THIRD + " " + license_texts.BSD_DISCLAIMER
+    apache = (pathlib.Path(__file__).resolve().parents[1] / "skills/skill-creator/LICENSE.txt").read_text()
+    populated = "Copyright 2026 Anthropic, PBC."
+    restrictions = ("Acme No Commercial Use", "Acme NONCOMMERCIAL ONLY", "Not For Commercial Use",
+                    "Acme no COMMERCIAL use", "Acme (commercial use is forbidden)",
+                    "Acme\nCommercial use is forbidden", "Acme\nCopyright 2026 No Commercial Use")
+    rows = []
+    for template, make in (("bsd3", lambda field: bsd.format(HOLDER=field, ITS="its")),
+                            ("apache", lambda field: apache.replace(populated, field))):
+        for index, restriction in enumerate(restrictions):
+            for extra in (False, True):
+                field = ("Acme\n" if extra else "") + restriction
+                valid = "Acme-Labs, LLC. <contact@example.org>"
+                if template == "apache":
+                    field = ("Copyright 2026 Acme\n" if extra else "") + "Copyright 2026 " + restriction
+                    valid = ("Copyright 2026 Acme\n" if extra else "") + "Copyright 2026 " + valid
+                elif extra:
+                    valid = "\n" + valid
+                name = f"{template}-{index}-{'additional' if extra else 'first'}"
+                rows.extend(((name, make(field).encode(), "unknown"),
+                             (name + "-positive", make(valid).encode(), "eligible")))
+        for index, holder in enumerate(("Jane Doe", "The Apache Software Foundation", "Acme And Contributors")):
+            field = "Copyright 2026 " + holder if template == "apache" else holder
+            rows.append((f"{template}-multiword-{index}", make(field).encode(), "unknown"))
+        for index, holder in enumerate(("Acme", "Jean-Luc", "O'Neil, Inc.", "NONCOMMERCIAL", "No-Commercial-Use")):
+            field = "Copyright 2026 " + holder if template == "apache" else holder
+            rows.append((f"{template}-identifier-{index}", make(field).encode(), "eligible"))
+    rows.append(("apache-fixed-example", apache.replace(populated, "Copyright [yyyy] [name of copyright owner]").encode(), "eligible"))
+    for index, example in enumerate(("Copyright [yyyy] [name of copyright owner] No Commercial Use",
+                                     "Copyright [2026] [Acme]", "Copyright [yyyy] [name of copyright owner]\nCopyright 2026 Acme")):
+        rows.append((f"apache-modified-example-{index}", apache.replace(populated, example).encode(), "unknown"))
+    return rows
 
 
 class StoreClock:
@@ -336,9 +372,13 @@ class PortableEvidenceTest(MaterialsCase):
                  ("Copyright © 2026 Acme <contact@example.org>", "eligible"),
                  ("Copyright (c) 2026 Jean-Luc", "eligible"),
                  ("Copyright (c) 2026 O'Neil, LLC.", "eligible"))
-        for index, (prefix, expected) in enumerate(cases):
-            with self.subTest(prefix=prefix):
-                original = LICENSE.replace(notice, prefix).encode()
+        originals = [(f"mit-preamble-{index}", LICENSE.replace(notice, prefix).encode(), expected)
+                     for index, (prefix, expected) in enumerate(cases)] + populated_holder_cases()
+        self.sources = self.make_sources(make_tmp_dir(self) / "all-license-formats",
+                                         license_allow=["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0"])
+        self.spec = self.sources.register(self.spec)[1]
+        for index, (name, original, expected) in enumerate(originals):
+            with self.subTest(name=name):
                 self.release(f"v1.0.{index + 1}", {"LICENSE": original.decode(),
                                                   "src/lib.rs": f"pub fn notice_{index}() {{}}\n"})
                 checked = self.sources.check_one(self.spec)
@@ -349,7 +389,8 @@ class PortableEvidenceTest(MaterialsCase):
                 saved = manifest["license"]["files"][0]
                 self.assertEqual(original, self.sources.blob(saved["sha256"]))
                 built = materials.build(self.selection(), self.sources, view=self.view(), now=self.clock.now())
-                empty = self.make_sources(make_tmp_dir(self) / "empty")
+                empty = self.make_sources(make_tmp_dir(self) / "empty",
+                                          license_allow=["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0"])
                 report = materials.check(built.text, empty, None, self.view())
                 embedded = portable.verify(built.record["portable_evidence"][0])
                 self.assertEqual(original, embedded.read(saved["sha256"]))

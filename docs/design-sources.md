@@ -42,20 +42,26 @@ state, the configuration or the OS scheduler cannot be used (for example `OAH_SO
 - **Licenses are read in full.** oah keeps the actual license text and any nested license files, and judges
   eligibility against `[sources] license_allow`. A license it cannot recognise stays unknown; it is never
   guessed.
-- **Copyright holders are single identifiers.** A copyright line can be omitted from strict license
-  matching only when its holder is one ASCII identifier with no whitespace. This invariant applies to
-  every copyright line, including additional lines; capitalization never makes extra holder words safe.
+- **Copyright holders are single identifiers.** One shared parser checks every populated holder/name
+  field before case or whitespace normalization: preamble copyright lines in all supported licenses,
+  the BSD-3 third-clause name, and the Apache appendix copyright notices. Each holder must be one ASCII
+  identifier with no whitespace; capitalization never makes extra holder words safe. Each additional
+  copyright line must independently match the same rule. A BSD-3 name field cannot absorb a second line.
   Supported lines have `Copyright`, `Portions Copyright`, `(c)` or `©`, four-digit years (including ranges
   or comma-separated years), then that identifier. It starts with an uppercase letter and may contain
   letters, digits, or apostrophe/hyphen joins followed by an uppercase letter (`Acme`, `Jean-Luc`, `O'Neil`).
   Optional components are a comma and one company suffix (`Inc`, `Ltd`, `LLC`, `Corp`, `Co`), a final period,
   `<email>`, and `All rights reserved` (case-insensitive, optional final period). For example,
-  `Copyright (c) 2026 Acme-Labs, LLC.` is supported. Any other holder text stays in the matching input,
-  so the result is `unknown`: this includes `Acme No Commercial Use`, `Acme NONCOMMERCIAL ONLY`,
+  `Copyright (c) 2026 Acme-Labs, LLC.` is supported; a BSD-3 name may use the same identifier, company
+  suffix and email without a copyright marker or years. The Apache appendix may instead contain the
+  exact fixed unfilled example `Copyright [yyyy] [name of copyright owner]`; modified examples are unknown.
+  Any unsupported field makes the whole governing license `unknown`: this includes
+  `Acme No Commercial Use`, `Acme NONCOMMERCIAL ONLY`,
   `Acme And Contributors`, `Jane Doe <jane@example.org>` and `The Apache Software Foundation`.
-  Legitimate multiword or otherwise unsupported names require manual review, even with an email or
-  company suffix. This recognizes a restricted notice format; it does not verify the holder's identity
-  or interpret the meaning of a single identifier. Every original byte is preserved, including when
+  Legitimate multiword or otherwise unsupported names require manual review/confirmation in every template,
+  including populated BSD-3 and Apache appendix fields, even with an email or company suffix. This recognizes
+  a restricted format; it does not verify identity or interpret the meaning of a single identifier such as
+  `NONCOMMERCIAL` or `No-Commercial-Use`. Every original byte is preserved, including when
   classification is `unknown`.
 - **Requests are public and credential-free.** oah sends no cookie or authorization header and refuses to
   run through an HTTP proxy, because a proxy would choose the destination it cannot vet.
