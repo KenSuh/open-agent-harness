@@ -42,14 +42,21 @@ state, the configuration or the OS scheduler cannot be used (for example `OAH_SO
 - **Licenses are read in full.** oah keeps the actual license text and any nested license files, and judges
   eligibility against `[sources] license_allow`. A license it cannot recognise stays unknown; it is never
   guessed.
-- **Copyright notices use a limited syntax.** Before a supported license body, oah accepts a copyright
-  marker, four-digit years (including ranges or comma-separated years), and one to four ASCII name tokens
-  starting with an uppercase letter. Name tokens may contain letters, digits, and apostrophe/hyphen joins
-  followed by an uppercase letter, as in `Jean-Luc O'Neil`. An optional comma-separated company suffix
-  (`Inc`, `Ltd`, `LLC`, `Corp`, `Co`), final period, `<email>` and exact `All rights reserved` are supported.
-  Extra clauses, conjunctions, lowercase holder prose and other unsupported spellings remain `unknown`,
-  with every original byte preserved. This is bounded syntax recognition, not legal certification of a
-  name-shaped string; unsupported legitimate notices may also need manual review.
+- **Copyright holders are single identifiers.** A copyright line can be omitted from strict license
+  matching only when its holder is one ASCII identifier with no whitespace. This invariant applies to
+  every copyright line, including additional lines; capitalization never makes extra holder words safe.
+  Supported lines have `Copyright`, `Portions Copyright`, `(c)` or `©`, four-digit years (including ranges
+  or comma-separated years), then that identifier. It starts with an uppercase letter and may contain
+  letters, digits, or apostrophe/hyphen joins followed by an uppercase letter (`Acme`, `Jean-Luc`, `O'Neil`).
+  Optional components are a comma and one company suffix (`Inc`, `Ltd`, `LLC`, `Corp`, `Co`), a final period,
+  `<email>`, and `All rights reserved` (case-insensitive, optional final period). For example,
+  `Copyright (c) 2026 Acme-Labs, LLC.` is supported. Any other holder text stays in the matching input,
+  so the result is `unknown`: this includes `Acme No Commercial Use`, `Acme NONCOMMERCIAL ONLY`,
+  `Acme And Contributors`, `Jane Doe <jane@example.org>` and `The Apache Software Foundation`.
+  Legitimate multiword or otherwise unsupported names require manual review, even with an email or
+  company suffix. This recognizes a restricted notice format; it does not verify the holder's identity
+  or interpret the meaning of a single identifier. Every original byte is preserved, including when
+  classification is `unknown`.
 - **Requests are public and credential-free.** oah sends no cookie or authorization header and refuses to
   run through an HTTP proxy, because a proxy would choose the destination it cannot vet.
 

@@ -1162,11 +1162,12 @@ class LicenseTest(unittest.TestCase):
         self.assertEqual(("ISC", True), (classify(ISC.encode()).spdx, classify(ISC.encode()).strict))
         self.assertEqual(("GPL-3.0", False), (classify(GPL.encode()).spdx, classify(GPL.encode()).strict))
         for notice in ("Copyright (c) 2015-2026 Acme, Inc.\nAll rights reserved.",
-                       "(c) 2026 Acme", "Copyright © 2026 Jane Doe <jane@example.org>"):
+                       "(c) 2026 Acme", "Copyright © 2026 Acme <contact@example.org>"):
             with self.subTest(notice=notice):
                 result = classify(LICENSE.replace("Copyright (c) 2026 Acme", notice).encode())
                 self.assertEqual(("MIT", True), (result.spdx, result.strict))
-        for name, data in (("extra terms", (LICENSE + "\nYou may not use this software to build weapons.\n").encode()),
+        for name, data in (("multiword holder", LICENSE.replace("2026 Acme", "2026 Jane Doe <jane@example.org>").encode()),
+                           ("extra terms", (LICENSE + "\nYou may not use this software to build weapons.\n").encode()),
                            ("parenthesized terms", LICENSE.replace("2026 Acme", "2026 Acme (commercial use is forbidden)").encode()),
                            ("copyright clauses", LICENSE.replace("2026 Acme", "2026 Acme; permission required").encode()),
                            ("snippet", LICENSE.split("\n\n")[2].encode()),

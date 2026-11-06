@@ -41,11 +41,11 @@ _TITLES = {"mit license", "the mit license", "mit license (mit)", "the mit licen
            "the isc license", "isc license (isc)", "the isc license (isc)", "isc", "bsd 2-clause license",
            "bsd 3-clause license", "bsd-2-clause license", "bsd-3-clause license", "the bsd license", "bsd license",
            "the 2-clause bsd license", "the 3-clause bsd license", "new bsd license", "simplified bsd license"}
-_HOLDER_WORD = r"[A-Z][A-Za-z0-9]*(?:['-][A-Z][A-Za-z0-9]*)*"
+_HOLDER_ID = r"[A-Z][A-Za-z0-9]*(?:['-][A-Z][A-Za-z0-9]*)*"
 _COPYRIGHT_NOTICE = re.compile(
     r"(?i:(?:portions )?copyright(?:\s*(?:\(c\)|©))?|\(c\)|©)\s+"
     r"[0-9]{4}(?:\s*[-,]\s*[0-9]{4})*\s+"
-    + _HOLDER_WORD + r"(?:[ \t]+" + _HOLDER_WORD + r"){0,3}"
+    + _HOLDER_ID +
     r"(?:, (?i:inc|ltd|llc|corp|co))?\.?"
     r"(?: <[\w.+-]+@[\w.-]+>)?"
     r"(?: (?i:all rights reserved)\.?)?")

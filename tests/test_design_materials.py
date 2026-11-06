@@ -308,10 +308,10 @@ class PortableEvidenceTest(MaterialsCase):
         notice = "Copyright (c) 2026 Acme"
         cases = ((notice, "eligible"),
                  ("Copyright (c) 2015-2026 Acme, Inc.\nAll rights reserved.", "eligible"),
-                 ("Copyright © 2026 Jane Doe <jane@example.org>", "eligible"),
+                 ("Copyright © 2026 Jane Doe <jane@example.org>", "unknown"),
                  ("(c) 2026 Acme", "eligible"),
-                 ("Copyright (c) 2026 Jean-Luc O'Neil", "eligible"),
-                 ("Copyright (c) 2026 The Apache Software Foundation", "eligible"),
+                 ("Copyright (c) 2026 Jean-Luc O'Neil", "unknown"),
+                 ("Copyright (c) 2026 The Apache Software Foundation", "unknown"),
                  (notice + ". Commercial use is forbidden.", "unknown"),
                  (notice + "\nCopyright notice: commercial use is forbidden.", "unknown"),
                  (notice + "\nAll rights reserved; commercial use is forbidden.", "unknown"),
@@ -320,7 +320,22 @@ class PortableEvidenceTest(MaterialsCase):
                  (notice + " distribution requires written approval", "unknown"),
                  (notice + " and Contributors", "unknown"),
                  ("Copyright (c) 2026 the Acme project contributors", "unknown"),
-                 ("Copyright (c) 2026 One Two Three Four Five", "unknown"))
+                 ("Copyright (c) 2026 One Two Three Four Five", "unknown"),
+                 ("Copyright (c) 2026 Acme, Inc.", "eligible"),
+                 (notice + " No Commercial Use", "unknown"),
+                 ("Copyright (c) 2026 Acme-Labs, LLC", "eligible"),
+                 (notice + " NONCOMMERCIAL ONLY", "unknown"),
+                 ("Copyright (c) 2026 Acme, LLC", "eligible"),
+                 ("Copyright (c) 2026 Not For Commercial Use", "unknown"),
+                 (notice + "\nCopyright (c) 2026 Acme-Labs, Inc.", "eligible"),
+                 (notice + "\nCopyright (c) 2026 No Commercial Use", "unknown"),
+                 (notice + "\nCopyright (c) 2026 Acme, LLC", "eligible"),
+                 (notice + "\nCopyright (c) 2026 NONCOMMERCIAL ONLY", "unknown"),
+                 (notice + " And Contributors", "unknown"),
+                 (notice + "\nCopyright (c) 2026 Acme And Contributors", "unknown"),
+                 ("Copyright © 2026 Acme <contact@example.org>", "eligible"),
+                 ("Copyright (c) 2026 Jean-Luc", "eligible"),
+                 ("Copyright (c) 2026 O'Neil, LLC.", "eligible"))
         for index, (prefix, expected) in enumerate(cases):
             with self.subTest(prefix=prefix):
                 original = LICENSE.replace(notice, prefix).encode()
